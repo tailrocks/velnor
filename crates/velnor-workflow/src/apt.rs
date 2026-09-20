@@ -1143,9 +1143,10 @@ fn read_regular_file(path: &Path) -> Result<Vec<u8>, GeneratorError> {
 }
 
 /// The sentinel is a fresh proof for one incoming handoff. Schema-2 binds it
-/// to the exact persisted selection bytes; legacy APT verification has no
-/// selection and uses the fixed marker. A pre-existing marker is never
-/// overwritten, so failed or stale verification cannot arm publication.
+/// to the exact persisted selection bytes and every selected asset's bytes;
+/// legacy APT verification has no selection and uses the fixed marker. A
+/// pre-existing marker is never overwritten, so failed or stale verification
+/// cannot arm publication.
 fn expected_sentinel(incoming: &Path) -> Result<Vec<u8>, GeneratorError> {
     let selection = incoming.join(DISCOVERY_SELECTION_FILE);
     match std::fs::symlink_metadata(&selection) {
@@ -2643,6 +2644,7 @@ pub(crate) fn deb_control_field(
         // control members name their file `control` with or without a `./`
         // prefix depending on the producer, and name matching would guess.
         let scratch = scratch_dir("deb-control")?;
+        validate_tar_payload(&payload, path_overlay)?;
         let result = run_tar_stdin(
             &["-x", "-C", scratch.to_str().unwrap_or("."), "-f", "-"],
             &payload,
@@ -2706,11 +2708,11 @@ fn tar_decompress_flag(payload: &[u8]) -> Option<&'static str> {
 }
 
 /// Run `tar` with fixed arguments and a piped archive payload.
-fn run_tar_stdin(
+fn run_tar_stdin_output(
     args: &[&str],
     payload: &[u8],
     path_overlay: Option<&Path>,
-) -> Result<(), GeneratorError> {
+) -> Result<Vec<u8>, GeneratorError> {
     let mut extract = Command::new("tar");
     let mut full_args: Vec<&str> = Vec::with_capacity(args.len() + 1);
     if let Some((first, rest)) = args.split_first() {
@@ -2755,6 +2757,88 @@ fn run_tar_stdin(
             output.status
         )));
     }
+    Ok(output.stdout)
+}
+
+fn run_tar_stdin(
+    args: &[&str],
+    payload: &[u8],
+    path_overlay: Option<&Path>,
+) -> Result<(), GeneratorError> {
+    run_tar_stdin_output(args, payload, path_overlay).map(|_| ())
+}
+
+/// Reject archive names and member types before any pathname-based extraction.
+/// Only relative regular files and directories are accepted; symlinks,
+/// hardlinks, device nodes, FIFOs, and traversal names are never needed by a
+/// package identity tree and would make tar's destination semantics unsafe.
+fn validate_tar_payload(payload: &[u8], path_overlay: Option<&Path>) -> Result<(), GeneratorError> {
+    let names = run_tar_stdin_output(&["-t", "-f", "-"], payload, path_overlay)?;
+    let names = String::from_utf8(names)
+        .map_err(|_| GeneratorError::usage("archive member listing is not UTF-8"))?;
+    for raw_name in names.lines() {
+        let name = raw_name.strip_suffix('/').unwrap_or(raw_name);
+        let name = name.strip_prefix("./").unwrap_or(name);
+        if name.is_empty()
+            || name.starts_with('/')
+            || name
+                .split('/')
+                .any(|component| component.is_empty() || component == "..")
+        {
+            return Err(GeneratorError::usage(
+                "archive member path is not confined to the extraction directory",
+            ));
+        }
+    }
+    let details = run_tar_stdin_output(&["-t", "-v", "-f", "-"], payload, path_overlay)?;
+    let details = String::from_utf8(details)
+        .map_err(|_| GeneratorError::usage("archive member metadata is not UTF-8"))?;
+    for line in details.lines() {
+        let kind = line.as_bytes().first().copied();
+        if !matches!(kind, Some(b'd' | b'-')) {
+            return Err(GeneratorError::usage(
+                "archive member type is not a regular file or directory",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Create a fresh extraction destination while rejecting a symlink or hard
+/// link at every parent boundary. Unix creation is relative to an opened
+/// parent descriptor, so a concurrent replacement cannot redirect mkdir.
+fn prepare_extraction_destination(dest: &Path) -> Result<(), GeneratorError> {
+    if std::fs::symlink_metadata(dest).is_ok() {
+        return Err(GeneratorError::usage(
+            "archive extraction destination already exists",
+        ));
+    }
+    let parent = dest
+        .parent()
+        .ok_or_else(|| GeneratorError::usage("archive extraction destination has no parent"))?;
+    let name = dest
+        .file_name()
+        .ok_or_else(|| GeneratorError::usage("archive extraction destination has no name"))?;
+    #[cfg(unix)]
+    {
+        let parent_file = open_directory_nofollow(parent)
+            .map_err(|error| GeneratorError::io("open extraction parent", parent, &error))?;
+        rustix::fs::mkdirat(&parent_file, name, rustix::fs::Mode::from_raw_mode(0o700)).map_err(
+            |error| {
+                let error = std::io::Error::from(error);
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    GeneratorError::usage("archive extraction destination already exists")
+                } else {
+                    GeneratorError::io("create extraction destination", dest, &error)
+                }
+            },
+        )?;
+        let _directory = open_directory_nofollow(dest)
+            .map_err(|error| GeneratorError::io("open extraction destination", dest, &error))?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir(dest)
+        .map_err(|error| GeneratorError::io("create extraction destination", dest, &error))?;
     Ok(())
 }
 
@@ -2770,36 +2854,37 @@ pub(crate) fn deb_extract_data(
         let (Some(deb_name), Some(dest_name)) = (verified_deb.to_str(), dest.to_str()) else {
             return Err(GeneratorError::usage("deb path is not UTF-8"));
         };
-        std::fs::create_dir_all(dest)
-            .map_err(|error| GeneratorError::io("create", dest, &error))?;
-        if backend == DebBackend::Auto && tool_present("dpkg-deb", path_overlay) {
+        let payload = if backend == DebBackend::Auto && tool_present("dpkg-deb", path_overlay) {
             run_fixed(
                 "dpkg-deb",
-                &["-x".to_owned(), deb_name.to_owned(), dest_name.to_owned()],
+                &["--fsys-tarfile".to_owned(), deb_name.to_owned()],
+                None,
+                path_overlay,
+            )?
+        } else {
+            let members = run_fixed(
+                "ar",
+                &["t".to_owned(), deb_name.to_owned()],
                 None,
                 path_overlay,
             )?;
-            return Ok(());
-        }
-        let members = run_fixed(
-            "ar",
-            &["t".to_owned(), deb_name.to_owned()],
-            None,
-            path_overlay,
-        )?;
-        let data = String::from_utf8_lossy(&members)
-            .lines()
-            .find(|line| line.starts_with("data.tar"))
-            .ok_or_else(|| {
-                GeneratorError::usage(format!("deb {} has no data.tar member", deb.display()))
-            })?
-            .to_owned();
-        let payload = run_fixed(
-            "ar",
-            &["p".to_owned(), deb_name.to_owned(), data],
-            None,
-            path_overlay,
-        )?;
+            let data = String::from_utf8(members)
+                .map_err(|_| GeneratorError::usage("deb member listing is not UTF-8"))?
+                .lines()
+                .find(|line| line.starts_with("data.tar"))
+                .ok_or_else(|| {
+                    GeneratorError::usage(format!("deb {} has no data.tar member", deb.display()))
+                })?
+                .to_owned();
+            run_fixed(
+                "ar",
+                &["p".to_owned(), deb_name.to_owned(), data],
+                None,
+                path_overlay,
+            )?
+        };
+        validate_tar_payload(&payload, path_overlay)?;
+        prepare_extraction_destination(dest)?;
         run_tar_stdin(&["-x", "-C", dest_name, "-f", "-"], &payload, path_overlay)
     })();
     let _ = std::fs::remove_dir_all(&verified_root);
@@ -5980,6 +6065,27 @@ mod tests {
             "reject non-UTF-8 incoming entry",
         );
         assert!(error.contains("non-UTF-8"), "{error}");
+        let raw_name = OsString::from_vec(b"invalid-\xff".to_vec());
+        let raw_path = fixture.incoming.join(&raw_name);
+        match std::fs::write(&raw_path, b"fixture") {
+            Ok(()) => {
+                let error = must_fail(
+                    dir_names(&fixture.incoming),
+                    "reject a real non-UTF-8 incoming entry",
+                );
+                assert!(error.contains("non-UTF-8"), "{error}");
+                let _ = std::fs::remove_file(raw_path);
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::InvalidInput
+                    || error.raw_os_error() == Some(libc::EILSEQ) =>
+            {
+                // APFS rejects byte sequences that are not valid Unicode; the
+                // direct conversion assertion above still covers the shared
+                // fail-closed boundary on this platform.
+            }
+            Err(error) => panic!("could not create invalid UTF-8 fixture: {error}"),
+        }
         let _ = std::fs::remove_dir_all(&fixture.root);
     }
 
@@ -7210,16 +7316,86 @@ mod tests {
             });
             let deb = make_deb_with_parent_entry(&dir, name, symlink_parent);
             let extract = dir.join("extracted");
-            must(
+            let error = must_fail(
                 deb_extract_data(&deb, &extract, DebBackend::ArTar, None),
-                "extract malicious parent archive",
+                "reject malicious parent archive",
             );
+            assert!(error.contains("member type"), "{error}");
             assert!(
-                require_file(&extract.join("usr/share/app/build-identity.json")).is_err(),
-                "archive parent must not be trusted: {name}"
+                !extract.exists(),
+                "unsafe archive created an extraction root"
             );
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_extraction_rejects_a_symlink_destination() {
+        let dir = fixture_dir("deb-destination-symlink");
+        let deb = make_deb(
+            &dir,
+            "example-destination-symlink.deb",
+            "example",
+            "1.2.3",
+            "amd64",
+            "example",
+            "app",
+            FIXTURE_COMMIT,
+            "1.2.3",
+            b"{}",
+            b"bytes",
+        );
+        let outside = dir.join("outside");
+        must(std::fs::create_dir(&outside), "create extraction outside");
+        write_bytes(&outside.join("marker"), b"untouched");
+        let destination = dir.join("extracted");
+        make_symlink(&outside, &destination);
+        let error = must_fail(
+            deb_extract_data(&deb, &destination, DebBackend::ArTar, None),
+            "reject symlink extraction destination",
+        );
+        assert!(error.contains("destination already exists"), "{error}");
+        assert_eq!(
+            must(std::fs::read(outside.join("marker")), "read marker"),
+            b"untouched"
+        );
+        assert!(!outside.join("usr").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    fn tar_payload_with_member(name: &str) -> Vec<u8> {
+        let mut header = [0_u8; 512];
+        assert!(name.len() < 100);
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        header[100..108].copy_from_slice(b"0000644\0");
+        header[108..116].copy_from_slice(b"0000000\0");
+        header[116..124].copy_from_slice(b"0000000\0");
+        header[124..136].copy_from_slice(b"00000000001\0");
+        header[136..148].copy_from_slice(b"00000000000\0");
+        header[148..156].fill(b' ');
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        let checksum: u32 = header.iter().map(|byte| u32::from(*byte)).sum();
+        let checksum = format!("{checksum:06o}\0 ");
+        header[148..156].copy_from_slice(checksum.as_bytes());
+        let mut payload = header.to_vec();
+        payload.push(b'x');
+        payload.extend(std::iter::repeat_n(0, 511));
+        payload.extend(std::iter::repeat_n(0, 1024));
+        payload
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_member_parent_traversal_is_rejected_before_extraction() {
+        let payload = tar_payload_with_member("../escaped");
+        let error = must_fail(
+            validate_tar_payload(&payload, None),
+            "reject traversal archive member",
+        );
+        assert!(error.contains("not confined"), "{error}");
     }
 
     #[test]
