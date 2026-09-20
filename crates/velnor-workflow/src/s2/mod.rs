@@ -1461,10 +1461,9 @@ impl TrustedBaseline {
                 };
                 let mut outputs = BTreeMap::new();
                 for (relative, expected) in state.outputs {
-                    let spec = format!("{revision}:{}", relative.display());
-                    let bytes = git_blob(root, &spec).map_err(|error| {
+                    let bytes = git_regular_blob(root, revision, &relative).map_err(|error| {
                         GeneratorError::usage(format!(
-                            "baseline output is missing from commit {revision}: {}: {error}",
+                            "baseline output is not an immutable regular blob in commit {revision}: {}: {error}",
                             relative.display()
                         ))
                     })?;
@@ -1528,6 +1527,67 @@ fn git_blob(root: &Path, spec: &str) -> Result<Vec<u8>, GeneratorError> {
         )));
     }
     Ok(output.stdout)
+}
+
+/// Read a baseline output only after proving its immutable tree entry is a
+/// regular blob. `git cat-file blob <rev>:<path>` alone would also read the
+/// bytes of a tracked symlink, allowing a sidecar path claim to masquerade as
+/// generated output.
+fn git_regular_blob(
+    root: &Path,
+    revision: &str,
+    relative: &Path,
+) -> Result<Vec<u8>, GeneratorError> {
+    let relative_text = relative.to_str().ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "baseline output path is not UTF-8: {}",
+            relative.display()
+        ))
+    })?;
+    let output = git_command(root, &["ls-tree", "-z", revision, "--", relative_text])?;
+    if !output.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "baseline tree lookup failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let entries = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    if entries.len() != 1 {
+        return Err(GeneratorError::usage(format!(
+            "baseline output tree entry count is {}, expected one",
+            entries.len()
+        )));
+    }
+    let entry = entries[0];
+    let separator = entry
+        .iter()
+        .position(|byte| *byte == b'\t')
+        .ok_or_else(|| GeneratorError::usage("baseline output tree entry is malformed"))?;
+    if &entry[separator + 1..] != relative_text.as_bytes() {
+        return Err(GeneratorError::usage(
+            "baseline output tree entry path does not match the requested output",
+        ));
+    }
+    let metadata = std::str::from_utf8(&entry[..separator])
+        .map_err(|_| GeneratorError::usage("baseline output tree metadata is not UTF-8"))?;
+    let fields = metadata.split(' ').collect::<Vec<_>>();
+    if fields.len() != 3
+        || !matches!(fields[0], "100644" | "100755")
+        || fields[1] != "blob"
+        || fields[2].len() != 40
+        || !fields[2].bytes().all(|byte| byte.is_ascii_hexdigit())
+        || fields[2].bytes().any(|byte| byte.is_ascii_uppercase())
+    {
+        return Err(GeneratorError::usage(
+            "baseline output tree entry is not a regular blob",
+        ));
+    }
+    let spec = format!("{revision}:{}", relative.display());
+    git_blob(root, &spec)
 }
 
 fn git_blob_optional(root: &Path, spec: &str) -> Result<Option<Vec<u8>>, GeneratorError> {
@@ -9204,6 +9264,66 @@ mod tests {
             TrustedBaseline::from_git(root, &revision),
             "load immutable test baseline",
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn immutable_baseline_rejects_sidecar_claimed_symlink_outputs() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_repository("baseline-symlink-output");
+        let workflow = root.join(".github/workflows/ci-pr.yml");
+        must(
+            fs::create_dir_all(workflow.parent().unwrap_or(&root)),
+            "create workflow directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/ci")),
+            "create CI directory",
+        );
+        must(
+            fs::write(root.join("outside.yml"), "outside\n"),
+            "write target",
+        );
+        must(
+            symlink("../outside.yml", &workflow),
+            "create tracked workflow symlink",
+        );
+        let digest = content_digest_bytes(b"../outside.yml");
+        let state = format!(
+            "{OWNERSHIP_STATE_HEADER}schema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t{GENERATOR_REVISION}\n[outputs]\n.github/workflows/ci-pr.yml\t{digest:016x}\n"
+        );
+        must(
+            fs::write(root.join(OWNERSHIP_STATE), state),
+            "write baseline state",
+        );
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.name", "baseline-test"][..],
+            &["config", "user.email", "baseline@test"][..],
+            &["add", "-A"][..],
+            &["commit", "-qm", "symlink baseline"][..],
+        ] {
+            let status = must(
+                Command::new("git").current_dir(&root).args(args).status(),
+                "commit symlink baseline",
+            );
+            assert!(status.success());
+        }
+        let revision = must(
+            Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output(),
+            "read symlink baseline revision",
+        );
+        let revision = String::from_utf8_lossy(&revision.stdout).trim().to_owned();
+        let error = must_some(
+            TrustedBaseline::from_git(&root, &revision).err(),
+            "reject symlink baseline output",
+        );
+        assert!(error.to_string().contains("not an immutable regular blob"));
+        let _ = fs::remove_dir_all(root);
     }
 
     fn fixture_root() -> PathBuf {
