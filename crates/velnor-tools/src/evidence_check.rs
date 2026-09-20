@@ -11,7 +11,6 @@
 
 use crate::g0_contract::*;
 use crate::g0_workflow::{derive_workflow_plan, DerivedWorkflowPlan};
-use crate::github_raw_store::RawEvidenceStore;
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use clap::Args;
@@ -178,10 +177,6 @@ pub struct EvidenceCheckArgs {
     /// live authority merely by passing this flag. G7 always enables it.
     #[arg(long)]
     pub live: bool,
-    /// Explicit local root of an immutable CAS evidence store for offline
-    /// validation or a future trusted collector handoff.
-    #[arg(long)]
-    pub evidence_root: Option<PathBuf>,
     /// Emit a stable JSON report.
     #[arg(long)]
     pub json: bool,
@@ -195,7 +190,6 @@ pub struct EvidenceCheckInput {
     pub evidence: PathBuf,
     pub release_manifest: Option<PathBuf>,
     pub live: bool,
-    pub evidence_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -862,7 +856,6 @@ pub async fn evidence_check(args: EvidenceCheckArgs) -> Result<()> {
         evidence: args.evidence,
         release_manifest: args.release_manifest,
         live: args.live || stage == Stage::G7,
-        evidence_root: args.evidence_root,
     };
     let report = if input.live {
         check_paths_live(&input).await?
@@ -915,12 +908,6 @@ pub fn check_paths(input: &EvidenceCheckInput) -> Result<CheckReport> {
         &evidence,
         release.as_ref(),
         CheckMode::Offline,
-    );
-    check_g0_external_storage(
-        stage,
-        evidence.g0_inventory.as_ref(),
-        input.evidence_root.as_deref(),
-        &mut report.findings,
     );
     finding(
         &mut report.findings,
@@ -1938,308 +1925,6 @@ fn check_g0_inventory(
     check_g0_dependency_graph(manifest, collector, &raw_ids, findings);
     check_g0_model_session(collector, &raw_ids, findings);
     check_g0_access(collector, &raw_ids, findings);
-}
-
-/// Reopen every content-addressed object from an explicitly approved local
-/// store.  `storage_ref` is only an identifier; accepting its shape without
-/// reading the object would leave the checker vulnerable to self-attested
-/// wrapper digests.  The root is never inferred from a URI and no network
-/// scheme is accepted here.  The shared store reads through descriptor-
-/// relative no-follow handles; this checker does not canonicalize a path and
-/// then reopen it by name.
-fn check_g0_external_storage(
-    stage: Stage,
-    inventory: Option<&G0InventoryEvidence>,
-    evidence_root: Option<&Path>,
-    findings: &mut Vec<Finding>,
-) {
-    let Some(inventory) = inventory else {
-        return;
-    };
-    if stage != Stage::G0 && evidence_root.is_none() {
-        return;
-    }
-    let Some(root) = evidence_root else {
-        finding(
-            findings,
-            "g0-storage-root-missing",
-            "",
-            "evidence_root",
-            "typed G0 evidence requires an explicit local immutable CAS root",
-        );
-        return;
-    };
-    let store = match RawEvidenceStore::open(root) {
-        Ok(store) => store,
-        Err(error) => {
-            finding(
-                findings,
-                "g0-storage-root",
-                "",
-                "evidence_root",
-                error.to_string(),
-            );
-            return;
-        }
-    };
-
-    let snapshot_bytes = BASE64.decode(&inventory.collector_snapshot_bytes_base64);
-    if let Ok(bytes) = snapshot_bytes.as_ref() {
-        check_g0_external_object(
-            "evidence.g0_inventory.collector_snapshot_storage_ref",
-            &store,
-            &inventory.collector_snapshot_storage_ref,
-            &inventory.collector_snapshot_sha256,
-            bytes,
-            findings,
-        );
-    } else {
-        finding(
-            findings,
-            "g0-storage-bytes",
-            "",
-            "evidence.g0_inventory.collector_snapshot_bytes_base64",
-            "collector snapshot bytes must decode before external CAS verification",
-        );
-    }
-    for raw in &inventory.collector_snapshot.raw_objects {
-        let Ok(bytes) = BASE64.decode(&raw.bytes_base64) else {
-            finding(
-                findings,
-                "g0-storage-bytes",
-                "",
-                "evidence.g0_inventory.collector_snapshot.raw_objects.bytes_base64",
-                format!(
-                    "raw object {} bytes must decode before external CAS verification",
-                    raw.raw_id
-                ),
-            );
-            continue;
-        };
-        check_g0_external_object(
-            "evidence.g0_inventory.collector_snapshot.raw_objects.storage_ref",
-            &store,
-            &raw.storage_ref,
-            &raw.sha256,
-            &bytes,
-            findings,
-        );
-        check_g0_external_original(
-            "evidence.g0_inventory.collector_snapshot.raw_objects.original_storage_ref",
-            &store,
-            &raw.original_storage_ref,
-            &raw.original_sha256,
-            raw.original_byte_length,
-            findings,
-        );
-    }
-    check_g0_external_artifact(
-        "evidence.g0_inventory.collector_snapshot.workload_artifact",
-        &inventory.collector_snapshot.workload_artifact,
-        &inventory.collector_snapshot.raw_objects,
-        &store,
-        findings,
-    );
-    for repository in &inventory.collector_snapshot.repositories {
-        for workflow in &repository.workflows {
-            check_g0_external_source(
-                "evidence.g0_inventory.collector_snapshot.workflow.source",
-                &workflow.source,
-                &store,
-                findings,
-            );
-            check_g0_external_artifact(
-                "evidence.g0_inventory.collector_snapshot.workflow.generated_state",
-                &workflow.generated_state,
-                &inventory.collector_snapshot.raw_objects,
-                &store,
-                findings,
-            );
-            for dependency in workflow
-                .reusable_workflows
-                .iter()
-                .chain(workflow.actions.iter())
-                .chain(workflow.scanners.iter())
-            {
-                check_g0_external_source(
-                    "evidence.g0_inventory.collector_snapshot.workflow_dependency.source",
-                    &dependency.source,
-                    &store,
-                    findings,
-                );
-            }
-        }
-        for artifact in &repository.artifacts {
-            let Some(raw) = artifact.raw_object_refs.iter().find_map(|raw_id| {
-                inventory
-                    .collector_snapshot
-                    .raw_objects
-                    .iter()
-                    .find(|raw| raw.raw_id == *raw_id && raw.sha256 == artifact.digest)
-            }) else {
-                continue;
-            };
-            let Ok(expected) = BASE64.decode(&raw.bytes_base64) else {
-                finding(
-                    findings,
-                    "g0-storage-bytes",
-                    &repository.repository,
-                    "evidence.g0_inventory.collector_snapshot.artifacts.raw_object_refs",
-                    "artifact raw object bytes must decode before external CAS verification",
-                );
-                continue;
-            };
-            check_g0_external_object(
-                "evidence.g0_inventory.collector_snapshot.artifacts.storage_ref",
-                &store,
-                &raw.storage_ref,
-                &artifact.digest,
-                &expected,
-                findings,
-            );
-        }
-    }
-}
-
-fn check_g0_external_object(
-    field: &str,
-    store: &RawEvidenceStore,
-    storage_ref: &str,
-    digest: &str,
-    expected: &[u8],
-    findings: &mut Vec<Finding>,
-) {
-    match store.read_verified(storage_ref, digest, expected.len() as u64) {
-        Ok(measured) if measured == expected => {}
-        Ok(_) => finding(
-            findings,
-            "g0-storage-mismatch",
-            "",
-            field,
-            "reopened immutable storage bytes do not match the captured bytes",
-        ),
-        Err(error) => {
-            let code = match error {
-                crate::github_raw_store::RawStoreError::InvalidReference
-                | crate::github_raw_store::RawStoreError::InvalidDigest => "g0-storage-ref",
-                crate::github_raw_store::RawStoreError::NotRegular
-                | crate::github_raw_store::RawStoreError::TooLarge => "g0-storage-size",
-                crate::github_raw_store::RawStoreError::OpenObject(ref io)
-                    if io.kind() == std::io::ErrorKind::NotFound =>
-                {
-                    "g0-storage-missing"
-                }
-                crate::github_raw_store::RawStoreError::OpenObject(_)
-                | crate::github_raw_store::RawStoreError::Read(_)
-                | crate::github_raw_store::RawStoreError::Length { .. }
-                | crate::github_raw_store::RawStoreError::Digest { .. } => "g0-storage-mismatch",
-                crate::github_raw_store::RawStoreError::OpenRoot(_) => "g0-storage-root",
-            };
-            finding(findings, code, "", field, error.to_string());
-        }
-    }
-}
-
-fn check_g0_external_original(
-    field: &str,
-    store: &RawEvidenceStore,
-    storage_ref: &str,
-    digest: &str,
-    byte_length: u64,
-    findings: &mut Vec<Finding>,
-) {
-    if let Err(error) = store.read_original_verified(storage_ref, digest, byte_length) {
-        let code = match error {
-            crate::github_raw_store::RawStoreError::InvalidReference
-            | crate::github_raw_store::RawStoreError::InvalidDigest => "g0-storage-ref",
-            crate::github_raw_store::RawStoreError::NotRegular
-            | crate::github_raw_store::RawStoreError::TooLarge => "g0-storage-size",
-            crate::github_raw_store::RawStoreError::OpenObject(ref io)
-                if io.kind() == std::io::ErrorKind::NotFound =>
-            {
-                "g0-storage-missing"
-            }
-            crate::github_raw_store::RawStoreError::OpenObject(_)
-            | crate::github_raw_store::RawStoreError::Read(_)
-            | crate::github_raw_store::RawStoreError::Length { .. }
-            | crate::github_raw_store::RawStoreError::Digest { .. } => "g0-storage-mismatch",
-            crate::github_raw_store::RawStoreError::OpenRoot(_) => "g0-storage-root",
-        };
-        finding(
-            findings,
-            code,
-            "",
-            field,
-            format!("original provider-response CAS verification failed: {error}"),
-        );
-    }
-}
-
-fn check_g0_external_source(
-    field: &str,
-    source: &G0WorkflowSource,
-    store: &RawEvidenceStore,
-    findings: &mut Vec<Finding>,
-) {
-    let Ok(expected) = BASE64.decode(&source.bytes_base64) else {
-        finding(
-            findings,
-            "g0-storage-bytes",
-            "",
-            field,
-            "workflow source bytes must decode before external CAS verification",
-        );
-        return;
-    };
-    check_g0_external_object(
-        &format!("{field}.storage_ref"),
-        store,
-        &source.storage_ref,
-        &source.sha256,
-        &expected,
-        findings,
-    );
-}
-
-fn check_g0_external_artifact(
-    field: &str,
-    artifact: &G0ArtifactReference,
-    raw_objects: &[G0RawObjectRef],
-    store: &RawEvidenceStore,
-    findings: &mut Vec<Finding>,
-) {
-    let Some(raw) = artifact.raw_object_refs.iter().find_map(|raw_id| {
-        raw_objects
-            .iter()
-            .find(|raw| raw.raw_id == *raw_id && raw.sha256 == artifact.sha256)
-    }) else {
-        finding(
-            findings,
-            "g0-storage-artifact",
-            "",
-            field,
-            "artifact CAS verification requires a referenced raw object with the same digest",
-        );
-        return;
-    };
-    let Ok(expected) = BASE64.decode(&raw.bytes_base64) else {
-        finding(
-            findings,
-            "g0-storage-bytes",
-            "",
-            field,
-            "artifact raw object bytes must decode before external CAS verification",
-        );
-        return;
-    };
-    check_g0_external_object(
-        &format!("{field}.storage_ref"),
-        store,
-        &artifact.storage_ref,
-        &artifact.sha256,
-        &expected,
-        findings,
-    );
 }
 
 fn check_g0_collector_identity(collector: &G0CollectorSnapshot, findings: &mut Vec<Finding>) {
@@ -8886,37 +8571,6 @@ mod tests {
             .join(format!("velnor-g0-public-check-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("create fixture directory");
-        let store_root = directory.join("store");
-        let store_objects = store_root.join("sha256");
-        std::fs::create_dir_all(&store_objects).expect("create CAS directory");
-        let original_objects = store_root.join("original");
-        std::fs::create_dir_all(&original_objects).expect("create original CAS directory");
-        let snapshot_bytes = BASE64
-            .decode(&baseline_inventory.collector_snapshot_bytes_base64)
-            .expect("decode fixture snapshot bytes");
-        let snapshot_hex = baseline_inventory
-            .collector_snapshot_sha256
-            .strip_prefix("sha256:")
-            .expect("snapshot digest has prefix");
-        std::fs::write(store_objects.join(snapshot_hex), snapshot_bytes)
-            .expect("write snapshot CAS object");
-        for raw in &baseline_inventory.collector_snapshot.raw_objects {
-            let bytes = BASE64.decode(&raw.bytes_base64).expect("decode raw bytes");
-            let hex = raw
-                .sha256
-                .strip_prefix("sha256:")
-                .expect("raw digest has prefix");
-            std::fs::write(store_objects.join(hex), bytes).expect("write raw CAS object");
-            let original_hex = raw
-                .original_sha256
-                .strip_prefix("sha256:")
-                .expect("original digest has prefix");
-            let original_bytes = BASE64
-                .decode(&raw.bytes_base64)
-                .expect("decode original fixture bytes");
-            std::fs::write(original_objects.join(original_hex), original_bytes)
-                .expect("write original CAS object");
-        }
         let manifest_path = directory.join("manifest.json");
         let snapshot_path = directory.join("snapshot.json");
         let evidence_path = directory.join("evidence.json");
@@ -8942,9 +8596,8 @@ mod tests {
             evidence: evidence_path.clone(),
             release_manifest: None,
             live: false,
-            evidence_root: Some(store_root.clone()),
         })
-        .expect("public checker accepts serialized fixture");
+        .expect("public checker parses serialized fixture");
         assert!(report
             .findings
             .iter()
@@ -8952,53 +8605,10 @@ mod tests {
         assert_eq!(report.status, "fail");
         assert_eq!(report.mode, "offline");
 
-        let first_original_hex = baseline_inventory.collector_snapshot.raw_objects[0]
-            .original_sha256
-            .strip_prefix("sha256:")
-            .expect("original digest has prefix");
-        std::fs::remove_file(original_objects.join(first_original_hex))
-            .expect("remove original response object");
-        let missing_original_report = check_paths(&EvidenceCheckInput {
-            stage: "G0".to_owned(),
-            manifest: manifest_path.clone(),
-            snapshot: snapshot_path.clone(),
-            evidence: evidence_path.clone(),
-            release_manifest: None,
-            live: false,
-            evidence_root: Some(store_root.clone()),
-        })
-        .expect("public checker reports missing original CAS object");
-        assert!(missing_original_report.findings.iter().any(|finding| {
-            finding.code == "g0-storage-missing" && finding.field.contains("original_storage_ref")
-        }));
-        let missing_store_report = check_paths(&EvidenceCheckInput {
-            stage: "G0".to_owned(),
-            manifest: manifest_path.clone(),
-            snapshot: snapshot_path.clone(),
-            evidence: evidence_path.clone(),
-            release_manifest: None,
-            live: false,
-            evidence_root: None,
-        })
-        .expect("public checker reports missing CAS root");
-        assert!(missing_store_report
-            .findings
-            .iter()
-            .any(|finding| finding.code == "g0-storage-root-missing"));
-
         let mut graph_inventory = baseline_inventory.clone();
         graph_inventory.collector_snapshot.dependency_graph.edges[0].target_source_ref =
             "refs/heads/foreign".to_owned();
         refresh_typed_inventory_bytes(&mut graph_inventory);
-        let graph_snapshot_bytes = BASE64
-            .decode(&graph_inventory.collector_snapshot_bytes_base64)
-            .expect("decode graph mutation bytes");
-        let graph_snapshot_hex = graph_inventory
-            .collector_snapshot_sha256
-            .strip_prefix("sha256:")
-            .expect("graph digest has prefix");
-        std::fs::write(store_objects.join(graph_snapshot_hex), graph_snapshot_bytes)
-            .expect("write graph mutation CAS object");
         let mut graph_evidence = evidence.clone();
         graph_evidence.g0_inventory = Some(graph_inventory);
         std::fs::write(
@@ -9013,7 +8623,6 @@ mod tests {
             evidence: evidence_path.clone(),
             release_manifest: None,
             live: false,
-            evidence_root: Some(store_root.clone()),
         })
         .expect("public checker parses graph mutation");
         assert!(graph_report
@@ -9022,8 +8631,7 @@ mod tests {
             .any(|finding| finding.code == "g0-dependency-edge"));
 
         // Recompute the outer caller-visible envelope digest after changing one
-        // raw response, but retain immutable content-addressed refs and the
-        // captured raw digest. The reopened CAS bytes must still disagree.
+        // raw response, but retain the captured raw digest.
         let mut mutated_inventory = baseline_inventory;
         let raw = &mut mutated_inventory.collector_snapshot.raw_objects[0];
         raw.bytes_base64 = BASE64.encode(b"tampered");
@@ -9047,7 +8655,6 @@ mod tests {
             evidence: evidence_path,
             release_manifest: None,
             live: false,
-            evidence_root: Some(store_root),
         })
         .expect("public checker parses mutated fixture");
         assert!(mutated_report
@@ -9058,10 +8665,6 @@ mod tests {
             .findings
             .iter()
             .any(|finding| finding.code == "g0-collector-storage"));
-        assert!(mutated_report
-            .findings
-            .iter()
-            .any(|finding| finding.code == "g0-storage-mismatch"));
         std::fs::remove_dir_all(directory).expect("remove fixture directory");
     }
 
@@ -9188,40 +8791,7 @@ mod tests {
             .expect("canonical temp directory")
             .join(format!("velnor-g0-child-matrix-cli-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(directory.join("store/sha256")).expect("create fixture store");
-        std::fs::create_dir_all(directory.join("store/original"))
-            .expect("create original fixture store");
-        let store_root = directory.join("store");
-        let snapshot_bytes = BASE64
-            .decode(&inventory.collector_snapshot_bytes_base64)
-            .expect("decode snapshot bytes");
-        let snapshot_hex = inventory
-            .collector_snapshot_sha256
-            .strip_prefix("sha256:")
-            .expect("snapshot digest has prefix");
-        std::fs::write(store_root.join("sha256").join(snapshot_hex), snapshot_bytes)
-            .expect("write snapshot object");
-        for raw in &inventory.collector_snapshot.raw_objects {
-            let bytes = BASE64.decode(&raw.bytes_base64).expect("decode raw object");
-            let hex = raw
-                .sha256
-                .strip_prefix("sha256:")
-                .expect("raw digest has prefix");
-            std::fs::write(store_root.join("sha256").join(hex), bytes).expect("write raw object");
-            let original_hex = raw
-                .original_sha256
-                .strip_prefix("sha256:")
-                .expect("original digest has prefix");
-            let original_bytes = BASE64
-                .decode(&raw.bytes_base64)
-                .expect("decode original fixture bytes");
-            std::fs::write(
-                store_root.join("original").join(original_hex),
-                original_bytes,
-            )
-            .expect("write original object");
-        }
-
+        std::fs::create_dir_all(&directory).expect("create fixture directory");
         let manifest_path = directory.join("manifest.json");
         let snapshot_path = directory.join("snapshot.json");
         let evidence_path = directory.join("evidence.json");
@@ -9257,7 +8827,6 @@ mod tests {
             evidence: evidence_path.clone(),
             release_manifest: None,
             live: false,
-            evidence_root: Some(store_root.clone()),
         };
         let report = check_paths(&input).expect("public checker parses child matrix fixture");
         assert!(
@@ -9275,7 +8844,6 @@ mod tests {
             evidence: input.evidence,
             release_manifest: None,
             live: false,
-            evidence_root: input.evidence_root,
             json: true,
         })
         .await
@@ -10468,7 +10036,6 @@ mod tests {
             evidence: evidence_path,
             release_manifest: None,
             live: true,
-            evidence_root: None,
         })
         .await
         .expect_err("live mode must reject a result-only envelope");
@@ -10487,7 +10054,6 @@ mod tests {
             evidence: PathBuf::from("caller-authored-evidence.json"),
             release_manifest: None,
             live: true,
-            evidence_root: Some(PathBuf::from("caller-authored-store")),
         })
         .await
         .expect_err("public live entrypoint must not upgrade local files");
@@ -10505,7 +10071,6 @@ mod tests {
             evidence: PathBuf::from("caller-authored-evidence.json"),
             release_manifest: None,
             live: true,
-            evidence_root: Some(PathBuf::from("caller-authored-store")),
             json: true,
         })
         .await

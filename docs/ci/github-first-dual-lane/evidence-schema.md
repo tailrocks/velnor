@@ -1,7 +1,8 @@
 # GitHub-first dual-lane evidence schema v2
 
-`velnor-tools evidence-check` is a fail-closed verifier. It consumes four
-independent machine-readable inputs plus an explicit local evidence store:
+`velnor-tools evidence-check` is a fail-closed verifier. Offline mode consumes
+three independent machine-readable inputs; trusted live mode receives the
+producer's verified raw-store handle in-process:
 
 ```text
 velnor-tools evidence-check \
@@ -9,7 +10,6 @@ velnor-tools evidence-check \
   --manifest manifest.json \
   --snapshot snapshot.json \
   --evidence records.json \
-  --evidence-root ./immutable-cas \
   --live \
   --release-manifest application-manifest.json
 ```
@@ -32,12 +32,12 @@ nullable-row normalization, legacy fallbacks, and flat release/install aliases
 are not accepted. Parse failure is failure. No credentials, bearer tokens, or
 authentication headers may occur in any source/provenance field.
 
-`--evidence-root` is an explicit local immutable CAS root for validation or a
-future trusted collector handoff. The checker resolves
-only `sha256://<hex>` references beneath
-`<root>/sha256/<hex>`, reopens each regular file, and recomputes its measured
-bytes and SHA-256. It never treats a URI or caller digest as proof, follows
-symlinks outside the root, or fetches arbitrary network URLs.
+Offline validation recomputes supplied base64 bytes and checks canonical
+`sha256://<hex>` references, but does not open a caller-selected CAS path.
+Only the producer-owned live store may reopen and rehash safe/original bytes;
+its verified handle is passed through the authenticated capture. The checker
+never treats a URI or caller digest as proof, follows a caller path, or
+fetches arbitrary network URLs.
 
 ## Reviewed workload manifest
 
@@ -225,7 +225,8 @@ The integration target is one in-process path, not a second JSON normalizer:
    bytes supplied by the authenticated transport; `verify(&RawObjectRef)` must
    reopen the same descriptor-relative object and sidecar. A caller-supplied
    `original_sha256`, URI, or path is metadata until verification succeeds. No
-   checker-local CAS implementation may substitute for this store.
+   checker-local CAS implementation may substitute for this store. The
+   checker no longer carries a second path-based raw-store implementation.
 3. The checker owner keeps `g0_contract.rs`, `g0_workflow.rs`, and
    `evidence_check.rs`. The eventual adapter must pass the producer's typed
    capture directly to these types, verify measured CAS bytes, and call the
@@ -255,12 +256,12 @@ revision sets, source-derived expectations, and measured raw objects before
 constructing it. `VerifiedRawStoreHandle` must call the production
 descriptor-relative store's reopen/rehash verification. A future checker
 integration may accept only this in-process value; offline files continue to use
-`check_paths` for rejection tests and cannot authorize G0 or G7.
+`check_paths` for parser/rejection tests and cannot authorize G0 or G7.
 
 The producer installs its adapter once with
 `live_authority::install_collector(Box<dyn AuthenticatedClosingCollector>)`
 during process setup. Registration is immutable and process-local; no command
-argument, JSON field, timestamp, digest, or evidence-root path can install or
+argument, JSON field, timestamp, digest, or caller path can install or
 replace the authority. If setup does not register the authenticated collector,
 `--live` returns the explicit capability error.
 
@@ -310,8 +311,9 @@ match the measured bytes. A raw object also carries
 `original_sha256`, `original_byte_length`, and `original_storage_ref` for the
 exact authenticated provider response before credential masking. The
 producer's canonical CAS keeps that original response under its typed
-`original` namespace; offline validation reopens and rehashes it, while live
-authority must receive the producer-verified binding. A caller-supplied
+`original` namespace; the producer's verified live handle reopens and rehashes
+it before authority reaches the checker. Offline validation checks the typed
+bytes and references only; it cannot authorize a gate. A caller-supplied
 original digest or URI is never proof. `has_next_page`
 requires the next captured page in the same canonical stream, with contiguous
 page number/cursor and an exact `https://api.github.com` URL/path/query link;
@@ -374,21 +376,21 @@ cannot authorize an unrelated target revision.
 
 The same external-storage rule applies to generated-state and workload
 artifacts: `storage_ref` must address the exact measured `sha256` bytes of a
-raw object referenced by that artifact. The checker reopens every source and
-artifact object through the explicit evidence root before comparing bytes; a
-caller-provided base64 field, digest, URI, or parsed-object reserialization
+raw object referenced by that artifact. The producer's verified live handle
+reopens each source and artifact object before authority reaches the checker;
+a caller-provided base64 field, digest, URI, or parsed-object reserialization
 cannot substitute for that read. Typed workload-to-check/package/release
 edges must also preserve the source repository and workload identity; a node
 from another repository is not a valid endpoint merely because its digest and
 ID are present.
 
 `--live` will have one canonical input path once collector integration lands:
-a producer-owned authenticated capture in `evidence.g0_inventory`, plus the
-explicit `--evidence-root` CAS. The checker must revalidate the capture
+a producer-owned authenticated capture in `evidence.g0_inventory`, plus its
+verified raw-store handle. The checker must revalidate the capture
 identity, request/page chain, raw response bindings, source-derived workflow
 graph, current repository/PR/check inventory, and measured CAS bytes against
 the collector's authority binding. A typed capture, fresh timestamp, or
-self-consistent local CAS is not that binding. Until the authenticated
+self-consistent caller file is not that binding. Until the authenticated
 read-only API collector and closing-head reconciliation are wired, `--live`
 rejects before reading caller files. Offline fixtures prove only parser and
 rejection behavior and cannot declare G0 or G7 completion. Execution stages
