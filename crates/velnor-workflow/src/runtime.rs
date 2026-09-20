@@ -4463,7 +4463,6 @@ pub(crate) fn valid_registry_host(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::error::Error;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use crate::primitives::prepared_tools::{ProducerIdentity, ToolFile, ToolOutcome};
@@ -4857,8 +4856,7 @@ mod tests {
         name: &str,
         changed: &str,
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-selection-{name}-{}-{id}",
             std::process::id()
@@ -4921,8 +4919,7 @@ mod tests {
 
     fn stale_base_selection_git_fixture(
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-stale-base-selection-{}-{id}",
             std::process::id()
@@ -4986,8 +4983,7 @@ mod tests {
 
     fn lockfile_version_selection_git_fixture(
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-version-selection-{}-{id}",
             std::process::id()
@@ -5194,8 +5190,7 @@ workspace_check = true
         changes: &[(&str, &str, &str)],
         config_text: &str,
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-current-project-selection-{name}-{}-{id}",
             std::process::id()
@@ -5366,8 +5361,7 @@ workspace_check = true
     #[test]
     fn velnor_only_plan_output_excludes_swift_and_empties_its_matrix() -> Result<(), Box<dyn Error>>
     {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let path = std::env::temp_dir().join(format!(
             "velnor-workflow-runner-matrices-{}-{id}",
             std::process::id()
@@ -5409,8 +5403,7 @@ workspace_check = true
 
     #[test]
     fn selection_artifact_round_trips_scope_and_sha() -> Result<(), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let path = std::env::temp_dir().join(format!(
             "velnor-workflow-selection-artifact-{}-{id}",
             std::process::id()
@@ -6874,8 +6867,7 @@ workspace_check = true
     }
 
     fn manifest_fixture(name: &str) -> std::path::PathBuf {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let dir = std::env::temp_dir().join(format!(
             "velnor-workflow-manifest-{name}-{pid}-{id}",
             pid = std::process::id()
@@ -7162,12 +7154,8 @@ workspace_check = true
     }
 
     fn install_fixture(name: &str, manifest: &ToolManifest) -> InstallFixture {
-        static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "velnor-prepared-tool-install-{name}-{}-{}",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
+        let id = crate::unique_suffix();
+        let root = std::env::temp_dir().join(format!("velnor-prepared-tool-install-{name}-{id}"));
         let dir = root.join("bundle");
         must(
             fs::create_dir_all(dir.join("bin")),
