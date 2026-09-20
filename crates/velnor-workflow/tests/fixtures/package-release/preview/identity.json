@@ -1,0 +1,24 @@
+{
+  "manifest": {
+    "assets": [
+      {
+        "name": "package.tar.gz",
+        "sha256": "eaa28c660449a5b079b677446d87a0555e6d2c7d2a152e5b0220a5f4526904ce"
+      }
+    ],
+    "schema": "example.consumer-manifest-v1",
+    "source_commit": "0123456789abcdef0123456789abcdef01234567",
+    "source_ref": "refs/heads/main",
+    "source_repository": "example/project",
+    "supporting_assets": [
+      {
+        "name": "provenance.json",
+        "sha256": "81eb42f94be79f457c6833c7b21b869898372afff33f2504a0a65811e84b6370"
+      }
+    ],
+    "version": "1.2.3-preview.7+0123456"
+  },
+  "source_digest": "0123456789abcdef0123456789abcdef01234567",
+  "source_ref": "refs/heads/main",
+  "source_repository": "example/project"
+}
