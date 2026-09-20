@@ -23,18 +23,15 @@ const POLICY_UNIT_ID: &str = "rust-policy";
 /// other value fails the install, so the scan rejects it up front.
 const RUSTUP_PROFILES: [&str; 3] = ["minimal", "default", "complete"];
 
-/// Read the repository's pinned toolchain from a repository directory,
-/// statting the two candidate files. For callers that already hold the walked
-/// file set, prefer [`parse_rust_toolchain`].
-pub(crate) fn parse_rust_toolchain_from_dir(
+/// Parse the pinned toolchain from a detector-approved regular-file view.
+/// Generation-config units must use the same raw detector inputs as the rest
+/// of the scan; consulting a fresh Git-index walk here would hide an
+/// untracked regular pin or follow a symlinked pin.
+pub(crate) fn parse_rust_toolchain_from_files(
     root: &Path,
+    files: &BTreeSet<String>,
 ) -> Result<Option<RustToolchain>, GeneratorError> {
-    if root.join("rust-toolchain.toml").is_file() || root.join("rust-toolchain").is_file() {
-        let files = super::file_walk::repository_files(root, &[])?;
-        let file_set: BTreeSet<String> = files.iter().cloned().collect();
-        return parse_rust_toolchain(root, &file_set);
-    }
-    Ok(None)
+    parse_rust_toolchain(root, files)
 }
 
 /// Parse the repository's pinned Rust toolchain, if it declares one.

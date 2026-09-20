@@ -1348,6 +1348,22 @@ impl RawInventory {
             .collect()
     }
 
+    fn detector_regular_files(&self, detector_inputs: &BTreeSet<PathBuf>) -> Vec<String> {
+        detector_inputs
+            .iter()
+            .filter(|path| matches!(self.entries.get(*path), Some(RawInventoryEntry::Regular(_))))
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn omitted_non_regular_files(&self, detector_inputs: &BTreeSet<PathBuf>) -> Vec<String> {
+        detector_inputs
+            .iter()
+            .filter(|path| !matches!(self.entries.get(*path), Some(RawInventoryEntry::Regular(_))))
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
     fn fingerprint(
         &self,
         detector_inputs: &BTreeSet<PathBuf>,
@@ -1731,14 +1747,17 @@ fn scan_target_with_baseline(
             ));
         }
         let detector_inputs = pass_inventory.detector_inputs(&owned_paths);
-        let shape = scan::scan_shape_with_owned_paths(
+        let detector_files = pass_inventory.detector_regular_files(&detector_inputs);
+        let omitted_non_regular = pass_inventory.omitted_non_regular_files(&detector_inputs);
+        let shape = scan::scan_shape_with_detector_files(
             root,
             &scan_providers,
             scan_default_branch,
-            exclude,
-            &owned_paths,
+            detector_files,
+            omitted_non_regular,
         )?;
-        let scanned = resolve_scanned_target(root, generation.as_ref(), shape)?;
+        let detector_file_set = shape.files().iter().cloned().collect();
+        let scanned = resolve_scanned_target(root, generation.as_ref(), shape, &detector_file_set)?;
         let rendered = rendered_files_for_scanned(root, &scanned)?;
         let mut next = baseline_paths.clone();
         next.extend(current_exact_paths(root, &rendered)?);
@@ -1765,6 +1784,7 @@ fn resolve_scanned_target(
     root: &Path,
     generation: Option<&config::RepoGenerationConfig>,
     shape: scan::RepositoryShape,
+    detector_files: &BTreeSet<String>,
 ) -> Result<ScannedTarget, GeneratorError> {
     let mut config = ProjectConfig::from(shape.clone());
     if let Some(generation) = generation {
@@ -1796,7 +1816,7 @@ fn resolve_scanned_target(
     // Rust unit, so the parsed pin is stamped onto any Rust unit that lacks
     // one; a repository with no pin leaves them unstamped for generation to
     // refuse.
-    if let Some(toolchain) = scan::rust::parse_rust_toolchain_from_dir(root)? {
+    if let Some(toolchain) = scan::rust::parse_rust_toolchain_from_files(root, detector_files)? {
         for unit in &mut config.units {
             if unit.kind == UnitKind::Rust && unit.toolchain.is_none() {
                 unit.toolchain = Some(toolchain.clone());
@@ -6338,6 +6358,17 @@ enum FilePreimage {
     },
 }
 
+/// A mutation is rollback-safe only while the post-write preimage still
+/// matches. Bytes alone are insufficient: a concurrent same-byte replacement
+/// or mode change must stop recovery rather than deleting or overwriting the
+/// replacement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AppliedMutation {
+    relative: PathBuf,
+    before: FilePreimage,
+    after: FilePreimage,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileIdentity {
     length: u64,
@@ -7726,7 +7757,7 @@ fn apply_generated_write_plan(
         && (!plan.ownership_present || plan.ownership_needs_refresh)
     {
         return match apply_ownership_refresh(root, files, inputs, plan) {
-            Ok(outcome) => {
+            Ok((outcome, after)) => {
                 if let Err(error) = journal.record(root, Path::new(OWNERSHIP_STATE)) {
                     let preimage = plan
                         .files
@@ -7738,7 +7769,11 @@ fn apply_generated_write_plan(
                         })?;
                     return rollback_after_error(
                         root,
-                        &[(PathBuf::from(OWNERSHIP_STATE), preimage)],
+                        &[AppliedMutation {
+                            relative: PathBuf::from(OWNERSHIP_STATE),
+                            before: preimage,
+                            after,
+                        }],
                         error,
                     );
                 }
@@ -7781,12 +7816,16 @@ fn apply_generated_write_plan(
                 GeneratorError::usage("generated plan has no file preimage"),
             );
         };
-        if let Err(error) =
-            write_reviewed_file(&root.join(relative), relative, content, &planned.preimage)
-        {
-            return rollback_after_error(root, &mutated, error);
-        }
-        mutated.push((relative.clone(), planned.preimage.clone()));
+        let after =
+            match write_reviewed_file(&root.join(relative), relative, content, &planned.preimage) {
+                Ok(after) => after,
+                Err(error) => return rollback_after_error(root, &mutated, error),
+            };
+        mutated.push(AppliedMutation {
+            relative: relative.clone(),
+            before: planned.preimage.clone(),
+            after,
+        });
         if let Err(error) = journal.record(root, relative) {
             return rollback_after_error(root, &mutated, error);
         }
@@ -7804,11 +7843,15 @@ fn apply_generated_write_plan(
                 GeneratorError::usage("generated plan has no stale-file preimage"),
             );
         };
-        if let Err(error) = delete_reviewed_file(&root.join(relative), relative, &planned.preimage)
-        {
-            return rollback_after_error(root, &mutated, error);
-        }
-        mutated.push((relative.clone(), planned.preimage.clone()));
+        let after = match delete_reviewed_file(&root.join(relative), relative, &planned.preimage) {
+            Ok(after) => after,
+            Err(error) => return rollback_after_error(root, &mutated, error),
+        };
+        mutated.push(AppliedMutation {
+            relative: relative.clone(),
+            before: planned.preimage.clone(),
+            after,
+        });
         if let Err(error) = journal.record(root, relative) {
             return rollback_after_error(root, &mutated, error);
         }
@@ -7825,15 +7868,20 @@ fn apply_generated_write_plan(
             GeneratorError::usage("generated plan has no ownership preimage"),
         );
     };
-    if let Err(error) = write_reviewed_file(
+    let after = match write_reviewed_file(
         &root.join(&ownership_path),
         &ownership_path,
         &ownership_state_content(files, inputs),
         &ownership_file.preimage,
     ) {
-        return rollback_after_error(root, &mutated, error);
-    }
-    mutated.push((ownership_path, ownership_file.preimage.clone()));
+        Ok(after) => after,
+        Err(error) => return rollback_after_error(root, &mutated, error),
+    };
+    mutated.push(AppliedMutation {
+        relative: ownership_path,
+        before: ownership_file.preimage.clone(),
+        after,
+    });
     if let Err(error) = journal.record(root, Path::new(OWNERSHIP_STATE)) {
         return rollback_after_error(root, &mutated, error);
     }
@@ -7846,7 +7894,7 @@ fn apply_generated_write_plan(
 
 fn rollback_after_error(
     root: &Path,
-    mutated: &[(PathBuf, FilePreimage)],
+    mutated: &[AppliedMutation],
     error: GeneratorError,
 ) -> Result<WriteOutcome, GeneratorError> {
     if let Err(rollback) = rollback_generated_files(root, mutated) {
@@ -7864,16 +7912,23 @@ fn rollback_after_error(
 
 fn rollback_generated_files(
     root: &Path,
-    mutated: &[(PathBuf, FilePreimage)],
+    mutated: &[AppliedMutation],
 ) -> Result<(), GeneratorError> {
-    for (relative, preimage) in mutated.iter().rev() {
-        let path = root.join(relative);
-        match preimage {
+    for mutation in mutated.iter().rev() {
+        let path = root.join(&mutation.relative);
+        let current = capture_file_preimage(&path, &mutation.relative)?;
+        if current != mutation.after {
+            return Err(GeneratorError::usage(format!(
+                "cannot roll back generated file after post-write identity changed: {}",
+                mutation.relative.display()
+            )));
+        }
+        match &mutation.before {
             FilePreimage::Missing => match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                     return Err(GeneratorError::usage(format!(
                         "cannot roll back non-regular generated file: {}",
-                        relative.display()
+                        mutation.relative.display()
                     )));
                 }
                 Ok(_) => fs::remove_file(&path).map_err(|error| {
@@ -7911,7 +7966,7 @@ fn apply_ownership_refresh(
     files: &BTreeMap<PathBuf, String>,
     inputs: &GenerationInputs,
     plan: &GeneratedWritePlan,
-) -> Result<WriteOutcome, GeneratorError> {
+) -> Result<(WriteOutcome, FilePreimage), GeneratorError> {
     let ownership_path = PathBuf::from(OWNERSHIP_STATE);
     let ownership_file = plan
         .files
@@ -7922,16 +7977,19 @@ fn apply_ownership_refresh(
         .then(|| ownership_path.clone())
         .into_iter()
         .collect();
-    write_reviewed_file(
+    let after = write_reviewed_file(
         &root.join(&ownership_path),
         &ownership_path,
         &ownership_state_content(files, inputs),
         &ownership_file.preimage,
     )?;
-    Ok(WriteOutcome::Written {
-        changed: vec![ownership_path],
-        created,
-    })
+    Ok((
+        WriteOutcome::Written {
+            changed: vec![ownership_path.clone()],
+            created,
+        },
+        after,
+    ))
 }
 
 fn reject_symlinked_output_root(root: &Path) -> Result<(), GeneratorError> {
@@ -8506,7 +8564,7 @@ fn write_reviewed_file(
     relative: &Path,
     content: &str,
     expected: &FilePreimage,
-) -> Result<(), GeneratorError> {
+) -> Result<FilePreimage, GeneratorError> {
     write_reviewed_file_observed(path, relative, content, expected, |_| Ok(()))
 }
 
@@ -8516,7 +8574,7 @@ fn write_reviewed_file_observed<F>(
     content: &str,
     expected: &FilePreimage,
     before_replace: F,
-) -> Result<(), GeneratorError>
+) -> Result<FilePreimage, GeneratorError>
 where
     F: FnOnce(&Path) -> Result<(), GeneratorError>,
 {
@@ -8547,7 +8605,11 @@ where
             }
             fs::remove_file(&staged)
                 .map_err(|error| GeneratorError::io("remove staged file", &staged, &error))?;
-            Ok(())
+            let after = capture_file_preimage(path, relative)?;
+            if !after.has_bytes(content.as_bytes()) {
+                return Err(preimage_changed(relative));
+            }
+            Ok(after)
         }
         FilePreimage::Regular { .. } => {
             let (backup_dir, backup) = reserve_backup_path(path)?;
@@ -8598,7 +8660,11 @@ where
             // ownership-state update; a leftover backup remains recoverable.
             let _ = fs::remove_file(&backup);
             let _ = fs::remove_dir(&backup_dir);
-            Ok(())
+            let after = capture_file_preimage(path, relative)?;
+            if !after.has_bytes(content.as_bytes()) {
+                return Err(preimage_changed(relative));
+            }
+            Ok(after)
         }
     }
 }
@@ -8607,7 +8673,7 @@ fn delete_reviewed_file(
     path: &Path,
     relative: &Path,
     expected: &FilePreimage,
-) -> Result<(), GeneratorError> {
+) -> Result<FilePreimage, GeneratorError> {
     if matches!(expected, FilePreimage::Missing) {
         return Err(preimage_changed(relative));
     }
@@ -8639,7 +8705,11 @@ fn delete_reviewed_file(
     // progress monotonic even if cleanup leaves a recoverable hidden backup.
     let _ = fs::remove_file(&backup);
     let _ = fs::remove_dir(&backup_dir);
-    Ok(())
+    let after = capture_file_preimage(path, relative)?;
+    if !matches!(after, FilePreimage::Missing) {
+        return Err(preimage_changed(relative));
+    }
+    Ok(after)
 }
 
 /// Test helper: replace a path with new content through the same staged
@@ -9266,6 +9336,14 @@ mod tests {
         )
     }
 
+    fn assert_git_override_rejected(root: &Path, revision: &str, expected: &str) {
+        let error = must_some(
+            TrustedBaseline::from_git(root, revision).err(),
+            "Git object override must be rejected",
+        );
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn immutable_baseline_rejects_sidecar_claimed_symlink_outputs() {
@@ -9323,6 +9401,108 @@ mod tests {
             "reject symlink baseline output",
         );
         assert!(error.to_string().contains("not an immutable regular blob"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn immutable_baseline_rejects_git_object_overrides() {
+        let root = temporary_repository("git-object-overrides");
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            ),
+            "write baseline manifest",
+        );
+        let baseline = committed_test_baseline(&root);
+        let status = must(
+            Command::new("git")
+                .current_dir(&root)
+                .args(["commit", "--allow-empty", "-qm", "second baseline commit"])
+                .status(),
+            "create second baseline commit",
+        );
+        assert!(status.success(), "second baseline commit failed: {status}");
+        let replacement = must(
+            Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output(),
+            "read replacement commit",
+        );
+        assert!(replacement.status.success(), "read replacement failed");
+        let replacement = String::from_utf8_lossy(&replacement.stdout)
+            .trim()
+            .to_owned();
+        let revision = baseline.revision.clone();
+
+        let status = must(
+            Command::new("git")
+                .current_dir(&root)
+                .args(["replace", &revision, &replacement])
+                .status(),
+            "install replace ref",
+        );
+        assert!(status.success(), "install replace ref failed: {status}");
+        assert_git_override_rejected(&root, &revision, "Git replace refs are active");
+        let status = must(
+            Command::new("git")
+                .current_dir(&root)
+                .args(["replace", "-d", &revision])
+                .status(),
+            "remove replace ref",
+        );
+        assert!(status.success(), "remove replace ref failed: {status}");
+
+        let grafts = must(
+            Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "--git-path", "info/grafts"])
+                .output(),
+            "resolve graft path",
+        );
+        assert!(grafts.status.success(), "resolve graft path failed");
+        let grafts = PathBuf::from(String::from_utf8_lossy(&grafts.stdout).trim());
+        let grafts = if grafts.is_absolute() {
+            grafts
+        } else {
+            root.join(grafts)
+        };
+        must(
+            fs::create_dir_all(grafts.parent().unwrap_or(&root)),
+            "create graft directory",
+        );
+        must(
+            fs::write(&grafts, format!("{revision} {replacement}\n")),
+            "write graft override",
+        );
+        assert_git_override_rejected(&root, &revision, "Git object override is active");
+        must(fs::remove_file(&grafts), "remove graft override");
+
+        let alternates = must(
+            Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "--git-path", "objects/info/alternates"])
+                .output(),
+            "resolve alternate path",
+        );
+        assert!(alternates.status.success(), "resolve alternate path failed");
+        let alternates = PathBuf::from(String::from_utf8_lossy(&alternates.stdout).trim());
+        let alternates = if alternates.is_absolute() {
+            alternates
+        } else {
+            root.join(alternates)
+        };
+        must(
+            fs::create_dir_all(alternates.parent().unwrap_or(&root)),
+            "create alternate directory",
+        );
+        must(
+            fs::write(&alternates, "/tmp/foreign-git-objects\n"),
+            "write alternate override",
+        );
+        assert_git_override_rejected(&root, &revision, "Git object override is active");
+
         let _ = fs::remove_dir_all(root);
     }
 
@@ -9511,6 +9691,97 @@ mod tests {
             }),
             "raw inventory must not follow a linked directory"
         );
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detector_view_consumes_untracked_regular_files_and_types_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_repository("raw-detector-view");
+        let outside = temporary_directory("raw-detector-view-outside");
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            ),
+            "write detector fixture manifest",
+        );
+        let linked = root.join(".github/workflows/linked.yml");
+        must(
+            fs::create_dir_all(linked.parent().unwrap_or(&root)),
+            "create linked workflow directory",
+        );
+        must(
+            fs::write(outside.join("workflow.yml"), "name: linked\n"),
+            "write linked workflow target",
+        );
+        must(
+            symlink(outside.join("workflow.yml"), &linked),
+            "create tracked workflow symlink",
+        );
+        let _baseline = committed_test_baseline(&root);
+
+        let untracked_action = root.join(".github/actions/untracked/action.yml");
+        must(
+            fs::create_dir_all(untracked_action.parent().unwrap_or(&root)),
+            "create untracked action directory",
+        );
+        must(
+            fs::write(
+                &untracked_action,
+                "name: untracked\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            "write untracked action",
+        );
+
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(provider_set([ProviderId::GithubHosted])),
+                "main",
+            ),
+            "scan raw detector fixture",
+        );
+        assert!(
+            scanned
+                .shape
+                .files()
+                .iter()
+                .any(|path| path == ".github/actions/untracked/action.yml"),
+            "untracked regular files must feed detector inputs: {:?}",
+            scanned.shape.files()
+        );
+        assert!(
+            !scanned
+                .shape
+                .files()
+                .iter()
+                .any(|path| path == ".github/workflows/linked.yml"),
+            "symlinks must not become detector-readable paths: {:?}",
+            scanned.shape.files()
+        );
+        assert!(
+            scanned.shape.limitations().iter().any(|limitation| {
+                limitation.contains("Non-regular repository entry omitted from static detectors")
+                    && limitation.contains(".github/workflows/linked.yml")
+            }),
+            "symlink omission must be an explicit typed limitation: {:?}",
+            scanned.shape.limitations()
+        );
+        let inventory = must(
+            capture_raw_inventory(&root, &[]),
+            "capture detector fixture inventory",
+        );
+        assert!(matches!(
+            inventory
+                .entries
+                .get(Path::new(".github/workflows/linked.yml")),
+            Some(RawInventoryEntry::Symlink { .. })
+        ));
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
@@ -20345,8 +20616,19 @@ lockfile = true
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)),
             "change replacement mode",
         );
+        let after = must(
+            capture_file_preimage(&path, &relative),
+            "capture replacement mode",
+        );
         must(
-            rollback_generated_files(&root, &[(relative.clone(), preimage)]),
+            rollback_generated_files(
+                &root,
+                &[AppliedMutation {
+                    relative: relative.clone(),
+                    before: preimage,
+                    after,
+                }],
+            ),
             "roll back reviewed file",
         );
         assert_eq!(
@@ -20356,6 +20638,86 @@ lockfile = true
         assert_eq!(
             must(fs::metadata(&path), "read rolled back mode").mode() & 0o7777,
             0o640
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rollback_refuses_same_bytes_replacement_after_write() {
+        let root = temporary_repository("rollback-same-bytes-replacement");
+        let relative = PathBuf::from(".github/workflows/ci-pr.yml");
+        let path = root.join(&relative);
+        must(
+            fs::create_dir_all(path.parent().unwrap_or(&root)),
+            "create workflow directory",
+        );
+        must(fs::write(&path, "old bytes\n"), "write old bytes");
+        let before = must(capture_file_preimage(&path, &relative), "capture old bytes");
+        must(atomic_write(&path, "new bytes\n"), "write generated bytes");
+        let after = must(
+            capture_file_preimage(&path, &relative),
+            "capture generated identity",
+        );
+        must(
+            atomic_write(&path, "new bytes\n"),
+            "replace generated bytes with same bytes",
+        );
+
+        let error = must_some(
+            rollback_generated_files(
+                &root,
+                &[AppliedMutation {
+                    relative: relative.clone(),
+                    before,
+                    after,
+                }],
+            )
+            .err(),
+            "rollback must refuse same-byte replacement",
+        );
+        assert!(error.to_string().contains("post-write identity changed"));
+        assert_eq!(
+            must(fs::read_to_string(&path), "read preserved replacement"),
+            "new bytes\n"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rollback_refuses_recreated_missing_preimage() {
+        let root = temporary_repository("rollback-recreated-missing");
+        let relative = PathBuf::from(".github/workflows/ci-pr.yml");
+        let path = root.join(&relative);
+        let before = FilePreimage::Missing;
+        must(
+            atomic_write(&path, "generated bytes\n"),
+            "write generated file",
+        );
+        let after = must(
+            capture_file_preimage(&path, &relative),
+            "capture generated identity",
+        );
+        must(
+            atomic_write(&path, "generated bytes\n"),
+            "recreate generated file",
+        );
+
+        let error = must_some(
+            rollback_generated_files(
+                &root,
+                &[AppliedMutation {
+                    relative: relative.clone(),
+                    before,
+                    after,
+                }],
+            )
+            .err(),
+            "rollback must refuse recreated missing preimage",
+        );
+        assert!(error.to_string().contains("post-write identity changed"));
+        assert_eq!(
+            must(fs::read_to_string(&path), "read preserved recreation"),
+            "generated bytes\n"
         );
         let _ = fs::remove_dir_all(root);
     }

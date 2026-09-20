@@ -54,6 +54,25 @@ pub(crate) fn scan_shape_with_owned_paths(
     owned_paths: &BTreeSet<std::path::PathBuf>,
 ) -> Result<RepositoryShape, GeneratorError> {
     let files = file_walk::repository_files_with_owned_paths(root, exclude, owned_paths)?;
+    scan_shape_with_detector_files(root, providers, default_branch, files, Vec::new())
+}
+
+/// Run the detector pipeline over a caller-owned, physically regular file
+/// view. The caller may retain a broader raw inventory for race fingerprints,
+/// but symlinks and other non-regular entries never become detector-readable
+/// paths. Their omission is explicit in the shape limitations rather than
+/// silently changing capability inference.
+pub(crate) fn scan_shape_with_detector_files(
+    root: &Path,
+    providers: &ProviderSet,
+    default_branch: &str,
+    mut files: Vec<String>,
+    mut omitted_non_regular: Vec<String>,
+) -> Result<RepositoryShape, GeneratorError> {
+    files.sort();
+    files.dedup();
+    omitted_non_regular.sort();
+    omitted_non_regular.dedup();
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
     let context = ScanContext {
         root,
@@ -73,6 +92,11 @@ pub(crate) fn scan_shape_with_owned_paths(
         default_branch: default_branch.to_owned(),
         providers: providers.clone(),
     };
+    shape
+        .limitations
+        .extend(omitted_non_regular.into_iter().map(|path| {
+            format!("Non-regular repository entry omitted from static detectors: {path}.")
+        }));
     // Detector order is part of the contract: ids are sorted stably below, so
     // the first detector to claim an id keeps the un-suffixed form.
     file_walk::detect(&context, &mut shape);
@@ -108,6 +132,11 @@ impl RepositoryShape {
     /// Every repository path the walk observed, relative to the root.
     pub(crate) fn files(&self) -> &[String] {
         &self.files
+    }
+
+    #[cfg(test)]
+    pub(crate) fn limitations(&self) -> &[String] {
+        &self.limitations
     }
 
     pub(crate) fn unit_ids(&self) -> impl Iterator<Item = &str> {

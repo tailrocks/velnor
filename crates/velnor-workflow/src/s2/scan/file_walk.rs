@@ -16,6 +16,7 @@ const GENERATOR_OWNED_SCAN_FILES: &[&str] = &[
     "config/fleet/velnor-host.env",
 ];
 
+#[cfg(test)]
 pub(crate) fn repository_files(
     root: &Path,
     exclude: &[String],
