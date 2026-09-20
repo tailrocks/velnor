@@ -6065,27 +6065,24 @@ mod tests {
             "reject non-UTF-8 incoming entry",
         );
         assert!(error.contains("non-UTF-8"), "{error}");
+        let _ = std::fs::remove_dir_all(&fixture.root);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn incoming_directory_listing_rejects_a_real_non_utf8_entry() {
+        let fixture = discovery_fixture("discovery-real-non-utf8");
         let raw_name = OsString::from_vec(b"invalid-\xff".to_vec());
         let raw_path = fixture.incoming.join(&raw_name);
-        match std::fs::write(&raw_path, b"fixture") {
-            Ok(()) => {
-                let error = must_fail(
-                    dir_names(&fixture.incoming),
-                    "reject a real non-UTF-8 incoming entry",
-                );
-                assert!(error.contains("non-UTF-8"), "{error}");
-                let _ = std::fs::remove_file(raw_path);
-            }
-            Err(error)
-                if error.kind() == std::io::ErrorKind::InvalidInput
-                    || error.raw_os_error() == Some(libc::EILSEQ) =>
-            {
-                // APFS rejects byte sequences that are not valid Unicode; the
-                // direct conversion assertion above still covers the shared
-                // fail-closed boundary on this platform.
-            }
-            Err(error) => panic!("could not create invalid UTF-8 fixture: {error}"),
-        }
+        must(
+            std::fs::write(&raw_path, b"fixture"),
+            "write invalid UTF-8 entry",
+        );
+        let error = must_fail(
+            dir_names(&fixture.incoming),
+            "reject a real non-UTF-8 incoming entry",
+        );
+        assert!(error.contains("non-UTF-8"), "{error}");
         let _ = std::fs::remove_dir_all(&fixture.root);
     }
 
