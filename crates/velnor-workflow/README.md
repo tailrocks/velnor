@@ -71,6 +71,7 @@ file = "preview.yml"
 [declare.args]
 build_tasks = ["build-package"]
 verify_tasks = ["verify-package"]
+publication_lock_branch = "package-release-lock"
 ```
 
 `verify_tasks` is a list of plain mise task names, not shell commands or an
@@ -78,12 +79,22 @@ arbitrary command array. Omit it when a package has no repository-owned
 semantic verification beyond Velnor's generic manifest, checksum, and
 provenance checks.
 
+`pre_publish_tasks` is an optional list of distinct plain mise task names for
+one-time migration work that runs exactly once after the verified source
+checkout and publication lock, but before immutable release mutation. These
+tasks receive the publisher's GitHub token and source-checkout context; they
+must write any remote-mutation marker to `GITHUB_ENV` before mutation and must
+not overlap `verify_tasks`. `publication_lock_branch` is a required,
+repository-specific lock namespace; do not reuse it across independent
+publication lanes.
+
 The rolling release is current-contract-only: an existing public release must
 match the declared manifest, identity, asset digests, tag, source, and version
 contract. An interrupted draft is discarded only after that same typed contract
 and release/tag ownership are re-read; missing or mixed state is rejected before
 publication mutation. Migration of an older consumer release belongs in that
-consumer's release automation.
+consumer's release automation and must use `pre_publish_tasks` with a durable
+recovery contract.
 
 ## `[renovate]` — self-hosted dependency updates
 

@@ -79,6 +79,7 @@ payloads = ["a.tar.gz"]
 supporting_assets = ["SHA256SUMS"]
 channel = "preview"
 release_tag = "preview"
+publication_lock_branch = "package-release-lock"
 github_release_type = "prerelease"
 publish_environment = "github-preview"
 consumer_repository = "example/tap"
@@ -269,8 +270,18 @@ fn package_release_hook_renders_locked_pre_publish_migration_with_narrow_tokens(
     let published = workflow
         .find("- name: Download and re-verify published release")
         .expect("published verification");
+    let finalizer = workflow
+        .find("- name: Finalize package publication lock")
+        .expect("publication lock finalizer");
     assert!(handoff < attest && attest < lock && lock < migration && migration < immutable);
-    assert!(immutable < published);
+    assert!(immutable < published && published < finalizer);
+    assert_eq!(
+        workflow
+            .matches("- name: Finalize package publication lock")
+            .count(),
+        1
+    );
+    assert!(workflow.contains("if: ${{ always() }}"));
     assert!(workflow.contains("GH_TOKEN: ${{ github.token }}\n          VELNOR_SOURCE_CHECKOUT_DIR: ${{ github.workspace }}/source"));
     assert!(workflow.contains("        working-directory: source\n        run: |\n          set -euo pipefail\n          mise run 'migrate-preview-legacy'"));
     let publish_job = workflow

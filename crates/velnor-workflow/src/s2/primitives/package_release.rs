@@ -24,6 +24,7 @@ struct PackageReleaseSpec {
     build_tasks: Vec<String>,
     verify_tasks: Vec<String>,
     pre_publish_tasks: Vec<String>,
+    publication_lock_branch: String,
     package_dir: String,
     manifest_schema: String,
     source_repository: String,
@@ -54,6 +55,7 @@ impl Primitive for PackageRelease {
         &[
             "build_tasks",
             "pre_publish_tasks",
+            "publication_lock_branch",
             "verify_tasks",
             "channel",
             "concurrency_group",
@@ -312,6 +314,28 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
                 "package-release pre_publish_tasks entry {task} is not a plain mise task"
             )));
         }
+        if verify_tasks.iter().any(|verify_task| verify_task == task) {
+            return Err(GeneratorError::usage(format!(
+                "package-release pre_publish_tasks entry {task} overlaps verify_tasks"
+            )));
+        }
+    }
+    for (index, task) in pre_publish_tasks.iter().enumerate() {
+        if pre_publish_tasks[..index]
+            .iter()
+            .any(|previous| previous == task)
+        {
+            return Err(GeneratorError::usage(format!(
+                "package-release pre_publish_tasks contains duplicate entry {task}"
+            )));
+        }
+    }
+
+    let publication_lock_branch = required_string(args, "publication_lock_branch")?;
+    if !crate::s2::runtime::valid_branch(&publication_lock_branch) {
+        return Err(GeneratorError::usage(
+            "package-release publication_lock_branch must be a valid branch name",
+        ));
     }
 
     let package_dir = required_string(args, "package_dir")?;
@@ -440,6 +464,7 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
         build_tasks,
         verify_tasks,
         pre_publish_tasks,
+        publication_lock_branch,
         package_dir,
         manifest_schema,
         source_repository,
@@ -965,15 +990,39 @@ fn publication_lock_script() -> &'static str {
 # create-only: an existing lock is never taken over, including after a stale
 # or abandoned run. Only the owner that still has the exact blob SHA may
 # delete the lock file; the branch itself is intentionally retained.
-publication_lock_branch="velnor-publication-lock"
-publication_lock_path=".velnor/publication-lock.json"
+publication_lock_branch="${VELNOR_PUBLICATION_LOCK_BRANCH:?missing VELNOR_PUBLICATION_LOCK_BRANCH}"
+publication_lock_path=".package-release-publication-lock.json"
 publication_lock_sha="${VELNOR_PUBLICATION_LOCK_SHA:-}"
 publication_lock_acquired=0
-publication_lock_retain=0
+publication_lock_retain="${VELNOR_PUBLICATION_LOCK_RETAIN:-0}"
+publication_lock_released="${VELNOR_PUBLICATION_LOCK_RELEASED:-0}"
 if [ -n "$publication_lock_sha" ]; then
   publication_lock_acquired=1
 fi
 publication_lock_token="${GITHUB_REPOSITORY}:${GITHUB_WORKFLOW:-unknown}:${GITHUB_RUN_ID:-unknown}:${GITHUB_RUN_ATTEMPT:-unknown}"
+
+mark_publication_lock_retain() {
+  publication_lock_retain=1
+  if [ -n "${GITHUB_ENV:-}" ]; then
+    printf 'VELNOR_PUBLICATION_LOCK_RETAIN=1\n' >> "$GITHUB_ENV"
+  fi
+}
+
+mark_publication_lock_released() {
+  publication_lock_released=1
+  publication_lock_acquired=0
+  publication_lock_sha=""
+  if [ -n "${GITHUB_ENV:-}" ]; then
+    printf 'VELNOR_PUBLICATION_LOCK_RELEASED=1\nVELNOR_PUBLICATION_LOCK_RETAIN=0\n' >> "$GITHUB_ENV"
+  fi
+}
+
+clear_publication_lock_retain() {
+  publication_lock_retain=0
+  if [ -n "${GITHUB_ENV:-}" ]; then
+    printf 'VELNOR_PUBLICATION_LOCK_RETAIN=0\n' >> "$GITHUB_ENV"
+  fi
+}
 
 publication_lock_http_status() {
   awk '/^HTTP\/[0-9.]+ [0-9]+/ {print $2; exit}' "$1"
@@ -1063,7 +1112,7 @@ assert_publication_lock() {
 }
 
 release_publication_lock() {
-  if [ "$publication_lock_acquired" = 0 ]; then
+  if [ "$publication_lock_acquired" = 0 ] || [ "$publication_lock_released" = 1 ]; then
     return 0
   fi
   if ! assert_publication_lock; then
@@ -1077,8 +1126,7 @@ release_publication_lock() {
     echo "::error::Velnor publication lock release failed; retaining lock for manual recovery" >&2
     return 1
   fi
-  publication_lock_acquired=0
-  publication_lock_sha=""
+  mark_publication_lock_released
 }
 "#
 }
@@ -1124,6 +1172,41 @@ if [ -z "${GITHUB_ENV:-}" ]; then
 fi
 printf 'VELNOR_PUBLICATION_LOCK_SHA=%s\n' "$publication_lock_sha" >> "$GITHUB_ENV"
 publication_lock_handoff=1
+"#,
+    );
+    script
+}
+
+fn render_publication_lock_finalizer_script() -> String {
+    let mut script = String::from(
+        r#"set -Eeuo pipefail
+transaction_dir="$(mktemp -d)"
+"#,
+    );
+    script.push_str(publication_lock_script());
+    script.push_str(
+        r#"
+cleanup_publication_lock_finalizer() {
+  local status="$1"
+  trap - EXIT
+  if ! rm -rf -- "$transaction_dir"; then
+    status=1
+  fi
+  exit "$status"
+}
+trap 'cleanup_publication_lock_finalizer "$?"' EXIT
+
+if [ "$publication_lock_acquired" = 0 ] || [ "$publication_lock_released" = 1 ]; then
+  exit 0
+fi
+if [ "$publication_lock_retain" = 1 ]; then
+  echo "::warning::Velnor publication lock retained for manual recovery after an uncertain remote mutation" >&2
+  exit 0
+fi
+if ! release_publication_lock; then
+  echo "::error::Velnor publication lock finalizer could not release its owned lock" >&2
+  exit 1
+fi
 "#,
     );
     script
@@ -1763,6 +1846,7 @@ rollback() {
       status=1
     else
       echo "::warning::rolling preview publication failed; previous release restored" >&2
+      clear_publication_lock_retain
     fi
   fi
   exit "$status"
@@ -1892,6 +1976,7 @@ esac
 
 if [ "$had_release" = 0 ]; then
   mutated=1
+  mark_publication_lock_retain
   create_json="$(gh api --method POST --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases" \
     -f "tag_name=$rolling_tag" -f "target_commitish=$EXPECTED_SOURCE_COMMIT" \
     -f "name=$RELEASE_TITLE_PREFIX $candidate_version" \
@@ -1922,6 +2007,7 @@ if [ "$had_release" = 0 ]; then
   fi
 else
   mutated=1
+  mark_publication_lock_retain
   if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
     echo "::error::rolling preview ownership changed before publication; refusing mutation" >&2
     false
@@ -2184,6 +2270,7 @@ case "$response_http" in
       exit 1
     fi
     immutable_publication_mutated=1
+    mark_publication_lock_retain
     if [ -n "$tag_sha" ]; then
       gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --draft "${release_flags[@]}" --title "$title" --notes "Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT"
     else
@@ -2237,6 +2324,7 @@ if [ "$immutable_public" = 0 ]; then
         exit 1
       fi
       immutable_publication_mutated=1
+      mark_publication_lock_retain
       gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "$PACKAGE_DIR/$asset_name"
     fi
   done < "$expected_assets"
@@ -2256,6 +2344,7 @@ if [ "$immutable_public" = 0 ]; then
     exit 1
   fi
   immutable_publication_mutated=1
+  mark_publication_lock_retain
   gh api --method PATCH --repo "$GITHUB_REPOSITORY" \
     "repos/$GITHUB_REPOSITORY/releases/$(jq -er '.id' <<<"$staged_body")" \
     -F draft=false -F "prerelease=$RELEASE_PRERELEASE" -F make_latest=false >/dev/null
@@ -2387,6 +2476,8 @@ fn render_publish_job(
     output.push_str(workspace_expr);
     output.push_str("/package\n      VELNOR_PACKAGE_CHANNEL: ");
     output.push_str(channel_yaml);
+    output.push_str("\n      VELNOR_PUBLICATION_LOCK_BRANCH: ");
+    output.push_str(&crate::s2::yaml_scalar(&spec.publication_lock_branch));
     output.push_str("\n      EXPECTED_SOURCE_REPOSITORY: ");
     output.push_str(source_repository_yaml);
     output.push_str("\n      EXPECTED_SOURCE_REF: ");
@@ -2519,6 +2610,15 @@ fn render_publish_job(
     output.push_str(github_token_expr);
     output.push_str("\n        run: |\n");
     output.push_str(&rolling_refresh);
+    output.push_str(
+        "      - name: Finalize package publication lock\n        if: ${{ always() }}\n        env:\n          GH_TOKEN: ",
+    );
+    output.push_str(github_token_expr);
+    output.push_str("\n        run: |\n");
+    output.push_str(&indent_script(
+        &render_publication_lock_finalizer_script(),
+        10,
+    ));
     output.push_str("      - name: Checkout consumer repository\n        uses: ");
     output.push_str(checkout);
     output.push_str("\n        with:\n          repository: ");
@@ -2615,6 +2715,7 @@ payloads = ["a.tar.gz", "b.tar.gz", "c.tar.gz", "d.tar.gz", "e.tar.gz", "f.tar.g
 supporting_assets = ["SHA256SUMS", "a.tar.gz.bundle", "capsule-manifest.json"]
 channel = "preview"
 release_tag = "preview"
+publication_lock_branch = "package-release-lock"
 github_release_type = "prerelease"
 publish_environment = "github-preview"
 consumer_repository = "example/tap"
@@ -2664,6 +2765,7 @@ payloads = ["a.tar.gz", "b.tar.gz", "c.tar.gz", "d.tar.gz", "e.tar.gz", "f.tar.g
 supporting_assets = ["SHA256SUMS", "a.tar.gz.bundle", "capsule-manifest.json"]
 channel = "preview"
 release_tag = "preview"
+publication_lock_branch = "package-release-lock"
 github_release_type = "prerelease"
 publish_environment = "github-preview"
 release_title_prefix = "Preview"
@@ -2912,6 +3014,30 @@ concurrency_group = "package-release-preview"
     }
 
     #[test]
+    fn package_release_rejects_duplicate_or_overlapping_pre_publish_tasks() {
+        let mut duplicate = args();
+        duplicate.insert(
+            "pre_publish_tasks".to_owned(),
+            toml::Value::Array(vec![
+                toml::Value::String("migrate-preview-legacy".to_owned()),
+                toml::Value::String("migrate-preview-legacy".to_owned()),
+            ]),
+        );
+        let error = parse_spec(&Args(&duplicate)).expect_err("duplicates must fail");
+        assert!(error.to_string().contains("duplicate entry"));
+
+        let mut overlap = args();
+        overlap.insert(
+            "pre_publish_tasks".to_owned(),
+            toml::Value::Array(vec![toml::Value::String(
+                "verify-preview-package".to_owned(),
+            )]),
+        );
+        let error = parse_spec(&Args(&overlap)).expect_err("verification overlap must fail");
+        assert!(error.to_string().contains("overlaps verify_tasks"));
+    }
+
+    #[test]
     fn package_release_verification_tasks_must_exist_in_mise() {
         let root = std::env::temp_dir().join(format!(
             "velnor-package-release-mise-{}",
@@ -3007,6 +3133,121 @@ concurrency_group = "package-release-preview"
         let script = verification_script(&spec);
         assert!(script.contains("verify_sha256_sidecar \"$dir/a.tar.gz.sha256\" \"$dir/a.tar.gz\""));
         assert!(script.contains("checksum sidecar is not one strict digest line"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn publication_lock_finalizer_releases_pre_publish_failure_for_next_run() {
+        use std::process::Command;
+
+        let finalizer = render_publication_lock_finalizer_script();
+        let acquire = render_publication_lock_acquire_script();
+        let lock_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let root = std::env::temp_dir().join(format!(
+            "velnor-publication-lock-finalizer-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create finalizer fixture");
+        std::fs::write(root.join("lock-state"), b"held").expect("seed held lock");
+        let finalizer_script = format!(
+            r#"set -Eeuo pipefail
+gh() {{
+  printf '%s\n' "$*" >> "$TEST_TMPDIR/gh.log"
+  if [[ "$*" == *"contents/.package-release-publication-lock.json?ref=package-release-lock"* ]]; then
+    if [ ! -e "$TEST_TMPDIR/lock-state" ]; then return 1; fi
+    printf '{{"type":"file","path":".package-release-publication-lock.json","sha":"{lock_sha}"}}\n'
+    return 0
+  fi
+  if [[ "$*" == *"--method DELETE"* ]]; then
+    rm -f -- "$TEST_TMPDIR/lock-state"
+    : > "$TEST_TMPDIR/released"
+    return 0
+  fi
+  return 1
+}}
+{finalizer}
+"#,
+        );
+        let env_file = root.join("github-env");
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(&finalizer_script)
+            .env("TEST_TMPDIR", &root)
+            .env("GITHUB_REPOSITORY", "example/project")
+            .env("GITHUB_WORKFLOW", "preview")
+            .env("GITHUB_RUN_ID", "42")
+            .env("GITHUB_RUN_ATTEMPT", "3")
+            .env("VELNOR_PUBLICATION_LOCK_BRANCH", "package-release-lock")
+            .env("VELNOR_PUBLICATION_LOCK_SHA", lock_sha)
+            .env("GITHUB_ENV", &env_file)
+            .env("GH_TOKEN", "test-token")
+            .output()
+            .expect("run publication lock finalizer");
+        assert!(
+            output.status.success(),
+            "finalizer failed:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(root.join("released").exists());
+        assert!(!root.join("lock-state").exists());
+        assert!(std::fs::read_to_string(&env_file)
+            .expect("read finalizer environment")
+            .contains("VELNOR_PUBLICATION_LOCK_RELEASED=1"));
+
+        let next_env = root.join("next-github-env");
+        let acquire_script = format!(
+            r#"set -Eeuo pipefail
+gh() {{
+  printf '%s\n' "$*" >> "$TEST_TMPDIR/next-gh.log"
+  if [[ "$*" == *"git/ref/heads/package-release-lock"* ]]; then
+    printf 'HTTP/2 200 OK\r\n\r\n{{}}\n'
+    return 0
+  fi
+  if [[ "$*" == *"--method PUT"* ]]; then
+    if [ -e "$TEST_TMPDIR/lock-state" ]; then return 1; fi
+    : > "$TEST_TMPDIR/lock-state"
+    printf '{{"content":{{"sha":"{lock_sha}"}}}}\n'
+    return 0
+  fi
+  if [[ "$*" == *"contents/.package-release-publication-lock.json?ref=package-release-lock"* ]]; then
+    printf '{{"type":"file","path":".package-release-publication-lock.json","sha":"{lock_sha}"}}\n'
+    return 0
+  fi
+  return 1
+}}
+{acquire}
+"#,
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(&acquire_script)
+            .env("TEST_TMPDIR", &root)
+            .env("GITHUB_REPOSITORY", "example/project")
+            .env("GITHUB_WORKFLOW", "preview")
+            .env("GITHUB_RUN_ID", "43")
+            .env("GITHUB_RUN_ATTEMPT", "1")
+            .env("VELNOR_PUBLICATION_LOCK_BRANCH", "package-release-lock")
+            .env(
+                "EXPECTED_SOURCE_COMMIT",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )
+            .env("GITHUB_ENV", &next_env)
+            .env("GH_TOKEN", "test-token")
+            .output()
+            .expect("run next publication lock acquisition");
+        assert!(
+            output.status.success(),
+            "next acquisition failed:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(root.join("lock-state").exists());
+        assert!(std::fs::read_to_string(next_env)
+            .expect("read next acquisition environment")
+            .contains("VELNOR_PUBLICATION_LOCK_SHA="));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
@@ -3630,8 +3871,12 @@ concurrency_group = "package-release-preview"
             .or_else(|| immutable.find("gh api --method PATCH"))
             .expect("immutable release mutation");
         assert!(acquire < first_immutable_mutation);
-        assert!(immutable.contains("publication_lock_branch=\"velnor-publication-lock\""));
-        assert!(immutable.contains("publication_lock_path=\".velnor/publication-lock.json\""));
+        assert!(immutable.contains(
+            "publication_lock_branch=\"${VELNOR_PUBLICATION_LOCK_BRANCH:?missing VELNOR_PUBLICATION_LOCK_BRANCH}\""
+        ));
+        assert!(
+            immutable.contains("publication_lock_path=\".package-release-publication-lock.json\"")
+        );
         assert!(immutable.contains("VELNOR_PUBLICATION_LOCK_SHA"));
         assert!(immutable.contains("assert_publication_lock"));
         assert!(immutable
@@ -3682,6 +3927,7 @@ GITHUB_REPOSITORY=example/project
 GITHUB_WORKFLOW=preview
 GITHUB_RUN_ID=42
 GITHUB_RUN_ATTEMPT=3
+VELNOR_PUBLICATION_LOCK_BRANCH=velnor-publication-lock
 EXPECTED_SOURCE_COMMIT=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 transaction_dir="$TEST_TMPDIR/transaction"
 mkdir -p "$transaction_dir"
@@ -3698,8 +3944,8 @@ gh() {{
     printf '{{"content":{{"sha":"{lock_sha}"}}}}\n'
     return 0
   fi
-  if [[ "$*" == *"contents/.velnor/publication-lock.json?ref=velnor-publication-lock"* ]]; then
-    printf '{{"type":"file","path":".velnor/publication-lock.json","sha":"{lock_sha}"}}\n'
+  if [[ "$*" == *"contents/.package-release-publication-lock.json?ref=velnor-publication-lock"* ]]; then
+    printf '{{"type":"file","path":".package-release-publication-lock.json","sha":"{lock_sha}"}}\n'
     return 0
   fi
   if [[ "$*" == *"--method DELETE"* ]]; then
@@ -3797,14 +4043,15 @@ GITHUB_REPOSITORY=example/project
 GITHUB_WORKFLOW=preview
 GITHUB_RUN_ID=42
 GITHUB_RUN_ATTEMPT=3
+VELNOR_PUBLICATION_LOCK_BRANCH=velnor-publication-lock
 EXPECTED_SOURCE_COMMIT=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 transaction_dir="$TEST_TMPDIR/transaction"
 GITHUB_ENV="$TEST_TMPDIR/github-env"
 mkdir -p "$transaction_dir"
 gh() {{
   printf '%s\n' "$*" >> "$TEST_TMPDIR/gh.log"
-  if [[ "$*" == *"contents/.velnor/publication-lock.json?ref=velnor-publication-lock"* ]]; then
-    printf '{{"type":"file","path":".velnor/publication-lock.json","sha":"{lock_sha}"}}\n'
+  if [[ "$*" == *"contents/.package-release-publication-lock.json?ref=velnor-publication-lock"* ]]; then
+    printf '{{"type":"file","path":".package-release-publication-lock.json","sha":"{lock_sha}"}}\n'
     return 0
   fi
   if [[ "$*" == *"--method DELETE"* ]]; then
