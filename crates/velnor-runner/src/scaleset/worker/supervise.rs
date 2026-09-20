@@ -827,19 +827,9 @@ impl Supervision {
     /// releases: the dir holds the raw job logs, which must not rest on
     /// shared disk past the worker's lifetime. Fails closed on a dir this
     /// worker's export did not create (no `diagnostics/` child) rather
-    /// than deleting an unrelated tree.
+    /// than deleting an unrelated tree. Idempotent, including after a
+    /// prior partial directory removal.
     pub fn release_state(&self) -> Result<()> {
-        self.remove_state_dir(true)
-    }
-
-    /// Delete a state directory whose ownership and released state were
-    /// verified from the durable worker registry. This path is idempotent,
-    /// including after a prior partial directory removal.
-    pub(crate) fn release_owned_state(&self) -> Result<()> {
-        self.remove_state_dir(false)
-    }
-
-    fn remove_state_dir(&self, require_diagnostics: bool) -> Result<()> {
         super::runner::RunnerSpec::scrub_jit_env_files_for_state(&self.state_dir)
             .context("scrub JIT env file before deleting worker state")?;
         let metadata = match std::fs::symlink_metadata(&self.state_dir) {
@@ -857,7 +847,7 @@ impl Supervision {
                 self.state_dir.display()
             );
         }
-        if require_diagnostics && !self.state_dir.join("diagnostics").is_dir() {
+        if !self.state_dir.join("diagnostics").is_dir() {
             anyhow::bail!(
                 "refusing to delete {}: no diagnostics dir (not a released worker state dir)",
                 self.state_dir.display()

@@ -72,7 +72,6 @@ pub struct WorkerRow {
     pub runner_start_deadline_epoch: Option<u64>,
     pub dind_restarts_used: u32,
     pub diagnostics_complete: bool,
-    pub state_dir_cleanup_pending: bool,
 }
 
 /// Parse a stored lifecycle value. Unknown values fail closed: a worker
@@ -126,15 +125,12 @@ impl WorkerRegistry {
                  runner_start_deadline_epoch INTEGER,
                  dind_restarts_used INTEGER NOT NULL DEFAULT 0 CHECK (dind_restarts_used >= 0),
                  diagnostics_complete INTEGER NOT NULL DEFAULT 0
-                     CHECK (diagnostics_complete IN (0, 1)),
-                 state_dir_cleanup_pending INTEGER NOT NULL DEFAULT 0
-                     CHECK (state_dir_cleanup_pending IN (0, 1))
+                     CHECK (diagnostics_complete IN (0, 1))
              );
              INSERT OR IGNORE INTO scaleset_worker_runtime
                  (ownership_id, runner_start_deadline_epoch, dind_restarts_used,
-                  diagnostics_complete, state_dir_cleanup_pending)
-             SELECT ownership_id, NULL, 0, 0,
-                    CASE WHEN worker_state IN ('owned_cleanup', 'permit_released') THEN 1 ELSE 0 END
+                  diagnostics_complete)
+             SELECT ownership_id, NULL, 0, 0
              FROM scaleset_workers;",
         )
         .context("create durable scale-set runtime table")?;
@@ -179,7 +175,6 @@ impl WorkerRegistry {
                 .map(|seconds| seconds.max(0) as u64),
             dind_restarts_used: row.get::<_, i64>(16)?.clamp(0, u32::MAX as i64) as u32,
             diagnostics_complete: row.get::<_, i64>(17)? != 0,
-            state_dir_cleanup_pending: row.get::<_, i64>(18)? != 0,
         })
     }
 
@@ -232,7 +227,7 @@ impl WorkerRegistry {
             .execute(
                 "INSERT OR IGNORE INTO scaleset_worker_runtime
                  (ownership_id, runner_start_deadline_epoch, dind_restarts_used,
-                  diagnostics_complete, state_dir_cleanup_pending) VALUES (?1, NULL, 0, 0, 0)",
+                  diagnostics_complete) VALUES (?1, NULL, 0, 0)",
                 params![ownership_id],
             )
             .context("ensure worker runtime row")?;
@@ -249,7 +244,7 @@ impl WorkerRegistry {
                         dind_data_path, runner_digest, dind_digest, worker_state,
                         generation, created_at, updated_at,
                         r.runner_start_deadline_epoch, COALESCE(r.dind_restarts_used, 0),
-                        COALESCE(r.diagnostics_complete, 0), COALESCE(r.state_dir_cleanup_pending, 0)
+                        COALESCE(r.diagnostics_complete, 0)
                  FROM scaleset_workers w
                  LEFT JOIN scaleset_worker_runtime r USING (ownership_id)
                  WHERE w.ownership_id = ?1",
@@ -269,7 +264,7 @@ impl WorkerRegistry {
                         dind_data_path, runner_digest, dind_digest, worker_state,
                         generation, created_at, updated_at,
                         r.runner_start_deadline_epoch, COALESCE(r.dind_restarts_used, 0),
-                        COALESCE(r.diagnostics_complete, 0), COALESCE(r.state_dir_cleanup_pending, 0)
+                        COALESCE(r.diagnostics_complete, 0)
                  FROM scaleset_workers w
                  LEFT JOIN scaleset_worker_runtime r USING (ownership_id)
                  WHERE w.request_id = ?1 LIMIT 1",
@@ -291,7 +286,7 @@ impl WorkerRegistry {
                         dind_data_path, runner_digest, dind_digest, worker_state,
                         generation, created_at, updated_at,
                         r.runner_start_deadline_epoch, COALESCE(r.dind_restarts_used, 0),
-                        COALESCE(r.diagnostics_complete, 0), COALESCE(r.state_dir_cleanup_pending, 0)
+                        COALESCE(r.diagnostics_complete, 0)
                  FROM scaleset_workers w
                  LEFT JOIN scaleset_worker_runtime r USING (ownership_id)
                  WHERE w.worker_state != 'permit_released' ORDER BY w.created_at ASC",
@@ -303,38 +298,12 @@ impl WorkerRegistry {
             .context("list live workers")
     }
 
-    /// Workers whose host state directories still need deletion.
-    pub fn list_state_cleanup_pending(&self) -> Result<Vec<WorkerRow>> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT ownership_id, operation_id, request_id, runner_name,
-                        runner_container_id, dind_container_id, network_name, workspace_path,
-                        dind_data_path, runner_digest, dind_digest, worker_state,
-                        generation, created_at, updated_at,
-                        r.runner_start_deadline_epoch, COALESCE(r.dind_restarts_used, 0),
-                        COALESCE(r.diagnostics_complete, 0), COALESCE(r.state_dir_cleanup_pending, 0)
-                 FROM scaleset_workers w
-                 LEFT JOIN scaleset_worker_runtime r USING (ownership_id)
-                 WHERE COALESCE(r.state_dir_cleanup_pending, 0) = 1
-                 ORDER BY w.updated_at ASC",
-            )
-            .context("prepare worker state cleanup list")?;
-        stmt.query_map([], Self::row_to_worker)
-            .context("list worker state cleanup pending")?
-            .collect::<Result<Vec<_>, _>>()
-            .context("list worker state cleanup pending")
-    }
-
     /// Persist one lifecycle state (the [`EdgeSink`] write path).
     pub fn set_state(&mut self, ownership_id: &str, state: ScaleSetWorkerState) -> Result<()> {
         let now = Self::now_rfc3339();
         let generation = i64::try_from(self.generation).unwrap_or(i64::MAX);
-        let tx = self
+        let updated = self
             .conn
-            .transaction()
-            .context("begin worker state transaction")?;
-        let updated = tx
             .execute(
                 "UPDATE scaleset_workers
                  SET worker_state = ?1, generation = ?2, updated_at = ?3
@@ -345,22 +314,6 @@ impl WorkerRegistry {
         if updated == 0 {
             anyhow::bail!("worker registry holds no row for {ownership_id:?}");
         }
-        if matches!(
-            state,
-            ScaleSetWorkerState::OwnedCleanup | ScaleSetWorkerState::PermitReleased
-        ) {
-            let pending = i64::from(state == ScaleSetWorkerState::OwnedCleanup);
-            tx.execute(
-                "INSERT INTO scaleset_worker_runtime
-                 (ownership_id, runner_start_deadline_epoch, dind_restarts_used,
-                  diagnostics_complete, state_dir_cleanup_pending)
-                 VALUES (?1, NULL, 0, 0, ?2)
-                 ON CONFLICT(ownership_id) DO UPDATE SET state_dir_cleanup_pending = excluded.state_dir_cleanup_pending",
-                params![ownership_id, pending],
-            )
-            .context("record worker state cleanup phase")?;
-        }
-        tx.commit().context("commit worker state transition")?;
         Ok(())
     }
 
@@ -417,17 +370,6 @@ impl WorkerRegistry {
         if updated == 0 {
             anyhow::bail!("worker runtime holds no row for {ownership_id:?}");
         }
-        Ok(())
-    }
-
-    fn clear_state_dir_cleanup_pending(&mut self, ownership_id: &str) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE scaleset_worker_runtime SET state_dir_cleanup_pending = 0
-             WHERE ownership_id = ?1",
-                params![ownership_id],
-            )
-            .context("clear released state cleanup marker")?;
         Ok(())
     }
 
@@ -857,25 +799,6 @@ impl DaemonWorkerLane {
                 "scale-set terminal cleanup scan failed"
             ),
         }
-        match self.registry.list_state_cleanup_pending() {
-            Ok(rows) => {
-                for row in rows {
-                    if row.worker_state == ScaleSetWorkerState::PermitReleased
-                        && let Err(error) = self.cleanup_released_state_dir(&row)
-                    {
-                        tracing::warn!(
-                            worker = row.ownership_id.as_str(),
-                            error = format!("{error:#}"),
-                            "released scale-set state cleanup retry failed"
-                        );
-                    }
-                }
-            }
-            Err(error) => tracing::warn!(
-                error = format!("{error:#}"),
-                "released scale-set state cleanup scan failed"
-            ),
-        }
         let keys: Vec<String> = self.workers.keys().cloned().collect();
         for key in keys {
             if self
@@ -895,32 +818,6 @@ impl DaemonWorkerLane {
                 );
             }
         }
-    }
-
-    fn cleanup_released_state_dir(&mut self, row: &WorkerRow) -> Result<()> {
-        if row.worker_state != ScaleSetWorkerState::PermitReleased || !row.state_dir_cleanup_pending
-        {
-            anyhow::bail!(
-                "worker {} is not awaiting released state cleanup",
-                row.ownership_id
-            );
-        }
-        let state_dir = self.recorded_state_dir(row)?;
-        let identity = WorkerIdentity::new(OwnershipId::bind(
-            self.config.scale_set_id,
-            &row.runner_name,
-        ));
-        Supervision::from_runtime(
-            identity,
-            &state_dir,
-            row.dind_restarts_used,
-            row.runner_start_deadline_epoch,
-        )
-        .release_owned_state()?;
-        self.registry
-            .clear_state_dir_cleanup_pending(&row.ownership_id)?;
-        self.workers.remove(&row.ownership_id);
-        Ok(())
     }
 
     /// Drive one worker `→ terminal → diagnostic_export → owned_cleanup`,
@@ -956,14 +853,15 @@ impl DaemonWorkerLane {
             return Ok(TerminalOutcome::AlreadyReleased);
         };
         if row.worker_state == ScaleSetWorkerState::PermitReleased {
-            // Legacy rows from the pre-replay implementation may have
-            // released the permit before deleting host state. Finish that
-            // durable cleanup before treating the replay as complete.
+            // The row says released, but a restart between the
+            // adoption-time release and the completion observation lets
+            // startup reconcile re-attest the permit from the
+            // still-active demand row. Converge to the recorded truth.
+            // The exported diagnostics stay on disk for post-mortem,
+            // exactly like a fresh release: deletion ends owned Docker
+            // objects, never the exported logs.
             if let Some(holder) = holder_for_key(self.config.scale_set_id, key) {
                 self.ledger.release(&holder)?;
-            }
-            if row.state_dir_cleanup_pending {
-                self.cleanup_released_state_dir(&row)?;
             }
             return Ok(TerminalOutcome::AlreadyReleased);
         }
@@ -1107,18 +1005,6 @@ impl DaemonWorkerLane {
         self.refresh_generation()
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         let mut report = AdoptReport::default();
-        for row in self.registry.list_state_cleanup_pending()? {
-            if row.worker_state == ScaleSetWorkerState::PermitReleased {
-                if let Err(error) = self.cleanup_released_state_dir(&row) {
-                    tracing::warn!(
-                        worker = row.ownership_id.as_str(),
-                        error = format!("{error:#}"),
-                        "released scale-set state cleanup will retry on idle"
-                    );
-                }
-                report.resumed_cleanup += 1;
-            }
-        }
         let intents = self.intents.list_for_set(self.config.scale_set_id)?;
         for intent in &intents {
             let key = Self::ownership_key(intent);
@@ -2042,7 +1928,6 @@ mod tests {
         assert!(first_lane.drive_terminal(&key).is_err());
         let row = first_lane.registry.get(&key).unwrap().unwrap();
         assert_eq!(row.worker_state, ScaleSetWorkerState::OwnedCleanup);
-        assert!(row.state_dir_cleanup_pending);
         assert!(state_dir.join("raw-job.log").exists());
         assert_eq!(first_lane.ledger.occupied().unwrap(), 1);
         assert_eq!(
@@ -2077,7 +1962,6 @@ mod tests {
         );
         let row = replay_lane.registry.get(&key).unwrap().unwrap();
         assert_eq!(row.worker_state, ScaleSetWorkerState::PermitReleased);
-        assert!(!row.state_dir_cleanup_pending);
         assert_eq!(replay_lane.ledger.occupied().unwrap(), 0);
         let calls_after_release = replay_seen.lock().unwrap().len();
         assert_eq!(calls_after_release, 6);
@@ -2239,6 +2123,136 @@ mod tests {
             Some(LedgerPermitState::Uncertain)
         );
         assert_eq!(lane.ledger.occupied().unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn released_row_backfill_preserves_diagnostics_without_stranding() {
+        // A worker row recorded as `permit_released` before the runtime
+        // table existed: the backfill adopts it, and both adoption and a
+        // terminal replay treat it exactly like a fresh release — the
+        // permit converges to released, the exported diagnostics stay on
+        // disk for post-mortem, no Docker work runs, nothing strands.
+        let dir = unique_test_dir("released-backfill-diagnostics");
+        let db = dir.join("state.db");
+        let ledger = dir.join("permit-ledger.db");
+        let state_root = dir.join("workers");
+        let ownership = OwnershipId::bind(7, "velnor-7-4247");
+        let identity = WorkerIdentity::new(ownership.clone());
+        let key = ownership.as_str();
+        let state_dir = state_root.join(ownership.slug());
+        std::fs::create_dir_all(state_dir.join("diagnostics")).unwrap();
+        std::fs::write(state_dir.join("raw-job.log"), b"job output\n").unwrap();
+        std::fs::write(
+            state_dir.join("diagnostics/capture.complete"),
+            b"velnor-diagnostics-v1\n",
+        )
+        .unwrap();
+
+        // Seed the holder as held: a restart re-attested the permit from
+        // the still-active demand row, so the replay must converge it.
+        let holder = permit_holder(7, 4247);
+        {
+            let mut global = velnor_control::permit_ledger::PermitLedger::open(&ledger).unwrap();
+            global.set_max_jobs(1).unwrap();
+            let generation = global.begin_epoch().unwrap();
+            let now = velnor_model::Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp()
+                .max(0) as u64;
+            global
+                .observe_demand(
+                    &holder,
+                    velnor_control::permit_ledger::PermitLane::ScaleSet,
+                    "scaleset/7",
+                    now,
+                    now,
+                )
+                .unwrap();
+            assert_eq!(
+                global
+                    .acquire(
+                        &holder,
+                        velnor_control::permit_ledger::PermitLane::ScaleSet,
+                        velnor_control::permit_ledger::PermitState::Provisioning,
+                        generation,
+                        None,
+                    )
+                    .unwrap(),
+                velnor_control::permit_ledger::AcquireOutcome::Acquired
+            );
+        }
+
+        // Legacy row, as the pre-runtime-table implementation left it:
+        // straight into `scaleset_workers`, no runtime row.
+        velnor_control::store::Store::open(&db).unwrap();
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute(
+                "INSERT INTO scaleset_workers
+                 (ownership_id, operation_id, request_id, runner_name, network_name,
+                  workspace_path, dind_data_path, runner_digest, dind_digest,
+                  worker_state, generation, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'permit_released', 0,
+                         '2026-09-18T00:00:00Z', '2026-09-18T00:00:00Z')",
+                params![
+                    key,
+                    "op-legacy",
+                    4247,
+                    "velnor-7-4247",
+                    identity.network(),
+                    state_dir.join("workspace").to_string_lossy(),
+                    state_dir.join("dind-data").to_string_lossy(),
+                    "sha256:runner",
+                    "sha256:dind",
+                ],
+            )
+            .unwrap();
+        }
+        let mut intents = ProvisionIntentStore::open(&db).unwrap();
+        intents
+            .record_intent(
+                "op-legacy",
+                &crate::scaleset::intents::provision_ownership_id(7, "velnor-7-4247"),
+                7,
+                4247,
+                "velnor-7-4247",
+                "sha256:runner",
+                "sha256:dind",
+                1,
+            )
+            .unwrap();
+        drop(intents);
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = CleanupRunner::missing(identity.runner_container(), seen.clone());
+        let mut lane = test_lane(&db, &ledger, &state_root, Box::new(runner));
+
+        // The backfill adopted the legacy row with defaults.
+        let row = lane.registry.get(&key).unwrap().unwrap();
+        assert_eq!(row.worker_state, ScaleSetWorkerState::PermitReleased);
+        assert!(!row.diagnostics_complete);
+
+        // Adoption skips the released row without Docker work.
+        let report = lane.adopt_live_workers().unwrap();
+        assert_eq!(report.skipped_released, 1);
+        assert_eq!(report.resumed_cleanup, 0);
+        assert_eq!(report.failed, 0);
+        assert!(seen.lock().unwrap().is_empty());
+
+        // A terminal replay converges the re-attested permit and keeps
+        // the exported diagnostics; nothing strands.
+        lane.drive_terminal(&key).unwrap();
+        assert!(seen.lock().unwrap().is_empty());
+        assert!(state_dir.join("raw-job.log").is_file());
+        assert!(
+            state_dir.join("diagnostics/capture.complete").is_file(),
+            "backfilled release preserves diagnostics like a fresh release"
+        );
+        let row = lane.registry.get(&key).unwrap().unwrap();
+        assert_eq!(row.worker_state, ScaleSetWorkerState::PermitReleased);
+        assert_eq!(lane.ledger.holder_state(&holder).unwrap(), None);
+        assert_eq!(lane.ledger.occupied().unwrap(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
