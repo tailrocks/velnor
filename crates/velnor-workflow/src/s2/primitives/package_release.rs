@@ -814,28 +814,13 @@ fn render_workflow(
     );
     let _ = writeln!(
         output,
-        "jobs:\n  build:\n    name: Verify package release\n    if: {build_if}\n    runs-on: {runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    outputs:\n      version: {}\n      source_commit: {}\n    env:\n      PACKAGE_DIR: {package_dir_yaml}\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/{package_dir}\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n",
+        "jobs:\n  build:\n    name: Verify package release\n    if: {build_if}\n    runs-on: {runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    outputs:\n      version: {}\n      source_commit: {}\n    env:\n      PACKAGE_DIR: {package_dir_yaml}\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/{package_dir}\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n",
         github_expression("steps.verify.outputs.version"),
         github_expression("steps.verify.outputs.source_commit"),
     );
-    output = output.replace(
-        &format!("      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n"),
-        &format!(
-            "      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}\n"
-        ),
-    );
     let _ = writeln!(
         output,
-        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n        run: |\n          set -euo pipefail\n          mkdir -p \"$VELNOR_VERIFIED_PACKAGE_DIR\"\n{tasks}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}      - name: Attest declared payloads\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: {workspace_expr}/{package_dir}\n          if-no-files-found: error\n          retention-days: 2\n",
-    );
-    output = output.replace("Attest declared payloads", "Attest declared package assets");
-    output = output.replace(
-        "          install: false\n      - name: Enforce workflow policy",
-        "          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy",
-    );
-    output = output.replace(
-        &format!("          path: {workspace_expr}/{package_dir}\n"),
-        &format!("          path: {package_path_yaml}\n"),
+        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n        run: |\n          set -euo pipefail\n          mkdir -p \"$VELNOR_VERIFIED_PACKAGE_DIR\"\n{tasks}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: {package_path_yaml}\n          if-no-files-found: error\n          retention-days: 2\n",
     );
     output.push('\n');
     output.push_str(&render_publish_job(
@@ -862,22 +847,6 @@ fn render_workflow(
         &message_yaml,
         &concurrency_yaml,
     ));
-    output = output.replace(
-        "git -C source ls-remote origin",
-        "git -C source -c \"http.extraheader=AUTHORIZATION: bearer $GH_TOKEN\" ls-remote origin",
-    );
-    output = output.replace(
-        "remote_branch_sha=\"$(git ls-remote origin",
-        "remote_branch_sha=\"$(git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" ls-remote origin",
-    );
-    output = output.replace(
-        "          response_status=0\n          gh api --repo \"$GITHUB_REPOSITORY\" -i \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\" > \"$release_json\" 2>/dev/null || response_status=$?\n",
-        "          if ! gh api --repo \"$GITHUB_REPOSITORY\" -i \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\" > \"$release_json\" 2>/dev/null; then\n            :\n          fi\n",
-    );
-    output = output.replace(
-        "git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push --force-with-lease=refs/heads/$automation_branch:$remote_branch_sha origin",
-        "git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push \"--force-with-lease=refs/heads/$automation_branch:$remote_branch_sha\" origin",
-    );
     output
 }
 
@@ -1358,9 +1327,9 @@ trap 'rm -rf -- "$transaction_dir"' EXIT
 remote_tag_sha() {
   local tag_name="$1"
   local sha
-  sha="$(git -C source ls-remote origin "refs/tags/$tag_name^{}" | awk 'NR == 1 {print $1}')"
+  sha="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name^{}" | awk 'NR == 1 {print $1}')"
   if [ -z "$sha" ]; then
-    sha="$(git -C source ls-remote origin "refs/tags/$tag_name" | awk 'NR == 1 {print $1}')"
+    sha="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name" | awk 'NR == 1 {print $1}')"
   fi
   printf '%s\n' "$sha"
 }
@@ -1702,27 +1671,51 @@ fn render_publish_job(
     output.push_str("\n          GH_TOKEN: ");
     output.push_str(updater_token_expr);
     output.push_str(
-        "\n        run: |\n          set -euo pipefail\n          cd consumer\n          git config user.name \"github-actions[bot]\"\n          git config user.email \"41898282+github-actions[bot]@users.noreply.github.com\"\n          automation_branch=\"automation/package-release-$RELEASE_TAG\"\n          remote_branch_sha=\"$(git ls-remote origin \"refs/heads/$automation_branch\" | awk 'NR == 1 {print $1}')\"\n          git switch --force-create \"$automation_branch\" \"origin/$CONSUMER_BRANCH\"\n          VELNOR_PACKAGE_CHANNEL=\"$VELNOR_PACKAGE_CHANNEL\" VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_ASSET_TAG\" VELNOR_VERIFIED_PACKAGE_DIR=\"$GITHUB_WORKSPACE/published-package\" bash -c \"$UPDATER\"\n          git diff --check\n          if git diff --quiet; then\n            echo \"consumer already references the verified release\"\n          else\n            git add -A\n            git commit -s -m \"$UPDATE_COMMIT_MESSAGE\"\n            if [ -n \"$remote_branch_sha\" ]; then\n              git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push --force-with-lease=refs/heads/$automation_branch:$remote_branch_sha origin \"HEAD:refs/heads/$automation_branch\"\n            else\n              git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push origin \"HEAD:refs/heads/$automation_branch\"\n            fi\n          fi\n          pr_url=\"$(gh pr list --repo \"$CONSUMER_REPOSITORY\" --head \"$automation_branch\" --base \"$CONSUMER_BRANCH\" --state open --json url --jq '.[0].url // empty')\"\n          if [ -z \"$pr_url\" ] && ! git diff --quiet HEAD \"origin/$CONSUMER_BRANCH\"; then\n            pr_url=\"$(gh pr create --repo \"$CONSUMER_REPOSITORY\" --head \"$automation_branch\" --base \"$CONSUMER_BRANCH\" --title \"$UPDATE_COMMIT_MESSAGE ($RELEASE_ASSET_TAG)\" --body \"Automated verified package update. Review and merge this PR; the publisher never merges consumer changes.\")\"\n          fi\n          printf 'pr_url=%s\\n' \"$pr_url\" >> \"$GITHUB_OUTPUT\"\n          if [ -n \"$pr_url\" ]; then echo \"::notice::Consumer update PR: $pr_url\"; else echo \"::notice::Consumer update PR: none\"; fi\n",
-    );
-    output = output.replace(
-        "          automation_branch=\"automation/package-release-$RELEASE_TAG\"\n          remote_branch_sha=\"$(git ls-remote origin \"refs/heads/$automation_branch\" | awk 'NR == 1 {print $1}')\"\n          git switch --force-create \"$automation_branch\" \"origin/$CONSUMER_BRANCH\"\n",
-        "          stale_branch=\"automation/package-release-$RELEASE_TAG\"\n          automation_branch=\"automation/package-release-$RELEASE_ASSET_TAG\"\n          while IFS= read -r stale_pr_url; do\n            if [ -n \"$stale_pr_url\" ]; then\n              gh pr close \"$stale_pr_url\" --repo \"$CONSUMER_REPOSITORY\" --comment \"Superseded by immutable package release $RELEASE_ASSET_TAG\"\n            fi\n          done < <(gh pr list --repo \"$CONSUMER_REPOSITORY\" --head \"$stale_branch\" --base \"$CONSUMER_BRANCH\" --state open --json url --jq '.[].url')\n          remote_branch_sha=\"$(git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" ls-remote origin \"refs/heads/$automation_branch\" | awk 'NR == 1 {print $1}')\"\n          if [ -n \"$remote_branch_sha\" ]; then\n            git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" fetch origin \"refs/heads/$automation_branch:refs/remotes/origin/$automation_branch\"\n            git switch --detach \"origin/$automation_branch\"\n          else\n            git switch --create \"$automation_branch\" \"origin/$CONSUMER_BRANCH\"\n          fi\n",
-    );
-    output = output.replace(
-        "          git diff --check\n          if git diff --quiet; then",
-        "          untracked_files=\"$(git ls-files --others --exclude-standard)\"\n          if [ -n \"$untracked_files\" ]; then\n            echo \"::notice::consumer updater produced untracked files; staging them\"\n            printf '%s\\n' \"$untracked_files\"\n          fi\n          git diff --check\n          if [ -z \"$(git status --porcelain --untracked-files=all)\" ]; then",
-    );
-    output = output.replace(
-        "            if [ -n \"$remote_branch_sha\" ]; then\n              git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push --force-with-lease=refs/heads/$automation_branch:$remote_branch_sha origin \"HEAD:refs/heads/$automation_branch\"\n            else\n              git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push origin \"HEAD:refs/heads/$automation_branch\"\n            fi",
-        "            git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push origin \"HEAD:refs/heads/$automation_branch\"",
-    );
-    output = output.replace(
-        "          else\n            git add -A\n            git commit -s -m \"$UPDATE_COMMIT_MESSAGE\"\n            git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push origin \"HEAD:refs/heads/$automation_branch\"\n          fi",
-        "          else\n            if [ -n \"$remote_branch_sha\" ]; then\n              echo \"::error::immutable consumer branch already exists and would need rewriting; refusing to mutate it\" >&2\n              exit 1\n            fi\n            git add -A\n            git commit -s -m \"$UPDATE_COMMIT_MESSAGE\"\n            git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push origin \"HEAD:refs/heads/$automation_branch\"\n          fi",
-    );
-    output = output.replace(
-        "VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_ASSET_TAG\"",
-        "VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_TAG\"",
+        r#"
+        run: |
+          set -euo pipefail
+          cd consumer
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          stale_branch="automation/package-release-$RELEASE_TAG"
+          automation_branch="automation/package-release-$RELEASE_ASSET_TAG"
+          while IFS= read -r stale_pr_url; do
+            if [ -n "$stale_pr_url" ]; then
+              gh pr close "$stale_pr_url" --repo "$CONSUMER_REPOSITORY" --comment "Superseded by immutable package release $RELEASE_ASSET_TAG"
+            fi
+          done < <(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$stale_branch" --base "$CONSUMER_BRANCH" --state open --json url --jq '.[].url')
+          remote_branch_sha="$(git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" ls-remote origin "refs/heads/$automation_branch" | awk 'NR == 1 {print $1}')"
+          if [ -n "$remote_branch_sha" ]; then
+            git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" fetch origin "refs/heads/$automation_branch:refs/remotes/origin/$automation_branch"
+            git switch --detach "origin/$automation_branch"
+          else
+            git switch --create "$automation_branch" "origin/$CONSUMER_BRANCH"
+          fi
+          VELNOR_PACKAGE_CHANNEL="$VELNOR_PACKAGE_CHANNEL" VELNOR_PACKAGE_RELEASE_TAG="$RELEASE_TAG" VELNOR_VERIFIED_PACKAGE_DIR="$GITHUB_WORKSPACE/published-package" bash -c "$UPDATER"
+          untracked_files="$(git ls-files --others --exclude-standard)"
+          if [ -n "$untracked_files" ]; then
+            echo "::notice::consumer updater produced untracked files; staging them"
+            printf '%s\n' "$untracked_files"
+          fi
+          git diff --check
+          if [ -z "$(git status --porcelain --untracked-files=all)" ]; then
+            echo "consumer already references the verified release"
+          else
+            if [ -n "$remote_branch_sha" ]; then
+              echo "::error::immutable consumer branch already exists and would need rewriting; refusing to mutate it" >&2
+              exit 1
+            fi
+            git add -A
+            git commit -s -m "$UPDATE_COMMIT_MESSAGE"
+            git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" push origin "HEAD:refs/heads/$automation_branch"
+          fi
+          pr_url="$(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$automation_branch" --base "$CONSUMER_BRANCH" --state open --json url --jq '.[0].url // empty')"
+          if [ -z "$pr_url" ] && ! git diff --quiet HEAD "origin/$CONSUMER_BRANCH"; then
+            pr_url="$(gh pr create --repo "$CONSUMER_REPOSITORY" --head "$automation_branch" --base "$CONSUMER_BRANCH" --title "$UPDATE_COMMIT_MESSAGE ($RELEASE_ASSET_TAG)" --body "Automated verified package update. Review and merge this PR; the publisher never merges consumer changes.")"
+          fi
+          printf 'pr_url=%s\n' "$pr_url" >> "$GITHUB_OUTPUT"
+          if [ -n "$pr_url" ]; then echo "::notice::Consumer update PR: $pr_url"; else echo "::notice::Consumer update PR: none"; fi
+"#,
     );
     output
 }
@@ -2221,6 +2214,13 @@ concurrency_group = "package-release-preview"
         assert!(workflow.contains("automation/package-release-$RELEASE_TAG"));
         assert!(workflow.contains("automation/package-release-$RELEASE_ASSET_TAG"));
         assert!(workflow.contains("gh pr close \"$stale_pr_url\""));
+        assert!(workflow.contains("git switch --detach \"origin/$automation_branch\""));
+        assert!(workflow
+            .contains("VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_TAG\" VELNOR_VERIFIED_PACKAGE_DIR"));
+        assert!(!workflow.contains("git switch --force-create \"$automation_branch\""));
+        assert!(!workflow.contains(
+            "VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_ASSET_TAG\" VELNOR_VERIFIED_PACKAGE_DIR"
+        ));
         assert!(workflow.contains("git ls-files --others --exclude-standard"));
         assert!(workflow.contains("git status --porcelain --untracked-files=all"));
         assert!(workflow.contains("consumer updater produced untracked files; staging them"));
