@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -2677,284 +2677,22 @@ fn prerequisite_commands(unit: &CiUnit, scope: Scope) -> Vec<String> {
         .collect()
 }
 
-/// Default output-stall budget for one `run_unit` project command: kill the
-/// child when no stdout/stderr byte arrives for this long.
-///
-/// Ten minutes because healthy compile/test commands stream at least a line
-/// every ~2-5 minutes while measured Mac wedges sat 34+ minutes with zero
-/// stdout bytes at the first compile-path `mbx` call — the gap between ~5
-/// and 34 minutes leaves 10 far from both a slow healthy command and a real
-/// wedge. The guard is stall-based, never wall-clock: every output byte
-/// resets the timer, so a chatty 28-minute suite runs to completion.
-/// Override with `VELNOR_RUN_CMD_STALL_SECS`; a missing, unparsable, or
-/// zero value falls back to this default.
-const DEFAULT_RUN_CMD_STALL_SECS: u64 = 600;
-/// Environment override for [`DEFAULT_RUN_CMD_STALL_SECS`], in seconds.
-const RUN_CMD_STALL_ENV: &str = "VELNOR_RUN_CMD_STALL_SECS";
-/// Silence quantum between child-exit polls while waiting for output: a
-/// silent command that already exited (or whose pipes grandchildren hold
-/// open) is noticed within this long instead of at the stall deadline.
-const RUN_CMD_EXIT_POLL_QUANTUM: Duration = Duration::from_secs(1);
-/// Bounded grace to drain a piped tail after the child exits, so detached
-/// pumps forward every byte before completion. Grandchildren holding the
-/// pipes open must not hang this drain.
-const RUN_CMD_DRAIN_GRACE: Duration = Duration::from_secs(10);
-
-fn run_cmd_stall_limit() -> Duration {
-    parse_run_cmd_stall_limit(env::var(RUN_CMD_STALL_ENV).ok().as_deref())
-}
-
-fn parse_run_cmd_stall_limit(raw: Option<&str>) -> Duration {
-    let seconds = raw
-        .map(str::trim)
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|seconds| *seconds > 0);
-    Duration::from_secs(seconds.unwrap_or(DEFAULT_RUN_CMD_STALL_SECS))
-}
-
-/// One output chunk forwarded by a child-stream pump, or that stream's EOF.
-enum PumpEvent {
-    Output,
-    Eof,
-}
-
-/// Forward one child pipe to the matching process stream, reporting every
-/// chunk as [`PumpEvent::Output`] so the stall guard treats output bytes as
-/// heartbeats. Runs detached: it exits on pipe EOF (or when the guard drops
-/// the receiver), so a wedged grandchild holding the pipe cannot hang the
-/// stall kill.
-fn pump_child_stream<R, W>(mut reader: R, mut writer: W, sender: &mpsc::Sender<PumpEvent>)
-where
-    R: Read + Send + 'static,
-    W: Write + Send + 'static,
-{
-    let mut buffer = [0_u8; 8192];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
-            Ok(read) => {
-                let _ = writer.write_all(&buffer[..read]);
-                let _ = writer.flush();
-                if sender.send(PumpEvent::Output).is_err() {
-                    break;
-                }
-            }
-        }
-    }
-    let _ = sender.send(PumpEvent::Eof);
-}
-
-/// The pre-guard failure contract, unchanged: exit status decides.
-fn check_unit_command_status(unit_id: &str, status: ExitStatus) -> Result<(), GeneratorError> {
-    if status.success() {
-        Ok(())
-    } else {
-        Err(GeneratorError::usage(format!(
-            "CI command failed for unit {unit_id} with {status}"
-        )))
-    }
-}
-
-/// Run one project command, killing it on output stall: no stdout/stderr
-/// byte for `stall_limit` while the child is still alive. Every output byte
-/// resets the timer; a silent exit inside the deadline race counts as
-/// completion, not a stall.
-fn run_command_with_stall_guard(
-    root: &Path,
-    unit_id: &str,
-    command: &str,
-    stall_limit: Duration,
-) -> Result<(), GeneratorError> {
-    let mut child = Command::new("bash")
-        .args(["-euo", "pipefail", "-c", command])
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| GeneratorError::usage(format!("run CI command {unit_id}: {error}")))?;
-    let (sender, receiver) = mpsc::channel();
-    let mut expected_eof = 0;
-    if let Some(stdout) = child.stdout.take() {
-        expected_eof += 1;
-        let sender = sender.clone();
-        thread::spawn(move || pump_child_stream(stdout, std::io::stdout(), &sender));
-    }
-    if let Some(stderr) = child.stderr.take() {
-        expected_eof += 1;
-        let sender = sender.clone();
-        thread::spawn(move || pump_child_stream(stderr, std::io::stderr(), &sender));
-    }
-    drop(sender);
-    let pid = child.id();
-    let mut deadline = Instant::now() + stall_limit;
-    let mut eofs = 0;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match receiver.recv_timeout(remaining.min(RUN_CMD_EXIT_POLL_QUANTUM)) {
-            Ok(PumpEvent::Output) => {
-                deadline = Instant::now() + stall_limit;
-            }
-            Ok(PumpEvent::Eof) => {
-                eofs += 1;
-                if eofs >= expected_eof {
-                    break;
-                }
-            }
-            Err(_) => {
-                // A silent exit (or grandchildren holding the pipes) is
-                // completion, noticed within one poll quantum.
-                if child.try_wait().ok().flatten().is_some() {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    // No pool.lock/inflight path constants exist in
-                    // velnor-workflow, so there is no scheduler state to dump
-                    // without hardcoding host paths; the error carries unit,
-                    // command, stall budget, pid, and child state instead.
-                    let state = match child.try_wait() {
-                        Ok(Some(status)) => {
-                            return check_unit_command_status(unit_id, status);
-                        }
-                        Ok(None) => String::from("running"),
-                        Err(error) => format!("unknown (try_wait failed: {error})"),
-                    };
-                    let _ = child.kill();
-                    let reaped = match child.wait() {
-                        Ok(status) => format!("reaped with {status}"),
-                        Err(error) => format!("reap failed: {error}"),
-                    };
-                    return Err(GeneratorError::usage(format!(
-                        "CI command stalled for unit {unit_id}: no stdout/stderr output for {}s; killed pid {pid} (was {state}, {reaped}); command: {command}",
-                        stall_limit.as_secs(),
-                    )));
-                }
-            }
-        }
-    }
-    let status = child
-        .wait()
-        .map_err(|error| GeneratorError::usage(format!("run CI command {unit_id}: {error}")))?;
-    let drain_deadline = Instant::now() + RUN_CMD_DRAIN_GRACE;
-    while eofs < expected_eof && Instant::now() < drain_deadline {
-        match receiver.recv_timeout(drain_deadline.saturating_duration_since(Instant::now())) {
-            Ok(PumpEvent::Output) => {}
-            Ok(PumpEvent::Eof) => {
-                eofs += 1;
-            }
-            Err(_) => break,
-        }
-    }
-    check_unit_command_status(unit_id, status)
-}
-
 fn run_unit(root: &Path, unit: &CiUnit, commands: &[String]) -> Result<(), GeneratorError> {
-    let stall_limit = run_cmd_stall_limit();
+    let limits = crate::exec::RunLimits::from_env();
     for command in commands {
         println!("::group::{}: {}", unit.id, command);
-        let outcome = run_command_with_stall_guard(root, &unit.id, command, stall_limit);
+        let started = Instant::now();
+        let outcome = crate::exec::run_command(root, &unit.id, command, &limits)
+            .map_err(GeneratorError::usage);
+        println!(
+            "velnor: unit {} command finished in {:.1}s",
+            unit.id,
+            started.elapsed().as_secs_f64()
+        );
         println!("::endgroup::");
         outcome?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod run_cmd_stall_tests {
-    use super::{
-        parse_run_cmd_stall_limit, run_command_with_stall_guard, DEFAULT_RUN_CMD_STALL_SECS,
-    };
-    use std::time::Duration;
-
-    #[test]
-    fn stall_limit_parses_override_and_falls_back() {
-        assert_eq!(
-            parse_run_cmd_stall_limit(None),
-            Duration::from_secs(DEFAULT_RUN_CMD_STALL_SECS)
-        );
-        assert_eq!(
-            parse_run_cmd_stall_limit(Some("30")),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            parse_run_cmd_stall_limit(Some(" 120 ")),
-            Duration::from_mins(2)
-        );
-        for invalid in ["", "0", "-5", "ten", "1.5"] {
-            assert_eq!(
-                parse_run_cmd_stall_limit(Some(invalid)),
-                Duration::from_secs(DEFAULT_RUN_CMD_STALL_SECS),
-                "invalid override {invalid:?} must fall back to the default",
-            );
-        }
-    }
-
-    #[test]
-    fn silent_command_past_stall_limit_fails_naming_the_stall() {
-        let result = run_command_with_stall_guard(
-            &std::env::temp_dir(),
-            "test-unit",
-            "exec sleep 30",
-            Duration::from_millis(200),
-        );
-        let message = match result {
-            Ok(()) => String::from("<unexpected success>"),
-            Err(error) => error.to_string(),
-        };
-        assert!(
-            message.contains("stall"),
-            "silent sleeper must fail naming the stall, got: {message}"
-        );
-        assert!(
-            message.contains("test-unit") && message.contains("exec sleep 30"),
-            "stall error must name unit and command, got: {message}"
-        );
-    }
-
-    #[test]
-    fn chatty_slow_command_succeeds_past_wall_clock_limit() {
-        // ~6s of wall-clock against a 4s stall window: periodic output
-        // resets the timer, so this must succeed. The chatter is
-        // shell-builtin-only: `echo` plus `read -t` on a pipe from one
-        // setup-time `sleep` (its stderr detached so the sleeper can't hold
-        // the child's pipes open past exit). The old per-tick external
-        // `sleep` fork/execed under parallel-test load, and its scheduling
-        // jitter crossed the window and flaked the suite. Six ~1s gaps
-        // hold 3s of slack each; the spelling stays bash-3.2-safe (no
-        // coproc, no fractional `read -t`).
-        let result = run_command_with_stall_guard(
-            &std::env::temp_dir(),
-            "test-unit",
-            "exec 3< <(sleep 15 2>&-); for i in 1 2 3 4 5 6; do echo tick-$i; read -t 1 <&3 || true; done; exec 3<&-",
-            Duration::from_secs(4),
-        );
-        let message = match &result {
-            Ok(()) => String::new(),
-            Err(error) => error.to_string(),
-        };
-        assert!(
-            result.is_ok(),
-            "chatty command must succeed, got: {message}"
-        );
-    }
-
-    #[test]
-    fn failing_command_keeps_original_error() {
-        let result = run_command_with_stall_guard(
-            &std::env::temp_dir(),
-            "test-unit",
-            "exit 3",
-            Duration::from_mins(1),
-        );
-        let message = match result {
-            Ok(()) => String::from("<unexpected success>"),
-            Err(error) => error.to_string(),
-        };
-        assert!(
-            message.contains("CI command failed for unit test-unit"),
-            "exit-status failure must keep its error, got: {message}"
-        );
-    }
 }
 
 pub(crate) fn test_crates(

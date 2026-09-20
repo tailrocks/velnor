@@ -25,6 +25,7 @@ mod config;
 #[cfg(all(test, unix))]
 mod consumer_negatives;
 mod estate;
+mod exec;
 pub(crate) mod platform;
 mod policy;
 mod primitives;
