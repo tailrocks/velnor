@@ -9,7 +9,7 @@
 //! inventing workflow/job associations for external checks.
 
 use super::{
-    collect_rest, github_check_suite_runs_request, github_check_suites_request,
+    collect_binary, collect_rest, github_check_suite_runs_request, github_check_suites_request,
     github_open_pull_requests_request, github_single_object_request,
     github_workflow_artifacts_request, github_workflow_attempt_jobs_request,
     github_workflow_attempt_request, github_workflow_runs_request, AcquisitionError,
@@ -65,6 +65,16 @@ pub struct LiveDependency {
     pub repository: String,
     pub path: String,
     pub revision: String,
+    pub resolved_path: Option<String>,
+    pub source_bytes_base64: Option<String>,
+    pub source_raw_object_refs: Vec<String>,
+    pub raw_object_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveSourceJob {
+    pub job_id: String,
     pub raw_object_refs: Vec<String>,
 }
 
@@ -74,7 +84,10 @@ pub struct LiveWorkflow {
     pub path: String,
     pub revision: String,
     pub source_sha: String,
+    pub source_bytes_base64: String,
+    pub source_raw_object_refs: Vec<String>,
     pub events: Vec<String>,
+    pub source_jobs: Vec<LiveSourceJob>,
     pub reusable_workflows: Vec<LiveDependency>,
     pub actions: Vec<LiveDependency>,
     pub scanners: Vec<LiveDependency>,
@@ -122,6 +135,7 @@ pub struct LiveJob {
 pub struct LiveArtifact {
     pub artifact_id: u64,
     pub run_id: u64,
+    pub run_attempt: u32,
     pub run_head_sha: String,
     pub name: String,
     pub digest: String,
@@ -1016,6 +1030,7 @@ where
         let revision = required_sha(&content, &["sha"])?;
         let source_text = decode_workflow_content(&content)?;
         let events = parse_workflow_events(&source_text)?;
+        let source_jobs = parse_source_jobs(&source_text, manifest, &content_raw_ids)?;
         let (reusable_workflows, actions, scanners) = parse_workflow_dependencies(
             &source_text,
             &manifest.repository,
@@ -1045,12 +1060,15 @@ where
             scanners,
         } = dependencies;
         let mut raw_ids = list_raw_ids.clone();
-        raw_ids.extend(content_raw_ids);
+        raw_ids.extend(content_raw_ids.clone());
         workflows.push(LiveWorkflow {
             path,
             revision,
             source_sha: source_sha.to_owned(),
+            source_bytes_base64: BASE64.encode(source_text.as_bytes()),
+            source_raw_object_refs: content_raw_ids.clone(),
             events,
+            source_jobs,
             reusable_workflows,
             actions,
             scanners,
@@ -1095,6 +1113,7 @@ where
     validate_workflow_content(&content, &manifest.repository, path, source_sha)?;
     let revision = required_sha(&content, &["sha"])?;
     let source_text = decode_workflow_content(&content)?;
+    let source_jobs = parse_source_jobs(&source_text, manifest, &content_raw_ids)?;
     let (reusable_workflows, actions, scanners) = parse_workflow_dependencies(
         &source_text,
         &manifest.repository,
@@ -1127,7 +1146,10 @@ where
         path: path.to_owned(),
         revision,
         source_sha: source_sha.to_owned(),
+        source_bytes_base64: BASE64.encode(source_text.as_bytes()),
+        source_raw_object_refs: content_raw_ids.clone(),
         events: parse_workflow_events(&source_text)?,
+        source_jobs,
         reusable_workflows,
         actions,
         scanners,
@@ -1287,18 +1309,77 @@ where
             ),
         )
         .await?;
-        let run_artifacts = artifact_values
+        let mut run_artifacts = artifact_values
             .iter()
             .map(|artifact| {
                 parse_artifact(
                     artifact,
                     &manifest.repository,
                     run_id,
+                    latest_attempt,
                     &run_source_sha,
                     artifact_raw_ids.clone(),
                 )
             })
             .collect::<Result<Vec<_>>>()?;
+        let mut archive_raw_ids = Vec::new();
+        for artifact in &mut run_artifacts {
+            if artifact.expired != Some(false) {
+                bail!(
+                    "artifact {} in run {} is expired or has unknown expiration state",
+                    artifact.artifact_id,
+                    artifact.run_id
+                );
+            }
+            let archive_result = collect_binary(
+                transport,
+                store,
+                auth,
+                super::RestCollectionRequest::new(
+                    collection_id(
+                        &manifest.repository,
+                        &format!(
+                            "{collection_prefix}-run-{}-artifact-{}-zip",
+                            artifact.run_id, artifact.artifact_id
+                        ),
+                    ),
+                    format!(
+                        "/repos/{}/actions/artifacts/{}/zip",
+                        manifest.repository, artifact.artifact_id
+                    ),
+                    None::<String>,
+                    "workflow_artifacts",
+                )
+                .with_per_page(1),
+            )
+            .await
+            .map_err(|error| anyhow!(acquisition_error_message(error)))?;
+            if !archive_result.complete {
+                bail!(
+                    "artifact {} archive acquisition incomplete: {:?}",
+                    artifact.artifact_id,
+                    archive_result.state
+                );
+            }
+            let archive_refs = archive_result
+                .raw_objects
+                .iter()
+                .filter(|raw| {
+                    raw.object_kind == "workflow_artifacts" && raw.sha256 == artifact.digest
+                })
+                .map(|raw| raw.raw_id.clone())
+                .collect::<Vec<_>>();
+            if archive_refs.len() != 1 {
+                bail!(
+                    "artifact {} archive bytes do not match metadata digest {}",
+                    artifact.artifact_id,
+                    artifact.digest
+                );
+            }
+            archive_raw_ids.extend(archive_refs.iter().cloned());
+            ledger.ingest(archive_result)?;
+            artifact.raw_object_refs = archive_refs;
+        }
         artifacts.extend(run_artifacts);
         for (attempt, attempt_raw_ids, attempt_number) in attempts {
             let attempt_run_id = required_u64(&attempt, &["id"])?;
@@ -1355,6 +1436,7 @@ where
             raw_ids.extend(attempt_raw_ids);
             raw_ids.extend(jobs_raw_ids);
             raw_ids.extend(artifact_raw_ids.clone());
+            raw_ids.extend(archive_raw_ids.clone());
             raw_ids.sort();
             raw_ids.dedup();
             executions.push(LiveExecution {
@@ -1721,6 +1803,7 @@ fn parse_artifact(
     value: &Value,
     repository: &str,
     run_id: u64,
+    run_attempt: u32,
     run_head_sha: &str,
     raw_object_refs: Vec<String>,
 ) -> Result<LiveArtifact> {
@@ -1742,6 +1825,7 @@ fn parse_artifact(
     Ok(LiveArtifact {
         artifact_id,
         run_id: artifact_run_id,
+        run_attempt,
         run_head_sha: artifact_head_sha,
         name: required_string(value, &["name"])?,
         digest,
@@ -2107,6 +2191,55 @@ fn parse_workflow_events(source: &str) -> Result<Vec<String>> {
     Ok(events)
 }
 
+fn parse_source_jobs(
+    source: &str,
+    manifest: &ManifestRepository,
+    raw_object_refs: &[String],
+) -> Result<Vec<LiveSourceJob>> {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(source).context("parse workflow source jobs")?;
+    let jobs = yaml
+        .get("jobs")
+        .and_then(serde_yaml::Value::as_mapping)
+        .ok_or_else(|| anyhow!("workflow lacks jobs mapping"))?;
+    let mut job_ids = jobs
+        .keys()
+        .map(|key| {
+            let value = key.as_str();
+            if value.trim().is_empty() {
+                Err(anyhow!("workflow job ID is not a non-empty string"))
+            } else {
+                Ok(value.to_owned())
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    job_ids.sort();
+    job_ids.dedup();
+    if job_ids.is_empty() {
+        bail!("workflow source has no jobs");
+    }
+    let mut expected = manifest
+        .expected_jobs
+        .iter()
+        .map(|job| job.job_id.clone())
+        .collect::<Vec<_>>();
+    expected.sort();
+    expected.dedup();
+    if job_ids != expected {
+        bail!(
+            "workflow source job IDs do not match reviewed expected jobs for {}",
+            manifest.repository
+        );
+    }
+    Ok(job_ids
+        .into_iter()
+        .map(|job_id| LiveSourceJob {
+            job_id,
+            raw_object_refs: raw_object_refs.to_vec(),
+        })
+        .collect())
+}
+
 fn parse_workflow_dependencies(
     source: &str,
     current_repository: &str,
@@ -2215,7 +2348,48 @@ where
                 dependency.repository, dependency.path, dependency.revision
             )
         })?;
-        validate_dependency_tree(&tree, &dependency.repository, &dependency.path)?;
+        let resolved_path =
+            validate_dependency_tree(&tree, &dependency.repository, &dependency.path)?;
+        let encoded_path = encode_api_path(&resolved_path);
+        let (source, source_raw_ids) = collect_one(
+            transport,
+            store,
+            auth,
+            ledger,
+            github_single_object_request(
+                collection_id(
+                    &manifest.repository,
+                    &format!(
+                        "workflow-dependency-source-{}-{}-{}",
+                        safe_id(workflow_path),
+                        safe_id(source_sha),
+                        index
+                    ),
+                ),
+                format!(
+                    "/repos/{}/contents/{encoded_path}?ref={}",
+                    dependency.repository, dependency.revision
+                ),
+                "workflow.dependency.source",
+            ),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "workflow dependency source {}/{}@{}",
+                dependency.repository, resolved_path, dependency.revision
+            )
+        })?;
+        validate_workflow_content(
+            &source,
+            &dependency.repository,
+            &resolved_path,
+            &dependency.revision,
+        )?;
+        let source_text = decode_workflow_content(&source)?;
+        dependency.resolved_path = Some(resolved_path);
+        dependency.source_bytes_base64 = Some(BASE64.encode(source_text.as_bytes()));
+        dependency.source_raw_object_refs = source_raw_ids;
         dependency.raw_object_refs = raw_ids;
     }
     let mut reusable = Vec::new();
@@ -2237,7 +2411,7 @@ where
     })
 }
 
-fn validate_dependency_tree(value: &Value, repository: &str, path: &str) -> Result<()> {
+fn validate_dependency_tree(value: &Value, repository: &str, path: &str) -> Result<String> {
     if value.get("truncated").and_then(Value::as_bool) != Some(false) {
         bail!("dependency tree {repository}@{path} is truncated");
     }
@@ -2259,18 +2433,22 @@ fn validate_dependency_tree(value: &Value, repository: &str, path: &str) -> Resu
         candidates.push(format!("{requested}/action.yml"));
         candidates.push(format!("{requested}/action.yaml"));
     }
-    let found = tree.iter().any(|entry| {
+    let found = tree.iter().find_map(|entry| {
         let Some(entry_path) = entry.get("path").and_then(Value::as_str) else {
-            return false;
+            return None;
         };
-        candidates.iter().any(|candidate| {
-            entry_path == candidate && entry.get("type").and_then(Value::as_str) == Some("blob")
-        })
+        candidates
+            .iter()
+            .find(|candidate| {
+                entry_path == candidate.as_str()
+                    && entry.get("type").and_then(Value::as_str) == Some("blob")
+            })
+            .cloned()
     });
-    if !found {
+    let Some(found) = found else {
         bail!("dependency target {repository}/{requested} is absent from immutable tree");
-    }
-    Ok(())
+    };
+    Ok(found)
 }
 
 fn collect_uses(value: &serde_yaml::Value, output: &mut Vec<String>) {
@@ -2345,6 +2523,9 @@ fn parse_dependency(
         repository,
         path,
         revision,
+        resolved_path: None,
+        source_bytes_base64: None,
+        source_raw_object_refs: Vec::new(),
         raw_object_refs: Vec::new(),
     })
 }
@@ -2521,19 +2702,21 @@ mod tests {
     }
 
     impl FixtureTransport {
-        fn with_json(value: Value) -> Self {
-            let body = serde_json::to_vec(&value).expect("fixture JSON");
-            let mut responses = VecDeque::new();
-            responses.push_back(Ok(TransportResponse {
-                status: 200,
-                headers: BTreeMap::from([(
-                    "content-type".to_owned(),
-                    "application/json".to_owned(),
-                )]),
-                body,
-                effective_endpoint: "https://api.github.com/repos/actions/checkout/git/trees/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?recursive=1"
-                    .to_owned(),
-            }));
+        fn with_json_values(values: Vec<(&str, Value)>) -> Self {
+            let responses = values
+                .into_iter()
+                .map(|(endpoint, value)| {
+                    Ok(TransportResponse {
+                        status: 200,
+                        headers: BTreeMap::from([(
+                            "content-type".to_owned(),
+                            "application/json".to_owned(),
+                        )]),
+                        body: serde_json::to_vec(&value).expect("fixture JSON"),
+                        effective_endpoint: endpoint.to_owned(),
+                    })
+                })
+                .collect();
             Self {
                 requests: Mutex::new(Vec::new()),
                 responses: Mutex::new(responses),
@@ -2613,7 +2796,23 @@ mod tests {
             "truncated": false,
             "tree": [{"path": "action.yml", "type": "blob"}]
         });
-        let transport = FixtureTransport::with_json(tree);
+        let source = serde_json::json!({
+            "path": "action.yml",
+            "sha": "dddddddddddddddddddddddddddddddddddddddd",
+            "encoding": "base64",
+            "content": BASE64.encode(b"name: checkout\nruns:\n  using: composite\n  steps: []\n"),
+            "url": "https://api.github.com/repos/actions/checkout/contents/action.yml?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        });
+        let transport = FixtureTransport::with_json_values(vec![
+            (
+                "https://api.github.com/repos/actions/checkout/git/trees/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?recursive=1",
+                tree,
+            ),
+            (
+                "https://api.github.com/repos/actions/checkout/contents/action.yml?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                source,
+            ),
+        ]);
         let mut store = FixtureStore::default();
         let auth = AuthIdentity::new(
             "fixture-auth",
@@ -2644,6 +2843,9 @@ mod tests {
                     repository: "actions/checkout".to_owned(),
                     path: ".".to_owned(),
                     revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                    resolved_path: None,
+                    source_bytes_base64: None,
+                    source_raw_object_refs: Vec::new(),
                     raw_object_refs: Vec::new(),
                 }],
                 scanners: Vec::new(),
@@ -2653,10 +2855,20 @@ mod tests {
         .expect("dependency tree binding");
         assert_eq!(dependencies.actions.len(), 1);
         assert_eq!(dependencies.actions[0].raw_object_refs.len(), 1);
-        assert_eq!(ledger.raw_objects.len(), 1);
+        assert_eq!(
+            dependencies.actions[0].resolved_path.as_deref(),
+            Some("action.yml")
+        );
+        assert!(dependencies.actions[0].source_bytes_base64.is_some());
+        assert_eq!(dependencies.actions[0].source_raw_object_refs.len(), 1);
+        assert_eq!(ledger.raw_objects.len(), 2);
         assert_eq!(ledger.raw_objects[0].object_kind, "workflow.dependency");
+        assert_eq!(
+            ledger.raw_objects[1].object_kind,
+            "workflow.dependency.source"
+        );
         let requests = transport.requests.lock().expect("fixture request lock");
-        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.len(), 2);
         assert_eq!(
             requests[0].endpoint_or_operation,
             "https://api.github.com/repos/actions/checkout/git/trees/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?recursive=1"
@@ -2664,6 +2876,10 @@ mod tests {
         assert_eq!(
             requests[0].endpoint_or_operation,
             ledger.requests[0].endpoint_or_operation
+        );
+        assert_eq!(
+            requests[1].endpoint_or_operation,
+            "https://api.github.com/repos/actions/checkout/contents/action.yml?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
     }
 
@@ -2741,6 +2957,7 @@ jobs:
         let artifact = |artifact_id, run_id| LiveArtifact {
             artifact_id,
             run_id,
+            run_attempt: 1,
             run_head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
             name: "dist".to_owned(),
             digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -2963,6 +3180,7 @@ jobs:
             &value,
             "tailrocks/velnor",
             7,
+            2,
             "cccccccccccccccccccccccccccccccccccccccc",
             vec!["raw".to_owned()],
         )
@@ -2977,6 +3195,7 @@ jobs:
             }),
             "tailrocks/velnor",
             7,
+            2,
             "cccccccccccccccccccccccccccccccccccccccc",
             vec![]
         )

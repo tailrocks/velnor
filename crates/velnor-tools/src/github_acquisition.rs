@@ -1223,6 +1223,143 @@ where
 }
 
 /// Acquire a GraphQL connection until `pageInfo.hasNextPage` is false.
+/// Acquire one binary response without attempting JSON parsing.  This is
+/// used for immutable GitHub artifact archives: the exact archive bytes are
+/// retained in the same request/raw ledger and never represented by a
+/// caller-asserted digest.
+pub async fn collect_binary<T, S>(
+    transport: &T,
+    store: &mut S,
+    auth: &AuthIdentity,
+    request: RestCollectionRequest,
+) -> Result<CollectionResult, AcquisitionError>
+where
+    T: AcquisitionTransport + ?Sized,
+    S: RawObjectStore,
+{
+    auth.validate()?;
+    validate_rest_request(&request)?;
+    let endpoint = request.api_origin.bind(&request.endpoint)?;
+    let request_id = format!("{}-0001", request.collection_id);
+    let acquisition_request = AcquisitionRequest {
+        api: ApiKind::Rest,
+        method: HttpMethod::Get,
+        api_origin: request.api_origin.clone(),
+        endpoint_or_operation: endpoint,
+        query: request.query.clone(),
+        body: None,
+    };
+    let started_at_utc = utc_now();
+    let response = match transport.send(acquisition_request.clone()).await {
+        Ok(response) => response,
+        Err(failure) => {
+            let state = transport_failure_state(failure);
+            return Ok(CollectionResult {
+                items: Vec::new(),
+                requests: vec![make_record(
+                    &request_id,
+                    &acquisition_request,
+                    auth,
+                    started_at_utc,
+                    utc_now(),
+                    None,
+                    None,
+                    PageState {
+                        number: 1,
+                        per_page: Some(request.per_page as u32),
+                        link_next: None,
+                        cursor_in: None,
+                        cursor_out: None,
+                        has_next_page: None,
+                        items_returned: 0,
+                    },
+                    None,
+                    None,
+                    state,
+                    false,
+                    Some("transport failure".to_owned()),
+                    None,
+                    None,
+                )],
+                raw_objects: Vec::new(),
+                state,
+                complete: false,
+            });
+        }
+    };
+    request.api_origin.validate_candidate(
+        &Url::parse(&response.effective_endpoint)
+            .map_err(|_| AcquisitionError::EndpointViolation)?,
+    )?;
+    let rate_limit = rate_limit_from_headers(&response.headers);
+    let media_type = header_value(&response.headers, "content-type")
+        .unwrap_or_else(|| "application/octet-stream".to_owned());
+    let raw_id = format!("{request_id}-response");
+    let raw = retain_raw(
+        store,
+        &auth.credentials,
+        RawObject {
+            raw_id,
+            request_id: request_id.clone(),
+            object_kind: if response.status / 100 == 2 {
+                request.object_kind.clone()
+            } else {
+                format!("{}.error", request.object_kind)
+            },
+            canonicalization: "raw-bytes-v1".to_owned(),
+            media_type,
+            bytes: response.body,
+            original_sha256: String::new(),
+            original_byte_length: 0,
+        },
+    )?;
+    let raw_id = raw.raw_id.clone();
+    let status = response.status;
+    let (state, complete, error_raw_ref, truncation_reason) = if status / 100 == 2 {
+        (AcquisitionState::Complete, true, None, None)
+    } else {
+        let state = http_state(status, rate_limit.as_ref());
+        (
+            state,
+            false,
+            Some(raw_id.clone()),
+            Some(format!("HTTP status {status}")),
+        )
+    };
+    let request_record = make_record(
+        &request_id,
+        &acquisition_request,
+        auth,
+        started_at_utc,
+        utc_now(),
+        Some(status),
+        Some(&response.headers),
+        PageState {
+            number: 1,
+            per_page: Some(request.per_page as u32),
+            link_next: None,
+            cursor_in: None,
+            cursor_out: None,
+            has_next_page: Some(false),
+            items_returned: 0,
+        },
+        Some(raw_id),
+        error_raw_ref,
+        state,
+        complete,
+        truncation_reason,
+        None,
+        rate_limit,
+    );
+    Ok(CollectionResult {
+        items: Vec::new(),
+        requests: vec![request_record],
+        raw_objects: vec![raw],
+        state,
+        complete,
+    })
+}
+
 pub async fn collect_graphql<T, S>(
     transport: &T,
     store: &mut S,

@@ -32,6 +32,10 @@ pub struct G0MappingBindings {
     pub phase: String,
     pub model_session: G0ModelSession,
     pub workload_artifact: G0ArtifactReference,
+    /// External CAS reference written by the same collector process for the
+    /// canonical typed snapshot bytes.  A URI supplied without an object
+    /// write is not accepted as authoritative evidence.
+    pub collector_snapshot_storage_ref: String,
     /// Explicit workflow-to-workload mapping for repos with more than one
     /// reviewed workload.  A single-workload repo is mapped automatically.
     pub workflow_workloads: BTreeMap<(String, String), Vec<String>>,
@@ -214,10 +218,16 @@ pub fn map_g0_inventory_with_supplement(
         access: map_access(live, &raw_by_id)?,
         workload_artifact: bindings.workload_artifact.clone(),
     };
-    let canonical = serde_json::to_vec(&snapshot).context("serialize canonical G0 snapshot")?;
+    let canonical = canonical_json_bytes(&snapshot).context("serialize canonical G0 snapshot")?;
+    let snapshot_sha256 = sha256_digest(&canonical);
+    if bindings.collector_snapshot_storage_ref != canonical_storage_ref(&snapshot_sha256) {
+        bail!("collector snapshot storage reference does not match canonical bytes");
+    }
     let evidence = G0InventoryEvidence {
         collector_snapshot: snapshot,
-        collector_snapshot_sha256: sha256_digest(&canonical),
+        collector_snapshot_bytes_base64: BASE64.encode(&canonical),
+        collector_snapshot_sha256: snapshot_sha256,
+        collector_snapshot_storage_ref: bindings.collector_snapshot_storage_ref.clone(),
     };
     let supplement = map_supplement(live, &canonical);
     Ok(G0MappedInventory {
@@ -327,6 +337,8 @@ fn map_request(request: &RequestRecord) -> Result<G0RequestRecord> {
             HttpMethod::Post => "POST".to_owned(),
         },
         endpoint_or_operation: request.endpoint_or_operation.clone(),
+        query_base64: request.query_base64.clone(),
+        variables_base64: request.variables_base64.clone(),
         query_sha256: request
             .query_sha256
             .clone()
@@ -399,6 +411,7 @@ fn map_raw_object(raw: &RawObjectRef) -> Result<G0RawObjectRef> {
         canonicalization: raw.canonicalization.clone(),
         sha256: raw.sha256.clone(),
         byte_length: raw.byte_length,
+        bytes_base64: raw.bytes_base64.clone(),
         media_type: raw.media_type.clone(),
         storage_ref: raw.storage_ref.clone(),
     })
@@ -416,6 +429,45 @@ fn is_sha256_digest(value: &str) -> bool {
 fn canonical_storage_ref(digest: &str) -> String {
     let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
     format!("sha256://{hex}")
+}
+
+fn canonical_json_bytes<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
+    let value = serde_json::to_value(value).context("convert G0 snapshot to JSON")?;
+    Ok(canonical_json(&value).into_bytes())
+}
+
+fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_owned(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => {
+            serde_json::to_string(value).expect("JSON string serialization cannot fail")
+        }
+        serde_json::Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(canonical_json)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        serde_json::Value::Object(values) => {
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort();
+            let members = keys
+                .into_iter()
+                .map(|key| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(key).expect("JSON key serialization cannot fail"),
+                        canonical_json(values.get(key).expect("key collected from object"))
+                    )
+                })
+                .collect::<Vec<_>>();
+            format!("{{{}}}", members.join(","))
+        }
+    }
 }
 
 fn map_supplement(live: &LiveCollection, canonical: &[u8]) -> G0MappingSupplement {
@@ -562,8 +614,10 @@ fn map_repository(
             &["workflow_artifacts"],
         )?;
         if artifact.run_id == 0
+            || artifact.run_attempt == 0
             || !is_sha(&artifact.run_head_sha)
             || !is_sha256_digest(&artifact.digest)
+            || artifact.expired.is_none()
         {
             bail!(
                 "artifact {} in {} lacks immutable run identity or digest",
@@ -618,6 +672,7 @@ fn map_repository(
             map_workflow(
                 workflow,
                 repository,
+                manifest,
                 raw_by_id,
                 request_by_id,
                 observed_at_utc,
@@ -640,6 +695,25 @@ fn map_repository(
             )
         })
         .collect::<Result<Vec<_>>>()?;
+    let artifacts = repository
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            Ok(G0ArtifactObservation {
+                artifact_id: artifact.artifact_id,
+                run_id: artifact.run_id,
+                run_attempt: artifact.run_attempt,
+                run_head_sha: artifact.run_head_sha.clone(),
+                name: artifact.name.clone(),
+                digest: artifact.digest.clone(),
+                expired: artifact.expired.ok_or_else(|| {
+                    anyhow!("artifact {} lacks expired state", artifact.artifact_id)
+                })?,
+                source_url: artifact.source_url.clone(),
+                raw_object_refs: artifact.raw_object_refs.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(G0RepositoryInventory {
         repository: repository.repository.clone(),
         repository_id: repository.repository_id,
@@ -647,6 +721,7 @@ fn map_repository(
         default_branch_sha: repository.default_branch_sha.clone(),
         rulesets,
         workflows,
+        artifacts,
         open_prs,
         main_checks,
         raw_object_refs: repository.raw_object_refs.clone(),
@@ -656,6 +731,7 @@ fn map_repository(
 fn map_workflow(
     workflow: &LiveWorkflow,
     repository: &LiveRepository,
+    manifest: &ManifestRepository,
     raw_by_id: &BTreeMap<String, &RawObjectRef>,
     request_by_id: &BTreeMap<String, &RequestRecord>,
     observed_at_utc: &str,
@@ -667,16 +743,22 @@ fn map_workflow(
         &format!("workflow {}", workflow.path),
         &["workflows", "workflow.source"],
     )?;
-    let source_raw = workflow
-        .raw_object_refs
-        .iter()
-        .find_map(|raw_id| {
-            raw_by_id
-                .get(raw_id)
-                .copied()
-                .filter(|raw| raw.object_kind == "workflow.source")
-        })
-        .ok_or_else(|| anyhow!("workflow {} lacks source raw object", workflow.path))?;
+    validate_raw_references(
+        &workflow.source_raw_object_refs,
+        raw_by_id,
+        request_by_id,
+        &format!("workflow source {}", workflow.path),
+        &["workflow.source"],
+    )?;
+    let source = map_source(
+        &repository.repository,
+        &workflow.path,
+        &workflow.revision,
+        &workflow.source_sha,
+        &workflow.source_bytes_base64,
+        &workflow.source_raw_object_refs,
+        raw_by_id,
+    )?;
     for dependency in workflow
         .reusable_workflows
         .iter()
@@ -693,44 +775,136 @@ fn map_workflow(
             ),
             &["workflow.dependency"],
         )?;
+        validate_raw_references(
+            &dependency.source_raw_object_refs,
+            raw_by_id,
+            request_by_id,
+            &format!(
+                "workflow dependency source {}/{}@{}",
+                dependency.repository, dependency.path, dependency.revision
+            ),
+            &["workflow.dependency.source"],
+        )?;
     }
     let generated_state = G0ArtifactReference {
         name: workflow.path.clone(),
         schema: "github.workflow-source.v1".to_owned(),
-        source_url: format!(
-            "https://github.com/{}/blob/{}/{}",
-            repository.repository, workflow.source_sha, workflow.path
-        ),
-        sha256: source_raw.sha256.clone(),
+        source_url: source.source_url.clone(),
+        sha256: source.sha256.clone(),
+        storage_ref: source.storage_ref.clone(),
+        source_revision: workflow.revision.clone(),
+        source_digest: source.sha256.clone(),
         observed_at_utc: observed_at_utc.to_owned(),
-        raw_object_refs: workflow.raw_object_refs.clone(),
+        raw_object_refs: workflow.source_raw_object_refs.clone(),
     };
+    let source_jobs = workflow
+        .source_jobs
+        .iter()
+        .map(|job| {
+            let expected = manifest
+                .expected_jobs
+                .iter()
+                .find(|expected| expected.job_id == job.job_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "workflow source job {} is absent from reviewed manifest",
+                        job.job_id
+                    )
+                })?;
+            validate_raw_references(
+                &job.raw_object_refs,
+                raw_by_id,
+                request_by_id,
+                &format!("workflow source job {}", job.job_id),
+                &["workflow.source"],
+            )?;
+            Ok(G0SourceJob {
+                job_id: job.job_id.clone(),
+                workload_id: expected.workload_id.clone(),
+                provider: expected.provider.clone(),
+                platform: expected.platform.clone(),
+                architecture: expected.architecture.clone(),
+                required: expected.required,
+                raw_object_refs: job.raw_object_refs.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(G0WorkflowInventory {
-        path: workflow.path.clone(),
-        revision: workflow.revision.clone(),
-        source_sha: workflow.source_sha.clone(),
+        source,
         events: workflow.events.clone(),
+        source_jobs,
         reusable_workflows: workflow
             .reusable_workflows
             .iter()
-            .map(map_dependency)
+            .map(|dependency| map_dependency(dependency, raw_by_id))
             .collect::<Result<Vec<_>>>()?,
         actions: workflow
             .actions
             .iter()
-            .map(map_dependency)
+            .map(|dependency| map_dependency(dependency, raw_by_id))
             .collect::<Result<Vec<_>>>()?,
         scanners: workflow
             .scanners
             .iter()
-            .map(map_dependency)
+            .map(|dependency| map_dependency(dependency, raw_by_id))
             .collect::<Result<Vec<_>>>()?,
         generated_state,
         raw_object_refs: workflow.raw_object_refs.clone(),
     })
 }
 
-fn map_dependency(dependency: &LiveDependency) -> Result<G0WorkflowDependency> {
+fn map_source(
+    repository: &str,
+    path: &str,
+    revision: &str,
+    source_sha: &str,
+    bytes_base64: &str,
+    raw_object_refs: &[String],
+    raw_by_id: &BTreeMap<String, &RawObjectRef>,
+) -> Result<G0WorkflowSource> {
+    if path.trim().is_empty() || !is_sha(revision) || !is_sha(source_sha) {
+        bail!("workflow source {} has malformed immutable identity", path);
+    }
+    let bytes = BASE64
+        .decode(bytes_base64)
+        .with_context(|| format!("decode workflow source {repository}/{path}"))?;
+    if bytes.is_empty() {
+        bail!("workflow source {repository}/{path} is empty");
+    }
+    let sha256 = sha256_digest(&bytes);
+    let raw = raw_object_refs
+        .iter()
+        .filter_map(|raw_id| raw_by_id.get(raw_id).copied())
+        .find(|raw| {
+            raw.object_kind == "workflow.source"
+                && raw.sha256 == sha256
+                && raw.bytes_base64 == bytes_base64
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "workflow source {repository}/{path} lacks a raw object bound to exact source bytes"
+            )
+        })?;
+    Ok(G0WorkflowSource {
+        repository: repository.to_owned(),
+        path: path.to_owned(),
+        revision: revision.to_owned(),
+        source_sha: source_sha.to_owned(),
+        source_url: format!("https://github.com/{repository}/blob/{source_sha}/{path}"),
+        media_type: "text/yaml".to_owned(),
+        canonicalization: "raw-utf8".to_owned(),
+        sha256,
+        storage_ref: canonical_storage_ref(&raw.sha256),
+        byte_length: bytes.len() as u64,
+        bytes_base64: bytes_base64.to_owned(),
+        raw_object_refs: raw_object_refs.to_owned(),
+    })
+}
+
+fn map_dependency(
+    dependency: &LiveDependency,
+    raw_by_id: &BTreeMap<String, &RawObjectRef>,
+) -> Result<G0WorkflowDependency> {
     if !is_sha(&dependency.revision) {
         bail!(
             "workflow dependency {}/{} remains tag/ref-bound at {}",
@@ -739,12 +913,26 @@ fn map_dependency(dependency: &LiveDependency) -> Result<G0WorkflowDependency> {
             dependency.revision
         );
     }
+    let path = dependency
+        .resolved_path
+        .as_deref()
+        .unwrap_or(&dependency.path);
+    let bytes_base64 = dependency
+        .source_bytes_base64
+        .as_deref()
+        .ok_or_else(|| anyhow!("workflow dependency {path} lacks source bytes"))?;
+    let source = map_source(
+        &dependency.repository,
+        path,
+        &dependency.revision,
+        &dependency.revision,
+        bytes_base64,
+        &dependency.source_raw_object_refs,
+        raw_by_id,
+    )?;
     Ok(G0WorkflowDependency {
         kind: dependency.kind.clone(),
-        repository: dependency.repository.clone(),
-        path: dependency.path.clone(),
-        revision: dependency.revision.clone(),
-        raw_object_refs: dependency.raw_object_refs.clone(),
+        source,
     })
 }
 
@@ -841,6 +1029,12 @@ fn map_pull_request(
                 workflow_revision: binding.workflow_revision.clone(),
                 event: binding.event.clone(),
                 source_sha: binding.source_sha.clone(),
+                actual_checkout_sha: binding.actual_checkout_sha.clone().ok_or_else(|| {
+                    anyhow!(
+                        "PR #{} workflow binding lacks checkout SHA",
+                        identity.number
+                    )
+                })?,
                 run_ids: binding.run_ids.clone(),
                 raw_object_refs: binding.raw_object_refs.clone(),
             })
@@ -894,6 +1088,7 @@ fn map_pull_request(
         merge_group_sha: identity.merge_group_sha.clone(),
         trust,
         applicability,
+        source_url: identity.source_url.clone(),
         workflow_bindings,
         required_check_producers,
         raw_object_refs: pull_request.raw_object_refs.clone(),
@@ -933,7 +1128,7 @@ fn map_check(
             check.context
         );
     }
-    let _actual_checkout_sha = check
+    let actual_checkout_sha = check
         .actual_checkout_sha
         .clone()
         .or_else(|| execution.actual_checkout_sha.clone())
@@ -968,6 +1163,7 @@ fn map_check(
         run_attempt,
         job_id,
         source_sha: check.source_sha.clone(),
+        actual_checkout_sha,
         event,
         status: check.status.clone(),
         conclusion: check.conclusion.clone().unwrap_or_else(|| "".to_owned()),
@@ -1063,7 +1259,7 @@ fn map_dependency_graph(
                 manifest_repository.repository
             );
         }
-        let source_raw_refs = workflow.raw_object_refs.clone();
+        let source_raw_refs = workflow.source_raw_object_refs.clone();
         graph_raw_ids.extend(source_raw_refs.iter().cloned());
         for workload in workloads {
             if !manifest_repository
@@ -1084,6 +1280,8 @@ fn map_dependency_graph(
                     repository: manifest_repository.repository.clone(),
                     workload_id: workload.clone(),
                     applicability: "required".to_owned(),
+                    source_sha: workflow.source_sha.clone(),
+                    source_ref: workflow.path.clone(),
                     raw_object_refs: source_raw_refs.clone(),
                 });
             }
@@ -1102,6 +1300,16 @@ fn map_dependency_graph(
                         dependency.repository, dependency.path, dependency.revision
                     ),
                     &["workflow.dependency"],
+                )?;
+                validate_raw_references(
+                    &dependency.source_raw_object_refs,
+                    raw_by_id,
+                    request_by_id,
+                    &format!(
+                        "dependency graph source {}/{}@{}",
+                        dependency.repository, dependency.path, dependency.revision
+                    ),
+                    &["workflow.dependency.source"],
                 )?;
                 if !is_sha(&dependency.revision) {
                     bail!(
@@ -1125,6 +1333,11 @@ fn map_dependency_graph(
                         repository: dependency.repository.clone(),
                         workload_id: workload.clone(),
                         applicability: "required".to_owned(),
+                        source_sha: dependency.revision.clone(),
+                        source_ref: dependency
+                            .resolved_path
+                            .clone()
+                            .unwrap_or_else(|| dependency.path.clone()),
                         raw_object_refs: dependency.raw_object_refs.clone(),
                     });
                 }
@@ -1134,6 +1347,13 @@ fn map_dependency_graph(
                     to: dependency_node_id,
                     kind: dependency.kind.clone(),
                     required: true,
+                    source_sha: workflow.source_sha.clone(),
+                    source_ref: workflow.path.clone(),
+                    target_source_sha: dependency.revision.clone(),
+                    target_source_ref: dependency
+                        .resolved_path
+                        .clone()
+                        .unwrap_or_else(|| dependency.path.clone()),
                     raw_object_refs: dependency.raw_object_refs.clone(),
                 });
             }
