@@ -74,3 +74,18 @@ defines job-local temporary storage. The pinned
 [download-artifact v8.0.1 action](https://github.com/actions/download-artifact/blob/3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c/action.yml)
 accepts an explicit extraction path; this unit changes that input and its
 consumers rather than weakening source identity.
+
+## Published checkpoint
+
+Published as `57e7cafc410020a6d5097b50bfc82b0162b64551`, tree
+`07d8bd49b044f0c9249dcb43551192872e0f5a84`. Local signed commit
+`521bab5430ee8089fe175ec56fae36aba96dacb5` has identical tree and is retained.
+The default-feature generator rebuilt from the exact published revision and
+passed `generate . --check --plain` using the verified 4fa runtime for the
+declared pin. Candidate closure:
+`68a468253f6e968848c1c82eb59a235639613029dce566f3c6af3c001fe97503`.
+An earlier no-default-feature build was correctly rejected because it is not
+the declared candidate feature contract; no policy guard was relaxed.
+
+Fresh PR run `35510807365` and policy `35510805245` are in progress.
+Real packaging and ARM validation remain pending.

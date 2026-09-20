@@ -7,6 +7,17 @@ Historical work remains in [the September 16 cache plan](../2026-09-16-ci-workfl
 and [the September 17 behavior ledger](../2026-09-17-pr994-behavior-ledger.md).
 Their claims require revalidation against current revisions.
 
+## Latest measured checkpoint
+
+Metadata staging is published as `57e7cafc`; exact-revision CI is running.
+The preceding two successful full PR observations took 458s and 534s from
+trigger to required result, with aggregate job execution 1,210s and 1,314s.
+Runner jobs took 413s and 508s; generator jobs 186s and 167s. Both retained
+1,943 generator tests and 2,516 passing runner tests, five existing skips and
+one repeated leaky-test result. Same image/region does not prove identical
+hardware or contention. Sample size two supports no speedup or plateau claim.
+Raw second-run evidence is under `observations/velnor-35508841303-*`.
+
 ## Completion contract
 
 - Generator/runtime fixes, regenerated Velnor, Jackin and Parallax consumers.
