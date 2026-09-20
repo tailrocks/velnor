@@ -1105,6 +1105,12 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "product fixtures use fail-fast assertions and serialization helpers"
+)]
 mod tests {
     use super::*;
     use flate2::{write::GzEncoder, Compression};

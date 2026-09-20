@@ -5277,6 +5277,14 @@ fn render_maintenance(config: &ProjectConfig) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::format_push_string,
+    clippy::too_many_lines,
+    reason = "release fixtures use fail-fast assertions and compact rendered-shell setup"
+)]
 mod tests {
     #![expect(
         clippy::panic,
@@ -6726,10 +6734,7 @@ mod tests {
         );
         let actual = fs::read_to_string(root.join("product-assets/product-manifest.json.sha256"))
             .expect("read rendered sidecar");
-        let expected_digest = Sha256::digest(manifest)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        let expected_digest = digest_of_bytes(manifest);
         assert_eq!(
             actual,
             format!("{expected_digest}  product-manifest.json\n")
