@@ -4,6 +4,7 @@ mod fleet_policy;
 mod fleet_policy_client;
 mod g0_contract;
 mod g0_workflow;
+pub(crate) mod github_acquisition;
 mod github_raw_store;
 mod lane_compare;
 mod live_authority;
