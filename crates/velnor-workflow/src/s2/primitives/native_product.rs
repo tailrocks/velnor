@@ -16,11 +16,10 @@ use crate::s2::{
 };
 
 /// Product build images are pinned here because Apple compilation cannot use a
-/// Linux selector.  The Intel lane is intentionally current and explicit:
-/// silently falling back to an old Intel image would make the advertised
-/// x86_64-apple-darwin product unverifiable.
-pub(crate) const MACOS_ARM64_RUNNER: &str = "macos-27";
-const MACOS_X86_64_RUNNER: &str = "macos-26-intel";
+/// Linux selector.  This is the exact current arm64 preview label.  Intel is
+/// retained in the typed target census but explicitly blocked until GitHub
+/// offers a macOS 27 Intel image; no fallback image is valid.
+pub(crate) const MACOS_ARM64_RUNNER: &str = "xcode-27";
 const PRODUCT_MANIFEST_FILE: &str = "product-manifest.json";
 
 pub(crate) fn is_native_product_side(primitive: &str) -> bool {
@@ -50,6 +49,7 @@ impl Primitive for NativeProduct {
             "archive_component",
             "archive_identity_schema",
             "archive_manifest_schema",
+            "blocked_targets",
             "channel",
             "components",
             "manifest_schema",
@@ -71,6 +71,7 @@ impl Primitive for NativeProduct {
         let manifest_schema = required_string(args, "manifest_schema")?;
         let source_repository = required_string(args, "source_repository")?;
         let targets = args.strings("targets")?.unwrap_or_default();
+        let blocked_targets = args.strings("blocked_targets")?.unwrap_or_default();
         let components = parse_components(args.string_tables("components")?)?;
         validate_product_contract(
             &product_id,
@@ -81,6 +82,7 @@ impl Primitive for NativeProduct {
             &archive_manifest_schema,
             &manifest_schema,
             &targets,
+            &blocked_targets,
             &components,
         )?;
         let content = render_workflow(
@@ -93,6 +95,7 @@ impl Primitive for NativeProduct {
             &archive_manifest_schema,
             &manifest_schema,
             &targets,
+            &blocked_targets,
             &components,
         );
         Ok(Rendered {
@@ -176,6 +179,7 @@ fn validate_product_contract(
     archive_manifest_schema: &str,
     manifest_schema: &str,
     targets: &[String],
+    blocked_targets: &[String],
     components: &[Component],
 ) -> Result<(), GeneratorError> {
     if !safe_name(product_id) {
@@ -234,6 +238,24 @@ fn validate_product_contract(
             "`native-product` targets must be exactly the four supported targets; missing `{missing}`"
         )));
     }
+    let mut blocked_set = BTreeSet::new();
+    for target in blocked_targets {
+        if !target_set.contains(target.as_str()) || !blocked_set.insert(target.as_str()) {
+            return Err(GeneratorError::usage(format!(
+                "`native-product` blocked target `{target}` is not a unique declared target"
+            )));
+        }
+    }
+    if !blocked_set.contains("x86_64-apple-darwin") {
+        return Err(GeneratorError::usage(
+            "`native-product` must explicitly block x86_64-apple-darwin until a macOS 27 Intel runner is offered",
+        ));
+    }
+    if blocked_set.len() == target_set.len() {
+        return Err(GeneratorError::usage(
+            "`native-product` needs at least one unblocked target to build",
+        ));
+    }
     let mut component_set = BTreeSet::new();
     if components.is_empty() {
         return Err(GeneratorError::usage(
@@ -256,7 +278,7 @@ fn validate_product_contract(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn render_workflow(
     ctx: &RenderCtx<'_>,
     product_id: &str,
@@ -267,15 +289,34 @@ fn render_workflow(
     archive_manifest_schema: &str,
     manifest_schema: &str,
     targets: &[String],
+    blocked_targets: &[String],
     components: &[Component],
 ) -> String {
+    let blocked_set = blocked_targets
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     let mut matrix = String::new();
-    for target in targets {
+    for target in targets
+        .iter()
+        .filter(|target| !blocked_set.contains(target.as_str()))
+    {
         let _ = writeln!(
             matrix,
             "          - target: {}\n            runner: {}",
             yaml_scalar(target),
             runner_for_target(ctx, target),
+        );
+    }
+
+    let blocker_runner = runner_for_target(ctx, "x86_64-unknown-linux-gnu");
+    let mut blocked_jobs = String::new();
+    for target in blocked_targets {
+        let job_id = format!("blocked-{}", target.replace('-', "_"));
+        let _ = writeln!(
+            blocked_jobs,
+            "  {job_id}:\n    name: Blocked native product target / {target}\n    runs-on: {blocker_runner}\n    timeout-minutes: 5\n    permissions:\n      contents: read\n    steps:\n      - name: Refuse unsupported target\n        run: |\n          echo \"::error::native product target {target} is blocked: macOS 27 Intel is unavailable; no fallback runner is permitted\" >&2\n          exit 1\n",
+            target = yaml_scalar(target),
         );
     }
 
@@ -346,12 +387,22 @@ fn render_workflow(
     let archive_identity_schema_q = shell_quote(archive_identity_schema);
     let archive_manifest_schema_q = shell_quote(archive_manifest_schema);
     let targets_json_q = shell_quote(&targets_json);
+    let blocked_targets_json = format!(
+        "[{}]",
+        blocked_targets
+            .iter()
+            .map(|target| format!("\"{target}\""))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let blocked_targets_json_q = shell_quote(&blocked_targets_json);
     let components_json_q = shell_quote(&components_json);
     let default_branch_q = shell_quote(&ctx.config.default_branch);
 
-    format!(
-        "{GENERATED_HEADER}# Build-only producer. release.yml is the sole provider publisher.\nname: Native product build\nrun-name: Native product build · ${{{{ github.ref_name }}}}\n\non:\n  workflow_call:\n\nconcurrency:\n  group: native-product-build-${{{{ github.workflow }}}}-${{{{ github.run_id }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  build:\n    name: Build product / ${{{{ matrix.target }}}}\n    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 90\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    permissions:\n      contents: read\n    env:\n      TARGET: ${{{{ matrix.target }}}}\n      PRODUCT_ID: {product_id_q}\n      CHANNEL: {channel_q}\n      SOURCE_REPOSITORY: {source_repository_q}\n      MANIFEST_SCHEMA: {manifest_schema_q}\n      ARCHIVE_COMPONENT: {archive_component_q}\n      ARCHIVE_IDENTITY_SCHEMA: {archive_identity_schema_q}\n      ARCHIVE_MANIFEST_SCHEMA: {archive_manifest_schema_q}\n      DEFAULT_BRANCH: {default_branch_q}\n      TARGETS_JSON: {targets_json_q}\n      COMPONENTS_JSON: {components_json_q}\n    steps:\n      - name: Checkout exact source\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Prove exact source identity\n        run: |\n          set -euo pipefail\n          actual=\"$(git rev-parse HEAD)\"\n          case \"$actual\" in ''|*[!0-9a-f]*) echo '::error::checkout is not a lowercase 40-hex commit' >&2; exit 1 ;; esac\n          [ \"${{{{#actual}}}}\" -eq 40 ] && [ \"$actual\" = \"$GITHUB_SHA\" ] || {{ echo '::error::checkout source differs from event source' >&2; exit 1; }}\n          test -z \"$(git status --porcelain)\" || {{ echo '::error::native product checkout is dirty' >&2; exit 1; }}\n      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Read Cargo component metadata\n        run: cargo metadata --locked --no-deps --format-version 1 > cargo-metadata.json\n      - name: Build and verify typed sibling inventory\n        run: |\n          set -euo pipefail\n          if [ \"$CHANNEL\" = stable ]; then\n            PRODUCT_VERSION=\"${{{{ github.ref_name }}}}\"\n            PRODUCT_VERSION=\"${{PRODUCT_VERSION#v}}\"\n            [[ \"$PRODUCT_VERSION\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] || {{ echo '::error::stable product source tag is not SemVer' >&2; exit 1; }}\n          else\n            PRODUCT_VERSION=\"0.0.0-preview.${{{{ github.run_number }}}}+$(printf '%s' \"$GITHUB_SHA\" | cut -c1-7)\"\n          fi\n          SOURCE_COMMIT=\"$GITHUB_SHA\"\n          SOURCE_REF=\"$GITHUB_REF\"\n          RELEASE_TAG=\"$GITHUB_REF_NAME\"\n          export PRODUCT_VERSION SOURCE_COMMIT SOURCE_REF RELEASE_TAG\n          mkdir -p \"dist/$TARGET/package\"\n          : > \"dist/$TARGET/artifacts-$TARGET.jsonl\"\n          : > \"dist/$TARGET/components-$TARGET.jsonl\"\n{build_steps}          jq -S -n --arg schema \"$MANIFEST_SCHEMA\" --arg product_id \"$PRODUCT_ID\" --arg channel \"$CHANNEL\" --arg source_repository \"$SOURCE_REPOSITORY\" --arg source_ref \"$SOURCE_REF\" --arg source_commit \"$SOURCE_COMMIT\" --arg release_tag \"$RELEASE_TAG\" --arg version \"$PRODUCT_VERSION\" --arg archive_component \"$ARCHIVE_COMPONENT\" --arg archive_identity_schema \"$ARCHIVE_IDENTITY_SCHEMA\" --arg archive_manifest_schema \"$ARCHIVE_MANIFEST_SCHEMA\" --argjson targets \"$TARGETS_JSON\" --argjson components \"$COMPONENTS_JSON\" '{{schema:$schema,product_id:$product_id,channel:$channel,source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit,release_tag:$release_tag,version:$version,archive_component:$archive_component,archive_identity_schema:$archive_identity_schema,archive_manifest_schema:$archive_manifest_schema,targets:$targets,components:$components}}' > \"dist/$TARGET/product-contract-$TARGET.json\"\n          test \"$(jq -s 'map(.name) | unique | sort | length' \"dist/$TARGET/components-$TARGET.jsonl\")\" -eq {component_count}\n          test \"$(jq -s 'map(.target) | unique | sort | length' \"dist/$TARGET/components-$TARGET.jsonl\")\" -eq 1\n      - name: Upload source-bound product build\n        uses: {upload}\n        with:\n          name: native-product-${{{{ matrix.target }}}}\n          path: dist/${{{{ matrix.target }}}}\n          if-no-files-found: error\n          retention-days: 2\n\n# The stable release workflow downloads these build artifacts, asks the provider\n# for its numeric release id, then writes {PRODUCT_MANIFEST_FILE}; this file\n# never calls gh release create/upload and cannot publish a competing product.\n",
+    let mut output = format!(
+        "{GENERATED_HEADER}# Build-only producer. release.yml is the sole provider publisher.\nname: Native product build\nrun-name: Native product build · ${{{{ github.ref_name }}}}\n\non:\n  workflow_call:\n\nconcurrency:\n  group: native-product-build-${{{{ github.workflow }}}}-${{{{ github.run_id }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n{blocked_jobs}  build:\n    name: Build product / ${{{{ matrix.target }}}}\n    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 90\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    permissions:\n      contents: read\n    env:\n      TARGET: ${{{{ matrix.target }}}}\n      PRODUCT_ID: {product_id_q}\n      CHANNEL: {channel_q}\n      SOURCE_REPOSITORY: {source_repository_q}\n      MANIFEST_SCHEMA: {manifest_schema_q}\n      ARCHIVE_COMPONENT: {archive_component_q}\n      ARCHIVE_IDENTITY_SCHEMA: {archive_identity_schema_q}\n      ARCHIVE_MANIFEST_SCHEMA: {archive_manifest_schema_q}\n      DEFAULT_BRANCH: {default_branch_q}\n      TARGETS_JSON: {targets_json_q}\n      BLOCKED_TARGETS_JSON: {blocked_targets_json_q}\n      COMPONENTS_JSON: {components_json_q}\n    steps:\n      - name: Checkout exact source\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Prove exact source identity\n        run: |\n          set -euo pipefail\n          actual=\"$(git rev-parse HEAD)\"\n          case \"$actual\" in ''|*[!0-9a-f]*) echo '::error::checkout is not a lowercase 40-hex commit' >&2; exit 1 ;; esac\n          [ \"${{{{#actual}}}}\" -eq 40 ] && [ \"$actual\" = \"$GITHUB_SHA\" ] || {{ echo '::error::checkout source differs from event source' >&2; exit 1; }}\n          test -z \"$(git status --porcelain)\" || {{ echo '::error::native product checkout is dirty' >&2; exit 1; }}\n      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Read Cargo component metadata\n        run: cargo metadata --locked --no-deps --format-version 1 > cargo-metadata.json\n      - name: Build and verify typed sibling inventory\n        run: |\n          set -euo pipefail\n          if [ \"$CHANNEL\" = stable ]; then\n            PRODUCT_VERSION=\"${{{{ github.ref_name }}}}\"\n            PRODUCT_VERSION=\"${{PRODUCT_VERSION#v}}\"\n            [[ \"$PRODUCT_VERSION\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] || {{ echo '::error::stable product source tag is not SemVer' >&2; exit 1; }}\n          else\n            PRODUCT_VERSION=\"0.0.0-preview.${{{{ github.run_number }}}}+$(printf '%s' \"$GITHUB_SHA\" | cut -c1-7)\"\n          fi\n          SOURCE_COMMIT=\"$GITHUB_SHA\"\n          SOURCE_REF=\"$GITHUB_REF\"\n          RELEASE_TAG=\"$GITHUB_REF_NAME\"\n          export PRODUCT_VERSION SOURCE_COMMIT SOURCE_REF RELEASE_TAG\n          mkdir -p \"dist/$TARGET/package\"\n          : > \"dist/$TARGET/artifacts-$TARGET.jsonl\"\n          : > \"dist/$TARGET/components-$TARGET.jsonl\"\n{build_steps}          jq -S -n --arg schema \"$MANIFEST_SCHEMA\" --arg product_id \"$PRODUCT_ID\" --arg channel \"$CHANNEL\" --arg source_repository \"$SOURCE_REPOSITORY\" --arg source_ref \"$SOURCE_REF\" --arg source_commit \"$SOURCE_COMMIT\" --arg release_tag \"$RELEASE_TAG\" --arg version \"$PRODUCT_VERSION\" --arg archive_component \"$ARCHIVE_COMPONENT\" --arg archive_identity_schema \"$ARCHIVE_IDENTITY_SCHEMA\" --arg archive_manifest_schema \"$ARCHIVE_MANIFEST_SCHEMA\" --argjson targets \"$TARGETS_JSON\" --argjson blocked_targets \"$BLOCKED_TARGETS_JSON\" --argjson components \"$COMPONENTS_JSON\" '{{schema:$schema,product_id:$product_id,channel:$channel,source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit,release_tag:$release_tag,version:$version,archive_component:$archive_component,archive_identity_schema:$archive_identity_schema,archive_manifest_schema:$archive_manifest_schema,targets:$targets,blocked_targets:$blocked_targets,components:$components}}' > \"dist/$TARGET/product-contract-$TARGET.json\"\n          test \"$(jq -s 'map(.name) | unique | sort | length' \"dist/$TARGET/components-$TARGET.jsonl\")\" -eq {component_count}\n          test \"$(jq -s 'map(.target) | unique | sort | length' \"dist/$TARGET/components-$TARGET.jsonl\")\" -eq 1\n      - name: Upload source-bound product build\n        uses: {upload}\n        with:\n          name: native-product-${{{{ matrix.target }}}}\n          path: dist/${{{{ matrix.target }}}}\n          if-no-files-found: error\n          retention-days: 2\n\n# The stable release workflow downloads these build artifacts, asks the provider\n# for its numeric release id, then writes {PRODUCT_MANIFEST_FILE}; this file\n# never calls gh release create/upload and cannot publish a competing product.\n",
         matrix = matrix,
+        blocked_jobs = blocked_jobs,
         build_steps = build_steps,
         component_count = components.len(),
     )
@@ -359,14 +410,28 @@ fn render_workflow(
     .replace(
         "never calls gh release create/upload and cannot publish a competing product.",
         "never mutates provider releases or publishes a competing product.",
-    )
+    );
+    output = output.replace(
+        "          test -z \"$(git status --porcelain)\" || { echo '::error::native product checkout is dirty' >&2; exit 1; }\n",
+        r#"          test -z "$(git status --porcelain)" || { echo '::error::native product checkout is dirty' >&2; exit 1; }
+          [ "$SOURCE_REPOSITORY" = "$GITHUB_REPOSITORY" ] || { echo '::error::configured source repository differs from event repository' >&2; exit 1; }
+          remote_repository="$(git config --get remote.origin.url || true)"
+          case "$remote_repository" in
+            https://github.com/*) remote_repository="${remote_repository#https://github.com/}" ;;
+            git@github.com:*) remote_repository="${remote_repository#git@github.com:}" ;;
+            ssh://git@github.com/*) remote_repository="${remote_repository#ssh://git@github.com/}" ;;
+            *) echo '::error::checkout origin is not a GitHub repository URL' >&2; exit 1 ;;
+          esac
+          remote_repository="${remote_repository%.git}"
+          [ "$remote_repository" = "$SOURCE_REPOSITORY" ] || { echo '::error::checkout origin differs from configured source repository' >&2; exit 1; }
+"#,
+    );
+    output
 }
 
 fn runner_for_target(ctx: &RenderCtx<'_>, target: &str) -> String {
     if target == "aarch64-apple-darwin" {
         yaml_scalar(MACOS_ARM64_RUNNER)
-    } else if target == "x86_64-apple-darwin" {
-        yaml_scalar(MACOS_X86_64_RUNNER)
     } else if target.starts_with("aarch64-") {
         yaml_scalar("ubuntu-24.04-arm")
     } else {
@@ -436,7 +501,10 @@ mod tests {
         .collect()
     }
 
-    fn valid_contract(targets: &[String]) -> Result<(), GeneratorError> {
+    fn valid_contract(
+        targets: &[String],
+        blocked_targets: &[String],
+    ) -> Result<(), GeneratorError> {
         validate_product_contract(
             "example",
             "stable",
@@ -446,6 +514,7 @@ mod tests {
             "velnor.homebrew-install/v1",
             "velnor.product-manifest/v1",
             targets,
+            blocked_targets,
             &[component("runner")],
         )
     }
@@ -455,14 +524,30 @@ mod tests {
     fn contract_requires_exact_four_target_census() {
         let mut targets = four_targets();
         targets.pop();
-        let error = match valid_contract(&targets) {
+        let blocked = vec!["x86_64-apple-darwin".to_owned()];
+        let error = match valid_contract(&targets, &blocked) {
             Ok(()) => panic!("partial target census must fail"),
             Err(error) => error,
         };
         assert!(error.to_string().contains("x86_64-apple-darwin"));
         targets.push("aarch64-apple-darwin".to_owned());
         targets.push("aarch64-apple-darwin".to_owned());
-        assert!(valid_contract(&targets).is_err());
+        assert!(valid_contract(&targets, &blocked).is_err());
+    }
+
+    #[test]
+    #[expect(clippy::panic, reason = "missing Intel blocker must fail loudly")]
+    fn intel_target_requires_explicit_blocker_and_stays_in_census() {
+        let targets = four_targets();
+        let empty = Vec::new();
+        let error = match valid_contract(&targets, &empty) {
+            Ok(()) => panic!("Intel blocker is required"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("x86_64-apple-darwin"));
+        let blocked = vec!["x86_64-apple-darwin".to_owned()];
+        assert!(valid_contract(&targets, &blocked).is_ok());
+        assert!(error.to_string().contains("macOS 27 Intel"));
     }
 
     #[test]
@@ -499,10 +584,12 @@ mod tests {
     fn product_build_lane_has_no_second_publisher_or_old_intel_fallback() {
         let source = include_str!("native_product.rs");
         assert!(source.contains("workflow_call:"));
-        assert!(source.contains("macos-27"));
-        assert!(source.contains("macos-26-intel"));
-        let old_runner = ["macos", "15-intel"].join("-");
-        assert!(!source.contains(&old_runner));
+        assert!(source.contains("xcode-27"));
+        let invented_arm_runner = ["macos", "27"].join("-");
+        let forbidden_intel_runner = ["macos", "26-intel"].join("-");
+        assert!(!source.contains(&invented_arm_runner));
+        assert!(!source.contains(&forbidden_intel_runner));
+        assert!(source.contains("blocked target"));
         assert!(source.contains("architecture does not match"));
         assert!(source.contains("component version differs"));
     }

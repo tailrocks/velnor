@@ -4012,6 +4012,7 @@ dependencies = [
  "base64 0.23.1",
  "blake3",
  "clap",
+ "flate2",
  "futures-util",
  "globset",
  "http-body-util",

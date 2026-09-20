@@ -1957,6 +1957,14 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
     // replacing the three action/package placeholders. jq object braces stay
     // single in the source and therefore remain unchanged.
     output = output.replace("{{", "{").replace("}}", "}");
+    output = output.replace(
+        r#"          product_version="$(jq -er '.version' "$contract")"
+          source_commit="#,
+        r#"          blocked_targets="$(jq -c '.blocked_targets // []' "$contract")"
+          [ "$blocked_targets" = '[]' ] || { echo '::error::native product has blocked targets; publication is blocked until every required target is buildable' >&2; exit 1; }
+          product_version="$(jq -er '.version' "$contract")"
+          source_commit="#,
+    );
     output = output
         .replace("${{#contracts[@]}}", "${#contracts[@]}")
         .replace("${{contracts[0]}}", "${contracts[0]}")
@@ -1965,6 +1973,35 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
             "gh api repos/$GITHUB_REPOSITORY/releases -f",
             "gh api \"repos/$GITHUB_REPOSITORY/releases\" -f",
         );
+    output = output.replace(
+        r#"          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" 2>/dev/null || true)"
+          if [ -z "$release_json" ]; then
+            release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases" -f tag_name="$tag" -f target_commitish="$COMMIT" -f name="$tag" -F draft=true -F prerelease=false)"
+          fi
+"#,
+        r#"          release_response="$(mktemp)"
+          release_error="$release_response.error"
+          release_status=0
+          gh api -i "repos/$GITHUB_REPOSITORY/releases/tags/$tag" >"$release_response" 2>"$release_error" || release_status=$?
+          release_http="$(awk 'toupper($1) ~ /^HTTP\// { code=$2 } END { gsub(/\r/, "", code); print code }' "$release_response")"
+          if [ "$release_status" -eq 0 ]; then
+            release_json="$(awk 'body { print; next } /^\r?$/ { body=1 }' "$release_response")"
+          elif [ "$release_http" = 404 ]; then
+            release_json=""
+          else
+            cat "$release_error" >&2
+            echo "::error::provider release lookup failed (HTTP ${release_http:-unknown}); refusing to create or publish" >&2
+            exit 1
+          fi
+          if [ -z "$release_json" ]; then
+            release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases" -f tag_name="$tag" -f target_commitish="$COMMIT" -f name="$tag" -F draft=true -F prerelease=false)"
+          fi
+"#,
+    );
+    output = output.replace(
+        "          jq -e --arg tag \"$tag\" --arg commit \"$COMMIT\" '.tag_name == $tag and (.target_commitish == $commit or .target_commitish == \"\")' <<<\"$release_json\" >/dev/null",
+        "          jq -e --arg tag \"$tag\" --arg commit \"$COMMIT\" '.tag_name == $tag and .target_commitish == $commit and .draft == true and .prerelease == false' <<<\"$release_json\" >/dev/null",
+    );
     output = output.replace(
         r#"            tar -czf "product-assets/$archive" -C "$archive_dir" identity.json manifest.json *"#,
         r#"            archive_path="$PWD/product-assets/$archive"
@@ -1978,6 +2015,50 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
     output = output.replace(
         "parent_manifest_id:$parent_manifest_id,components:[]}",
         "parent_manifest_id:$parent_manifest_id,components:$components}",
+    );
+    let product_verification = {
+        let release_tool = format!("artifacts/{package}-release-tool");
+        let block = format!(
+        "          sha256sum product-assets/product-manifest.json > product-assets/product-manifest.json.sha256\n\
+          rm -rf -- product-payload\n\
+          mkdir product-payload\n\
+          while IFS= read -r name; do\n\
+            cp -- \"product-assets/$name\" \"product-payload/$name\"\n\
+          done < <(jq -r '.artifacts[].name' product-assets/product-manifest.json)\n\
+          product_schema=\"$(jq -er '.schema' product-assets/product-manifest.json)\"\n\
+          product_id=\"$(jq -er '.product_id' product-assets/product-manifest.json)\"\n\
+          product_channel=\"$(jq -er '.channel' product-assets/product-manifest.json)\"\n\
+          verify_args=(\n\
+            --manifest product-assets/product-manifest.json\n\
+            --checksum product-assets/product-manifest.json.sha256\n\
+            --artifacts product-payload\n\
+            --schema \"$product_schema\"\n\
+            --product-id \"$product_id\"\n\
+            --channel \"$product_channel\"\n\
+            --version \"$product_version\"\n\
+            --source-repository \"$GITHUB_REPOSITORY\"\n\
+            --source-ref \"$source_ref\"\n\
+            --source-commit \"$source_commit\"\n\
+            --release-tag \"$release_tag\"\n\
+            --release-id \"$PRODUCT_RELEASE_ID\"\n\
+          )\n\
+          while IFS= read -r target; do verify_args+=(--target \"$target\"); done < <(jq -r '.targets[]' \"$contract\")\n\
+          while IFS= read -r component; do verify_args+=(--component \"$component\"); done < <(jq -r '.components[].name' \"$contract\")\n\
+          {release_tool} release verify-product \"${{verify_args[@]}}\"\n",
+        );
+        let mut indented = String::new();
+        for line in block.lines() {
+            let _ = writeln!(indented, "          {}", line.trim_start());
+        }
+        indented
+    };
+    output = output.replace(
+        "          sha256sum product-assets/product-manifest.json > product-assets/product-manifest.json.sha256\n",
+        &product_verification,
+    );
+    output = output.replace(
+        "          subject-path: product-assets/*\n",
+        "          subject-path: product-assets/*\n      - name: Verify native product attestations before publication\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: |\n          set -euo pipefail\n          for subject in product-assets/*; do\n            gh attestation verify \"$subject\" --repo \"$GITHUB_REPOSITORY\"\n          done\n",
     );
     output
 }
@@ -2003,7 +2084,11 @@ fn render_native_publish_job(
     } else {
         published
     };
-    let subject_count = 2 * release.targets.len();
+    // The subject glob contains one tarball per release target and one Debian
+    // payload per Linux architecture.  Keep this derived from the actual
+    // emitted lists; product archives are verified/published separately.
+    let subject_count = release.targets.len()
+        + deb_architectures(&release.targets).map_or(0, |architectures| architectures.len());
     let manifest_step = if release.manifest_schema.is_empty() {
         "      - name: Assemble consumer release manifest\n        run: |\n          echo '::error::native release with a package consumer needs manifest_schema; declare the consumer manifest schema URN' >&2\n          exit 1\n"
             .to_owned()
@@ -2063,7 +2148,9 @@ fn render_native_publish_job(
         let product_existing = r#"            # Reconcile every immutable product asset, not only the manifest sidecar.
             product_dir="$tmp/product-assets"
             mkdir -p "$product_dir"
-            provider_release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" | jq -er '.id | numbers | tostring')"
+            provider_release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+            jq -e --arg tag "$tag" --arg commit "$COMMIT" '(.id | numbers) and (.tag_name == $tag) and (.target_commitish == $commit) and (.draft == false) and (.prerelease == false)' <<<"$provider_release_json" >/dev/null
+            provider_release_id="$(jq -er '.id | numbers | tostring' <<<"$provider_release_json")"
             product_release_id="$(jq -er '.release_id | numbers | tostring' "$tmp/product-manifest.json")"
             [ "$provider_release_id" = "$product_release_id" ] || { echo '::error::published product manifest release id differs from provider release' >&2; exit 1; }
             jq -e --arg version "$VERSION" --arg commit "$COMMIT" --arg tag "$tag" --arg repository "$GITHUB_REPOSITORY" '
@@ -2073,11 +2160,49 @@ fn render_native_publish_job(
               ([.artifacts[].name] | index("product-manifest.json") | not) and
               ([.artifacts[].name] | index("product-manifest.json.sha256") | not)
             ' "$tmp/product-manifest.json" >/dev/null
+            product_contract="${{ steps.product-release.outputs.contract }}"
+            product_payload="$tmp/product-payload"
+            mkdir -p "$product_payload"
+            gh attestation verify "$tmp/product-manifest.json" --repo "$GITHUB_REPOSITORY"
+            gh attestation verify "$tmp/product-manifest.json.sha256" --repo "$GITHUB_REPOSITORY"
             while IFS= read -r name; do
               test -n "$name"
               gh release download "$tag" --pattern "$name" --dir "$product_dir" --clobber >/dev/null 2>&1 \
                 || { echo "::error::published product is missing $name" >&2; exit 1; }
+              gh attestation verify "$product_dir/$name" --repo "$GITHUB_REPOSITORY"
+              cp -- "$product_dir/$name" "$product_payload/$name"
             done < <(jq -r '.artifacts[].name' "$tmp/product-manifest.json")
+            product_verify_args=(
+              --manifest "$tmp/product-manifest.json"
+              --checksum "$tmp/product-manifest.json.sha256"
+              --artifacts "$product_payload"
+              --schema "$(jq -er '.schema' "$tmp/product-manifest.json")"
+              --product-id "$(jq -er '.product_id' "$tmp/product-manifest.json")"
+              --channel stable
+              --version "$VERSION"
+              --source-repository "$GITHUB_REPOSITORY"
+              --source-ref "refs/tags/$tag"
+              --source-commit "$COMMIT"
+              --release-tag "$tag"
+              --release-id "$product_release_id"
+            )
+            while IFS= read -r target; do product_verify_args+=(--target "$target"); done < <(jq -r '.targets[]' "$product_contract")
+            while IFS= read -r component; do product_verify_args+=(--component "$component"); done < <(jq -r '.components[].name' "$product_contract")
+            artifacts/{binary}-release-tool release verify-product "${product_verify_args[@]}"
+            verify_product_archive() {
+              local archive="$1" member duplicate members
+              members="$(tar -tzf "$archive")" || return 1
+              [ -n "$members" ] || return 1
+              duplicate="$(printf '%s\n' "$members" | sort | uniq -d)"
+              [ -z "$duplicate" ] || { echo "::error::archive has duplicate members: $archive" >&2; return 1; }
+              while IFS= read -r member; do
+                case "$member" in
+                  ''|/*|../*|*/../*|*/..|*/*) echo "::error::archive has unsafe member $member: $archive" >&2; return 1 ;;
+                esac
+              done <<<"$members"
+              tar -tvzf "$archive" | awk 'substr($0, 1, 1) != "-" { exit 1 }' \
+                || { echo "::error::archive contains a non-regular member: $archive" >&2; return 1; }
+            }
             while IFS= read -r row; do
               name="$(jq -er '.name' <<<"$row")"
               expected_sha="$(jq -er '.sha256' <<<"$row")"
@@ -2089,13 +2214,15 @@ fn render_native_publish_job(
               kind="$(jq -er '.kind' <<<"$row")"
               case "$kind" in
                 archive|homebrew-archive)
+                  verify_product_archive "$product_dir/$name"
                   jq -e --arg parent "$product_release_id" '.parent_manifest_id == $parent' \
                     <(tar -xOzf "$product_dir/$name" identity.json) >/dev/null \
                     || { echo "::error::published archive identity is not bound to its parent release: $name" >&2; exit 1; }
                   ;;
               esac
             done < <(jq -c '.artifacts[]' "$tmp/product-manifest.json")
-"#;
+"#
+        .replace("{binary}", &release.binary);
         create_verify = create_verify.replace(
             "            # The record must name this exact tag, source commit, crate version\n",
             &format!("{product_existing}            # The record must name this exact tag, source commit, crate version\n"),
@@ -2123,7 +2250,7 @@ fn render_native_publish_job(
     } else {
         ""
     };
-    format!(
+    let mut output = format!(
         "  publish:\n    name: Control / Publish\n    needs: [{needs}]\n{mode_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n      packages: read\n    env:\n      VERSION: {version}\n      SOURCE_REF: ${{{{ github.ref }}}}\n      SOURCE_COMMIT: ${{{{ github.sha }}}}\n      COMMIT: ${{{{ github.sha }}}}\n      INDEX_DIGEST: ${{{{ needs.image.outputs.index_digest }}}}\n      MANIFEST_SHA256: ${{{{ needs.image.outputs.manifest_sha256 }}}}\n      GHCR_IMAGE: {image}\n      SOURCE_URL: {source_url}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n      - name: Download release artifacts\n        uses: {download}\n        with:\n          path: artifacts\n          pattern: {provider}-*\n          merge-multiple: true\n      - name: Download Debian packages\n        uses: {download}\n        with:\n          name: debian-packages\n          path: artifacts\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: release-metadata\n          path: artifacts\n      - name: Download image digests\n        uses: {download}\n        with:\n          name: image-digests\n          path: artifacts\n      - name: Verify tarball provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in artifacts/*.tar.gz; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\"; done\n      - name: Verify deb provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in artifacts/*.deb; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\" --signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/ci-release-package-signer.yml\"; done\n{record_assembly}{record_reverify}      - name: Assemble independent checksums\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=(artifacts/*.tar.gz artifacts/*.deb)\n          test \"${{#subjects[@]}}\" -eq {subject_count}\n          : > SHA256SUMS\n          : > assets.jsonl\n          for subject in \"${{subjects[@]}}\"; do\n            name=$(basename \"$subject\")\n            digest=$(sha256sum \"$subject\" | awk '{{print $1}}')\n            sidecar=\"$(awk 'NF {{print $1; exit}}' \"${{subject}}.sha256\")\"\n            [[ \"$digest\" =~ ^[0-9a-f]{{64}}$ && \"$sidecar\" = \"$digest\" ]] \\\n              || {{ echo \"::error::$name sidecar does not match its payload\" >&2; exit 1; }}\n            printf '%s  %s\\n' \"$digest\" \"$name\" >> SHA256SUMS\n            jq -cn --arg name \"$name\" --arg sha256 \"$digest\" '{{name:$name,sha256:$sha256}}' >> assets.jsonl\n          done\n          test \"$(wc -l < SHA256SUMS | tr -d ' ')\" -eq {subject_count}\n          (cd artifacts && sha256sum --check --strict ../SHA256SUMS)\n{manifest_step}      - name: Stage package subjects for hosted signer\n        run: |\n          set -euo pipefail\n          mkdir signer-input\n          cp artifacts/{binary}-*.tar.gz artifacts/{package}-*.deb signer-input/\n{packaged_identity}      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n      - name: Log in to GHCR for immutable image verification\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Verify OCI index stayed immutable before publication\n        env:\n          EXPECTED_INDEX_DIGEST: ${{{{ needs.image.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > published-image.json\n          published_index=\"$(jq -er '.manifest.digest' published-image.json)\"\n          [ \"$published_index\" = \"$EXPECTED_INDEX_DIGEST\" ] || {{\n            echo \"::error::OCI version tag moved from $EXPECTED_INDEX_DIGEST to $published_index before release publication\" >&2\n            exit 1\n          }}\n{tag_check}{create_verify}      - name: Upload package subjects\n        uses: {upload}\n        with:\n          name: package-subjects\n          path: signer-input\n          if-no-files-found: error\n          retention-days: 2\n",
         runner = selected_runner(config),
         provider = canonical_provider(config),
@@ -2132,7 +2259,14 @@ fn render_native_publish_job(
         binary = release.binary,
         package = release.package,
         tag_check = TAG_IMMUTABILITY_STEP,
-    )
+    );
+    if product_enabled {
+        output = output.replace(
+            "      packages: read\n    env:",
+            "      packages: read\n      id-token: write\n      attestations: write\n    env:",
+        );
+    }
+    output
 }
 
 /// The preview identity job: one resolved `~preview.N+sha7` version, bound
@@ -6131,6 +6265,11 @@ mod tests {
             "{publish}"
         );
         assert!(publish.contains("SHA256SUMS"), "{publish}");
+        assert!(publish.contains("blocked_targets"), "{publish}");
+        assert!(
+            publish.contains("publication is blocked until every required target is buildable"),
+            "{publish}"
+        );
         assert!(
             publish.contains("--arg schema 'example.test/consumer-manifest-v1'"),
             "{publish}"
@@ -6138,6 +6277,26 @@ mod tests {
         assert!(publish.contains("release-manifest.json"), "{publish}");
         assert!(publish.contains("product-manifest.json"), "{publish}");
         assert!(publish.contains("provider release id"), "{publish}");
+        assert!(publish.contains("release verify-product"), "{publish}");
+        assert!(
+            publish.contains("Verify native product attestations before publication"),
+            "{publish}"
+        );
+        assert!(
+            publish.contains("gh api -i \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\""),
+            "{publish}"
+        );
+        assert!(
+            publish.contains("provider release lookup failed"),
+            "{publish}"
+        );
+        assert!(publish.contains("verify_product_archive()"), "{publish}");
+        assert!(publish.contains("id-token: write"), "{publish}");
+        assert!(publish.contains("attestations: write"), "{publish}");
+        assert!(
+            publish.contains("test \"${#subjects[@]}\" -eq 4"),
+            "{publish}"
+        );
         assert!(
             publish.contains("artifacts/example-${{ needs.verify.outputs.version }}-amd64.deb"),
             "{publish}"

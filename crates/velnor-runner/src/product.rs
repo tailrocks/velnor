@@ -12,6 +12,7 @@ use std::fs;
 use std::path::{Component, Path};
 
 use anyhow::{bail, Result};
+use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -100,6 +101,8 @@ pub enum ApplicationManifestError {
     Architecture,
     #[error("application manifest is missing a target archive")]
     ArchiveMissing,
+    #[error("application manifest archive contains unsafe or unexpected members")]
+    ArchiveUnsafe,
     #[error("application manifest is not canonical JSON")]
     NonCanonical,
     #[error("application manifest digest does not match its bytes")]
@@ -232,6 +235,7 @@ impl ApplicationManifest {
         }
 
         let mut component_names = BTreeSet::new();
+        let mut component_binaries = BTreeSet::new();
         let mut component_targets = BTreeSet::new();
         for component in &self.components {
             if !safe_slug(&component.name)
@@ -250,6 +254,9 @@ impl ApplicationManifest {
             for target in &component.targets {
                 if !supported_target(target) || !targets.insert(target) {
                     return Err(ApplicationManifestError::Target);
+                }
+                if !component_binaries.insert((component.binary.as_str(), target.as_str())) {
+                    return Err(ApplicationManifestError::Duplicate("component binary"));
                 }
                 component_targets.insert(target.as_str());
                 let found = self.artifacts.iter().any(|artifact| {
@@ -287,6 +294,111 @@ impl ApplicationManifest {
             .any(|artifact| !component_targets.contains(artifact.target.as_str()))
         {
             return Err(ApplicationManifestError::Target);
+        }
+        Ok(())
+    }
+
+    /// Verify the exact typed profile supplied by the producer configuration.
+    /// The base manifest validator remains reusable for other product shapes;
+    /// publication additionally supplies the target/component census so a
+    /// consumer cannot accept a self-authored partial inventory.
+    pub fn verify_profile(
+        &self,
+        expected_targets: &[String],
+        expected_components: &[String],
+    ) -> std::result::Result<(), ApplicationManifestError> {
+        self.verify()?;
+        let expected_target_count = expected_targets.len();
+        let expected_targets = expected_targets
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let expected_component_count = expected_components.len();
+        let expected_components = expected_components
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if expected_targets.is_empty()
+            || expected_components.is_empty()
+            || expected_target_count != expected_targets.len()
+            || expected_component_count != expected_components.len()
+        {
+            return Err(ApplicationManifestError::ArtifactInventory);
+        }
+        let actual_components = self
+            .components
+            .iter()
+            .map(|component| component.name.as_str())
+            .collect::<BTreeSet<_>>();
+        if actual_components != expected_components {
+            return Err(ApplicationManifestError::ArtifactInventory);
+        }
+
+        let actual_targets = self
+            .components
+            .iter()
+            .flat_map(|component| component.targets.iter().map(String::as_str))
+            .collect::<BTreeSet<_>>();
+        if actual_targets != expected_targets {
+            return Err(ApplicationManifestError::ArtifactInventory);
+        }
+        for component in &self.components {
+            let component_targets = component
+                .targets
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            if component_targets != expected_targets {
+                return Err(ApplicationManifestError::ArtifactInventory);
+            }
+        }
+
+        let expected_binary_names = self
+            .components
+            .iter()
+            .flat_map(|component| {
+                expected_targets
+                    .iter()
+                    .map(move |target| format!("{}-{target}", component.binary))
+            })
+            .collect::<BTreeSet<_>>();
+        let actual_binary_names = self
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.kind == "binary")
+            .map(|artifact| artifact.name.clone())
+            .collect::<BTreeSet<_>>();
+        if actual_binary_names != expected_binary_names {
+            return Err(ApplicationManifestError::ArtifactInventory);
+        }
+
+        let archive_targets = self
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.kind == "archive" || artifact.kind == "homebrew-archive")
+            .map(|artifact| artifact.target.as_str())
+            .collect::<BTreeSet<_>>();
+        if archive_targets != expected_targets {
+            return Err(ApplicationManifestError::ArtifactInventory);
+        }
+        let apt_targets = self
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.kind == "apt-package")
+            .map(|artifact| artifact.target.as_str())
+            .collect::<BTreeSet<_>>();
+        let expected_apt_targets = expected_targets
+            .iter()
+            .copied()
+            .filter(|target| target.ends_with("-unknown-linux-gnu"))
+            .collect::<BTreeSet<_>>();
+        if apt_targets != expected_apt_targets {
+            return Err(ApplicationManifestError::ArtifactInventory);
+        }
+        let expected_artifacts =
+            expected_binary_names.len() + expected_targets.len() + expected_apt_targets.len();
+        if self.artifacts.len() != expected_artifacts {
+            return Err(ApplicationManifestError::ArtifactInventory);
         }
         Ok(())
     }
@@ -358,9 +470,70 @@ impl ApplicationManifest {
             }
             if artifact.kind == "binary" {
                 verify_binary_architecture(&path, &artifact.target)?;
+            } else if matches!(artifact.kind.as_str(), "archive" | "homebrew-archive") {
+                verify_archive_members(&path, self, &artifact.target)?;
             }
         }
         Ok(())
+    }
+}
+
+/// Inspect a product archive without extracting it.  Product archives are
+/// gzip-compressed tar streams containing only the target's sibling binaries
+/// and the two typed identity documents.  Refuse paths, duplicate members,
+/// links, directories, and undeclared files before any consumer can extract
+/// the archive.
+fn verify_archive_members(
+    path: &Path,
+    manifest: &ApplicationManifest,
+    target: &str,
+) -> std::result::Result<(), ApplicationManifestError> {
+    let expected = manifest
+        .components
+        .iter()
+        .filter(|component| {
+            component
+                .targets
+                .iter()
+                .any(|candidate| candidate == target)
+        })
+        .map(|component| component.binary.as_str())
+        .chain(["identity.json", "manifest.json"])
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    let file = fs::File::open(path).map_err(|_| ApplicationManifestError::ArtifactMissing)?;
+    let decoder = GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    let mut actual = BTreeSet::new();
+    for entry in archive
+        .entries()
+        .map_err(|_| ApplicationManifestError::ArchiveUnsafe)?
+    {
+        let entry = entry.map_err(|_| ApplicationManifestError::ArchiveUnsafe)?;
+        if !entry.header().entry_type().is_file() {
+            return Err(ApplicationManifestError::ArchiveUnsafe);
+        }
+        let path = entry
+            .path()
+            .map_err(|_| ApplicationManifestError::ArchiveUnsafe)?;
+        let mut components = path.components();
+        let Some(Component::Normal(name)) = components.next() else {
+            return Err(ApplicationManifestError::ArchiveUnsafe);
+        };
+        if components.next().is_some() {
+            return Err(ApplicationManifestError::ArchiveUnsafe);
+        }
+        let Some(name) = name.to_str() else {
+            return Err(ApplicationManifestError::ArchiveUnsafe);
+        };
+        if !actual.insert(name.to_owned()) {
+            return Err(ApplicationManifestError::ArchiveUnsafe);
+        }
+    }
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ApplicationManifestError::ArchiveUnsafe)
     }
 }
 
@@ -517,6 +690,8 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::{write::GzEncoder, Compression};
+    use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn x86_elf() -> Vec<u8> {
@@ -526,8 +701,41 @@ mod tests {
         bytes
     }
 
+    fn archive_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        for (name, contents) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            if header.set_path("placeholder").is_err() {
+                return Vec::new();
+            }
+            let path_bytes = name.as_bytes();
+            let header_bytes = header.as_mut_bytes();
+            header_bytes[..100].fill(0);
+            header_bytes[..path_bytes.len()].copy_from_slice(path_bytes);
+            header.set_cksum();
+            tar_bytes.extend_from_slice(header.as_bytes());
+            tar_bytes.extend_from_slice(contents);
+            let padding = (512 - contents.len() % 512) % 512;
+            tar_bytes.resize(tar_bytes.len() + padding, 0);
+        }
+        tar_bytes.resize(tar_bytes.len() + 1024, 0);
+        let mut bytes = Vec::new();
+        let mut encoder = GzEncoder::new(&mut bytes, Compression::default());
+        if encoder.write_all(&tar_bytes).is_err() || encoder.finish().is_err() {
+            return Vec::new();
+        }
+        bytes
+    }
+
     fn manifest() -> ApplicationManifest {
         let binary = x86_elf();
+        let archive = archive_bytes(&[
+            ("runner", b"binary"),
+            ("identity.json", b"{}"),
+            ("manifest.json", b"{}"),
+        ]);
         ApplicationManifest {
             schema: PRODUCT_MANIFEST_SCHEMA.to_owned(),
             product_id: "example".to_owned(),
@@ -550,8 +758,15 @@ mod tests {
                     name: "runner-x86_64-unknown-linux-gnu.tar.gz".to_owned(),
                     target: "x86_64-unknown-linux-gnu".to_owned(),
                     kind: "archive".to_owned(),
-                    sha256: hex_lower(&Sha256::digest(b"archive")),
-                    size: 7,
+                    sha256: hex_lower(&Sha256::digest(&archive)),
+                    size: archive.len() as u64,
+                },
+                ApplicationArtifact {
+                    name: "runner-x86_64-unknown-linux-gnu.deb".to_owned(),
+                    target: "x86_64-unknown-linux-gnu".to_owned(),
+                    kind: "apt-package".to_owned(),
+                    sha256: hex_lower(&Sha256::digest(b"deb")),
+                    size: 3,
                 },
             ],
             components: vec![ApplicationComponent {
@@ -571,6 +786,33 @@ mod tests {
         let bytes = value.to_canonical_json();
         assert!(!bytes.contains("manifest_sha256"));
         assert!(ApplicationManifest::verify_bytes(bytes.as_bytes(), Some(&value.digest())).is_ok());
+    }
+
+    #[test]
+    fn typed_profile_rejects_missing_or_extra_inventory() {
+        let mut value = manifest();
+        value.artifacts[0].name = "runner-x86_64-unknown-linux-gnu".to_owned();
+        let targets = vec!["x86_64-unknown-linux-gnu".to_owned()];
+        let components = vec!["runner".to_owned()];
+        let profile_result = value.verify_profile(&targets, &components);
+        assert_eq!(profile_result, Ok(()));
+        value
+            .artifacts
+            .retain(|artifact| artifact.kind != "archive");
+        assert_eq!(
+            value.verify_profile(&targets, &components),
+            Err(ApplicationManifestError::ArchiveMissing)
+        );
+        value = manifest();
+        value.artifacts[0].name = "runner-x86_64-unknown-linux-gnu".to_owned();
+        let extra_target = vec![
+            "x86_64-unknown-linux-gnu".to_owned(),
+            "aarch64-unknown-linux-gnu".to_owned(),
+        ];
+        assert_eq!(
+            value.verify_profile(&extra_target, &components),
+            Err(ApplicationManifestError::ArtifactInventory)
+        );
     }
 
     #[test]
@@ -659,15 +901,54 @@ mod tests {
         assert!(fs::write(root.join("runner"), x86_elf()).is_ok());
         assert!(fs::write(
             root.join("runner-x86_64-unknown-linux-gnu.tar.gz"),
-            b"archive"
+            archive_bytes(&[
+                ("runner", b"binary"),
+                ("identity.json", b"{}"),
+                ("manifest.json", b"{}"),
+            ])
         )
         .is_ok());
+        assert!(fs::write(root.join("runner-x86_64-unknown-linux-gnu.deb"), b"deb").is_ok());
         assert!(value.verify_artifacts(&root).is_ok());
         assert!(fs::write(root.join("runner"), b"changed").is_ok());
         assert_eq!(
             value.verify_artifacts(&root),
             Err(ApplicationManifestError::ArtifactSize)
         );
+        assert!(fs::remove_dir_all(root).is_ok());
+    }
+
+    #[test]
+    fn unsafe_archive_members_are_rejected_without_extraction() {
+        let mut value = manifest();
+        let unsafe_archive = archive_bytes(&[
+            ("../escape", b"binary"),
+            ("identity.json", b"{}"),
+            ("manifest.json", b"{}"),
+        ]);
+        value.artifacts[1].sha256 = hex_lower(&Sha256::digest(&unsafe_archive));
+        value.artifacts[1].size = unsafe_archive.len() as u64;
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let root = std::env::temp_dir().join(format!(
+            "velnor-product-unsafe-archive-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        assert!(fs::create_dir_all(&root).is_ok());
+        assert!(fs::write(root.join("runner"), x86_elf()).is_ok());
+        assert!(fs::write(
+            root.join("runner-x86_64-unknown-linux-gnu.tar.gz"),
+            unsafe_archive
+        )
+        .is_ok());
+        assert!(fs::write(root.join("runner-x86_64-unknown-linux-gnu.deb"), b"deb").is_ok());
+        assert_eq!(
+            value.verify_artifacts(&root),
+            Err(ApplicationManifestError::ArchiveUnsafe)
+        );
+        assert!(fs::read(root.join("escape")).is_err());
         assert!(fs::remove_dir_all(root).is_ok());
     }
 

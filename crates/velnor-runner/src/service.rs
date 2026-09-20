@@ -299,6 +299,8 @@ pub enum ReleaseCommand {
     Assemble(ReleaseAssembleArgs),
     /// Verify a record against its independent checksum and internal coherence.
     VerifyRecord(ReleaseVerifyRecordArgs),
+    /// Verify the canonical application manifest and its exact native payload.
+    VerifyProduct(Box<ReleaseVerifyProductArgs>),
     /// Validate the installed binary/package/manifest against the active record.
     /// Run by both `.service` units before ExecStart.
     VerifyInstalled(ReleaseVerifyInstalledArgs),
@@ -362,6 +364,41 @@ pub struct ReleaseVerifyRecordArgs {
     /// Served preverified APT metadata claims JSON; not a raw-byte verifier.
     #[arg(long)]
     pub served_apt_metadata: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct ReleaseVerifyProductArgs {
+    /// Canonical product manifest JSON.
+    #[arg(long)]
+    pub manifest: PathBuf,
+    /// Directory containing exactly the manifest's payload artifacts.
+    #[arg(long)]
+    pub artifacts: PathBuf,
+    /// External manifest checksum sidecar.
+    #[arg(long)]
+    pub checksum: Option<PathBuf>,
+    #[arg(long)]
+    pub schema: Option<String>,
+    #[arg(long)]
+    pub product_id: Option<String>,
+    #[arg(long)]
+    pub channel: Option<String>,
+    #[arg(long)]
+    pub version: Option<String>,
+    #[arg(long)]
+    pub source_repository: Option<String>,
+    #[arg(long)]
+    pub source_ref: Option<String>,
+    #[arg(long)]
+    pub source_commit: Option<String>,
+    #[arg(long)]
+    pub release_tag: Option<String>,
+    #[arg(long)]
+    pub release_id: Option<String>,
+    #[arg(long = "target", action = clap::ArgAction::Append)]
+    pub targets: Vec<String>,
+    #[arg(long = "component", action = clap::ArgAction::Append)]
+    pub components: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -486,6 +523,9 @@ impl From<ReleaseArgs> for crate::args::ReleaseArgs {
                 ReleaseCommand::VerifyRecord(x) => {
                     crate::args::ReleaseCommand::VerifyRecord(x.into())
                 }
+                ReleaseCommand::VerifyProduct(x) => {
+                    crate::args::ReleaseCommand::VerifyProduct(Box::new((*x).into()))
+                }
                 ReleaseCommand::VerifyInstalled(x) => {
                     crate::args::ReleaseCommand::VerifyInstalled(x.into())
                 }
@@ -526,6 +566,25 @@ fwd_release!(
         publication,
         expected_apt_metadata,
         served_apt_metadata
+    }
+);
+fwd_release!(
+    ReleaseVerifyProductArgs,
+    crate::args::ReleaseVerifyProductArgs {
+        manifest,
+        artifacts,
+        checksum,
+        schema,
+        product_id,
+        channel,
+        version,
+        source_repository,
+        source_ref,
+        source_commit,
+        release_tag,
+        release_id,
+        targets,
+        components
     }
 );
 fwd_release!(

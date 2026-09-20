@@ -586,6 +586,13 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn exact_xcode_27_is_github_owned_but_unpinned_xcode_is_not() {
+    assert!(is_github_owned_label("xcode-27"));
+    assert!(!is_github_owned_label("xcode-latest"));
+    assert!(!is_github_owned_label("xcode-26"));
+}
+
 /// The owner policy job acquires products (no `--rev <sha>` install) and its
 /// candidate step passes shell variables to `closure --rev=`: those variable
 /// references are not pin literals, so the pin rule still passes on the

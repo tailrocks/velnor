@@ -43,6 +43,7 @@ pub enum ReleaseCommand {
     Emit(ReleaseEmitArgs),
     Assemble(ReleaseAssembleArgs),
     VerifyRecord(ReleaseVerifyRecordArgs),
+    VerifyProduct(Box<ReleaseVerifyProductArgs>),
     VerifyInstalled(ReleaseVerifyInstalledArgs),
     Activate(ReleaseActivateArgs),
     Rollback(ReleaseRollbackArgs),
@@ -77,6 +78,24 @@ pub struct ReleaseVerifyRecordArgs {
     pub publication: Option<PathBuf>,
     pub expected_apt_metadata: Option<PathBuf>,
     pub served_apt_metadata: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+pub struct ReleaseVerifyProductArgs {
+    pub manifest: PathBuf,
+    pub artifacts: PathBuf,
+    pub checksum: Option<PathBuf>,
+    pub schema: Option<String>,
+    pub product_id: Option<String>,
+    pub channel: Option<String>,
+    pub version: Option<String>,
+    pub source_repository: Option<String>,
+    pub source_ref: Option<String>,
+    pub source_commit: Option<String>,
+    pub release_tag: Option<String>,
+    pub release_id: Option<String>,
+    pub targets: Vec<String>,
+    pub components: Vec<String>,
 }
 
 #[derive(Debug)]

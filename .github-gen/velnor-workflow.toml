@@ -233,6 +233,7 @@ manifest_schema = "velnor.product-manifest/v1"
 product_id = "velnor"
 source_repository = "tailrocks/velnor"
 targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin"]
+blocked_targets = ["x86_64-apple-darwin"]
 
 [declare.args.components]
 velnor-runner = ["velnor-runner", "velnor-runner", "release-build", "version"]
@@ -252,6 +253,7 @@ manifest_schema = "velnor.product-manifest/v1"
 product_id = "velnor"
 source_repository = "tailrocks/velnor"
 targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin"]
+blocked_targets = ["x86_64-apple-darwin"]
 
 [declare.args.components]
 velnor-runner = ["velnor-runner", "velnor-runner", "release-build", "version"]

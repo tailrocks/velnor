@@ -56,8 +56,8 @@ use sha2::{Digest, Sha256};
 
 use crate::args::{
     ReleaseActivateArgs, ReleaseArgs, ReleaseAssembleArgs, ReleaseCommand, ReleaseEmitArgs,
-    ReleaseExportArgs, ReleaseRollbackArgs, ReleaseVerifyInstalledArgs, ReleaseVerifyRecordArgs,
-    INSTALLED_BINARY_PATH,
+    ReleaseExportArgs, ReleaseRollbackArgs, ReleaseVerifyInstalledArgs, ReleaseVerifyProductArgs,
+    ReleaseVerifyRecordArgs, INSTALLED_BINARY_PATH,
 };
 
 /// Schema tags. A consumer refuses an unknown shape before trusting any field.
@@ -1636,11 +1636,90 @@ pub fn run(args: ReleaseArgs) -> Result<()> {
         ReleaseCommand::Emit(args) => emit_command(args),
         ReleaseCommand::Assemble(args) => assemble_command(args),
         ReleaseCommand::VerifyRecord(args) => verify_record_command(args),
+        ReleaseCommand::VerifyProduct(args) => verify_product_command(*args),
         ReleaseCommand::VerifyInstalled(args) => verify_installed_command(args),
         ReleaseCommand::Activate(args) => activate_command(args),
         ReleaseCommand::Rollback(args) => rollback_command(args),
         ReleaseCommand::Export(args) => export_command(args),
     }
+}
+
+fn verify_product_command(args: ReleaseVerifyProductArgs) -> Result<()> {
+    let bytes = fs::read(&args.manifest)
+        .with_context(|| format!("read product manifest {}", args.manifest.display()))?;
+    let expected_digest = args
+        .checksum
+        .as_deref()
+        .map(|path| read_artifact_checksum(path, "product manifest"))
+        .transpose()?;
+    let manifest = crate::product::ApplicationManifest::verify_bytes(
+        &bytes,
+        expected_digest.as_ref().map(Sha256Hex::as_str),
+    )
+    .map_err(|error| anyhow::anyhow!("verify product manifest: {error}"))?;
+    crate::product::publication_identity().context("verify product publication identity")?;
+    for (field, expected, actual) in [
+        (
+            "schema",
+            args.schema.as_deref(),
+            Some(manifest.schema.as_str()),
+        ),
+        (
+            "product_id",
+            args.product_id.as_deref(),
+            Some(manifest.product_id.as_str()),
+        ),
+        (
+            "channel",
+            args.channel.as_deref(),
+            Some(manifest.channel.as_str()),
+        ),
+        (
+            "version",
+            args.version.as_deref(),
+            Some(manifest.version.as_str()),
+        ),
+        (
+            "source_repository",
+            args.source_repository.as_deref(),
+            Some(manifest.source_repository.as_str()),
+        ),
+        (
+            "source_ref",
+            args.source_ref.as_deref(),
+            Some(manifest.source_ref.as_str()),
+        ),
+        (
+            "source_commit",
+            args.source_commit.as_deref(),
+            Some(manifest.source_commit.as_str()),
+        ),
+        (
+            "release_tag",
+            args.release_tag.as_deref(),
+            Some(manifest.release_tag.as_str()),
+        ),
+        (
+            "release_id",
+            args.release_id.as_deref(),
+            Some(manifest.release_id.as_str()),
+        ),
+    ] {
+        if expected.is_some() && expected != actual {
+            bail!("product manifest {field} differs from the publisher identity");
+        }
+    }
+    if args.targets.is_empty() || args.components.is_empty() {
+        bail!("product verification requires typed target and component profiles");
+    }
+    manifest
+        .verify_profile(&args.targets, &args.components)
+        .map_err(|error| anyhow::anyhow!("verify product profile: {error}"))?;
+    manifest
+        .verify_artifacts(&args.artifacts)
+        .map_err(|error| anyhow::anyhow!("verify product artifacts: {error}"))?;
+    println!("{}", manifest.digest());
+    Ok(())
 }
 
 fn read_record_file(path: &Path) -> Result<(Vec<u8>, ReleaseRecord)> {

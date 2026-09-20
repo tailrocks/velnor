@@ -14718,8 +14718,8 @@ lockfile = true
         config.workflow_files.push("native-product.yml".to_owned());
         let native_product_actionlint = render_actionlint_config(&config);
         assert!(
-            native_product_actionlint.contains("    - macos-27\n"),
-            "the native product lane needs its current arm64 macos label: {native_product_actionlint}"
+            native_product_actionlint.contains("    - xcode-27\n"),
+            "the native product lane needs its current arm64 xcode label: {native_product_actionlint}"
         );
         config.workflow_files.pop();
         if let Some(release) = config.release.as_mut() {
