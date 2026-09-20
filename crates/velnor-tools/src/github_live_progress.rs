@@ -60,7 +60,7 @@ impl LiveProgressFile {
     pub fn create(evidence_dir: &Path) -> Result<Self> {
         let path = evidence_dir.join(REQUEST_PROGRESS_FILE);
         let file = OpenOptions::new()
-            .write(true)
+            .append(true)
             .create_new(true)
             .open(&path)
             .with_context(|| format!("create append-only progress file {}", path.display()))?;
@@ -258,6 +258,16 @@ mod tests {
         let text = fs::read_to_string(progress.path())?;
         assert_eq!(text.matches("\"event\":\"terminal\"").count(), 1);
         assert!(text.contains("\"status\":\"complete\""));
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn progress_creation_refuses_reuse_of_an_existing_capture(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = temp_dir()?;
+        let _progress = LiveProgressFile::create(&directory)?;
+        assert!(LiveProgressFile::create(&directory).is_err());
         fs::remove_dir_all(directory)?;
         Ok(())
     }
