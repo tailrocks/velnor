@@ -1231,6 +1231,21 @@ mod tests {
     }
 
     #[test]
+    fn canonical_component_rows_have_only_consumer_fields() {
+        let value = serde_json::to_value(&manifest().components[0]).unwrap();
+        let fields = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            fields,
+            BTreeSet::from(["binary", "crate", "name", "targets", "version"])
+        );
+    }
+
+    #[test]
     fn typed_profile_rejects_missing_or_extra_inventory() {
         let mut value = manifest();
         value.artifacts[0].name = "runner-x86_64-unknown-linux-gnu".to_owned();
@@ -1386,6 +1401,69 @@ mod tests {
         assert!(fs::write(root.join("runner-x86_64-unknown-linux-gnu.deb"), b"deb").is_ok());
         assert_eq!(
             value.verify_artifacts(&root),
+            Err(ApplicationManifestError::ArchiveUnsafe)
+        );
+        assert!(fs::remove_dir_all(root).is_ok());
+    }
+
+    #[test]
+    fn duplicate_archive_components_are_rejected_before_map_conversion() {
+        let mut value = manifest();
+        let contract = component_contract();
+        let identity_bytes = serde_json::to_vec(&serde_json::json!({
+            "schema": contract.archive_identity_schema,
+            "product_id": value.product_id,
+            "channel": value.channel,
+            "version": value.version,
+            "source_repository": value.source_repository,
+            "source_ref": value.source_ref,
+            "source_commit": value.source_commit,
+            "release_tag": value.release_tag,
+            "parent_manifest_id": value.release_id,
+        }))
+        .unwrap();
+        let component = serde_json::json!({
+            "name": "runner",
+            "crate": "runner",
+            "crate_version": "0.1.0",
+            "release_version": "1.2.3",
+            "source_commit": "0123456789abcdef0123456789abcdef01234567",
+            "binary_sha256": hex_lower(&Sha256::digest(x86_elf())),
+        });
+        let archive_manifest_bytes = serde_json::to_vec(&serde_json::json!({
+            "schema": contract.archive_manifest_schema,
+            "product_id": value.product_id,
+            "channel": value.channel,
+            "version": value.version,
+            "source_repository": value.source_repository,
+            "source_ref": value.source_ref,
+            "source_commit": value.source_commit,
+            "release_tag": value.release_tag,
+            "parent_manifest_id": value.release_id,
+            "components": [component.clone(), component],
+        }))
+        .unwrap();
+        let archive = archive_bytes(&[
+            ("runner", &x86_elf()),
+            ("identity.json", &identity_bytes),
+            ("manifest.json", &archive_manifest_bytes),
+        ]);
+        value.artifacts[1].sha256 = hex_lower(&Sha256::digest(&archive));
+        value.artifacts[1].size = archive.len() as u64;
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let root = std::env::temp_dir().join(format!(
+            "velnor-product-duplicate-component-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        assert!(fs::create_dir_all(&root).is_ok());
+        assert!(fs::write(root.join("runner-x86_64-unknown-linux-gnu"), x86_elf()).is_ok());
+        assert!(fs::write(root.join("runner-x86_64-unknown-linux-gnu.tar.gz"), archive).is_ok());
+        assert!(fs::write(root.join("runner-x86_64-unknown-linux-gnu.deb"), b"deb").is_ok());
+        assert_eq!(
+            value.verify_artifacts_with_contract(&root, Some(&contract)),
             Err(ApplicationManifestError::ArchiveUnsafe)
         );
         assert!(fs::remove_dir_all(root).is_ok());
