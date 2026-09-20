@@ -640,6 +640,61 @@ where
     Ok((item, raw_ids))
 }
 
+/// Fetch a contents endpoint in GitHub's raw media representation.  The
+/// metadata request and this raw request are both retained; callers compare
+/// their bytes before treating the source as immutable YAML evidence.
+async fn collect_raw_source<T, S>(
+    transport: &T,
+    store: &mut S,
+    auth: &AuthIdentity,
+    ledger: &mut Ledger,
+    collection_id: String,
+    repository: &str,
+    path: &str,
+    revision: &str,
+    object_kind: &str,
+) -> Result<(String, Vec<String>)>
+where
+    T: super::AcquisitionTransport + ?Sized,
+    S: RawObjectStore,
+{
+    let encoded_path = encode_api_path(path);
+    let result = super::collect_binary(
+        transport,
+        store,
+        auth,
+        super::RestCollectionRequest::new(
+            collection_id,
+            format!("/repos/{repository}/contents/{encoded_path}?ref={revision}"),
+            None::<String>,
+            object_kind,
+        )
+        .with_accept("application/vnd.github.raw+json")
+        .with_per_page(1),
+    )
+    .await
+    .map_err(|error| anyhow!(acquisition_error_message(error)))?;
+    if !result.complete {
+        bail!("raw source acquisition incomplete: {:?}", result.state);
+    }
+    let raw = result
+        .raw_objects
+        .iter()
+        .find(|raw| raw.object_kind == object_kind)
+        .ok_or_else(|| anyhow!("raw source response lacks object kind {object_kind}"))?;
+    let bytes = BASE64
+        .decode(&raw.bytes_base64)
+        .context("decode raw workflow source bytes")?;
+    let source = String::from_utf8(bytes).context("raw workflow source is not UTF-8")?;
+    let raw_ids = result
+        .raw_objects
+        .iter()
+        .map(|raw| raw.raw_id.clone())
+        .collect::<Vec<_>>();
+    ledger.ingest(result)?;
+    Ok((source, raw_ids))
+}
+
 fn singleton_identity(value: &Value) -> Option<String> {
     ["id", "node_id", "sha", "url", "path"]
         .into_iter()
@@ -1028,14 +1083,32 @@ where
         .await?;
         validate_workflow_content(&content, &manifest.repository, &path, source_sha)?;
         let revision = required_sha(&content, &["sha"])?;
-        let source_text = decode_workflow_content(&content)?;
+        let metadata_source_text = decode_workflow_content(&content)?;
+        let (source_text, source_raw_ids) = collect_raw_source(
+            transport,
+            store,
+            auth,
+            ledger,
+            collection_id(
+                &manifest.repository,
+                &format!("workflow-raw-source-{}", safe_id(&path)),
+            ),
+            &manifest.repository,
+            &path,
+            source_sha,
+            "workflow.source",
+        )
+        .await?;
+        if source_text != metadata_source_text {
+            bail!("workflow source metadata and raw media bytes differ for {path}");
+        }
         let events = parse_workflow_events(&source_text)?;
-        let source_jobs = parse_source_jobs(&source_text, manifest, &content_raw_ids)?;
+        let source_jobs = parse_source_jobs(&source_text, manifest, &source_raw_ids)?;
         let (reusable_workflows, actions, scanners) = parse_workflow_dependencies(
             &source_text,
             &manifest.repository,
             source_sha,
-            &content_raw_ids,
+            &source_raw_ids,
         )?;
         let dependencies = bind_workflow_dependencies(
             WorkflowDependencyContext {
@@ -1061,12 +1134,13 @@ where
         } = dependencies;
         let mut raw_ids = list_raw_ids.clone();
         raw_ids.extend(content_raw_ids.clone());
+        raw_ids.extend(source_raw_ids.clone());
         workflows.push(LiveWorkflow {
             path,
             revision,
             source_sha: source_sha.to_owned(),
             source_bytes_base64: BASE64.encode(source_text.as_bytes()),
-            source_raw_object_refs: content_raw_ids.clone(),
+            source_raw_object_refs: source_raw_ids,
             events,
             source_jobs,
             reusable_workflows,
@@ -1112,13 +1186,35 @@ where
     .await?;
     validate_workflow_content(&content, &manifest.repository, path, source_sha)?;
     let revision = required_sha(&content, &["sha"])?;
-    let source_text = decode_workflow_content(&content)?;
-    let source_jobs = parse_source_jobs(&source_text, manifest, &content_raw_ids)?;
+    let metadata_source_text = decode_workflow_content(&content)?;
+    let (source_text, source_raw_ids) = collect_raw_source(
+        transport,
+        store,
+        auth,
+        ledger,
+        collection_id(
+            &manifest.repository,
+            &format!(
+                "workflow-raw-source-{}-{}",
+                safe_id(path),
+                safe_id(source_sha)
+            ),
+        ),
+        &manifest.repository,
+        path,
+        source_sha,
+        "workflow.source",
+    )
+    .await?;
+    if source_text != metadata_source_text {
+        bail!("workflow source metadata and raw media bytes differ for {path}");
+    }
+    let source_jobs = parse_source_jobs(&source_text, manifest, &source_raw_ids)?;
     let (reusable_workflows, actions, scanners) = parse_workflow_dependencies(
         &source_text,
         &manifest.repository,
         source_sha,
-        &content_raw_ids,
+        &source_raw_ids,
     )?;
     let dependencies = bind_workflow_dependencies(
         WorkflowDependencyContext {
@@ -1147,13 +1243,13 @@ where
         revision,
         source_sha: source_sha.to_owned(),
         source_bytes_base64: BASE64.encode(source_text.as_bytes()),
-        source_raw_object_refs: content_raw_ids.clone(),
+        source_raw_object_refs: source_raw_ids.clone(),
         events: parse_workflow_events(&source_text)?,
         source_jobs,
         reusable_workflows,
         actions,
         scanners,
-        raw_object_refs: content_raw_ids,
+        raw_object_refs: content_raw_ids.into_iter().chain(source_raw_ids).collect(),
     })
 }
 
@@ -2351,7 +2447,7 @@ where
         let resolved_path =
             validate_dependency_tree(&tree, &dependency.repository, &dependency.path)?;
         let encoded_path = encode_api_path(&resolved_path);
-        let (source, source_raw_ids) = collect_one(
+        let (source, _source_metadata_raw_ids) = collect_one(
             transport,
             store,
             auth,
@@ -2386,7 +2482,35 @@ where
             &resolved_path,
             &dependency.revision,
         )?;
-        let source_text = decode_workflow_content(&source)?;
+        let metadata_source_text = decode_workflow_content(&source)?;
+        let (source_text, source_raw_ids) = collect_raw_source(
+            transport,
+            store,
+            auth,
+            ledger,
+            collection_id(
+                &manifest.repository,
+                &format!(
+                    "workflow-dependency-raw-source-{}-{}-{}",
+                    safe_id(workflow_path),
+                    safe_id(source_sha),
+                    index
+                ),
+            ),
+            &dependency.repository,
+            &resolved_path,
+            &dependency.revision,
+            "workflow.dependency.source",
+        )
+        .await?;
+        if source_text != metadata_source_text {
+            bail!(
+                "workflow dependency source metadata and raw media bytes differ for {}/{}@{}",
+                dependency.repository,
+                resolved_path,
+                dependency.revision
+            );
+        }
         dependency.resolved_path = Some(resolved_path);
         dependency.source_bytes_base64 = Some(BASE64.encode(source_text.as_bytes()));
         dependency.source_raw_object_refs = source_raw_ids;
@@ -2702,6 +2826,13 @@ mod tests {
     }
 
     impl FixtureTransport {
+        fn with_responses(responses: Vec<Result<TransportResponse, TransportFailure>>) -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                responses: Mutex::new(responses.into_iter().collect()),
+            }
+        }
+
         fn with_json_values(values: Vec<(&str, Value)>) -> Self {
             let responses = values
                 .into_iter()
@@ -2717,10 +2848,7 @@ mod tests {
                     })
                 })
                 .collect();
-            Self {
-                requests: Mutex::new(Vec::new()),
-                responses: Mutex::new(responses),
-            }
+            Self::with_responses(responses)
         }
     }
 
@@ -2803,15 +2931,35 @@ mod tests {
             "content": BASE64.encode(b"name: checkout\nruns:\n  using: composite\n  steps: []\n"),
             "url": "https://api.github.com/repos/actions/checkout/contents/action.yml?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         });
-        let transport = FixtureTransport::with_json_values(vec![
-            (
-                "https://api.github.com/repos/actions/checkout/git/trees/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?recursive=1",
-                tree,
-            ),
-            (
-                "https://api.github.com/repos/actions/checkout/contents/action.yml?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                source,
-            ),
+        let source_bytes = b"name: checkout\nruns:\n  using: composite\n  steps: []\n".to_vec();
+        let transport = FixtureTransport::with_responses(vec![
+            Ok(TransportResponse {
+                status: 200,
+                headers: BTreeMap::from([(
+                    "content-type".to_owned(),
+                    "application/json".to_owned(),
+                )]),
+                body: serde_json::to_vec(&tree).expect("tree fixture"),
+                effective_endpoint: "https://api.github.com/repos/actions/checkout/git/trees/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?recursive=1".to_owned(),
+            }),
+            Ok(TransportResponse {
+                status: 200,
+                headers: BTreeMap::from([(
+                    "content-type".to_owned(),
+                    "application/json".to_owned(),
+                )]),
+                body: serde_json::to_vec(&source).expect("source metadata fixture"),
+                effective_endpoint: "https://api.github.com/repos/actions/checkout/contents/action.yml?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            }),
+            Ok(TransportResponse {
+                status: 200,
+                headers: BTreeMap::from([(
+                    "content-type".to_owned(),
+                    "text/yaml".to_owned(),
+                )]),
+                body: source_bytes,
+                effective_endpoint: "https://api.github.com/repos/actions/checkout/contents/action.yml?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            }),
         ]);
         let mut store = FixtureStore::default();
         let auth = AuthIdentity::new(
@@ -2861,14 +3009,18 @@ mod tests {
         );
         assert!(dependencies.actions[0].source_bytes_base64.is_some());
         assert_eq!(dependencies.actions[0].source_raw_object_refs.len(), 1);
-        assert_eq!(ledger.raw_objects.len(), 2);
+        assert_eq!(ledger.raw_objects.len(), 3);
         assert_eq!(ledger.raw_objects[0].object_kind, "workflow.dependency");
         assert_eq!(
             ledger.raw_objects[1].object_kind,
             "workflow.dependency.source"
         );
+        assert_eq!(
+            ledger.raw_objects[2].object_kind,
+            "workflow.dependency.source"
+        );
         let requests = transport.requests.lock().expect("fixture request lock");
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         assert_eq!(
             requests[0].endpoint_or_operation,
             "https://api.github.com/repos/actions/checkout/git/trees/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?recursive=1"
@@ -2880,6 +3032,10 @@ mod tests {
         assert_eq!(
             requests[1].endpoint_or_operation,
             "https://api.github.com/repos/actions/checkout/contents/action.yml?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(
+            requests[2].accept.as_deref(),
+            Some("application/vnd.github.raw+json")
         );
     }
 

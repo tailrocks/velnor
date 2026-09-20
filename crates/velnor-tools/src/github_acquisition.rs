@@ -276,6 +276,9 @@ pub struct AcquisitionRequest {
     pub api_origin: GithubApiOrigin,
     pub endpoint_or_operation: String,
     pub query: BTreeMap<String, String>,
+    /// One of the fixed provider media types.  This is transport metadata,
+    /// never caller-controlled header text.
+    pub accept: Option<String>,
     pub body: Option<Vec<u8>>,
 }
 
@@ -537,6 +540,7 @@ pub struct RestCollectionRequest {
     pub api_origin: GithubApiOrigin,
     pub endpoint: String,
     pub query: BTreeMap<String, String>,
+    pub accept: Option<String>,
     pub item_field: Option<String>,
     pub per_page: usize,
     pub object_kind: String,
@@ -555,6 +559,7 @@ impl RestCollectionRequest {
             api_origin: GithubApiOrigin::github(),
             endpoint: endpoint.into(),
             query: BTreeMap::new(),
+            accept: None,
             item_field: item_field.map(Into::into),
             per_page: 100,
             object_kind: object_kind.into(),
@@ -564,6 +569,11 @@ impl RestCollectionRequest {
 
     pub fn with_query(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.query.insert(name.into(), value.into());
+        self
+    }
+
+    pub fn with_accept(mut self, accept: impl Into<String>) -> Self {
+        self.accept = Some(accept.into());
         self
     }
 
@@ -838,6 +848,7 @@ where
             api_origin: request.api_origin.clone(),
             endpoint_or_operation: endpoint.clone(),
             query: page_query.clone(),
+            accept: request.accept.clone(),
             body: None,
         };
         let request_id = format!("{}-{page_number_u32:04}", request.collection_id);
@@ -1247,6 +1258,7 @@ where
         api_origin: request.api_origin.clone(),
         endpoint_or_operation: endpoint,
         query: request.query.clone(),
+        accept: request.accept.clone(),
         body: None,
     };
     let started_at_utc = utc_now();
@@ -1393,6 +1405,7 @@ where
             api_origin: request.api_origin.clone(),
             endpoint_or_operation: endpoint,
             query: BTreeMap::new(),
+            accept: None,
             body: Some(body),
         };
         let request_id = format!("{}-{page_number_u32:04}", request.collection_id);
@@ -1985,6 +1998,14 @@ fn validate_rest_request(request: &RestCollectionRequest) -> Result<(), Acquisit
         .any(|(key, value)| key_is_sensitive(key) || looks_like_secret(value))
     {
         return Err(AcquisitionError::EndpointViolation);
+    }
+    if request.accept.as_deref().is_some_and(|accept| {
+        !matches!(
+            accept,
+            "application/vnd.github+json" | "application/vnd.github.raw+json"
+        )
+    }) {
+        return Err(AcquisitionError::InvalidRequest);
     }
     Ok(())
 }
@@ -3337,6 +3358,7 @@ mod tests {
             query: [("token".to_owned(), "ghp_secret".to_owned())]
                 .into_iter()
                 .collect(),
+            accept: None,
             body: Some(b"github_pat_secret".to_vec()),
         };
         let debug = format!("{request:?}");

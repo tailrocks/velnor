@@ -197,7 +197,12 @@ impl AcquisitionTransport for GithubHttpTransport {
                 HttpMethod::Get => self.client.get(url.clone()),
                 HttpMethod::Post => self.client.post(url.clone()),
             };
-            builder = builder.headers(self.request_headers()?);
+            let mut headers = self.request_headers()?;
+            if let Some(accept) = request.accept.as_deref() {
+                let value = HeaderValue::from_str(accept).map_err(|_| TransportFailure::Other)?;
+                headers.insert(ACCEPT, value);
+            }
+            builder = builder.headers(headers);
             if let Some(body) = request.body {
                 if body.len() > self.max_body_bytes {
                     return Err(TransportFailure::Other);
