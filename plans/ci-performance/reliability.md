@@ -111,8 +111,8 @@ the locally absent renderer at `38dbf85e`, and the source/pin bootstrap defect
 remains open. [Independent review](reviews/reliability-required-gate.md) and
 [26 emitted-shell outcomes](observations/reliability-required-gate-replay.json)
 are retained. Strict full-workspace Clippy passed after correcting a newly
-introduced documentation lint. The replay deliberately records the remaining selected-but-not-
-admitted skip behavior; it does not certify that behavior as correct.
+introduced documentation lint. The refreshed replay rejects selected-but-not-admitted skips. The original
+accepting result remains preserved in the earlier commit history.
 
 Commits `6a208e5` and `ec1bccf2` are pushed in
 [draft PR #979](https://github.com/tailrocks/velnor/pull/979). The second commit
@@ -138,8 +138,9 @@ first PR runs. `s2/scan/mod.rs` serializes every tracked pathname into
 unchanged. Investigate narrowing identity to behavior-relevant scan evidence,
 with new-manifest/discovery regressions, before changing this contract.
 
-The admission tightening passed 20 focused generator tests and strict full-workspace
-Clippy. [Independent review](reviews/reliability-gate-admission.md) confirms no valid
+The admission tightening (`0b74f799`) passed 20 focused generator tests, all 26
+actual generated-shell scenarios, and strict full-workspace Clippy. A second
+generation was byte-identical across all 21 `.github` files. [Independent review](reviews/reliability-gate-admission.md) confirms no valid
 selected-but-unadmitted obligation. It also found dispatch CSV normalization
 drift: the planner trims whitespace but workflow admission matches raw inputs;
 explicit empty input also differs. Strict verdicts now expose this contradiction

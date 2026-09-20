@@ -120,9 +120,9 @@
     "expected_success": false
   },
   {
-    "case": "selected but not admitted requires skip",
-    "exit": 0,
-    "expected_success": true
+    "case": "selected but not admitted fails",
+    "exit": 1,
+    "expected_success": false
   },
   {
     "case": "selected but not admitted cannot run",

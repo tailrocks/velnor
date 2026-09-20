@@ -1480,10 +1480,8 @@ jobs:
                 *) echo "expected CI job github-hosted-bun-velnor did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-bun-velnor ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-bun-velnor contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-bun-velnor)"
@@ -1503,10 +1501,8 @@ jobs:
                 *) echo "expected CI job velnor-bun-velnor did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-bun-velnor ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-bun-velnor contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-bun-velnor)"
@@ -1526,10 +1522,8 @@ jobs:
                 *) echo "expected CI job github-hosted-docker did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-docker ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-docker contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-docker)"
@@ -1549,10 +1543,8 @@ jobs:
                 *) echo "expected CI job velnor-docker did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-docker ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-docker contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-docker)"
@@ -1572,10 +1564,8 @@ jobs:
                 *) echo "expected CI job github-hosted-docs did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-docs ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-docs contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-docs)"
@@ -1595,10 +1585,8 @@ jobs:
                 *) echo "expected CI job velnor-docs did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-docs ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-docs contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-docs)"
@@ -1618,10 +1606,8 @@ jobs:
                 *) echo "expected CI job github-hosted-opentofu did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-opentofu ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-opentofu contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-opentofu)"
@@ -1641,10 +1627,8 @@ jobs:
                 *) echo "expected CI job velnor-opentofu did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-opentofu ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-opentofu contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-opentofu)"
@@ -1664,10 +1648,8 @@ jobs:
                 *) echo "expected CI prerequisite prepare-cargo did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI prerequisite prepare-cargo ran outside its provider admission (PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED=$PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI prerequisite prepare-cargo contradicts provider admission (PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED=$PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job prepare-cargo)"
@@ -1687,10 +1669,8 @@ jobs:
                 *) echo "expected CI job github-hosted-rust-policy did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-rust-policy ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-rust-policy contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-rust-policy)"
@@ -1710,10 +1690,8 @@ jobs:
                 *) echo "expected CI job velnor-rust-policy did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-rust-policy ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-rust-policy contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-rust-policy)"
@@ -1733,10 +1711,8 @@ jobs:
                 *) echo "expected CI job github-hosted-rust-unit-collector did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-rust-unit-collector ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-rust-unit-collector contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-rust-unit-collector)"
@@ -1756,10 +1732,8 @@ jobs:
                 *) echo "expected CI job velnor-rust-unit-collector did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-rust-unit-collector ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-rust-unit-collector contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-rust-unit-collector)"
@@ -1779,10 +1753,8 @@ jobs:
                 *) echo "expected CI job github-hosted-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-rust-velnor-bench ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-rust-velnor-bench contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-rust-velnor-bench)"
@@ -1802,10 +1774,8 @@ jobs:
                 *) echo "expected CI job velnor-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-rust-velnor-bench ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-rust-velnor-bench contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-rust-velnor-bench)"
@@ -1825,10 +1795,8 @@ jobs:
                 *) echo "expected CI job github-hosted-rust-velnor-client did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-rust-velnor-client ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-rust-velnor-client contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-rust-velnor-client)"
@@ -1848,10 +1816,8 @@ jobs:
                 *) echo "expected CI job velnor-rust-velnor-client did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-rust-velnor-client ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-rust-velnor-client contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-rust-velnor-client)"
@@ -1871,10 +1837,8 @@ jobs:
                 *) echo "expected CI job github-hosted-rust-velnor-control did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-rust-velnor-control ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-rust-velnor-control contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-rust-velnor-control)"
@@ -1894,10 +1858,8 @@ jobs:
                 *) echo "expected CI job velnor-rust-velnor-control did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-rust-velnor-control ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-rust-velnor-control contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-rust-velnor-control)"
@@ -1917,10 +1879,8 @@ jobs:
                 *) echo "expected CI job github-hosted-rust-velnor-model did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-rust-velnor-model ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-rust-velnor-model contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-rust-velnor-model)"
@@ -1940,10 +1900,8 @@ jobs:
                 *) echo "expected CI job velnor-rust-velnor-model did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-rust-velnor-model ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-rust-velnor-model contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-rust-velnor-model)"
@@ -1963,10 +1921,8 @@ jobs:
                 *) echo "expected CI job github-hosted-rust-velnor-render did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-rust-velnor-render ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-rust-velnor-render contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-rust-velnor-render)"
@@ -1986,10 +1942,8 @@ jobs:
                 *) echo "expected CI job velnor-rust-velnor-render did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-rust-velnor-render ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-rust-velnor-render contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-rust-velnor-render)"
@@ -2009,10 +1963,8 @@ jobs:
                 *) echo "expected CI job github-hosted-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-rust-velnor-runner ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-rust-velnor-runner contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-rust-velnor-runner)"
@@ -2032,10 +1984,8 @@ jobs:
                 *) echo "expected CI job velnor-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-rust-velnor-runner ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-rust-velnor-runner contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-rust-velnor-runner)"
@@ -2055,10 +2005,8 @@ jobs:
                 *) echo "expected CI job github-hosted-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-rust-velnor-tools ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-rust-velnor-tools contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-rust-velnor-tools)"
@@ -2078,10 +2026,8 @@ jobs:
                 *) echo "expected CI job velnor-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-rust-velnor-tools ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-rust-velnor-tools contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-rust-velnor-tools)"
@@ -2101,10 +2047,8 @@ jobs:
                 *) echo "expected CI job github-hosted-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-rust-velnor-workflow ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-rust-velnor-workflow contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-rust-velnor-workflow)"
@@ -2124,10 +2068,8 @@ jobs:
                 *) echo "expected CI job velnor-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-rust-velnor-workflow ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-rust-velnor-workflow contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-rust-velnor-workflow)"
@@ -2147,10 +2089,8 @@ jobs:
                 *) echo "expected CI job github-hosted-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-rust-velnor-workflow-contract ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-rust-velnor-workflow-contract contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-rust-velnor-workflow-contract)"
@@ -2170,10 +2110,8 @@ jobs:
                 *) echo "expected CI job velnor-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-rust-velnor-workflow-contract ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-rust-velnor-workflow-contract contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-rust-velnor-workflow-contract)"
@@ -2193,10 +2131,8 @@ jobs:
                 *) echo "expected CI job github-hosted-rust-velnorctl did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-rust-velnorctl ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-rust-velnorctl contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-rust-velnorctl)"
@@ -2216,10 +2152,8 @@ jobs:
                 *) echo "expected CI job velnor-rust-velnorctl did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-rust-velnorctl ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-rust-velnorctl contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-rust-velnorctl)"
@@ -2239,10 +2173,8 @@ jobs:
                 *) echo "expected CI job github-hosted-rust-production-topology did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job github-hosted-rust-production-topology ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job github-hosted-rust-production-topology contradicts provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job github-hosted-rust-production-topology)"
@@ -2262,10 +2194,8 @@ jobs:
                 *) echo "expected CI job velnor-rust-production-topology did not pass: $result" >&2; exit 1 ;;
               esac
             else
-              case "$result" in
-                skipped) ;;
-                *) echo "selected CI job velnor-rust-production-topology ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
-              esac
+              echo "selected CI job velnor-rust-production-topology contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2
+              exit 1
             fi
           else
             result="$(result_for_job velnor-rust-production-topology)"
