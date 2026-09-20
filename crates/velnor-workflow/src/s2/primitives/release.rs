@@ -2434,7 +2434,15 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
     output = output.replace("{{", "{").replace("}}", "}");
     output = output.replace(
         "          PRODUCT_RELEASE_ID: ${{ steps.product-release.outputs.release_id }}\n",
-        "          GH_TOKEN: ${{ github.token }}\n          PRODUCT_RELEASE_ID: ${{ steps.product-release.outputs.release_id }}\n",
+        "          GH_TOKEN: ${{ github.token }}\n          PRODUCT_RELEASE_ID: ${{ needs.admit-product-release.outputs.release_id }}\n",
+    );
+    output = output.replace(
+        "          PRODUCT_CONTRACT: ${{ steps.product-release.outputs.contract }}\n",
+        "",
+    );
+    output = output.replace(
+        "          [[ \"$release_id\" =~ ^[1-9][0-9]*$ ]] || { echo '::error::provider release id is not a positive decimal number' >&2; exit 1; }\n",
+        "          [[ \"$release_id\" =~ ^[1-9][0-9]*$ ]] || { echo '::error::provider release id is not a positive decimal number' >&2; exit 1; }\n          [ \"$release_id\" = \"$PRODUCT_RELEASE_ID\" ] || { echo '::error::provider release id differs from admitted release' >&2; exit 1; }\n",
     );
     // Debian packages already belong to the release-root inventory. Keep
     // their canonical basename in the product manifest, but do not copy a
@@ -2575,7 +2583,8 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
     );
     output = output.replace(
         "          contract=\"$PRODUCT_CONTRACT\"\n",
-        r#"          contract="$PRODUCT_CONTRACT"
+        r#"          contract="$(find native-product -type f -name 'product-contract-*.json' -print -quit)"
+          test -s "$contract" && test ! -L "$contract" || { echo '::error::native product contract is missing or linked' >&2; exit 1; }
           source_component_contract=".github/ci/native-product-contract.json"
           test -s "$source_component_contract" || { echo '::error::source native product component contract is missing' >&2; exit 1; }
           cargo metadata --locked --no-deps --format-version 1 > product-cargo-metadata.json
@@ -2868,7 +2877,6 @@ fn render_native_publish_job(
 "#
         .replace("__ASSETS__", &assets);
         let draft_upload = r#"          if [ "$(gh release view "$tag" --json isDraft --jq '.isDraft')" = true ]; then
-            PRODUCT_RELEASE_ID="${{ steps.product-release.outputs.release_id }}"
             test -n "${PRODUCT_RELEASE_ID:-}" || { echo '::error::product draft id was not resolved' >&2; exit 1; }
             # Upload, then admit the exact draft bytes before the irreversible flip.
             gh release upload "$tag" __ASSETS__ product-assets/*
@@ -7418,6 +7426,16 @@ mod tests {
         );
         assert!(publish.contains("release-manifest.json"), "{publish}");
         assert!(publish.contains("product-manifest.json"), "{publish}");
+        assert!(
+            !publish.contains("steps.product-release.outputs"),
+            "stable product assembly must consume admitted release outputs, not a local provider fallback: {publish}"
+        );
+        assert!(
+            publish.contains(
+                "PRODUCT_RELEASE_ID: ${{ needs.admit-product-release.outputs.release_id }}"
+            ),
+            "stable product assembly must carry the admitted provider release id: {publish}"
+        );
         assert!(publish.contains("release-attestation.json"), "{publish}");
         assert!(
             publish.contains(
