@@ -199,20 +199,14 @@ impl TransportFixture {
         permissions.set_mode(0o755);
         fs::set_permissions(&binary, permissions).expect("candidate permissions");
         let manifest_value = json!({
-            "role": "producer",
-            "workflow_path": ".github/workflows/ci-pr.yml",
-            "job_name": "candidate_producer",
-            "event": "pull_request",
-            "repository": REPOSITORY,
-            "head_sha": HEAD_SHA,
-            "artifact_name": self.generated.artifact_name,
-            "closure": CLOSURE,
+            "schema": "velnor.bootstrap-producer-manifest.v1",
             "profile": "debug",
-            "platform": "linux/amd64",
-            "features": "tui",
-            "build_image_repository": self.generated.build_image_repository,
-            "build_image_digest": self.generated.build_image_digest,
-            "build_image_platform_digest": format!("sha256:{}", "b".repeat(64)),
+            "features": [],
+            "platform": "linux-amd64",
+            "repository": REPOSITORY,
+            "run_id": RUN_ID,
+            "revision": HEAD_SHA,
+            "closure": fixture_closure(),
             "binary_sha256": file_sha256(&binary),
         });
         fs::write(
@@ -357,6 +351,7 @@ impl TransportFixture {
             .env("GITHUB_RUN_ATTEMPT", RUN_ATTEMPT.to_string())
             .env("RUNNER_OS", "Linux")
             .env("RUNNER_ARCH", "X64")
+            .env("FIXTURE_SCENARIO", &self.scenario)
             .env("CANDIDATE_ARTIFACT_NAME", &self.generated.artifact_name)
             .env("CANDIDATE_HEAD_SHA", HEAD_SHA)
             .env(
@@ -388,36 +383,40 @@ impl TransportFixture {
             "head_sha": HEAD_SHA, "base_sha": BASE_SHA, "base_revision": BASE_REVISION,
             "head_tree_sha": HEAD_TREE_SHA, "base_tree_sha": BASE_TREE_SHA,
             "pr_number": PR_NUMBER,
-            "profile": "debug", "platform": "linux/amd64", "features": "tui",
-            "build_image_repository": self.generated.build_image_repository,
-            "build_image_digest": self.generated.build_image_digest,
-            "build_image_platform_digest": format!("sha256:{}", "b".repeat(64)),
+            "producer_run_created_at": "2026-09-20T00:00:00Z",
+            "head_tree_api_digest": "a".repeat(64),
+            "base_tree_api_digest": "b".repeat(64),
+            "profile": "debug", "platform": "linux-amd64", "features": [],
+            "checkout_action_archive_sha256": "cebb825b471e77ce4dd7f1f37ccdfb3ae5b68e78f6f6d2f6e2521c3cfce27e72",
+            "download_action_archive_sha256": "498e5a207a6e181257cfe7bb4d8e273e758ea729ad10f0eff617505006bd1d77",
+            "upload_action_archive_sha256": "69baddda1bd8d80441109e489128f1b6944fddd92586ad1855275121beeae897",
+            "manifest_member": "candidate-manifest.json",
+            "manifest_schema_sha256": "a".repeat(64),
             "artifact_name": self.generated.artifact_name, "artifact_id": ARTIFACT_ID,
             "artifact_size": 128, "artifact_service_digest": format!("sha256:{}", "d".repeat(64)),
             "artifact_raw_zip_sha256": "e".repeat(64),
+            "artifact_created_at": "2026-09-20T00:00:00Z",
+            "artifact_updated_at": "2026-09-20T00:00:00Z",
             "artifact_expires_at": "2099-01-01T00:00:00Z", "source_archive_sha256": source_sha,
-            "candidate_closure": CLOSURE, "contract_sha256": "f".repeat(64)
+            "candidate_closure": fixture_closure(), "contract_sha256": "f".repeat(64),
+            "manifest_sha256": "1".repeat(64)
         });
         let manifest = json!({
-            "role": "producer", "workflow_path": ".github/workflows/ci-pr.yml",
-            "job_name": "candidate_producer", "event": "pull_request", "repository": REPOSITORY,
-            "head_sha": HEAD_SHA, "artifact_name": self.generated.artifact_name,
-            "profile": "debug", "platform": "linux/amd64", "features": "tui",
-            "build_image_repository": self.generated.build_image_repository,
-            "build_image_digest": self.generated.build_image_digest,
-            "build_image_platform_digest": format!("sha256:{}", "b".repeat(64)),
+            "schema": "velnor.bootstrap-producer-manifest.v1",
+            "profile": "debug", "features": [], "platform": "linux-amd64",
+            "repository": REPOSITORY, "run_id": RUN_ID, "revision": HEAD_SHA,
+            "closure": fixture_closure(),
             "binary_sha256": file_sha256(&binary)
         });
+        let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest");
+        fs::write(handoff_dir.join("candidate-manifest.json"), &manifest_bytes).expect("manifest");
+        let mut handoff = handoff;
+        handoff["manifest_sha256"] = json!(hex_sha256(&manifest_bytes));
         fs::write(
             handoff_dir.join("handoff.json"),
             serde_json::to_vec(&handoff).expect("handoff"),
         )
         .expect("handoff");
-        fs::write(
-            handoff_dir.join("candidate-manifest.json"),
-            serde_json::to_vec(&manifest).expect("manifest"),
-        )
-        .expect("manifest");
         fs::copy(&binary, handoff_dir.join("velnor-workflow")).expect("binary");
         fs::copy(&self.source_archive, handoff_dir.join("source.tar")).expect("source archive");
         let script = materialize_github_expressions(&self.generated.execute);
@@ -523,6 +522,7 @@ fn generated_acquire_rejects_transport_and_identity_faults() {
 #[test]
 fn generated_producer_keeps_upload_surface_after_build() {
     let fixture = TransportFixture::new();
+    fixture.valid_artifact();
     let output = fixture.run_producer_build();
     assert!(
         output.status.success(),
@@ -698,6 +698,7 @@ fn valid_scenario(
             "id": RUN_ID, "path": ".github/workflows/ci-pr.yml", "workflow_id": WORKFLOW_ID,
             "event": "pull_request", "head_sha": HEAD_SHA, "status": "completed",
             "conclusion": "success", "run_attempt": RUN_ATTEMPT,
+            "created_at": "2026-09-20T00:00:00Z",
             "repository": {"id": 42, "full_name": REPOSITORY},
             "head_repository": {"id": 42, "full_name": REPOSITORY},
             "pull_requests": [{"number": PR_NUMBER, "base": {"sha": BASE_SHA}}]
@@ -706,6 +707,8 @@ fn valid_scenario(
         "api_base_tree": BASE_TREE_SHA,
         "object_head_tree": HEAD_TREE_SHA,
         "object_base_tree": BASE_TREE_SHA,
+        "api_head_entries": [{"path": "Cargo.toml", "mode": "100644", "type": "blob", "sha": "4444444444444444444444444444444444444444", "size": 1}],
+        "api_base_entries": [{"path": "Cargo.toml", "mode": "100644", "type": "blob", "sha": "5555555555555555555555555555555555555555", "size": 1}],
         "jobs": [{
             "id": JOB_ID, "name": "candidate_producer", "run_id": RUN_ID,
             "head_sha": HEAD_SHA, "status": "completed", "conclusion": "success",
@@ -778,6 +781,12 @@ fn hex_sha256(bytes: &[u8]) -> String {
         })
 }
 
+fn fixture_closure() -> String {
+    let mut input = b"100644 blob 4444444444444444444444444444444444444444\tCargo.toml\n".to_vec();
+    input.extend_from_slice(b"closure-version:1\\nfeatures:\\nprofile:debug\\n");
+    hex_sha256(&input)
+}
+
 fn write_executable(path: &Path, contents: &str) {
     fs::write(path, contents).expect("fake command");
     let mut permissions = fs::metadata(path).expect("fake metadata").permissions();
@@ -828,6 +837,10 @@ elif "/commits/" in url:
     sha = url.rsplit("/commits/", 1)[1].split("?", 1)[0]
     tree = scenario["api_base_tree"] if sha == os.environ["BASE_SHA"] else scenario["api_head_tree"]
     print(json.dumps({"sha": sha, "commit": {"tree": {"sha": tree}}}))
+elif "/git/trees/" in url:
+    tree = url.rsplit("/git/trees/", 1)[1].split("?", 1)[0]
+    entries = scenario["api_base_entries"] if tree == scenario["api_base_tree"] else scenario["api_head_entries"]
+    print(json.dumps({"sha": tree, "truncated": False, "tree": entries}))
 elif url.rstrip("/") == "repos/" + os.environ["GITHUB_REPOSITORY"]:
     print(json.dumps({"id": 42, "full_name": os.environ["GITHUB_REPOSITORY"]}))
 elif "/runs/" in url and "/jobs" in url:
@@ -846,11 +859,16 @@ else:
 const CURL_FIXTURE: &str = r#"#!/usr/bin/env python3
 import os, shutil, sys
 args = sys.argv[1:]
-shutil.copyfile(os.environ["FIXTURE_ARCHIVE"], args[args.index("--output") + 1])
+destination = args[args.index("--output") + 1]
+url = next((arg for arg in args if arg.startswith("http")), "")
+if "/tarball/" in url:
+    open(destination, "wb").write(b"base-owned action archive fixture\n")
+else:
+    shutil.copyfile(os.environ["FIXTURE_ARCHIVE"], destination)
 "#;
 
 const GIT_FIXTURE: &str = r#"#!/usr/bin/env python3
-import json, os, sys
+import io, json, os, sys, tarfile
 args = sys.argv[1:]
 scenario = json.load(open(os.environ["FIXTURE_SCENARIO"]))
 commands = {"init", "fetch", "show", "archive", "ls-tree", "cat-file", "rev-parse"}
@@ -876,7 +894,16 @@ elif command == "show":
         sha = target
         print(scenario["object_base_tree"] if sha == os.environ["BASE_SHA"] else scenario["object_head_tree"])
 elif command == "archive":
-    sys.stdout.buffer.write(open(os.environ["FIXTURE_SOURCE_ARCHIVE"], "rb").read())
+    if ".github/workflows" in rest:
+        contract = os.environ["FIXTURE_HEAD_CONTRACT"] if os.environ["HEAD_SHA"] in rest else os.environ["FIXTURE_CONTRACT"]
+        payload = open(contract, "rb").read()
+        with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as archive:
+            member = tarfile.TarInfo(".github/workflows/ci-pr.yml")
+            member.size = len(payload)
+            member.mode = 0o644
+            archive.addfile(member, io.BytesIO(payload))
+    else:
+        sys.stdout.buffer.write(open(os.environ["FIXTURE_SOURCE_ARCHIVE"], "rb").read())
 elif command == "ls-tree":
     print("100644 blob 4444444444444444444444444444444444444444\tCargo.toml")
 elif command == "cat-file":
@@ -907,8 +934,20 @@ exec "$@"
 "#;
 
 const SHA256SUM_FIXTURE: &str = r#"#!/usr/bin/env python3
-import hashlib, sys
+import hashlib, os, sys
+if len(sys.argv) == 1:
+    print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest(), "-")
+    raise SystemExit(0)
 for path in sys.argv[1:]:
+    action_digests = {
+        "action-checkout.tar.gz": "cebb825b471e77ce4dd7f1f37ccdfb3ae5b68e78f6f6d2f6e2521c3cfce27e72",
+        "action-upload.tar.gz": "69baddda1bd8d80441109e489128f1b6944fddd92586ad1855275121beeae897",
+        "action-download.tar.gz": "498e5a207a6e181257cfe7bb4d8e273e758ea729ad10f0eff617505006bd1d77",
+    }
+    name = os.path.basename(path)
+    if name in action_digests:
+        print(action_digests[name], path)
+        continue
     with open(path, "rb") as stream:
         print(hashlib.sha256(stream.read()).hexdigest(), path)
 "#;

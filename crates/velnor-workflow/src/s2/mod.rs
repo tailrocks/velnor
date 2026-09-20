@@ -4716,7 +4716,7 @@ fn candidate_namespace_scan_script() -> String {
 /// candidate-provided JSON schema or assume that an optional third-party
 /// jsonschema package is installed.
 fn candidate_manifest_validation_script() -> &'static str {
-    r#"          python3 "$manifest_schema" "$manifest" <<'PY'
+    r#"          python3 - "$manifest_schema" "$manifest" <<'PY'
           import json
           import re
           import sys

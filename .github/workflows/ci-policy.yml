@@ -320,7 +320,7 @@ jobs:
           JSON
           manifest_schema_sha256="$(sha256sum "$manifest_schema" | awk '{print $1}')"
           if [[ ! "$manifest_schema_sha256" =~ ^[0-9a-f]{64}$ ]]; then exit 1; fi
-          python3 "$manifest_schema" "$manifest" <<'PY'
+          python3 - "$manifest_schema" "$manifest" <<'PY'
           import json
           import re
           import sys
@@ -990,7 +990,7 @@ jobs:
           PY
           producer_manifest="$producer_dir/candidate-manifest.json"
           producer_binary="$producer_dir/velnor-workflow"
-          python3 "$verifier_manifest_schema" "$producer_manifest" <<'PY'
+          python3 - "$verifier_manifest_schema" "$producer_manifest" <<'PY'
           import json
           import re
           import sys
