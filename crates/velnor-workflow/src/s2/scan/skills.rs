@@ -48,7 +48,7 @@ impl SkillsCheck {
                 "set -o pipefail && test \"$(bun --version)\" = \"{bun}\" && tmp=$(mktemp -d) && trap 'rm -rf \"$tmp\"' EXIT && repo=$(basename \"$PWD\") && mkdir \"$tmp/$repo\" && git archive --format=tar HEAD | tar -x -C \"$tmp/$repo\" && cp -R \"$tmp/$repo/docs\" \"$tmp/docs.expected\" && bun \"$tmp/$repo/scripts/generate-docs.ts\" && diff -ru \"$tmp/docs.expected\" \"$tmp/$repo/docs\""
             ),
             Self::HelperSyntax => format!(
-                "set -o pipefail && test \"$(bun --version)\" = \"{bun}\" && tmp=$(mktemp -d) && trap 'rm -rf \"$tmp\"' EXIT && find scripts -type f -name '*.ts' -not -path '{HELPER_TEMPLATE_GLOB}' -print0 | xargs -0 bun build --target=bun --no-bundle --outdir \"$tmp\""
+                "set -o pipefail && test \"$(bun --version)\" = \"{bun}\" && tmp=$(mktemp -d) && trap 'rm -rf \"$tmp\"' EXIT && find scripts -type f -iname '*.ts' -not -path '{HELPER_TEMPLATE_GLOB}' -print0 | xargs -0 bun build --target=bun --no-bundle --outdir \"$tmp\""
             ),
         }
     }
@@ -246,7 +246,9 @@ fn has_generated_docs_surface(context: &ScanContext<'_>) -> bool {
 fn has_helper_sources(context: &ScanContext<'_>, template_files: &BTreeSet<String>) -> bool {
     context.files.iter().any(|file| {
         file.starts_with("scripts/")
-            && file.ends_with(".ts")
+            && Path::new(file)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("ts"))
             && file != "scripts/generate-docs.ts"
             && !template_files.contains(file)
     })
@@ -1834,6 +1836,23 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
     }
 
     #[test]
+    fn uppercase_typescript_helper_gets_helper_syntax_check() {
+        let mut fixture = Fixture::new();
+        fixture
+            .files
+            .retain(|file| !file.starts_with("docs/") && !file.starts_with("scripts/"));
+        fixture.files.push("scripts/HELPER.TS".to_owned());
+        fixture.write("scripts/HELPER.TS", "console.log('ok');\n");
+        let (_, shape) = fixture
+            .run_detect()
+            .unwrap_or_else(|error| panic!("uppercase helper must detect: {error}"));
+        assert!(shape.units[0]
+            .pr_commands
+            .iter()
+            .any(|command| command.contains("bun build")));
+    }
+
+    #[test]
     fn markdown_fence_tracks_character_and_opening_length() {
         assert_eq!(markdown_fence("~~~rust"), Some((b'~', 3)));
         assert_eq!(markdown_fence("````rust"), Some((b'`', 4)));
@@ -1887,6 +1906,7 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
             command.contains("find scripts")
                 && command.contains("bun build")
                 && command.contains("test \"$(bun --version)\" = \"1.2.3\"")
+                && command.contains("-iname '*.ts'")
                 && command.contains("-not -path '*/templates/*'")
         }));
     }
