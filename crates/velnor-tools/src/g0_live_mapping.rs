@@ -13,7 +13,6 @@ use crate::evidence_check::{ManifestDocument, ManifestRepository, CANONICAL_REPO
 use crate::g0_contract::*;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use serde_json::Value;
 use serde_yaml::Value as YamlValue;
 use std::collections::{BTreeMap, BTreeSet};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
