@@ -3835,6 +3835,18 @@ fn g0_json_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
         .and_then(Value::as_str)
 }
 
+fn g0_check_run_identity_valid(value: &Value, check: &G0CheckProducer, app_id: u64) -> bool {
+    g0_json_u64(value, &["id"]) == Some(check.check_run_id)
+        && g0_json_string(value, &["name"]) == Some(check.context.as_str())
+        && g0_json_string(value, &["head_sha"]) == Some(check.source_sha.as_str())
+        && g0_json_string(value, &["status"]) == Some(check.status.as_str())
+        && g0_json_string(value, &["conclusion"]) == Some(check.conclusion.as_str())
+        && g0_json_string(value, &["html_url"]) == Some(check.html_url.as_str())
+        && g0_json_u64(value, &["check_suite", "id"]) == Some(check.check_suite_id)
+        && g0_json_u64(value, &["app", "id"]) == Some(app_id)
+        && g0_json_string(value, &["app", "slug"]) == Some(check.app_slug.as_str())
+}
+
 fn g0_capture_raw_json(
     raw_refs: &[String],
     object_kind: &str,
@@ -3969,27 +3981,21 @@ fn g0_check_raw_evidence_valid(
         raw_objects,
     );
     let common = app_id.is_some_and(|app_id| {
-        check_run.as_ref().is_some_and(|value| {
-            g0_json_u64(value, &["id"]) == Some(check.check_run_id)
-                && g0_json_string(value, &["name"]) == Some(check.context.as_str())
-                && g0_json_string(value, &["head_sha"]) == Some(check.source_sha.as_str())
-                && g0_json_string(value, &["status"]) == Some(check.status.as_str())
-                && g0_json_string(value, &["conclusion"]) == Some(check.conclusion.as_str())
-                && g0_json_string(value, &["html_url"]) == Some(check.html_url.as_str())
-                && g0_json_u64(value, &["check_suite", "id"]) == Some(check.check_suite_id)
-                && g0_json_u64(value, &["app", "id"]) == Some(app_id)
-                && g0_json_string(value, &["app", "slug"]) == Some(check.app_slug.as_str())
-        }) && check_suite.as_ref().is_some_and(|value| {
-            g0_json_u64(value, &["id"]) == Some(check.check_suite_id)
-                && g0_json_string(value, &["head_sha"]) == Some(check.source_sha.as_str())
-                && g0_json_string(value, &["status"]) == Some(check.status.as_str())
-                && g0_json_string(value, &["conclusion"]) == Some(check.conclusion.as_str())
-                && g0_json_u64(value, &["app", "id"]) == Some(app_id)
-                && g0_json_string(value, &["app", "slug"]) == Some(check.app_slug.as_str())
-        }) && app.as_ref().is_some_and(|value| {
-            g0_json_u64(value, &["id"]) == Some(app_id)
-                && g0_json_string(value, &["slug"]) == Some(check.app_slug.as_str())
-        })
+        check_run
+            .as_ref()
+            .is_some_and(|value| g0_check_run_identity_valid(value, check, app_id))
+            && check_suite.as_ref().is_some_and(|value| {
+                g0_json_u64(value, &["id"]) == Some(check.check_suite_id)
+                    && g0_json_string(value, &["head_sha"]) == Some(check.source_sha.as_str())
+                    && g0_json_string(value, &["status"]) == Some(check.status.as_str())
+                    && g0_json_string(value, &["conclusion"]) == Some(check.conclusion.as_str())
+                    && g0_json_u64(value, &["app", "id"]) == Some(app_id)
+                    && g0_json_string(value, &["app", "slug"]) == Some(check.app_slug.as_str())
+            })
+            && app.as_ref().is_some_and(|value| {
+                g0_json_u64(value, &["id"]) == Some(app_id)
+                    && g0_json_string(value, &["slug"]) == Some(check.app_slug.as_str())
+            })
     });
     if !common {
         return false;
@@ -8001,6 +8007,35 @@ mod tests {
         }
     }
 
+    fn captured_raw_reference(
+        raw_id: &str,
+        request_id: &str,
+        object_kind: &str,
+        bytes: &[u8],
+    ) -> G0RawObjectRef {
+        let digest = digest_bytes(bytes);
+        let storage_ref = format!(
+            "sha256://{}",
+            digest
+                .strip_prefix("sha256:")
+                .expect("fixture digest prefix")
+        );
+        G0RawObjectRef {
+            raw_id: raw_id.to_owned(),
+            request_id: request_id.to_owned(),
+            object_kind: object_kind.to_owned(),
+            canonicalization: "raw-json".to_owned(),
+            sha256: digest.clone(),
+            byte_length: bytes.len() as u64,
+            bytes_base64: BASE64.encode(bytes),
+            media_type: "application/json".to_owned(),
+            storage_ref: storage_ref.clone(),
+            original_sha256: digest,
+            original_byte_length: bytes.len() as u64,
+            original_storage_ref: storage_ref,
+        }
+    }
+
     fn sha(seed: char) -> String {
         std::iter::repeat_n(seed, SHA_LENGTH).collect()
     }
@@ -10660,6 +10695,108 @@ mod tests {
             g0_select_raw_member(checks, "check_run", 106_031_458_188, &checks_request)
                 .expect("DCO must be selected from the complete checks page");
         assert_eq!(g0_json_u64(&selected_dco, &["app", "id"]), Some(974_774));
+
+        let dco_check = G0CheckProducer {
+            context: "DCO".to_owned(),
+            app_id: "974774".to_owned(),
+            app_slug: "dco-2".to_owned(),
+            provider: G0CheckProvider::ExternalApp,
+            api: G0ApiKind::Rest,
+            check_suite_id: 96_108_219_979,
+            check_run_id: 106_031_458_188,
+            source_sha: "df9fb272c025f76cc8711560209afcdfd6cc4e00".to_owned(),
+            event: "pull_request".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: "success".to_owned(),
+            html_url: "https://github.com/tailrocks/velnor/runs/106031458188".to_owned(),
+            raw_object_refs: Vec::new(),
+        };
+        assert!(g0_check_run_identity_valid(
+            &selected_dco,
+            &dco_check,
+            974_774
+        ));
+        let mut wrong_app = dco_check.clone();
+        wrong_app.app_id = "12526".to_owned();
+        wrong_app.app_slug = "sonarqubecloud".to_owned();
+        assert!(!g0_check_run_identity_valid(
+            &selected_dco,
+            &wrong_app,
+            12_526
+        ));
+        let mut wrong_suite = dco_check.clone();
+        wrong_suite.check_suite_id = 96_108_224_766;
+        assert!(!g0_check_run_identity_valid(
+            &selected_dco,
+            &wrong_suite,
+            974_774
+        ));
+
+        let mut valid_request = checks_request.clone();
+        valid_request.request_id = "real-checks-request".to_owned();
+        valid_request.response_raw_ref = "real-checks-raw".to_owned();
+        let valid_raw = captured_raw_reference(
+            "real-checks-raw",
+            "real-checks-request",
+            "check_run",
+            &checks_bytes,
+        );
+        assert!(g0_capture_raw_json(
+            &["real-checks-raw".to_owned()],
+            "check_run",
+            dco_check.check_run_id,
+            &[checks_request.endpoint_or_operation.clone()],
+            &[valid_request.clone()],
+            &[valid_raw.clone()],
+        )
+        .is_some());
+        let mut wrong_endpoint = valid_request.clone();
+        wrong_endpoint.endpoint_or_operation =
+            "/repos/tailrocks/velnor/check-runs/106031458188".to_owned();
+        assert!(g0_capture_raw_json(
+            &["real-checks-raw".to_owned()],
+            "check_run",
+            dco_check.check_run_id,
+            &[checks_request.endpoint_or_operation.clone()],
+            &[wrong_endpoint],
+            &[valid_raw.clone()],
+        )
+        .is_none());
+        assert!(g0_capture_raw_json(
+            &["real-checks-raw".to_owned()],
+            "check_run",
+            dco_check.check_run_id + 1,
+            &[checks_request.endpoint_or_operation.clone()],
+            &[valid_request.clone()],
+            &[valid_raw.clone()],
+        )
+        .is_none());
+        let mut rehashed_page = checks_bytes.clone();
+        let old_count = b"\"total_count\":70";
+        let new_count = b"\"total_count\":69";
+        let count_offset = rehashed_page
+            .windows(old_count.len())
+            .position(|window| window == old_count)
+            .expect("captured checks count");
+        rehashed_page.splice(
+            count_offset..count_offset + old_count.len(),
+            new_count.iter().copied(),
+        );
+        let rehashed_raw = captured_raw_reference(
+            "real-checks-raw",
+            "real-checks-request",
+            "check_run",
+            &rehashed_page,
+        );
+        assert!(g0_capture_raw_json(
+            &["real-checks-raw".to_owned()],
+            "check_run",
+            dco_check.check_run_id,
+            &[checks_request.endpoint_or_operation],
+            &[valid_request],
+            &[rehashed_raw],
+        )
+        .is_none());
 
         let sonar: Value = serde_json::from_slice(&sonar_bytes).expect("Sonar checks page JSON");
         let sonar_check = sonar["check_runs"]
