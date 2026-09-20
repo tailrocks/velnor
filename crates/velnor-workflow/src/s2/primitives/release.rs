@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use super::signer_contract::SignerCallInputs;
+use super::signer_contract::{SignerCallInputs, SignerLane};
 use super::{
     checks_env, docker_build_token_env_for_members, render_cargo_source_preparation,
     render_pinned_toolchain_steps, render_retained_output_cache_note, Args, CacheBackend,
@@ -1706,7 +1706,8 @@ fn render_sign_deb_job(
     let subject_path = format!("{stem}-{version}-${{{{ matrix.arch }}}}.deb");
     let signer_inputs = SignerCallInputs::admitted_expression("debian-packages", &subject_path)
         .ok()?
-        .render_yaml()
+        .render_yaml_for_lane(SignerLane::Debian, &release.source_repository)
+        .ok()?
         .replace('\n', "\n      ");
     Some(format!(
         "  sign-deb:\n    name: {name}\n{needs}{gate}    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    permissions:\n      attestations: write\n      contents: read\n      id-token: write\n    uses: ./.github/workflows/ci-release-package-signer.yml\n    with:\n      {signer_inputs}"
@@ -1828,8 +1829,23 @@ fn render_native_product_subject_plan_job(
 /// One reusable shared-signer matrix cell per native subject. The matrix is
 /// derived only from the strict subject-plan output and is blocked while the
 /// declared Intel target remains unavailable.
-fn render_sign_native_product_job() -> String {
-    "  sign-native-product:\n    name: Sign native product / ${{ matrix.subject }}\n    needs: [admit-product-release, native-product-subject-plan]\n    if: ${{ always() && needs.admit-product-release.result == 'success' && needs.native-product-subject-plan.result == 'success' && needs.native-product-subject-plan.outputs.blocked_targets == '[]' }}\n    strategy:\n      fail-fast: false\n      matrix:\n        subject: ${{ fromJSON(needs.native-product-subject-plan.outputs.subjects_json) }}\n    permissions:\n      attestations: write\n      contents: read\n      id-token: write\n    uses: ./.github/workflows/ci-release-package-signer.yml\n    with:\n      artifact-name: native-product-assets\n      subject-path: ${{ matrix.subject }}\n      source-ref: ${{ needs.admit-product-release.outputs.source_ref }}\n      source-digest: ${{ needs.admit-product-release.outputs.source_commit }}\n".to_owned()
+#[expect(
+    clippy::panic,
+    reason = "the fixed generator-owned matrix subject must satisfy the typed signer contract"
+)]
+fn render_sign_native_product_job(release: &ReleaseSpec) -> String {
+    let signer_inputs = match SignerCallInputs::admitted_expression(
+        "native-product-assets",
+        "${{ matrix.subject }}",
+    )
+    .and_then(|inputs| inputs.render_yaml_for_lane(SignerLane::Native, &release.source_repository))
+    {
+        Ok(inputs) => inputs.replace('\n', "\n      "),
+        Err(error) => panic!("native signer inputs are not generator-safe: {error}"),
+    };
+    format!(
+        "  sign-native-product:\n    name: Sign native product / ${{{{ matrix.subject }}}}\n    needs: [admit-product-release, native-product-subject-plan]\n    if: ${{{{ always() && needs.admit-product-release.result == 'success' && needs.native-product-subject-plan.result == 'success' && needs.native-product-subject-plan.outputs.blocked_targets == '[]' }}}}\n    strategy:\n      fail-fast: false\n      matrix:\n        subject: ${{{{ fromJSON(needs.native-product-subject-plan.outputs.subjects_json) }}}}\n    permissions:\n      attestations: write\n      contents: read\n      id-token: write\n    uses: ./.github/workflows/ci-release-package-signer.yml\n    with:\n      {signer_inputs}"
+    )
 }
 
 /// The multi-arch platform matrix: one native builder per consumer
@@ -3468,7 +3484,7 @@ fn render_native_preview(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
             config, release, true,
         ));
         jobs.push('\n');
-        jobs.push_str(&render_sign_native_product_job());
+        jobs.push_str(&render_sign_native_product_job(release));
         jobs.push('\n');
     }
     let guest_job = render_guest_payload_job(config, release, true);
@@ -5475,7 +5491,7 @@ fn render_native_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         ));
         extra.push('\n');
         publish_needs.push("native-product-subject-plan".to_owned());
-        extra.push_str(&render_sign_native_product_job());
+        extra.push_str(&render_sign_native_product_job(release));
         extra.push('\n');
         publish_needs.push("sign-native-product".to_owned());
     }
@@ -6794,7 +6810,7 @@ mod tests {
             ),
             (
                 "ci-release-package-signer.yml",
-                "63e76d5e5615192d52e34bba0b8bd51ddcec3b610e934633dd282c585d9721f1",
+                "7863fa5e11bd93bfb9909551ae2afaac9b0e0047abba39591fa30919fcfbcd8d",
             ),
         ];
         let root = scanned_root("default");
@@ -6847,6 +6863,13 @@ mod tests {
                 "{file} must carry the generated header: {rendered}"
             );
         }
+        let signer = rendered(&surface, "ci-release-package-signer.yml");
+        assert!(
+            signer.contains("record-artifact-name:")
+                && signer.contains("velnor.attestation-record/v1")
+                && signer.contains("actions/upload-artifact@"),
+            "the shared signer must emit a typed record artifact: {signer}"
+        );
         assert!(surface.added_files.is_empty());
         let _ = fs::remove_dir_all(root);
     }

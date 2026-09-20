@@ -20,6 +20,15 @@ on:
       source-digest:
         required: true
         type: string
+      source-repository:
+        required: true
+        type: string
+      lane:
+        required: true
+        type: string
+      record-artifact-name:
+        required: true
+        type: string
 
 permissions: {}
 
@@ -38,12 +47,20 @@ jobs:
           SUBJECT_PATH: ${{ inputs.subject-path }}
           SOURCE_REF: ${{ inputs.source-ref }}
           SOURCE_DIGEST: ${{ inputs.source-digest }}
+          SOURCE_REPOSITORY: ${{ inputs.source-repository }}
+          LANE: ${{ inputs.lane }}
+          RECORD_ARTIFACT_NAME: ${{ inputs.record-artifact-name }}
         run: |
           set -euo pipefail
-          [[ "$SOURCE_REF" == refs/tags/v* || "$SOURCE_REF" == refs/heads/main ]]
+          [[ "$SOURCE_REF" == refs/tags/v* || "$SOURCE_REF" == refs/heads/* ]]
           [[ "$SOURCE_DIGEST" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_REPOSITORY" == "$GITHUB_REPOSITORY" ]]
+          [[ "$SOURCE_REPOSITORY" =~ ^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]]
+          [[ "$LANE" == native || "$LANE" == debian || "$LANE" == runtime || "$LANE" == image || "$LANE" == apt ]]
           [[ "$ARTIFACT_NAME" != */* && "$ARTIFACT_NAME" != *..* && -n "$ARTIFACT_NAME" ]]
-          [[ "$SUBJECT_PATH" != /* && "$SUBJECT_PATH" != *..* && -n "$SUBJECT_PATH" ]]
+          [[ "$SUBJECT_PATH" != */* && "$SUBJECT_PATH" != \\* && "$SUBJECT_PATH" != *..* && -n "$SUBJECT_PATH" ]]
+          [[ "$RECORD_ARTIFACT_NAME" == "$LANE-attestation-record-$SUBJECT_PATH" ]]
+          [[ "$RECORD_ARTIFACT_NAME" != */* && "$RECORD_ARTIFACT_NAME" != *..* && -n "$RECORD_ARTIFACT_NAME" ]]
 
       - name: Checkout admitted source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -75,6 +92,47 @@ jobs:
           sha256sum -- "$ARTIFACT" > SHA256SUMS
           sha256sum --check --strict SHA256SUMS
 
+      - name: Write typed attestation record
+        env:
+          ARTIFACT_NAME: ${{ inputs.artifact-name }}
+          SUBJECT_PATH: ${{ inputs.subject-path }}
+          SOURCE_REPOSITORY: ${{ inputs.source-repository }}
+          SOURCE_REF: ${{ inputs.source-ref }}
+          SOURCE_DIGEST: ${{ inputs.source-digest }}
+          LANE: ${{ inputs.lane }}
+          RECORD_ARTIFACT_NAME: ${{ inputs.record-artifact-name }}
+        run: |
+          set -euo pipefail
+          artifact="signer-input/$SUBJECT_PATH"
+          subject_sha256="$(sha256sum -- "$artifact" | awk '{print $1}')"
+          subject_size="$(wc -c <"$artifact" | tr -d '[:space:]')"
+          jq -S -n \
+            --arg schema "velnor.attestation-record/v1" \
+            --arg lane "$LANE" \
+            --arg artifact_name "$RECORD_ARTIFACT_NAME" \
+            --arg subject "$SUBJECT_PATH" \
+            --arg subject_sha256 "$subject_sha256" \
+            --argjson subject_size "$subject_size" \
+            --arg source_repository "$SOURCE_REPOSITORY" \
+            --arg source_ref "$SOURCE_REF" \
+            --arg source_commit "$SOURCE_DIGEST" \
+            --arg signer_workflow ".github/workflows/ci-release-package-signer.yml" \
+            --arg oidc_issuer "https://token.actions.githubusercontent.com" \
+            --arg predicate_type "https://slsa.dev/provenance/v1" \
+            '{schema:$schema,lane:$lane,artifact_name:$artifact_name,subject:$subject,subject_sha256:$subject_sha256,subject_size:$subject_size,source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit,signer_workflow:$signer_workflow,oidc_issuer:$oidc_issuer,predicate_type:$predicate_type}' \
+            > attestation-record.json
+          sha256sum attestation-record.json > attestation-record.json.sha256
+
       - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
           subject-path: signer-input/${{ inputs.subject-path }}
+
+      - name: Upload typed attestation record
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.record-artifact-name }}
+          path: |
+            attestation-record.json
+            attestation-record.json.sha256
+          if-no-files-found: error
+          retention-days: 2

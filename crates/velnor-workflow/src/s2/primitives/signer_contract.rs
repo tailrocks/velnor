@@ -435,6 +435,7 @@ impl SignerCallInputs {
     ) -> Result<Self, String> {
         let normalized = subject_path
             .replace("${{ matrix.arch }}", "arch")
+            .replace("${{ matrix.subject }}", "subject")
             .replace("${{ needs.verify.outputs.version }}", "version")
             .replace("${{ needs.identity.outputs.version }}", "version");
         if !safe_basename(artifact_name)
@@ -443,6 +444,7 @@ impl SignerCallInputs {
             || subject_path.contains('/')
             || subject_path.contains('\\')
             || subject_path.matches("${{ matrix.arch }}").count() > 1
+            || subject_path.matches("${{ matrix.subject }}").count() > 1
             || subject_path
                 .matches("${{ needs.verify.outputs.version }}")
                 .count()
@@ -474,6 +476,27 @@ impl SignerCallInputs {
             "artifact-name: {}\nsubject-path: {}\nsource-ref: {}\nsource-digest: {}\n",
             self.artifact_name, self.subject_path, self.source_ref, self.source_digest
         )
+    }
+
+    /// Render the complete reusable-signer call, including the typed record
+    /// transport. The source repository is an admitted identity input, not a
+    /// value inferred by the signer from its checkout context.
+    pub(crate) fn render_yaml_for_lane(
+        &self,
+        lane: SignerLane,
+        source_repository: &str,
+    ) -> Result<String, String> {
+        if !valid_repository(source_repository) {
+            return Err("signer source repository is not a safe owner/repository".to_owned());
+        }
+        let record_artifact_name = signer_record_artifact_name(lane, &self.subject_path);
+        Ok(format!(
+            "{}lane: {}\nsource-repository: {}\nrecord-artifact-name: {}\n",
+            self.render_yaml(),
+            lane.as_str(),
+            source_repository,
+            record_artifact_name
+        ))
     }
 }
 
@@ -870,9 +893,14 @@ mod tests {
             "runner-v1.2.3-${{ matrix.arch }}.deb",
         )
         .expect("matrix subject remains a basename expression");
-        assert!(matrix
-            .render_yaml()
-            .contains("subject-path: runner-v1.2.3-${{ matrix.arch }}.deb"));
+        let rendered = matrix
+            .render_yaml_for_lane(SignerLane::Debian, SOURCE_REPOSITORY)
+            .expect("complete signer input is valid");
+        assert!(rendered.contains("subject-path: runner-v1.2.3-${{ matrix.arch }}.deb"));
+        assert!(rendered.contains("lane: debian"));
+        assert!(rendered.contains(
+            "source-repository: tailrocks/velnor\nrecord-artifact-name: debian-attestation-record-runner-v1.2.3-${{ matrix.arch }}.deb"
+        ));
         assert!(
             SignerCallInputs::admitted_expression("debian-packages", "nested/runner.deb").is_err()
         );
