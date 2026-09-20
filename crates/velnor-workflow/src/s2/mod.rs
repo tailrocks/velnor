@@ -16621,15 +16621,27 @@ lockfile = true
         let hosted = hosted_policy_job("0".repeat(40).as_str());
         assert!(
             hosted.contains(&format!(
-                "      - name: Set up actionlint\n        uses: {}\n        with:\n          install_args: actionlint@{ACTIONLINT_VERSION}\n          cache: false\n      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
+                "      - name: Set up actionlint\n        uses: {}\n        with:\n          install_args: actionlint@{ACTIONLINT_VERSION}\n          cache: false\n",
                 ActionPin::Mise.reference()
+            )),
+            "{hosted}"
+        );
+        assert!(
+            hosted.contains(&format!(
+                "      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n"
             )),
             "{hosted}"
         );
         let velnor = velnor_policy_job("0".repeat(40).as_str(), "[self-hosted]");
         assert!(
             velnor.contains(&format!(
-                "      - name: Set up actionlint\n        run: mise --yes install actionlint@{ACTIONLINT_VERSION}\n      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n"
+                "      - name: Set up actionlint\n        run: mise --yes install actionlint@{ACTIONLINT_VERSION}\n"
+            )),
+            "{velnor}"
+        );
+        assert!(
+            velnor.contains(&format!(
+                "      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n"
             )),
             "{velnor}"
         );

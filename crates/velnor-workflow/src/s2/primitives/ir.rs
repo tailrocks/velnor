@@ -803,9 +803,11 @@ mod tests {
             "{rendered}"
         );
         assert_eq!(
-            rendered.matches("id: candidate_upload").count(),
+            rendered
+                .matches("        id: candidate_upload\n        uses:")
+                .count(),
             1,
-            "{rendered}"
+            "the producer YAML has one uploader step; embedded policy assertions are not YAML steps: {rendered}"
         );
         assert!(
             rendered.contains("artifact_id: ${{ steps.candidate_upload.outputs.artifact-id }}"),

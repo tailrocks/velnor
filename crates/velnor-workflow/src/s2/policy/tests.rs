@@ -1549,6 +1549,17 @@ fn assert_candidate_transport_roles(job: &str) {
     );
 }
 
+fn assert_bounded_source_archives(job: &str) {
+    assert!(
+        job.contains("bounded_git_archive \"$HEAD_SHA\" \"$handoff/source.tar\""),
+        "source handoff archives must use the bounded writer: {job}"
+    );
+    assert!(
+        !job.contains("git -C \"$source_repo\" archive --format=tar \"$HEAD_SHA\" >"),
+        "source handoff archives must not use unbounded shell redirection: {job}"
+    );
+}
+
 fn assert_candidate_transport_acquisition(job: &str) {
     assert_candidate_transport_roles(job);
     assert!(
@@ -1570,10 +1581,7 @@ fn assert_candidate_transport_acquisition(job: &str) {
         job.contains("fetch --no-tags --depth=1 \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\""),
         "{job}"
     );
-    assert!(
-        job.contains("git -C \"$source_repo\" archive --format=tar \"$HEAD_SHA\""),
-        "{job}"
-    );
+    assert_bounded_source_archives(job);
     assert!(
         job.contains("git -C \"$verifier_source_repo\" ls-tree -r \"$HEAD_SHA\""),
         "{job}"

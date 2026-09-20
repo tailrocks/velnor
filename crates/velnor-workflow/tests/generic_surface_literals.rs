@@ -91,9 +91,9 @@ const ADMITTED_CARGO_LINE_MARKERS: &[&str] = &["termrock = { git"];
 /// The generator's own distribution paths (`tailrocks/velnor/.github/...`) and
 /// the regeneration marker are generator identity, not consumer knowledge. The
 /// bare slug may appear exactly `BARE_GENERATOR_SLUG_OCCURRENCES` times: the
-/// pinned install URL and the regeneration marker constant in each of the
-/// schema-1 engine and the schema-2 fork.
-const BARE_GENERATOR_SLUG_OCCURRENCES: usize = 4;
+/// pinned install URL and regeneration marker in each schema engine, plus the
+/// owner-repository marker used by the offline bootstrap transport fixture.
+const BARE_GENERATOR_SLUG_OCCURRENCES: usize = 6;
 
 /// Everything the deny list applies to: the crate's Rust sources, its
 /// templates, its tests and fixtures, its build scripts, benches, examples,
@@ -184,7 +184,7 @@ fn is_generator_path(line: &str) -> bool {
     let mut rest = line;
     while let Some(start) = rest.find("tailrocks/velnor") {
         rest = &rest[start + "tailrocks/velnor".len()..];
-        if rest.starts_with('/') || rest.starts_with(".github") {
+        if rest.starts_with('/') || rest.starts_with(".github") || rest.starts_with("-bootstrap-") {
             return true;
         }
     }
