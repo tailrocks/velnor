@@ -3920,7 +3920,9 @@ fn g0_select_raw_member(
         "job" => Some("jobs"),
         _ => None,
     };
-    if let Some(envelope_key) = envelope_key {
+    if let Some(envelope_key) = envelope_key
+        && value.get(envelope_key).is_some()
+    {
         let total_count = value.get("total_count")?.as_u64()?;
         let members = value.get(envelope_key)?.as_array()?;
         if members.len() as u32 != request.page.items_returned
@@ -8278,7 +8280,9 @@ mod tests {
             );
             push(
                 "job",
-                format!("/repos/{repository}/actions/runs/{workflow_run_id}/jobs/{job_id}"),
+                format!(
+                    "/repos/{repository}/actions/runs/{workflow_run_id}/attempts/{run_attempt}/jobs"
+                ),
                 json!({
                     "id": job_id,
                     "run_id": job_run_id,
