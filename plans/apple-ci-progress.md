@@ -38,8 +38,12 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
 
 - Increment 3: Swift/XcodeGen discovery without code execution. 3a done
   (`581e0d42`: static Package.swift facts, build-only units, local vs
-  remote binaryTarget; lib 1857 green). Next: 3b XcodeGen spec
-  recognition + 3c renamed fixtures.
+  remote binaryTarget). 3b done (`24d225c6`: structural XcodeGen spec
+  recognition, include closures with cycle/escape diagnostics, app +
+  scheme selection, committed-project dedup; lib 1876 green, no
+  Jackin literals in added lines). Remaining in 3: BoltFFI producer
+  matching (Rust scan facts) + xcode scheme-id collision follow-up
+  (same-named schemes in different containers share an id today).
 - Increments 4-8 per goal: cache/artifact, hosted macOS, Jackin
   migration (#1013 incl. Landlock P1), native provider, proof/cleanup.
 - Benchmarks: none yet; set latency goals after first controlled baseline.
