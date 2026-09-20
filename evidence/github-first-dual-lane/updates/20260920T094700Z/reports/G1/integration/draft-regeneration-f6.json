@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "kind": "disposable-draft-regeneration",
+  "captured_at": "2026-09-20T16:22:43+07:00",
+  "source": {
+    "branch": "codex/github-first-source-integration",
+    "commit": "f6cb27c4606103d0c879bbc60a6a060911ce7b91",
+    "remote_commit": "f6cb27c4606103d0c879bbc60a6a060911ce7b91",
+    "generator_source_sha": "f6cb27c4606103d0c879bbc60a6a060911ce7b91",
+    "generator_source_closure": "9ac962a622605e3edcd5debbc9f4f990abe15cfda1ae1a663c066e00e58c356c",
+    "declared_generator_revision": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+    "declared_generator_contract": 54,
+    "config_path": ".github-gen/velnor-workflow.toml"
+  },
+  "command": "cd crates/velnor-workflow && mbx run --locked --manifest-path Cargo.toml -- --plain --force --output <draft-root> ../..",
+  "drafts": [
+    {
+      "root": "/private/tmp/g1-f6-draft-a.nYIwwv",
+      "file_count": 21,
+      "render_hash_algorithm": "SHA-256 of sorted '<file-sha256>  <relative-path>' lines",
+      "render_sha256": "4151e4af7308a7d4788afa26155afea03868cad0374ad955e31c6d7fb4f94b4d",
+      "files": [
+        [".github/actionlint.yaml", "29bcdd3f50cb45e8c0319515591d48102de730510bdaa0bdf713e33cde8ecffb"],
+        [".github/actions/report-velnor-ci-outcomes/action.yml", "e6e8fce36f7d47abf9a66e033d5c79cce86afbbc75a50bb20ffcf1c634eeb09b"],
+        [".github/actions/setup-velnor-workflow/action.yml", "a9d836b3a3aaac30b42ac13caa250efe660062c5f9d9aff1d3cbeb9ee84a77e5"],
+        [".github/ci/.github-actions-generator-state", "91f20c8aef25a3ba54a40ede5a4e50cfe46138c32082349895a87b2e236cc51a"],
+        [".github/ci/project.toml", "1ac075d5b1a84efab7c6f420e8db00164620379743838db52571f2812ac6c00e"],
+        [".github/workflows/AGENTS.md", "e766b3141ed179ec69f9b37c16cb16912ccf4b2896ca350df3357a5031d204fb"],
+        [".github/workflows/ci-main.yml", "c9f40379054187fb202ea95a0c1cb3543019128924b2a72d26a20050a18f399d"],
+        [".github/workflows/ci-policy.yml", "ecd80ad19a07182755c7a7d5998502c04dd9951851997be82129a7becd2da2bb"],
+        [".github/workflows/ci-pr.yml", "3dbf1c0418a0b2b1dfb580572d76ad5d1f1761ce73bba63df84dfbad1b30b84b"],
+        [".github/workflows/ci-release-package-signer.yml", "63e76d5e5615192d52e34bba0b8bd51ddcec3b610e934633dd282c585d9721f1"],
+        [".github/workflows/ci-runtime-products.yml", "93eb04cb68acdf0d778cdd5214484b4e2b6fb9cb9b819c5bc46545c0a1d4e7c7"],
+        [".github/workflows/ci-unit-bun.yml", "be7f298942594b035e3ff9558d7c272798c10d043bac8e7cccbf539888c8dc12"],
+        [".github/workflows/ci-unit-docker.yml", "660e622255972307bfb0b0f60359480f372bd24f9c5cc508f18b0b2dae9f7f66"],
+        [".github/workflows/ci-unit-docs.yml", "d9d8e11223933af4387d77d56408e817fe6c4500d0bcad5cfbd882da4fc7ab3e"],
+        [".github/workflows/ci-unit-opentofu.yml", "787c357e9846212d9f58e267f67b17e6171cb743f9ef6d20b6abe2d3a1989667"],
+        [".github/workflows/ci-unit-rust.yml", "52f76948eba95a6763cc164219867dedb5cfa6608f054c07dfee42a5963bac6f"],
+        [".github/workflows/maintenance.yml", "9c9f46e7a542f93db34fbba00597b8dd5e016dd2ce9d7397d40e0269c5339a8f"],
+        [".github/workflows/nightly.yml", "d77f1277199018693e608353cafbe03853d25112a2b947538abb9d0bef9420b4"],
+        [".github/workflows/preview.yml", "f33f85279f97a813d94deb25020f1d7b9b7cc5d336e9be9e714c2be77439ae02"],
+        [".github/workflows/release.yml", "4755cb6208b7894c2821c4c5054ff868ab84dd18768eb9ee4a1a737c2f89f8f5"],
+        ["config/fleet/velnor-host.env", "00c010b47c9704b1295eeb0f8ffc43d1d4b05e63c72d2f3cbdcab3b1bff32459"]
+      ]
+    },
+    {
+      "root": "/private/tmp/g1-f6-draft-b.XZiJ1N",
+      "file_count": 21,
+      "render_hash_algorithm": "same as draft A",
+      "render_sha256": "4151e4af7308a7d4788afa26155afea03868cad0374ad955e31c6d7fb4f94b4d"
+    }
+  ],
+  "deterministic_repeat": true,
+  "canonical_drift": [
+    {
+      "path": ".github/actionlint.yaml",
+      "canonical_sha256": "44ad924472fd9d2dd4bb08755e872dea4ad8140cfbd169242c079fb4af507789",
+      "draft_sha256": "29bcdd3f50cb45e8c0319515591d48102de730510bdaa0bdf713e33cde8ecffb",
+      "delta": "remove macos-26 label; add xcode-27 label"
+    },
+    {
+      "path": ".github/ci/project.toml",
+      "canonical_sha256": "64023c903452dffb00503c5a3859a9da9226c2755584cbe1218157e8c5e0d170",
+      "draft_sha256": "1ac075d5b1a84efab7c6f420e8db00164620379743838db52571f2812ac6c00e",
+      "delta": "detected static scan list adds rust-test-targets:velnor-tools:1"
+    },
+    {
+      "path": ".github/workflows/ci-runtime-products.yml",
+      "canonical_sha256": "1b28c3159a6d76a72fb1ee8163f4e53b8ce3e60e5b9e3b72b08151885383a596",
+      "draft_sha256": "93eb04cb68acdf0d778cdd5214484b4e2b6fb9cb9b819c5bc46545c0a1d4e7c7",
+      "delta": "macOS ARM64 matrix runner macos-26 -> xcode-27"
+    },
+    {
+      "path": ".github/ci/.github-actions-generator-state",
+      "canonical_sha256": "71b049eaf533c4f4043de31b1b21ea65c1091bbfd0a7ac89eb0ba74fa48f7066",
+      "draft_sha256": "91f20c8aef25a3ba54a40ede5a4e50cfe46138c32082349895a87b2e236cc51a",
+      "delta": "scan input and hashes for the three changed outputs update; generator contract remains 54"
+    }
+  ],
+  "verification": {
+    "draft_check": {
+      "command": "mbx run --locked --manifest-path Cargo.toml -- --plain --check --output /private/tmp/g1-f6-draft-a.nYIwwv ../..",
+      "exit_code": 0,
+      "candidate_closure": "9ac962a622605e3edcd5debbc9f4f990abe15cfda1ae1a663c066e00e58c356c",
+      "notice": "draft matches candidate render, not declared pin; promotion remains pending"
+    },
+    "canonical_check": {
+      "command": "mbx run --locked --manifest-path Cargo.toml -- --plain --check ../..",
+      "exit_code": 1,
+      "reported_paths": [
+        ".github/actionlint.yaml",
+        ".github/ci/project.toml",
+        ".github/workflows/ci-runtime-products.yml",
+        ".github/ci/.github-actions-generator-state"
+      ]
+    },
+    "actionlint": {
+      "command": "actionlint -config-file /private/tmp/g1-f6-draft-a.nYIwwv/.github/actionlint.yaml /private/tmp/g1-f6-draft-a.nYIwwv/.github/workflows/*.yml",
+      "exit_code": 0,
+      "version": "1.7.12"
+    },
+    "canonical_worktree_clean": true
+  },
+  "limitations": [
+    "Draft roots are disposable review output, not canonical source artifacts.",
+    "The declared generator pin remains 0dc79895ff1c5e88be7c3822c437e1c5b5282e12; no pin or sidecar adoption was performed.",
+    "No generated-file commit, merge, runtime publication, attestation, privileged execution, or promotion claim.",
+    "Full source/generated integration remains blocked until the publish-then-pin authority sequence and separate review complete."
+  ]
+}

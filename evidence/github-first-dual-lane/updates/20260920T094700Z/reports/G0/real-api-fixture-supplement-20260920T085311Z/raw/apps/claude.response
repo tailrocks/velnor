@@ -1,0 +1,29 @@
+HTTP/2.0 200 OK
+Access-Control-Allow-Origin: *
+Access-Control-Expose-Headers: ETag, Link, Location, Retry-After, X-GitHub-OTP, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Used, X-RateLimit-Resource, X-RateLimit-Reset, X-OAuth-Scopes, X-Accepted-OAuth-Scopes, X-Poll-Interval, X-GitHub-Media-Type, X-GitHub-SSO, X-GitHub-Request-Id, Deprecation, Sunset, Warning
+Cache-Control: private, max-age=60, s-maxage=60
+Content-Security-Policy: default-src 'none'
+Content-Type: application/json; charset=utf-8
+Date: Sun, 20 Sep 2026 08:54:34 GMT
+Etag: W/"a6989405ffd1342f79e82c856dfd30bfe1df34e9ccce491c7d2b12826527b696"
+Referrer-Policy: origin-when-cross-origin, strict-origin-when-cross-origin
+Server: github.com
+Strict-Transport-Security: max-age=31536000; includeSubdomains; preload
+Vary: Accept, Authorization, Cookie, X-GitHub-OTP,Accept-Encoding, Accept, X-Requested-With
+X-Accepted-Oauth-Scopes: 
+X-Content-Type-Options: nosniff
+X-Frame-Options: deny
+X-Github-Api-Version-Selected: 2022-11-28
+X-Github-Edge-Region: southeastasia
+X-Github-Media-Type: github.v3; format=json
+X-Github-Request-Id: F63F:32039F:1D3EFFD:1EC792B:6AAF9F4A
+X-Oauth-Client-Id: 178c6fc778ccc68e1d6a
+X-Oauth-Scopes: admin:org, delete_repo, gist, repo, workflow
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4648
+X-Ratelimit-Reset: 1789897133
+X-Ratelimit-Resource: core
+X-Ratelimit-Used: 352
+X-Xss-Protection: 0
+
+{"id":1236702,"client_id":"Iv23liqTIFEtdIu6Vn1r","slug":"claude","node_id":"A_kwHOBIuudM4AEt7e","owner":{"login":"anthropics","id":76263028,"node_id":"MDEyOk9yZ2FuaXphdGlvbjc2MjYzMDI4","avatar_url":"https://avatars.githubusercontent.com/u/76263028?v=4","gravatar_id":"","url":"https://api.github.com/users/anthropics","html_url":"https://github.com/anthropics","followers_url":"https://api.github.com/users/anthropics/followers","following_url":"https://api.github.com/users/anthropics/following{/other_user}","gists_url":"https://api.github.com/users/anthropics/gists{/gist_id}","starred_url":"https://api.github.com/users/anthropics/starred{/owner}{/repo}","subscriptions_url":"https://api.github.com/users/anthropics/subscriptions","organizations_url":"https://api.github.com/users/anthropics/orgs","repos_url":"https://api.github.com/users/anthropics/repos","events_url":"https://api.github.com/users/anthropics/events{/privacy}","received_events_url":"https://api.github.com/users/anthropics/received_events","type":"Organization","user_view_type":"public","site_admin":false},"name":"Claude","description":"Run Claude Code from your GitHub Pull Requests and Issues to respond to reviewer feedback, fix CI errors, or modify code, turning it into a virtual teammate that works alongside your development pipelines.\r\n\r\nThis is built on the publicly available Claude Code SDK.","external_url":"https://anthropic.com/claude-code","html_url":"https://github.com/apps/claude","created_at":"2025-04-30T17:54:24Z","updated_at":"2026-08-21T22:48:39Z","permissions":{"actions":"write","checks":"write","contents":"write","discussions":"write","issues":"write","members":"read","metadata":"read","pull_requests":"write","repository_hooks":"write","statuses":"read","workflows":"write"},"events":["check_run","check_suite","commit_comment","discussion","discussion_comment","issues","issue_comment","merge_queue_entry","pull_request","pull_request_review","pull_request_review_comment","push","release","status","sub_issues"]}

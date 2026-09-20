@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "kind": "disposable-draft-regeneration-aggregate-correction",
+  "captured_at": "2026-09-20T16:30:00+07:00",
+  "supersedes_metadata_only": {
+    "path": "G1/integration/draft-regeneration-f6.json",
+    "sha256": "dc8f01c18a8ab793bd32fe03cbcb935f2c0c9f607fe46d3d5be3ba62851b57c3",
+    "review_path": "G1/integration/review-disposable-render-f6cb27c4606103d0c879bbc60a6a060911ce7b91.md",
+    "review_sha256": "bd0f0f16856243fb3212484bbfede5812e612a15771d8870337f0f63a334f522"
+  },
+  "source": {
+    "branch": "codex/github-first-source-integration",
+    "commit": "f6cb27c4606103d0c879bbc60a6a060911ce7b91",
+    "generator_source_sha": "f6cb27c4606103d0c879bbc60a6a060911ce7b91",
+    "generator_source_closure": "9ac962a622605e3edcd5debbc9f4f990abe15cfda1ae1a663c066e00e58c356c",
+    "declared_generator_revision": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+    "declared_generator_contract": 54
+  },
+  "correction": {
+    "old_render_sha256": "4151e4af7308a7d4788afa26155afea03868cad0374ad955e31c6d7fb4f94b4d",
+    "corrected_render_sha256": "2e164a3d07f64bc608c82e0c96ff4648c88034f0387ca2a8629da00474cfddbd",
+    "file_count": 21,
+    "canonical_bytes_algorithm": {
+      "record_encoding": "lowercase file SHA-256, two ASCII spaces, relative UTF-8 path without a leading ./, then one LF",
+      "record_order": "LC_ALL=C bytewise sort of complete encoded records, not path order",
+      "aggregate": "SHA-256 over the exact concatenation of those sorted record bytes"
+    },
+    "reproduction_test": "(cd /private/tmp/g1-f6-draft-a.nYIwwv && find . -type f -print | sort | while IFS= read -r relpath; do clean_rel=${relpath#./}; digest=$(shasum -a 256 \"$relpath\" | awk '{print $1}'); printf '%s  %s\\n' \"$digest\" \"$clean_rel\"; done | LC_ALL=C sort | shasum -a 256)",
+    "independent_passes": [
+      "2e164a3d07f64bc608c82e0c96ff4648c88034f0387ca2a8629da00474cfddbd",
+      "2e164a3d07f64bc608c82e0c96ff4648c88034f0387ca2a8629da00474cfddbd"
+    ],
+    "repeat_match": true,
+    "per_file_hashes_unchanged_from_superseded_metadata": true
+  },
+  "artifact_boundary": {
+    "draft_a": "/private/tmp/g1-f6-draft-a.nYIwwv",
+    "draft_b": "/private/tmp/g1-f6-draft-b.XZiJ1N",
+    "draft_a_and_b_byte_identical": true,
+    "canonical_worktree_clean": true,
+    "canonical_generated_files_untouched": true,
+    "pin_untouched": true,
+    "canonical_drift_paths_remain": [
+      ".github/actionlint.yaml",
+      ".github/ci/project.toml",
+      ".github/workflows/ci-runtime-products.yml",
+      ".github/ci/.github-actions-generator-state"
+    ]
+  },
+  "limitations": [
+    "This is append-only evidence metadata; the superseded JSON remains immutable and is not rewritten.",
+    "No rerender was performed for this correction; only unchanged draft bytes were rehashed.",
+    "The corrected aggregate does not authorize generated-file adoption, generator pin promotion, publication, attestation, merge, or privileged execution."
+  ]
+}

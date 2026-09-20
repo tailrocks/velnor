@@ -1,0 +1,272 @@
+[
+  {
+    "number": 971,
+    "id": 4583234741,
+    "node_id": "PR_kwDOStNhZc8AAAABES6ctQ",
+    "html_url": "https://github.com/tailrocks/velnor/pull/971",
+    "state": "open",
+    "draft": false,
+    "body": null,
+    "user": {
+      "login": "donbeave",
+      "type": "User",
+      "id": 139017
+    },
+    "head": {
+      "label": "tailrocks:codex/fix-sccache-env-actionlint",
+      "ref": "codex/fix-sccache-env-actionlint",
+      "sha": "311a3d2658657aabca3183a74bcd300d0a158956",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "base": {
+      "label": "tailrocks:main",
+      "ref": "main",
+      "sha": "9307861d2668424d27012c3c736d48ab47f9012e",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "merge_commit_sha": "502845e391d4508d89d852002bca4f4d715e119a",
+    "updated_at": "2026-09-20T09:31:57Z"
+  },
+  {
+    "number": 968,
+    "id": 4581570162,
+    "node_id": "PR_kwDOStNhZc8AAAABERU2cg",
+    "html_url": "https://github.com/tailrocks/velnor/pull/968",
+    "state": "open",
+    "draft": true,
+    "body": "Establish a reproducible CI performance campaign for the workflow generator and its Jackin/Parallax consumers. Current commits preserve raw historical run/job timestamps, separate elapsed latency from aggregate execution, and define explicit tenfold targets and completion criteria.\n\nImplementation and controlled measurements are in progress. No speedup is claimed. The campaign record is plans/ci-performance/README.md; baseline observations retain source and effective PR merge revisions.\n\nValidation so far: current generator builds with --locked --no-default-features; dry-run scans succeed for all three checkouts; campaign documentation lint passes; historical timestamp arithmetic checked. Required coverage and trust boundaries remain in scope.",
+    "user": {
+      "login": "donbeave",
+      "type": "User",
+      "id": 139017
+    },
+    "head": {
+      "label": "tailrocks:codex/ci-performance-campaign",
+      "ref": "codex/ci-performance-campaign",
+      "sha": "2447cc8d96150a0efc71165d9cc5649fdabd9e96",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "base": {
+      "label": "tailrocks:main",
+      "ref": "main",
+      "sha": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "merge_commit_sha": null,
+    "updated_at": "2026-09-20T09:19:42Z"
+  },
+  {
+    "number": 963,
+    "id": 4580976198,
+    "node_id": "PR_kwDOStNhZc8AAAABEQwmRg",
+    "html_url": "https://github.com/tailrocks/velnor/pull/963",
+    "state": "open",
+    "draft": false,
+    "body": "## Purpose\n\nThis PR is the signed-history replacement for #961. The previous PR imported\n`857646a0` without a sign-off, and repository DCO remediation is disabled. That\ncommit duplicated the content already present in `main`, so this branch starts\nfrom current `main` and cherry-picks only the independently approved,\nproperly-attributed source units. PR #961 remains open until this replacement\npasses independent review and hosted checks.\n\n## Exact scope\n\n- base: `main` at `b5a4b4afaa6ca807927cacc03659b570a895dd5c`\n- head: `fb78d85d464fd5082e5c161922afd7942380fabc`\n- 16 approved source commits plus one generated metadata refresh\n- generator output refreshed only in `.github/ci/project.toml` and\n  `.github/ci/.github-actions-generator-state`\n- no workflow YAML, fleet rollout, consumer migration, or merge/release action\n\nThe replacement tree is exactly equal to PR #961 head\n`5b9a16a620951b65bbfe0a5cf7b1ffe04a317303`; `git diff` between those trees is\nempty. The replacement has 17 commits ahead of current `main`; every one has a\n`Signed-off-by` and `Co-authored-by: Codex <codex@openai.com>` trailer. The\nunsigned imported `857646a0` is absent.\n\n## Local verification\n\n- `cargo fmt --all -- --check`\n- `git diff --check`\n- `cargo test -p velnor-tools --all-targets` — 246 passed\n- `cargo test -p velnor-workflow --all-features --lib` — 1804 passed\n- `cargo test --workspace --exclude velnor-runner` — 3019 passed\n- `cargo clippy --workspace --all-targets -- -D warnings` — passed\n- `cargo clippy -p velnor-workflow --all-features --all-targets -- -D warnings` — passed\n- authoritative workflow generator `--check` — passed\n\nPlease perform a fresh exact diff review and hosted CI/DCO review. Do not merge\nuntil those gates and independent review are complete.\n",
+    "user": {
+      "login": "donbeave",
+      "type": "User",
+      "id": 139017
+    },
+    "head": {
+      "label": "tailrocks:codex/github-first-g3-integration-signed",
+      "ref": "codex/github-first-g3-integration-signed",
+      "sha": "056362aadb738279924ef05597f9a014392f48bf",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "base": {
+      "label": "tailrocks:main",
+      "ref": "main",
+      "sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "merge_commit_sha": null,
+    "updated_at": "2026-09-20T04:12:32Z"
+  },
+  {
+    "number": 962,
+    "id": 4580915543,
+    "node_id": "PR_kwDOStNhZc8AAAABEQs5Vw",
+    "html_url": "https://github.com/tailrocks/velnor/pull/962",
+    "state": "open",
+    "draft": false,
+    "body": "## Summary\n\n- Integrate current main and preserve hosted-only automatic/default-dispatch recovery while retaining the Velnor provider.\n- Route every hosted aarch64 release, preview Debian, guest, and image producer matrix row to ubuntu-24.04-arm.\n- Add native C/C++/ar/OpenSSL-family preflight and explicit Cargo linker variables; remove the misleading cross-compiler install from native arm64 guest setup.\n- Regenerate .github workflows through the source-built renderer.\n\n## Verification\n\n- Source-built scan: 17 units, github-hosted plus preserved Velnor universe.\n- Focused release tests: 102 passed.\n- Full velnor-workflow lib suite: 1768 passed.\n- Clippy with all features: clean.\n- actionlint preview.yml and release.yml: clean.\n- Generator dry-run after regeneration: 0 files would change.\n\n## Bootstrap note\n\nThe generated tree intentionally retains the currently published runtime pin 0dc79895ff1c5e88be7c3822c437e1c5b5282e12. The old pinned renderer cannot parse the typed verification_providers field, so pinned --check remains blocked until the new source renderer is bootstrapped/published and the pin is adopted. This PR makes no G1 completion claim; hosted PR and post-merge stable/preview evidence remain required.",
+    "user": {
+      "login": "donbeave",
+      "type": "User",
+      "id": 139017
+    },
+    "head": {
+      "label": "tailrocks:codex/github-first-hosted-g1-security-3ae",
+      "ref": "codex/github-first-hosted-g1-security-3ae",
+      "sha": "43ba3b414f245bf3aa9176afce5bf97f2d1e5235",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "base": {
+      "label": "tailrocks:main",
+      "ref": "main",
+      "sha": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "merge_commit_sha": null,
+    "updated_at": "2026-09-20T08:01:06Z"
+  },
+  {
+    "number": 961,
+    "id": 4580862315,
+    "node_id": "PR_kwDOStNhZc8AAAABEQppaw",
+    "html_url": "https://github.com/tailrocks/velnor/pull/961",
+    "state": "open",
+    "draft": false,
+    "body": "## Scope\n\nG0 tools/generator source preparation only. This PR carries the independently\napproved source integration chain:\n\n- estate scope contract\n- strict JSON validation\n- lane comparison\n- generic Skills scanner and validation\n- Rust include scanner/consumer support\n\nIt does not migrate consumers, alter fleet policy, release artifacts, or roll\nout the 32-repository estate. G1/G2 rollout remains blocked.\n\n## Exact refs\n\n- Base: `main` at `b5a4b4afaa6ca807927cacc03659b570a895dd5c`\n- Head: `codex/github-first-g3-integration` at\n  `5b9a16a620951b65bbfe0a5cf7b1ffe04a317303`\n- Current graph merge-base: `b5a4b4afaa6ca807927cacc03659b570a895dd5c`\n- Fresh-main synchronization merge:\n  `5913fa6ff07ad08fb42dc78ae1530e9f0e11b308`\n- Approved source integration review:\n  `G1/integration/review-857646a.md`\n\nThe synchronization merge had no content delta against its first parent.\nOriginal source commits were preserved with `cherry-pick -x`; signed-off and\nCodex co-author trailers remain intact.\n\n## Authoritative generation\n\nThe generator was run from `crates/velnor-workflow` after dry-run review:\n\n```sh\nmbx run --locked --manifest-path Cargo.toml -- --plain --force ../..\nmbx run --locked --manifest-path Cargo.toml -- --plain --check ../..\n```\n\nOnly these generator-owned metadata files changed:\n\n- `.github/ci/project.toml`\n- `.github/ci/.github-actions-generator-state`\n\nThe semantic change is the newly detected\n`rust-test-targets:velnor-tools:1`, with matching scan/output hashes. No\nworkflow YAML, consumer documentation, fleet, or rollout file changed.\n\n## Verification\n\n- `cargo fmt --all -- --check`: pass\n- `git diff --check`: pass\n- workspace Clippy, all targets, `-D warnings`: pass\n- `cargo test -p velnor-tools --all-targets`: 246 passed\n- `cargo test -p velnor-workflow --all-features --lib`: 1,804 passed\n- workflow all-features Clippy: pass\n- `cargo test --workspace --exclude velnor-runner`: 3,019 passed\n- generator `--check`: pass\n- eight pinned real Skills repositories: scan, Bun 1.4.0 helper syntax,\n  and docs-generator validation completed; no consumer files changed\n\nKnown baseline caveats remain documented in the integration evidence:\ntwo no-default-features closure feature tests fail identically on the base, and\nthe full workspace benchmark is host-sensitive while its targeted base and\nhead runs pass.\n\n## Review gate\n\nPlease review the complete final diff and all paginated review feedback and\nCI results. Do not merge until the independent exact-delta review and hosted\nchecks pass. This PR is source preparation only; no fleet rollout or consumer\ngeneration is authorized here.\n",
+    "user": {
+      "login": "donbeave",
+      "type": "User",
+      "id": 139017
+    },
+    "head": {
+      "label": "tailrocks:codex/github-first-g3-integration",
+      "ref": "codex/github-first-g3-integration",
+      "sha": "5b9a16a620951b65bbfe0a5cf7b1ffe04a317303",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "base": {
+      "label": "tailrocks:main",
+      "ref": "main",
+      "sha": "b5a4b4afaa6ca807927cacc03659b570a895dd5c",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "merge_commit_sha": null,
+    "updated_at": "2026-09-19T22:12:11Z"
+  },
+  {
+    "number": 960,
+    "id": 4580831765,
+    "node_id": "PR_kwDOStNhZc8AAAABEQnyFQ",
+    "html_url": "https://github.com/tailrocks/velnor/pull/960",
+    "state": "open",
+    "draft": false,
+    "body": "## Root cause\nThe Preview Debian job downloaded `preview-metadata` into checkout-relative `metadata/` immediately before the release build. The fail-closed identity guard correctly observed `?? metadata/` and rejected the dirty tree.\n\n## Fix\nGenerated release/preview Debian jobs download metadata under `${{ runner.temp }}/velnor-release-metadata`; shell staging and release-tool calls use that temp directory. The clean-tree identity guard remains unchanged. Both schema generators and generated workflows are covered.\n\n## Evidence\n- Failing Preview run: 35468978367, amd64 job 105968085418, main `b5a4b4afaa6ca807927cacc03659b570a895dd5c`.\n- Local focused generator tests: `cargo test --locked -p velnor-workflow native_preview_produces_debs_with_rolling_identity` (2 passed).\n- Generator `--check`, fmt, and package clippy (`-D warnings`) pass.\n- ARM64 toolchain failure is separate and untouched.\n\nNo release or merge performed by this branch.\n",
+    "user": {
+      "login": "donbeave",
+      "type": "User",
+      "id": 139017
+    },
+    "head": {
+      "label": "tailrocks:codex/g1-preview-amd64-dirty-identity",
+      "ref": "codex/g1-preview-amd64-dirty-identity",
+      "sha": "c8f7a2b353f9d2d6a60d3ad8bb2dc6299a108ceb",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "base": {
+      "label": "tailrocks:main",
+      "ref": "main",
+      "sha": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "merge_commit_sha": "b27461728395c6ba4ff228500ca863d0271e4c7b",
+    "updated_at": "2026-09-19T23:21:50Z"
+  },
+  {
+    "number": 957,
+    "id": 4580474770,
+    "node_id": "PR_kwDOStNhZc8AAAABEQR_kg",
+    "html_url": "https://github.com/tailrocks/velnor/pull/957",
+    "state": "open",
+    "draft": false,
+    "body": "Require explicit highest stable GitHub-hosted macOS major per required architecture; current macOS 26 labels are macos-26 (arm64) and macos-26-intel (Intel). Reject macos-latest, macOS 15, older-major fallback, architecture substitution, and floating action/image refs. Validation: git diff --check; only AGENTS.md changed. Sources: https://github.com/actions/runner-images#available-images and https://docs.github.com/en/actions/reference/runners/github-hosted-runners. Do not merge from this branch.",
+    "user": {
+      "login": "donbeave",
+      "type": "User",
+      "id": 139017
+    },
+    "head": {
+      "label": "tailrocks:codex/latest-macos-policy",
+      "ref": "codex/latest-macos-policy",
+      "sha": "92387e88c32f933a9061b819256e535662655cb2",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "base": {
+      "label": "tailrocks:main",
+      "ref": "main",
+      "sha": "b5a4b4afaa6ca807927cacc03659b570a895dd5c",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "merge_commit_sha": null,
+    "updated_at": "2026-09-19T22:20:33Z"
+  },
+  {
+    "number": 952,
+    "id": 4568108722,
+    "node_id": "PR_kwDOStNhZc8AAAABEEfOsg",
+    "html_url": "https://github.com/tailrocks/velnor/pull/952",
+    "state": "open",
+    "draft": false,
+    "body": "## Defects (B3 tag v0.1.277, run 35332416794)\n\n**D1 — release docker legs lack the seed lifecycle.** `full_commands` consumes `.velnor-docker-cache/seed` via `--build-context velnor-cache-seed`, but the release renderer suppresses the generic restore for `mutable_mount_seed` units (`s2/primitives/mod.rs`) and never emitted the seed lifecycle in its place (`render_mutable_mount_seed_restore_from_input` is unit-workflow-only). Both providers' docker legs failed with `stat .velnor-docker-cache/seed: no such file or directory`.\n\n**D4 — release workflow leg lacks the pin fetch.** The `--plain --check` guard resolves `closure_of_tree(pin)` from local history, but release checkouts are shallow and release legs never fetched the pin commit (the `Fetch D19 pin history` step is unit-workflow-only). The generator leg failed with `revision fdeed261… is not a commit`.\n\n## Fix (generator source, s2 pipeline)\n\n- `s2/primitives/ir.rs`: new `render_mutable_mount_seed_restore_for_unit` renders the seed restore + context preparation for a concrete `(provider, unit)` through the shared `render_seed_restore_steps` and the `unit_snapshot` grammar, so release legs share the seed CI saves (verified: release key compat `743cc362f16c` equals the CI caller's `seed_compat`). New shared `D19_PIN_FETCH_COMMANDS`; the unit-workflow step renders through it byte-identically (regen touched no unit workflow).\n- `s2/primitives/release.rs`: `render_release_unit_job` emits the seed lifecycle for seed units on every provider, and a hosted-only `Fetch D19 pin history` step (new `render_release_pin_fetch`) before the checks for units running `--plain --check`. Local legs already provision the pin via the pinned-renderer step.\n- Regen: `release.yml` + generator state only. `--dry-run` reports 0.\n\n## Regression tests\n\n- `native_release_seed_legs_restore_the_docker_seed_on_both_providers`: both legs restore + mkdir before run, generic restore stays suppressed, key carries concrete provider segments. Fails pre-fix.\n- `native_release_hosted_check_leg_fetches_the_d19_pin_before_running`: hosted leg fetches before run; velnor leg carries the pinned-renderer step instead. Fails pre-fix.\n\n## Gates\n\n`cargo test -p velnor-workflow` (1735 lib + all integration suites green), `cargo clippy -p velnor-workflow --all-targets -- -D warnings` clean, `cargo fmt --check` clean, `actionlint` clean, `--plain --force` then `--dry-run` = 0.\n\n## Follow-up (not in this PR)\n\nA pin-bump to the merge commit will be needed after merge so the declared D19 pin renders this tree.",
+    "user": {
+      "login": "donbeave",
+      "type": "User",
+      "id": 139017
+    },
+    "head": {
+      "label": "tailrocks:fix/release-leg-seed-pin-fetch",
+      "ref": "fix/release-leg-seed-pin-fetch",
+      "sha": "a5c1c0bd5c92c4c52d58ccb21042b1b2c0b08637",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "base": {
+      "label": "tailrocks:main",
+      "ref": "main",
+      "sha": "3123f8ae63a1fe98fe1d4dc86fb25b212defcd59",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "merge_commit_sha": null,
+    "updated_at": "2026-09-18T11:07:20Z"
+  },
+  {
+    "number": 948,
+    "id": 4567703887,
+    "node_id": "PR_kwDOStNhZc8AAAABEEGhTw",
+    "html_url": "https://github.com/tailrocks/velnor/pull/948",
+    "state": "open",
+    "draft": true,
+    "body": "Authoring-only C1 host-setup for work-plan STEP C1 action 3 (spec section 6 + 6.1). Zero bastion writes; execution waits for the B4+C gates and a dedicated C-gate infra agent.\n\n## Files (all new under `plans/bastion-three-provider-ci/c1-host-setup/`)\n- `provision-bastion.sh` — idempotent provisioner (`--check` / apply), step-mapped B1..C5 to the ansible source\n- `pins.env` — exact docker-ce set pins + key fingerprints + sources + 2026-09-18 resolution date\n- `targets.env` — bastion inventory entry (shell form of the `hosts.ini` pattern)\n- `README.md` — preconditions + exact execution command for the C-gate agent, decisions, MUST-NOT compliance, evidence\n\nShell was chosen over ansible to match repo conventions (`scripts/*.sh`, no ansible tooling here).\n\n## Key properties\n- Pins (2026-09-18, trixie amd64): docker-ce(-cli) `5:29.8.1`, containerd.io `2.3.5`, buildx `0.37.1`, compose `5.5.1`\n- Docker APT key fingerprinted fail-closed against two independent references (Ubuntu keyserver + published docs fingerprint); trixie InRelease verifies Good\n- Drain gates (exit 2) before dockerd-affecting changes; holds on docker set (+velnor-runner if present); no upgrade/dist-upgrade/autoremove/prune anywhere\n- Pre-flight route read precedes the pool decision; pools default off (selene-style), refused on conflict even when requested\n- Cosmetics (terminfo/shell) opt-in only, never abort; Drain-Docker block, drive-init, per-repo reservations, mise/nushell/holla, release-upgrade path all excluded with rationale in README\n\n## Validation (no host touched)\n- `bash -n` + `shellcheck` clean; MUST-NOT grep clean (see README for the exact audit)\n- Full `debian:13` (amd64) container matrix: `--check` purity, apply convergence, second `--check` exit 0, cosmetics landing, pools plan, pool-conflict / fingerprint-mismatch / drain refusals + ALLOW override. Dry-run caught and fixed 3 real bugs.\n\n## For the C-gate agent\nExecution command + preconditions are in the README. Re-verify pins at gate time if the date moved on.",
+    "user": {
+      "login": "donbeave",
+      "type": "User",
+      "id": 139017
+    },
+    "head": {
+      "label": "tailrocks:c1/bastion-host-setup",
+      "ref": "c1/bastion-host-setup",
+      "sha": "ab82b08746ec312558981f8461a32a1e3350d802",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "base": {
+      "label": "tailrocks:main",
+      "ref": "main",
+      "sha": "c2883fb3b1545127e89f290d853dd286e1ce805c",
+      "repo": "tailrocks/velnor",
+      "fork": false
+    },
+    "merge_commit_sha": null,
+    "updated_at": "2026-09-18T10:51:46Z"
+  }
+]

@@ -1,0 +1,28 @@
+HTTP/2.0 200 OK
+Access-Control-Allow-Origin: *
+Access-Control-Expose-Headers: ETag, Link, Location, Retry-After, X-GitHub-OTP, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Used, X-RateLimit-Resource, X-RateLimit-Reset, X-OAuth-Scopes, X-Accepted-OAuth-Scopes, X-Poll-Interval, X-GitHub-Media-Type, X-GitHub-SSO, X-GitHub-Request-Id, Deprecation, Sunset, Warning
+Cache-Control: private, max-age=60, s-maxage=60
+Content-Security-Policy: default-src 'none'
+Content-Type: application/json; charset=utf-8
+Date: Sun, 20 Sep 2026 08:53:19 GMT
+Etag: W/"1ecbf40c4a492d19b33464284f9033452b5e51d6245797b8d7ae8d21372939a1"
+Link: <https://api.github.com/repositories/1200197694/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=3>; rel="prev", <https://api.github.com/repositories/1200197694/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=1>; rel="first"
+Referrer-Policy: origin-when-cross-origin, strict-origin-when-cross-origin
+Server: github.com
+Strict-Transport-Security: max-age=31536000; includeSubdomains; preload
+Vary: Accept, Authorization, Cookie, X-GitHub-OTP,Accept-Encoding, Accept, X-Requested-With
+X-Accepted-Oauth-Scopes: 
+X-Content-Type-Options: nosniff
+X-Frame-Options: deny
+X-Github-Api-Version-Selected: 2022-11-28
+X-Github-Edge-Region: southeastasia
+X-Github-Media-Type: github.v3; format=json
+X-Github-Request-Id: 23A9:2E7AE0:1D4105B:1EC9AB4:6AAF9EFE
+X-Oauth-Client-Id: 178c6fc778ccc68e1d6a
+X-Oauth-Scopes: admin:org, delete_repo, gist, repo, workflow
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4682
+X-Ratelimit-Reset: 1789897133
+X-Ratelimit-Resource: core
+X-Ratelimit-Used: 318
+X-Xss-Protection: 0

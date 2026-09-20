@@ -1,0 +1,47 @@
+{
+  "schema_version": "stable_external_evidence_checkpoint.v1",
+  "checkpoint_id": "20260920T094700Z",
+  "capture_cutoff_utc": "2026-09-20T09:47:00Z",
+  "parent_checkpoint": "339527872a63d5e36ed172fee267d500fdde9510",
+  "source_root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence",
+  "destination_root": "evidence/github-first-dual-lane/updates/20260920T094700Z",
+  "integrity": {
+    "hash_algorithm": "SHA-256",
+    "source_reads_bracketed_copy": true,
+    "regular_non_symlink_only": true,
+    "source_destination_reconciled": true,
+    "source_file_count": 134,
+    "source_bytes": 1665184,
+    "groups": {
+      "G0": {"files": 125, "bytes": 1619850},
+      "G1": {"files": 9, "bytes": 45334}
+    },
+    "inventory": "INVENTORY.tsv"
+  },
+  "included": {
+    "previous_packaging_review_sha256": "9ee9368085dd6648b36a0eb97ecac18d662031aa4be2c6782c682bdd76519a69",
+    "docs_review_sha256": "b010c42f2a9afa08dc9b9f285719caeccf65df86a3d141b938b4bc115579c5b4",
+    "fixture_original_raw_file_count": 72,
+    "fixture_original_manifest_sha256": "1146764830a0e6e31518dd05abd6c00e6627f554d6dbbc97a55d721facabe70a",
+    "fixture_corrected_manifest_sha256": "fea65b61ff1668ff58762066b207ac1c9534452d328080f1f0680e7cb571447e",
+    "fixture_corrected_review_sha256": "d4830c96fcf1b34f593a951ffbe424f847946d74bc46b11e4867b16abc30df6c",
+    "checker_successor_review_sha256": "19ebb74504a7ea30dc27466e3ae21130f9fe513b2e7c81041d4514e90df095c0",
+    "retention_review_sha256": "3b6202c7063a4f027c96c30062d4b9298ad0ba2a57644b92c12bacb2d783ae73",
+    "retention_clarified_review_sha256": "2f1baf4700fa165d4e8a4bc8de82fdafbd86c84368997148b761dabc6c4666f4",
+    "apt_review_sha256": "220b9b98991061b939f2be17a65b0d56d02e6183c878b6980f54c6c7ad36c99e",
+    "native_review_sha256": "d0df4743c4d3f0f74c9216d468cad3bf3ebbd398076fc13c08235f8e6c06eb80",
+    "apt_producer_review_sha256": "d39272de8431e35a037f25d5ba96ba9ef2c207a5db8fca8e08866ad77de62413",
+    "current_pr_snapshot_review_sha256": "87714d0cd584e8f2aa816b7cda54fc2f6f6f2844b109c91dbee74732286681cb",
+    "current_pr_snapshot_manifest_sha256": "27325132cc58d532fb597df659327f35dc97df798c4647781456135a950447b5",
+    "draft_original_sha256": "dc8f01c18a8ab793bd32fe03cbcb935f2c0c9f607fe46d3d5be3ba62851b57c3",
+    "draft_correction_sha256": "05d50ce9ffa162a47a15516bbf5025813f569dac9380a291b59a53932866b5ef",
+    "draft_review_sha256": "bd0f0f16856243fb3212484bbfede5812e612a15771d8870337f0f63a334f522",
+    "draft_correction_review_sha256": "d072b0fa00e85de9b922cbc768aaab622063f70a4fbea33951d1bc5e14791443"
+  },
+  "excluded": {
+    "unresolved_requested_source_token": "sourcef64b203",
+    "reason": "No matching regular file, filename, or content reference existed in the source evidence tree at the fixed cutoff.",
+    "attestation": "none",
+    "gate_status": "not-evaluated"
+  }
+}

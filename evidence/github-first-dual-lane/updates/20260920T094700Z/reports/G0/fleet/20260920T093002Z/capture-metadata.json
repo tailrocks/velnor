@@ -1,0 +1,30 @@
+{
+  "repository": "tailrocks/velnor",
+  "default_branch": "main",
+  "principal": "donbeave",
+  "capture_directory_utc": "20260920T093002Z",
+  "initial_capture_started_utc": "2026-09-20T09:31:09Z",
+  "initial_http_dates_utc": {
+    "repo": "2026-09-20T09:31:18Z",
+    "main_ref": "2026-09-20T09:31:18Z",
+    "open_prs": "2026-09-20T09:31:18Z"
+  },
+  "reread_capture_started_utc": "2026-09-20T09:33:50Z",
+  "reread_http_dates_utc": {
+    "main_ref": "2026-09-20T09:33:57Z",
+    "open_prs": "2026-09-20T09:33:58Z"
+  },
+  "finalized_utc": "2026-09-20T09:37:22Z",
+  "current_main_sha_initial": "9307861d2668424d27012c3c736d48ab47f9012e",
+  "current_main_sha_reread": "9307861d2668424d27012c3c736d48ab47f9012e",
+  "open_pr_count_initial": 9,
+  "open_pr_count_reread": 9,
+  "pagination_pages_initial": 1,
+  "pagination_pages_reread": 1,
+  "api_errors": [],
+  "read_only": true,
+  "credentials_saved": false,
+  "checks_logs_history_fetched": false,
+  "github_writes_performed": false,
+  "source_edits_performed": false
+}

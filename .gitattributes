@@ -8,3 +8,6 @@ evidence/github-first-dual-lane/updates/**/reports/G0/fleet/skills-raw-*/auth-id
 # Later bounded raw fixtures and raw-manifest inventory are also byte-sensitive.
 evidence/github-first-dual-lane/updates/**/reports/G0/real-api-fixture-corpus-*/raw/** -text -filter
 evidence/github-first-dual-lane/updates/**/reports/G0/g0-run-metadata-capture-*/raw-manifest.json -text -filter
+# The bounded fixture supplement and PR snapshot retain raw HTTP/API bytes.
+evidence/github-first-dual-lane/updates/**/reports/G0/real-api-fixture-supplement-*/raw/** -text -filter
+evidence/github-first-dual-lane/updates/**/reports/G0/fleet/20260920T093002Z/** -text -filter

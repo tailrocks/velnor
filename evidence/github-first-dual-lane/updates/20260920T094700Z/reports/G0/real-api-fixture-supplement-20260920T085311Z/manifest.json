@@ -1,0 +1,756 @@
+{
+  "schema_version": "real_github_api_check_suite_supplement_manifest.v1",
+  "artifact_kind": "immutable_real_github_api_check_suite_and_app_fixture_supplement",
+  "corpus_created_at_utc": "2026-09-20T08:53:11Z",
+  "status": "read_only_source_supplement_not_gate",
+  "scope": {
+    "base_corpus": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/real-api-fixture-corpus-20260920T080318Z",
+    "intended_consumer": "g0_checker",
+    "coordination": "g3_distribution_consumers",
+    "read_only_only": true,
+    "no_source_edits": true,
+    "no_dispatch": true,
+    "no_rollout": true
+  },
+  "auth": {
+    "principal": "donbeave",
+    "method": "authenticated read-only GitHub CLI GET",
+    "credential_policy": "no Authorization header, bearer token, or token value copied",
+    "observed_oauth_scopes": [
+      "admin:org",
+      "delete_repo",
+      "gist",
+      "repo",
+      "workflow"
+    ],
+    "observed_client_id": "178c6fc778ccc68e1d6a"
+  },
+  "capture": {
+    "command_pattern": "gh api --method GET --include <endpoint>",
+    "method": "GET only",
+    "authenticated": true,
+    "response_envelope": "Each raw/*.response retains the combined status/header/body bytes. Split *.http/*.body files are retained for mapper convenience.",
+    "captured_window_utc": "2026-09-20T08:53:12Z/2026-09-20T08:54:34Z"
+  },
+  "pagination": {
+    "query": "per_page=1&page=N",
+    "connections": [
+      {
+        "repository": "tailrocks/velnor",
+        "commit_sha": "df9fb272c025f76cc8711560209afcdfd6cc4e00",
+        "endpoint": "/repos/tailrocks/velnor/commits/{sha}/check-suites",
+        "per_page": 1,
+        "pages": 3,
+        "total_count": 3
+      },
+      {
+        "repository": "jackin-project/homebrew-tap",
+        "commit_sha": "c501e90d014c207234ed94ea41f7a1c9b6ea0c7c",
+        "endpoint": "/repos/jackin-project/homebrew-tap/commits/{sha}/check-suites",
+        "per_page": 1,
+        "pages": 4,
+        "total_count": 4
+      }
+    ],
+    "all_pages_captured": true,
+    "link_headers_in_request_records": true
+  },
+  "request_records": [
+    {
+      "id": "velnor-check-suites-page-1",
+      "repository": "tailrocks/velnor",
+      "method": "GET",
+      "url": "https://api.github.com/repos/tailrocks/velnor/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-suites?per_page=1&page=1",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:53:12 GMT",
+      "page": 1,
+      "has_next": true,
+      "link_header": "<https://api.github.com/repositories/1255367013/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-suites?per_page=1&page=2>; rel=\"next\", <https://api.github.com/repositories/1255367013/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-suites?per_page=1&page=3>; rel=\"last\"",
+      "raw": {
+        "response": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0001.response",
+        "http": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0001.http",
+        "body": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0001.body",
+        "stderr": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0001.stderr"
+      }
+    },
+    {
+      "id": "velnor-check-suites-page-2",
+      "repository": "tailrocks/velnor",
+      "method": "GET",
+      "url": "https://api.github.com/repos/tailrocks/velnor/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-suites?per_page=1&page=2",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:53:13 GMT",
+      "page": 2,
+      "has_next": true,
+      "link_header": "<https://api.github.com/repositories/1255367013/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-suites?per_page=1&page=1>; rel=\"prev\", <https://api.github.com/repositories/1255367013/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-suites?per_page=1&page=3>; rel=\"next\", <https://api.github.com/repositories/1255367013/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-suites?per_page=1&page=3>; rel=\"last\", <https://api.github.com/repositories/1255367013/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-suites?per_page=1&page=1>; rel=\"first\"",
+      "raw": {
+        "response": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0002.response",
+        "http": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0002.http",
+        "body": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0002.body",
+        "stderr": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0002.stderr"
+      }
+    },
+    {
+      "id": "velnor-check-suites-page-3",
+      "repository": "tailrocks/velnor",
+      "method": "GET",
+      "url": "https://api.github.com/repos/tailrocks/velnor/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-suites?per_page=1&page=3",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:53:15 GMT",
+      "page": 3,
+      "has_next": false,
+      "link_header": "<https://api.github.com/repositories/1255367013/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-suites?per_page=1&page=2>; rel=\"prev\", <https://api.github.com/repositories/1255367013/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-suites?per_page=1&page=1>; rel=\"first\"",
+      "raw": {
+        "response": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0003.response",
+        "http": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0003.http",
+        "body": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0003.body",
+        "stderr": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0003.stderr"
+      }
+    },
+    {
+      "id": "homebrew-check-suites-page-1",
+      "repository": "jackin-project/homebrew-tap",
+      "method": "GET",
+      "url": "https://api.github.com/repos/jackin-project/homebrew-tap/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=1",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:53:16 GMT",
+      "page": 1,
+      "has_next": true,
+      "link_header": "<https://api.github.com/repositories/1200197694/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=2>; rel=\"next\", <https://api.github.com/repositories/1200197694/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=4>; rel=\"last\"",
+      "raw": {
+        "response": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0001.response",
+        "http": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0001.http",
+        "body": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0001.body",
+        "stderr": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0001.stderr"
+      }
+    },
+    {
+      "id": "homebrew-check-suites-page-2",
+      "repository": "jackin-project/homebrew-tap",
+      "method": "GET",
+      "url": "https://api.github.com/repos/jackin-project/homebrew-tap/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=2",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:53:17 GMT",
+      "page": 2,
+      "has_next": true,
+      "link_header": "<https://api.github.com/repositories/1200197694/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=1>; rel=\"prev\", <https://api.github.com/repositories/1200197694/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=3>; rel=\"next\", <https://api.github.com/repositories/1200197694/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=4>; rel=\"last\", <https://api.github.com/repositories/1200197694/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=1>; rel=\"first\"",
+      "raw": {
+        "response": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0002.response",
+        "http": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0002.http",
+        "body": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0002.body",
+        "stderr": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0002.stderr"
+      }
+    },
+    {
+      "id": "homebrew-check-suites-page-3",
+      "repository": "jackin-project/homebrew-tap",
+      "method": "GET",
+      "url": "https://api.github.com/repos/jackin-project/homebrew-tap/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=3",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:53:18 GMT",
+      "page": 3,
+      "has_next": true,
+      "link_header": "<https://api.github.com/repositories/1200197694/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=2>; rel=\"prev\", <https://api.github.com/repositories/1200197694/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=4>; rel=\"next\", <https://api.github.com/repositories/1200197694/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=4>; rel=\"last\", <https://api.github.com/repositories/1200197694/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=1>; rel=\"first\"",
+      "raw": {
+        "response": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0003.response",
+        "http": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0003.http",
+        "body": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0003.body",
+        "stderr": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0003.stderr"
+      }
+    },
+    {
+      "id": "homebrew-check-suites-page-4",
+      "repository": "jackin-project/homebrew-tap",
+      "method": "GET",
+      "url": "https://api.github.com/repos/jackin-project/homebrew-tap/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=4",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:53:19 GMT",
+      "page": 4,
+      "has_next": false,
+      "link_header": "<https://api.github.com/repositories/1200197694/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=3>; rel=\"prev\", <https://api.github.com/repositories/1200197694/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-suites?per_page=1&page=1>; rel=\"first\"",
+      "raw": {
+        "response": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0004.response",
+        "http": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0004.http",
+        "body": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0004.body",
+        "stderr": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0004.stderr"
+      }
+    },
+    {
+      "id": "homebrew-tap-check-suite-96059348120",
+      "repository": "jackin-project/homebrew-tap",
+      "method": "GET",
+      "url": "https://api.github.com/repos/jackin-project/homebrew-tap/check-suites/96059348120",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:54:32 GMT",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "response": "raw/check-suites/homebrew-tap/suite-96059348120.response",
+        "http": "raw/check-suites/homebrew-tap/suite-96059348120.http",
+        "body": "raw/check-suites/homebrew-tap/suite-96059348120.body",
+        "stderr": "raw/check-suites/homebrew-tap/suite-96059348120.stderr"
+      }
+    },
+    {
+      "id": "homebrew-tap-check-suite-96059348227",
+      "repository": "jackin-project/homebrew-tap",
+      "method": "GET",
+      "url": "https://api.github.com/repos/jackin-project/homebrew-tap/check-suites/96059348227",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:54:33 GMT",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "response": "raw/check-suites/homebrew-tap/suite-96059348227.response",
+        "http": "raw/check-suites/homebrew-tap/suite-96059348227.http",
+        "body": "raw/check-suites/homebrew-tap/suite-96059348227.body",
+        "stderr": "raw/check-suites/homebrew-tap/suite-96059348227.stderr"
+      }
+    },
+    {
+      "id": "homebrew-tap-check-suite-96059348318",
+      "repository": "jackin-project/homebrew-tap",
+      "method": "GET",
+      "url": "https://api.github.com/repos/jackin-project/homebrew-tap/check-suites/96059348318",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:53:23 GMT",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "response": "raw/check-suites/homebrew-tap/suite-96059348318.response",
+        "http": "raw/check-suites/homebrew-tap/suite-96059348318.http",
+        "body": "raw/check-suites/homebrew-tap/suite-96059348318.body",
+        "stderr": "raw/check-suites/homebrew-tap/suite-96059348318.stderr"
+      }
+    },
+    {
+      "id": "homebrew-tap-check-suite-96059350728",
+      "repository": "jackin-project/homebrew-tap",
+      "method": "GET",
+      "url": "https://api.github.com/repos/jackin-project/homebrew-tap/check-suites/96059350728",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:53:24 GMT",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "response": "raw/check-suites/homebrew-tap/suite-96059350728.response",
+        "http": "raw/check-suites/homebrew-tap/suite-96059350728.http",
+        "body": "raw/check-suites/homebrew-tap/suite-96059350728.body",
+        "stderr": "raw/check-suites/homebrew-tap/suite-96059350728.stderr"
+      }
+    },
+    {
+      "id": "velnor-check-suite-96108219979",
+      "repository": "tailrocks/velnor",
+      "method": "GET",
+      "url": "https://api.github.com/repos/tailrocks/velnor/check-suites/96108219979",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:53:20 GMT",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "response": "raw/check-suites/velnor/suite-96108219979.response",
+        "http": "raw/check-suites/velnor/suite-96108219979.http",
+        "body": "raw/check-suites/velnor/suite-96108219979.body",
+        "stderr": "raw/check-suites/velnor/suite-96108219979.stderr"
+      }
+    },
+    {
+      "id": "velnor-check-suite-96108224766",
+      "repository": "tailrocks/velnor",
+      "method": "GET",
+      "url": "https://api.github.com/repos/tailrocks/velnor/check-suites/96108224766",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:53:21 GMT",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "response": "raw/check-suites/velnor/suite-96108224766.response",
+        "http": "raw/check-suites/velnor/suite-96108224766.http",
+        "body": "raw/check-suites/velnor/suite-96108224766.body",
+        "stderr": "raw/check-suites/velnor/suite-96108224766.stderr"
+      }
+    },
+    {
+      "id": "velnor-check-suite-96108227551",
+      "repository": "tailrocks/velnor",
+      "method": "GET",
+      "url": "https://api.github.com/repos/tailrocks/velnor/check-suites/96108227551",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:53:22 GM",
+      "page": 1,
+      "has_next": false,
+      "link_header": "raw/check-suites/velnor/suite-96108227551.http\tHTTP/2.0 200 OK\tSun, 20 Sep 2026 08:53:22 GMT",
+      "raw": {
+        "response": "raw/check-suites/velnor/suite-96108227551.response",
+        "http": "raw/check-suites/velnor/suite-96108227551.http",
+        "body": "raw/check-suites/velnor/suite-96108227551.body",
+        "stderr": "raw/check-suites/velnor/suite-96108227551.stderr"
+      }
+    },
+    {
+      "id": "app-sonarqubecloud",
+      "repository": "GitHub platform",
+      "method": "GET",
+      "url": "https://api.github.com/apps/sonarqubecloud",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:53:27 GMT",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "response": "raw/apps/sonarqubecloud.response",
+        "http": "raw/apps/sonarqubecloud.http",
+        "body": "raw/apps/sonarqubecloud.body",
+        "stderr": "raw/apps/sonarqubecloud.stderr"
+      }
+    },
+    {
+      "id": "app-github-actions",
+      "repository": "GitHub platform",
+      "method": "GET",
+      "url": "https://api.github.com/apps/github-actions",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:53:26 GMT",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "response": "raw/apps/github-actions.response",
+        "http": "raw/apps/github-actions.http",
+        "body": "raw/apps/github-actions.body",
+        "stderr": "raw/apps/github-actions.stderr"
+      }
+    },
+    {
+      "id": "app-dco-2",
+      "repository": "GitHub platform",
+      "method": "GET",
+      "url": "https://api.github.com/apps/dco-2",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:53:25 GMT",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "response": "raw/apps/dco-2.response",
+        "http": "raw/apps/dco-2.http",
+        "body": "raw/apps/dco-2.body",
+        "stderr": "raw/apps/dco-2.stderr"
+      }
+    },
+    {
+      "id": "app-claude",
+      "repository": "GitHub platform",
+      "method": "GET",
+      "url": "https://api.github.com/apps/claude",
+      "status": 200,
+      "status_line": "HTTP/2.0 200 OK",
+      "response_date_header": "Sun, 20 Sep 2026 08:54:34 GMT",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "response": "raw/apps/claude.response",
+        "http": "raw/apps/claude.http",
+        "body": "raw/apps/claude.body",
+        "stderr": "raw/apps/claude.stderr"
+      }
+    }
+  ],
+  "base_corpus": {
+    "path": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/real-api-fixture-corpus-20260920T080318Z",
+    "manifest_sha256": "d2c66c7bb61dfa6a0ddf4ea336feb8704b1c137aaba6031c2930ca58f5fae2bb",
+    "relationship_report_sha256": "28b88ef07aa00166e3914f5abe8ff852c98a7fc2dfde2ca618da6d3e50983845",
+    "original_velnor_check_runs_body_sha256": "2f30395551e7bfad2f0271dfeaa09bd4768da3905dfa1a42785aa12d6388bf57",
+    "original_homebrew_check_runs_body_sha256": "c241e54220d3a3c04d5761e100be507b9c2dfec15772414b898a90957b7551b5"
+  },
+  "raw_files": [
+    {
+      "path": "raw/apps/claude.body",
+      "sha256": "a8d70be79d74d55f1a8d2b1392e3db5db37effd61f195eab0b41677eb7e7477a",
+      "bytes": 2023
+    },
+    {
+      "path": "raw/apps/claude.http",
+      "sha256": "0318e540baf4564ba44f6d1edd1cc23b1fec91cb6e070632896a33b44deecc9e",
+      "bytes": 1414
+    },
+    {
+      "path": "raw/apps/claude.response",
+      "sha256": "f31ea654e203bd6abd414991ef1b0d01adf40fe23789cad741ec190646b0b81d",
+      "bytes": 3441
+    },
+    {
+      "path": "raw/apps/claude.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/apps/dco-2.body",
+      "sha256": "ed6b3e0dd54ee0c6ae825b171e0d9a6f09c1c92eb5a55050ceb443a78e7f1cf8",
+      "bytes": 1731
+    },
+    {
+      "path": "raw/apps/dco-2.http",
+      "sha256": "d88183781d9910cc1f8d91db7328f83b131ad0fa7c5dbec875a00126edd550a6",
+      "bytes": 1414
+    },
+    {
+      "path": "raw/apps/dco-2.response",
+      "sha256": "5d62f2b9f56c2655564e25f58b1c29785606953d5e3f381d2c7c9383328e331a",
+      "bytes": 3149
+    },
+    {
+      "path": "raw/apps/dco-2.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/apps/github-actions.body",
+      "sha256": "b44eb514d435b509136d91e192fb948589f81e6b0bba52d7c3c5954d17318c21",
+      "bytes": 2244
+    },
+    {
+      "path": "raw/apps/github-actions.http",
+      "sha256": "d4a4af8cdfd8b002971a5fe00de69d9e17b938708470743c33f6f327d9ff7b51",
+      "bytes": 1413
+    },
+    {
+      "path": "raw/apps/github-actions.response",
+      "sha256": "8d8440e42d67fb64adb1be9c6c92ee1c20758a502c18938cd62800f8df6ac1b9",
+      "bytes": 3661
+    },
+    {
+      "path": "raw/apps/github-actions.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/apps/sonarqubecloud.body",
+      "sha256": "20cfcbe09b6a4596420ec3d10c19a16e79e134982a90026febdace8807cfc0a9",
+      "bytes": 4608
+    },
+    {
+      "path": "raw/apps/sonarqubecloud.http",
+      "sha256": "7cd0c5f547f7804fe4e6696a21f96c91cc9df821e44acb581cfaa667bbf4f915",
+      "bytes": 1414
+    },
+    {
+      "path": "raw/apps/sonarqubecloud.response",
+      "sha256": "47eb80a201dd7647454a69cbaee706a43eeb3b0c176c6e084ac6c1431f5a6ae3",
+      "bytes": 6026
+    },
+    {
+      "path": "raw/apps/sonarqubecloud.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0001.body",
+      "sha256": "2ed6bc5270caf1fc44e43b9d93987a7f9b5369794b1b53ecb5af9e447d537e32",
+      "bytes": 7908
+    },
+    {
+      "path": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0001.http",
+      "sha256": "12c7138c20703fff42075db1cfba968cc94c112814b35a6ac79db07e30c28f96",
+      "bytes": 1704
+    },
+    {
+      "path": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0001.response",
+      "sha256": "852c3a77fa6a0871c227bdbac99c5c63c4451375b87efdfc3190e5c4cd5c3f13",
+      "bytes": 9616
+    },
+    {
+      "path": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0001.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0002.body",
+      "sha256": "c67439be305f1dc2ac80803867d7789dfcc2c2305a3ef36b23d16962807a0cf2",
+      "bytes": 7616
+    },
+    {
+      "path": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0002.http",
+      "sha256": "b6b310ad35413797b48ae84c3bc1030f3bdcfd4f195160a47c79eb3846be60fa",
+      "bytes": 1989
+    },
+    {
+      "path": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0002.response",
+      "sha256": "d1ec3a97c931748a0848c297c35ba77f8b09a2d557f3d42507b97cc45851b15c",
+      "bytes": 9609
+    },
+    {
+      "path": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0002.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0003.body",
+      "sha256": "9d0c89ae87e0cc322779c6b9fdd829e81905eb88bd5f4c5b4f8a536017221e37",
+      "bytes": 10501
+    },
+    {
+      "path": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0003.http",
+      "sha256": "1e752cdc25d252e998f0a549c24b40556b758d2097386ad8ad80e82eb3a5df39",
+      "bytes": 1989
+    },
+    {
+      "path": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0003.response",
+      "sha256": "28ad03bf03c66d20e1e9b9fe1df3e601437bd37eff485ba3c37a0faefbe13ead",
+      "bytes": 12494
+    },
+    {
+      "path": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0003.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0004.body",
+      "sha256": "8d8b4a453c5fcece0060dc90d2e51e351fb7aa63f2976dbd9b305746469a5bd8",
+      "bytes": 8138
+    },
+    {
+      "path": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0004.http",
+      "sha256": "10fd35321297e749b83432c4b77ccde428961fd84c92855f04dcf6c72f95d296",
+      "bytes": 1705
+    },
+    {
+      "path": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0004.response",
+      "sha256": "62b36dabb534d1b66e27d1a54323fc925fb1896177926122449a84eb12ab378f",
+      "bytes": 9847
+    },
+    {
+      "path": "raw/check-suites/homebrew-commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/list/page-0004.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/check-suites/homebrew-tap/suite-96059348120.body",
+      "sha256": "f4dbb606bf2dbb61488c8ac64599845b31f46f19c6b92cc3aa1be25e548b3886",
+      "bytes": 7873
+    },
+    {
+      "path": "raw/check-suites/homebrew-tap/suite-96059348120.http",
+      "sha256": "d45a34c6a7098ee22a8d89da11662a2b3ee4d8558a253666688a09f945133327",
+      "bytes": 1414
+    },
+    {
+      "path": "raw/check-suites/homebrew-tap/suite-96059348120.response",
+      "sha256": "1bfb726c7c8d9d7b802172360608be19204e26314c8121f5a88df10891909a26",
+      "bytes": 9291
+    },
+    {
+      "path": "raw/check-suites/homebrew-tap/suite-96059348120.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/check-suites/homebrew-tap/suite-96059348227.body",
+      "sha256": "da719f5f94c1920c2cdb9189f2bf159ef34f64e4603a629d79774507ba92b8f2",
+      "bytes": 7581
+    },
+    {
+      "path": "raw/check-suites/homebrew-tap/suite-96059348227.http",
+      "sha256": "6cc367058364ad2ea7be957018f9c29ca03f2bbf42d7416402eb69f04fc82f70",
+      "bytes": 1414
+    },
+    {
+      "path": "raw/check-suites/homebrew-tap/suite-96059348227.response",
+      "sha256": "1c2a2597048302c465b99ff4784bff11b7f1f232095e5bbe15120b2ebfe538a5",
+      "bytes": 8999
+    },
+    {
+      "path": "raw/check-suites/homebrew-tap/suite-96059348227.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/check-suites/homebrew-tap/suite-96059348318.body",
+      "sha256": "2326afb596860639ca6fa0b3332dc03185cdda4eb3783f261ea088a720f66086",
+      "bytes": 10466
+    },
+    {
+      "path": "raw/check-suites/homebrew-tap/suite-96059348318.http",
+      "sha256": "bec7b8f8bbbd14e47ac09fb7a90b59931961e6cd11fcd5e4c170ff00d4b8f4a6",
+      "bytes": 1414
+    },
+    {
+      "path": "raw/check-suites/homebrew-tap/suite-96059348318.response",
+      "sha256": "b1f244e5b42e838ba0d00f516bb8d88b78e862ab25df304eacaefbb2792899f1",
+      "bytes": 11884
+    },
+    {
+      "path": "raw/check-suites/homebrew-tap/suite-96059348318.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/check-suites/homebrew-tap/suite-96059350728.body",
+      "sha256": "c81efac0ee69025a940465fd59a2310722c65a497e76b2a7f3c8f2214a2cb460",
+      "bytes": 8103
+    },
+    {
+      "path": "raw/check-suites/homebrew-tap/suite-96059350728.http",
+      "sha256": "82679aa65641f9929a7e522a96753f348685c2bfaa8afc024ddde52bc71f258d",
+      "bytes": 1414
+    },
+    {
+      "path": "raw/check-suites/homebrew-tap/suite-96059350728.response",
+      "sha256": "d613b23fabde81f8fc6a8a49a3ba2c22b399c13119caf495231d1b84c2894106",
+      "bytes": 9521
+    },
+    {
+      "path": "raw/check-suites/homebrew-tap/suite-96059350728.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0001.body",
+      "sha256": "2e7dd90c7472d7262337c31816eba1db85877061bd636a45a012e43fddde4835",
+      "bytes": 7636
+    },
+    {
+      "path": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0001.http",
+      "sha256": "49953c734c840ef7955f85fc4fd7e7b323827460b4ed7e05d00f76cdfbe46bb1",
+      "bytes": 1704
+    },
+    {
+      "path": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0001.response",
+      "sha256": "9a1cad238c0eb40f63d0c5464321c21812d82900d44123b198a99196e49d426a",
+      "bytes": 9344
+    },
+    {
+      "path": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0001.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0002.body",
+      "sha256": "0c91d9334168fc624200342d4fed1ce4773e02c1f85ad940187ce46966cd2d57",
+      "bytes": 8150
+    },
+    {
+      "path": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0002.http",
+      "sha256": "8614b2009d5489d0b2461d849a33f6d1db303a9eb1413df8d4a9e22a30088b8d",
+      "bytes": 1988
+    },
+    {
+      "path": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0002.response",
+      "sha256": "55df742580c1a45c11b0776f722f972b88ea1fae0d61708605615b851996fe81",
+      "bytes": 10142
+    },
+    {
+      "path": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0002.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0003.body",
+      "sha256": "e3dae9cf355729af977d88ea5dc8dbf7127bbed14cfa74a8cd6eb25cd0ecbd10",
+      "bytes": 8151
+    },
+    {
+      "path": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0003.http",
+      "sha256": "490fd2f1428bf59a9099a866a138c0119573325264ef7d4c9fcbf4b2db6c6bf8",
+      "bytes": 1705
+    },
+    {
+      "path": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0003.response",
+      "sha256": "ffe3532a62aaec4a5d77b36ac69b7e67513d6cf60ff19b508bf5cc9e36f53e0c",
+      "bytes": 9860
+    },
+    {
+      "path": "raw/check-suites/velnor-commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/list/page-0003.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/check-suites/velnor/suite-96108219979.body",
+      "sha256": "68e78efc7ba89f30078d0271aa136cef77b361733b312b8327cb305eae4e2742",
+      "bytes": 7601
+    },
+    {
+      "path": "raw/check-suites/velnor/suite-96108219979.http",
+      "sha256": "d5667749afdabb75e02c7b856308eb032fa334aba087716a536d52791648bf26",
+      "bytes": 1414
+    },
+    {
+      "path": "raw/check-suites/velnor/suite-96108219979.response",
+      "sha256": "f8033aad82797f8b226f426ea88285ed9a2da71f45948e5fcf690958fc84cd9b",
+      "bytes": 9019
+    },
+    {
+      "path": "raw/check-suites/velnor/suite-96108219979.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/check-suites/velnor/suite-96108224766.body",
+      "sha256": "f6738248fcbef4a32c94811cc7259278024a65a9953190a98732b260b868809b",
+      "bytes": 8115
+    },
+    {
+      "path": "raw/check-suites/velnor/suite-96108224766.http",
+      "sha256": "9b777299863ddfa5eab00e7f21f4e4e6eb424670bcdf0e3e58d358207891728e",
+      "bytes": 1414
+    },
+    {
+      "path": "raw/check-suites/velnor/suite-96108224766.response",
+      "sha256": "a28e7111810f242808828af3df26316dcd6ae8e1eae444f81f5ade3aaa83ee98",
+      "bytes": 9533
+    },
+    {
+      "path": "raw/check-suites/velnor/suite-96108224766.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/check-suites/velnor/suite-96108227551.body",
+      "sha256": "3f542f3e9cd2eb314b6701f2ac50e4c62b13f5b035e479634d7886f0b896ae6f",
+      "bytes": 8116
+    },
+    {
+      "path": "raw/check-suites/velnor/suite-96108227551.http",
+      "sha256": "61b81995032dffbab0386750da3b42ee86e03dc93403504eedc1b2536ad081bb",
+      "bytes": 1414
+    },
+    {
+      "path": "raw/check-suites/velnor/suite-96108227551.response",
+      "sha256": "fd9a25080374df939ec562dea554ce1a9bf8dee814fd0225fb392c0cbdd06f07",
+      "bytes": 9534
+    },
+    {
+      "path": "raw/check-suites/velnor/suite-96108227551.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    }
+  ],
+  "relationship_report": "relationship-report.json",
+  "readme": "README.md"
+}
+
