@@ -233,15 +233,57 @@ pub fn map_g0_inventory(
     Ok(map_g0_inventory_with_supplement(live, manifest, bindings)?.evidence)
 }
 
+fn validate_fixed_repository_set(manifest: &ManifestDocument, live: &LiveCollection) -> Result<()> {
+    if manifest.repositories.len() != 32 || live.repositories.len() != 32 {
+        bail!(
+            "G0 mapping requires exactly 32 manifest and live repositories (manifest={}, live={})",
+            manifest.repositories.len(),
+            live.repositories.len()
+        );
+    }
+    let manifest_names = manifest
+        .repositories
+        .iter()
+        .map(|repository| repository.repository.clone())
+        .collect::<Vec<_>>();
+    let live_names = live
+        .repositories
+        .iter()
+        .map(|repository| repository.repository.clone())
+        .collect::<Vec<_>>();
+    validate_fixed_repository_names(&manifest_names, &live_names)
+}
+
+fn validate_fixed_repository_names(manifest_names: &[String], live_names: &[String]) -> Result<()> {
+    let manifest_set = manifest_names.iter().cloned().collect::<BTreeSet<_>>();
+    if manifest_set.len() != manifest_names.len() {
+        bail!("G0 manifest repository census contains duplicate names");
+    }
+    let live_set = live_names.iter().cloned().collect::<BTreeSet<_>>();
+    if live_set.len() != live_names.len() {
+        bail!("G0 live repository census contains duplicate names");
+    }
+    if manifest_set != live_set {
+        let missing = manifest_set
+            .difference(&live_set)
+            .cloned()
+            .collect::<Vec<_>>();
+        let extra = live_set
+            .difference(&manifest_set)
+            .cloned()
+            .collect::<Vec<_>>();
+        bail!("G0 manifest/live repository census differs: missing={missing:?}, extra={extra:?}");
+    }
+    Ok(())
+}
+
 pub fn map_g0_inventory_with_supplement(
     live: &LiveCollection,
     manifest: &ManifestDocument,
     bindings: &G0MappingBindings,
 ) -> Result<G0MappedInventory> {
     bindings.validate()?;
-    if manifest.repositories.len() != 32 || live.repositories.len() != 32 {
-        bail!("G0 mapping requires exactly 32 manifest and live repositories");
-    }
+    validate_fixed_repository_set(manifest, live)?;
     let raw_by_id = live
         .raw_objects
         .iter()
@@ -293,12 +335,12 @@ pub fn map_g0_inventory_with_supplement(
     let collector = G0CollectorIdentity {
         name: bindings.collector_name.clone(),
         revision: bindings.collector_revision.clone(),
-        mode: "read-only-live".to_owned(),
+        mode: "read_only".to_owned(),
         api_base: "https://api.github.com".to_owned(),
         api_versions: vec![GITHUB_API_VERSION.to_owned()],
     };
     let snapshot = G0CollectorSnapshot {
-        schema_version: 1,
+        schema_version: 2,
         snapshot_id: live.snapshot_id.clone(),
         manifest_id: live.manifest_id.clone(),
         phase: bindings.phase.clone(),
@@ -1789,5 +1831,25 @@ mod tests {
         let mut tampered = model;
         tampered.bytes_base64 = BASE64.encode(b"{}");
         assert!(CapturedModelSession::from_raw_object(&tampered).is_err());
+    }
+
+    #[test]
+    fn fixed_repository_census_requires_exact_unique_set() {
+        let expected = (0..32)
+            .map(|index| format!("tailrocks/repo-{index:02}"))
+            .collect::<Vec<_>>();
+        assert!(validate_fixed_repository_names(&expected, &expected).is_ok());
+
+        let mut duplicate = expected.clone();
+        duplicate[31] = duplicate[0].clone();
+        let error = validate_fixed_repository_names(&expected, &duplicate)
+            .expect_err("duplicate live repository must fail closed");
+        assert!(error.to_string().contains("duplicate"));
+
+        let mut mismatched = expected.clone();
+        mismatched[31] = "tailrocks/replacement".to_owned();
+        let error = validate_fixed_repository_names(&expected, &mismatched)
+            .expect_err("wrong 32-name set must fail closed");
+        assert!(error.to_string().contains("differs"));
     }
 }
