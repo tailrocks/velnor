@@ -117,11 +117,13 @@ remain timestamped `b5`-bound evidence, not current-main proof. See external
   approved. PR963's `fb78d85d464fd5082e5c161922afd7942380fabc` signed
   replacement is historical to the `b5` snapshot; external comparison records
   the tree-equivalent replacement with `857` excluded. The current query
-  reports head `c440d4db3fd59a9e4abd396d7a75e670c4f3d862` on base
-  `d20d4d1d17590cca85b501d982cbaad70d42c641`; no fresh exact-head review or
+  reports head `c440d4db3fd59a9e4abd396d7a75e670c4f3d862` on API base
+  `1048337062ea625fada1b4f7c07f2feed75f60c7`; no fresh exact-head review or
   approval was observed. The independent review of
   `0c1ec75753cf9f8044a3a2ff01c2d144e9c59132` does not transfer to `c440d4db`.
-  Never force-push or override required checks.
+  Later remote main `e94b48406c4ed206fce2bbf39b788264e72cf39c` is a separate
+  fresh census under review, while d20 is historical. Never force-push or
+  override required checks.
 - Product validation uses the separately typed validator-only
   product/publisher design owned by `/root/g0_inventory` and reviewed by
   `/root/g0_reviewer`; publication precedes separate PR957 pin adoption. Do

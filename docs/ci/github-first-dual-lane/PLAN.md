@@ -132,7 +132,7 @@ generator-rendering reproducibility only. The rows below remain timestamped
 | PR962, head `94b43578cad9720e569780d18dc966370ed47c11`, base `b5a4b4afaa6ca807927cacc03659b570a895dd5c` | Open; required and Velnor-workflow hosted failures observed | Not merge-ready; no gate evidence |
 | PR961 historical path | Open head `5b9a16a620951b65bbfe0a5cf7b1ffe04a317303` on base `b5a4b4afaa6ca807927cacc03659b570a895dd5c`; its history contains unsigned `857`, and DCO is `action_required` | Historical record only; not repaired, approved, merged, or a gate result |
 | PR963 signed replacement (historical b5 snapshot) | Open head `fb78d85d464fd5082e5c161922afd7942380fabc` on the same observed base; external comparison records the tree-equivalent signed replacement with redundant `857` excluded | Historical only; hosted checks were observed successful, but no disposition transfers to a later head |
-| PR963 current query | Head `c440d4db3fd59a9e4abd396d7a75e670c4f3d862`, base `d20d4d1d17590cca85b501d982cbaad70d42c641` | Fresh exact-head review/approval not observed; the historical `0c1ec75753cf9f8044a3a2ff01c2d144e9c59132` review does not transfer |
+| PR963 current query | Exact API tuple: head `c440d4db3fd59a9e4abd396d7a75e670c4f3d862`, base `1048337062ea625fada1b4f7c07f2feed75f60c7` | Fresh exact-head review/approval not observed; the historical `0c1ec75753cf9f8044a3a2ff01c2d144e9c59132` review does not transfer. Later remote main `e94b48406c4ed206fce2bbf39b788264e72cf39c` is a separate fresh census under review; d20 is historical. |
 
 The selected G2 design is a separately typed validator-only product/publisher,
 owned by `/root/g0_inventory` and reviewed by `/root/g0_reviewer`. It must not

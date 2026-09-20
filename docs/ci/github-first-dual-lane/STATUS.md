@@ -58,7 +58,7 @@ plus both independent approvals with cleanup proof.
 | Hostile producer fixture | Exact `d60c0e2211b2830c64e7489d05b4cfe0bc77d65f` | ZIP-only assertion residual; source-only, no G1 approval |
 | Scan candidate | Exact `0a15fd06e002f57dca546d5c041754f1ec433508` reports 1,756 library tests | `G1/scan-integrity/source-review-0a15fd06.md` rejects exact D19 closure plus authority, detector-input, rollback, and hostile-fixture gaps; no G1 approval |
 
-Current external main evidence also reports d20
+The v4-capture external main evidence (historical at its capture) reports d20
 `d20d4d1d17590cca85b501d982cbaad70d42c641` routing Apple jobs to forbidden
 `macos-26`; exact `xcode-27` is required. Runs `35475920678` (runtime) and
 `35475920808` (preview) / `35475920826` (CI/Main) are historical facts, not
@@ -114,10 +114,12 @@ timestamped `b5`-bound observations, not current-main proof. See external
   replacement is also historical to the `b5` snapshot; external comparison
   records the tree-equivalent replacement with `857` excluded. The current
   read-only query reports head
-  `c440d4db3fd59a9e4abd396d7a75e670c4f3d862` on base
-  `d20d4d1d17590cca85b501d982cbaad70d42c641`; no fresh exact-head review or
+  `c440d4db3fd59a9e4abd396d7a75e670c4f3d862` on API base
+  `1048337062ea625fada1b4f7c07f2feed75f60c7`; no fresh exact-head review or
   approval was observed. The independent `0c1ec75753cf9f8044a3a2ff01c2d144e9c59132`
-  review does not transfer to `c440d4db`. Force/override remains forbidden.
+  review does not transfer to `c440d4db`. Later remote main
+  `e94b48406c4ed206fce2bbf39b788264e72cf39c` is a separate fresh census;
+  d20 is a historical main observation. Force/override remains forbidden.
 - The selected product boundary is a separately typed validator-only
   product/publisher owned by `/root/g0_inventory` and reviewed by
   `/root/g0_reviewer`; no three-platform runtime reuse or platform-selection
