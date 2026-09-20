@@ -12127,6 +12127,99 @@ lockfile = true
         }
     }
 
+    fn assert_phase_report_workflow(workflow: &str, report_uses: &str) {
+        for needle in [
+            "set -o pipefail",
+            "velnor-ci-timing-${GITHUB_RUN_ID:-unknown}",
+            "(set -C; printf '%s\\n' \"$(date +%s)\"",
+            "| tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?",
+            "\n          exit $rc",
+            "- name: Report phase timings and cache outcomes",
+            "\n        if: always()\n",
+            "job_label: ",
+        ] {
+            assert!(workflow.contains(needle), "workflow missing {needle}");
+        }
+        assert!(workflow.contains(&format!("uses: {report_uses}")));
+        for marker in [
+            "JOB_STARTED",
+            "RUNNER_SETUP_ENDED",
+            "SELECTION_ENDED",
+            "TOOL_BOOTSTRAP_ENDED",
+            "CACHE_PREP_ENDED",
+            "CARGO_FETCH_ENDED",
+            "CHECKS_STARTED",
+            "CHECKS_ENDED",
+            "CLEANUP_ENDED",
+        ] {
+            assert!(!workflow.contains(&format!("VELNOR_{marker}_EPOCH")));
+        }
+        assert!(
+            workflow.find("- name: Report phase timings and cache outcomes")
+                > workflow.find("- name: Mark cleanup end"),
+            "report step must run after cleanup markers"
+        );
+    }
+
+    fn assert_report_action_template(action: &str) {
+        for needle in [
+            "schema_version: 2",
+            "runner_setup_seconds:",
+            "selection_transport_seconds:",
+            "tool_bootstrap_seconds:",
+            "cache_prep_seconds:",
+            "cargo_fetch_seconds:",
+            "cleanup_seconds:",
+            "total_seconds:",
+            "jq -nc",
+            "VELNOR_CI_REPORT ",
+            "cache_outcomes:",
+            "classify_gha_cache()",
+            "classify_complete_cache_keys()",
+            "cache_declarations_json=",
+            "host_warm_layers:",
+            "VELNOR_HOST_WARM_LAYERS: ${{ inputs.host_warm_layers }}",
+            "VELNOR_CI_LANE: ${{ inputs.ci_lane }}",
+            "VELNOR_CACHE_RUSTUP_PRIMARY: ${{ inputs.cache_rustup_primary }}",
+            "VELNOR_CACHE_MBX_HIT: ${{ inputs.cache_mbx_hit }}",
+            "VELNOR_CACHE_MBX_MATCHED: ${{ inputs.cache_mbx_matched }}",
+            "::warning::Cold cache layer(s)",
+            "VELNOR_CONTEXT_RUN_STARTED_AT: ${{ github.run_started_at }}",
+            "VELNOR_RUN_STARTED_AT",
+            "VELNOR_JOB_QUEUED_AT",
+            "queue_source",
+            "read_marker()",
+            "rfc3339_epoch()",
+            "sub(\"\\\\.[0-9]+Z$\"; \"Z\")",
+            "max_telemetry_seconds=$((7 * 24 * 60 * 60))",
+            "valid_epoch()",
+            "job_started_usable=false",
+            "total_source=\"unusable_job_start\"",
+            "total_source",
+            "timing_dir=\"$RUNNER_TEMP/velnor-ci-timing-",
+            "job_ended=\"$(date +%s)\"",
+        ] {
+            assert!(action.contains(needle), "report action missing {needle}");
+        }
+        for forbidden in [
+            "schema_version: 1",
+            "grep -qiE 'exact hit'",
+            "grep -qiE 'warm start'",
+            "grep -qiE '(^|[^a-z])miss([^a-z]|$)'",
+            "VELNOR_RUN_STARTED_AT: ${{ github.run_started_at }}",
+            "echo \"VELNOR_JOB_ENDED_EPOCH=$(date +%s)\"",
+            ">> \"$GITHUB_ENV\"",
+            "gh api",
+            "GH_TOKEN",
+            "GH_REPO",
+        ] {
+            assert!(
+                !action.contains(forbidden),
+                "report action retained {forbidden}"
+            );
+        }
+    }
+
     #[test]
     fn phase_report_step_renders_in_both_unit_paths() {
         let config = scanned_fixture(all_providers());
@@ -12155,84 +12248,10 @@ lockfile = true
                 continue;
             };
             rendered += 1;
-            assert!(workflow.contains("set -o pipefail"));
-            assert!(workflow.contains("velnor-ci-timing-${GITHUB_RUN_ID:-unknown}"));
-            assert!(workflow.contains("(set -C; printf '%s\\n' \"$(date +%s)\""));
-            for marker in [
-                "JOB_STARTED",
-                "RUNNER_SETUP_ENDED",
-                "SELECTION_ENDED",
-                "TOOL_BOOTSTRAP_ENDED",
-                "CACHE_PREP_ENDED",
-                "CARGO_FETCH_ENDED",
-                "CHECKS_STARTED",
-                "CHECKS_ENDED",
-                "CLEANUP_ENDED",
-            ] {
-                assert!(!workflow.contains(&format!("VELNOR_{marker}_EPOCH")));
-            }
-            assert!(workflow.contains("| tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?"));
-            assert!(workflow.contains("\n          exit $rc"));
-            assert!(workflow.contains("- name: Report phase timings and cache outcomes"));
-            assert!(workflow.contains("\n        if: always()\n"));
-            assert!(
-                workflow.contains(&format!("uses: {report_uses}")),
-                "report action uses must match ci_report_action_uses"
-            );
-            assert!(workflow.contains("job_label: "));
-            assert!(
-                workflow.find("- name: Report phase timings and cache outcomes")
-                    > workflow.find("- name: Mark cleanup end"),
-                "report step must run after cleanup markers"
-            );
+            assert_phase_report_workflow(&workflow, &report_uses);
         }
         assert!(rendered > 1, "the fixture renders several kind paths");
-        let action = report_velnor_ci_outcomes_action_template();
-        assert!(action.contains("schema_version: 2"));
-        assert!(!action.contains("schema_version: 1"));
-        assert!(action.contains("runner_setup_seconds:"));
-        assert!(action.contains("selection_transport_seconds:"));
-        assert!(action.contains("tool_bootstrap_seconds:"));
-        assert!(action.contains("cache_prep_seconds:"));
-        assert!(action.contains("cargo_fetch_seconds:"));
-        assert!(action.contains("cleanup_seconds:"));
-        assert!(action.contains("total_seconds:"));
-        assert!(action.contains("jq -nc"));
-        assert!(action.contains("VELNOR_CI_REPORT "));
-        assert!(action.contains("cache_outcomes:"));
-        assert!(action.contains("classify_gha_cache()"));
-        assert!(action.contains("classify_complete_cache_keys()"));
-        assert!(action.contains("cache_declarations_json="));
-        assert!(action.contains("host_warm_layers:"));
-        assert!(action.contains("VELNOR_HOST_WARM_LAYERS: ${{ inputs.host_warm_layers }}"));
-        assert!(action.contains("VELNOR_CI_LANE: ${{ inputs.ci_lane }}"));
-        assert!(action.contains("VELNOR_CACHE_RUSTUP_PRIMARY: ${{ inputs.cache_rustup_primary }}"));
-        assert!(action.contains("VELNOR_CACHE_MBX_HIT: ${{ inputs.cache_mbx_hit }}"));
-        assert!(action.contains("VELNOR_CACHE_MBX_MATCHED: ${{ inputs.cache_mbx_matched }}"));
-        assert!(!action.contains("grep -qiE 'exact hit'"));
-        assert!(!action.contains("grep -qiE 'warm start'"));
-        assert!(!action.contains("grep -qiE '(^|[^a-z])miss([^a-z]|$)'"));
-        assert!(action.contains("::warning::Cold cache layer(s)"));
-        assert!(action.contains("VELNOR_CONTEXT_RUN_STARTED_AT: ${{ github.run_started_at }}"));
-        assert!(action.contains("VELNOR_RUN_STARTED_AT"));
-        assert!(action.contains("VELNOR_JOB_QUEUED_AT"));
-        assert!(action.contains("queue_source"));
-        assert!(action.contains("read_marker()"));
-        assert!(action.contains("rfc3339_epoch()"));
-        assert!(action.contains("sub(\"\\\\.[0-9]+Z$\"; \"Z\")"));
-        assert!(action.contains("max_telemetry_seconds=$((7 * 24 * 60 * 60))"));
-        assert!(action.contains("valid_epoch()"));
-        assert!(action.contains("job_started_usable=false"));
-        assert!(action.contains("total_source=\"unusable_job_start\""));
-        assert!(action.contains("total_source"));
-        assert!(action.contains("timing_dir=\"$RUNNER_TEMP/velnor-ci-timing-"));
-        assert!(action.contains("job_ended=\"$(date +%s)\""));
-        assert!(!action.contains("VELNOR_RUN_STARTED_AT: ${{ github.run_started_at }}"));
-        assert!(!action.contains("echo \"VELNOR_JOB_ENDED_EPOCH=$(date +%s)\""));
-        assert!(!action.contains(">> \"$GITHUB_ENV\""));
-        assert!(!action.contains("gh api"));
-        assert!(!action.contains("GH_TOKEN"));
-        assert!(!action.contains("GH_REPO"));
+        assert_report_action_template(&report_velnor_ci_outcomes_action_template());
     }
 
     #[test]
@@ -12482,13 +12501,20 @@ lockfile = true
         assert!(env_override["checks_wall_seconds"].is_null());
     }
 
-    #[test]
-    fn report_action_classifies_cache_outcomes_for_github_and_velnor_lanes() {
-        let github = run_report_action_case_with_env(
+    fn assert_cache_outcomes(name: &str, env_markers: &[(&str, &str)], expected: &[(&str, &str)]) {
+        let report = run_report_action_case_with_env(name, &[], None, None, env_markers);
+        for &(layer, outcome) in expected {
+            assert_eq!(
+                report["cache_outcomes"][layer],
+                serde_json::json!(outcome),
+                "{name}: {layer}"
+            );
+        }
+    }
+
+    fn assert_github_cache_outcomes() {
+        assert_cache_outcomes(
             "github-cache-outcomes",
-            &[],
-            None,
-            None,
             &[
                 ("VELNOR_CI_LANE", "github"),
                 ("VELNOR_CACHE_RUSTUP_PRIMARY", "velnor-rustup-Linux-X64-abc"),
@@ -12499,155 +12525,93 @@ lockfile = true
                 ("VELNOR_CACHE_CARGO_MATCHED", ""),
                 ("VELNOR_CACHE_MBX_HIT", "false"),
             ],
+            &[
+                ("rustup", "exact"),
+                ("mold", "prefix"),
+                ("cargo", "cold"),
+                ("mbx", "unknown"),
+            ],
         );
-        assert_eq!(
-            github["cache_outcomes"]["rustup"],
-            serde_json::json!("exact")
-        );
-        assert_eq!(
-            github["cache_outcomes"]["mold"],
-            serde_json::json!("prefix")
-        );
-        assert_eq!(github["cache_outcomes"]["cargo"], serde_json::json!("cold"));
-        assert_eq!(
-            github["cache_outcomes"]["mbx"],
-            serde_json::json!("unknown")
-        );
-
-        let github_matched_without_primary = run_report_action_case_with_env(
+        assert_cache_outcomes(
             "github-matched-without-primary",
-            &[],
-            None,
-            None,
             &[("VELNOR_CACHE_CARGO_MATCHED", "matched-only")],
+            &[("cargo", "unknown")],
         );
-        assert_eq!(
-            github_matched_without_primary["cache_outcomes"]["cargo"],
-            serde_json::json!("unknown")
-        );
+    }
 
-        let explicit_prefix = run_report_action_case_with_env(
+    fn assert_mbx_key_cache_outcomes() {
+        assert_cache_outcomes(
             "mbx-explicit-prefix",
-            &[],
-            None,
-            None,
             &[
                 ("VELNOR_CACHE_MBX_HIT", "false"),
                 ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
                 ("VELNOR_CACHE_MBX_MATCHED", "primary-prefix"),
             ],
+            &[("mbx", "prefix")],
         );
-        assert_eq!(
-            explicit_prefix["cache_outcomes"]["mbx"],
-            serde_json::json!("prefix")
-        );
-
-        let boolean_exact_without_matched_key = run_report_action_case_with_env(
-            "mbx-boolean-exact-without-matched-key",
-            &[],
-            None,
-            None,
-            &[
-                ("VELNOR_CACHE_MBX_HIT", "true"),
-                ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
-            ],
-        );
-        assert_eq!(
-            boolean_exact_without_matched_key["cache_outcomes"]["mbx"],
-            serde_json::json!("exact")
-        );
-
-        let boolean_exact_without_keys = run_report_action_case_with_env(
-            "mbx-boolean-exact-without-keys",
-            &[],
-            None,
-            None,
-            &[("VELNOR_CACHE_MBX_HIT", "true")],
-        );
-        assert_eq!(
-            boolean_exact_without_keys["cache_outcomes"]["mbx"],
-            serde_json::json!("unknown")
-        );
-
-        let contradictory_exact = run_report_action_case_with_env(
+        assert_cache_outcomes(
             "mbx-false-with-equal-keys",
-            &[],
-            None,
-            None,
             &[
                 ("VELNOR_CACHE_MBX_HIT", "false"),
                 ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
                 ("VELNOR_CACHE_MBX_MATCHED", "primary"),
             ],
+            &[("mbx", "unknown")],
         );
-        assert_eq!(
-            contradictory_exact["cache_outcomes"]["mbx"],
-            serde_json::json!("unknown")
+        assert_cache_outcomes(
+            "mbx-matched-without-primary",
+            &[
+                ("VELNOR_CACHE_MBX_HIT", "false"),
+                ("VELNOR_CACHE_MBX_MATCHED", "matched-only"),
+            ],
+            &[("mbx", "unknown")],
         );
+        assert_cache_outcomes(
+            "mbx-explicit-exact",
+            &[
+                ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
+                ("VELNOR_CACHE_MBX_MATCHED", "primary"),
+            ],
+            &[("mbx", "exact")],
+        );
+    }
 
-        let contradictory_prefix = run_report_action_case_with_env(
+    fn assert_mbx_boolean_cache_outcomes() {
+        assert_cache_outcomes(
+            "mbx-boolean-exact-without-matched-key",
+            &[
+                ("VELNOR_CACHE_MBX_HIT", "true"),
+                ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
+            ],
+            &[("mbx", "exact")],
+        );
+        assert_cache_outcomes(
+            "mbx-boolean-exact-without-keys",
+            &[("VELNOR_CACHE_MBX_HIT", "true")],
+            &[("mbx", "unknown")],
+        );
+        assert_cache_outcomes(
             "mbx-true-with-different-keys",
-            &[],
-            None,
-            None,
             &[
                 ("VELNOR_CACHE_MBX_HIT", "true"),
                 ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
                 ("VELNOR_CACHE_MBX_MATCHED", "primary-prefix"),
             ],
+            &[("mbx", "unknown")],
         );
-        assert_eq!(
-            contradictory_prefix["cache_outcomes"]["mbx"],
-            serde_json::json!("unknown")
-        );
-
-        let invalid_boolean = run_report_action_case_with_env(
+        assert_cache_outcomes(
             "mbx-invalid-boolean",
-            &[],
-            None,
-            None,
             &[
                 ("VELNOR_CACHE_MBX_HIT", "TRUE"),
                 ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
                 ("VELNOR_CACHE_MBX_MATCHED", "primary"),
             ],
+            &[("mbx", "unknown")],
         );
-        assert_eq!(
-            invalid_boolean["cache_outcomes"]["mbx"],
-            serde_json::json!("unknown")
-        );
+    }
 
-        let incomplete_prefix = run_report_action_case_with_env(
-            "mbx-matched-without-primary",
-            &[],
-            None,
-            None,
-            &[
-                ("VELNOR_CACHE_MBX_HIT", "false"),
-                ("VELNOR_CACHE_MBX_MATCHED", "matched-only"),
-            ],
-        );
-        assert_eq!(
-            incomplete_prefix["cache_outcomes"]["mbx"],
-            serde_json::json!("unknown")
-        );
-
-        let explicit_exact = run_report_action_case_with_env(
-            "mbx-explicit-exact",
-            &[],
-            None,
-            None,
-            &[
-                ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
-                ("VELNOR_CACHE_MBX_MATCHED", "primary"),
-            ],
-        );
-        assert_eq!(
-            explicit_exact["cache_outcomes"]["mbx"],
-            serde_json::json!("exact")
-        );
-
-        let misleading_log = run_report_action_case_with_env_and_log(
+    fn assert_compiler_log_does_not_classify_mbx() {
+        let report = run_report_action_case_with_env_and_log(
             "mbx-misleading-compiler-log",
             &[],
             None,
@@ -12656,11 +12620,13 @@ lockfile = true
             Some("exact hit\nwarm start\nmiss\n"),
         );
         assert_eq!(
-            misleading_log["cache_outcomes"]["mbx"],
+            report["cache_outcomes"]["mbx"],
             serde_json::json!("unknown")
         );
+    }
 
-        let velnor = run_report_action_case_with_env(
+    fn assert_velnor_cache_declarations() {
+        let report = run_report_action_case_with_env(
             "velnor-host-warm",
             &[],
             None,
@@ -12670,16 +12636,26 @@ lockfile = true
                 ("VELNOR_HOST_WARM_LAYERS", "rustup,mold,mbx,cargo"),
             ],
         );
-        assert!(velnor["cache_outcomes"]["rustup"].is_null());
+        for layer in ["rustup", "cargo"] {
+            assert!(report["cache_outcomes"][layer].is_null(), "{layer}");
+        }
         assert_eq!(
-            velnor["cache_outcomes"]["mbx"],
+            report["cache_outcomes"]["mbx"],
             serde_json::json!("unknown")
         );
-        assert!(velnor["cache_outcomes"]["cargo"].is_null());
         assert_eq!(
-            velnor["cache_declarations"]["host_warm_layers"],
+            report["cache_declarations"]["host_warm_layers"],
             serde_json::json!(["rustup", "mold", "mbx", "cargo"])
         );
+    }
+
+    #[test]
+    fn report_action_classifies_cache_outcomes_for_github_and_velnor_lanes() {
+        assert_github_cache_outcomes();
+        assert_mbx_key_cache_outcomes();
+        assert_mbx_boolean_cache_outcomes();
+        assert_compiler_log_does_not_classify_mbx();
+        assert_velnor_cache_declarations();
     }
 
     #[test]
