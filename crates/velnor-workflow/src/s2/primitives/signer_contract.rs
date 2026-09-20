@@ -522,7 +522,7 @@ impl SignerLane {
 
     const fn subject_inventory_artifact(self) -> &'static str {
         match self {
-            Self::Native => "native-subjects.json",
+            Self::Native => "native-product-assets",
             Self::Debian => "debian-subjects.json",
             Self::Runtime => "runtime-subjects.json",
             Self::Image => "image-digests.json",
@@ -677,7 +677,7 @@ mod tests {
         SubjectInventory {
             schema: SUBJECT_INVENTORY_SCHEMA.to_owned(),
             lane: "native".to_owned(),
-            artifact_name: "native-subjects.json".to_owned(),
+            artifact_name: "native-product-assets".to_owned(),
             source_repository: SOURCE_REPOSITORY.to_owned(),
             source_ref: SOURCE_REF.to_owned(),
             source_commit: SOURCE_COMMIT.to_owned(),
