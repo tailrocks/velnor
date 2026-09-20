@@ -1507,7 +1507,7 @@ fn render_undebianable_job(config: &ProjectConfig, release: &ReleaseSpec, needs:
 fn identity_debian_lane_env(preview: bool, version: &str) -> String {
     if preview {
         format!(
-            "      VERSION: {version}\n      CRATE_VERSION: ${{{{ needs.identity.outputs.crate_version }}}}\n      SOURCE_COMMIT: ${{{{ needs.identity.outputs.commit }}}}\n      VELNOR_RELEASE_BUILD: \"1\"\n      VELNOR_PREVIEW_SOURCE_SHA: ${{{{ needs.identity.outputs.commit }}}}\n"
+            "      VERSION: {version}\n      CRATE_VERSION: ${{{{ needs.identity.outputs.crate_version }}}}\n      SOURCE_COMMIT: ${{{{ needs.identity.outputs.commit }}}}\n      VELNOR_RELEASE_BUILD: \"1\"\n      VELNOR_PREVIEW_SOURCE_SHA: ${{{{ needs.identity.outputs.commit }}}}\n      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc\n      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc\n"
         )
     } else {
         format!("      VERSION: {version}\n      VELNOR_RELEASE_BUILD: \"1\"\n")
@@ -1596,8 +1596,14 @@ fn render_identity_debian_job(
     } else {
         "release-metadata"
     };
+    let cross_toolchain = if preview {
+        "      - name: Install Linux arm64 cross toolchain\n        if: matrix.target == 'aarch64-unknown-linux-gnu'\n        run: |\n          set -euo pipefail\n          sudo apt-get update\n          sudo apt-get install -y --no-install-recommends \\\n            gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross\n          command -v aarch64-linux-gnu-gcc\n"
+    } else {
+        ""
+    };
     let mut steps = format!(
-        "      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Set up sccache\n        uses: {sccache}\n        with:\n          version: v0.16.0\n      - name: Install cargo-deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          cargo install cargo-deb --version 3.7.0 --locked\n          cargo-deb --version\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: {metadata_artifact}\n          path: metadata\n",
+        "      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}{cross_toolchain}      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Set up sccache\n        uses: {sccache}\n        with:\n          version: v0.16.0\n      - name: Install cargo-deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          cargo install cargo-deb --version 3.7.0 --locked\n          cargo-deb --version\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: {metadata_artifact}\n          path: metadata\n",
+        cross_toolchain = cross_toolchain,
     );
     if preview {
         let _ = writeln!(
@@ -9386,6 +9392,24 @@ JSON
         assert!(
             preview_debian.contains("Build release runner binary"),
             "{preview_debian}"
+        );
+        assert!(
+            preview_debian.contains("Install Linux arm64 cross toolchain")
+                && preview_debian.contains("if: matrix.target == 'aarch64-unknown-linux-gnu'")
+                && preview_debian.contains("gcc-aarch64-linux-gnu libc6-dev-arm64-cross")
+                && preview_debian.contains("command -v aarch64-linux-gnu-gcc"),
+            "preview arm64 Debian builds must install and select the cross compiler: {preview_debian}"
+        );
+        assert!(
+            preview_debian.contains("CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc")
+                && preview_debian.contains(
+                    "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc"
+                ),
+            "preview arm64 Debian builds must bind compiler and linker selection: {preview_debian}"
+        );
+        assert!(
+            !debian.contains("Install Linux arm64 cross toolchain"),
+            "stable Debian builds reuse source-bound binaries and must not add preview-only setup: {debian}"
         );
         assert!(
             !preview.contains("Reuse the build job's release binary"),
