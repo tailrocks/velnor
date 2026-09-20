@@ -9,12 +9,13 @@ use super::live_collector::{
     LivePullRequest, LivePullRequestIdentity, LiveRepository, LiveWorkflow,
 };
 use super::{sha256_digest, AcquisitionState, ApiKind, HttpMethod, RawObjectRef, RequestRecord};
-use crate::evidence_check::{ManifestDocument, ManifestRepository};
+use crate::evidence_check::{ManifestDocument, ManifestRepository, CANONICAL_REPOSITORIES};
 use crate::g0_contract::*;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use std::collections::{BTreeMap, BTreeSet};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use url::Url;
 
 const ORCHESTRATOR_MODEL: &str = "gpt-6-astra";
 const ORCHESTRATOR_EFFORT: &str = "low";
@@ -257,6 +258,10 @@ fn validate_fixed_repository_set(manifest: &ManifestDocument, live: &LiveCollect
             live.repositories.len()
         );
     }
+    let canonical_names = CANONICAL_REPOSITORIES
+        .iter()
+        .map(|repository| (*repository).to_owned())
+        .collect::<Vec<_>>();
     let manifest_names = manifest
         .repositories
         .iter()
@@ -267,6 +272,7 @@ fn validate_fixed_repository_set(manifest: &ManifestDocument, live: &LiveCollect
         .iter()
         .map(|repository| repository.repository.clone())
         .collect::<Vec<_>>();
+    validate_fixed_repository_names(&canonical_names, &manifest_names)?;
     validate_fixed_repository_names(&manifest_names, &live_names)
 }
 
@@ -312,6 +318,18 @@ fn merge_raw_object_sets(
     workload_raw_id: &str,
 ) -> Result<Vec<RawObjectRef>> {
     let mut merged = BTreeMap::<String, RawObjectRef>::new();
+    let mut provider_ids = BTreeSet::new();
+    for raw in provider_objects {
+        if !provider_ids.insert(raw.raw_id.as_str()) {
+            bail!("provider raw ledger repeats raw object {}", raw.raw_id);
+        }
+    }
+    let mut local_ids = BTreeSet::new();
+    for raw in local_objects {
+        if !local_ids.insert(raw.raw_id.as_str()) {
+            bail!("local binding ledger repeats raw object {}", raw.raw_id);
+        }
+    }
     for raw in provider_objects.iter().chain(local_objects) {
         // Validate the bytes and both canonical storage references before the
         // object enters the map.  The producer store has already verified the
@@ -349,6 +367,19 @@ fn merge_raw_object_sets(
     Ok(merged.into_values().collect())
 }
 
+fn index_unique_requests(requests: &[RequestRecord]) -> Result<BTreeMap<String, &RequestRecord>> {
+    let mut indexed = BTreeMap::new();
+    for request in requests {
+        if indexed
+            .insert(request.request_id.clone(), request)
+            .is_some()
+        {
+            bail!("live request ledger repeats request {}", request.request_id);
+        }
+    }
+    Ok(indexed)
+}
+
 pub fn map_g0_inventory_with_supplement(
     live: &LiveCollection,
     manifest: &ManifestDocument,
@@ -361,11 +392,7 @@ pub fn map_g0_inventory_with_supplement(
         .iter()
         .map(|raw| (raw.raw_id.clone(), raw))
         .collect::<BTreeMap<_, _>>();
-    let request_by_id = live
-        .requests
-        .iter()
-        .map(|request| (request.request_id.clone(), request))
-        .collect::<BTreeMap<_, _>>();
+    let request_by_id = index_unique_requests(&live.requests)?;
     let requests = live
         .requests
         .iter()
@@ -940,6 +967,33 @@ fn map_repository(
             if !ruleset.complete {
                 bail!("ruleset {} is incomplete", ruleset.ruleset_id);
             }
+            validate_github_api_url(
+                &ruleset.source_url,
+                &format!(
+                    "/repos/{}/rulesets/{}",
+                    repository.repository, ruleset.ruleset_id
+                ),
+                &format!("ruleset {} source URL", ruleset.ruleset_id),
+            )?;
+            validate_nested_raw_references(
+                &ruleset.raw_object_refs,
+                raw_by_id,
+                request_by_id,
+                &format!("ruleset {}", ruleset.ruleset_id),
+                &[
+                    RawEndpointBinding {
+                        object_kind: "rulesets",
+                        endpoint: format!("/repos/{}/rulesets", repository.repository),
+                    },
+                    RawEndpointBinding {
+                        object_kind: "ruleset",
+                        endpoint: format!(
+                            "/repos/{}/rulesets/{}",
+                            repository.repository, ruleset.ruleset_id
+                        ),
+                    },
+                ],
+            )?;
             Ok(G0RulesetInventory {
                 ruleset_id: ruleset.ruleset_id,
                 name: ruleset.name.clone(),
@@ -954,6 +1008,20 @@ fn map_repository(
                     .required_checks
                     .iter()
                     .map(|check| {
+                        if check.ruleset_id != ruleset.ruleset_id {
+                            bail!(
+                                "ruleset {} required check {} has foreign ruleset identity",
+                                ruleset.ruleset_id,
+                                check.context
+                            );
+                        }
+                        if check.raw_object_refs != ruleset.raw_object_refs {
+                            bail!(
+                                "ruleset {} required check {} has unbound raw identity",
+                                ruleset.ruleset_id,
+                                check.context
+                            );
+                        }
                         Ok(G0RequiredCheckPolicy {
                             context: check.context.clone(),
                             app_id: check.app_id.clone().ok_or_else(|| {
@@ -989,7 +1057,7 @@ fn map_repository(
     let open_prs = repository
         .open_prs
         .iter()
-        .map(|pr| map_pull_request(pr, manifest, repository))
+        .map(|pr| map_pull_request(pr, manifest, repository, raw_by_id, request_by_id))
         .collect::<Result<Vec<_>>>()?;
     let main_checks = repository
         .main_checks
@@ -999,6 +1067,9 @@ fn map_repository(
                 check,
                 &repository.workflows,
                 Some(&repository.main_executions),
+                &repository.repository,
+                raw_by_id,
+                request_by_id,
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1291,12 +1362,137 @@ fn validate_raw_references(
     Ok(())
 }
 
+struct RawEndpointBinding {
+    object_kind: &'static str,
+    endpoint: String,
+}
+
+fn validate_nested_raw_references(
+    raw_ids: &[String],
+    raw_by_id: &BTreeMap<String, &RawObjectRef>,
+    request_by_id: &BTreeMap<String, &RequestRecord>,
+    label: &str,
+    expected: &[RawEndpointBinding],
+) -> Result<()> {
+    if raw_ids.is_empty() {
+        bail!("{label} lacks raw object references");
+    }
+    let expected_by_kind = expected
+        .iter()
+        .map(|binding| (binding.object_kind, binding))
+        .collect::<BTreeMap<_, _>>();
+    let mut observed_kinds = BTreeSet::new();
+    let mut seen_raw_ids = BTreeSet::new();
+    for raw_id in raw_ids {
+        if !seen_raw_ids.insert(raw_id) {
+            bail!("{label} repeats raw object {raw_id}");
+        }
+        let raw = raw_by_id
+            .get(raw_id)
+            .copied()
+            .ok_or_else(|| anyhow!("{label} references missing raw object {raw_id}"))?;
+        let binding = expected_by_kind
+            .get(raw.object_kind.as_str())
+            .ok_or_else(|| {
+                anyhow!(
+                    "{label} raw object {raw_id} has unexpected object kind {}",
+                    raw.object_kind
+                )
+            })?;
+        let request = request_by_id
+            .get(&raw.request_id)
+            .copied()
+            .ok_or_else(|| anyhow!("{label} raw object {raw_id} has missing request"))?;
+        if request.api != ApiKind::Rest
+            || request.method != HttpMethod::Get
+            || request.endpoint_or_operation != binding.endpoint
+        {
+            bail!(
+                "{label} raw object {raw_id} is bound to {} instead of {} {}",
+                request.endpoint_or_operation,
+                binding.object_kind,
+                binding.endpoint
+            );
+        }
+        observed_kinds.insert(raw.object_kind.as_str());
+    }
+    for binding in expected {
+        if !observed_kinds.contains(binding.object_kind) {
+            bail!(
+                "{label} lacks raw object kind {} at {}",
+                binding.object_kind,
+                binding.endpoint
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_github_html_url(value: &str, expected_path: &str, label: &str) -> Result<()> {
+    let parsed = Url::parse(value).with_context(|| format!("parse {label}"))?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("github.com")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != expected_path
+    {
+        bail!("{label} is not bound to https://github.com{expected_path}");
+    }
+    Ok(())
+}
+
+fn validate_github_api_url(value: &str, expected_path: &str, label: &str) -> Result<()> {
+    let parsed = Url::parse(value).with_context(|| format!("parse {label}"))?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("api.github.com")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != expected_path
+    {
+        bail!("{label} is not bound to https://api.github.com{expected_path}");
+    }
+    Ok(())
+}
+
 fn map_pull_request(
     pull_request: &LivePullRequest,
     manifest: &ManifestRepository,
     repository: &LiveRepository,
+    raw_by_id: &BTreeMap<String, &RawObjectRef>,
+    request_by_id: &BTreeMap<String, &RequestRecord>,
 ) -> Result<G0PullRequestInventory> {
     let identity = &pull_request.identity;
+    validate_github_html_url(
+        &identity.source_url,
+        &format!("{}/pull/{}", repository.repository, identity.number),
+        &format!("PR #{} source URL", identity.number),
+    )?;
+    if pull_request.raw_object_refs != identity.raw_object_refs {
+        bail!(
+            "PR #{} outer raw identity differs from its detail identity",
+            identity.number
+        );
+    }
+    validate_nested_raw_references(
+        &identity.raw_object_refs,
+        raw_by_id,
+        request_by_id,
+        &format!("PR #{} identity", identity.number),
+        &[
+            RawEndpointBinding {
+                object_kind: "pull_requests",
+                endpoint: format!("/repos/{}/pulls", repository.repository),
+            },
+            RawEndpointBinding {
+                object_kind: "pull_request",
+                endpoint: format!("/repos/{}/pulls/{}", repository.repository, identity.number),
+            },
+        ],
+    )?;
     let head_repository = identity
         .head_repository
         .clone()
@@ -1386,7 +1582,16 @@ fn map_pull_request(
     let required_check_producers = pull_request
         .checks
         .iter()
-        .map(|check| map_check(check, &repository.workflows, Some(&pull_request.executions)))
+        .map(|check| {
+            map_check(
+                check,
+                &repository.workflows,
+                Some(&pull_request.executions),
+                &repository.repository,
+                raw_by_id,
+                request_by_id,
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
     Ok(G0PullRequestInventory {
         number: identity.number,
@@ -1412,6 +1617,9 @@ fn map_check(
     check: &LiveCheck,
     workflows: &[LiveWorkflow],
     executions: Option<&[LiveExecution]>,
+    repository: &str,
+    raw_by_id: &BTreeMap<String, &RawObjectRef>,
+    request_by_id: &BTreeMap<String, &RequestRecord>,
 ) -> Result<G0CheckProducer> {
     let app_id = check
         .app_id
@@ -1426,6 +1634,33 @@ fn map_check(
     let check_run_attempt = check
         .run_attempt
         .ok_or_else(|| anyhow!("check {} lacks run attempt", check.context))?;
+    validate_github_html_url(
+        &check.source_url,
+        &format!("{repository}/runs/{}", check.check_run_id),
+        &format!("check {} source URL", check.context),
+    )?;
+    let check_suite_id = check
+        .check_suite_id
+        .ok_or_else(|| anyhow!("check {} lacks suite identity", check.context))?;
+    validate_nested_raw_references(
+        &check.raw_object_refs,
+        raw_by_id,
+        request_by_id,
+        &format!("check {}", check.context),
+        &[
+            RawEndpointBinding {
+                object_kind: "check_suites",
+                endpoint: format!(
+                    "/repos/{repository}/commits/{}/check-suites",
+                    check.source_sha
+                ),
+            },
+            RawEndpointBinding {
+                object_kind: "check_suite_runs",
+                endpoint: format!("/repos/{repository}/check-suites/{check_suite_id}/check-runs"),
+            },
+        ],
+    )?;
     let matching_executions = executions
         .into_iter()
         .flatten()
@@ -1520,9 +1755,7 @@ fn map_check(
     Ok(G0CheckProducer {
         context: check.context.clone(),
         app_id,
-        check_suite_id: check
-            .check_suite_id
-            .ok_or_else(|| anyhow!("check {} lacks suite identity", check.context))?,
+        check_suite_id,
         check_run_id: check.check_run_id,
         workflow_run_id,
         run_attempt,
@@ -1839,6 +2072,47 @@ mod tests {
         }
     }
 
+    fn rest_request(raw: &RawObjectRef, endpoint: &str) -> RequestRecord {
+        RequestRecord {
+            request_id: raw.request_id.clone(),
+            api: ApiKind::Rest,
+            method: HttpMethod::Get,
+            endpoint_or_operation: endpoint.to_owned(),
+            query_base64: BASE64.encode(b"{}"),
+            variables_base64: BASE64.encode(b"{}"),
+            query_sha256: Some(sha256_digest(b"{}")),
+            variables_sha256: Some(sha256_digest(b"{}")),
+            redacted_variables: None,
+            auth_identity_ref: "collector.auth".to_owned(),
+            started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+            completed_at_utc: "2026-09-20T00:00:01Z".to_owned(),
+            http_status: Some(200),
+            api_request_id: Some("request".to_owned()),
+            rate_limit: Some(crate::github_acquisition::RateLimitObservation {
+                limit: Some(5000),
+                remaining: Some(4999),
+                used: Some(1),
+                reset_at: Some("2026-09-20T01:00:00Z".to_owned()),
+                retry_after: None,
+            }),
+            safe_scopes: Some(vec!["metadata:read".to_owned()]),
+            page: crate::github_acquisition::PageState {
+                number: 1,
+                per_page: Some(100),
+                link_next: None,
+                cursor_in: None,
+                cursor_out: None,
+                has_next_page: Some(false),
+                items_returned: 1,
+            },
+            response_raw_ref: Some(raw.raw_id.clone()),
+            error_raw_ref: None,
+            state: AcquisitionState::Complete,
+            complete: true,
+            truncation_reason: None,
+        }
+    }
+
     #[test]
     fn model_and_workload_bindings_require_typed_raw_objects() {
         let model = raw_object(
@@ -1963,5 +2237,91 @@ mod tests {
         assert!(
             merge_raw_object_sets(&[], &[workload, conflicting], "model-1", "workload-1",).is_err()
         );
+    }
+
+    #[test]
+    fn nested_raw_identity_binds_kind_to_exact_request_endpoint() {
+        let list = raw_object("pull_requests", "pr-list", serde_json::json!([1]));
+        let detail = raw_object(
+            "pull_request",
+            "pr-detail",
+            serde_json::json!({"number": 7}),
+        );
+        let list_endpoint = "/repos/tailrocks/example/pulls";
+        let detail_endpoint = "/repos/tailrocks/example/pulls/7";
+        let raw_values = [list.clone(), detail.clone()];
+        let raw_by_id = raw_values
+            .iter()
+            .map(|raw| (raw.raw_id.clone(), raw))
+            .collect::<BTreeMap<_, _>>();
+        let requests = [
+            rest_request(&list, list_endpoint),
+            rest_request(&detail, detail_endpoint),
+        ];
+        let request_by_id = requests
+            .iter()
+            .map(|request| (request.request_id.clone(), request))
+            .collect::<BTreeMap<_, _>>();
+        let raw_ids = vec![list.raw_id.clone(), detail.raw_id.clone()];
+        let expected = [
+            RawEndpointBinding {
+                object_kind: "pull_requests",
+                endpoint: list_endpoint.to_owned(),
+            },
+            RawEndpointBinding {
+                object_kind: "pull_request",
+                endpoint: detail_endpoint.to_owned(),
+            },
+        ];
+        assert!(validate_nested_raw_references(
+            &raw_ids,
+            &raw_by_id,
+            &request_by_id,
+            "PR #7",
+            &expected,
+        )
+        .is_ok());
+
+        let mut wrong_endpoint = requests[1].clone();
+        wrong_endpoint.endpoint_or_operation = "/repos/tailrocks/example/rulesets/7".to_owned();
+        let wrong_requests = [requests[0].clone(), wrong_endpoint];
+        let wrong_request_by_id = wrong_requests
+            .iter()
+            .map(|request| (request.request_id.clone(), request))
+            .collect::<BTreeMap<_, _>>();
+        assert!(validate_nested_raw_references(
+            &raw_ids,
+            &raw_by_id,
+            &wrong_request_by_id,
+            "PR #7",
+            &expected,
+        )
+        .is_err());
+
+        let mut wrong_kind_detail = detail.clone();
+        wrong_kind_detail.object_kind = "ruleset".to_owned();
+        let wrong_kind_values = [list.clone(), wrong_kind_detail];
+        let wrong_kind_by_id = wrong_kind_values
+            .iter()
+            .map(|raw| (raw.raw_id.clone(), raw))
+            .collect::<BTreeMap<_, _>>();
+        assert!(validate_nested_raw_references(
+            &raw_ids,
+            &wrong_kind_by_id,
+            &request_by_id,
+            "PR #7",
+            &expected,
+        )
+        .is_err());
+
+        let duplicate = vec![list.raw_id.clone(), list.raw_id];
+        assert!(validate_nested_raw_references(
+            &duplicate,
+            &raw_by_id,
+            &request_by_id,
+            "PR #7",
+            &expected,
+        )
+        .is_err());
     }
 }
