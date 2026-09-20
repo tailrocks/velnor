@@ -1360,7 +1360,18 @@ fn controller_applies_dependency_false_without_github() {
 #[test]
 fn job_once_without_ownership_fails() {
     let dir = scratch("job-noown");
-    Journal::open(dir.join("journal.db")).unwrap();
+    let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+    prime_named_ready(&mut journal, "job-noown");
+    drop(journal);
+    velnor_runner::node::cleanup::claim_owned(&dir, "missing", Generation::INITIAL.0).unwrap();
+    let launch_token = velnor_runner::node::cleanup::with_dead_owned_pid_intent(
+        &dir,
+        "missing",
+        Generation::INITIAL.0,
+        |token| Ok(token.to_owned()),
+    )
+    .unwrap()
+    .expect("fixture must publish a fresh worker launch intent");
     let output = Command::new(runner())
         .args([
             "job",
@@ -1368,16 +1379,24 @@ fn job_once_without_ownership_fails() {
             dir.to_str().unwrap(),
             "--job-id",
             "missing",
+            "--launch-token",
+            &launch_token,
+            "--slot-id",
+            "job-noown-1",
             "--generation",
             "1",
             "--once",
         ])
         .output()
         .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
-        "unowned job must not run: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "unowned job must not run: {stderr}"
+    );
+    assert!(
+        stderr.contains("has no generation-owned record"),
+        "worker must reject missing durable job ownership after launch intent: {stderr}"
     );
     std::fs::remove_dir_all(dir).ok();
 }
@@ -1388,27 +1407,62 @@ fn job_once_without_exec_persists_only_after_ownership() {
     let mut journal = Journal::open(dir.join("journal.db")).unwrap();
     prime_named_ready(&mut journal, "jobown");
     use velnor_model::JobId;
-    journal
-        .apply(Event::JobAcquisitionIntended {
-            slot_id: SlotId("jobown-1".into()),
-            job_id: JobId("slot-1-worker".into()),
-            generation: Generation::INITIAL,
-            message_id: "msg-1".into(),
-            run_service_url: "https://run.example/run".into(),
-            intended_unix: 1_000,
-        })
-        .unwrap();
-    journal
-        .apply(Event::JobOwned {
-            job_id: JobId("slot-1-worker".into()),
-            slot_id: SlotId("jobown-1".into()),
-            attempt: 1,
-            generation: Generation::INITIAL,
-            worker: "velnor-job@slot-1-worker".into(),
-            accepted_unix: 0,
-        })
-        .unwrap();
+    let request_id = JobId("runner-request-1".into());
+    let job_id = JobId("slot-1-worker".into());
+    assert!(
+        !journal
+            .apply(Event::JobAcquisitionIntended {
+                slot_id: SlotId("jobown-1".into()),
+                job_id: request_id.clone(),
+                generation: Generation::INITIAL,
+                message_id: "msg-1".into(),
+                runner_request_id: Some(request_id.0.clone()),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
+            })
+            .unwrap()
+            .rejected,
+        "acquisition intent fixture must be accepted"
+    );
+    assert!(
+        !journal
+            .apply(Event::JobAcquisitionResolved {
+                provisional_job_id: request_id,
+                acquired_job_id: job_id.clone(),
+                plan_id: "plan-1".into(),
+                generation: Generation::INITIAL,
+                runner_request_id: Some("runner-request-1".into()),
+                permit_lease: None,
+            })
+            .unwrap()
+            .rejected,
+        "resolved acquisition fixture must be accepted"
+    );
+    assert!(
+        !journal
+            .apply(Event::JobOwned {
+                job_id,
+                slot_id: SlotId("jobown-1".into()),
+                attempt: 1,
+                generation: Generation::INITIAL,
+                worker: "velnor-job@slot-1-worker".into(),
+                accepted_unix: 0,
+            })
+            .unwrap()
+            .rejected,
+        "owned-job fixture must be accepted"
+    );
     drop(journal);
+    velnor_runner::node::cleanup::claim_owned(&dir, "slot-1-worker", Generation::INITIAL.0)
+        .unwrap();
+    let launch_token = velnor_runner::node::cleanup::with_dead_owned_pid_intent(
+        &dir,
+        "slot-1-worker",
+        Generation::INITIAL.0,
+        |token| Ok(token.to_owned()),
+    )
+    .unwrap()
+    .expect("fixture must publish a fresh worker launch intent");
     let output = Command::new(runner())
         .args([
             "job",
@@ -1416,6 +1470,8 @@ fn job_once_without_exec_persists_only_after_ownership() {
             dir.to_str().unwrap(),
             "--job-id",
             "slot-1-worker",
+            "--launch-token",
+            &launch_token,
             "--generation",
             "1",
             "--once",
@@ -1483,35 +1539,63 @@ fn controller_sends_pending_completion_outbox() {
     prime_named_ready(&mut journal, "out");
     use velnor_control::journal::payload_checksum;
     use velnor_model::JobId;
+    let request_id = JobId("runner-request-1".into());
     let job_id = JobId("slot-1-worker".into());
-    journal
-        .apply(Event::JobAcquisitionIntended {
-            slot_id: SlotId("out-1".into()),
-            job_id: job_id.clone(),
-            generation: Generation::INITIAL,
-            message_id: "msg-1".into(),
-            run_service_url: "https://run.example/run".into(),
-            intended_unix: 1_000,
-        })
-        .unwrap();
-    journal
-        .apply(Event::JobOwned {
-            job_id: job_id.clone(),
-            slot_id: SlotId("out-1".into()),
-            attempt: 1,
-            generation: Generation::INITIAL,
-            worker: "velnor-job@slot-1-worker".into(),
-            accepted_unix: 0,
-        })
-        .unwrap();
+    assert!(
+        !journal
+            .apply(Event::JobAcquisitionIntended {
+                slot_id: SlotId("out-1".into()),
+                job_id: request_id.clone(),
+                generation: Generation::INITIAL,
+                message_id: "msg-1".into(),
+                runner_request_id: Some(request_id.0.clone()),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
+            })
+            .unwrap()
+            .rejected,
+        "acquisition intent fixture must be accepted"
+    );
+    assert!(
+        !journal
+            .apply(Event::JobAcquisitionResolved {
+                provisional_job_id: request_id,
+                acquired_job_id: job_id.clone(),
+                plan_id: "plan-1".into(),
+                generation: Generation::INITIAL,
+                runner_request_id: Some("runner-request-1".into()),
+                permit_lease: None,
+            })
+            .unwrap()
+            .rejected,
+        "resolved acquisition fixture must be accepted"
+    );
+    assert!(
+        !journal
+            .apply(Event::JobOwned {
+                job_id: job_id.clone(),
+                slot_id: SlotId("out-1".into()),
+                attempt: 1,
+                generation: Generation::INITIAL,
+                worker: "velnor-job@slot-1-worker".into(),
+                accepted_unix: 0,
+            })
+            .unwrap()
+            .rejected,
+        "owned-job fixture must be accepted"
+    );
     let payload = b"conclusion=success";
-    journal
-        .apply(Event::CompletionIntended {
-            job_id: job_id.clone(),
-            generation: Generation::INITIAL,
-            payload_sha256: payload_checksum(payload),
-        })
-        .unwrap();
+    assert!(
+        !journal
+            .apply(Event::CompletionIntended {
+                job_id: job_id.clone(),
+                generation: Generation::INITIAL,
+                payload_sha256: payload_checksum(payload),
+            })
+            .unwrap()
+            .rejected,
+        "completion fixture must be accepted"
+    );
     velnor_runner::node::cleanup::write_outbox(&dir, &job_id.0, 1, payload).unwrap();
     drop(journal);
 
@@ -1546,7 +1630,9 @@ fn controller_sends_pending_completion_outbox() {
         !pending[0].send_started,
         "send-started is only after an actual GitHub send, not outbox observation"
     );
-    if let Some(pid) = velnor_runner::node::cleanup::read_owned_pid(&dir, "slot-1-worker", 1) {
+    if let Some(pid) =
+        velnor_runner::node::cleanup::read_owned_pid(&dir, "slot-1-worker", 1).unwrap()
+    {
         kill_pid(pid);
     }
     std::fs::remove_dir_all(dir).ok();
