@@ -34,15 +34,42 @@ missing IDs are counted and censor completeness. Otherwise derived completion
 is null with an explicit unknown reason. Any API `completed_at` field is kept
 as metadata and never substitutes for derived job completion.
 
-Run completion is the maximum verified non-skipped job `completed_at`; run
-`updated_at` is never used. Job execution durations and their sum are separate
-from run wall latency. The sum is null when the verified job set is incomplete
-or any non-skipped job duration is missing, while a partial observed sum and
-unobserved/unknown counts are retained. Pre-start (`run_started_at -
-created_at`) is reported separately and labeled unclassified. Skipped jobs stay
-in completeness counts, including GitHub's inverted synthetic timestamps, and
-are not silently treated as executed work. Job attempts must exactly match the
-run attempt; mismatches remain separate synthetic rows.
+Run completion is the maximum observed non-skipped job `completed_at`; run
+`updated_at` is never used. Collection completeness and execution freshness
+are separate facts. `run_attempt` plus a new job ID does not prove that a
+rerun executed the job: GitHub can expose a reused successful job under the
+new attempt while retaining its earlier timestamps.
+
+For every non-skipped job, the collector classifies freshness against the
+run's `run_started_at`: `fresh` when the job starts at or after that boundary,
+`stale_before_attempt` when it starts earlier, and an explicit unknown or
+invalid state when the boundary/start/order cannot be proven. Skipped jobs
+remain in the collection count and do not create freshness obligations; their
+synthetic inverted intervals remain visible as skipped evidence.
+
+`attempt_freshness_state` must be `complete_fresh` before a full execution sum
+or `attempt_wall_ms` is emitted. Mixed or stale attempts retain raw rows,
+`fresh_execution_partial_sum_ms`, `stale_execution_partial_sum_ms`, fresh and
+stale counts, and a `fresh_attempt_wall_ms` value only when that observed
+subset has complete timing. Per-subset unknown counters expose missing or
+overflowed durations; a partial sum never hides those failures. Those fields
+are explicitly partial evidence and must not be used as full-workflow
+benchmarks. `run_lifetime_ms` measures
+`created_at` to completion only for attempt 1, where `created_at` is the
+trigger boundary. Reruns report
+`run_lifetime_state=unknown_rerun_created_at_is_original`; their attempt wall
+measurement uses `run_started_at` and remains null unless all executed records
+are fresh and valid. `pre_start_ms` remains unclassified and is never queue
+time.
+
+This timestamp boundary is execution evidence, not source or coverage proof.
+For stronger rerun attribution, a transport may bind current and prior attempt
+snapshots, or a generated workflow may emit a per-attempt marker. Missing
+snapshot or marker evidence remains unknown; it cannot upgrade a stale or
+mixed timestamp set. `complete_fresh` proves only the observed timing
+boundary; it does not prove source identity, effective checkout, required
+coverage, or artifact validity. Job attempts must exactly match the run
+attempt; mismatches remain separate synthetic rows.
 
 CSV is a flat job ranking with raw timestamp strings, duration, run metadata,
 referenced-workflow JSON, cache/report fields when present, and completeness

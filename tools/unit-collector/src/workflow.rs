@@ -226,14 +226,34 @@ pub struct WorkflowJobRecord {
     pub malformed_job_entries: usize,
     pub attempt_match: bool,
     pub executed_timing_complete: Option<bool>,
+    /// Freshness is independent from collection completeness. A rerun may
+    /// expose complete job records from an earlier attempt.
+    pub attempt_freshness_state: String,
     pub completion_state: String,
-    /// All-jobs completion excludes skipped jobs with invalid/missing times.
+    /// Maximum observed non-skipped completion, including stale records when
+    /// the attempt freshness state is mixed.
     pub all_jobs_completed_at: Option<String>,
-    pub all_jobs_wall_ms: Option<u64>,
+    /// Original run creation to completion. This is a trigger-to-final metric
+    /// only for the initial attempt; reruns retain the original created_at.
+    pub run_lifetime_ms: Option<u64>,
+    pub run_lifetime_state: String,
+    /// Full attempt wall time is emitted only when every executed record is
+    /// fresh and its timing is valid.
+    pub attempt_wall_ms: Option<u64>,
+    /// Wall time for the fresh, observed subset. This is explicitly partial
+    /// when `attempt_freshness_state` is mixed or stale.
+    pub fresh_attempt_wall_ms: Option<u64>,
     /// Execution sum excludes skipped jobs and is null when an executed job
-    /// has missing or invalid timestamps.
+    /// is stale, missing, invalid, or otherwise incomplete.
     pub execution_sum_ms: Option<u64>,
     pub execution_partial_sum_ms: u64,
+    pub fresh_execution_partial_sum_ms: Option<u64>,
+    pub stale_execution_partial_sum_ms: Option<u64>,
+    pub fresh_execution_unknown_jobs: usize,
+    pub stale_execution_unknown_jobs: usize,
+    pub fresh_executed_jobs: usize,
+    pub stale_executed_jobs: usize,
+    pub freshness_unknown_jobs: usize,
     pub execution_unknown_jobs: usize,
     pub execution_unobserved_jobs: Option<usize>,
     pub skipped_jobs: usize,
@@ -261,6 +281,7 @@ pub struct WorkflowJobRecord {
     pub job_completed_at: Option<String>,
     pub job_duration_ms: Option<u64>,
     pub job_duration_state: String,
+    pub job_freshness_state: String,
     pub steps: Vec<WorkflowStepRecord>,
 }
 
@@ -375,11 +396,22 @@ pub fn write_workflow_csv<W: Write>(
         "malformed_job_entries",
         "attempt_match",
         "executed_timing_complete",
+        "attempt_freshness_state",
         "completion_state",
         "all_jobs_completed_at",
-        "all_jobs_wall_ms",
+        "run_lifetime_ms",
+        "run_lifetime_state",
+        "attempt_wall_ms",
+        "fresh_attempt_wall_ms",
         "execution_sum_ms",
         "execution_partial_sum_ms",
+        "fresh_execution_partial_sum_ms",
+        "stale_execution_partial_sum_ms",
+        "fresh_execution_unknown_jobs",
+        "stale_execution_unknown_jobs",
+        "fresh_executed_jobs",
+        "stale_executed_jobs",
+        "freshness_unknown_jobs",
         "execution_unknown_jobs",
         "execution_unobserved_jobs",
         "skipped_jobs",
@@ -403,6 +435,7 @@ pub fn write_workflow_csv<W: Write>(
         "job_completed_at",
         "job_duration_ms",
         "job_duration_state",
+        "job_freshness_state",
         "step_count",
         "timed_step_count",
         "steps_json",
@@ -453,11 +486,22 @@ pub fn write_workflow_csv<W: Write>(
             record.malformed_job_entries.to_string(),
             record.attempt_match.to_string(),
             display_opt(&record.executed_timing_complete),
+            record.attempt_freshness_state.clone(),
             record.completion_state.clone(),
             display_opt(&record.all_jobs_completed_at),
-            display_opt(&record.all_jobs_wall_ms),
+            display_opt(&record.run_lifetime_ms),
+            record.run_lifetime_state.clone(),
+            display_opt(&record.attempt_wall_ms),
+            display_opt(&record.fresh_attempt_wall_ms),
             display_opt(&record.execution_sum_ms),
             record.execution_partial_sum_ms.to_string(),
+            display_opt(&record.fresh_execution_partial_sum_ms),
+            display_opt(&record.stale_execution_partial_sum_ms),
+            record.fresh_execution_unknown_jobs.to_string(),
+            record.stale_execution_unknown_jobs.to_string(),
+            record.fresh_executed_jobs.to_string(),
+            record.stale_executed_jobs.to_string(),
+            record.freshness_unknown_jobs.to_string(),
             record.execution_unknown_jobs.to_string(),
             display_opt(&record.execution_unobserved_jobs),
             record.skipped_jobs.to_string(),
@@ -481,6 +525,7 @@ pub fn write_workflow_csv<W: Write>(
             display_opt(&record.job_completed_at),
             display_opt(&record.job_duration_ms),
             record.job_duration_state.clone(),
+            record.job_freshness_state.clone(),
             record.steps.len().to_string(),
             timed_steps.to_string(),
             steps_json,
@@ -546,27 +591,31 @@ pub fn render_workflow_summary(records: &[WorkflowJobRecord]) -> String {
     );
     let _ = writeln!(
         summary,
-        "Execution sums exclude skipped jobs and are null when the job set is incomplete or an executed job has missing or invalid timestamps; observed partial sums remain separate."
+        "Full execution and attempt-wall sums require a complete fresh attempt; observed fresh/stale partial sums and unknown counters remain separate."
     );
     let _ = writeln!(
         summary,
-        "Pre-start intervals are unclassified; no queue attribution or critical path is inferred without a dependency graph."
+        "Pre-start intervals are unclassified; rerun intervals are not queue time, and no queue attribution or critical path is inferred without a dependency graph."
+    );
+    let _ = writeln!(
+        summary,
+        "The raw duration table includes stale records for evidence; rows with freshness other than fresh are not current-attempt bottlenecks."
     );
     let _ = writeln!(summary);
     let _ = writeln!(summary, "## Ranked jobs by raw API duration");
     let _ = writeln!(summary);
     let _ = writeln!(
         summary,
-        "| Rank | Run | Attempt | Job | Duration ms | Conclusion | Runner | Completion state |"
+        "| Rank | Run | Attempt | Job | Duration ms | Conclusion | Runner | Job freshness | Completion state |"
     );
     let _ = writeln!(
         summary,
-        "| ---: | ---: | ---: | --- | ---: | --- | --- | --- |"
+        "| ---: | ---: | ---: | --- | ---: | --- | --- | --- | --- |"
     );
     for (index, record) in ranked.into_iter().take(25).enumerate() {
         let _ = writeln!(
             summary,
-            "| {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             index + 1,
             display_opt(&record.run_id),
             display_opt(&record.run_attempt),
@@ -574,6 +623,7 @@ pub fn render_workflow_summary(records: &[WorkflowJobRecord]) -> String {
             display_opt(&record.job_duration_ms),
             markdown_cell(record.job_conclusion.as_deref().unwrap_or(UNKNOWN)),
             markdown_cell(record.runner_name.as_deref().unwrap_or(UNKNOWN)),
+            record.job_freshness_state,
             record.completion_state,
         );
     }
@@ -1140,6 +1190,79 @@ fn timestamp_duration(start: Option<&str>, end: Option<&str>) -> (Option<u64>, S
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobFreshness {
+    Fresh,
+    StaleBeforeAttempt,
+    UnknownAttemptStart,
+    UnknownJobStart,
+    InvalidOrder,
+    NotApplicableSkipped,
+}
+
+impl JobFreshness {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::StaleBeforeAttempt => "stale_before_attempt",
+            Self::UnknownAttemptStart => "unknown_attempt_start",
+            Self::UnknownJobStart => "unknown_job_start",
+            Self::InvalidOrder => "invalid_order",
+            Self::NotApplicableSkipped => "not_applicable_skipped",
+        }
+    }
+}
+
+fn classify_job_freshness(run: &WorkflowRunInput, job: &WorkflowJobInput) -> JobFreshness {
+    if is_skipped(job) {
+        return JobFreshness::NotApplicableSkipped;
+    }
+    let Some(attempt_started) = timestamp(run.run_started_at.as_deref()) else {
+        return JobFreshness::UnknownAttemptStart;
+    };
+    let Some(job_started) = timestamp(job.started_at.as_deref()) else {
+        return JobFreshness::UnknownJobStart;
+    };
+    if timestamp_duration(job.started_at.as_deref(), job.completed_at.as_deref()).1
+        == "invalid_order"
+    {
+        return JobFreshness::InvalidOrder;
+    }
+    if job_started < attempt_started {
+        JobFreshness::StaleBeforeAttempt
+    } else {
+        JobFreshness::Fresh
+    }
+}
+
+fn attempt_freshness_state(
+    fresh_executed_jobs: usize,
+    stale_executed_jobs: usize,
+    freshness_unknown_jobs: usize,
+) -> &'static str {
+    if fresh_executed_jobs == 0 && stale_executed_jobs == 0 && freshness_unknown_jobs == 0 {
+        "not_applicable_all_skipped"
+    } else if freshness_unknown_jobs != 0 {
+        "unknown_job_freshness"
+    } else if stale_executed_jobs != 0 && fresh_executed_jobs != 0 {
+        "mixed_stale_records"
+    } else if stale_executed_jobs != 0 {
+        "stale_records"
+    } else {
+        "complete_fresh"
+    }
+}
+
+fn add_duration(sum: &mut u64, unknown: &mut usize, duration: Option<u64>) {
+    match duration {
+        Some(duration) => match sum.checked_add(duration) {
+            Some(next) => *sum = next,
+            None => *unknown = unknown.saturating_add(1),
+        },
+        None => *unknown = unknown.saturating_add(1),
+    }
+}
+
 fn build_records(
     runs: Vec<WorkflowRunInput>,
     pages: Vec<JobPage>,
@@ -1380,25 +1503,65 @@ fn records_for_run(
         })
         .count();
     let mut execution_partial_sum_ms = 0_u64;
+    let mut fresh_execution_partial_sum_ms = 0_u64;
+    let mut stale_execution_partial_sum_ms = 0_u64;
     let mut execution_unknown_jobs = conflicting_executed_jobs;
+    let mut freshness_unknown_jobs = conflicting_executed_jobs;
+    let mut fresh_executed_jobs = 0_usize;
+    let mut stale_executed_jobs = 0_usize;
+    let mut fresh_execution_unknown_jobs = conflicting_executed_jobs;
+    let mut stale_execution_unknown_jobs = conflicting_executed_jobs;
     let mut max_job_duration_ms = None;
     let mut max_job_name = None;
+    let mut fresh_completion_times = Vec::new();
     for job in &executed_jobs {
+        let freshness = classify_job_freshness(run, job);
         let (duration, _) =
             timestamp_duration(job.started_at.as_deref(), job.completed_at.as_deref());
-        match duration {
-            Some(duration) => {
-                if let Some(sum) = execution_partial_sum_ms.checked_add(duration) {
-                    execution_partial_sum_ms = sum;
-                } else {
-                    execution_unknown_jobs = execution_unknown_jobs.saturating_add(1);
-                }
-                if max_job_duration_ms.is_none_or(|current| duration > current) {
-                    max_job_duration_ms = Some(duration);
-                    max_job_name = job.name.clone();
+        add_duration(
+            &mut execution_partial_sum_ms,
+            &mut execution_unknown_jobs,
+            duration,
+        );
+        match freshness {
+            JobFreshness::Fresh => {
+                fresh_executed_jobs = fresh_executed_jobs.saturating_add(1);
+                add_duration(
+                    &mut fresh_execution_partial_sum_ms,
+                    &mut fresh_execution_unknown_jobs,
+                    duration,
+                );
+                if let Some(completion) = timestamp(job.completed_at.as_deref()) {
+                    fresh_completion_times.push((completion, job.completed_at.clone()));
                 }
             }
-            None => execution_unknown_jobs = execution_unknown_jobs.saturating_add(1),
+            JobFreshness::StaleBeforeAttempt => {
+                stale_executed_jobs = stale_executed_jobs.saturating_add(1);
+                if let Some(duration) = duration {
+                    match stale_execution_partial_sum_ms.checked_add(duration) {
+                        Some(next) => stale_execution_partial_sum_ms = next,
+                        None => {
+                            execution_unknown_jobs = execution_unknown_jobs.saturating_add(1);
+                            stale_execution_unknown_jobs =
+                                stale_execution_unknown_jobs.saturating_add(1);
+                        }
+                    }
+                } else {
+                    stale_execution_unknown_jobs = stale_execution_unknown_jobs.saturating_add(1);
+                }
+            }
+            JobFreshness::UnknownAttemptStart
+            | JobFreshness::UnknownJobStart
+            | JobFreshness::InvalidOrder => {
+                freshness_unknown_jobs = freshness_unknown_jobs.saturating_add(1);
+            }
+            JobFreshness::NotApplicableSkipped => {}
+        }
+        if let Some(duration) = duration
+            && max_job_duration_ms.is_none_or(|current| duration > current)
+        {
+            max_job_duration_ms = Some(duration);
+            max_job_name = job.name.clone();
         }
     }
     let execution_unobserved_jobs = expected.map(|expected| expected.saturating_sub(observed));
@@ -1418,9 +1581,28 @@ fn records_for_run(
             && conflicting_executed_jobs == 0
             && valid_execution_durations == executed_jobs.len(),
     );
+    let freshness_state = attempt_freshness_state(
+        fresh_executed_jobs,
+        stale_executed_jobs,
+        freshness_unknown_jobs,
+    );
+    let fresh_jobs: Vec<_> = executed_jobs
+        .iter()
+        .copied()
+        .filter(|job| classify_job_freshness(run, job) == JobFreshness::Fresh)
+        .collect();
+    let fresh_timing_complete = !fresh_jobs.is_empty()
+        && fresh_jobs.iter().all(|job| job_is_terminal(job))
+        && fresh_execution_unknown_jobs == 0
+        && fresh_jobs.iter().all(|job| {
+            timestamp_duration(job.started_at.as_deref(), job.completed_at.as_deref())
+                .0
+                .is_some()
+        });
     let execution_sum_ms = (jobs_complete == Some(true)
         && executed_timing_complete == Some(true)
-        && execution_unknown_jobs == 0)
+        && execution_unknown_jobs == 0
+        && freshness_state == "complete_fresh")
         .then_some(execution_partial_sum_ms);
 
     let valid_completion_times: Vec<_> = executed_jobs
@@ -1446,6 +1628,11 @@ fn records_for_run(
     } else {
         None
     };
+    let fresh_completion = if run_terminal == Some(true) && fresh_timing_complete {
+        max_timestamp(&fresh_completion_times)
+    } else {
+        None
+    };
     let completion_state = if run_terminal != Some(true) {
         match run_terminal {
             None => "unknown_run_status",
@@ -1458,6 +1645,12 @@ fn records_for_run(
         "unknown_no_executed_jobs"
     } else if !executed_completion_complete {
         "unknown_job_timestamps"
+    } else if freshness_state != "complete_fresh" {
+        match freshness_state {
+            "mixed_stale_records" => "unknown_mixed_job_freshness",
+            "stale_records" => "unknown_stale_job_freshness",
+            _ => "unknown_job_freshness",
+        }
     } else if run_completion.is_some() {
         "verified"
     } else {
@@ -1465,12 +1658,42 @@ fn records_for_run(
     }
     .to_owned();
 
-    let all_jobs_wall_ms = run_completion.as_ref().and_then(|(_, completion)| {
-        timestamp_duration(run.created_at.as_deref(), Some(completion.as_str())).0
+    let (run_lifetime_ms, run_lifetime_state) = match run.run_attempt {
+        Some(1) => {
+            let lifetime = run_completion.as_ref().and_then(|(_, completion)| {
+                timestamp_duration(run.created_at.as_deref(), Some(completion.as_str())).0
+            });
+            let state = if lifetime.is_some() {
+                "observed_initial_attempt"
+            } else {
+                "unknown_initial_attempt_timing"
+            };
+            (lifetime, state.to_owned())
+        }
+        Some(_) => (None, "unknown_rerun_created_at_is_original".to_owned()),
+        None => (None, "unknown_attempt".to_owned()),
+    };
+    let attempt_wall_ms = if jobs_complete == Some(true)
+        && freshness_state == "complete_fresh"
+        && executed_timing_complete == Some(true)
+    {
+        run_completion.as_ref().and_then(|(_, completion)| {
+            timestamp_duration(run.run_started_at.as_deref(), Some(completion.as_str())).0
+        })
+    } else {
+        None
+    };
+    let fresh_attempt_wall_ms = fresh_completion.as_ref().and_then(|(_, completion)| {
+        timestamp_duration(run.run_started_at.as_deref(), Some(completion.as_str())).0
     });
     let (pre_start_ms, pre_start_state) = pre_start(run);
-    let (required_gate_completed_at, required_gate_state) =
-        required_gate(&jobs, options, attempt_match, duplicate_or_page_conflict);
+    let (required_gate_completed_at, required_gate_state) = required_gate(
+        run,
+        &jobs,
+        options,
+        attempt_match,
+        duplicate_or_page_conflict,
+    );
 
     let base = BaseRecord {
         run,
@@ -1480,11 +1703,24 @@ fn records_for_run(
         malformed_job_entries,
         attempt_match,
         executed_timing_complete,
+        attempt_freshness_state: freshness_state.to_owned(),
         completion_state,
         run_completion: run_completion.map(|(_, raw)| raw),
-        all_jobs_wall_ms,
+        run_lifetime_ms,
+        run_lifetime_state,
+        attempt_wall_ms,
+        fresh_attempt_wall_ms,
         execution_sum_ms,
         execution_partial_sum_ms,
+        fresh_execution_partial_sum_ms: (fresh_executed_jobs != 0)
+            .then_some(fresh_execution_partial_sum_ms),
+        stale_execution_partial_sum_ms: (stale_executed_jobs != 0)
+            .then_some(stale_execution_partial_sum_ms),
+        fresh_execution_unknown_jobs,
+        stale_execution_unknown_jobs,
+        fresh_executed_jobs,
+        stale_executed_jobs,
+        freshness_unknown_jobs,
         execution_unknown_jobs,
         execution_unobserved_jobs,
         skipped_jobs,
@@ -1510,11 +1746,22 @@ struct BaseRecord<'a> {
     malformed_job_entries: usize,
     attempt_match: bool,
     executed_timing_complete: Option<bool>,
+    attempt_freshness_state: String,
     completion_state: String,
     run_completion: Option<String>,
-    all_jobs_wall_ms: Option<u64>,
+    run_lifetime_ms: Option<u64>,
+    run_lifetime_state: String,
+    attempt_wall_ms: Option<u64>,
+    fresh_attempt_wall_ms: Option<u64>,
     execution_sum_ms: Option<u64>,
     execution_partial_sum_ms: u64,
+    fresh_execution_partial_sum_ms: Option<u64>,
+    stale_execution_partial_sum_ms: Option<u64>,
+    fresh_execution_unknown_jobs: usize,
+    stale_execution_unknown_jobs: usize,
+    fresh_executed_jobs: usize,
+    stale_executed_jobs: usize,
+    freshness_unknown_jobs: usize,
     execution_unknown_jobs: usize,
     execution_unobserved_jobs: Option<usize>,
     skipped_jobs: usize,
@@ -1580,11 +1827,22 @@ impl BaseRecord<'_> {
             malformed_job_entries: self.malformed_job_entries,
             attempt_match: self.attempt_match,
             executed_timing_complete: self.executed_timing_complete,
+            attempt_freshness_state: self.attempt_freshness_state.clone(),
             completion_state: self.completion_state.clone(),
             all_jobs_completed_at: self.run_completion.clone(),
-            all_jobs_wall_ms: self.all_jobs_wall_ms,
+            run_lifetime_ms: self.run_lifetime_ms,
+            run_lifetime_state: self.run_lifetime_state.clone(),
+            attempt_wall_ms: self.attempt_wall_ms,
+            fresh_attempt_wall_ms: self.fresh_attempt_wall_ms,
             execution_sum_ms: self.execution_sum_ms,
             execution_partial_sum_ms: self.execution_partial_sum_ms,
+            fresh_execution_partial_sum_ms: self.fresh_execution_partial_sum_ms,
+            stale_execution_partial_sum_ms: self.stale_execution_partial_sum_ms,
+            fresh_execution_unknown_jobs: self.fresh_execution_unknown_jobs,
+            stale_execution_unknown_jobs: self.stale_execution_unknown_jobs,
+            fresh_executed_jobs: self.fresh_executed_jobs,
+            stale_executed_jobs: self.stale_executed_jobs,
+            freshness_unknown_jobs: self.freshness_unknown_jobs,
             execution_unknown_jobs: self.execution_unknown_jobs,
             execution_unobserved_jobs: self.execution_unobserved_jobs,
             skipped_jobs: self.skipped_jobs,
@@ -1608,6 +1866,9 @@ impl BaseRecord<'_> {
             job_completed_at: job.and_then(|job| job.completed_at.clone()),
             job_duration_ms,
             job_duration_state,
+            job_freshness_state: job
+                .map(|job| classify_job_freshness(self.run, job).as_str().to_owned())
+                .unwrap_or_else(|| "no_job".to_owned()),
             steps: job.map(|job| job.steps.clone()).unwrap_or_default(),
         }
     }
@@ -1634,6 +1895,9 @@ fn max_timestamp(values: &[(OffsetDateTime, Option<String>)]) -> Option<(OffsetD
 }
 
 fn pre_start(run: &WorkflowRunInput) -> (Option<u64>, String) {
+    if run.run_attempt.is_some_and(|attempt| attempt > 1) {
+        return (None, "unknown_rerun_inter_attempt".to_owned());
+    }
     let Some(created) = timestamp(run.created_at.as_deref()) else {
         return (None, "unknown_timestamps".to_owned());
     };
@@ -1651,6 +1915,7 @@ fn pre_start(run: &WorkflowRunInput) -> (Option<u64>, String) {
 }
 
 fn required_gate(
+    run: &WorkflowRunInput,
     jobs: &[WorkflowJobInput],
     options: &WorkflowCollectOptions,
     attempt_match: bool,
@@ -1711,6 +1976,20 @@ fn required_gate(
         let Some(completion) = timestamp(job.completed_at.as_deref()) else {
             return (None, "unknown_gate_timestamps".to_owned());
         };
+        match classify_job_freshness(run, job) {
+            JobFreshness::Fresh => {}
+            JobFreshness::StaleBeforeAttempt => {
+                return (None, "unknown_gate_stale_job".to_owned());
+            }
+            JobFreshness::UnknownAttemptStart
+            | JobFreshness::UnknownJobStart
+            | JobFreshness::InvalidOrder => {
+                return (None, "unknown_gate_freshness".to_owned());
+            }
+            JobFreshness::NotApplicableSkipped => {
+                return (None, "unknown_gate_skipped".to_owned());
+            }
+        }
         completed.push((completion, job.completed_at.clone()));
     }
     max_timestamp(&completed)

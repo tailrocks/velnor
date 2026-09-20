@@ -5,7 +5,9 @@
     reason = "fixture assertions intentionally fail loudly"
 )]
 
-use unit_collector::{collect_workflow, parse_run_documents, WorkflowCollectOptions};
+use unit_collector::{
+    collect_workflow, parse_run_documents, render_workflow_summary, WorkflowCollectOptions,
+};
 
 fn run_json(id: u64, attempt: u64, status: &str, ref_name: &str) -> String {
     format!(
@@ -231,8 +233,17 @@ fn parallel_jobs_rank_by_raw_timestamps_and_keep_gate_separate() {
         records[0].all_jobs_completed_at.as_deref(),
         Some("2026-09-20T00:00:15Z")
     );
-    assert_eq!(records[0].all_jobs_wall_ms, Some(15_000));
+    assert_eq!(records[0].run_lifetime_ms, Some(15_000));
+    assert_eq!(records[0].run_lifetime_state, "observed_initial_attempt");
+    assert_eq!(records[0].attempt_wall_ms, Some(10_000));
+    assert_eq!(records[0].fresh_attempt_wall_ms, Some(10_000));
+    assert_eq!(records[0].attempt_freshness_state, "complete_fresh");
     assert_eq!(records[0].execution_sum_ms, Some(6_000));
+    assert_eq!(records[0].fresh_execution_partial_sum_ms, Some(6_000));
+    assert_eq!(records[0].stale_execution_partial_sum_ms, None);
+    assert_eq!(records[0].fresh_executed_jobs, 2);
+    assert_eq!(records[0].stale_executed_jobs, 0);
+    assert_eq!(records[0].freshness_unknown_jobs, 0);
     assert_eq!(
         records[0].required_gate_completed_at.as_deref(),
         Some("2026-09-20T00:00:12Z")
@@ -298,12 +309,201 @@ fn skipped_inverted_timestamps_do_not_invalidate_real_completion() {
     assert!(records
         .iter()
         .all(|record| record.execution_sum_ms == Some(6_000)));
+    assert!(records
+        .iter()
+        .all(|record| record.attempt_freshness_state == "complete_fresh"));
+    assert!(records
+        .iter()
+        .all(|record| record.fresh_attempt_wall_ms == Some(9_000)));
     let skipped = records
         .iter()
         .find(|record| record.job_name.as_deref() == Some("skipped"))
         .expect("skipped row");
     assert_eq!(skipped.job_duration_ms, None);
     assert_eq!(skipped.job_duration_state, "skipped");
+    assert_eq!(skipped.job_freshness_state, "not_applicable_skipped");
+}
+
+#[test]
+fn rerun_freshness_censors_mixed_records_and_keeps_partial_evidence() {
+    let run = run_json(30, 2, "completed", "refs/pull/7/merge")
+        .replace("2026-09-20T00:00:05Z", "2026-09-20T00:00:10Z");
+    let stale = job(
+        301,
+        30,
+        2,
+        "reused",
+        "success",
+        "2026-09-20T00:00:07Z",
+        "2026-09-20T00:00:09Z",
+    );
+    let fresh = job(
+        302,
+        30,
+        2,
+        "rerun",
+        "success",
+        "2026-09-20T00:00:11Z",
+        "2026-09-20T00:00:13Z",
+    );
+    let jobs = format!(r#"{{"total_count": 2, "jobs": [{stale}, {fresh}]}}"#);
+    let records = collect_workflow(
+        &[("run.json".to_owned(), run)],
+        &[("jobs.json".to_owned(), jobs)],
+        &WorkflowCollectOptions::default(),
+    )
+    .expect("mixed rerun fixture parses");
+
+    assert!(records
+        .iter()
+        .all(|record| record.jobs_complete == Some(true)));
+    assert!(records.iter().all(|record| record.attempt_match));
+    assert!(records
+        .iter()
+        .all(|record| record.attempt_freshness_state == "mixed_stale_records"));
+    assert!(records
+        .iter()
+        .all(|record| record.completion_state == "unknown_mixed_job_freshness"));
+    assert!(records
+        .iter()
+        .all(|record| record.run_lifetime_ms.is_none()));
+    assert!(records
+        .iter()
+        .all(|record| { record.run_lifetime_state == "unknown_rerun_created_at_is_original" }));
+    assert!(records.iter().all(|record| record.pre_start_ms.is_none()));
+    assert!(records
+        .iter()
+        .all(|record| record.pre_start_state == "unknown_rerun_inter_attempt"));
+    assert!(records
+        .iter()
+        .all(|record| record.attempt_wall_ms.is_none()));
+    assert!(records
+        .iter()
+        .all(|record| record.fresh_attempt_wall_ms == Some(3_000)));
+    assert!(records
+        .iter()
+        .all(|record| record.execution_sum_ms.is_none()));
+    assert!(records
+        .iter()
+        .all(|record| record.execution_partial_sum_ms == 4_000));
+    assert!(records
+        .iter()
+        .all(|record| record.fresh_execution_partial_sum_ms == Some(2_000)));
+    assert!(records
+        .iter()
+        .all(|record| record.stale_execution_partial_sum_ms == Some(2_000)));
+    assert!(records
+        .iter()
+        .all(|record| record.fresh_execution_unknown_jobs == 0));
+    assert!(records
+        .iter()
+        .all(|record| record.stale_execution_unknown_jobs == 0));
+    assert!(records.iter().all(|record| record.fresh_executed_jobs == 1));
+    assert!(records.iter().all(|record| record.stale_executed_jobs == 1));
+    assert!(records
+        .iter()
+        .all(|record| record.freshness_unknown_jobs == 0));
+
+    let stale_row = records
+        .iter()
+        .find(|record| record.job_name.as_deref() == Some("reused"))
+        .expect("stale row");
+    assert_eq!(stale_row.job_freshness_state, "stale_before_attempt");
+    let fresh_row = records
+        .iter()
+        .find(|record| record.job_name.as_deref() == Some("rerun"))
+        .expect("fresh row");
+    assert_eq!(fresh_row.job_freshness_state, "fresh");
+
+    let summary = render_workflow_summary(&records);
+    assert!(summary.contains("Job freshness"));
+    assert!(summary.contains("stale_before_attempt"));
+    assert!(summary.contains("not current-attempt bottlenecks"));
+}
+
+#[test]
+fn rerun_with_all_fresh_jobs_has_attempt_timing_but_no_initial_lifetime() {
+    let run = run_json(31, 2, "completed", "refs/pull/7/merge");
+    let first = job(
+        311,
+        31,
+        2,
+        "first",
+        "success",
+        "2026-09-20T00:00:10Z",
+        "2026-09-20T00:00:12Z",
+    );
+    let second = job(
+        312,
+        31,
+        2,
+        "second",
+        "success",
+        "2026-09-20T00:00:11Z",
+        "2026-09-20T00:00:14Z",
+    );
+    let records = collect_workflow(
+        &[("run.json".to_owned(), run)],
+        &[(
+            "jobs.json".to_owned(),
+            format!(r#"{{"total_count": 2, "jobs": [{first}, {second}]}}"#),
+        )],
+        &WorkflowCollectOptions::default(),
+    )
+    .expect("fresh rerun fixture parses");
+
+    assert!(records
+        .iter()
+        .all(|record| record.attempt_freshness_state == "complete_fresh"));
+    assert!(records
+        .iter()
+        .all(|record| record.completion_state == "verified"));
+    assert!(records
+        .iter()
+        .all(|record| record.run_lifetime_ms.is_none()));
+    assert!(records
+        .iter()
+        .all(|record| record.run_lifetime_state == "unknown_rerun_created_at_is_original"));
+    assert!(records
+        .iter()
+        .all(|record| record.attempt_wall_ms == Some(9_000)));
+    assert!(records
+        .iter()
+        .all(|record| record.fresh_attempt_wall_ms == Some(9_000)));
+    assert!(records
+        .iter()
+        .all(|record| record.execution_sum_ms == Some(5_000)));
+}
+
+#[test]
+fn missing_job_start_fails_freshness_without_rejecting_job_collection() {
+    let run = run_json(32, 2, "completed", "refs/pull/7/merge");
+    let missing_start = job(
+        321,
+        32,
+        2,
+        "missing-start",
+        "success",
+        "2026-09-20T00:00:10Z",
+        "2026-09-20T00:00:12Z",
+    )
+    .replace("\"started_at\": \"2026-09-20T00:00:10Z\",", "");
+    let records = collect_workflow(
+        &[("run.json".to_owned(), run)],
+        &[(
+            "jobs.json".to_owned(),
+            format!(r#"{{"total_count": 1, "jobs": [{missing_start}]}}"#),
+        )],
+        &WorkflowCollectOptions::default(),
+    )
+    .expect("missing job start fixture parses");
+
+    assert_eq!(records[0].jobs_complete, Some(true));
+    assert_eq!(records[0].attempt_freshness_state, "unknown_job_freshness");
+    assert_eq!(records[0].job_freshness_state, "unknown_job_start");
+    assert_eq!(records[0].attempt_wall_ms, None);
+    assert_eq!(records[0].fresh_attempt_wall_ms, None);
+    assert_eq!(records[0].execution_sum_ms, None);
 }
 
 #[test]
@@ -330,6 +530,7 @@ fn missing_count_or_timestamp_censors_completion_and_sum() {
     assert_eq!(records[0].jobs_complete, Some(false));
     assert_eq!(records[0].completion_state, "unknown_job_count_or_pages");
     assert_eq!(records[0].all_jobs_completed_at, None);
+    assert_eq!(records[0].attempt_wall_ms, None);
     assert_eq!(records[0].execution_sum_ms, None);
     assert_eq!(records[0].execution_partial_sum_ms, 2_000);
     assert_eq!(records[0].execution_unobserved_jobs, Some(1));
@@ -349,6 +550,11 @@ fn missing_count_or_timestamp_censors_completion_and_sum() {
     .expect("missing timestamp fixture parses");
     assert_eq!(records[0].jobs_complete, Some(true));
     assert_eq!(records[0].completion_state, "unknown_job_timestamps");
+    assert_eq!(records[0].run_lifetime_ms, None);
+    assert_eq!(
+        records[0].run_lifetime_state,
+        "unknown_initial_attempt_timing"
+    );
     assert_eq!(records[0].execution_sum_ms, None);
     assert_eq!(records[0].execution_unknown_jobs, 1);
 }
