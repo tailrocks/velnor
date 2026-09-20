@@ -1197,10 +1197,11 @@ fn read_regular_file_at(
 }
 
 /// The sentinel is a fresh proof for one incoming handoff. Schema-2 binds it
-/// to the exact persisted selection bytes and every selected asset's bytes;
-/// legacy APT verification has no selection and uses the fixed marker. A
-/// pre-existing marker is never overwritten, so failed or stale verification
-/// cannot arm publication.
+/// to the exact persisted selection bytes and every selected asset's bytes.
+/// There is no legacy fixed-marker mode: an incoming handoff without the
+/// producer-owned application selection is not publishable. A pre-existing
+/// marker is never overwritten, so failed or stale verification cannot arm
+/// publication.
 fn expected_sentinel(incoming: &Path) -> Result<Vec<u8>, GeneratorError> {
     let selection = incoming.join(DISCOVERY_SELECTION_FILE);
     match std::fs::symlink_metadata(&selection) {
@@ -1232,7 +1233,9 @@ fn expected_sentinel(incoming: &Path) -> Result<Vec<u8>, GeneratorError> {
             }
             Ok(proof.into_bytes())
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(b"verified\n".to_vec()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(GeneratorError::usage(
+            "APT verification requires the producer-owned discovery selection; legacy handoff removed",
+        )),
         Err(error) => Err(GeneratorError::io(
             "stat discovery selection",
             &selection,
@@ -2501,7 +2504,7 @@ fn parse_discovery_selection(
 /// Check a subordinate producer record against the externally hashed parent
 /// manifest. The producer owns each subordinate schema; this boundary only
 /// enforces the cross-record edge and its detached digest.
-fn verify_subordinate_record(
+fn verify_subordinate_record_digest(
     incoming: &Path,
     payload_name: &str,
     sidecar_name: &str,
@@ -2529,6 +2532,38 @@ fn verify_subordinate_record(
     Ok(())
 }
 
+/// Check a package projection's parent release identity. Keeping this as a
+/// release ID rather than embedding the product-manifest digest avoids a
+/// digest cycle: the canonical manifest hashes the `.deb`, whose packaged
+/// `manifest.json` must therefore not contain that digest.
+fn verify_subordinate_record_id(
+    incoming: &Path,
+    payload_name: &str,
+    sidecar_name: &str,
+    expected_parent: &str,
+) -> Result<(), GeneratorError> {
+    let payload_path = incoming.join(payload_name);
+    let payload_bytes = read_regular_file(&payload_path)?;
+    let sidecar = sidecar_digest(&incoming.join(sidecar_name))?;
+    if sidecar != sha256_hex(&payload_bytes) {
+        return Err(GeneratorError::usage(format!(
+            "discovery subordinate {payload_name} checksum differs from its sidecar"
+        )));
+    }
+    let document =
+        serde_json::from_slice::<serde_json::Value>(&payload_bytes).map_err(|error| {
+            GeneratorError::usage(format!(
+                "discovery subordinate {payload_name} is not valid JSON: {error}"
+            ))
+        })?;
+    if field(&document, "parent_manifest_id")? != expected_parent {
+        return Err(GeneratorError::usage(format!(
+            "discovery subordinate {payload_name} does not bind the canonical release ID"
+        )));
+    }
+    Ok(())
+}
+
 /// Verify the release-owned subordinate byte edges which are not represented
 /// as product artifact rows. This is deliberately a projection check: the
 /// producer remains the authority for each record's full schema.
@@ -2536,17 +2571,17 @@ fn verify_discovery_subordinates(
     selection: &DiscoverySelection,
     incoming: &Path,
 ) -> Result<(), GeneratorError> {
-    verify_subordinate_record(
+    verify_subordinate_record_digest(
         incoming,
         RECORD_FILE,
         RECORD_SIDECAR,
         &selection.manifest_sha256,
     )?;
-    verify_subordinate_record(
+    verify_subordinate_record_id(
         incoming,
         MANIFEST_FILE,
         MANIFEST_SIDECAR,
-        &selection.manifest_sha256,
+        &selection.release_id,
     )?;
     let release_manifest = read_json(&incoming.join(PREVIEW_MANIFEST_FILE))?;
     if field(&release_manifest, "parent_manifest_sha256")? != selection.manifest_sha256 {
@@ -4236,6 +4271,7 @@ fn verify_snapshot_subordinate(
     payload_name: &str,
     sidecar_name: &str,
     expected_parent: &str,
+    parent_field: &str,
 ) -> Result<(), GeneratorError> {
     let payload = files.get(payload_name).ok_or_else(|| {
         GeneratorError::usage(format!("publication incoming is missing {payload_name}"))
@@ -4256,7 +4292,7 @@ fn verify_snapshot_subordinate(
             "publication subordinate {payload_name} is not valid JSON: {error}"
         ))
     })?;
-    if field(&document, "parent_manifest_sha256")? != expected_parent {
+    if field(&document, parent_field)? != expected_parent {
         return Err(GeneratorError::usage(format!(
             "publication subordinate {payload_name} does not bind the canonical product manifest"
         )));
@@ -4325,12 +4361,14 @@ fn verify_snapshot_selection(
         RECORD_FILE,
         RECORD_SIDECAR,
         &selection.manifest_sha256,
+        "parent_manifest_sha256",
     )?;
     verify_snapshot_subordinate(
         files,
         MANIFEST_FILE,
         MANIFEST_SIDECAR,
-        &selection.manifest_sha256,
+        &selection.release_id,
+        "parent_manifest_id",
     )?;
     let release_manifest = files
         .get(PREVIEW_MANIFEST_FILE)
@@ -4413,7 +4451,7 @@ fn verify_snapshot_selection(
 /// outside the publisher's capability set.
 struct IncomingSnapshot {
     files: BTreeMap<String, Vec<u8>>,
-    selection: Option<DiscoverySelection>,
+    selection: DiscoverySelection,
 }
 
 impl IncomingSnapshot {
@@ -4437,75 +4475,63 @@ impl IncomingSnapshot {
                 )));
             }
         }
-        let selection = match files.get(DISCOVERY_SELECTION_FILE) {
-            Some(bytes) => {
-                let document =
-                    serde_json::from_slice::<serde_json::Value>(bytes).map_err(|error| {
-                        GeneratorError::usage(format!(
-                            "{} is not valid JSON: {error}",
-                            incoming.join(DISCOVERY_SELECTION_FILE).display()
-                        ))
-                    })?;
-                Some(parse_discovery_selection(&document)?)
-            }
-            None => None,
-        };
+        let selection_bytes = files.get(DISCOVERY_SELECTION_FILE).ok_or_else(|| {
+            GeneratorError::usage(
+                "publication incoming has no producer-owned discovery selection; legacy handoff removed",
+            )
+        })?;
+        let selection_document = serde_json::from_slice::<serde_json::Value>(selection_bytes)
+            .map_err(|error| {
+                GeneratorError::usage(format!(
+                    "{} is not valid JSON: {error}",
+                    incoming.join(DISCOVERY_SELECTION_FILE).display()
+                ))
+            })?;
+        let selection = parse_discovery_selection(&selection_document)?;
         let sentinel = files.get(SENTINEL_FILE).ok_or_else(|| {
             GeneratorError::usage("publication incoming has no verification sentinel")
         })?;
-        let expected = expected_sentinel_from_files(&files, selection.as_ref())?;
+        let expected = expected_sentinel_from_files(&files, &selection)?;
         if sentinel != &expected {
             return Err(GeneratorError::usage(
                 "publication incoming sentinel does not bind its captured bytes",
             ));
         }
-        if let Some(selection) = &selection {
-            verify_snapshot_selection(selection, &files)?;
-            let mut expected_names = selection
-                .release_assets
-                .iter()
-                .map(|asset| asset.name.clone())
-                .collect::<BTreeSet<_>>();
-            expected_names.insert(DISCOVERY_SELECTION_FILE.to_owned());
-            expected_names.insert(SENTINEL_FILE.to_owned());
-            if files.keys().any(|name| !expected_names.contains(name)) {
-                return Err(GeneratorError::usage(
-                    "publication incoming contains an asset absent from discovery",
-                ));
-            }
-            for asset in &selection.release_assets {
-                let bytes = files.get(&asset.name).ok_or_else(|| {
-                    GeneratorError::usage(format!(
-                        "publication incoming is missing selected asset {}",
-                        asset.name
-                    ))
-                })?;
-                if bytes.len() as u64 != asset.size {
-                    return Err(GeneratorError::usage(format!(
-                        "publication asset {} size differs from discovery",
-                        asset.name
-                    )));
-                }
+        verify_snapshot_selection(&selection, &files)?;
+        let mut expected_names = selection
+            .release_assets
+            .iter()
+            .map(|asset| asset.name.clone())
+            .collect::<BTreeSet<_>>();
+        expected_names.insert(DISCOVERY_SELECTION_FILE.to_owned());
+        expected_names.insert(SENTINEL_FILE.to_owned());
+        if files.keys().any(|name| !expected_names.contains(name)) {
+            return Err(GeneratorError::usage(
+                "publication incoming contains an asset absent from discovery",
+            ));
+        }
+        for asset in &selection.release_assets {
+            let bytes = files.get(&asset.name).ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "publication incoming is missing selected asset {}",
+                    asset.name
+                ))
+            })?;
+            if bytes.len() as u64 != asset.size {
+                return Err(GeneratorError::usage(format!(
+                    "publication asset {} size differs from discovery",
+                    asset.name
+                )));
             }
         }
         Ok(Self { files, selection })
-    }
-
-    fn bytes(&self, name: &str) -> Result<&[u8], GeneratorError> {
-        self.files
-            .get(name)
-            .map(Vec::as_slice)
-            .ok_or_else(|| GeneratorError::usage(format!("publication incoming is missing {name}")))
     }
 }
 
 fn expected_sentinel_from_files(
     files: &BTreeMap<String, Vec<u8>>,
-    selection: Option<&DiscoverySelection>,
+    selection: &DiscoverySelection,
 ) -> Result<Vec<u8>, GeneratorError> {
-    let Some(selection) = selection else {
-        return Ok(b"verified\n".to_vec());
-    };
     let selection_bytes = files
         .get(DISCOVERY_SELECTION_FILE)
         .ok_or_else(|| GeneratorError::usage("publication incoming has no discovery selection"))?;
@@ -4569,6 +4595,75 @@ pub(crate) struct PublishInputs<'a> {
     pub(crate) selection_path: Option<&'a Path>,
 }
 
+/// The complete publication control snapshot. Incoming release bytes,
+/// pointer metadata, and retained rollback packages are all captured before
+/// staging or signing. Publication never reopens these mutable pathnames
+/// after this boundary.
+struct PublicationSnapshot {
+    files: BTreeMap<String, Vec<u8>>,
+    selection: DiscoverySelection,
+    previous_pointer: serde_json::Value,
+    retained_debs: BTreeMap<String, Vec<u8>>,
+}
+
+impl PublicationSnapshot {
+    fn capture(
+        inputs: &PublishInputs<'_>,
+        incoming: IncomingSnapshot,
+    ) -> Result<Self, GeneratorError> {
+        let previous_pointer = read_json(inputs.previous_pointer)?;
+        let retained_debs = capture_retained_debs(inputs.prev_dir, &inputs.contract.package)?;
+        Ok(Self {
+            files: incoming.files,
+            selection: incoming.selection,
+            previous_pointer,
+            retained_debs,
+        })
+    }
+
+    fn bytes(&self, name: &str) -> Result<&[u8], GeneratorError> {
+        self.files
+            .get(name)
+            .map(Vec::as_slice)
+            .ok_or_else(|| GeneratorError::usage(format!("publication incoming is missing {name}")))
+    }
+}
+
+/// Capture retained package bytes through one held directory descriptor. A
+/// package-looking symlink or hard link is rejected; unrelated entries retain
+/// the existing behavior of being ignored by the rollback projection.
+fn capture_retained_debs(
+    dir: Option<&Path>,
+    package: &str,
+) -> Result<BTreeMap<String, Vec<u8>>, GeneratorError> {
+    let Some(dir) = dir else {
+        return Ok(BTreeMap::new());
+    };
+    #[cfg(unix)]
+    let directory = open_directory_nofollow(dir)
+        .map_err(|error| GeneratorError::io("open rollback directory", dir, &error))?;
+    #[cfg(unix)]
+    let names = dir_names_from_file(&directory, dir)?;
+    #[cfg(not(unix))]
+    let names = dir_names(dir)?;
+    let mut retained = BTreeMap::new();
+    for name in names {
+        if !name.starts_with(package) || !is_deb_file(&name) {
+            continue;
+        }
+        #[cfg(unix)]
+        let bytes = read_regular_file_at(&directory, &name, &dir.join(&name))?;
+        #[cfg(not(unix))]
+        let bytes = read_regular_file(&dir.join(&name))?;
+        if retained.insert(name.clone(), bytes).is_some() {
+            return Err(GeneratorError::usage(format!(
+                "rollback directory contains duplicate package entry: {name}"
+            )));
+        }
+    }
+    Ok(retained)
+}
+
 /// Publish a suite into the staging tree: deterministic pool, per-arch
 /// indexes, signed metadata, publication record. Every refusal below lands
 /// before signing, and stable wipes only the validated staging directory.
@@ -4586,7 +4681,7 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
             ));
         }
     }
-    let snapshot = IncomingSnapshot::capture(inputs.incoming).map_err(|error| {
+    let incoming = IncomingSnapshot::capture(inputs.incoming).map_err(|error| {
         GeneratorError::usage(format!(
             "publish: refusing — verify has not armed the reprepro sentinel: {error}"
         ))
@@ -4603,16 +4698,26 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
             "publish: selection and selection path must be supplied together",
         ));
     }
-    if let (Some(expected), Some(actual)) = (inputs.selection, &snapshot.selection)
-        && expected != actual
+    if let Some(expected) = inputs.selection
+        && expected != &incoming.selection
     {
         return Err(GeneratorError::usage(
             "publish: captured incoming selection differs from verification",
         ));
     }
-    if inputs.selection.is_some() != snapshot.selection.is_some() {
+    if incoming.selection.suite()? != inputs.suite {
         return Err(GeneratorError::usage(
-            "publish: captured incoming selection is not the requested mode",
+            "publish: discovery selection channel does not match suite",
+        ));
+    }
+    if incoming.selection.package != inputs.contract.package {
+        return Err(GeneratorError::usage(
+            "publish: discovery selection package does not match the APT contract",
+        ));
+    }
+    if incoming.selection.apt_version()? != inputs.version {
+        return Err(GeneratorError::usage(
+            "publish: discovery selection version does not match the requested APT version",
         ));
     }
     for tool in ["apt-ftparchive", "gpg"] {
@@ -4659,6 +4764,10 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
             "staging directory must be a relative path without traversal",
         ));
     }
+    // Capture the previous pointer and retained rollback bytes after cheap
+    // secret/configuration refusals, but before any key import, staging, or
+    // signing mutation. All later publication reads use this snapshot.
+    let snapshot = PublicationSnapshot::capture(inputs, incoming)?;
     // The signing key is imported and proven before any mutation or signing:
     // a missing, unimportable, or disagreeing key fails here, never mid-run.
     let homedir = import_signing_key(
@@ -4822,36 +4931,28 @@ fn stage_package_bytes(
     result
 }
 
-/// Stage every `*.deb` directly inside `dir` whose name starts with the
-/// package prefix, skipping names the candidate already carries (after a
-/// byte-equality check).
+/// Stage every retained rollback `.deb` captured before publication, skipping
+/// names the candidate already carries (after a byte-equality check).
 fn stage_dir_debs(
-    dir: &Path,
+    retained_debs: &BTreeMap<String, Vec<u8>>,
     pool: &Path,
-    snapshot: &IncomingSnapshot,
+    snapshot: &PublicationSnapshot,
     contract: &AptContract,
     backend: DebBackend,
     path_overlay: Option<&Path>,
 ) -> Result<(), GeneratorError> {
-    for name in dir_names(dir)? {
-        if !name.starts_with(&contract.package) || !is_deb_file(&name) {
-            continue;
-        }
-        let deb = dir.join(&name);
-        if read_regular_file(&deb).is_err() {
-            continue;
-        }
-        if let Some(candidate) = snapshot.files.get(&name) {
-            if sha256_hex(candidate) != sha256_file(&deb)? {
+    for (name, deb_bytes) in retained_debs {
+        if let Some(candidate) = snapshot.files.get(name) {
+            if sha256_hex(candidate) != sha256_hex(deb_bytes) {
                 return Err(GeneratorError::usage(format!(
                     "published package name collides with different candidate bytes: {name}"
                 )));
             }
             continue;
         }
-        stage_package(
-            &deb,
-            &pool.join(&name),
+        stage_package_bytes(
+            deb_bytes,
+            &pool.join(name),
             contract,
             backend,
             path_overlay,
@@ -5320,14 +5421,14 @@ fn publish_stable(
     inputs: &PublishInputs<'_>,
     passphrase: &str,
     homedir: &str,
-    snapshot: &IncomingSnapshot,
+    snapshot: &PublicationSnapshot,
 ) -> Result<(), GeneratorError> {
     let contract = &inputs.contract;
     let tag = parse_stable_tag(&inputs.version)?;
     // Malformed pointers are rejected before any mutation or signing: only
     // the tag-agreement half waits for the retained rollback, which the
     // strict index build below computes.
-    check_stable_pointer_shape(inputs.previous_pointer)?;
+    check_stable_pointer_shape(&snapshot.previous_pointer)?;
     if inputs.staging.exists() {
         std::fs::remove_dir_all(inputs.staging)
             .map_err(|error| GeneratorError::io("wipe", inputs.staging, &error))?;
@@ -5342,9 +5443,9 @@ fn publish_stable(
     std::fs::write(inputs.staging.join("conf/distributions"), distributions)
         .map_err(|error| GeneratorError::io("write", inputs.staging, &error))?;
     stage_keyring(inputs.staging, contract)?;
-    if let Some(prev_dir) = inputs.prev_dir {
+    if inputs.prev_dir.is_some() {
         stage_dir_debs(
-            prev_dir,
+            &snapshot.retained_debs,
             &pool,
             snapshot,
             contract,
@@ -5357,17 +5458,14 @@ fn publish_stable(
     for arch in REQUIRED_ARCHES {
         let name = format!("{}-{}-{arch}.deb", contract.package, tag.version);
         if snapshot.files.contains_key(&name) {
-            let expected_sha256 = inputs
-                .selection
-                .map(|selection| selection_artifact_digest(selection, &name))
-                .transpose()?;
+            let expected_sha256 = selection_artifact_digest(&snapshot.selection, &name)?;
             stage_package_bytes(
                 snapshot.bytes(&name)?,
                 &pool.join(&name),
                 contract,
                 inputs.backend,
                 inputs.path_overlay,
-                expected_sha256.as_deref(),
+                Some(&expected_sha256),
             )?;
         }
     }
@@ -5384,7 +5482,7 @@ fn publish_stable(
         contract.retention,
         inputs.path_overlay,
     )?;
-    check_stable_pointer(inputs.previous_pointer, &format!("v{rollback}"))?;
+    check_stable_pointer(&snapshot.previous_pointer, &format!("v{rollback}"))?;
     prime_signer_agent(&contract.signer, homedir, passphrase, inputs.path_overlay)?;
     sign_suite_release(
         inputs.staging,
@@ -5405,11 +5503,11 @@ fn publish_stable(
         &tag.tag,
         &tag.version,
         &source_record,
-        inputs.previous_pointer,
+        &snapshot.previous_pointer,
         inputs.path_overlay,
         passphrase,
         homedir,
-        inputs.selection,
+        &snapshot.selection,
     )?;
     std::fs::write(
         inputs.staging.join("last-publish"),
@@ -5425,7 +5523,7 @@ fn publish_preview(
     inputs: &PublishInputs<'_>,
     passphrase: &str,
     homedir: &str,
-    snapshot: &IncomingSnapshot,
+    snapshot: &PublicationSnapshot,
 ) -> Result<(), GeneratorError> {
     let contract = &inputs.contract;
     let parsed = parse_preview_version(&inputs.version)?;
@@ -5436,7 +5534,7 @@ fn publish_preview(
     }
     // The preview pointer needs no computed values, so it is rejected before
     // any mutation or signing.
-    check_preview_pointer(inputs.previous_pointer, inputs.bootstrap)?;
+    check_preview_pointer(&snapshot.previous_pointer, inputs.bootstrap)?;
     let pool = pool_root(inputs.staging, Suite::Preview, contract);
     std::fs::create_dir_all(inputs.staging.join("conf"))
         .map_err(|error| GeneratorError::io("create", inputs.staging, &error))?;
@@ -5452,11 +5550,11 @@ fn publish_preview(
             inputs.path_overlay,
         )?;
     } else {
-        let Some(prev_dir) = inputs.prev_dir else {
+        if inputs.prev_dir.is_none() {
             return Err(GeneratorError::usage("publish: --prev-dir is required"));
-        };
+        }
         stage_dir_debs(
-            prev_dir,
+            &snapshot.retained_debs,
             &pool,
             snapshot,
             contract,
@@ -5501,11 +5599,11 @@ fn publish_preview(
         PREVIEW_TAG,
         &parsed.version,
         &source_manifest,
-        inputs.previous_pointer,
+        &snapshot.previous_pointer,
         inputs.path_overlay,
         passphrase,
         homedir,
-        inputs.selection,
+        &snapshot.selection,
     )?;
     std::fs::write(
         inputs.staging.join(Suite::Preview.last_publish_file()),
@@ -5521,7 +5619,7 @@ fn stage_preview_candidates(
     inputs: &PublishInputs<'_>,
     parsed: &PreviewVersion,
     pool: &Path,
-    snapshot: &IncomingSnapshot,
+    snapshot: &PublicationSnapshot,
 ) -> Result<(), GeneratorError> {
     let contract = &inputs.contract;
     for arch in REQUIRED_ARCHES {
@@ -5538,17 +5636,14 @@ fn stage_preview_candidates(
                 parsed.version
             )));
         }
+        let expected_sha256 = selection_artifact_digest(&snapshot.selection, &name)?;
         stage_package_bytes(
             deb,
             &pool.join(&name),
             contract,
             inputs.backend,
             inputs.path_overlay,
-            inputs
-                .selection
-                .map(|selection| selection_artifact_digest(selection, &name))
-                .transpose()?
-                .as_deref(),
+            Some(&expected_sha256),
         )?;
     }
     Ok(())
@@ -5713,12 +5808,9 @@ fn sign_suite_release(
 }
 
 /// Check the stable previous pointer shape: the final schema only — an object
-/// with exactly `tag` and a 64-hex `source_record_sha256`. Shape needs no
-/// computed values, so the publisher runs it before any mutation or signing.
-/// The legacy string bridge is gone: breaking changes are preferred over
-/// compat branches.
-fn check_stable_pointer_shape(path: &Path) -> Result<(), GeneratorError> {
-    let pointer = read_json(path)?;
+/// with exactly `tag` and a 64-hex `source_record_sha256`. The caller passes
+/// the immutable pointer snapshot, so validation cannot race a replacement.
+fn check_stable_pointer_shape(pointer: &serde_json::Value) -> Result<(), GeneratorError> {
     let object = pointer.as_object().ok_or_else(|| {
         GeneratorError::usage("publish: stable previous pointer must be an object")
     })?;
@@ -5740,9 +5832,11 @@ fn check_stable_pointer_shape(path: &Path) -> Result<(), GeneratorError> {
 /// Check the stable previous pointer names the retained rollback tag. The
 /// tag agreement needs the rollback only the strict index build computes, so
 /// the publisher runs it right after indexing but still before any signing.
-fn check_stable_pointer(path: &Path, rollback_tag: &str) -> Result<(), GeneratorError> {
-    check_stable_pointer_shape(path)?;
-    let pointer = read_json(path)?;
+fn check_stable_pointer(
+    pointer: &serde_json::Value,
+    rollback_tag: &str,
+) -> Result<(), GeneratorError> {
+    check_stable_pointer_shape(pointer)?;
     if field(&pointer, "tag")? != rollback_tag {
         return Err(GeneratorError::usage(
             "publish: previous pointer disagrees with retained rollback version",
@@ -5753,8 +5847,10 @@ fn check_stable_pointer(path: &Path, rollback_tag: &str) -> Result<(), Generator
 
 /// Check the preview previous pointer: the JSON string `"preview"` once a
 /// rollback pair is retained, JSON null for a bootstrapped suite.
-fn check_preview_pointer(path: &Path, bootstrap: bool) -> Result<(), GeneratorError> {
-    let pointer = read_json(path)?;
+fn check_preview_pointer(
+    pointer: &serde_json::Value,
+    bootstrap: bool,
+) -> Result<(), GeneratorError> {
     if bootstrap {
         if !pointer.is_null() {
             return Err(GeneratorError::usage(
@@ -5990,11 +6086,11 @@ fn emit_publication_record(
     tag: &str,
     version: &str,
     source_digest: &str,
-    previous_pointer: &Path,
+    previous_pointer: &serde_json::Value,
     path_overlay: Option<&Path>,
     passphrase: &str,
     homedir: &str,
-    selection: Option<&DiscoverySelection>,
+    selection: &DiscoverySelection,
 ) -> Result<(), GeneratorError> {
     let inrelease = sha256_file(&staging.join(format!("dists/{}/InRelease", suite.as_str())))?;
     let mut packages = Vec::new();
@@ -6009,7 +6105,6 @@ fn emit_publication_record(
             "sha256": sha256_file(&index)?,
         }));
     }
-    let previous = read_json(previous_pointer)?;
     let mut record = BTreeMap::new();
     record.insert(
         "crate_version".to_owned(),
@@ -6020,7 +6115,7 @@ fn emit_publication_record(
         serde_json::Value::String(inrelease),
     );
     record.insert("packages".to_owned(), serde_json::Value::Array(packages));
-    record.insert("previous".to_owned(), previous);
+    record.insert("previous".to_owned(), previous_pointer.clone());
     record.insert(
         "schema".to_owned(),
         serde_json::Value::String(PUBLICATION_RECORD_SCHEMA.to_owned()),
@@ -6039,29 +6134,27 @@ fn emit_publication_record(
             serde_json::Value::String(PREVIEW_SUITE.to_owned()),
         );
     }
-    if let Some(selection) = selection {
-        if selection.suite()? != suite {
-            return Err(GeneratorError::usage(
-                "publication selection channel does not match suite",
-            ));
-        }
-        record.insert(
-            "canonical_manifest_sha256".to_owned(),
-            serde_json::Value::String(selection.manifest_sha256.clone()),
-        );
-        record.insert(
-            "provider_release_id".to_owned(),
-            serde_json::Value::from(selection.provider_release_id),
-        );
-        record.insert(
-            "release_id".to_owned(),
-            serde_json::Value::String(selection.release_id.clone()),
-        );
-        record.insert(
-            "release_tag".to_owned(),
-            serde_json::Value::String(selection.release_tag.clone()),
-        );
+    if selection.suite()? != suite {
+        return Err(GeneratorError::usage(
+            "publication selection channel does not match suite",
+        ));
     }
+    record.insert(
+        "canonical_manifest_sha256".to_owned(),
+        serde_json::Value::String(selection.manifest_sha256.clone()),
+    );
+    record.insert(
+        "provider_release_id".to_owned(),
+        serde_json::Value::from(selection.provider_release_id),
+    );
+    record.insert(
+        "release_id".to_owned(),
+        serde_json::Value::String(selection.release_id.clone()),
+    );
+    record.insert(
+        "release_tag".to_owned(),
+        serde_json::Value::String(selection.release_tag.clone()),
+    );
     record.insert("tag".to_owned(), serde_json::Value::String(tag.to_owned()));
     let text = serde_json::to_string_pretty(&record).map_err(|error| {
         GeneratorError::usage(format!("publication record is not serializable: {error}"))
@@ -6444,6 +6537,437 @@ mod tests {
         write_bytes(path, format!("{digest}  {}\n", path.display()).as_bytes());
     }
 
+    /// Add the canonical producer selection to the legacy-shaped package
+    /// fixtures. The package verifier still exercises its historical
+    /// subordinate schemas, but publication now requires this complete
+    /// product inventory and immutable asset proof in every mode.
+    #[allow(clippy::too_many_lines)]
+    fn attach_product_selection(
+        dir: &Path,
+        channel: &str,
+        source: &str,
+        package: &str,
+        binary: &str,
+        identity: &str,
+        product_version: &str,
+        commit: &str,
+        tag: &str,
+    ) {
+        let apt_names = must(
+            dir_names(dir),
+            "list fixture assets before attaching product selection",
+        )
+        .into_iter()
+        .filter(|name| name.starts_with(package) && is_deb_file(name))
+        .collect::<Vec<_>>();
+        assert_eq!(apt_names.len(), REQUIRED_ARCHES.len());
+        let base_version = product_version
+            .split("~preview.")
+            .next()
+            .unwrap_or(product_version);
+        let release_id = "123";
+        let package_manifest_path = dir.join(MANIFEST_FILE);
+        let package_manifest = if package_manifest_path.is_file() {
+            must(
+                serde_json::from_slice::<serde_json::Value>(&must(
+                    std::fs::read(&package_manifest_path),
+                    "read fixture package manifest",
+                )),
+                "parse fixture package manifest",
+            )
+        } else {
+            serde_json::json!({
+                "schema": "velnor.package-release.v1",
+                "source_sha": commit,
+                "crate_version": base_version,
+                "version": 1
+            })
+        };
+        let mut package_manifest_object = package_manifest
+            .as_object()
+            .cloned()
+            .expect("fixture package manifest object");
+        package_manifest_object.insert(
+            "parent_manifest_id".to_owned(),
+            serde_json::Value::String(release_id.to_owned()),
+        );
+        let package_manifest_bytes = must(
+            serde_json::to_vec(&serde_json::Value::Object(package_manifest_object)),
+            "serialize fixture package manifest",
+        );
+        write_bytes(&package_manifest_path, &package_manifest_bytes);
+        write_sidecar(
+            &dir.join(MANIFEST_SIDECAR),
+            &sha256_hex(&package_manifest_bytes),
+        );
+        if channel == "stable" {
+            for name in &apt_names {
+                let arch = if name.ends_with("-amd64.deb") {
+                    "amd64"
+                } else {
+                    "arm64"
+                };
+                let _ = make_deb(
+                    dir,
+                    name,
+                    package,
+                    product_version,
+                    arch,
+                    binary,
+                    identity,
+                    commit,
+                    product_version,
+                    &package_manifest_bytes,
+                    b"fixture-daemon-bytes",
+                );
+                let digest = must(sha256_file(&dir.join(name)), "hash rebuilt fixture deb");
+                write_sidecar(&dir.join(format!("{name}.sha256")), &digest);
+            }
+        }
+        let mut artifact_values = Vec::new();
+        let mut artifact_assets = Vec::new();
+        let components = serde_json::json!([
+            {
+                "name": "velnorctl",
+                "crate": "velnorctl",
+                "version": base_version,
+                "binary": "velnorctl",
+                "targets": PRODUCT_TARGETS
+            },
+            {
+                "name": "velnor-runner",
+                "crate": "velnor-runner",
+                "version": base_version,
+                "binary": "velnor-runner",
+                "targets": PRODUCT_TARGETS
+            },
+            {
+                "name": "velnor-workflow",
+                "crate": "velnor-workflow",
+                "version": base_version,
+                "binary": "velnor-workflow",
+                "targets": PRODUCT_TARGETS
+            }
+        ]);
+        for component in ["velnorctl", "velnor-runner", "velnor-workflow"] {
+            for target in PRODUCT_TARGETS {
+                let name = format!("{component}-{target}");
+                let bytes = format!("fixture-{channel}-{name}").into_bytes();
+                artifact_values.push(serde_json::json!({
+                    "name": name,
+                    "target": target,
+                    "kind": "binary",
+                    "sha256": sha256_hex(&bytes),
+                    "size": bytes.len()
+                }));
+                artifact_assets.push((name, bytes));
+            }
+        }
+        for target in PRODUCT_TARGETS {
+            let name = format!("velnor-{target}.tar");
+            let bytes = format!("fixture-archive-{channel}-{target}").into_bytes();
+            let kind = if target.ends_with("-apple-darwin") {
+                "homebrew-archive"
+            } else {
+                "archive"
+            };
+            artifact_values.push(serde_json::json!({
+                "name": name,
+                "target": target,
+                "kind": kind,
+                "sha256": sha256_hex(&bytes),
+                "size": bytes.len()
+            }));
+            artifact_assets.push((name, bytes));
+        }
+        for name in &apt_names {
+            let target = if name.ends_with("-amd64.deb") {
+                "x86_64-unknown-linux-gnu"
+            } else {
+                "aarch64-unknown-linux-gnu"
+            };
+            let bytes = must(std::fs::read(dir.join(name)), "read fixture deb");
+            artifact_values.push(serde_json::json!({
+                "name": name,
+                "target": target,
+                "kind": "apt-package",
+                "sha256": sha256_hex(&bytes),
+                "size": bytes.len()
+            }));
+        }
+        let source_ref = if channel == "stable" {
+            format!("refs/tags/{tag}")
+        } else {
+            PREVIEW_SOURCE_REF.to_owned()
+        };
+        let release_tag = if channel == "stable" {
+            tag.to_owned()
+        } else {
+            format!("preview-{commit}")
+        };
+        let manifest = serde_json::json!({
+            "schema": PRODUCT_MANIFEST_SCHEMA,
+            "product_id": "velnor",
+            "channel": channel,
+            "version": product_version.replace("~preview.", "-preview."),
+            "source_repository": source,
+            "source_ref": source_ref,
+            "source_commit": commit,
+            "release_tag": release_tag,
+            "release_id": release_id,
+            "artifacts": artifact_values.clone(),
+            "components": components
+        });
+        let manifest_bytes = must(
+            serde_json::to_vec(&manifest),
+            "serialize fixture product manifest",
+        );
+        let manifest_sha = sha256_hex(&manifest_bytes);
+        write_bytes(&dir.join(PRODUCT_MANIFEST_ASSET), &manifest_bytes);
+        write_bytes(
+            &dir.join("product-manifest.json.sha256"),
+            format!("{manifest_sha}  {PRODUCT_MANIFEST_ASSET}\n").as_bytes(),
+        );
+
+        // Bind both package-specific subordinate records to the external
+        // product digest, preserving their existing role-specific fields.
+        for name in [RECORD_FILE, MANIFEST_FILE] {
+            let document = if dir.join(name).is_file() {
+                must(
+                    serde_json::from_slice::<serde_json::Value>(&must(
+                        std::fs::read(dir.join(name)),
+                        "read fixture subordinate",
+                    )),
+                    "parse fixture subordinate",
+                )
+            } else {
+                serde_json::json!({
+                    "schema": "velnor.package-release.v1",
+                    "source_sha": commit,
+                    "crate_version": base_version,
+                    "version": 1
+                })
+            };
+            let mut object = document
+                .as_object()
+                .cloned()
+                .expect("fixture subordinate object");
+            let (parent_field, parent_value) = if name == MANIFEST_FILE {
+                ("parent_manifest_id", release_id.to_owned())
+            } else {
+                ("parent_manifest_sha256", manifest_sha.clone())
+            };
+            object.insert(
+                parent_field.to_owned(),
+                serde_json::Value::String(parent_value),
+            );
+            let bytes = must(
+                serde_json::to_vec(&serde_json::Value::Object(object)),
+                "serialize fixture subordinate",
+            );
+            write_bytes(&dir.join(name), &bytes);
+            write_sidecar(&dir.join(format!("{name}.sha256")), &sha256_hex(&bytes));
+        }
+
+        let release_assets_json = apt_names
+            .iter()
+            .map(|name| {
+                let bytes = must(std::fs::read(dir.join(name)), "read fixture package");
+                serde_json::json!({"name": name, "sha256": sha256_hex(&bytes)})
+            })
+            .collect::<Vec<_>>();
+        let release_manifest = if channel == "preview" {
+            let mut document = must(
+                serde_json::from_slice::<serde_json::Value>(&must(
+                    std::fs::read(dir.join(PREVIEW_MANIFEST_FILE)),
+                    "read fixture release manifest",
+                )),
+                "parse fixture release manifest",
+            );
+            document["parent_manifest_sha256"] = serde_json::Value::String(manifest_sha.clone());
+            document["assets"] = serde_json::Value::Array(release_assets_json);
+            document
+        } else {
+            serde_json::json!({
+                "schema": FIXTURE_SCHEMA,
+                "source_repository": source,
+                "source_ref": source_ref,
+                "source_commit": commit,
+                "version": product_version,
+                "parent_manifest_sha256": manifest_sha,
+                "assets": release_assets_json
+            })
+        };
+        let release_manifest_bytes = must(
+            serde_json::to_vec(&release_manifest),
+            "serialize fixture release manifest",
+        );
+        write_bytes(&dir.join(PREVIEW_MANIFEST_FILE), &release_manifest_bytes);
+        let mut sums = apt_names
+            .iter()
+            .map(|name| {
+                let bytes = must(std::fs::read(dir.join(name)), "read fixture package");
+                format!("{}  {name}\n", sha256_hex(&bytes))
+            })
+            .collect::<Vec<_>>();
+        sums.sort();
+        write_bytes(&dir.join(SHA256SUMS_FILE), sums.concat().as_bytes());
+        let record_path = dir.join(RECORD_FILE);
+        let mut record = must(
+            serde_json::from_slice::<serde_json::Value>(&must(
+                std::fs::read(&record_path),
+                "read fixture release record",
+            )),
+            "parse fixture release record",
+        );
+        if record.get("build").is_some() {
+            let package_manifest_sha = must(
+                sha256_file(&dir.join(MANIFEST_FILE)),
+                "hash fixture package manifest",
+            );
+            record["build"]["manifest_sha256"] =
+                serde_json::Value::String(package_manifest_sha.clone());
+            if record.get("oci_labels").is_some() {
+                record["oci_labels"]["manifest_sha256"] =
+                    serde_json::Value::String(package_manifest_sha);
+            }
+            if let Some(rows) = record
+                .get_mut("architectures")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for row in rows {
+                    let arch = must(field(row, "arch"), "read fixture architecture");
+                    let name = format!("{package}-{product_version}-{arch}.deb");
+                    row["deb_sha256"] = serde_json::Value::String(must(
+                        sha256_file(&dir.join(name)),
+                        "hash rebuilt fixture architecture deb",
+                    ));
+                }
+            }
+        }
+        let record_bytes = must(
+            serde_json::to_vec(&record),
+            "serialize fixture release record",
+        );
+        write_bytes(&record_path, &record_bytes);
+        write_sidecar(&dir.join(RECORD_SIDECAR), &sha256_hex(&record_bytes));
+        for (name, bytes) in artifact_assets {
+            write_bytes(&dir.join(&name), &bytes);
+        }
+
+        let mut raw_assets = vec![
+            (PRODUCT_MANIFEST_ASSET.to_owned(), manifest_bytes),
+            (
+                "product-manifest.json.sha256".to_owned(),
+                format!("{manifest_sha}  {PRODUCT_MANIFEST_ASSET}\n").into_bytes(),
+            ),
+        ];
+        for name in [RECORD_FILE, RECORD_SIDECAR, MANIFEST_FILE, MANIFEST_SIDECAR] {
+            raw_assets.push((
+                name.to_owned(),
+                must(std::fs::read(dir.join(name)), "read subordinate asset"),
+            ));
+        }
+        raw_assets.push((PREVIEW_MANIFEST_FILE.to_owned(), release_manifest_bytes));
+        raw_assets.push((
+            SHA256SUMS_FILE.to_owned(),
+            must(
+                std::fs::read(dir.join(SHA256SUMS_FILE)),
+                "read fixture sums",
+            ),
+        ));
+        for (name, bytes) in artifact_assets_from_manifest(&artifact_values, dir) {
+            raw_assets.push((name, bytes));
+        }
+        let mut release_assets = Vec::new();
+        for (offset, (name, bytes)) in raw_assets.into_iter().enumerate() {
+            release_assets.push(serde_json::json!({
+                "id": 100 + offset as u64,
+                "name": name,
+                "size": bytes.len(),
+                "state": "uploaded",
+                "browser_download_url": format!(
+                    "https://github.com/{source}/releases/download/{release_tag}/{name}"
+                )
+            }));
+        }
+        let source_ref_resolution = if channel == "preview" {
+            serde_json::json!({
+                "declared_ref_provenance": {
+                    "base_commit": commit,
+                    "head_commit": commit,
+                    "merge_base_commit": commit,
+                    "method": "github-compare-ancestry",
+                    "ref": PREVIEW_SOURCE_REF,
+                    "relation": "tip",
+                    "status": "identical"
+                },
+                "method": "github-git-ref",
+                "proof_ref": format!("refs/tags/{release_tag}"),
+                "resolved_commit": commit
+            })
+        } else {
+            serde_json::json!({
+                "method": "github-git-ref",
+                "proof_ref": format!("refs/tags/{release_tag}"),
+                "resolved_commit": commit
+            })
+        };
+        let selection = serde_json::json!({
+            "channel": channel,
+            "manifest": manifest,
+            "manifest_asset": PRODUCT_MANIFEST_ASSET,
+            "manifest_schema": PRODUCT_MANIFEST_SCHEMA,
+            "manifest_sha256": manifest_sha,
+            "package": package,
+            "product_id": "velnor",
+            "provider_release_id": 123,
+            "published_at": "2026-09-20T00:00:00Z",
+            "release_assets": release_assets,
+            "release_id": release_id,
+            "release_tag": release_tag,
+            "release_url": format!("https://github.com/{source}/releases/tag/{release_tag}"),
+            "source_commit": commit,
+            "source_ref": source_ref,
+            "source_ref_resolution": source_ref_resolution,
+            "source_repository": source,
+            "tag": release_tag,
+            "target_commitish": release_tag,
+            "version": product_version.replace("~preview.", "-preview.")
+        });
+        let selection_bytes = must(
+            serde_json::to_vec(&selection),
+            "serialize fixture discovery selection",
+        );
+        write_bytes(&dir.join(DISCOVERY_SELECTION_FILE), &selection_bytes);
+    }
+
+    fn artifact_assets_from_manifest(
+        artifacts: &[serde_json::Value],
+        dir: &Path,
+    ) -> Vec<(String, Vec<u8>)> {
+        let mut assets = Vec::new();
+        for artifact in artifacts {
+            let name = must(field(artifact, "name"), "fixture artifact name");
+            let bytes = if name.ends_with(".deb") {
+                must(std::fs::read(dir.join(name)), "read fixture deb artifact")
+            } else {
+                must(std::fs::read(dir.join(name)), "read fixture artifact")
+            };
+            assets.push((name.to_owned(), bytes));
+            if name.ends_with(".deb") {
+                assets.push((
+                    format!("{name}.sha256"),
+                    must(
+                        std::fs::read(dir.join(format!("{name}.sha256"))),
+                        "read fixture deb sidecar",
+                    ),
+                ));
+            }
+        }
+        assets
+    }
+
     struct DiscoveryFixture {
         root: PathBuf,
         selection_path: PathBuf,
@@ -6555,7 +7079,7 @@ mod tests {
         );
         let package_bytes = must(
             serde_json::to_vec(&serde_json::json!({
-                "parent_manifest_sha256": manifest_sha256,
+                "parent_manifest_id": "provider/123",
                 "schema": "velnor.package-release.v1"
             })),
             "serialize fixture package record",
@@ -6860,6 +7384,21 @@ mod tests {
     }
 
     #[test]
+    fn fixed_legacy_sentinel_cannot_arm_publication() {
+        let incoming = fixture_dir("legacy-fixed-sentinel");
+        write_bytes(&incoming.join(SENTINEL_FILE), b"verified\n");
+        let error = must_fail(
+            IncomingSnapshot::capture(&incoming),
+            "reject fixed legacy sentinel",
+        );
+        assert!(
+            error.contains("producer-owned discovery selection"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&incoming);
+    }
+
+    #[test]
     fn discovery_sentinel_binds_candidate_bytes_after_verification() {
         let fixture = discovery_fixture("discovery-sentinel-bytes");
         must(
@@ -6870,6 +7409,11 @@ mod tests {
             arm_sentinel(&fixture.incoming),
             "arm immutable selection sentinel",
         );
+        let original = must(
+            std::fs::read(fixture.incoming.join("example-1.2.3-amd64.deb")),
+            "read original candidate bytes",
+        );
+        assert_eq!(original.len(), b"tamperxxx".len());
         write_bytes(
             &fixture.incoming.join("example-1.2.3-amd64.deb"),
             b"tamperxxx",
@@ -8114,6 +8658,9 @@ mod tests {
         );
         write_bytes(&dir.join(RECORD_FILE), record.as_bytes());
         write_sidecar(&dir.join(RECORD_SIDECAR), &sha256_hex(record.as_bytes()));
+        attach_product_selection(
+            &dir, "stable", source, package, binary, identity, &version, &commit, &tag,
+        );
         StableIncoming { dir, tag, commit }
     }
 
@@ -8696,6 +9243,17 @@ mod tests {
             &dir.join(SHA256SUMS_FILE),
             format!("{}\n", sums.join("\n")).as_bytes(),
         );
+        attach_product_selection(
+            &dir,
+            "preview",
+            source,
+            package,
+            binary,
+            identity,
+            &version,
+            &commit,
+            &format!("preview-{commit}"),
+        );
         PreviewIncoming {
             dir,
             version,
@@ -8892,8 +9450,9 @@ mod tests {
         let rewritten: Vec<String> = text
             .lines()
             .map(|line| {
-                if line.ends_with(tilde) {
-                    format!("{deb_sha}  {tilde}")
+                if line.ends_with(tilde) || line.ends_with(name) {
+                    let pinned_name = line.split_whitespace().nth(1).unwrap_or(name);
+                    format!("{deb_sha}  {pinned_name}")
                 } else {
                     line.to_owned()
                 }
@@ -8907,7 +9466,8 @@ mod tests {
         );
         if let Some(assets) = manifest["assets"].as_array_mut() {
             for asset in assets {
-                if asset["name"].as_str() == Some(tilde) {
+                if matches!(asset["name"].as_str(), Some(value) if value == tilde || value == name)
+                {
                     asset["sha256"] = serde_json::Value::String(deb_sha.clone());
                 }
             }
@@ -9366,6 +9926,95 @@ mod tests {
             selection: None,
             selection_path: None,
         }
+    }
+
+    #[test]
+    fn publication_snapshot_freezes_pointer_and_rollback_bytes() {
+        let incoming = stable_incoming("snapshot-controls-incoming");
+        must(
+            verify_suite(&stable_verify_inputs(&incoming)),
+            "verify snapshot controls incoming",
+        );
+        let root = fixture_dir("snapshot-controls-root");
+        let prev = rollback_prev_dir(&root, "1.2.2", FIXTURE_COMMIT);
+        stable_pointer_file(&root, "v1.2.2");
+        let contract = apt_contract();
+        let inputs = publish_inputs(
+            Suite::Stable,
+            contract,
+            "v1.2.3",
+            &incoming.dir,
+            Some(&prev),
+            Path::new("previous-pointer.json"),
+            Path::new("public"),
+            false,
+            None,
+        );
+        in_fixture_root(&root, || {
+            let incoming_snapshot = must(
+                IncomingSnapshot::capture(inputs.incoming),
+                "capture incoming for controls",
+            );
+            let snapshot = must(
+                PublicationSnapshot::capture(&inputs, incoming_snapshot),
+                "capture publication controls",
+            );
+            let pointer_before = snapshot.previous_pointer.clone();
+            let rollback_name = snapshot
+                .retained_debs
+                .keys()
+                .next()
+                .cloned()
+                .expect("rollback package");
+            let rollback_before = snapshot
+                .retained_debs
+                .get(&rollback_name)
+                .cloned()
+                .expect("rollback bytes");
+
+            let replacement = serde_json::json!({
+                "tag": "v9.9.9",
+                "source_record_sha256": "dd".repeat(32)
+            });
+            write_bytes(
+                Path::new("previous-pointer.json"),
+                format!(
+                    "{}\n",
+                    must(serde_json::to_string(&replacement), "serialize pointer")
+                )
+                .as_bytes(),
+            );
+            let mut same_size = rollback_before.clone();
+            if let Some(first) = same_size.first_mut() {
+                *first ^= 0xff;
+            }
+            write_bytes(&prev.join(&rollback_name), &same_size);
+
+            assert_eq!(snapshot.previous_pointer, pointer_before);
+            assert_eq!(
+                snapshot.retained_debs.get(&rollback_name),
+                Some(&rollback_before)
+            );
+            assert_ne!(
+                must(
+                    std::fs::read("previous-pointer.json"),
+                    "read replacement pointer"
+                ),
+                must(
+                    serde_json::to_vec(&pointer_before),
+                    "serialize original pointer"
+                )
+            );
+            assert_ne!(
+                must(
+                    std::fs::read(prev.join(&rollback_name)),
+                    "read replacement rollback"
+                ),
+                rollback_before
+            );
+        });
+        let _ = std::fs::remove_dir_all(&incoming.dir);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
