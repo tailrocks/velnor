@@ -1,0 +1,142 @@
+Repository tailrocks/velnor
+  source: static-filesystem-and-manifest-inspection
+  profile: rust-workspace-release
+  providers: github-hosted, velnor
+
+Detected
+
+  ✓ cargo deny policy
+  ✓ cargo lockfile
+  ✓ cargo nextest policy
+  ✓ guest-agent: velnor-runner:velnor-guest-agent
+  ✓ guest-image: velnor-runner:velnor-guest-image
+  ✓ mise present
+  ✓ bun package manager · .
+  ✓ package.json script `build` · .
+  ✓ package.json script `typecheck` · .
+  ✓ release-build: velnor-runner
+  ✓ release-build: velnorctl
+  ✓ renovate configuration
+  ✓ rust-binaries: unit-collector:2
+  ✓ rust-binaries: velnor-bench:1
+  ✓ rust-binaries: velnor-runner:3
+  ✓ rust-binaries: velnor-tools:1
+  ✓ rust-binaries: velnor-workflow:1
+  ✓ rust-binaries: velnorctl:1
+  ✓ rust-build-script: velnor-runner
+  ✓ rust-build-script: velnor-workflow
+  ✓ rust-features: velnor-runner:4
+  ✓ rust-features: velnor-workflow:2
+  ✓ rust-features: velnorctl:2
+  ✓ rust-test-targets: unit-collector:1
+  ✓ rust-test-targets: velnor-client:1
+  ✓ rust-test-targets: velnor-control:1
+  ✓ rust-test-targets: velnor-model:1
+  ✓ rust-test-targets: velnor-render:1
+  ✓ rust-test-targets: velnor-runner:1
+  ✓ rust-test-targets: velnor-workflow-contract:1
+  ✓ rust-test-targets: velnor-workflow:1
+  ✓ rust-test-targets: velnorctl:1
+  ✓ Rust workspace · 11 packages
+
+Execution units
+
+  Rust: 13 jobs
+  Bun: 1 job
+  OpenTofu: 1 job
+  Docker: 1 job
+  Documentation: 1 job
+  - bun-velnor [Bun] · root=. · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: bun install --frozen-lockfile ; bun run typecheck ; bun run build
+  - docker [Docker] · root=. · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.' --build-context velnor-cache-seed='.velnor-docker-cache/seed' --cache-from type=gha,scope=docker,mode=max --cache-to type=gha,scope=docker,mode=max --secret id=github_token,env=GITHUB_TOKEN
+  - docs [Documentation] · root=. · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: npx --yes markdownlint-cli2@0.20.0 "**/*.md" "#node_modules" "#**/AGENTS.md" "#**/CLAUDE.md" "#target" "#**/target/**" "#dist" "#coverage" "#**/.cache/**" "#migrations/**"
+  - opentofu [OpenTofu] · root=. · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: tofu fmt -check -recursive -no-color ; TF_IN_AUTOMATION=1 TF_INPUT=0 tofu init -backend=false -input=false -no-color ; TF_IN_AUTOMATION=1 TF_INPUT=0 tofu validate -no-color
+  - rust-policy [Rust] · root=. · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: mbx deny check
+  - rust-unit-collector [Rust] · root=tools/unit-collector · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: cd -- 'tools/unit-collector' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'tools/unit-collector' && mbx clippy --locked --profile test --all-targets --all-features --package 'unit-collector' -- -D warnings ; cd -- 'tools/unit-collector' && mbx nextest run --locked --all-features --package 'unit-collector' --no-tests pass
+  - rust-velnor-bench [Rust] · root=crates/velnor-bench · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: cd -- 'crates/velnor-bench' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/velnor-bench' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnor-bench' -- -D warnings ; cd -- 'crates/velnor-bench' && mbx nextest run --locked --all-features --package 'velnor-bench' --no-tests pass
+    needs: rust-velnor-model, rust-velnor-runner
+  - rust-velnor-client [Rust] · root=crates/velnor-client · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: cd -- 'crates/velnor-client' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/velnor-client' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnor-client' -- -D warnings ; cd -- 'crates/velnor-client' && mbx nextest run --locked --all-features --package 'velnor-client' --no-tests pass
+    needs: rust-velnor-model
+  - rust-velnor-control [Rust] · root=crates/velnor-control · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: cd -- 'crates/velnor-control' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/velnor-control' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnor-control' -- -D warnings ; cd -- 'crates/velnor-control' && mbx nextest run --locked --all-features --package 'velnor-control' --no-tests pass
+    needs: rust-velnor-model
+  - rust-velnor-model [Rust] · root=crates/velnor-model · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: cd -- 'crates/velnor-model' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/velnor-model' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnor-model' -- -D warnings ; cd -- 'crates/velnor-model' && mbx nextest run --locked --all-features --package 'velnor-model' --no-tests pass
+  - rust-velnor-render [Rust] · root=crates/velnor-render · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: cd -- 'crates/velnor-render' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/velnor-render' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnor-render' -- -D warnings ; cd -- 'crates/velnor-render' && mbx nextest run --locked --all-features --package 'velnor-render' --no-tests pass
+    needs: rust-velnor-model
+  - rust-velnor-runner [Rust] · root=crates/velnor-runner · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: cd -- 'crates/velnor-runner' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/velnor-runner' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnor-runner' -- -D warnings ; cd -- 'crates/velnor-runner' && mbx nextest run --locked --all-features --package 'velnor-runner' --no-tests pass
+    needs: rust-velnor-control, rust-velnor-model
+  - rust-velnor-tools [Rust] · root=crates/velnor-tools · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: cd -- 'crates/velnor-tools' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/velnor-tools' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnor-tools' -- -D warnings ; cd -- 'crates/velnor-tools' && mbx nextest run --locked --all-features --package 'velnor-tools' --no-tests pass
+    needs: rust-velnor-client, rust-velnor-model
+  - rust-velnor-workflow [Rust] · root=crates/velnor-workflow · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../.. ; cd -- 'crates/velnor-workflow' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/velnor-workflow' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnor-workflow' -- -D warnings ; cd -- 'crates/velnor-workflow' && mbx nextest run --locked --all-features --package 'velnor-workflow' --no-tests pass
+    needs: rust-velnor-runner
+  - rust-velnor-workflow-contract [Rust] · root=crates/velnor-workflow-contract · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: cd -- 'crates/velnor-workflow-contract' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/velnor-workflow-contract' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnor-workflow-contract' -- -D warnings ; cd -- 'crates/velnor-workflow-contract' && mbx nextest run --locked --all-features --package 'velnor-workflow-contract' --no-tests pass
+  - rust-velnorctl [Rust] · root=crates/velnorctl · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: cd -- 'crates/velnorctl' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/velnorctl' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnorctl' -- -D warnings ; cd -- 'crates/velnorctl' && mbx nextest run --locked --all-features --package 'velnorctl' --no-tests pass
+    needs: rust-velnor-client, rust-velnor-control, rust-velnor-model, rust-velnor-render, rust-velnor-runner
+  - rust-production-topology [Rust] · root=. · runners=github-hosted: ubuntu-24.04; velnor: [self-hosted, velnor-target-mvp]
+    PR: mbx check --workspace --all-targets --locked ; mise run test-release-feature-boundary ; mise run test-release-boundary-script
+  total: 17 units · 15 dependency edges
+
+Generated files
+
+  = unchanged .github/actionlint.yaml                    actionlint runner-label contract
+  = unchanged .github/actions/report-velnor-ci-outcomes/action.yml generated CI support file
+  = unchanged .github/actions/setup-velnor-workflow/action.yml generated CI support file
+  = unchanged .github/ci/project.toml                    detected CI graph + binary runtime contract
+  = unchanged .github/workflows/AGENTS.md                workflow directory rule file
+  = unchanged .github/workflows/ci-main.yml              trusted main verification
+  = unchanged .github/workflows/ci-policy.yml            base-owned pull-request policy gate
+  = unchanged .github/workflows/ci-pr.yml                parallel PR verification
+  = unchanged .github/workflows/ci-release-package-signer.yml release artifact provenance signer
+  = unchanged .github/workflows/ci-runtime-products.yml  generated CI support file
+  = unchanged .github/workflows/ci-unit-bun.yml          generated CI support file
+  = unchanged .github/workflows/ci-unit-docker.yml       generated CI support file
+  = unchanged .github/workflows/ci-unit-docs.yml         generated CI support file
+  = unchanged .github/workflows/ci-unit-opentofu.yml     generated CI support file
+  ~ update    .github/workflows/ci-unit-rust.yml         generated CI support file
+  = unchanged .github/workflows/maintenance.yml          closed-PR cache cleanup
+  = unchanged .github/workflows/nightly.yml              scheduled full verification
+  = unchanged .github/workflows/preview.yml              preview artifact workflow
+  = unchanged .github/workflows/release.yml              release publisher workflow
+  = unchanged config/fleet/velnor-host.env               generated CI support file
+  ~ update    .github/ci/.github-actions-generator-state ownership and overwrite safety state
+
+Why
+
+  → Rust manifests become independently schedulable jobs per crate; Cargo resolves prerequisites inside each job while ci-required aggregates every selected result.
+  → package.json scripts and lockfiles select the native package manager, install mode, cache, and package job.
+  → Only checked-in, statically detected evidence controls generated commands; project code and task runners are never executed.
+  → Generated jobs invoke `velnor-workflow run` directly; the checked-in TOML remains the runtime contract for planning, execution, policy, and release commands.
+
+Boundaries
+
+  ! Manifests nested under tests/ or benches/ directories are treated as test fixtures and ignored.
+  ! No test script is declared in package.json; no package test command was invented.
+  ! Package inputs under . are conservatively watched as a complete package root because package scripts and bundlers may consume arbitrary files; an explicit watch override must prove a complete closure.
+  ! Project code, build scripts, task runners, and commands are never executed during analysis.
+  ! Release, signing, registry, deployment, branch-protection, and runner-capability contracts remain explicit manual inputs.
+  ! Renovate credentials, runner placement, and write permissions cannot be inferred from repository files.
+  ! Rust build scripts are watched but their system dependencies and generated outputs are not inferred.
+
+Template memory (ceiling 8.00 MiB, GitHub limit 10 MiB)
+
+  → .github/workflows/ci-main.yml: 3.97 MiB expanded (own 330.7 KiB; 2×ci-unit-bun.yml @ 59.6 KiB, 2×ci-unit-docker.yml @ 66.3 KiB, 2×ci-unit-docs.yml @ 59.2 KiB, 2×ci-unit-opentofu.yml @ 60.0 KiB, 27×ci-unit-rust.yml @ 120.3 KiB)
+  → .github/workflows/ci-pr.yml: 3.95 MiB expanded (own 304.4 KiB; 2×ci-unit-bun.yml @ 59.6 KiB, 2×ci-unit-docker.yml @ 66.3 KiB, 2×ci-unit-docs.yml @ 59.2 KiB, 2×ci-unit-opentofu.yml @ 60.0 KiB, 27×ci-unit-rust.yml @ 120.3 KiB)
+  → .github/workflows/preview.yml: 153.3 KiB expanded (own 147.6 KiB; 1×ci-release-package-signer.yml @ 5.8 KiB)
+  → .github/workflows/release.yml: 646.3 KiB expanded (own 640.6 KiB; 1×ci-release-package-signer.yml @ 5.8 KiB)
+
+Result Generated 21 files in /private/tmp/velnor-ci-integration
+

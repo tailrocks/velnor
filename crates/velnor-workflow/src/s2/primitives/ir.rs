@@ -437,16 +437,16 @@ mod tests {
             "each provider keeps the MBX setup block"
         );
         assert!(
-            kind.contains("if: ${{ inputs.mbx_enabled }}"),
+            kind.contains("if: ${{ (inputs.mbx_enabled) }}"),
             "mixed members gate MBX on the selected member"
         );
         assert!(
-            kind.contains("if: ${{ inputs.mbx_enabled == false }}"),
+            kind.contains("if: ${{ (inputs.mbx_enabled == false) }}"),
             "mixed members gate the sccache alternative on the selected member"
         );
         assert!(
             kind.contains(
-                "- name: Configure sccache environment\n        if: ${{ inputs.mbx_enabled == false }}"
+                "- name: Configure sccache environment\n        if: ${{ (inputs.mbx_enabled == false) }}"
             ),
             "mixed members gate the sccache environment on the selected member"
         );
@@ -515,8 +515,8 @@ mod tests {
             kind.matches("Set up Mr. Boxington").count(),
             ProviderId::ALL.len()
         );
-        assert!(!kind.contains("if: ${{ inputs.mbx_enabled }}"));
-        assert!(!kind.contains("if: ${{ inputs.mbx_enabled == false }}"));
+        assert!(!kind.contains("if: ${{ (inputs.mbx_enabled) }}"));
+        assert!(!kind.contains("if: ${{ (inputs.mbx_enabled == false) }}"));
         assert!(!kind.contains("Set up sccache"));
     }
 
@@ -536,8 +536,8 @@ mod tests {
                 1,
                 "the all-disabled job configures sccache once"
             );
-            assert!(!kind.contains("if: ${{ inputs.mbx_enabled }}"));
-            assert!(!kind.contains("if: ${{ inputs.mbx_enabled == false }}"));
+            assert!(!kind.contains("if: ${{ (inputs.mbx_enabled) }}"));
+            assert!(!kind.contains("if: ${{ (inputs.mbx_enabled == false) }}"));
             let facts = ir.unit_provider_facts(
                 &ir.units[0],
                 &ir.default_unit_contract(&ir.units[0], true),
@@ -919,7 +919,7 @@ mod tests {
     fn local_provider_check_implies_policy_runtime() {
         const CHECK: &str = "cd -- 'crates/velnor-workflow' && mbx run -- --plain --check ../..";
         const OTHER: &str = "cargo test --locked";
-        const PROVISION: &str = "      - name: Provision pinned Velnor workflow policy runtime\n        if: ${{ inputs.policy_runtime }}\n";
+        const PROVISION: &str = "      - name: Provision pinned Velnor workflow policy runtime\n        if: ${{ (inputs.policy_runtime) }}\n";
         let owner = workflow_setup_action_repository().to_owned();
         // Facts level: the regen-gate command in either command vector
         // implies the provision flag on every local provider, never GitHub.
@@ -1338,13 +1338,13 @@ mod tests {
         let candidate = &hosted[start..end];
         assert!(
             hosted.contains(
-                "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}"
+                "if: ${{ (inputs.candidate_publish) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}"
             ),
             "the prepare step carries the input gate merged with the pull-request same-repo gate: {hosted}"
         );
         assert!(
             hosted.contains(
-                "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate.outcome == 'success') }}"
+                "if: ${{ (inputs.candidate_publish) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate.outcome == 'success') }}"
             ),
             "the publish step additionally gates on the prepare step's skip output: {hosted}"
         );

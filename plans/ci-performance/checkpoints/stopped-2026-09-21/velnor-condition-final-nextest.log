@@ -1,0 +1,873 @@
+   Compiling velnor-workflow v0.1.0 (/private/tmp/velnor-ci-integration/crates/velnor-workflow)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.45s
+────────────
+ Nextest run ID 9f1cdaf8-9a44-47d8-b714-b7a8ae54a982 with nextest profile: default
+    Starting 2003 tests across 21 binaries
+        PASS [   0.036s] (   1/2003) velnor-workflow apt::tests::contract_resolution_applies_documented_defaults
+        PASS [   0.054s] (   2/2003) velnor-workflow apt::tests::contract_resolution_rejects_every_malformed_field
+        PASS [   0.063s] (   3/2003) velnor-workflow apt::tests::fetch_argv_is_fixed_and_slug_validated
+        PASS [   0.075s] (   4/2003) velnor-workflow apt::tests::deploy_guard_refuses_older_publications_only
+        PASS [   0.083s] (   5/2003) velnor-workflow apt::tests::contract_resolution_honors_explicit_values
+        PASS [   0.048s] (   6/2003) velnor-workflow apt::tests::fetch_patterns_are_fixed_allowists_per_suite
+        PASS [   0.030s] (   7/2003) velnor-workflow apt::tests::hex_and_fingerprint_shapes_match_the_runner
+        PASS [   0.108s] (   8/2003) velnor-workflow apt::tests::feed_urls_accept_https_hosts_only
+        PASS [   0.030s] (   9/2003) velnor-workflow apt::tests::origins_descriptions_and_staging_dirs_reject_control_shapes
+        PASS [   0.039s] (  10/2003) velnor-workflow apt::tests::package_binary_and_identity_names_reject_shell_shapes
+        PASS [   0.048s] (  11/2003) velnor-workflow apt::tests::keyring_paths_stay_relative_without_traversal
+        PASS [   0.043s] (  12/2003) velnor-workflow apt::tests::pool_naming_follows_the_debian_convention
+        PASS [   0.031s] (  13/2003) velnor-workflow apt::tests::preview_digit_run_suffix_sorts_after_letter_suffix
+        PASS [   0.031s] (  14/2003) velnor-workflow apt::tests::preview_order_agrees_with_dpkg_when_dpkg_exists
+        PASS [   0.593s] (  15/2003) velnor-workflow apt::tests::channel_update_rejects_incoherent_heads
+        PASS [   0.559s] (  16/2003) velnor-workflow apt::tests::gpg_stub_drains_piped_standard_input
+        PASS [   1.000s] (  17/2003) velnor-workflow apt::tests::deb_control_fields_read_through_both_backends
+        PASS [   1.405s] (  18/2003) velnor-workflow apt::tests::channel_update_emits_the_typed_channel_head
+        PASS [   0.477s] (  19/2003) velnor-workflow apt::tests::preview_verify_rejects_a_truncated_sums_list
+        PASS [   1.619s] (  20/2003) velnor-workflow apt::tests::disagreeing_key_refusal_leaves_no_agent_or_key_residue
+        PASS [   0.082s] (  21/2003) velnor-workflow apt::tests::preview_versions_compare_base_then_sequence_then_suffix
+        PASS [   0.051s] (  22/2003) velnor-workflow apt::tests::preview_versions_require_the_tilde_grammar
+        PASS [   0.053s] (  23/2003) velnor-workflow apt::tests::previous_pointer_derivation_implements_the_jq_rules
+        PASS [   0.041s] (  24/2003) velnor-workflow apt::tests::publication_records_parse_both_suite_shapes
+        PASS [   2.768s] (  25/2003) velnor-workflow apt::tests::preview_publish_modes_are_mutually_exclusive
+        PASS [   2.919s] (  26/2003) velnor-workflow apt::tests::preview_publish_wrong_pointer_rejected_pre_mutation
+        PASS [   0.089s] (  27/2003) velnor-workflow apt::tests::repository_slugs_accept_owner_name_only
+        PASS [   3.890s] (  28/2003) velnor-workflow apt::tests::preview_bootstrap_refuses_an_existing_pool
+        PASS [   0.414s] (  29/2003) velnor-workflow apt::tests::resolve_commit_invokes_git_ls_remote
+        PASS [   0.053s] (  30/2003) velnor-workflow apt::tests::retention_accepts_the_implemented_policy_only
+        PASS [   0.058s] (  31/2003) velnor-workflow apt::tests::secret_key_fingerprint_reads_the_first_fpr_record
+        PASS [   0.036s] (  32/2003) velnor-workflow apt::tests::secret_refs_name_environment_secrets_never_values
+        PASS [   2.629s] (  33/2003) velnor-workflow apt::tests::preview_verify_rejects_sidecar_and_control_defects
+        PASS [   3.716s] (  34/2003) velnor-workflow apt::tests::preview_verify_accepts_a_coherent_rolling_release
+        PASS [   4.656s] (  35/2003) velnor-workflow apt::tests::preview_publish_bootstrap_initializes_once
+        PASS [   4.140s] (  36/2003) velnor-workflow apt::tests::preview_verify_rejects_identity_and_grammar_defects
+        PASS [   5.587s] (  37/2003) velnor-workflow apt::tests::preview_publish_rejects_a_backward_candidate
+        PASS [   1.130s] (  38/2003) velnor-workflow apt::tests::stable_publish_refuses_empty_key_material
+        PASS [   3.047s] (  39/2003) velnor-workflow apt::tests::renamed_fixtures_verify_identically
+        PASS [   2.293s] (  40/2003) velnor-workflow apt::tests::stable_publish_malformed_pointer_rejected_pre_mutation
+        PASS [   2.338s] (  41/2003) velnor-workflow apt::tests::stable_publish_refuses_a_disagreeing_signing_key
+        PASS [   0.053s] (  42/2003) velnor-workflow apt::tests::stable_tags_require_the_v_prefix_and_a_numeric_triple
+        PASS [   1.139s] (  43/2003) velnor-workflow apt::tests::stable_publish_refuses_without_key_material
+        PASS [   6.780s] (  44/2003) velnor-workflow apt::tests::preview_publish_strict_keeps_the_shared_tree_and_enforces_order
+        PASS [   2.655s] (  45/2003) velnor-workflow apt::tests::stable_publish_refuses_before_any_signing
+        PASS [   0.667s] (  46/2003) velnor-workflow apt::tests::stable_verify_rejects_a_malformed_commit_before_any_fetch
+        PASS [   5.757s] (  47/2003) velnor-workflow apt::tests::publish_accepts_a_verify_produced_tree_across_the_artifact_handoff
+        PASS [   1.022s] (  48/2003) velnor-workflow apt::tests::stable_verify_rejects_a_rotated_signer
+        PASS [   1.784s] (  49/2003) velnor-workflow apt::tests::stable_verify_accepts_a_coherent_release_and_arms_the_sentinel
+        PASS [   2.516s] (  50/2003) velnor-workflow apt::tests::stable_publish_rejects_pool_collisions
+        PASS [   0.070s] (  51/2003) velnor-workflow apt::tests::stable_versions_compare_numerically_per_component
+        PASS [   0.042s] (  52/2003) velnor-workflow apt::tests::suites_parse_the_locked_pair_only
+        PASS [   0.085s] (  53/2003) velnor-workflow apt::tests::tar_decompression_flags_follow_payload_magic
+        PASS [   0.056s] (  54/2003) velnor-workflow closure::tests::build_script_mirrors_the_closure_spec
+        PASS [   1.305s] (  55/2003) velnor-workflow apt::tests::stable_verify_resolves_the_tag_commit_through_a_git_stub
+        PASS [   5.516s] (  56/2003) velnor-workflow apt::tests::stable_publish_disagreement_rejected_before_any_signing
+        PASS [   0.043s] (  57/2003) velnor-workflow closure::tests::canonical_digest_separates_features_profile_and_content
+        PASS [   0.049s] (  58/2003) velnor-workflow closure::tests::canonical_digest_is_order_independent
+        PASS [   2.659s] (  59/2003) velnor-workflow apt::tests::stable_verify_rejects_arch_and_packaged_identity_defects
+        PASS [   0.059s] (  60/2003) velnor-workflow closure::tests::crate_inputs_stay_closure_complete
+        PASS [   0.060s] (  61/2003) velnor-workflow closure::tests::dev_features_pin_the_candidate_build
+        PASS [   0.069s] (  62/2003) velnor-workflow closure::tests::product_tag_carries_a_digest_locator
+        PASS [   0.059s] (  63/2003) velnor-workflow closure::tests::stamped_features_match_dev_features
+        PASS [   0.080s] (  64/2003) velnor-workflow config::mise_closure::tests::binds_lock_backend_options_and_platform_artifact
+        PASS [   0.091s] (  65/2003) velnor-workflow config::mise_closure::tests::concrete_task_name_wins_alias_collision
+        PASS [   0.062s] (  66/2003) velnor-workflow config::mise_closure::tests::emitted_install_args_are_bare_committed_lock_keys
+        PASS [   0.087s] (  67/2003) velnor-workflow config::mise_closure::tests::expands_optional_wildcard_task_references
+        PASS [   0.059s] (  68/2003) velnor-workflow config::mise_closure::tests::keeps_before_and_after_invocations_distinct
+        PASS [   0.046s] (  69/2003) velnor-workflow config::mise_closure::tests::known_runner_labels_bind_lock_platform_and_unknown_labels_need_facts
+        PASS [   0.045s] (  70/2003) velnor-workflow config::mise_closure::tests::preserves_structured_task_arguments_and_environment
+        PASS [   0.075s] (  71/2003) velnor-workflow config::mise_closure::tests::leaves_opaque_shell_tools_out_of_the_typed_closure
+        PASS [   0.041s] (  72/2003) velnor-workflow config::mise_closure::tests::preserves_wait_for_as_validation_only
+        PASS [   0.064s] (  73/2003) velnor-workflow config::mise_closure::tests::reads_plain_rust_toolchain_channel
+        PASS [   0.058s] (  74/2003) velnor-workflow config::mise_closure::tests::rejects_lock_platform_or_backend_mismatch
+        PASS [   0.071s] (  75/2003) velnor-workflow config::mise_closure::tests::rejects_malformed_lock_identity_fields
+        PASS [   0.058s] (  76/2003) velnor-workflow config::mise_closure::tests::rejects_rust_toolchain_options_until_typed_rustup_provisioning
+        PASS [   0.062s] (  77/2003) velnor-workflow config::mise_closure::tests::rejects_task_local_backend_without_root_installer_identity
+        PASS [   0.047s] (  78/2003) velnor-workflow config::mise_closure::tests::rejects_task_local_selector_until_exact_installer_contract_exists
+        PASS [   0.071s] (  79/2003) velnor-workflow config::mise_closure::tests::rejects_unlocked_transitive_tool
+        PASS [   0.073s] (  80/2003) velnor-workflow config::mise_closure::tests::rejects_unknown_direct_platform
+        PASS [   2.742s] (  81/2003) velnor-workflow apt::tests::stable_verify_rejects_manifest_and_oci_incoherence
+        PASS [   0.041s] (  82/2003) velnor-workflow config::mise_closure::tests::resolves_typed_dependencies_and_scoped_tools_without_shell_parsing
+        PASS [   0.044s] (  83/2003) velnor-workflow config::mise_closure::tests::resolves_single_structured_run_task_and_its_tools
+        PASS [   0.058s] (  84/2003) velnor-workflow config::mise_closure::tests::resolves_versioned_tool_dependency_without_shell_splitting
+        PASS [   0.079s] (  85/2003) velnor-workflow config::mise_closure::tests::runner_platform_mapping_is_host_independent
+        PASS [   0.079s] (  86/2003) velnor-workflow config::mise_closure::tests::typed_rust_boundary_is_stage_scoped
+        PASS [   0.063s] (  87/2003) velnor-workflow config::mise_closure::tests::typed_rust_boundary_preserves_pin_and_excludes_rust_from_mise_install
+        PASS [   3.126s] (  88/2003) velnor-workflow apt::tests::stable_verify_rejects_bad_source_identity_before_mutation
+        PASS [   0.846s] (  89/2003) velnor-workflow closure::tests::closure_of_tree_agrees_with_git_on_a_fixture_repository
+        PASS [   0.071s] (  90/2003) velnor-workflow config::mise_closure::tests::typed_rust_boundary_rejects_task_selector_drift
+        PASS [   0.080s] (  91/2003) velnor-workflow config::mise_closure::tests::typed_rust_boundary_rejects_lock_version_drift
+        PASS [   0.053s] (  92/2003) velnor-workflow config::tests::absent_config_digests_the_empty_canonical_form
+        PASS [   0.072s] (  93/2003) velnor-workflow config::mise_closure::tests::typed_rust_boundary_requires_core_rust_lock_backend
+        PASS [   0.044s] (  94/2003) velnor-workflow config::tests::canonical_form_preserves_declarations_and_sorts_table_keys
+        PASS [   0.076s] (  95/2003) velnor-workflow config::tests::cache_sections_parse_and_stay_generator_only
+        PASS [   0.068s] (  96/2003) velnor-workflow config::tests::check_profile_rejects_bad_identity_cadence_and_contract
+        PASS [   0.050s] (  97/2003) velnor-workflow config::tests::check_profile_tools_match_lock_keys_by_exact_spelling
+        PASS [   2.649s] (  98/2003) velnor-workflow apt::tests::stable_verify_rejects_tampered_and_missing_inputs
+        PASS [   0.090s] (  99/2003) velnor-workflow config::tests::check_profile_rows_validate_and_leave_canonical_shape_without_them
+        PASS [   0.055s] ( 100/2003) velnor-workflow config::tests::check_profile_tools_require_pinned_lock_keys
+        PASS [   0.059s] ( 101/2003) velnor-workflow config::tests::check_profile_velnor_runner_needs_a_lane_and_labels
+        PASS [   0.053s] ( 102/2003) velnor-workflow config::tests::check_profile_without_schedule_passes_config_validation
+        PASS [   0.091s] ( 103/2003) velnor-workflow config::tests::declaration_order_is_part_of_the_digest
+        PASS [   0.043s] ( 104/2003) velnor-workflow config::tests::default_branch_outside_the_branch_alphabet_is_a_usage_error
+        PASS [   0.223s] ( 105/2003) velnor-workflow config::tests::args_stay_opaque_but_reject_unstable_values
+        PASS [   0.061s] ( 106/2003) velnor-workflow config::tests::discovery_reads_the_repository_root_and_ignores_absence
+        PASS [   0.059s] ( 107/2003) velnor-workflow config::tests::docker_context_paths_reject_missing_directories
+        PASS [   0.063s] ( 108/2003) velnor-workflow config::tests::docker_context_names_reject_duplicates_and_reserved_values
+        PASS [   0.064s] ( 109/2003) velnor-workflow config::tests::docker_context_paths_reject_traversal_and_escaping_symlinks
+        PASS [   0.063s] ( 110/2003) velnor-workflow config::tests::docker_release_accepts_an_image_with_defaulted_build_inputs
+        PASS [   0.152s] ( 111/2003) velnor-workflow config::tests::declared_files_stay_bare_yml_names
+        PASS [   0.034s] ( 112/2003) velnor-workflow config::tests::docker_release_rejects_unknown_platforms_and_escaping_paths
+        PASS [   0.171s] ( 113/2003) velnor-workflow config::tests::declared_mise_tools_match_lock_keys_by_exact_spelling
+        PASS [   0.044s] ( 114/2003) velnor-workflow config::tests::docs_unknown_field_fails_closed
+        PASS [   0.153s] ( 115/2003) velnor-workflow config::tests::docs_enabled_requires_declare_row
+        PASS [   0.164s] ( 116/2003) velnor-workflow config::tests::docs_complete_contract_validates
+        PASS [   0.061s] ( 117/2003) velnor-workflow config::tests::lock_key_reader_treats_a_missing_lock_as_unpinned
+        PASS [   0.069s] ( 118/2003) velnor-workflow config::tests::lock_key_parser_collects_bare_and_quoted_qualified_keys
+        PASS [   0.224s] ( 119/2003) velnor-workflow config::tests::empty_or_duplicate_mise_tools_fail
+        PASS [   0.049s] ( 120/2003) velnor-workflow config::tests::maintenance_overrides_must_be_shaped
+        PASS [   0.247s] ( 121/2003) velnor-workflow config::tests::docs_schedule_and_external_check_come_together
+        PASS [   0.199s] ( 122/2003) velnor-workflow config::tests::full_config_validates_against_a_scanned_shape
+        PASS [   2.313s] ( 123/2003) velnor-workflow closure::tests::candidate_closure_of_merge_matches_head_unless_main_touches_closure_paths
+        PASS [   0.082s] ( 124/2003) velnor-workflow config::tests::maintenance_unknown_field_fails_closed
+        PASS [   0.077s] ( 125/2003) velnor-workflow config::tests::package_update_channel_grants_fail_closed
+        PASS [   0.096s] ( 126/2003) velnor-workflow config::tests::policy_action_pin_admission_names_the_reviewed_allowlist
+        PASS [   0.108s] ( 127/2003) velnor-workflow config::tests::policy_dco_requires_the_external_dco_check
+        PASS [   0.378s] ( 128/2003) velnor-workflow config::tests::docs_enabled_requires_reason_address_build_and_a_check
+        PASS [   0.038s] ( 129/2003) velnor-workflow config::tests::release_jobs_reject_duplicate_ids
+        PASS [   0.155s] ( 130/2003) velnor-workflow config::tests::missing_generator_section_is_a_config_error
+        PASS [   0.047s] ( 131/2003) velnor-workflow config::tests::release_jobs_reject_other_kinds_and_bad_rows
+        PASS [   0.041s] ( 132/2003) velnor-workflow config::tests::release_naming_outside_shell_safe_alphabets_is_a_usage_error
+        PASS [   0.170s] ( 133/2003) velnor-workflow config::tests::misshapen_mise_tools_fail_regardless_of_lock
+        PASS [   0.049s] ( 134/2003) velnor-workflow config::tests::release_registry_auth_must_be_a_complete_docker_triple
+        PASS [   0.054s] ( 135/2003) velnor-workflow config::tests::renovate_allowed_commands_must_be_single_line_patterns
+        PASS [   0.174s] ( 136/2003) velnor-workflow config::tests::release_binding_shapes_fail_closed
+        PASS [   0.076s] ( 137/2003) velnor-workflow config::tests::renovate_git_author_must_name_an_email
+        PASS [   0.078s] ( 138/2003) velnor-workflow config::tests::renovate_extra_schedules_must_be_unique_crons
+        PASS [   0.057s] ( 139/2003) velnor-workflow config::tests::renovate_host_rules_secret_must_be_a_secret_name
+        PASS [   0.038s] ( 140/2003) velnor-workflow config::tests::renovate_lanes_both_rejects_runner_group
+        PASS [   0.040s] ( 141/2003) velnor-workflow config::tests::renovate_lanes_github_needs_no_velnor_declarations
+        PASS [   0.182s] ( 142/2003) velnor-workflow config::tests::release_bindings_parse_and_validate
+        PASS [   0.041s] ( 143/2003) velnor-workflow config::tests::renovate_repository_targets_must_be_slugs
+        PASS [   0.055s] ( 144/2003) velnor-workflow config::tests::renovate_signoff_requires_an_author
+        PASS [   0.067s] ( 145/2003) velnor-workflow config::tests::renovate_lanes_rejects_unknown_values
+        PASS [   0.161s] ( 146/2003) velnor-workflow config::tests::renovate_enabled_requires_declare_row_and_trusted_runners
+        PASS [   0.080s] ( 147/2003) velnor-workflow config::tests::renovate_writer_lanes_ignore_ci_runners
+        PASS [   0.084s] ( 148/2003) velnor-workflow config::tests::renovate_unknown_field_fails_closed
+        PASS [   0.072s] ( 149/2003) velnor-workflow config::tests::schema_must_be_exactly_one
+        PASS [   0.059s] ( 150/2003) velnor-workflow config::tests::tarball_bindings_on_other_kinds_are_a_usage_error
+        PASS [   0.041s] ( 151/2003) velnor-workflow config::tests::tasks_release_rejects_bad_job_shape
+        PASS [   0.059s] ( 152/2003) velnor-workflow config::tests::tasks_release_accepts_named_task_jobs
+        PASS [   0.139s] ( 153/2003) velnor-workflow config::tests::repository_must_be_an_owner_and_a_name
+        PASS [   0.041s] ( 154/2003) velnor-workflow config::tests::unit_requiring_trust_without_a_label_is_a_usage_error
+        PASS [   0.091s] ( 155/2003) velnor-workflow config::tests::tasks_release_accepts_job_shape
+        PASS [   0.061s] ( 156/2003) velnor-workflow config::tests::unknown_fields_are_rejected
+        PASS [   0.074s] ( 157/2003) velnor-workflow config::tests::valid_docker_image_accepts_references_and_rejects_injection
+        PASS [   0.141s] ( 158/2003) velnor-workflow config::tests::tasks_release_requires_jobs_and_rejects_artifact_bindings
+        PASS [   0.087s] ( 159/2003) velnor-workflow config::tests::workflow_dispatch_and_automatic_lane_defaults_are_optional
+        PASS [   0.130s] ( 160/2003) velnor-workflow config::tests::unknown_declared_unit_names_the_available_units
+        PASS [   0.094s] ( 161/2003) velnor-workflow config::tests::workflow_dispatch_runner_must_match_declared_runners
+        PASS [   0.103s] ( 162/2003) velnor-workflow config::tests::workflow_automatic_must_be_a_subset_of_runners
+        PASS [   0.075s] ( 163/2003) velnor-workflow config::tests::workflow_macos_runner_rejects_empty_labels
+        PASS [   0.063s] ( 164/2003) velnor-workflow config::tests::workflow_runners_accepts_lowercase_modes
+        PASS [   0.105s] ( 165/2003) velnor-workflow config::tests::workflow_macos_runner_is_optional_without_changing_canonical_shape
+        PASS [   0.057s] ( 166/2003) velnor-workflow config::tests::workflow_trusted_label_is_optional_without_changing_canonical_shape
+        PASS [   0.075s] ( 167/2003) velnor-workflow config::tests::workflow_runners_keeps_unknown_fields_denied
+        PASS [   0.085s] ( 168/2003) velnor-workflow config::tests::workflow_runners_is_optional_without_changing_canonical_shape
+        PASS [   0.055s] ( 169/2003) velnor-workflow config::tests::workflow_trusted_label_rejects_empty_confused_and_duplicate_labels
+        PASS [   0.112s] ( 170/2003) velnor-workflow config::tests::workflow_runners_rejects_unknown_or_non_lowercase_modes
+        PASS [   0.035s] ( 171/2003) velnor-workflow consumer_negatives::setup_action_declares_no_checksum_input
+        PASS [   5.593s] ( 172/2003) velnor-workflow apt::tests::stable_publish_stages_signs_and_records
+        PASS [   0.741s] ( 173/2003) velnor-workflow consumer_negatives::setup_action_cached_bytes_are_reverified
+        PASS [   1.005s] ( 174/2003) velnor-workflow consumer_negatives::candidate_acquire_recomputes_the_digest
+        PASS [   1.115s] ( 175/2003) velnor-workflow consumer_negatives::candidate_checksum_alone_confers_no_trust
+        PASS [   1.078s] ( 176/2003) velnor-workflow consumer_negatives::setup_action_missing_product_fails_closed_naming_the_producer
+        PASS [   1.407s] ( 177/2003) velnor-workflow consumer_negatives::candidate_acquire_exports_bound_product
+        PASS [   7.273s] ( 178/2003) velnor-workflow apt::tests::stable_publish_rejects_pointer_defects
+        PASS [   1.246s] ( 179/2003) velnor-workflow consumer_negatives::setup_action_untrusted_signer_rejects
+        PASS [   1.827s] ( 180/2003) velnor-workflow consumer_negatives::setup_action_self_report_mismatch_rejects
+        PASS [   1.151s] ( 181/2003) velnor-workflow consumer_negatives::setup_action_wrong_digest_rejects_before_install
+        PASS [   0.888s] ( 182/2003) velnor-workflow consumer_negatives::velnor_provisioner_missing_product_fails_closed
+        PASS [   2.013s] ( 183/2003) velnor-workflow consumer_negatives::cold_consumer_verifies_everything_with_zero_waivers
+        PASS [   0.028s] ( 184/2003) velnor-workflow estate::tests::approved_contract_accepts_labels_only_and_exact_group
+        PASS [   0.045s] ( 185/2003) velnor-workflow hosted_cargo_bin_toolchain_tests::save_follows_install_and_repairs_stale_cache_hits
+        PASS [   0.039s] ( 186/2003) velnor-workflow hosted_mold_setup_tests::mold_download_uses_the_canonical_bounded_flags
+        PASS [   0.049s] ( 187/2003) velnor-workflow platform::tests::agreed_env_fails_closed_on_conflict
+        PASS [   0.062s] ( 188/2003) velnor-workflow platform::tests::apple_work_matches_only_the_apple_executor
+        PASS [   0.044s] ( 189/2003) velnor-workflow platform::tests::arch_constrains_placement
+        PASS [   0.057s] ( 190/2003) velnor-workflow platform::tests::ffi_detection_follows_crate_types
+        PASS [   0.036s] ( 191/2003) velnor-workflow platform::tests::names_reject_shell_metacharacters
+        PASS [   1.290s] ( 192/2003) velnor-workflow consumer_negatives::velnor_provisioner_fails_closed_when_pin_unresolvable
+        PASS [   0.037s] ( 193/2003) velnor-workflow platform::tests::portable_units_match_every_executor
+        PASS [   0.033s] ( 194/2003) velnor-workflow platform::tests::prepare_exports_task_inputs
+        PASS [   0.027s] ( 195/2003) velnor-workflow platform::tests::prerequisite_prefers_its_own_task
+        PASS [   0.033s] ( 196/2003) velnor-workflow platform::tests::requirement_description_names_only_constraints
+        PASS [   0.153s] ( 197/2003) velnor-workflow policy::tests::a_second_pull_request_target_workflow_is_refused
+        PASS [   0.977s] ( 198/2003) velnor-workflow consumer_negatives::velnor_provisioner_untrusted_signer_rejects
+        PASS [   0.054s] ( 199/2003) velnor-workflow policy::tests::candidate_manifest_source_prefers_flag_over_env
+        PASS [   0.059s] ( 200/2003) velnor-workflow policy::tests::candidate_render_is_unavailable_without_git_history
+        PASS [   1.680s] ( 201/2003) velnor-workflow consumer_negatives::velnor_provisioner_resolves_remote_pin_to_its_true_closure
+        PASS [   1.262s] ( 202/2003) velnor-workflow consumer_negatives::velnor_provisioner_wrong_digest_rejects
+        PASS [   0.044s] ( 203/2003) velnor-workflow policy::tests::cli_requires_the_base_validator_revision
+        PASS [   0.622s] ( 204/2003) velnor-workflow policy::tests::candidate_manifest_for_another_tree_is_rejected
+        PASS [   0.853s] ( 205/2003) velnor-workflow policy::tests::bound_candidate_matching_head_tree_is_accepted
+        PASS [   0.159s] ( 206/2003) velnor-workflow policy::tests::entrypoint_audit_names_each_escalation
+        PASS [   0.065s] ( 207/2003) velnor-workflow policy::tests::from_env_consent_mapping_is_fail_closed
+        PASS [   0.057s] ( 208/2003) velnor-workflow policy::tests::generated_tree_report_distinguishes_pin_candidate_and_stale_main
+        PASS [   2.041s] ( 209/2003) velnor-workflow consumer_negatives::velnor_provisioner_reuses_slot_only_on_digest_match
+        PASS [   1.878s] ( 210/2003) velnor-workflow consumer_negatives::velnor_provisioner_self_report_mismatch_rejects
+        PASS [   0.293s] ( 211/2003) velnor-workflow policy::tests::forbidden_build_fails_closed_listing_every_candidate
+        PASS [   0.193s] ( 212/2003) velnor-workflow policy::tests::generated_entrypoint_satisfies_the_privilege_and_trigger_invariants
+        PASS [   0.194s] ( 213/2003) velnor-workflow policy::tests::job_level_env_with_runner_context_fails
+        PASS [   0.056s] ( 214/2003) velnor-workflow policy::tests::owner_entrypoint_pin_ignores_variable_references
+        PASS [   0.199s] ( 215/2003) velnor-workflow policy::tests::job_level_env_with_steps_context_fails
+        PASS [   0.282s] ( 216/2003) velnor-workflow policy::tests::job_level_env_with_allowed_contexts_passes
+        PASS [   0.868s] ( 217/2003) velnor-workflow policy::tests::candidate_render_rejects_a_binary_claiming_another_closure
+        PASS [   0.351s] ( 218/2003) velnor-workflow policy::tests::path_binary_is_used_when_its_reported_closure_is_the_pin
+        PASS [   0.751s] ( 219/2003) velnor-workflow policy::tests::lying_binary_whose_digest_misses_the_manifest_is_rejected
+        PASS [   1.249s] ( 220/2003) velnor-workflow policy::tests::malformed_candidate_manifest_is_rejected
+        PASS [   0.062s] ( 221/2003) velnor-workflow policy::tests::pin_source_follows_the_declared_repository
+        PASS [   3.907s] ( 222/2003) velnor-workflow consumer_negatives::setup_action_wrong_manifest_rejects
+        PASS [   0.027s] ( 223/2003) velnor-workflow policy::tests::policy_sibling_setup_action_is_a_reviewed_local_path
+        PASS [   0.051s] ( 224/2003) velnor-workflow policy::tests::rendered_entrypoints_pass_the_legacy_space_marker_scan
+        PASS [   0.189s] ( 225/2003) velnor-workflow policy::tests::pinned_binary_env_is_used_only_when_it_proves_the_pin
+        PASS [   0.122s] ( 226/2003) velnor-workflow policy::tests::the_running_binary_is_the_pin_when_built_at_it
+        PASS [   1.542s] ( 227/2003) velnor-workflow policy::tests::pin_reachable_fails_for_a_pin_outside_the_head_history
+        PASS [   1.579s] ( 228/2003) velnor-workflow policy::tests::pin_reachable_names_a_shallow_checkout_as_the_cause
+        PASS [   0.025s] ( 229/2003) velnor-workflow policy::tests::velnor_entrypoint_is_gated_and_never_builds_the_pin
+        PASS [   0.488s] ( 230/2003) velnor-workflow policy::tests::revision_fallback_requires_the_pin_and_a_closure_report
+        PASS [   0.039s] ( 231/2003) velnor-workflow primitives::cache::tests::cache_is_velnor_host_persistent_requires_every_path
+        PASS [   0.056s] ( 232/2003) velnor-workflow policy::tests::velnor_pr_gate_admits_dispatch_on_any_ref
+        PASS [   0.029s] ( 233/2003) velnor-workflow primitives::cache::tests::host_persistent_bypass_is_only_for_detected_backend_on_velnor
+        PASS [   3.513s] ( 234/2003) velnor-workflow consumer_negatives::velnor_provisioner_wrong_manifest_rejects
+        PASS [   0.042s] ( 235/2003) velnor-workflow primitives::cache::tests::velnor_host_persistent_cache_path_matches_runner_contract
+        PASS [   0.035s] ( 236/2003) velnor-workflow primitives::cache::tests::velnor_lane_skips_pinned_rust_toolchain
+        PASS [   0.047s] ( 237/2003) velnor-workflow primitives::check_profiles::tests::absent_branches_render_the_bare_push_trigger
+        PASS [   0.053s] ( 238/2003) velnor-workflow primitives::check_profiles::tests::absent_lanes_input_renders_no_lanes_surface
+        PASS [   0.048s] ( 239/2003) velnor-workflow primitives::check_profiles::tests::branches_without_push_empty_and_multiline_are_refused
+        PASS [   0.042s] ( 240/2003) velnor-workflow primitives::check_profiles::tests::cadence_renders_as_schedule_trigger_and_default_name
+        PASS [   0.032s] ( 241/2003) velnor-workflow primitives::check_profiles::tests::cron_less_evented_file_renders_no_schedule_trigger
+        PASS [   0.036s] ( 242/2003) velnor-workflow primitives::check_profiles::tests::cron_only_trigger_block_is_unchanged
+        PASS [   0.027s] ( 243/2003) velnor-workflow primitives::check_profiles::tests::custom_workflow_name_overrides_stem
+        PASS [   0.397s] ( 244/2003) velnor-workflow policy::tests::ungated_trusted_velnor_job_fails_the_trusted_runners_rule
+        PASS [   0.038s] ( 245/2003) velnor-workflow primitives::check_profiles::tests::declared_branches_scope_the_push_trigger_only
+        PASS [   2.615s] ( 246/2003) velnor-workflow policy::tests::checkout_arm_self_fetches_the_pin_in_a_shallow_clone
+        PASS [   0.038s] ( 247/2003) velnor-workflow primitives::check_profiles::tests::declared_events_canonicalize_to_push_then_pull_request
+        PASS [   0.035s] ( 248/2003) velnor-workflow primitives::check_profiles::tests::dependency_cycles_are_refused
+        PASS [   0.058s] ( 249/2003) velnor-workflow primitives::check_profiles::tests::declared_workflow_dispatch_validates_without_rendering_twice
+        PASS [   0.053s] ( 250/2003) velnor-workflow primitives::check_profiles::tests::evented_file_renders_push_pr_triggers_plus_shared_cron
+        PASS [   0.045s] ( 251/2003) velnor-workflow primitives::check_profiles::tests::lanes_input_leaves_macos_jobs_static
+        PASS [   0.542s] ( 252/2003) velnor-workflow policy::tests::unbound_env_candidate_is_rejected_without_manifest
+        PASS [   0.061s] ( 253/2003) velnor-workflow primitives::check_profiles::tests::evented_files_cancel_pull_requests_only
+        PASS [   1.695s] ( 254/2003) velnor-workflow policy::tests::pin_rules_pass_when_the_declared_pin_descends_from_the_base_validator
+        PASS [   0.053s] ( 255/2003) velnor-workflow primitives::check_profiles::tests::lanes_input_needs_both_lanes
+        PASS [   0.060s] ( 256/2003) velnor-workflow primitives::check_profiles::tests::lanes_input_needs_a_dispatchable_profile
+        PASS [   0.053s] ( 257/2003) velnor-workflow primitives::check_profiles::tests::lanes_input_refuses_mixed_dispatch_lanes
+        PASS [   0.039s] ( 258/2003) velnor-workflow primitives::check_profiles::tests::mixed_scheduled_and_schedule_less_profiles_are_refused
+        PASS [   0.062s] ( 259/2003) velnor-workflow primitives::check_profiles::tests::lanes_input_renders_velnor_default_for_velnor_files
+        PASS [   0.042s] ( 260/2003) velnor-workflow primitives::check_profiles::tests::multi_word_name_renders_one_valid_run_name_scalar
+        PASS [   0.039s] ( 261/2003) velnor-workflow primitives::check_profiles::tests::needs_render_within_one_file_and_cross_file_is_refused
+        PASS [   0.062s] ( 262/2003) velnor-workflow primitives::check_profiles::tests::mixed_cadences_are_refused
+        PASS [   0.080s] ( 263/2003) velnor-workflow primitives::check_profiles::tests::lanes_input_renders_homogeneous_github_dispatch_file
+        PASS [   0.041s] ( 264/2003) velnor-workflow primitives::check_profiles::tests::profile_cannot_override_mise_auto_install_policy
+        PASS [   0.030s] ( 265/2003) velnor-workflow primitives::check_profiles::tests::timeout_env_and_artifacts_pass_through_verbatim
+        PASS [   0.048s] ( 266/2003) velnor-workflow primitives::check_profiles::tests::required_and_advisory_jobs_split_continue_on_error
+        PASS [   0.040s] ( 267/2003) velnor-workflow primitives::check_profiles::tests::schedule_less_profile_in_cron_file_is_refused
+        PASS [   0.060s] ( 268/2003) velnor-workflow primitives::check_profiles::tests::runner_selection_covers_hosted_lanes_and_refuses_unknown
+        PASS [   0.040s] ( 269/2003) velnor-workflow primitives::check_profiles::tests::tools_render_per_lane
+        PASS [   0.058s] ( 270/2003) velnor-workflow primitives::check_profiles::tests::typed_rust_profile_rejects_path_and_toolchain_overrides
+        PASS [   0.061s] ( 271/2003) velnor-workflow primitives::check_profiles::tests::typed_rust_profile_is_provisioned_outside_mise_closure
+        PASS [   0.035s] ( 272/2003) velnor-workflow primitives::check_profiles::tests::unknown_repeated_and_empty_selections_are_refused
+        PASS [   0.064s] ( 273/2003) velnor-workflow primitives::check_profiles::tests::unknown_empty_repeated_and_mistyped_events_are_refused
+        PASS [   0.118s] ( 274/2003) velnor-workflow primitives::check_profiles::tests::push_without_pr_cancels_like_cron_only
+        PASS [   0.042s] ( 275/2003) velnor-workflow primitives::check_profiles::tests::velnor_lane_needs_labels_and_renders_them
+        PASS [   1.667s] ( 276/2003) velnor-workflow policy::tests::pin_self_fetch_fails_loud_when_the_remote_lacks_the_pin
+        PASS [   0.037s] ( 277/2003) velnor-workflow primitives::docs_site::tests::default_render_carries_no_lanes_surface
+        PASS [   0.056s] ( 278/2003) velnor-workflow primitives::docs_site::tests::consumer_contract_stays_verbatim
+        PASS [   0.046s] ( 279/2003) velnor-workflow primitives::docs_site::tests::empty_stages_render_no_job
+        PASS [   0.059s] ( 280/2003) velnor-workflow primitives::docs_site::tests::deploy_retries_the_pages_handoff_three_times
+        PASS [   0.072s] ( 281/2003) velnor-workflow primitives::docs_site::tests::artifact_reuse_round_trip_uses_guarded_names
+        PASS [   0.072s] ( 282/2003) velnor-workflow primitives::docs_site::tests::lanes_input_needs_both_lanes_and_label_routing
+        PASS [   0.066s] ( 283/2003) velnor-workflow primitives::docs_site::tests::lanes_input_renders_github_default_dispatch_and_conditional_runners
+        PASS [   0.059s] ( 284/2003) velnor-workflow primitives::docs_site::tests::post_deploy_verification_fails_closed
+        PASS [   0.047s] ( 285/2003) velnor-workflow primitives::docs_site::tests::scheduled_external_omitted_without_contract
+        PASS [   0.075s] ( 286/2003) velnor-workflow primitives::docs_site::tests::pull_request_runs_never_publish_or_satisfy_trusted_reuse
+        PASS [   0.071s] ( 287/2003) velnor-workflow primitives::docs_site::tests::reuse_hit_requires_verified_trusted_bytes
+        PASS [   0.071s] ( 288/2003) velnor-workflow primitives::docs_site::tests::reuse_recipe_covers_commands_toolchain_and_version
+        PASS [   0.051s] ( 289/2003) velnor-workflow primitives::docs_site::tests::side_file_predicates_match_the_registry
+        PASS [   0.119s] ( 290/2003) velnor-workflow primitives::docs_site::tests::local_and_scheduled_checks_split_by_event
+        PASS [   0.047s] ( 291/2003) velnor-workflow primitives::docs_site::tests::velnor_lane_without_labels_fails_closed
+        PASS [   0.042s] ( 292/2003) velnor-workflow primitives::ir::tests::automatic_reachability_keeps_untrusted_events_off_velnor
+        PASS [   0.039s] ( 293/2003) velnor-workflow primitives::ir::tests::candidate_step_gates_sit_directly_after_their_name_lines
+        PASS [   0.036s] ( 294/2003) velnor-workflow primitives::ir::tests::collapsed_callee_records_dependencies_from_inputs
+        PASS [   0.059s] ( 295/2003) velnor-workflow primitives::ir::tests::candidate_publish_flags_only_the_hosted_owner_of_the_generator_crate
+        FAIL [   0.050s] ( 296/2003) velnor-workflow primitives::ir::tests::candidate_steps_match_the_policy_consumer_contract
+  stdout ───
+
+    running 1 test
+    test primitives::ir::tests::candidate_steps_match_the_policy_consumer_contract ... FAILED
+
+    failures:
+
+    failures:
+        primitives::ir::tests::candidate_steps_match_the_policy_consumer_contract
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1874 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'primitives::ir::tests::candidate_steps_match_the_policy_consumer_contract' (22255943) panicked at crates/velnor-workflow/src/primitives/ir.rs:1133:9:
+    the prepare step carries the input gate merged with the pull-request same-repo gate: # Generated by velnor-workflow. Regenerate; do not hand-edit.
+    name: Rust
+    on:
+      workflow_call:
+        inputs:
+          unit:
+            required: true
+            type: string
+          selected_units:
+            required: true
+            type: string
+          scope:
+            required: true
+            type: string
+          full_units:
+            required: true
+            type: string
+          base_sha:
+            required: true
+            type: string
+          head_sha:
+            required: true
+            type: string
+          lane:
+            required: true
+            type: string
+          mise_tools:
+            required: false
+            type: string
+            default: ""
+          mise_runner:
+            required: false
+            type: boolean
+            default: false
+          mbx_enabled:
+            required: false
+            type: boolean
+            default: false
+          mbx_compat:
+            required: false
+            type: string
+            default: ""
+          mbx_dependency_files:
+            required: false
+            type: string
+            default: ""
+          mbx_freshness_files:
+            required: false
+            type: string
+            default: ""
+          cargo_bin_tools:
+            required: false
+            type: string
+            default: ""
+          tool_version:
+            required: false
+            type: string
+            default: ""
+          node_cache_dependency_path:
+            required: false
+            type: string
+            default: ""
+          cache_paths:
+            required: false
+            type: string
+            default: ""
+          cache_key_files:
+            required: false
+            type: string
+            default: ""
+          seed_compat:
+            required: false
+            type: string
+            default: ""
+          seed_dependency_files:
+            required: false
+            type: string
+            default: ""
+          seed_freshness_files:
+            required: false
+            type: string
+            default: ""
+          cargo_root:
+            required: false
+            type: string
+            default: ""
+          cargo_fetch_skip_when_warm:
+            required: false
+            type: boolean
+            default: false
+          cargo_net_offline:
+            required: false
+            type: boolean
+            default: false
+          host_warm_layers:
+            required: false
+            type: string
+            default: ""
+          policy_runtime:
+            required: false
+            type: boolean
+            default: false
+          candidate_publish:
+            required: false
+            type: boolean
+            default: false
+          apple_executor:
+            required: false
+            type: boolean
+            default: false
+          unit_dependencies:
+            required: false
+            type: string
+            default: ""
+          unit_admission:
+            required: false
+            type: string
+            default: ""
+
+    jobs:
+      verify-github:
+        name: GitHub
+        if: ${{ inputs.lane == 'github' && contains(format(',{0},', inputs.selected_units), format(',{0},', inputs.unit)) && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
+        runs-on: ubuntu-24.04
+        timeout-minutes: 45
+        steps:
+          - name: Mark CI job start
+            if: always()
+            run: |
+              timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+              umask 077
+              mkdir -p "$timing_dir"
+              marker="$timing_dir/JOB_STARTED"
+              if [[ ! -e "$marker" ]]; then
+                if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+                  chmod 0444 "$marker" 2>/dev/null || true
+                fi
+              fi
+          - name: Checkout
+            uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+            with:
+              persist-credentials: false
+              ref: ${{ inputs.head_sha }}
+          - name: Record unit dependencies
+            env:
+              UNIT_ID: ${{ inputs.unit }}
+              UNIT_DEPENDENCIES: ${{ inputs.unit_dependencies }}
+              UNIT_ADMISSION: ${{ inputs.unit_admission }}
+              UNIT_LANE: ${{ inputs.lane }}
+            run: |
+              {
+                echo '## Unit dependencies'
+                echo
+                echo "- Unit: $UNIT_ID"
+                echo "- Lane: $UNIT_LANE"
+                echo "- Admission: $UNIT_ADMISSION"
+                if [[ -z "$UNIT_DEPENDENCIES" ]]; then
+                  echo '- Dependencies: none'
+                else
+                  echo "- Dependencies: $UNIT_DEPENDENCIES"
+                fi
+              } >> "$GITHUB_STEP_SUMMARY"
+          - name: Download Velnor workflow runtime
+            uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+            with:
+              name: velnor-workflow-runtime-0000000000000000000000000000000000000000-${{ runner.os }}-${{ runner.arch }}
+              path: .velnor-workflow-runtime
+          - name: Verify Velnor workflow runtime
+            shell: bash
+            env:
+              EXPECTED_REVISION: 0000000000000000000000000000000000000000
+            run: |
+              set -euo pipefail
+              manifest=.velnor-workflow-runtime/manifest.json
+              jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$")) and (.policy_binary_sha256 | test("^[0-9a-f]{64}$")) and (.closure | test("^[0-9a-f]{64}$")) and (.policy_closure | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+              expected="$(jq -er '.binary_sha256' "$manifest")"
+              actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+              [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+              expected="$(jq -er '.policy_binary_sha256' "$manifest")"
+              actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{print $1}')"
+              [[ "$actual" == "$expected" ]] || { echo "::error::policy runtime digest mismatch" >&2; exit 1; }
+          - name: Add Velnor workflow runtime to PATH
+            shell: bash
+            env:
+              EXPECTED_REVISION: 0000000000000000000000000000000000000000
+            run: |
+              set -euo pipefail
+              home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
+              install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$home/bin/velnor-workflow"
+              install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy "$home/bin/velnor-workflow-policy"
+              expected_closure="$(jq -er '.policy_closure' .velnor-workflow-runtime/manifest.json)"
+              reported="$("$home/bin/velnor-workflow-policy" --closure)"
+              [[ "$reported" == "$expected_closure" ]] || { echo "::error::policy runtime reports closure $reported, expected $expected_closure" >&2; exit 1; }
+              echo "$home/bin" >> "$GITHUB_PATH"
+              echo "VELNOR_WORKFLOW_PINNED_BINARY=$home/bin/velnor-workflow-policy" >> "$GITHUB_ENV"
+          - name: Mark runner setup end
+            if: always()
+            run: |
+              timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+              umask 077
+              mkdir -p "$timing_dir"
+              marker="$timing_dir/RUNNER_SETUP_ENDED"
+              if [[ ! -e "$marker" ]]; then
+                if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+                  chmod 0444 "$marker" 2>/dev/null || true
+                fi
+              fi
+          - name: Materialize Velnor CI selection
+            shell: bash
+            env:
+              SELECTION_BASE_SHA: ${{ inputs.base_sha }}
+              SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
+              SELECTION_SCOPE: ${{ inputs.scope }}
+              SELECTION_UNITS: ${{ inputs.selected_units }}
+              SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+            run: |
+              set -euo pipefail
+              mkdir -p .velnor-ci-selection
+              {
+                printf 'version=1\n'
+                printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
+                printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
+                printf 'scope=%s\n' "$SELECTION_SCOPE"
+                printf 'units=%s\n' "$SELECTION_UNITS"
+                printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+              } > .velnor-ci-selection/velnor-ci-selection
+          - name: Mark selection transport end
+            if: always()
+            run: |
+              timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+              umask 077
+              mkdir -p "$timing_dir"
+              marker="$timing_dir/SELECTION_ENDED"
+              if [[ ! -e "$marker" ]]; then
+                if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+                  chmod 0444 "$marker" 2>/dev/null || true
+                fi
+              fi
+          - name: Set up sccache
+            uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+            with:
+              version: v0.16.0
+          - name: Configure sccache environment
+            run: |
+              {
+                echo 'CARGO_INCREMENTAL=0'
+                echo 'RUSTC_WRAPPER=sccache'
+                echo 'SCCACHE_GHA_ENABLED=true'
+              } >> "$GITHUB_ENV"
+          - name: Restore mold 2.42.0 cache
+            id: mold-cache
+            uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+            with:
+              path: ~/.cache/velnor/mold/2.42.0
+              key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
+          - name: Set up mold 2.42.0
+            shell: bash
+            env:
+              MOLD_VERSION: 2.42.0
+            run: |
+              set -euo pipefail
+              case "$(uname -m)" in
+                x86_64) mold_arch=x86_64; expected='f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d' ;;
+                aarch64) mold_arch=aarch64; expected='3c9a0a3624aac8a2007569ae50c33b3129a0f0ae8bcc974aeee2f8939d295190' ;;
+                *) echo "unsupported mold architecture: $(uname -m)" >&2; exit 1 ;;
+              esac
+              cache_dir="$HOME/.cache/velnor/mold/$MOLD_VERSION"
+              archive="$cache_dir/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
+              mkdir -p "$cache_dir"
+              if [[ ! -s "$archive" ]]; then
+                temporary="$archive.download"
+                trap 'rm -f "$temporary"' EXIT
+                curl --fail --show-error --silent --location --http1.1 --continue-at - --retry 20 --retry-all-errors --retry-delay 5 --retry-max-time 1800 --connect-timeout 30 --max-time 900 \
+                  --output "$temporary" \
+                  "https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
+                printf '%s  %s\n' "$expected" "$temporary" | sha256sum --check --strict
+                mv "$temporary" "$archive"
+                trap - EXIT
+              fi
+              printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
+              if [[ "$(id -u)" -eq 0 ]]; then
+                tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+              else
+                sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+              fi
+              command -v mold >/dev/null
+              mold --version | grep -F "$MOLD_VERSION"
+          - name: Save mold 2.42.0 cache
+            if: ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true'
+            uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+            with:
+              path: ~/.cache/velnor/mold/2.42.0
+              key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
+          - name: Mark tool bootstrap end
+            if: always()
+            run: |
+              timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+              umask 077
+              mkdir -p "$timing_dir"
+              marker="$timing_dir/TOOL_BOOTSTRAP_ENDED"
+              if [[ ! -e "$marker" ]]; then
+                if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+                  chmod 0444 "$marker" 2>/dev/null || true
+                fi
+              fi
+          - name: Mark cache prep end
+            if: always()
+            run: |
+              timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+              umask 077
+              mkdir -p "$timing_dir"
+              marker="$timing_dir/CACHE_PREP_ENDED"
+              if [[ ! -e "$marker" ]]; then
+                if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+                  chmod 0444 "$marker" 2>/dev/null || true
+                fi
+              fi
+          - name: Mark cargo fetch end
+            if: always()
+            run: |
+              timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+              umask 077
+              mkdir -p "$timing_dir"
+              marker="$timing_dir/CARGO_FETCH_ENDED"
+              if [[ ! -e "$marker" ]]; then
+                if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+                  chmod 0444 "$marker" 2>/dev/null || true
+                fi
+              fi
+          - name: Run unit checks
+            env:
+              CI_SCOPE: ${{ inputs.scope }}
+              CI_UNIT_ID: ${{ inputs.unit }}
+              EVENT_NAME: ${{ github.event_name }}
+              BASE_SHA: ${{ inputs.base_sha }}
+              HEAD_SHA: ${{ inputs.head_sha }}
+              VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+              MISE_AUTO_INSTALL: "false"
+              MISE_EXEC_AUTO_INSTALL: "false"
+              MISE_NOT_FOUND_AUTO_INSTALL: "false"
+            run: |
+              set -o pipefail
+              timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+              umask 077
+              mkdir -p "$timing_dir"
+              marker="$timing_dir/CHECKS_STARTED"
+              if [[ ! -e "$marker" ]]; then
+                if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+                  chmod 0444 "$marker" 2>/dev/null || true
+                fi
+              fi
+              rc=0
+              velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
+              timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+              umask 077
+              mkdir -p "$timing_dir"
+              marker="$timing_dir/CHECKS_ENDED"
+              if [[ ! -e "$marker" ]]; then
+                if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+                  chmod 0444 "$marker" 2>/dev/null || true
+                fi
+              fi
+              exit $rc
+          - name: Mark candidate phase start
+            if: ${{ (inputs.candidate_publish) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+            run: |
+              timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+              umask 077
+              mkdir -p "$timing_dir"
+              marker="$timing_dir/CANDIDATE_STARTED"
+              if [[ ! -e "$marker" ]]; then
+                if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+                  chmod 0444 "$marker" 2>/dev/null || true
+                fi
+              fi
+          - name: Mark candidate preparation start
+            if: ${{ (inputs.candidate_publish) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+            run: |
+              timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+              umask 077
+              mkdir -p "$timing_dir"
+              marker="$timing_dir/CANDIDATE_PREPARATION_STARTED"
+              if [[ ! -e "$marker" ]]; then
+                if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+                  chmod 0444 "$marker" 2>/dev/null || true
+                fi
+              fi
+          - name: Prepare candidate generator product
+            if: ${{ (inputs.candidate_publish) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+            id: candidate
+            env:
+              CANDIDATE_MERGE_SHA: ${{ inputs.head_sha }}
+              CANDIDATE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+              CANDIDATE_BASE_SHA: ${{ inputs.base_sha }}
+            run: |
+              set -euo pipefail
+              PR_HEAD="$CANDIDATE_PR_HEAD_SHA"
+              BASE="$CANDIDATE_BASE_SHA"
+              if ! git cat-file -e "$PR_HEAD^{commit}" 2>/dev/null; then
+                git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$PR_HEAD"
+              fi
+              head_closure="$(velnor-workflow closure --rev="$PR_HEAD" --candidate)"
+              if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+                git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$BASE"
+              fi
+              base_pin="$(git show "$BASE:.github-gen/velnor-workflow.toml" 2>/dev/null | sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' | head -n 1)"
+              test "$base_pin" != '' || base_pin="$(git show "$BASE:.github/workflows/ci-policy.yml" 2>/dev/null | sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{40}).*/\1/p' | head -n 1)"
+              test "$base_pin" != '' || { echo "::error::base $BASE declares no generator pin" >&2; exit 1; }
+              if ! git cat-file -e "$base_pin^{commit}" 2>/dev/null; then
+                git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$base_pin"
+              fi
+              base_closure="$(velnor-workflow closure --rev="$base_pin" --candidate)"
+              if [[ "$head_closure" == "$base_closure" ]]; then
+                echo "head $PR_HEAD shares the base pin's candidate closure; no candidate to publish"
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              merge_closure="$(velnor-workflow closure --rev="$CANDIDATE_MERGE_SHA" --candidate)"
+              worktree=""
+              use_unit_binary=false
+              if [[ "$merge_closure" == "$head_closure" ]]; then
+                test -x target/debug/velnor-workflow || { echo "::error::candidate packaging needs the unit's own target/debug/velnor-workflow; the checks must build the generator binary" >&2; exit 1; }
+                # The checks may build with different features than the candidate
+                # profile stamps, so only reuse their binary when it already
+                # reports the head closure; otherwise fall through to a clean
+                # default-features build below.
+                if [[ "$(target/debug/velnor-workflow --closure)" == "$head_closure" ]]; then
+                  use_unit_binary=true
+                fi
+              fi
+              if [[ "$use_unit_binary" == true ]]; then
+                binary="target/debug/velnor-workflow"
+                build_rev="$CANDIDATE_MERGE_SHA"
+              else
+                worktree="$RUNNER_TEMP/velnor-workflow-head"
+                rm -rf "$worktree"
+                git worktree add --detach "$worktree" "$PR_HEAD"
+                trap 'git worktree remove --force "$worktree"' EXIT
+                cargo build --locked -p velnor-workflow --manifest-path "$worktree/crates/velnor-workflow/Cargo.toml"
+                binary="$worktree/target/debug/velnor-workflow"
+                build_rev="$PR_HEAD"
+              fi
+              stage="$RUNNER_TEMP/velnor-workflow-candidate"
+              rm -rf "$stage"
+              mkdir -p "$stage"
+              install -m 0755 "$binary" "$stage/velnor-workflow"
+              digest="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"
+              reported="$("$stage/velnor-workflow" --closure)"
+              [[ "$reported" == "$head_closure" ]] || { echo "::error::candidate reports closure $reported, head $PR_HEAD declares $head_closure" >&2; exit 1; }
+              jq -n --arg profile debug --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg revision "$PR_HEAD" --arg closure "$head_closure" --arg build_revision "$build_rev" --arg binary_sha256 "$digest" '{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}' > "$stage/candidate-manifest.json"
+              if [[ "$worktree" != "" ]]; then
+                git worktree remove --force "$worktree"
+                trap - EXIT
+              fi
+              echo "name=velnor-workflow-candidate-${head_closure:0:16}-${RUNNER_OS}-${RUNNER_ARCH}" >> "$GITHUB_OUTPUT"
+          - name: Mark candidate preparation end
+            if: ${{ (inputs.candidate_publish) && (always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outcome == 'success') }}
+            run: |
+              timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+              umask 077
+              mkdir -p "$timing_dir"
+              marker="$timing_dir/CANDIDATE_PREPARATION_ENDED"
+              if [[ ! -e "$marker" ]]; then
+                if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+                  chmod 0444 "$marker" 2>/dev/null || true
+                fi
+              fi
+          - name: Mark candidate publication start
+            if: ${{ (inputs.candidate_publish) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate.outcome == 'success') }}
+            run: |
+              timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+              umask 077
+              mkdir -p "$timing_dir"
+              marker="$timing_dir/CANDIDATE_PUBLICATION_STARTED"
+              if [[ ! -e "$marker" ]]; then
+                if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+                  chmod 0444 "$marker" 2>/dev/null || true
+                fi
+              fi
+          - name: Publish candidate generator product
+            if: ${{ (inputs.candidate_publish) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate.outcome == 'success') }}
+            id: candidate_publication
+            uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+            with:
+              name: ${{ steps.candidate.outputs.name }}
+              path: ${{ runner.temp }}/velnor-workflow-candidate
+              if-no-files-found: error
+              retention-days: 1
+          - name: Mark candidate publication end
+            if: ${{ (inputs.candidate_publish) && (always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate_publication.outcome == 'success') }}
+            run: |
+              timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+              umask 077
+              mkdir -p "$timing_dir"
+              marker="$timing_dir/CANDIDATE_PUBLICATION_ENDED"
+              if [[ ! -e "$marker" ]]; then
+                if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+                  chmod 0444 "$marker" 2>/dev/null || true
+                fi
+              fi
+          - name: Mark candidate phase end
+            if: ${{ (inputs.candidate_publish) && (always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate_publication.outcome == 'success') }}
+            run: |
+              timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+              umask 077
+              mkdir -p "$timing_dir"
+              marker="$timing_dir/CANDIDATE_ENDED"
+              if [[ ! -e "$marker" ]]; then
+                if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+                  chmod 0444 "$marker" 2>/dev/null || true
+                fi
+              fi
+          - name: Report phase timings and cache outcomes
+            if: always()
+            uses: ./.github/actions/report-velnor-ci-outcomes
+            with:
+              job_label: ${{ inputs.unit }}
+              ci_lane: github
+              cache_mold_primary: ${{ steps.mold-cache.outputs.cache-primary-key }}
+              cache_mold_matched: ${{ steps.mold-cache.outputs.cache-matched-key }}
+
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 9 tests still running
+        PASS [   0.068s] ( 297/2003) velnor-workflow primitives::ir::tests::collapsed_rust_all_mbx_keeps_ungated_mbx_setup
+        PASS [   0.075s] ( 298/2003) velnor-workflow primitives::ir::tests::collapsed_rust_all_disabled_omits_mbx_and_keeps_sccache
+        FAIL [   0.060s] ( 299/2003) velnor-workflow primitives::ir::tests::collapsed_rust_members_gate_mbx_per_member
+  stdout ───
+
+    running 1 test
+    test primitives::ir::tests::collapsed_rust_members_gate_mbx_per_member ... FAILED
+
+    failures:
+
+    failures:
+        primitives::ir::tests::collapsed_rust_members_gate_mbx_per_member
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1874 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'primitives::ir::tests::collapsed_rust_members_gate_mbx_per_member' (22255988) panicked at crates/velnor-workflow/src/primitives/ir.rs:486:9:
+    mixed members gate MBX on the selected member
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.056s] ( 300/2003) velnor-workflow primitives::ir::tests::collapsed_swift_kind_lands_on_macos_while_rust_stays_on_linux
+        PASS [   0.048s] ( 301/2003) velnor-workflow primitives::ir::tests::exactly_one_caller_per_run_passes_candidate_publish
+        PASS [   0.057s] ( 302/2003) velnor-workflow primitives::ir::tests::collapsed_swift_partial_cache_composes_one_save_condition
+        PASS [   0.415s] ( 303/2003) velnor-workflow primitives::check_profiles::tests::rustup_component_check_accepts_exact_bare_or_host_names_only
+        PASS [   3.008s] ( 304/2003) velnor-workflow policy::tests::pin_monotonic_admits_an_unchanged_inherited_pin_and_refuses_a_regression
+        PASS [  14.454s] ( 305/2003) velnor-workflow apt::tests::stable_publish_rejects_pool_and_index_defects
+────────────
+     Summary [  20.372s] 305/2003 tests run: 303 passed, 2 failed, 0 skipped
+        FAIL [   0.050s] ( 296/2003) velnor-workflow primitives::ir::tests::candidate_steps_match_the_policy_consumer_contract
+        FAIL [   0.060s] ( 299/2003) velnor-workflow primitives::ir::tests::collapsed_rust_members_gate_mbx_per_member
+warning: 1698/2003 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

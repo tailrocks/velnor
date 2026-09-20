@@ -484,16 +484,16 @@ mod tests {
             "each lane keeps the MBX setup block"
         );
         assert!(
-            kind.contains("if: ${{ inputs.mbx_enabled }}"),
+            kind.contains("if: ${{ (inputs.mbx_enabled) }}"),
             "mixed members gate MBX on the selected member"
         );
         assert!(
-            kind.contains("if: ${{ inputs.mbx_enabled == false }}"),
+            kind.contains("if: ${{ (inputs.mbx_enabled == false) }}"),
             "mixed members gate the sccache alternative on the selected member"
         );
         assert!(
             kind.contains(
-                "- name: Configure sccache environment\n        if: ${{ inputs.mbx_enabled == false }}"
+                "- name: Configure sccache environment\n        if: ${{ (inputs.mbx_enabled == false) }}"
             ),
             "mixed members gate the sccache environment on the selected member"
         );
@@ -558,8 +558,8 @@ mod tests {
 
         let kind = must_render_kind(&ir);
         assert_eq!(kind.matches("Set up Mr. Boxington").count(), 2);
-        assert!(!kind.contains("if: ${{ inputs.mbx_enabled }}"));
-        assert!(!kind.contains("if: ${{ inputs.mbx_enabled == false }}"));
+        assert!(!kind.contains("if: ${{ (inputs.mbx_enabled) }}"));
+        assert!(!kind.contains("if: ${{ (inputs.mbx_enabled == false) }}"));
         assert!(!kind.contains("Set up sccache"));
     }
 
@@ -579,8 +579,8 @@ mod tests {
                 1,
                 "the all-disabled job configures sccache once"
             );
-            assert!(!kind.contains("if: ${{ inputs.mbx_enabled }}"));
-            assert!(!kind.contains("if: ${{ inputs.mbx_enabled == false }}"));
+            assert!(!kind.contains("if: ${{ (inputs.mbx_enabled) }}"));
+            assert!(!kind.contains("if: ${{ (inputs.mbx_enabled == false) }}"));
             let facts = ir.unit_lane_facts(
                 &ir.units[0],
                 &ir.default_unit_contract(&ir.units[0], true),
@@ -864,7 +864,7 @@ mod tests {
             "both lane jobs render",
         );
         assert!(
-            velnor.contains("      - name: Provision pinned Velnor workflow policy runtime\n        if: ${{ inputs.policy_runtime }}\n"),
+            velnor.contains("      - name: Provision pinned Velnor workflow policy runtime\n        if: ${{ (inputs.policy_runtime) }}\n"),
             "verify-velnor provisions the pinned policy binary behind the input gate: {velnor}"
         );
         assert!(
@@ -1132,13 +1132,13 @@ mod tests {
         let candidate = &hosted[start..end];
         assert!(
             hosted.contains(
-                "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}"
+                "if: ${{ (inputs.candidate_publish) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}"
             ),
             "the prepare step carries the input gate merged with the pull-request same-repo gate: {hosted}"
         );
         assert!(
             hosted.contains(
-                "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate.outcome == 'success') }}"
+                "if: ${{ (inputs.candidate_publish) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate.outcome == 'success') }}"
             ),
             "the publish step additionally gates on the prepare step's skip output: {hosted}"
         );

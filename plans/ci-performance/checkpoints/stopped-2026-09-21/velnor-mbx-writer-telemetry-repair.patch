@@ -1,0 +1,2492 @@
+.../actions/report-velnor-ci-outcomes/action.yml   | 252 +++++++++++++-
+ crates/velnor-workflow/src/lib.rs                  | 189 ++++++++++-
+ crates/velnor-workflow/src/primitives/ir.rs        | 365 ++++++++++++++++-----
+ crates/velnor-workflow/src/s2/mod.rs               | 161 ++++++++-
+ crates/velnor-workflow/src/s2/primitives/ir.rs     | 346 ++++++++++++++-----
+ 5 files changed, 1133 insertions(+), 180 deletions(-)
+
+diff --git a/.github-gen/sources/actions/report-velnor-ci-outcomes/action.yml b/.github-gen/sources/actions/report-velnor-ci-outcomes/action.yml
+index a06abc56..1b49fd83 100644
+--- a/.github-gen/sources/actions/report-velnor-ci-outcomes/action.yml
++++ b/.github-gen/sources/actions/report-velnor-ci-outcomes/action.yml
+@@ -44,6 +44,18 @@ inputs:
+     description: Matched archive key, only when the cache producer explicitly exposes it
+     required: false
+     default: ""
++  cache_pr_export_status:
++    description: Local same-repository PR MBX export result; this does not prove durable cache persistence
++    required: false
++    default: ""
++  cache_pr_export_kib:
++    description: Size of the locally exported same-repository PR MBX object bundle in KiB
++    required: false
++    default: ""
++  cache_pr_save_outcome:
++    description: GitHub cache save step outcome for the same-repository PR MBX writer
++    required: false
++    default: ""
+   cache_docker_seed_primary:
+     required: false
+     default: ""
+@@ -75,6 +87,9 @@ runs:
+         VELNOR_CACHE_MBX_HIT: ${{ inputs.cache_mbx_hit }}
+         VELNOR_CACHE_MBX_PRIMARY: ${{ inputs.cache_mbx_primary }}
+         VELNOR_CACHE_MBX_MATCHED: ${{ inputs.cache_mbx_matched }}
++        VELNOR_CACHE_PR_EXPORT_STATUS: ${{ inputs.cache_pr_export_status }}
++        VELNOR_CACHE_PR_EXPORT_KIB: ${{ inputs.cache_pr_export_kib }}
++        VELNOR_CACHE_PR_SAVE_OUTCOME: ${{ inputs.cache_pr_save_outcome }}
+         VELNOR_CACHE_DOCKER_SEED_PRIMARY: ${{ inputs.cache_docker_seed_primary }}
+         VELNOR_CACHE_DOCKER_SEED_MATCHED: ${{ inputs.cache_docker_seed_matched }}
+       run: |
+@@ -165,6 +180,10 @@ runs:
+         cache_seed_save_ended="$(read_marker CACHE_SEED_SAVE_ENDED)"
+         cache_bundle_save_started="$(read_marker CACHE_BUNDLE_SAVE_STARTED)"
+         cache_bundle_save_ended="$(read_marker CACHE_BUNDLE_SAVE_ENDED)"
++        cache_pr_export_started="$(read_marker CACHE_PR_EXPORT_STARTED)"
++        cache_pr_export_ended="$(read_marker CACHE_PR_EXPORT_ENDED)"
++        cache_pr_save_started="$(read_marker CACHE_PR_SAVE_STARTED)"
++        cache_pr_save_ended="$(read_marker CACHE_PR_SAVE_ENDED)"
+         runner_setup="$(phase_seconds "$job_started" "$runner_setup_end" || true)"
+         selection_transport="$(phase_seconds "$runner_setup_end" "$selection_end" || true)"
+         tool_bootstrap="$(phase_seconds "$selection_end" "$tool_bootstrap_end" || true)"
+@@ -176,6 +195,8 @@ runs:
+         candidate_publication="$(phase_seconds "$candidate_publication_started" "$candidate_publication_ended" || true)"
+         cache_seed_save="$(phase_seconds "$cache_seed_save_started" "$cache_seed_save_ended" || true)"
+         cache_bundle_save="$(phase_seconds "$cache_bundle_save_started" "$cache_bundle_save_ended" || true)"
++        cache_pr_export="$(phase_seconds "$cache_pr_export_started" "$cache_pr_export_ended" || true)"
++        cache_pr_save="$(phase_seconds "$cache_pr_save_started" "$cache_pr_save_ended" || true)"
+         cache_save_incomplete=false
+         for cache_pair in \
+           "$cache_seed_save_started:$cache_seed_save_ended" \
+@@ -185,7 +206,7 @@ runs:
+           if [[ -n "$cache_pair_started" || -n "$cache_pair_ended" ]] \
+             && ! { valid_epoch "$cache_pair_started" && valid_epoch "$cache_pair_ended" \
+               && phase_seconds "$cache_pair_started" "$cache_pair_ended" >/dev/null; }; then
+-            cache_save_incomplete=true
++              cache_save_incomplete=true
+           fi
+         done
+         cache_save_phase_invalid=false
+@@ -281,6 +302,155 @@ runs:
+           cache_seed_save=""
+           cache_bundle_save=""
+         fi
++        cache_pr_export_status="${VELNOR_CACHE_PR_EXPORT_STATUS:-}"
++        cache_pr_export_kib="${VELNOR_CACHE_PR_EXPORT_KIB:-}"
++        cache_pr_save_outcome="${VELNOR_CACHE_PR_SAVE_OUTCOME:-}"
++        cache_pr_export_observation=""
++        cache_pr_save_observation=""
++        cache_pr_durability_observation=""
++        cache_pr_phase_invalid=false
++        cache_pr_markers_present=false
++        cache_pr_save_pair_present=false
++        cache_pr_export_pair_complete=false
++        cache_pr_save_pair_complete=false
++        cache_pr_export_expected=false
++        cache_pr_save_expected=false
++        for cache_pr_marker in \
++          "$cache_pr_export_started" "$cache_pr_export_ended" \
++          "$cache_pr_save_started" "$cache_pr_save_ended"; do
++          if [[ -n "$cache_pr_marker" ]]; then
++            cache_pr_markers_present=true
++          fi
++        done
++        if [[ -n "$cache_pr_export_started" || -n "$cache_pr_export_ended" ]]; then
++          cache_pr_export_expected=true
++        fi
++        if [[ -n "$cache_pr_save_started" || -n "$cache_pr_save_ended" ]]; then
++          cache_pr_save_pair_present=true
++          cache_pr_save_expected=true
++        fi
++        if [[ -n "$cache_pr_export_status" ]]; then
++          case "$cache_pr_export_status" in
++            read_only|unsupported_cache_mode)
++              ;;
++            exported|export_failed|empty_export|missing_store|missing_export_group)
++              cache_pr_export_expected=true
++              ;;
++            *)
++              cache_pr_export_expected=true
++              ;;
++          esac
++        fi
++        if [[ "$cache_pr_export_status" == exported || \
++          ( -n "$cache_pr_save_outcome" && "$cache_pr_save_outcome" != skipped ) ]]; then
++          cache_pr_save_expected=true
++        fi
++        if [[ "$cache_pr_markers_present" == true ]]; then
++          if ! valid_epoch "$checks_ended"; then
++            cache_pr_phase_invalid=true
++          fi
++          if [[ -n "$cache_pr_export_started" || -n "$cache_pr_export_ended" ]]; then
++            if ! { valid_epoch "$cache_pr_export_started" && valid_epoch "$cache_pr_export_ended" \
++              && phase_seconds "$cache_pr_export_started" "$cache_pr_export_ended" >/dev/null; }; then
++              cache_pr_phase_invalid=true
++            else
++              cache_pr_export_pair_complete=true
++            fi
++          fi
++          if [[ -n "$cache_pr_save_started" || -n "$cache_pr_save_ended" ]] \
++            && ! { valid_epoch "$cache_pr_save_started" && valid_epoch "$cache_pr_save_ended" \
++              && phase_seconds "$cache_pr_save_started" "$cache_pr_save_ended" >/dev/null; }; then
++            cache_pr_phase_invalid=true
++          elif [[ -n "$cache_pr_save_started" || -n "$cache_pr_save_ended" ]]; then
++            cache_pr_save_pair_complete=true
++          fi
++          if valid_epoch "$checks_ended" && valid_epoch "$cache_pr_export_started" \
++            && ! phase_before_or_equal "$checks_ended" "$cache_pr_export_started"; then
++            cache_pr_phase_invalid=true
++          fi
++          if valid_epoch "$cache_pr_export_started" && valid_epoch "$cache_pr_export_ended" \
++            && ! phase_before_or_equal "$cache_pr_export_started" "$cache_pr_export_ended"; then
++            cache_pr_phase_invalid=true
++          fi
++          if valid_epoch "$cache_pr_export_ended" && valid_epoch "$cache_pr_save_started" \
++            && ! phase_before_or_equal "$cache_pr_export_ended" "$cache_pr_save_started"; then
++            cache_pr_phase_invalid=true
++          fi
++          if valid_epoch "$cache_pr_save_started" && valid_epoch "$cache_pr_save_ended" \
++            && ! phase_before_or_equal "$cache_pr_save_started" "$cache_pr_save_ended"; then
++            cache_pr_phase_invalid=true
++          fi
++          if [[ "$cache_pr_export_status" == exported ]] \
++            && { [[ "$cache_pr_export_pair_complete" != true ]] \
++              || [[ "$cache_pr_save_pair_complete" != true ]]; }; then
++            cache_pr_phase_invalid=true
++          fi
++          if [[ "$cache_pr_save_pair_present" == true ]] \
++            && [[ "$cache_pr_export_pair_complete" != true ]]; then
++            cache_pr_phase_invalid=true
++          fi
++          if [[ "$cache_pr_export_status" != exported ]] \
++            && [[ "$cache_pr_save_pair_present" == true ]]; then
++            cache_pr_phase_invalid=true
++          fi
++        elif [[ "$cache_pr_export_status" == exported ]]; then
++          # A successful export without marker pairs is an incomplete report,
++          # not evidence that the writer had no cost.
++          cache_pr_phase_invalid=true
++        fi
++        if [[ "$cache_pr_export_expected" == true ]] \
++          && [[ "$cache_pr_export_pair_complete" != true ]]; then
++          cache_pr_phase_invalid=true
++        fi
++        if [[ "$cache_pr_save_outcome" != "" && "$cache_pr_save_outcome" != skipped ]] \
++          && [[ "$cache_pr_save_pair_complete" != true ]]; then
++          cache_pr_phase_invalid=true
++        fi
++        if [[ "$cache_pr_phase_invalid" == true ]]; then
++          cache_save_incomplete=true
++        fi
++        if [[ "$cache_pr_export_status" == exported && "$cache_pr_save_outcome" == skipped ]]; then
++          cache_pr_phase_invalid=true
++          cache_save_incomplete=true
++        fi
++        if [[ "$cache_pr_phase_invalid" == true ]]; then
++          cache_pr_export=""
++          cache_pr_save=""
++          cache_pr_export_pair_complete=false
++          cache_pr_save_pair_complete=false
++          cache_pr_export_observation="export_local_phase_invalid"
++          cache_pr_save_observation="save_step_phase_invalid"
++        elif [[ "$cache_pr_markers_present" == true ]]; then
++          if [[ -n "$cache_pr_export" ]]; then
++            if [[ "$cache_pr_export_status" == exported ]]; then
++              cache_pr_export_observation="export_local"
++            elif [[ -n "$cache_pr_export_status" ]]; then
++              cache_pr_export_observation="export_local_$cache_pr_export_status"
++            else
++              cache_pr_export_observation="export_local_unknown"
++            fi
++          elif [[ "$cache_pr_export_expected" == true ]]; then
++            cache_pr_export_observation="export_local_unobserved"
++          fi
++          if [[ -n "$cache_pr_save" ]]; then
++            cache_pr_save_observation="save_step"
++          elif [[ "$cache_pr_save_expected" == true ]]; then
++            cache_pr_save_observation="save_step_unobserved"
++          fi
++        elif [[ -n "$cache_pr_export_status" || -n "$cache_pr_save_outcome" ]]; then
++          if [[ "$cache_pr_export_expected" == true ]]; then
++            cache_pr_export_observation="export_local_unobserved"
++          fi
++          if [[ "$cache_pr_save_expected" == true ]]; then
++            cache_pr_save_observation="save_step_unobserved"
++          fi
++        fi
++        if [[ "$cache_pr_markers_present" == true || -n "$cache_pr_export_status" || \
++          -n "$cache_pr_save_outcome" ]]; then
++          # A successful actions/cache/save step is only a step outcome. The
++          # cache service's durable receipt is outside this report boundary.
++          cache_pr_durability_observation="durable_unknown"
++        fi
+         cache_save="$(
+           if [[ "$cache_save_incomplete" != true ]]; then
+             phase_total=0
+@@ -291,18 +461,58 @@ runs:
+                 phase_count=$((phase_count + 1))
+               fi
+             done
++            for phase in "$cache_pr_export" "$cache_pr_save"; do
++              if [[ "$phase" =~ ^[0-9]+$ ]]; then
++                phase_total=$((phase_total + 10#$phase))
++                phase_count=$((phase_count + 1))
++              fi
++            done
+             if ((phase_count > 0)); then printf '%s' "$phase_total"; fi
+           fi
+         )"
+         cache_save_observed_json='[]'
+-        if [[ "$cache_seed_save" =~ ^[0-9]+$ && "$cache_bundle_save" =~ ^[0-9]+$ ]]; then
+-          cache_save_observed_json='["docker_seed","unit_bundle"]'
+-        elif [[ "$cache_seed_save" =~ ^[0-9]+$ ]]; then
+-          cache_save_observed_json='["docker_seed"]'
+-        elif [[ "$cache_bundle_save" =~ ^[0-9]+$ ]]; then
+-          cache_save_observed_json='["unit_bundle"]'
+-        fi
+-        cache_save_unobserved_json='["rustup","mold","cargo_bin","mbx_post_job"]'
++        cache_save_observed_items=""
++        cache_save_unobserved_items='"rustup","mold","cargo_bin","mbx_post_job"'
++        append_observed_phase() {
++          local phase="$1"
++          if [[ -n "$cache_save_observed_items" ]]; then
++            cache_save_observed_items="$cache_save_observed_items,$phase"
++          else
++            cache_save_observed_items="$phase"
++          fi
++        }
++        append_unobserved_phase() {
++          local phase="$1"
++          if [[ -n "$cache_save_unobserved_items" ]]; then
++            cache_save_unobserved_items="$cache_save_unobserved_items,$phase"
++          else
++            cache_save_unobserved_items="$phase"
++          fi
++        }
++        if [[ "$cache_seed_save" =~ ^[0-9]+$ ]]; then
++          append_observed_phase '"docker_seed"'
++        elif [[ "$cache_seed_save_started" != "" || "$cache_seed_save_ended" != "" ]]; then
++          append_unobserved_phase '"docker_seed"'
++        fi
++        if [[ "$cache_bundle_save" =~ ^[0-9]+$ ]]; then
++          append_observed_phase '"unit_bundle"'
++        elif [[ "$cache_bundle_save_started" != "" || "$cache_bundle_save_ended" != "" ]]; then
++          append_unobserved_phase '"unit_bundle"'
++        fi
++        if [[ "$cache_pr_export" =~ ^[0-9]+$ ]]; then
++          append_observed_phase '"mbx_pr_export"'
++        elif [[ "$cache_pr_export_expected" == true ]]; then
++          append_unobserved_phase '"mbx_pr_export"'
++        fi
++        if [[ "$cache_pr_save" =~ ^[0-9]+$ ]]; then
++          append_observed_phase '"mbx_pr_save"'
++        elif [[ "$cache_pr_save_expected" == true ]]; then
++          append_unobserved_phase '"mbx_pr_save"'
++        fi
++        if [[ -n "$cache_save_observed_items" ]]; then
++          cache_save_observed_json="[$cache_save_observed_items]"
++        fi
++        cache_save_unobserved_json="[$cache_save_unobserved_items]"
+         cache_save_observation=""
+         if [[ "$cache_save_phase_invalid" == true ]]; then
+           cache_save_observation="explicit_cache_save_phase_invalid"
+@@ -517,10 +727,18 @@ runs:
+           --arg candidate_publication "$candidate_publication" \
+           --arg cache_seed_save "$cache_seed_save" \
+           --arg cache_bundle_save "$cache_bundle_save" \
++          --arg cache_pr_export "$cache_pr_export" \
++          --arg cache_pr_save "$cache_pr_save" \
+           --arg cache_save "$cache_save" \
+           --arg cache_save_observation "$cache_save_observation" \
+           --arg cache_post_job_observation "$cache_post_job_observation" \
+           --arg candidate_observation "$candidate_observation" \
++          --arg cache_pr_export_observation "$cache_pr_export_observation" \
++          --arg cache_pr_save_observation "$cache_pr_save_observation" \
++          --arg cache_pr_durability_observation "$cache_pr_durability_observation" \
++          --arg cache_pr_export_status "$cache_pr_export_status" \
++          --arg cache_pr_export_kib "$cache_pr_export_kib" \
++          --arg cache_pr_save_outcome "$cache_pr_save_outcome" \
+           --argjson cache_save_observed "$cache_save_observed_json" \
+           --argjson cache_save_unobserved "$cache_save_unobserved_json" \
+           --arg total "$total" \
+@@ -553,10 +771,18 @@ runs:
+             candidate_publication_seconds: ($candidate_publication | if test("^[0-9]+$") then tonumber else null end),
+             cache_seed_save_seconds: ($cache_seed_save | if test("^[0-9]+$") then tonumber else null end),
+             cache_bundle_save_seconds: ($cache_bundle_save | if test("^[0-9]+$") then tonumber else null end),
++            cache_pr_export_seconds: ($cache_pr_export | if test("^[0-9]+$") then tonumber else null end),
++            cache_pr_save_seconds: ($cache_pr_save | if test("^[0-9]+$") then tonumber else null end),
+             cache_save_seconds: ($cache_save | if test("^[0-9]+$") then tonumber else null end),
+             cache_save_observation: ($cache_save_observation | if length > 0 then . else null end),
+             cache_post_job_observation: ($cache_post_job_observation | if length > 0 then . else null end),
+             candidate_observation: ($candidate_observation | if length > 0 then . else null end),
++            cache_pr_export_observation: ($cache_pr_export_observation | if length > 0 then . else null end),
++            cache_pr_save_observation: ($cache_pr_save_observation | if length > 0 then . else null end),
++            cache_pr_durability_observation: ($cache_pr_durability_observation | if length > 0 then . else null end),
++            cache_pr_export_status: ($cache_pr_export_status | if length > 0 then . else null end),
++            cache_pr_export_kib: ($cache_pr_export_kib | if test("^[0-9]+$") then tonumber else null end),
++            cache_pr_save_outcome: ($cache_pr_save_outcome | if length > 0 then . else null end),
+             cache_save_observed_phases: $cache_save_observed,
+             cache_save_unobserved_phases: $cache_save_unobserved,
+             cleanup_seconds: null,
+@@ -609,10 +835,18 @@ runs:
+           echo "| candidate_publication_seconds | ${candidate_publication:-unknown} |"
+           echo "| cache_seed_save_seconds | ${cache_seed_save:-unknown} |"
+           echo "| cache_bundle_save_seconds | ${cache_bundle_save:-unknown} |"
++          echo "| cache_pr_export_seconds | ${cache_pr_export:-unknown} |"
++          echo "| cache_pr_save_seconds | ${cache_pr_save:-unknown} |"
+           echo "| cache_save_seconds | ${cache_save:-unknown} |"
+           echo "| cache_save_observation | ${cache_save_observation:-unknown} |"
+           echo "| cache_post_job_observation | ${cache_post_job_observation:-unknown} |"
+           echo "| candidate_observation | ${candidate_observation:-unknown} |"
++          echo "| cache_pr_export_observation | ${cache_pr_export_observation:-unknown} |"
++          echo "| cache_pr_save_observation | ${cache_pr_save_observation:-unknown} |"
++          echo "| cache_pr_durability_observation | ${cache_pr_durability_observation:-unknown} |"
++          echo "| cache_pr_export_status | ${cache_pr_export_status:-unknown} |"
++          echo "| cache_pr_export_kib | ${cache_pr_export_kib:-unknown} |"
++          echo "| cache_pr_save_outcome | ${cache_pr_save_outcome:-unknown} |"
+           echo "| cache_save_observed_phases | ${cache_save_observed_json} |"
+           echo "| cache_save_unobserved_phases | ${cache_save_unobserved_json} |"
+           echo "| cleanup_seconds | unknown |"
+diff --git a/crates/velnor-workflow/src/lib.rs b/crates/velnor-workflow/src/lib.rs
+index 5560fa55..d86cda8f 100644
+--- a/crates/velnor-workflow/src/lib.rs
++++ b/crates/velnor-workflow/src/lib.rs
+@@ -35,7 +35,6 @@ mod runners;
+ pub(crate) mod runtime;
+ pub(crate) mod s2;
+ mod scan;
+-mod step_block;
+ mod template_memory;
+ #[cfg(feature = "tui")]
+ mod tui;
+@@ -137,6 +136,33 @@ pub const VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV: &str = "VELNOR_WORKFLOW_CANDID
+ // the audited tree's pin to descend from it.
+ const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
+ const MR_BOXINGTON_VERSION: &str = "1.12.0";
++
++/// GitHub payload mode shared by setup and the optional PR writer.
++#[allow(dead_code)]
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum MrBoxingtonGithubCacheMode {
++    Objects,
++    Target,
++}
++
++impl MrBoxingtonGithubCacheMode {
++    pub(crate) const fn as_str(self) -> &'static str {
++        match self {
++            Self::Objects => "objects",
++            Self::Target => "target",
++        }
++    }
++
++    pub(crate) const fn object_bundle_dir(self) -> Option<&'static str> {
++        match self {
++            Self::Objects => Some("github-actions-cache-v1"),
++            Self::Target => None,
++        }
++    }
++}
++
++pub(crate) const MR_BOXINGTON_GITHUB_CACHE_MODE: MrBoxingtonGithubCacheMode =
++    MrBoxingtonGithubCacheMode::Objects;
+ /// mbx's action-store budget setting (`gc.max_size`). It is the bound the
+ /// automatic sweep prunes the store to after a build, and the only budget
+ /// that applies on a hosted runner: `gc.max_total_size` is unset there and
+@@ -1750,8 +1776,9 @@ fn static_mr_boxington_step() -> String {
+     let mut step = mr_boxington_store_budget_step();
+     let _ = write!(
+         step,
+-        "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-${{{{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}}}-__VELNOR_SNAPSHOT_STATE__\n          restore-keys: |\n            velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-${{{{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}}}-\n            velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-\n          save-on-workflow-dispatch: true\n",
+-        ActionPin::MrBoxington.reference()
++        "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: {}\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-${{{{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}}}-__VELNOR_SNAPSHOT_STATE__\n          restore-keys: |\n            velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-${{{{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}}}-\n            velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-\n          save-on-workflow-dispatch: true\n",
++        ActionPin::MrBoxington.reference(),
++        crate::MR_BOXINGTON_GITHUB_CACHE_MODE.as_str()
+     );
+     step
+ }
+@@ -12520,10 +12547,15 @@ channel = "stable"
+             "candidate_publication_seconds:",
+             "cache_seed_save_seconds:",
+             "cache_bundle_save_seconds:",
++            "cache_pr_export_seconds:",
++            "cache_pr_save_seconds:",
+             "cache_save_seconds:",
+             "cache_save_observation:",
+             "cache_post_job_observation:",
+             "candidate_observation:",
++            "cache_pr_export_observation:",
++            "cache_pr_save_observation:",
++            "cache_pr_durability_observation:",
+             "candidate_phase_complete",
+             "cache_save_observed_phases:",
+             "cache_save_unobserved_phases:",
+@@ -12880,6 +12912,156 @@ channel = "stable"
+         );
+     }
+ 
++    fn assert_pr_cache_saves(now: u64, job_started: u64, checks_ended: u64) {
++        let valid = run_report_action_case_with_env(
++            "valid-pr-cache-save",
++            &[
++                ("JOB_STARTED", &job_started.to_string()),
++                ("CHECKS_ENDED", &checks_ended.to_string()),
++                ("CACHE_PR_EXPORT_STARTED", &(now - 8).to_string()),
++                ("CACHE_PR_EXPORT_ENDED", &(now - 7).to_string()),
++                ("CACHE_PR_SAVE_STARTED", &(now - 6).to_string()),
++                ("CACHE_PR_SAVE_ENDED", &(now - 5).to_string()),
++            ],
++            None,
++            None,
++            &[
++                ("VELNOR_CACHE_PR_EXPORT_STATUS", "exported"),
++                ("VELNOR_CACHE_PR_SAVE_OUTCOME", "success"),
++            ],
++        );
++        assert_eq!(valid["cache_pr_export_seconds"], serde_json::json!(1));
++        assert_eq!(valid["cache_pr_save_seconds"], serde_json::json!(1));
++        assert_eq!(valid["cache_save_seconds"], serde_json::json!(2));
++        assert_eq!(
++            valid["cache_save_observed_phases"],
++            serde_json::json!(["mbx_pr_export", "mbx_pr_save"])
++        );
++        assert_eq!(
++            valid["cache_save_unobserved_phases"],
++            serde_json::json!(["rustup", "mold", "cargo_bin", "mbx_post_job"])
++        );
++        assert_eq!(
++            valid["cache_pr_export_observation"],
++            serde_json::json!("export_local")
++        );
++        assert_eq!(
++            valid["cache_pr_save_observation"],
++            serde_json::json!("save_step")
++        );
++        assert_eq!(
++            valid["cache_pr_durability_observation"],
++            serde_json::json!("durable_unknown")
++        );
++
++        let missing_checks = run_report_action_case_with_env(
++            "pr-cache-save-missing-checks-end",
++            &[
++                ("JOB_STARTED", &job_started.to_string()),
++                ("CACHE_PR_EXPORT_STARTED", &(now - 8).to_string()),
++                ("CACHE_PR_EXPORT_ENDED", &(now - 7).to_string()),
++                ("CACHE_PR_SAVE_STARTED", &(now - 6).to_string()),
++                ("CACHE_PR_SAVE_ENDED", &(now - 5).to_string()),
++            ],
++            None,
++            None,
++            &[
++                ("VELNOR_CACHE_PR_EXPORT_STATUS", "exported"),
++                ("VELNOR_CACHE_PR_SAVE_OUTCOME", "success"),
++            ],
++        );
++        assert!(missing_checks["cache_pr_export_seconds"].is_null());
++        assert!(missing_checks["cache_pr_save_seconds"].is_null());
++        assert!(missing_checks["cache_save_seconds"].is_null());
++        assert_eq!(
++            missing_checks["cache_pr_export_observation"],
++            serde_json::json!("export_local_phase_invalid")
++        );
++        assert_eq!(
++            missing_checks["cache_save_unobserved_phases"],
++            serde_json::json!([
++                "rustup",
++                "mold",
++                "cargo_bin",
++                "mbx_post_job",
++                "mbx_pr_export",
++                "mbx_pr_save"
++            ])
++        );
++        assert_eq!(
++            missing_checks["cache_pr_durability_observation"],
++            serde_json::json!("durable_unknown")
++        );
++
++        let incomplete = run_report_action_case_with_env(
++            "pr-cache-save-incomplete",
++            &[
++                ("JOB_STARTED", &job_started.to_string()),
++                ("CHECKS_ENDED", &checks_ended.to_string()),
++                ("CACHE_PR_EXPORT_STARTED", &(now - 8).to_string()),
++                ("CACHE_PR_EXPORT_ENDED", &(now - 7).to_string()),
++                ("CACHE_PR_SAVE_STARTED", &(now - 6).to_string()),
++            ],
++            None,
++            None,
++            &[
++                ("VELNOR_CACHE_PR_EXPORT_STATUS", "exported"),
++                ("VELNOR_CACHE_PR_SAVE_OUTCOME", "skipped"),
++            ],
++        );
++        assert!(incomplete["cache_pr_export_seconds"].is_null());
++        assert!(incomplete["cache_pr_save_seconds"].is_null());
++        assert!(incomplete["cache_save_seconds"].is_null());
++        assert_eq!(
++            incomplete["cache_pr_save_observation"],
++            serde_json::json!("save_step_phase_invalid")
++        );
++
++        let future = run_report_action_case_with_env_and_log_at(
++            "pr-cache-save-future-marker",
++            &[
++                ("JOB_STARTED", &job_started.to_string()),
++                ("CHECKS_ENDED", &checks_ended.to_string()),
++                ("CACHE_PR_EXPORT_STARTED", &(now + 1).to_string()),
++                ("CACHE_PR_EXPORT_ENDED", &(now + 2).to_string()),
++                ("CACHE_PR_SAVE_STARTED", &(now + 3).to_string()),
++                ("CACHE_PR_SAVE_ENDED", &(now + 4).to_string()),
++            ],
++            None,
++            None,
++            &[
++                ("VELNOR_CACHE_PR_EXPORT_STATUS", "exported"),
++                ("VELNOR_CACHE_PR_SAVE_OUTCOME", "success"),
++            ],
++            None,
++            Some(now),
++        );
++        assert!(future["cache_pr_export_seconds"].is_null());
++        assert!(future["cache_pr_save_seconds"].is_null());
++        assert!(future["cache_save_seconds"].is_null());
++
++        let reversed = run_report_action_case_with_env(
++            "pr-cache-save-reversed",
++            &[
++                ("JOB_STARTED", &job_started.to_string()),
++                ("CHECKS_ENDED", &checks_ended.to_string()),
++                ("CACHE_PR_EXPORT_STARTED", &(now - 4).to_string()),
++                ("CACHE_PR_EXPORT_ENDED", &(now - 6).to_string()),
++                ("CACHE_PR_SAVE_STARTED", &(now - 5).to_string()),
++                ("CACHE_PR_SAVE_ENDED", &(now - 3).to_string()),
++            ],
++            None,
++            None,
++            &[
++                ("VELNOR_CACHE_PR_EXPORT_STATUS", "exported"),
++                ("VELNOR_CACHE_PR_SAVE_OUTCOME", "success"),
++            ],
++        );
++        assert!(reversed["cache_pr_export_seconds"].is_null());
++        assert!(reversed["cache_pr_save_seconds"].is_null());
++        assert!(reversed["cache_save_seconds"].is_null());
++    }
++
+     fn assert_incomplete_and_skipped(
+         now: u64,
+         job_started: u64,
+@@ -13040,6 +13222,7 @@ channel = "stable"
+         );
+ 
+         assert_combined_cache_saves(now, job_started, checks_started, checks_ended);
++        assert_pr_cache_saves(now, job_started, checks_ended);
+         assert_incomplete_and_skipped(now, job_started, checks_started, checks_ended);
+         assert_candidate_graph_validation(now, job_started, checks_started, checks_ended);
+         assert_malformed_cache_saves(now, job_started);
+diff --git a/crates/velnor-workflow/src/primitives/ir.rs b/crates/velnor-workflow/src/primitives/ir.rs
+index 01eff85f..ebb4bfb0 100644
+--- a/crates/velnor-workflow/src/primitives/ir.rs
++++ b/crates/velnor-workflow/src/primitives/ir.rs
+@@ -18,7 +18,6 @@ use super::{
+     MUTABLE_MOUNT_HOST_DIR,
+ };
+ use crate::reuse::REQUIRED_CHECK;
+-use crate::step_block::prefix_step_block_with_if;
+ use crate::{
+     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
+     hosted_cargo_bin_toolchain_save, hosted_cargo_bin_toolchain_verify, hosted_mold_setup,
+@@ -28,16 +27,11 @@ use crate::{
+     unit_job_id, unit_needs, velnor_runner, velnor_runner_group, velnor_rust_dependency_needs,
+     workflow_runtime_artifact_upload, workflow_runtime_download, workflow_runtime_setup,
+     workflow_selection_file_materialize, yaml_scalar, CachePurpose, CacheSpec, GeneratorError,
+-    ProjectConfig, RunnerMode, RustToolchain, SelectionFieldSources, Unit, UnitKind,
+-    VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
++    MrBoxingtonGithubCacheMode, ProjectConfig, RunnerMode, RustToolchain, SelectionFieldSources,
++    Unit, UnitKind, VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_GITHUB_CACHE_MODE,
++    MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
+ };
+ 
+-fn compose_step_block(block: &str, guard: Option<&str>) -> Result<String, GeneratorError> {
+-    prefix_step_block_with_if(block, guard).map_err(|error| {
+-        GeneratorError::usage(format!("invalid generated workflow step block: {error}"))
+-    })
+-}
+-
+ /// GitHub rejects reusable workflow files above this size.
+ pub(crate) const GITHUB_WORKFLOW_BYTE_LIMIT: usize = 500_000;
+ 
+@@ -81,9 +75,9 @@ mod tests {
+ 
+     use super::{
+         automatic_event_selects_lane, dispatch_choice_selects_lane, dispatch_lane_expression,
+-        lane_input, unit_owns_workflow_crate, AutomaticEvent, CachePurpose, CacheSpec,
+-        DispatchChoice::*, GraphNode, LaneAdmission, Pins, RunnerMode, Unit, UnitKind,
+-        VelnorPullRequest, VelnorRustNeeds, WorkflowIr, WorkflowKind,
++        lane_input, unit_owns_workflow_crate, AutomaticEvent, DispatchChoice::*, GraphNode,
++        LaneAdmission, Pins, RunnerMode, Unit, UnitKind, VelnorPullRequest, VelnorRustNeeds,
++        WorkflowIr, WorkflowKind,
+     };
+     use crate::{
+         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
+@@ -598,6 +592,81 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn same_repository_pr_mbx_writer_is_post_check_and_fail_closed() {
++        let mut ir = owner_test_ir(
++            "example/mbx-pr-writer",
++            vec![rust_unit("rust-mbx", "crates/mbx")],
++        );
++        ir.mr_boxington = true;
++        let rendered = must_render_kind(&ir);
++        let (hosted, velnor) = must_some(
++            rendered.split_once("\n  verify-velnor:\n"),
++            "both lane jobs render",
++        );
++        let start = must_some(
++            hosted.find("      - name: Export PR Mr. Boxington cache"),
++            "same-repository PR export step",
++        );
++        let end = must_some(
++            hosted.find("      - name: Report phase timings"),
++            "phase report step",
++        );
++        let writer = &hosted[start..end];
++        let checks = must_some(hosted.find("      - name: Run unit checks"), "checks step");
++        assert!(checks < start, "writer follows checks: {hosted}");
++        assert!(writer.contains("github.event_name == 'pull_request'"));
++        assert!(
++            writer.contains("github.event.pull_request.head.repo.full_name == github.repository")
++        );
++        assert!(writer.contains("github.event.pull_request.head.sha != ''"));
++        assert!(!writer.contains("pull_request_target"));
++        assert!(!writer.contains("workflow_dispatch"));
++        assert!(!writer.contains("github.event_name == 'push'"));
++        assert!(!writer.contains("github.ref == 'refs/heads/main'"));
++        assert!(writer.contains("steps.mbx-cache.outputs.cache-hit == 'false'"));
++        assert!(!writer.contains("steps.mbx-cache.outputs.cache-hit == 'true'"));
++        assert!(writer.contains("steps.mbx-cache.outputs.cache-primary-key != ''"));
++        assert!(writer.contains("success()"));
++        assert!(writer.contains(&format!(
++            "MBX_PR_CACHE_MODE: {}",
++            crate::MR_BOXINGTON_GITHUB_CACHE_MODE.as_str()
++        )));
++        assert!(hosted.contains("CACHE_PR_EXPORT_STARTED"));
++        assert!(hosted.contains("CACHE_PR_EXPORT_ENDED"));
++        assert!(hosted.contains("CACHE_PR_SAVE_STARTED"));
++        assert!(hosted.contains("CACHE_PR_SAVE_ENDED"));
++        assert!(writer.contains("MBX_REMOTE_MODE:-"));
++        assert!(hosted.contains("cache_pr_export_status:"));
++        let mut unsupported = String::new();
++        super::render_mbx_pr_cache_writer(
++            &mut unsupported,
++            "actions/cache/save@sha",
++            crate::MrBoxingtonGithubCacheMode::Target,
++        );
++        assert!(unsupported.is_empty());
++        assert!(writer.contains("mbx cache export --group"));
++        assert!(writer.contains("github-actions-cache-v1"));
++        assert!(writer.contains("steps.mbx_pr_export.outputs.status == 'exported'"));
++        assert!(writer.contains("continue-on-error: true"));
++        assert!(writer.contains("immutable-key conflict"));
++        assert!(writer.contains("if: always()"));
++        assert!(writer.contains("archive_kib"));
++        assert_eq!(
++            hosted.matches("Export PR Mr. Boxington cache").count(),
++            1,
++            "mixed MBX rendering must emit one PR export block"
++        );
++        assert_eq!(
++            hosted.matches("Save PR Mr. Boxington cache").count(),
++            1,
++            "mixed MBX rendering must emit one PR save block"
++        );
++        assert!(velnor.contains("Set up Mr. Boxington"));
++        assert!(!velnor.contains("Export PR Mr. Boxington cache"));
++        assert!(!velnor.contains("Save PR Mr. Boxington cache"));
++    }
++
+     fn candidate_flagged_callers(ir: &WorkflowIr) -> Vec<String> {
+         let mut flagged = Vec::new();
+         for unit in &ir.units {
+@@ -683,48 +752,6 @@ mod tests {
+         );
+     }
+ 
+-    #[test]
+-    fn collapsed_swift_partial_cache_composes_one_save_condition() {
+-        let mut cached = rust_unit("swift-cached", "native/cached");
+-        cached.kind = UnitKind::Swift;
+-        cached.label = "Swift package (cached)".to_owned();
+-        cached.platform = crate::platform::PlatformRequirement::apple_xcode();
+-        cached.cache = Some(CacheSpec {
+-            key_files: vec!["native/cached/Package.swift".to_owned()],
+-            paths: vec!["~/.swiftpm".to_owned()],
+-            purpose: CachePurpose::Generic,
+-            mbx_output_cache_justification: None,
+-            mutable_mount_seed: false,
+-        });
+-        let mut uncached = rust_unit("swift-uncached", "native/uncached");
+-        uncached.kind = UnitKind::Swift;
+-        uncached.label = "Swift package (uncached)".to_owned();
+-        uncached.platform = crate::platform::PlatformRequirement::apple_xcode();
+-        let ir = owner_test_ir("example/fixture", vec![cached, uncached]);
+-        let workflow = must_some(
+-            must_ok(
+-                ir.render_kind_unit_workflow(UnitKind::Swift, None),
+-                "swift partial-cache reusable renders",
+-            ),
+-            "swift partial-cache reusable exists",
+-        )
+-        .1;
+-        let save = must_some(
+-            workflow.find("      - name: Save unit cache"),
+-            "swift save step renders",
+-        );
+-        let save = &workflow[save..];
+-        let end = save[1..]
+-            .find("      - name: ")
+-            .map_or(save.len(), |offset| offset + 1);
+-        let save = &save[..end];
+-        assert_eq!(save.matches("        if:").count(), 1, "{save}");
+-        assert!(
+-            save.contains("(inputs.cache_key_files != '') && (always() &&"),
+-            "{save}"
+-        );
+-    }
+-
+     #[test]
+     fn candidate_publish_flags_only_the_hosted_owner_of_the_generator_crate() {
+         let owner = workflow_setup_action_repository().to_owned();
+@@ -1719,6 +1746,86 @@ fn render_cache_save_end_marker(
+     );
+ }
+ 
++/// The only untrusted event allowed to write the Mr. Boxington GitHub cache.
++///
++/// A normal `pull_request` run gets a merge-ref cache namespace. A fork run
++/// still gets restore access, but its head repository must not write into the
++/// base repository's cache namespace. `pull_request_target` is deliberately
++/// absent: it runs privileged workflow code from the base tree and is never a
++/// writer transport for PR code.
++fn same_repository_pull_request_gate() -> &'static str {
++    "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.sha != ''"
++}
++
++/// Export and save the current Mr. Boxington object closure for a successful
++/// same-repository PR.
++///
++/// The action's post step intentionally remains restore-only for PR events.
++/// This explicit writer runs after checks, so the ordinary PR cache remains
++/// merge-ref scoped while a later run can restore the exact source snapshot.
++/// The action/cache key is immutable: an exact hit skips the writer and a
++/// concurrent save failure is reported without turning a cache optimization
++/// into a required-check failure.
++fn render_mbx_pr_cache_writer(
++    output: &mut String,
++    cache_save_pin: &str,
++    mode: MrBoxingtonGithubCacheMode,
++) {
++    let Some(archive_dir) = mode.object_bundle_dir() else {
++        return;
++    };
++    let gate = format!(
++        "success() && ({}) && steps.mbx-cache.outputs.cache-hit == 'false' && steps.mbx-cache.outputs.cache-primary-key != ''",
++        same_repository_pull_request_gate()
++    );
++    render_phase_epoch_marker_if(
++        output,
++        "CACHE_PR_EXPORT_STARTED",
++        "Mark PR Mr. Boxington export start",
++        &format!("always() && ({gate})"),
++    );
++    let _ = writeln!(
++        output,
++        "      - name: Export PR Mr. Boxington cache\n        id: mbx_pr_export\n        if: {gate}\n        continue-on-error: true\n        shell: bash\n        env:\n          MBX_PR_CACHE_MODE: {mode}\n        run: |\n          set -u -o pipefail\n          status=missing_export_group\n          archive=\n          archive_kib=0\n          if [[ \"$MBX_PR_CACHE_MODE\" != objects ]]; then\n            status=unsupported_cache_mode\n          elif [[ \"${{MBX_REMOTE_MODE:-}}\" == read-only ]]; then\n            status=read_only\n          elif [[ -z \"${{MBX_CACHE_EXPORT_GROUP:-}}\" ]]; then\n            status=missing_export_group\n          elif ! store_dir=\"$(mbx cache dir)\"; then\n            status=missing_store\n          else\n            archive=\"$store_dir/{archive_dir}\"\n            if mbx cache export --group \"$MBX_CACHE_EXPORT_GROUP\" --format directory \"$archive\"; then\n              if [[ -d \"$archive\" ]]; then\n                status=exported\n                archive_kib=\"$(du -sk \"$archive\" 2>/dev/null | awk '{{print $1}}' || echo 0)\"\n              else\n                status=empty_export\n              fi\n            else\n              status=export_failed\n            fi\n          fi\n          {{\n            echo \"status=$status\"\n            echo \"cache_path=$archive\"\n            echo \"archive_kib=$archive_kib\"\n          }} >> \"$GITHUB_OUTPUT\"\n          echo \"PR Mr. Boxington export: status=$status archive_kib=$archive_kib\"",
++        mode = mode.as_str(),
++        archive_dir = archive_dir,
++    );
++    let export_end_gate =
++        format!("always() && ({gate}) && steps.mbx_pr_export.outcome != 'skipped'");
++    render_phase_epoch_marker_if(
++        output,
++        "CACHE_PR_EXPORT_ENDED",
++        "Mark PR Mr. Boxington export end",
++        &export_end_gate,
++    );
++    let save_gate = format!(
++        "success() && ({}) && steps.mbx-cache.outputs.cache-hit == 'false' && steps.mbx-cache.outputs.cache-primary-key != '' && steps.mbx_pr_export.outputs.status == 'exported'",
++        same_repository_pull_request_gate()
++    );
++    let save_start_gate = format!("always() && ({save_gate})");
++    render_phase_epoch_marker_if(
++        output,
++        "CACHE_PR_SAVE_STARTED",
++        "Mark PR Mr. Boxington save start",
++        &save_start_gate,
++    );
++    let _ = writeln!(
++        output,
++        "      - name: Save PR Mr. Boxington cache\n        id: mbx_pr_save\n        if: {save_gate}\n        continue-on-error: true\n        uses: {cache_save_pin}\n        with:\n          path: ${{{{ steps.mbx_pr_export.outputs.cache_path }}}}\n          key: ${{{{ steps.mbx-cache.outputs.cache-primary-key }}}}"
++    );
++    let save_end_gate =
++        format!("always() && ({save_gate}) && steps.mbx_pr_save.outcome != 'skipped'");
++    render_phase_epoch_marker_if(
++        output,
++        "CACHE_PR_SAVE_ENDED",
++        "Mark PR Mr. Boxington save end",
++        &save_end_gate,
++    );
++    output.push_str(
++        "      - name: Report PR Mr. Boxington cache outcome\n        if: always()\n        shell: bash\n        env:\n          MBX_PR_CACHE_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}\n          MBX_PR_EXPORT_STATUS: ${{ steps.mbx_pr_export.outputs.status }}\n          MBX_PR_EXPORT_KIB: ${{ steps.mbx_pr_export.outputs.archive_kib }}\n          MBX_PR_SAVE_OUTCOME: ${{ steps.mbx_pr_save.outcome }}\n        run: |\n          export_status=\"${MBX_PR_EXPORT_STATUS:-skipped}\"\n          save_outcome=\"${MBX_PR_SAVE_OUTCOME:-skipped}\"\n          printf 'PR Mr. Boxington cache: event=%s mode=objects hit=%s export=%s save=%s archive_kib=%s\\n' \\\n            \"${GITHUB_EVENT_NAME:-unknown}\" \"${MBX_PR_CACHE_HIT:-unknown}\" \"$export_status\" \"$save_outcome\" \"${MBX_PR_EXPORT_KIB:-unknown}\" \\\n            >> \"$GITHUB_STEP_SUMMARY\"\n          if [[ \"$save_outcome\" == failure ]]; then\n            echo '::warning::PR Mr. Boxington cache save did not complete (permission or immutable-key conflict); checks remain authoritative'\n          fi\n",
++    );
++}
++
+ /// Mark the start of a unit job before checkout.
+ pub(crate) fn render_ci_job_started_marker(output: &mut String) {
+     render_phase_epoch_marker(output, "JOB_STARTED", "Mark CI job start");
+@@ -1931,6 +2038,21 @@ fn render_cache_outcome_report_inputs(
+                 "          cache_mbx_primary: {}",
+                 step_output_expr(step_id, "cache-primary-key")
+             );
++            let _ = writeln!(
++                output,
++                "          cache_pr_export_status: {}",
++                step_output_expr("mbx_pr_export", "status")
++            );
++            let _ = writeln!(
++                output,
++                "          cache_pr_export_kib: {}",
++                step_output_expr("mbx_pr_export", "archive_kib")
++            );
++            let _ = writeln!(
++                output,
++                "          cache_pr_save_outcome: {}",
++                step_output_expr("mbx_pr_save", "outcome")
++            );
+             continue;
+         }
+         let _ = writeln!(
+@@ -2075,16 +2197,15 @@ fn render_collapsed_sccache_env_step(
+     output: &mut String,
+     sccache: FeatureCoverage,
+     mbx_input: &str,
+-) -> Result<(), GeneratorError> {
++) {
+     if !sccache.any {
+-        return Ok(());
++        return;
+     }
+     let block = "      - name: Configure sccache environment\n        run: |\n          {\n            echo 'CARGO_INCREMENTAL=0'\n            echo 'RUSTC_WRAPPER=sccache'\n            echo 'SCCACHE_GHA_ENABLED=true'\n          } >> \"$GITHUB_ENV\"\n";
+-    output.push_str(&compose_step_block(
++    output.push_str(&prefix_step_block_with_if(
+         block,
+         sccache.absent_gate(mbx_input).as_deref(),
+-    )?);
+-    Ok(())
++    ));
+ }
+ 
+ fn cargo_offline_run_prelude(members: &[&Unit]) -> String {
+@@ -2675,6 +2796,55 @@ fn append_unique_needs(needs: &mut Vec<String>, additional: impl IntoIterator<It
+     }
+ }
+ 
++fn prefix_step_block_with_if(block: &str, guard: Option<&str>) -> String {
++    let Some(guard) = guard else {
++        return block.to_owned();
++    };
++    let mut out = String::new();
++    let mut pending_name: Option<String> = None;
++    let mut pending_if: Option<String> = None;
++
++    let flush_step = |out: &mut String, name: &str, if_expr: Option<&str>| {
++        out.push_str(name);
++        out.push('\n');
++        let combined = if let Some(existing) = if_expr {
++            format!("        if: ${{{{ {guard} && ({existing}) }}}}\n")
++        } else {
++            format!("        if: ${{{{ {guard} }}}}\n")
++        };
++        out.push_str(&combined);
++    };
++
++    for line in block.lines() {
++        if line.starts_with("      - name:") {
++            if let Some(name) = pending_name.take() {
++                flush_step(&mut out, &name, pending_if.as_deref());
++                pending_if = None;
++            }
++            pending_name = Some(line.to_owned());
++        } else if pending_name.is_some() && line.trim().starts_with("if:") {
++            let expr = line.trim().strip_prefix("if:").unwrap_or("").trim();
++            pending_if = Some(
++                expr.strip_prefix("${{ ")
++                    .and_then(|value| value.strip_suffix(" }}"))
++                    .unwrap_or(expr)
++                    .to_owned(),
++            );
++        } else {
++            if let Some(name) = pending_name.take() {
++                flush_step(&mut out, &name, pending_if.as_deref());
++                pending_if = None;
++            }
++            out.push_str(line);
++            out.push('\n');
++        }
++    }
++    if let Some(name) = pending_name.take() {
++        flush_step(&mut out, &name, pending_if.as_deref());
++    }
++    out
++}
++
+ fn cargo_fetch_roots(members: &[&Unit]) -> Vec<String> {
+     let mut roots = BTreeSet::new();
+     for member in members {
+@@ -5010,13 +5180,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+         output: &mut String,
+         members: &[&Unit],
+         facts: &[LaneStepFacts],
+-    ) -> Result<(), GeneratorError> {
++    ) {
+         let member_records: Vec<BTreeSet<String>> = facts
+             .iter()
+             .map(|facts| facts.prepared_tools.iter().cloned().collect())
+             .collect();
+         if member_records.iter().all(BTreeSet::is_empty) {
+-            return Ok(());
++            return;
+         }
+         let mut union: BTreeMap<String, &Unit> = BTreeMap::new();
+         for (unit, records) in members.iter().zip(&member_records) {
+@@ -5043,9 +5213,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 self.pins.cache_restore,
+                 std::slice::from_ref(need),
+             );
+-            output.push_str(&compose_step_block(&block, gate.as_deref())?);
++            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+         }
+-        Ok(())
+     }
+ 
+     /// The single step block of a collapsed lane job. Every unit-specific
+@@ -5136,8 +5305,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+             }
+             per_member.into_iter().next().unwrap_or_default()
+         };
+-        let gated = |block: String, coverage: FeatureCoverage, input: &str| {
+-            compose_step_block(&block, coverage.gate(input).as_deref())
++        let gated = |block: String, coverage: FeatureCoverage, input: &str| -> String {
++            prefix_step_block_with_if(&block, coverage.gate(input).as_deref())
+         };
+ 
+         // The pinned policy runtime for units that run the generator's own
+@@ -5149,7 +5318,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 crate::workflow_pinned_policy_runtime_velnor("${{ github.workspace }}"),
+                 policy_runtime,
+                 lane_input::POLICY_RUNTIME,
+-            )?);
++            ));
+         }
+ 
+         // Tool provisioning, in the literal lane job's order.
+@@ -5157,7 +5326,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+         if !github_lane && mise_tools.any {
+             let mut block = String::new();
+             render_velnor_mise_install_from_input(&mut block);
+-            output.push_str(&gated(block, mise_tools, lane_input::MISE_TOOLS)?);
++            output.push_str(&gated(block, mise_tools, lane_input::MISE_TOOLS));
+         }
+         if !velnor_skips_pinned_rust_toolchain(lane)
+             && let Some(toolchain) = &toolchain
+@@ -5173,7 +5342,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 self.pins.mise,
+                 lane_input::expression(lane_input::MISE_TOOLS)
+             );
+-            output.push_str(&gated(block, mise_tools, lane_input::MISE_TOOLS)?);
++            output.push_str(&gated(block, mise_tools, lane_input::MISE_TOOLS));
+         }
+         let mise_runner = FeatureCoverage::over(&facts, |facts| facts.mise_runner);
+         if github_lane && mise_runner.any {
+@@ -5183,7 +5352,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 "      - name: Set up Mise\n        uses: {}\n        with:\n          install: false",
+                 self.pins.mise
+             );
+-            output.push_str(&gated(block, mise_runner, lane_input::MISE_RUNNER)?);
++            output.push_str(&gated(block, mise_runner, lane_input::MISE_RUNNER));
+         }
+         let mbx = FeatureCoverage::over(&facts, |facts| facts.mbx_enabled);
+         if mbx.any {
+@@ -5199,7 +5368,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+             } else {
+                 self.render_mbx_local_step(&mut block);
+             }
+-            output.push_str(&gated(block, mbx, lane_input::MBX_ENABLED)?);
++            output.push_str(&gated(block, mbx, lane_input::MBX_ENABLED));
+         }
+         let sccache =
+             FeatureCoverage::over(&facts, |facts| kind == UnitKind::Rust && !facts.mbx_enabled);
+@@ -5207,11 +5376,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+             let mut block = String::new();
+             let sccache_tools = BTreeSet::from([ToolRequirement::Sccache]);
+             self.render_kind_level_tool_steps(&mut block, lane, &sccache_tools, cache_save);
+-            output.push_str(&compose_step_block(
++            output.push_str(&prefix_step_block_with_if(
+                 &block,
+                 sccache.absent_gate(lane_input::MBX_ENABLED).as_deref(),
+-            )?);
+-            render_collapsed_sccache_env_step(output, sccache, lane_input::MBX_ENABLED)?;
++            ));
++            render_collapsed_sccache_env_step(output, sccache, lane_input::MBX_ENABLED);
+         }
+         if github_lane && kind_tools.contains(&ToolRequirement::Bun) {
+             let versioned = FeatureCoverage::over(&facts, |facts| facts.tool_version.is_some());
+@@ -5223,7 +5392,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                     self.pins.bun,
+                     lane_input::expression(lane_input::TOOL_VERSION)
+                 );
+-                output.push_str(&gated(block, versioned, lane_input::TOOL_VERSION)?);
++                output.push_str(&gated(block, versioned, lane_input::TOOL_VERSION));
+             }
+             if !versioned.all {
+                 let gate = versioned
+@@ -5233,7 +5402,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                     "      - name: Set up Bun\n        uses: {}\n",
+                     self.pins.bun
+                 );
+-                output.push_str(&compose_step_block(&block, gate.as_deref())?);
++                output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+             }
+         }
+         if github_lane && kind_tools.contains(&ToolRequirement::Node) {
+@@ -5251,7 +5420,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                     block,
+                     cached,
+                     lane_input::NODE_CACHE_DEPENDENCY_PATH,
+-                )?);
++                ));
+             }
+             if !cached.all {
+                 let gate = cached
+@@ -5259,7 +5428,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                     .then(|| format!("inputs.{} == ''", lane_input::NODE_CACHE_DEPENDENCY_PATH));
+                 let mut block = String::new();
+                 self.render_node_step(&mut block, None);
+-                output.push_str(&compose_step_block(&block, gate.as_deref())?);
++                output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+             }
+         }
+         let cargo_bin = FeatureCoverage::over(&facts, |facts| !facts.cargo_bin_tools.is_empty());
+@@ -5270,9 +5439,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 &lane_input::expression(lane_input::CARGO_BIN_TOOLS),
+                 cache_save,
+             );
+-            output.push_str(&gated(block, cargo_bin, lane_input::CARGO_BIN_TOOLS)?);
++            output.push_str(&gated(block, cargo_bin, lane_input::CARGO_BIN_TOOLS));
+         }
+-        self.render_collapsed_prepared_tool_steps(output, members, &facts)?;
++        self.render_collapsed_prepared_tool_steps(output, members, &facts);
+         self.render_kind_level_tool_steps(output, lane, &kind_tools, cache_save);
+         render_ci_tool_bootstrap_end_marker(output);
+ 
+@@ -5284,7 +5453,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+         if seed.any {
+             let mut block = String::new();
+             render_mutable_mount_seed_restore_from_input(&mut block, self, &checks_env);
+-            output.push_str(&gated(block, seed, lane_input::SEED_COMPAT)?);
++            output.push_str(&gated(block, seed, lane_input::SEED_COMPAT));
+         }
+         if bundle.any {
+             for unit in members {
+@@ -5303,7 +5472,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 self.pins.cache_restore,
+                 lane_input::expression(lane_input::CACHE_PATHS),
+             );
+-            output.push_str(&gated(block, bundle, lane_input::CACHE_KEY_FILES)?);
++            output.push_str(&gated(block, bundle, lane_input::CACHE_KEY_FILES));
+         }
+         render_ci_cache_prep_end_marker(output);
+ 
+@@ -5373,7 +5542,21 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 "Mark candidate phase end",
+                 candidate_event_complete_gate,
+             );
+-            output.push_str(&gated(block, candidate, lane_input::CANDIDATE_PUBLISH)?);
++            output.push_str(&gated(block, candidate, lane_input::CANDIDATE_PUBLISH));
++        }
++
++        // GitHub-hosted MBX members may publish a merge-ref-scoped PR cache
++        // after all checks pass. The block itself gates on the selected
++        // member, so mixed collapsed jobs never export a non-MBX member's
++        // store.
++        if github_lane && mbx.any {
++            let mut block = String::new();
++            render_mbx_pr_cache_writer(
++                &mut block,
++                self.pins.cache_save,
++                MR_BOXINGTON_GITHUB_CACHE_MODE,
++            );
++            output.push_str(&gated(block, mbx, lane_input::MBX_ENABLED));
+         }
+ 
+         // Cache collection.
+@@ -5386,7 +5569,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 &checks_env,
+                 cache_save,
+             );
+-            output.push_str(&gated(block, seed, lane_input::SEED_COMPAT)?);
++            output.push_str(&gated(block, seed, lane_input::SEED_COMPAT));
+         }
+         if cache_save_bundle {
+             let (cache_key, _) = format_cargo_bundle_cache_key(
+@@ -5403,7 +5586,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 lane_input::expression(lane_input::CACHE_PATHS),
+             );
+             render_cache_save_end_marker(&mut block, "BUNDLE", &save_gate, "unit_cache_save");
+-            output.push_str(&gated(block, bundle, lane_input::CACHE_KEY_FILES)?);
++            output.push_str(&gated(block, bundle, lane_input::CACHE_KEY_FILES));
+         }
+         let report = members
+             .iter()
+@@ -5743,6 +5926,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+             yaml_scalar(&unit.label),
+             checks_env,
+         );
++        if lane == RunnerMode::Github && self.uses_mr_boxington(unit) {
++            render_mbx_pr_cache_writer(
++                output,
++                self.pins.cache_save,
++                MR_BOXINGTON_GITHUB_CACHE_MODE,
++            );
++        }
+         if seed && lane == RunnerMode::Github {
+             render_mutable_mount_seed_collection(output, self, unit, cache_save);
+         } else if cache_save
+@@ -6344,6 +6534,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 checks_env(unit),
+                 yaml_scalar(&unit.id),
+             );
++            if lane == RunnerMode::Github && self.uses_mr_boxington(unit) {
++                render_mbx_pr_cache_writer(
++                    output,
++                    self.pins.cache_save,
++                    MR_BOXINGTON_GITHUB_CACHE_MODE,
++                );
++            }
+             if cache_save
+                 && lane == RunnerMode::Github
+                 && CacheBackend::Detected.lane_enables_actions_cache(lane, self, unit)
+diff --git a/crates/velnor-workflow/src/s2/mod.rs b/crates/velnor-workflow/src/s2/mod.rs
+index 2872e7f1..c10ea052 100644
+--- a/crates/velnor-workflow/src/s2/mod.rs
++++ b/crates/velnor-workflow/src/s2/mod.rs
+@@ -1694,8 +1694,9 @@ fn static_mr_boxington_step() -> String {
+     let mut step = mr_boxington_store_budget_step();
+     let _ = write!(
+         step,
+-        "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-${{{{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}}}-__VELNOR_SNAPSHOT_STATE__\n          restore-keys: |\n            velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-${{{{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}}}-\n            velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-\n          save-on-workflow-dispatch: true\n",
+-        ActionPin::MrBoxington.reference()
++        "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: {}\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-${{{{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}}}-__VELNOR_SNAPSHOT_STATE__\n          restore-keys: |\n            velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-${{{{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}}}-\n            velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-\n          save-on-workflow-dispatch: true\n",
++        ActionPin::MrBoxington.reference(),
++        crate::MR_BOXINGTON_GITHUB_CACHE_MODE.as_str()
+     );
+     step
+ }
+@@ -12333,10 +12334,15 @@ lockfile = true
+             "candidate_seconds:",
+             "cache_seed_save_seconds:",
+             "cache_bundle_save_seconds:",
++            "cache_pr_export_seconds:",
++            "cache_pr_save_seconds:",
+             "cache_save_seconds:",
+             "cache_save_observation:",
+             "cache_post_job_observation:",
+             "candidate_observation:",
++            "cache_pr_export_observation:",
++            "cache_pr_save_observation:",
++            "cache_pr_durability_observation:",
+             "candidate_phase_complete",
+             "cache_save_observed_phases:",
+             "cache_save_unobserved_phases:",
+@@ -12710,6 +12716,156 @@ lockfile = true
+         );
+     }
+ 
++    fn assert_pr_cache_saves(now: u64, job_started: u64, checks_ended: u64) {
++        let valid = run_report_action_case_with_env(
++            "valid-pr-cache-save",
++            &[
++                ("JOB_STARTED", &job_started.to_string()),
++                ("CHECKS_ENDED", &checks_ended.to_string()),
++                ("CACHE_PR_EXPORT_STARTED", &(now - 8).to_string()),
++                ("CACHE_PR_EXPORT_ENDED", &(now - 7).to_string()),
++                ("CACHE_PR_SAVE_STARTED", &(now - 6).to_string()),
++                ("CACHE_PR_SAVE_ENDED", &(now - 5).to_string()),
++            ],
++            None,
++            None,
++            &[
++                ("VELNOR_CACHE_PR_EXPORT_STATUS", "exported"),
++                ("VELNOR_CACHE_PR_SAVE_OUTCOME", "success"),
++            ],
++        );
++        assert_eq!(valid["cache_pr_export_seconds"], serde_json::json!(1));
++        assert_eq!(valid["cache_pr_save_seconds"], serde_json::json!(1));
++        assert_eq!(valid["cache_save_seconds"], serde_json::json!(2));
++        assert_eq!(
++            valid["cache_save_observed_phases"],
++            serde_json::json!(["mbx_pr_export", "mbx_pr_save"])
++        );
++        assert_eq!(
++            valid["cache_save_unobserved_phases"],
++            serde_json::json!(["rustup", "mold", "cargo_bin", "mbx_post_job"])
++        );
++        assert_eq!(
++            valid["cache_pr_export_observation"],
++            serde_json::json!("export_local")
++        );
++        assert_eq!(
++            valid["cache_pr_save_observation"],
++            serde_json::json!("save_step")
++        );
++        assert_eq!(
++            valid["cache_pr_durability_observation"],
++            serde_json::json!("durable_unknown")
++        );
++
++        let missing_checks = run_report_action_case_with_env(
++            "pr-cache-save-missing-checks-end",
++            &[
++                ("JOB_STARTED", &job_started.to_string()),
++                ("CACHE_PR_EXPORT_STARTED", &(now - 8).to_string()),
++                ("CACHE_PR_EXPORT_ENDED", &(now - 7).to_string()),
++                ("CACHE_PR_SAVE_STARTED", &(now - 6).to_string()),
++                ("CACHE_PR_SAVE_ENDED", &(now - 5).to_string()),
++            ],
++            None,
++            None,
++            &[
++                ("VELNOR_CACHE_PR_EXPORT_STATUS", "exported"),
++                ("VELNOR_CACHE_PR_SAVE_OUTCOME", "success"),
++            ],
++        );
++        assert!(missing_checks["cache_pr_export_seconds"].is_null());
++        assert!(missing_checks["cache_pr_save_seconds"].is_null());
++        assert!(missing_checks["cache_save_seconds"].is_null());
++        assert_eq!(
++            missing_checks["cache_pr_export_observation"],
++            serde_json::json!("export_local_phase_invalid")
++        );
++        assert_eq!(
++            missing_checks["cache_save_unobserved_phases"],
++            serde_json::json!([
++                "rustup",
++                "mold",
++                "cargo_bin",
++                "mbx_post_job",
++                "mbx_pr_export",
++                "mbx_pr_save"
++            ])
++        );
++        assert_eq!(
++            missing_checks["cache_pr_durability_observation"],
++            serde_json::json!("durable_unknown")
++        );
++
++        let incomplete = run_report_action_case_with_env(
++            "pr-cache-save-incomplete",
++            &[
++                ("JOB_STARTED", &job_started.to_string()),
++                ("CHECKS_ENDED", &checks_ended.to_string()),
++                ("CACHE_PR_EXPORT_STARTED", &(now - 8).to_string()),
++                ("CACHE_PR_EXPORT_ENDED", &(now - 7).to_string()),
++                ("CACHE_PR_SAVE_STARTED", &(now - 6).to_string()),
++            ],
++            None,
++            None,
++            &[
++                ("VELNOR_CACHE_PR_EXPORT_STATUS", "exported"),
++                ("VELNOR_CACHE_PR_SAVE_OUTCOME", "skipped"),
++            ],
++        );
++        assert!(incomplete["cache_pr_export_seconds"].is_null());
++        assert!(incomplete["cache_pr_save_seconds"].is_null());
++        assert!(incomplete["cache_save_seconds"].is_null());
++        assert_eq!(
++            incomplete["cache_pr_save_observation"],
++            serde_json::json!("save_step_phase_invalid")
++        );
++
++        let future = run_report_action_case_with_env_and_log_at(
++            "pr-cache-save-future-marker",
++            &[
++                ("JOB_STARTED", &job_started.to_string()),
++                ("CHECKS_ENDED", &checks_ended.to_string()),
++                ("CACHE_PR_EXPORT_STARTED", &(now + 1).to_string()),
++                ("CACHE_PR_EXPORT_ENDED", &(now + 2).to_string()),
++                ("CACHE_PR_SAVE_STARTED", &(now + 3).to_string()),
++                ("CACHE_PR_SAVE_ENDED", &(now + 4).to_string()),
++            ],
++            None,
++            None,
++            &[
++                ("VELNOR_CACHE_PR_EXPORT_STATUS", "exported"),
++                ("VELNOR_CACHE_PR_SAVE_OUTCOME", "success"),
++            ],
++            None,
++            Some(now),
++        );
++        assert!(future["cache_pr_export_seconds"].is_null());
++        assert!(future["cache_pr_save_seconds"].is_null());
++        assert!(future["cache_save_seconds"].is_null());
++
++        let reversed = run_report_action_case_with_env(
++            "pr-cache-save-reversed",
++            &[
++                ("JOB_STARTED", &job_started.to_string()),
++                ("CHECKS_ENDED", &checks_ended.to_string()),
++                ("CACHE_PR_EXPORT_STARTED", &(now - 4).to_string()),
++                ("CACHE_PR_EXPORT_ENDED", &(now - 6).to_string()),
++                ("CACHE_PR_SAVE_STARTED", &(now - 5).to_string()),
++                ("CACHE_PR_SAVE_ENDED", &(now - 3).to_string()),
++            ],
++            None,
++            None,
++            &[
++                ("VELNOR_CACHE_PR_EXPORT_STATUS", "exported"),
++                ("VELNOR_CACHE_PR_SAVE_OUTCOME", "success"),
++            ],
++        );
++        assert!(reversed["cache_pr_export_seconds"].is_null());
++        assert!(reversed["cache_pr_save_seconds"].is_null());
++        assert!(reversed["cache_save_seconds"].is_null());
++    }
++
+     fn assert_incomplete_and_skipped(
+         now: u64,
+         job_started: u64,
+@@ -12870,6 +13026,7 @@ lockfile = true
+         );
+ 
+         assert_combined_cache_saves(now, job_started, checks_started, checks_ended);
++        assert_pr_cache_saves(now, job_started, checks_ended);
+         assert_incomplete_and_skipped(now, job_started, checks_started, checks_ended);
+         assert_candidate_graph_validation(now, job_started, checks_started, checks_ended);
+         assert_malformed_cache_saves(now, job_started);
+diff --git a/crates/velnor-workflow/src/s2/primitives/ir.rs b/crates/velnor-workflow/src/s2/primitives/ir.rs
+index 03386c9e..a3e7b494 100644
+--- a/crates/velnor-workflow/src/s2/primitives/ir.rs
++++ b/crates/velnor-workflow/src/s2/primitives/ir.rs
+@@ -32,13 +32,7 @@ use crate::s2::{
+     SelectionFieldSources, Unit, UnitKind, GENERATED_HEADER, MR_BOXINGTON_VERSION,
+     OPEN_TOFU_VERSION,
+ };
+-use crate::step_block::prefix_step_block_with_if;
+-
+-fn compose_step_block(block: &str, guard: Option<&str>) -> Result<String, GeneratorError> {
+-    prefix_step_block_with_if(block, guard).map_err(|error| {
+-        GeneratorError::usage(format!("invalid generated workflow step block: {error}"))
+-    })
+-}
++use crate::{MrBoxingtonGithubCacheMode, MR_BOXINGTON_GITHUB_CACHE_MODE};
+ 
+ /// GitHub rejects reusable workflow files above this size.
+ pub(crate) const GITHUB_WORKFLOW_BYTE_LIMIT: usize = 500_000;
+@@ -82,9 +76,9 @@ mod tests {
+     use std::process::Command;
+ 
+     use super::{
+-        provider_input, unit_owns_workflow_crate, CachePurpose, CacheSpec, GraphNode, Pins,
+-        ProviderAdmission, ProviderId, ProviderSet, RequiredCaller, RustNeeds, Unit, UnitKind,
+-        WorkflowIr, WorkflowKind, REQUIRED_CHECK,
++        provider_input, unit_owns_workflow_crate, GraphNode, Pins, ProviderAdmission, ProviderId,
++        ProviderSet, RequiredCaller, RustNeeds, Unit, UnitKind, WorkflowIr, WorkflowKind,
++        REQUIRED_CHECK,
+     };
+     use crate::s2::{
+         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
+@@ -555,6 +549,81 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn same_repository_pr_mbx_writer_is_post_check_and_fail_closed() {
++        let mut ir = owner_test_ir(
++            "example/mbx-pr-writer",
++            vec![rust_unit("rust-mbx", "crates/mbx")],
++        );
++        ir.mr_boxington = true;
++        let rendered = must_render_kind(&ir);
++        let (hosted, velnor) = must_some(
++            rendered.split_once("\n  verify-velnor:\n"),
++            "both provider jobs render",
++        );
++        let start = must_some(
++            hosted.find("      - name: Export PR Mr. Boxington cache"),
++            "same-repository PR export step",
++        );
++        let end = must_some(
++            hosted.find("      - name: Report phase timings"),
++            "phase report step",
++        );
++        let writer = &hosted[start..end];
++        let checks = must_some(hosted.find("      - name: Run unit checks"), "checks step");
++        assert!(checks < start, "writer follows checks: {hosted}");
++        assert!(writer.contains("github.event_name == 'pull_request'"));
++        assert!(
++            writer.contains("github.event.pull_request.head.repo.full_name == github.repository")
++        );
++        assert!(writer.contains("github.event.pull_request.head.sha != ''"));
++        assert!(!writer.contains("pull_request_target"));
++        assert!(!writer.contains("workflow_dispatch"));
++        assert!(!writer.contains("github.event_name == 'push'"));
++        assert!(!writer.contains("github.ref == 'refs/heads/main'"));
++        assert!(writer.contains("steps.mbx-cache.outputs.cache-hit == 'false'"));
++        assert!(!writer.contains("steps.mbx-cache.outputs.cache-hit == 'true'"));
++        assert!(writer.contains("steps.mbx-cache.outputs.cache-primary-key != ''"));
++        assert!(writer.contains("success()"));
++        assert!(writer.contains(&format!(
++            "MBX_PR_CACHE_MODE: {}",
++            crate::MR_BOXINGTON_GITHUB_CACHE_MODE.as_str()
++        )));
++        assert!(hosted.contains("CACHE_PR_EXPORT_STARTED"));
++        assert!(hosted.contains("CACHE_PR_EXPORT_ENDED"));
++        assert!(hosted.contains("CACHE_PR_SAVE_STARTED"));
++        assert!(hosted.contains("CACHE_PR_SAVE_ENDED"));
++        assert!(writer.contains("MBX_REMOTE_MODE:-"));
++        assert!(hosted.contains("cache_pr_export_status:"));
++        let mut unsupported = String::new();
++        super::render_mbx_pr_cache_writer(
++            &mut unsupported,
++            "actions/cache/save@sha",
++            crate::MrBoxingtonGithubCacheMode::Target,
++        );
++        assert!(unsupported.is_empty());
++        assert!(writer.contains("mbx cache export --group"));
++        assert!(writer.contains("github-actions-cache-v1"));
++        assert!(writer.contains("steps.mbx_pr_export.outputs.status == 'exported'"));
++        assert!(writer.contains("continue-on-error: true"));
++        assert!(writer.contains("immutable-key conflict"));
++        assert!(writer.contains("if: always()"));
++        assert!(writer.contains("archive_kib"));
++        assert_eq!(
++            hosted.matches("Export PR Mr. Boxington cache").count(),
++            1,
++            "mixed MBX rendering must emit one PR export block"
++        );
++        assert_eq!(
++            hosted.matches("Save PR Mr. Boxington cache").count(),
++            1,
++            "mixed MBX rendering must emit one PR save block"
++        );
++        assert!(velnor.contains("Set up Mr. Boxington"));
++        assert!(!velnor.contains("Export PR Mr. Boxington cache"));
++        assert!(!velnor.contains("Save PR Mr. Boxington cache"));
++    }
++
+     fn candidate_flagged_callers(ir: &WorkflowIr) -> Vec<String> {
+         let mut flagged = Vec::new();
+         for unit in &ir.units {
+@@ -806,48 +875,6 @@ mod tests {
+         );
+     }
+ 
+-    #[test]
+-    fn collapsed_swift_partial_cache_composes_one_save_condition() {
+-        let mut cached = rust_unit("swift-cached", "native/cached");
+-        cached.kind = UnitKind::Swift;
+-        cached.label = "Swift package (cached)".to_owned();
+-        cached.platform = crate::s2::provider::Platform::MacosArm64;
+-        cached.cache = Some(CacheSpec {
+-            key_files: vec!["native/cached/Package.swift".to_owned()],
+-            paths: vec!["~/.swiftpm".to_owned()],
+-            purpose: CachePurpose::Generic,
+-            mbx_output_cache_justification: None,
+-            mutable_mount_seed: false,
+-        });
+-        let mut uncached = rust_unit("swift-uncached", "native/uncached");
+-        uncached.kind = UnitKind::Swift;
+-        uncached.label = "Swift package (uncached)".to_owned();
+-        uncached.platform = crate::s2::provider::Platform::MacosArm64;
+-        let ir = owner_test_ir("example/fixture", vec![cached, uncached]);
+-        let workflow = must_some(
+-            must_ok(
+-                ir.render_kind_unit_workflow(UnitKind::Swift, None),
+-                "swift partial-cache reusable renders",
+-            ),
+-            "swift partial-cache reusable exists",
+-        )
+-        .1;
+-        let save = must_some(
+-            workflow.find("      - name: Save unit cache"),
+-            "swift save step renders",
+-        );
+-        let save = &workflow[save..];
+-        let end = save[1..]
+-            .find("      - name: ")
+-            .map_or(save.len(), |offset| offset + 1);
+-        let save = &save[..end];
+-        assert_eq!(save.matches("        if:").count(), 1, "{save}");
+-        assert!(
+-            save.contains("(inputs.cache_key_files != '') && (always() &&"),
+-            "{save}"
+-        );
+-    }
+-
+     #[test]
+     fn candidate_publish_flags_only_the_hosted_owner_of_the_generator_crate() {
+         let owner = workflow_setup_action_repository().to_owned();
+@@ -1970,6 +1997,86 @@ fn render_cache_save_end_marker(
+     );
+ }
+ 
++/// The only untrusted event allowed to write the Mr. Boxington GitHub cache.
++///
++/// A normal `pull_request` run gets a merge-ref cache namespace. A fork run
++/// still gets restore access, but its head repository must not write into the
++/// base repository's cache namespace. `pull_request_target` is deliberately
++/// absent: it runs privileged workflow code from the base tree and is never a
++/// writer transport for PR code.
++fn same_repository_pull_request_gate() -> &'static str {
++    "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.sha != ''"
++}
++
++/// Export and save the current Mr. Boxington object closure for a successful
++/// same-repository PR.
++///
++/// The action's post step intentionally remains restore-only for PR events.
++/// This explicit writer runs after checks, so the ordinary PR cache remains
++/// merge-ref scoped while a later run can restore the exact source snapshot.
++/// The action/cache key is immutable: an exact hit skips the writer and a
++/// concurrent save failure is reported without turning a cache optimization
++/// into a required-check failure.
++fn render_mbx_pr_cache_writer(
++    output: &mut String,
++    cache_save_pin: &str,
++    mode: MrBoxingtonGithubCacheMode,
++) {
++    let Some(archive_dir) = mode.object_bundle_dir() else {
++        return;
++    };
++    let gate = format!(
++        "success() && ({}) && steps.mbx-cache.outputs.cache-hit == 'false' && steps.mbx-cache.outputs.cache-primary-key != ''",
++        same_repository_pull_request_gate()
++    );
++    render_phase_epoch_marker_if(
++        output,
++        "CACHE_PR_EXPORT_STARTED",
++        "Mark PR Mr. Boxington export start",
++        &format!("always() && ({gate})"),
++    );
++    let _ = writeln!(
++        output,
++        "      - name: Export PR Mr. Boxington cache\n        id: mbx_pr_export\n        if: {gate}\n        continue-on-error: true\n        shell: bash\n        env:\n          MBX_PR_CACHE_MODE: {mode}\n        run: |\n          set -u -o pipefail\n          status=missing_export_group\n          archive=\n          archive_kib=0\n          if [[ \"$MBX_PR_CACHE_MODE\" != objects ]]; then\n            status=unsupported_cache_mode\n          elif [[ \"${{MBX_REMOTE_MODE:-}}\" == read-only ]]; then\n            status=read_only\n          elif [[ -z \"${{MBX_CACHE_EXPORT_GROUP:-}}\" ]]; then\n            status=missing_export_group\n          elif ! store_dir=\"$(mbx cache dir)\"; then\n            status=missing_store\n          else\n            archive=\"$store_dir/{archive_dir}\"\n            if mbx cache export --group \"$MBX_CACHE_EXPORT_GROUP\" --format directory \"$archive\"; then\n              if [[ -d \"$archive\" ]]; then\n                status=exported\n                archive_kib=\"$(du -sk \"$archive\" 2>/dev/null | awk '{{print $1}}' || echo 0)\"\n              else\n                status=empty_export\n              fi\n            else\n              status=export_failed\n            fi\n          fi\n          {{\n            echo \"status=$status\"\n            echo \"cache_path=$archive\"\n            echo \"archive_kib=$archive_kib\"\n          }} >> \"$GITHUB_OUTPUT\"\n          echo \"PR Mr. Boxington export: status=$status archive_kib=$archive_kib\"",
++        mode = mode.as_str(),
++        archive_dir = archive_dir,
++    );
++    let export_end_gate =
++        format!("always() && ({gate}) && steps.mbx_pr_export.outcome != 'skipped'");
++    render_phase_epoch_marker_if(
++        output,
++        "CACHE_PR_EXPORT_ENDED",
++        "Mark PR Mr. Boxington export end",
++        &export_end_gate,
++    );
++    let save_gate = format!(
++        "success() && ({}) && steps.mbx-cache.outputs.cache-hit == 'false' && steps.mbx-cache.outputs.cache-primary-key != '' && steps.mbx_pr_export.outputs.status == 'exported'",
++        same_repository_pull_request_gate()
++    );
++    let save_start_gate = format!("always() && ({save_gate})");
++    render_phase_epoch_marker_if(
++        output,
++        "CACHE_PR_SAVE_STARTED",
++        "Mark PR Mr. Boxington save start",
++        &save_start_gate,
++    );
++    let _ = writeln!(
++        output,
++        "      - name: Save PR Mr. Boxington cache\n        id: mbx_pr_save\n        if: {save_gate}\n        continue-on-error: true\n        uses: {cache_save_pin}\n        with:\n          path: ${{{{ steps.mbx_pr_export.outputs.cache_path }}}}\n          key: ${{{{ steps.mbx-cache.outputs.cache-primary-key }}}}"
++    );
++    let save_end_gate =
++        format!("always() && ({save_gate}) && steps.mbx_pr_save.outcome != 'skipped'");
++    render_phase_epoch_marker_if(
++        output,
++        "CACHE_PR_SAVE_ENDED",
++        "Mark PR Mr. Boxington save end",
++        &save_end_gate,
++    );
++    output.push_str(
++        "      - name: Report PR Mr. Boxington cache outcome\n        if: always()\n        shell: bash\n        env:\n          MBX_PR_CACHE_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}\n          MBX_PR_EXPORT_STATUS: ${{ steps.mbx_pr_export.outputs.status }}\n          MBX_PR_EXPORT_KIB: ${{ steps.mbx_pr_export.outputs.archive_kib }}\n          MBX_PR_SAVE_OUTCOME: ${{ steps.mbx_pr_save.outcome }}\n        run: |\n          export_status=\"${MBX_PR_EXPORT_STATUS:-skipped}\"\n          save_outcome=\"${MBX_PR_SAVE_OUTCOME:-skipped}\"\n          printf 'PR Mr. Boxington cache: event=%s mode=objects hit=%s export=%s save=%s archive_kib=%s\\n' \\\n            \"${GITHUB_EVENT_NAME:-unknown}\" \"${MBX_PR_CACHE_HIT:-unknown}\" \"$export_status\" \"$save_outcome\" \"${MBX_PR_EXPORT_KIB:-unknown}\" \\\n            >> \"$GITHUB_STEP_SUMMARY\"\n          if [[ \"$save_outcome\" == failure ]]; then\n            echo '::warning::PR Mr. Boxington cache save did not complete (permission or immutable-key conflict); checks remain authoritative'\n          fi\n",
++    );
++}
++
+ /// Mark the start of a unit job before checkout.
+ pub(crate) fn render_ci_job_started_marker(output: &mut String) {
+     render_phase_epoch_marker(output, "JOB_STARTED", "Mark CI job start");
+@@ -2186,6 +2293,21 @@ fn render_cache_outcome_report_inputs(
+                 "          cache_mbx_primary: {}",
+                 step_output_expr(step_id, "cache-primary-key")
+             );
++            let _ = writeln!(
++                output,
++                "          cache_pr_export_status: {}",
++                step_output_expr("mbx_pr_export", "status")
++            );
++            let _ = writeln!(
++                output,
++                "          cache_pr_export_kib: {}",
++                step_output_expr("mbx_pr_export", "archive_kib")
++            );
++            let _ = writeln!(
++                output,
++                "          cache_pr_save_outcome: {}",
++                step_output_expr("mbx_pr_save", "outcome")
++            );
+             continue;
+         }
+         let _ = writeln!(
+@@ -2324,16 +2446,15 @@ fn render_collapsed_sccache_env_step(
+     output: &mut String,
+     sccache: FeatureCoverage,
+     mbx_input: &str,
+-) -> Result<(), GeneratorError> {
++) {
+     if !sccache.any {
+-        return Ok(());
++        return;
+     }
+     let block = "      - name: Configure sccache environment\n        run: |\n          {\n            echo 'CARGO_INCREMENTAL=0'\n            echo 'RUSTC_WRAPPER=sccache'\n            echo 'SCCACHE_GHA_ENABLED=true'\n          } >> \"$GITHUB_ENV\"\n";
+-    output.push_str(&compose_step_block(
++    output.push_str(&prefix_step_block_with_if(
+         block,
+         sccache.absent_gate(mbx_input).as_deref(),
+-    )?);
+-    Ok(())
++    ));
+ }
+ 
+ /// Every command the unit runs, on either provider: the scan-derived base
+@@ -2907,6 +3028,55 @@ fn append_unique_needs(needs: &mut Vec<String>, additional: impl IntoIterator<It
+     }
+ }
+ 
++fn prefix_step_block_with_if(block: &str, guard: Option<&str>) -> String {
++    let Some(guard) = guard else {
++        return block.to_owned();
++    };
++    let mut out = String::new();
++    let mut pending_name: Option<String> = None;
++    let mut pending_if: Option<String> = None;
++
++    let flush_step = |out: &mut String, name: &str, if_expr: Option<&str>| {
++        out.push_str(name);
++        out.push('\n');
++        let combined = if let Some(existing) = if_expr {
++            format!("        if: ${{{{ {guard} && ({existing}) }}}}\n")
++        } else {
++            format!("        if: ${{{{ {guard} }}}}\n")
++        };
++        out.push_str(&combined);
++    };
++
++    for line in block.lines() {
++        if line.starts_with("      - name:") {
++            if let Some(name) = pending_name.take() {
++                flush_step(&mut out, &name, pending_if.as_deref());
++                pending_if = None;
++            }
++            pending_name = Some(line.to_owned());
++        } else if pending_name.is_some() && line.trim().starts_with("if:") {
++            let expr = line.trim().strip_prefix("if:").unwrap_or("").trim();
++            pending_if = Some(
++                expr.strip_prefix("${{ ")
++                    .and_then(|value| value.strip_suffix(" }}"))
++                    .unwrap_or(expr)
++                    .to_owned(),
++            );
++        } else {
++            if let Some(name) = pending_name.take() {
++                flush_step(&mut out, &name, pending_if.as_deref());
++                pending_if = None;
++            }
++            out.push_str(line);
++            out.push('\n');
++        }
++    }
++    if let Some(name) = pending_name.take() {
++        flush_step(&mut out, &name, pending_if.as_deref());
++    }
++    out
++}
++
+ fn cargo_fetch_roots(members: &[&Unit]) -> Vec<String> {
+     let mut roots = BTreeSet::new();
+     for member in members {
+@@ -5008,13 +5178,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+         output: &mut String,
+         members: &[&Unit],
+         facts: &[ProviderStepFacts],
+-    ) -> Result<(), GeneratorError> {
++    ) {
+         let member_records: Vec<BTreeSet<String>> = facts
+             .iter()
+             .map(|facts| facts.prepared_tools.iter().cloned().collect())
+             .collect();
+         if member_records.iter().all(BTreeSet::is_empty) {
+-            return Ok(());
++            return;
+         }
+         let mut union: BTreeMap<String, &Unit> = BTreeMap::new();
+         for (unit, records) in members.iter().zip(&member_records) {
+@@ -5041,9 +5211,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 self.pins.cache_restore,
+                 std::slice::from_ref(need),
+             );
+-            output.push_str(&compose_step_block(&block, gate.as_deref())?);
++            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+         }
+-        Ok(())
+     }
+ 
+     /// The single step block of a collapsed provider job. Every unit-specific
+@@ -5134,8 +5303,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+             }
+             per_member.into_iter().next().unwrap_or_default()
+         };
+-        let gated = |block: String, coverage: FeatureCoverage, input: &str| {
+-            compose_step_block(&block, coverage.gate(input).as_deref())
++        let gated = |block: String, coverage: FeatureCoverage, input: &str| -> String {
++            prefix_step_block_with_if(&block, coverage.gate(input).as_deref())
+         };
+ 
+         // The pinned policy runtime for units that run the generator's own
+@@ -5150,7 +5319,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 ),
+                 policy_runtime,
+                 provider_input::POLICY_RUNTIME,
+-            )?);
++            ));
+         }
+ 
+         // Tool provisioning, in the literal provider job's order.
+@@ -5158,7 +5327,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+         if !hosted && mise_tools.any {
+             let mut block = String::new();
+             render_velnor_mise_install_from_input(&mut block);
+-            output.push_str(&gated(block, mise_tools, provider_input::MISE_TOOLS)?);
++            output.push_str(&gated(block, mise_tools, provider_input::MISE_TOOLS));
+         }
+         if !local_skips_pinned_rust_toolchain(provider)
+             && let Some(toolchain) = &toolchain
+@@ -5174,7 +5343,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 self.pins.mise,
+                 provider_input::expression(provider_input::MISE_TOOLS)
+             );
+-            output.push_str(&gated(block, mise_tools, provider_input::MISE_TOOLS)?);
++            output.push_str(&gated(block, mise_tools, provider_input::MISE_TOOLS));
+         }
+         let mise_runner = FeatureCoverage::over(&facts, |facts| facts.mise_runner);
+         if hosted && mise_runner.any {
+@@ -5184,7 +5353,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 "      - name: Set up Mise\n        uses: {}\n        with:\n          install: false",
+                 self.pins.mise
+             );
+-            output.push_str(&gated(block, mise_runner, provider_input::MISE_RUNNER)?);
++            output.push_str(&gated(block, mise_runner, provider_input::MISE_RUNNER));
+         }
+         let mbx = FeatureCoverage::over(&facts, |facts| facts.mbx_enabled);
+         if mbx.any {
+@@ -5200,7 +5369,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+             } else {
+                 self.render_mbx_local_step(&mut block);
+             }
+-            output.push_str(&gated(block, mbx, provider_input::MBX_ENABLED)?);
++            output.push_str(&gated(block, mbx, provider_input::MBX_ENABLED));
+         }
+         let sccache =
+             FeatureCoverage::over(&facts, |facts| kind == UnitKind::Rust && !facts.mbx_enabled);
+@@ -5208,11 +5377,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+             let mut block = String::new();
+             let sccache_tools = BTreeSet::from([ToolRequirement::Sccache]);
+             self.render_kind_level_tool_steps(&mut block, provider, &sccache_tools, cache_save);
+-            output.push_str(&compose_step_block(
++            output.push_str(&prefix_step_block_with_if(
+                 &block,
+                 sccache.absent_gate(provider_input::MBX_ENABLED).as_deref(),
+-            )?);
+-            render_collapsed_sccache_env_step(output, sccache, provider_input::MBX_ENABLED)?;
++            ));
++            render_collapsed_sccache_env_step(output, sccache, provider_input::MBX_ENABLED);
+         }
+         if hosted && kind_tools.contains(&ToolRequirement::Bun) {
+             let versioned = FeatureCoverage::over(&facts, |facts| facts.tool_version.is_some());
+@@ -5224,7 +5393,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                     self.pins.bun,
+                     provider_input::expression(provider_input::TOOL_VERSION)
+                 );
+-                output.push_str(&gated(block, versioned, provider_input::TOOL_VERSION)?);
++                output.push_str(&gated(block, versioned, provider_input::TOOL_VERSION));
+             }
+             if !versioned.all {
+                 let gate = versioned
+@@ -5234,7 +5403,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                     "      - name: Set up Bun\n        uses: {}\n",
+                     self.pins.bun
+                 );
+-                output.push_str(&compose_step_block(&block, gate.as_deref())?);
++                output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+             }
+         }
+         if hosted && kind_tools.contains(&ToolRequirement::Node) {
+@@ -5252,7 +5421,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                     block,
+                     cached,
+                     provider_input::NODE_CACHE_DEPENDENCY_PATH,
+-                )?);
++                ));
+             }
+             if !cached.all {
+                 let gate = cached.any.then(|| {
+@@ -5263,7 +5432,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 });
+                 let mut block = String::new();
+                 self.render_node_step(&mut block, None);
+-                output.push_str(&compose_step_block(&block, gate.as_deref())?);
++                output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+             }
+         }
+         let cargo_bin = FeatureCoverage::over(&facts, |facts| !facts.cargo_bin_tools.is_empty());
+@@ -5274,9 +5443,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 &provider_input::expression(provider_input::CARGO_BIN_TOOLS),
+                 cache_save,
+             );
+-            output.push_str(&gated(block, cargo_bin, provider_input::CARGO_BIN_TOOLS)?);
++            output.push_str(&gated(block, cargo_bin, provider_input::CARGO_BIN_TOOLS));
+         }
+-        self.render_collapsed_prepared_tool_steps(output, members, &facts)?;
++        self.render_collapsed_prepared_tool_steps(output, members, &facts);
+         self.render_kind_level_tool_steps(output, provider, &kind_tools, cache_save);
+         render_ci_tool_bootstrap_end_marker(output);
+ 
+@@ -5288,7 +5457,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+         if seed.any {
+             let mut block = String::new();
+             render_mutable_mount_seed_restore_from_input(&mut block, self, &checks_env);
+-            output.push_str(&gated(block, seed, provider_input::SEED_COMPAT)?);
++            output.push_str(&gated(block, seed, provider_input::SEED_COMPAT));
+         }
+         if bundle.any {
+             for unit in members {
+@@ -5310,7 +5479,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 self.pins.cache_restore,
+                 provider_input::expression(provider_input::CACHE_PATHS),
+             );
+-            output.push_str(&gated(block, bundle, provider_input::CACHE_KEY_FILES)?);
++            output.push_str(&gated(block, bundle, provider_input::CACHE_KEY_FILES));
+         }
+         render_ci_cache_prep_end_marker(output);
+ 
+@@ -5411,7 +5580,20 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 "Mark candidate phase end",
+                 candidate_event_complete_gate,
+             );
+-            output.push_str(&gated(block, candidate, provider_input::CANDIDATE_PUBLISH)?);
++            output.push_str(&gated(block, candidate, provider_input::CANDIDATE_PUBLISH));
++        }
++
++        // A same-repository PR may export the restored Mr. Boxington object
++        // closure only after every selected unit check completes. Forks keep
++        // restore access but never receive a writer path.
++        if hosted && mbx.any {
++            let mut block = String::new();
++            render_mbx_pr_cache_writer(
++                &mut block,
++                self.pins.cache_save,
++                MR_BOXINGTON_GITHUB_CACHE_MODE,
++            );
++            output.push_str(&gated(block, mbx, provider_input::MBX_ENABLED));
+         }
+ 
+         // Cache collection.
+@@ -5424,7 +5606,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 &checks_env,
+                 cache_save,
+             );
+-            output.push_str(&gated(block, seed, provider_input::SEED_COMPAT)?);
++            output.push_str(&gated(block, seed, provider_input::SEED_COMPAT));
+         }
+         if cache_save_bundle {
+             let (cache_key, _) = format_cargo_bundle_cache_key(
+@@ -5444,7 +5626,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 provider_input::expression(provider_input::CACHE_PATHS),
+             );
+             render_cache_save_end_marker(&mut block, "BUNDLE", &save_gate, "unit_cache_save");
+-            output.push_str(&gated(block, bundle, provider_input::CACHE_KEY_FILES)?);
++            output.push_str(&gated(block, bundle, provider_input::CACHE_KEY_FILES));
+         }
+         let report = members
+             .iter()
+
+Changes:
+
+.github-gen/sources/actions/report-velnor-ci-outcomes/action.yml
+@@ -44,6 +44,18 @@ inputs:
+     description: Matched archive key, only when the cache producer explicitly exposes it
+     required: false
+     default: ""
++  cache_pr_export_status:
++    description: Local same-repository PR MBX export result; this does not prove durable cache persistence
++    required: false
++    default: ""
++  cache_pr_export_kib:
++    description: Size of the locally exported same-repository PR MBX object bundle in KiB
++    required: false
++    default: ""
++  cache_pr_save_outcome:
++    description: GitHub cache save step outcome for the same-repository PR MBX writer
++    required: false
++    default: ""
+   cache_docker_seed_primary:
+     required: false
+     default: ""
+@@ -75,6 +87,9 @@ runs:
+         VELNOR_CACHE_MBX_HIT: ${{ inputs.cache_mbx_hit }}
+         VELNOR_CACHE_MBX_PRIMARY: ${{ inputs.cache_mbx_primary }}
+         VELNOR_CACHE_MBX_MATCHED: ${{ inputs.cache_mbx_matched }}
++        VELNOR_CACHE_PR_EXPORT_STATUS: ${{ inputs.cache_pr_export_status }}
++        VELNOR_CACHE_PR_EXPORT_KIB: ${{ inputs.cache_pr_export_kib }}
++        VELNOR_CACHE_PR_SAVE_OUTCOME: ${{ inputs.cache_pr_save_outcome }}
+         VELNOR_CACHE_DOCKER_SEED_PRIMARY: ${{ inputs.cache_docker_seed_primary }}
+         VELNOR_CACHE_DOCKER_SEED_MATCHED: ${{ inputs.cache_docker_seed_matched }}
+       run: |
+@@ -165,6 +180,10 @@ runs:
+         cache_seed_save_ended="$(read_marker CACHE_SEED_SAVE_ENDED)"
+         cache_bundle_save_started="$(read_marker CACHE_BUNDLE_SAVE_STARTED)"
+         cache_bundle_save_ended="$(read_marker CACHE_BUNDLE_SAVE_ENDED)"
++        cache_pr_export_started="$(read_marker CACHE_PR_EXPORT_STARTED)"
++        cache_pr_export_ended="$(read_marker CACHE_PR_EXPORT_ENDED)"
++        cache_pr_save_started="$(read_marker CACHE_PR_SAVE_STARTED)"
++        cache_pr_save_ended="$(read_marker CACHE_PR_SAVE_ENDED)"
+         runner_setup="$(phase_seconds "$job_started" "$runner_setup_end" || true)"
+         selection_transport="$(phase_seconds "$runner_setup_end" "$selection_end" || true)"
+         tool_bootstrap="$(phase_seconds "$selection_end" "$tool_bootstrap_end" || true)"
+@@ -176,6 +195,8 @@ runs:
+         candidate_publication="$(phase_seconds "$candidate_publication_started" "$candidate_publication_ended" || true)"
+         cache_seed_save="$(phase_seconds "$cache_seed_save_started" "$cache_seed_save_ended" || true)"
+         cache_bundle_save="$(phase_seconds "$cache_bundle_save_started" "$cache_bundle_save_ended" || true)"
++        cache_pr_export="$(phase_seconds "$cache_pr_export_started" "$cache_pr_export_ended" || true)"
++        cache_pr_save="$(phase_seconds "$cache_pr_save_started" "$cache_pr_save_ended" || true)"
+         cache_save_incomplete=false
+         for cache_pair in \
+           "$cache_seed_save_started:$cache_seed_save_ended" \
+@@ -185,7 +206,7 @@ runs:
+           if [[ -n "$cache_pair_started" || -n "$cache_pair_ended" ]] \
+             && ! { valid_epoch "$cache_pair_started" && valid_epoch "$cache_pair_ended" \
+               && phase_seconds "$cache_pair_started" "$cache_pair_ended" >/dev/null; }; then
+-            cache_save_incomplete=true
++              cache_save_incomplete=true
+           fi
+         done
+         cache_save_phase_invalid=false
+@@ -281,6 +302,155 @@ runs:
+           cache_seed_save=""
+           cache_bundle_save=""
+         fi
++        cache_pr_export_status="${VELNOR_CACHE_PR_EXPORT_STATUS:-}"
++        cache_pr_export_kib="${VELNOR_CACHE_PR_EXPORT_KIB:-}"
++        cache_pr_save_outcome="${VELNOR_CACHE_PR_SAVE_OUTCOME:-}"
++        cache_pr_export_observation=""
++        cache_pr_save_observation=""
++        cache_pr_durability_observation=""
++        cache_pr_phase_invalid=false
++        cache_pr_markers_present=false
++        cache_pr_save_pair_present=false
++        cache_pr_export_pair_complete=false
++        cache_pr_save_pair_complete=false
++        cache_pr_export_expected=false
++        cache_pr_save_expected=false
++        for cache_pr_marker in \
++          "$cache_pr_export_started" "$cache_pr_export_ended" \
++          "$cache_pr_save_started" "$cache_pr_save_ended"; do
++          if [[ -n "$cache_pr_marker" ]]; then
++            cache_pr_markers_present=true
++          fi
++        done
++        if [[ -n "$cache_pr_export_started" || -n "$cache_pr_export_ended" ]]; then
++          cache_pr_export_expected=true
++        fi
++        if [[ -n "$cache_pr_save_started" || -n "$cache_pr_save_ended" ]]; then
++          cache_pr_save_pair_present=true
++          cache_pr_save_expected=true
++        fi
++        if [[ -n "$cache_pr_export_status" ]]; then
++          case "$cache_pr_export_status" in
++            read_only|unsupported_cache_mode)
++              ;;
++            exported|export_failed|empty_export|missing_store|missing_export_group)
++              cache_pr_export_expected=true
++              ;;
++            *)
++              cache_pr_export_expected=true
++              ;;
++          esac
++        fi
++        if [[ "$cache_pr_export_status" == exported || \
++          ( -n "$cache_pr_save_outcome" && "$cache_pr_save_outcome" != skipped ) ]]; then
++          cache_pr_save_expected=true
++        fi
++        if [[ "$cache_pr_markers_present" == true ]]; then
++          if ! valid_epoch "$checks_ended"; then
++            cache_pr_phase_invalid=true
++          fi
++          if [[ -n "$cache_pr_export_started" || -n "$cache_pr_export_ended" ]]; then
++            if ! { valid_epoch "$cache_pr_export_started" && valid_epoch "$cache_pr_export_ended" \
++              && phase_seconds "$cache_pr_export_started" "$cache_pr_export_ended" >/dev/null; }; then
++              cache_pr_phase_invalid=true
++            else
++              cache_pr_export_pair_complete=true
++            fi
++          fi
++          if [[ -n "$cache_pr_save_started" || -n "$cache_pr_save_ended" ]] \
++            && ! { valid_epoch "$cache_pr_save_started" && valid_epoch "$cache_pr_save_ended" \
++              && phase_seconds "$cache_pr_save_started" "$cache_pr_save_ended" >/dev/null; }; then
++            cache_pr_phase_invalid=true
++          elif [[ -n "$cache_pr_save_started" || -n "$cache_pr_save_ended" ]]; then
++            cache_pr_save_pair_complete=true
++          fi
++          if valid_epoch "$checks_ended" && valid_epoch "$cache_pr_export_started" \
++            && ! phase_before_or_equal "$checks_ended" "$cache_pr_export_started"; then
++            cache_pr_phase_invalid=true
++          fi
++          if valid_epoch "$cache_pr_export_started" && valid_epoch "$cache_pr_export_ended" \
++            && ! phase_before_or_equal "$cache_pr_export_started" "$cache_pr_export_ended"; then
++            cache_pr_phase_invalid=true
++          fi
++          if valid_epoch "$cache_pr_export_ended" && valid_epoch "$cache_pr_save_started" \
++            && ! phase_before_or_equal "$cache_pr_export_ended" "$cache_pr_save_started"; then
++            cache_pr_phase_invalid=true
++          fi
++          if valid_epoch "$cache_pr_save_started" && valid_epoch "$cache_pr_save_ended" \
++            && ! phase_before_or_equal "$cache_pr_save_started" "$cache_pr_save_ended"; then
++            cache_pr_phase_invalid=true
++          fi
++          if [[ "$cache_pr_export_status" == exported ]] \
++            && { [[ "$cache_pr_export_pair_complete" != true ]] \
++              || [[ "$cache_pr_save_pair_complete" != true ]]; }; then
++            cache_pr_phase_invalid=true
++          fi
++          if [[ "$cache_pr_save_pair_present" == true ]] \
++            && [[ "$cache_pr_export_pair_complete" != true ]]; then
++            cache_pr_phase_invalid=true
++          fi
++          if [[ "$cache_pr_export_status" != exported ]] \
++            && [[ "$cache_pr_save_pair_present" == true ]]; then
++            cache_pr_phase_invalid=true
++          fi
++        elif [[ "$cache_pr_export_status" == exported ]]; then
++          # A successful export without marker pairs is an incomplete report,
++          # not evidence that the writer had no cost.
++          cache_pr_phase_invalid=true
++        fi
++        if [[ "$cache_pr_export_expected" == true ]] \
++          && [[ "$cache_pr_export_pair_complete" != true ]]; then
++          cache_pr_phase_invalid=true
++        fi
+  ... (49 additions truncated)
+@@ -291,18 +461,58 @@ runs:
+                 phase_count=$((phase_count + 1))
+               fi
+             done
++            for phase in "$cache_pr_export" "$cache_pr_save"; do
++              if [[ "$phase" =~ ^[0-9]+$ ]]; then
++                phase_total=$((phase_total + 10#$phase))
++                phase_count=$((phase_count + 1))
++              fi
++            done
+             if ((phase_count > 0)); then printf '%s' "$phase_total"; fi
+           fi
+         )"
+         cache_save_observed_json='[]'
+-        if [[ "$cache_seed_save" =~ ^[0-9]+$ && "$cache_bundle_save" =~ ^[0-9]+$ ]]; then
+-          cache_save_observed_json='["docker_seed","unit_bundle"]'
+-        elif [[ "$cache_seed_save" =~ ^[0-9]+$ ]]; then
+-          cache_save_observed_json='["docker_seed"]'
+-        elif [[ "$cache_bundle_save" =~ ^[0-9]+$ ]]; then
+-          cache_save_observed_json='["unit_bundle"]'
+-        fi
+-        cache_save_unobserved_json='["rustup","mold","cargo_bin","mbx_post_job"]'
++        cache_save_observed_items=""
++        cache_save_unobserved_items='"rustup","mold","cargo_bin","mbx_post_job"'
++        append_observed_phase() {
++          local phase="$1"
++          if [[ -n "$cache_save_observed_items" ]]; then
++            cache_save_observed_items="$cache_save_observed_items,$phase"
++          else
++            cache_save_observed_items="$phase"
++          fi
++        }
++        append_unobserved_phase() {
++          local phase="$1"
++          if [[ -n "$cache_save_unobserved_items" ]]; then
++            cache_save_unobserved_items="$cache_save_unobserved_items,$phase"
++          else
++            cache_save_unobserved_items="$phase"
++          fi
++        }
++        if [[ "$cache_seed_save" =~ ^[0-9]+$ ]]; then
++          append_observed_phase '"docker_seed"'
++        elif [[ "$cache_seed_save_started" != "" || "$cache_seed_save_ended" != "" ]]; then
++          append_unobserved_phase '"docker_seed"'
++        fi
++        if [[ "$cache_bundle_save" =~ ^[0-9]+$ ]]; then
++          append_observed_phase '"unit_bundle"'
++        elif [[ "$cache_bundle_save_started" != "" || "$cache_bundle_save_ended" != "" ]]; then
++          append_unobserved_phase '"unit_bundle"'
++        fi
++        if [[ "$cache_pr_export" =~ ^[0-9]+$ ]]; then
++          append_observed_phase '"mbx_pr_export"'
++        elif [[ "$cache_pr_export_expected" == true ]]; then
++          append_unobserved_phase '"mbx_pr_export"'
++        fi
++        if [[ "$cache_pr_save" =~ ^[0-9]+$ ]]; then
++          append_observed_phase '"mbx_pr_save"'
++        elif [[ "$cache_pr_save_expected" == true ]]; then
++          append_unobserved_phase '"mbx_pr_save"'
++        fi
++        if [[ -n "$cache_save_observed_items" ]]; then
++          cache_save_observed_json="[$cache_save_observed_items]"
++        fi
++        cache_save_unobserved_json="[$cache_save_unobserved_items]"
+         cache_save_observation=""
+         if [[ "$cache_save_phase_invalid" == true ]]; then
+           cache_save_observation="explicit_cache_save_phase_invalid"
+@@ -517,10 +727,18 @@ runs:
+           --arg candidate_publication "$candidate_publication" \
+           --arg cache_seed_save "$cache_seed_save" \
+           --arg cache_bundle_save "$cache_bundle_save" \
++          --arg cache_pr_export "$cache_pr_export" \
++          --arg cache_pr_save "$cache_pr_save" \
+           --arg cache_save "$cache_save" \
+           --arg cache_save_observation "$cache_save_observation" \
+           --arg cache_post_job_observation "$cache_post_job_observation" \
+           --arg candidate_observation "$candidate_observation" \
++          --arg cache_pr_export_observation "$cache_pr_export_observation" \
++          --arg cache_pr_save_observation "$cache_pr_save_observation" \
++          --arg cache_pr_durability_observation "$cache_pr_durability_observation" \
++          --arg cache_pr_export_status "$cache_pr_export_status" \
++          --arg cache_pr_export_kib "$cache_pr_export_kib" \
++          --arg cache_pr_save_outcome "$cache_pr_save_outcome" \
+           --argjson cache_save_observed "$cache_save_observed_json" \
+           --argjson cache_save_unobserved "$cache_save_unobserved_json" \
+           --arg total "$total" \
+@@ -553,10 +771,18 @@ runs:
+             candidate_publication_seconds: ($candidate_publication | if test("^[0-9]+$") then tonumber else null end),
+             cache_seed_save_seconds: ($cache_seed_save | if test("^[0-9]+$") then tonumber else null end),
+             cache_bundle_save_seconds: ($cache_bundle_save | if test("^[0-9]+$") then tonumber else null end),
++            cache_pr_export_seconds: ($cache_pr_export | if test("^[0-9]+$") then tonumber else null end),
++            cache_pr_save_seconds: ($cache_pr_save | if test("^[0-9]+$") then tonumber else null end),
+             cache_save_seconds: ($cache_save | if test("^[0-9]+$") then tonumber else null end),
+             cache_save_observation: ($cache_save_observation | if length > 0 then . else null end),
+             cache_post_job_observation: ($cache_post_job_observation | if length > 0 then . else null end),
+             candidate_observation: ($candidate_observation | if length > 0 then . else null end),
++            cache_pr_export_observation: ($cache_pr_export_observation | if length > 0 then . else null end),
++            cache_pr_save_observation: ($cache_pr_save_observation | if length > 0 then . else null end),
++            cache_pr_durability_observation: ($cache_pr_durability_observation | if length > 0 then . else null end),
++            cache_pr_export_status: ($cache_pr_export_status | if length > 0 then . else null end),
++            cache_pr_export_kib: ($cache_pr_export_kib | if test("^[0-9]+$") then tonumber else null end),
++            cache_pr_save_outcome: ($cache_pr_save_outcome | if length > 0 then . else null end),
+             cache_save_observed_phases: $cache_save_observed,
+             cache_save_unobserved_phases: $cache_save_unobserved,
+             cleanup_seconds: null,
+@@ -609,10 +835,18 @@ runs:
+           echo "| candidate_publication_seconds | ${candidate_publication:-unknown} |"
+           echo "| cache_seed_save_seconds | ${cache_seed_save:-unknown} |"
+           echo "| cache_bundle_save_seconds | ${cache_bundle_save:-unknown} |"
++          echo "| cache_pr_export_seconds | ${cache_pr_export:-unknown} |"
++          echo "| cache_pr_save_seconds | ${cache_pr_save:-unknown} |"
+           echo "| cache_save_seconds | ${cache_save:-unknown} |"
+           echo "| cache_save_observation | ${cache_save_observation:-unknown} |"
+           echo "| cache_post_job_observation | ${cache_post_job_observation:-unknown} |"
+           echo "| candidate_observation | ${candidate_observation:-unknown} |"
++          echo "| cache_pr_export_observation | ${cache_pr_export_observation:-unknown} |"
++          echo "| cache_pr_save_observation | ${cache_pr_save_observation:-unknown} |"
++          echo "| cache_pr_durability_observation | ${cache_pr_durability_observation:-unknown} |"
++          echo "| cache_pr_export_status | ${cache_pr_export_status:-unknown} |"
++          echo "| cache_pr_export_kib | ${cache_pr_export_kib:-unknown} |"
++          echo "| cache_pr_save_outcome | ${cache_pr_save_outcome:-unknown} |"
+           echo "| cache_save_observed_phases | ${cache_save_observed_json} |"
+           echo "| cache_save_unobserved_phases | ${cache_save_unobserved_json} |"
+           echo "| cleanup_seconds | unknown |"
+  +243 -9
+
+crates/velnor-workflow/src/lib.rs
+@@ -35,7 +35,6 @@ mod runners;
+ pub(crate) mod runtime;
+ pub(crate) mod s2;
+ mod scan;
+-mod step_block;
+ mod template_memory;
+ #[cfg(feature = "tui")]
+ mod tui;
+@@ -137,6 +136,33 @@ pub const VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV: &str = "VELNOR_WORKFLOW_CANDID
+ // the audited tree's pin to descend from it.
+ const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
+ const MR_BOXINGTON_VERSION: &str = "1.12.0";
++
++/// GitHub payload mode shared by setup and the optional PR writer.
++#[allow(dead_code)]
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum MrBoxingtonGithubCacheMode {
++    Objects,
++    Target,
++}
++
++impl MrBoxingtonGithubCacheMode {
++    pub(crate) const fn as_str(self) -> &'static str {
++        match self {
++            Self::Objects => "objects",
++            Self::Target => "target",
++        }
++    }
++
++    pub(crate) const fn object_bundle_dir(self) -> Option<&'static str> {
++        match self {
++            Self::Objects => Some("github-actions-cache-v1"),
++            Self::Target => None,
++        }
++    }
++}
++
++pub(crate) const MR_BOXINGTON_GITHUB_CACHE_MODE: MrBoxingtonGithubCacheMode =
++    MrBoxingtonGithubCacheMode::Objects;
+ /// mbx's action-store budget setting (`gc.max_size`). It is the bound the
+ /// automatic sweep prunes the store to after a build, and the only budget
+ /// that applies on a hosted runner: `gc.max_total_size` is unset there and
+@@ -1750,8 +1776,9 @@ fn static_mr_boxington_step() -> String {
+     let mut step = mr_boxington_store_budget_step();
+     let _ = write!(
+         step,
+-        "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-${{{{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}}}-__VELNOR_SNAPSHOT_STATE__\n          restore-keys: |\n            velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-${{{{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}}}-\n            velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-\n          save-on-workflow-dispatch: true\n",
+-        ActionPin::MrBoxington.reference()
++        "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: {}\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-${{{{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}}}-__VELNOR_SNAPSHOT_STATE__\n          restore-keys: |\n            velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-${{{{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}}}-\n            velnor-static-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ github.workflow }}}}-${{{{ github.job }}}}-\n          save-on-workflow-dispatch: true\n",
++        ActionPin::MrBoxington.reference(),
++        crate::MR_BOXINGTON_GITHUB_CACHE_MODE.as_str()
+     );
+     step
+ }
+@@ -12520,10 +12547,15 @@ channel = "stable"
+             "candidate_publication_seconds:",
+             "cache_seed_save_seconds:",
+             "cache_bundle_save_seconds:",
++            "cache_pr_export_seconds:",
++            "cache_pr_save_seconds:",
+             "cache_save_seconds:",
+             "cache_save_observation:",
+             "cache_post_job_observation:",
+             "candidate_observation:",
++            "cache_pr_export_observation:",
++            "cache_pr_save_observation:",
++            "cache_pr_durability_observation:",
+             "candidate_phase_complete",
+             "cache_save_observed_phases:",
+             "cache_save_unobserved_phases:",
+@@ -12880,6 +12912,156 @@ channel = "stable"
+         );
+     }
+ 
++    fn assert_pr_cache_saves(now: u64, job_started: u64, checks_ended: u64) {
++        let valid = run_report_action_case_with_env(
++            "valid-pr-cache-save",
++            &[
++                ("JOB_STARTED", &job_started.to_string()),
++                ("CHECKS_ENDED", &checks_ended.to_string()),
++                ("CACHE_PR_EXPORT_STARTED", &(now - 8).to_string()),
++                ("CACHE_PR_EXPORT_ENDED", &(now - 7).to_string()),
++                ("CACHE_PR_SAVE_STARTED", &(now - 6).to_string()),
++                ("CACHE_PR_SAVE_ENDED", &(now - 5).to_string()),
++            ],
++            None,
++            None,
++            &[
++                ("VELNOR_CACHE_PR_EXPORT_STATUS", "exported"),
++                ("VELNOR_CACHE_PR_SAVE_OUTCOME", "success"),
++            ],
++        );
++        assert_eq!(valid["cache_pr_export_seconds"], serde_json::json!(1));
++        assert_eq!(valid["cache_pr_save_seconds"], serde_json::json!(1));
++        assert_eq!(valid["cache_save_seconds"], serde_json::json!(2));
++        assert_eq!(
++            valid["cache_save_observed_phases"],
++            serde_json::json!(["mbx_pr_export", "mbx_pr_save"])
++        );
++        assert_eq!(
++            valid["cache_save_unobserved_phases"],
++            serde_json::json!(["rustup", "mold", "cargo_bin", "mbx_post_job"])
++        );
++        assert_eq!(
++            valid["cache_pr_export_observation"],
++            serde_json::json!("export_local")
++        );
++        assert_eq!(
++            valid["cache_pr_save_observation"],
++            serde_json::json!("save_step")
++        );
++        assert_eq!(
++            valid["cache_pr_durability_observation"],
++            serde_json::json!("durable_unknown")
++        );
++
++        let missing_checks = run_report_action_case_with_env(
++            "pr-cache-save-missing-checks-end",
++            &[
++                ("JOB_STARTED", &job_started.to_string()),
++                ("CACHE_PR_EXPORT_STARTED", &(now - 8).to_string()),
++                ("CACHE_PR_EXPORT_ENDED", &(now - 7).to_string()),
++                ("CACHE_PR_SAVE_STARTED", &(now - 6).to_string()),
++                ("CACHE_PR_SAVE_ENDED", &(now - 5).to_string()),
++            ],
++            None,
++            None,
++            &[
++                ("VELNOR_CACHE_PR_EXPORT_STATUS", "exported"),
++                ("VELNOR_CACHE_PR_SAVE_OUTCOME", "success"),
++            ],
++        );
++        assert!(missing_checks["cache_pr_export_seconds"].is_null());
++        assert!(missing_checks["cache_pr_save_seconds"].is_null());
++        assert!(missing_checks["cache_save_seconds"].is_null());
++        assert_eq!(
++            missing_checks["cache_pr_export_observation"],
++            serde_json::json!("export_local_phase_invalid")
++        );
++        assert_eq!(
++            missing_checks["cache_save_unobserved_phases"],
++            serde_json::json!([
++                "rustup",
++                "mold",
++                "cargo_bin",
++                "mbx_post_job",
++                "mbx_pr_export",
++                "mbx_pr_save"
++            ])
++        );
++        assert_eq!(
++            missing_checks["cache_pr_durability_observation"],
++            serde_json::json!("durable_unknown")
++        );
++
++        let incomplete = run_report_action_case_with_env(
++            "pr-cache-save-incomplete",
++            &[
++                ("JOB_STARTED", &job_started.to_string()),
++                ("CHECKS_ENDED", &checks_ended.to_string()),
++                ("CACHE_PR_EXPORT_STARTED", &(now - 8).to_string()),
++                ("CACHE_PR_EXPORT_ENDED", &(now - 7).to_string()),
++                ("CACHE_PR_SAVE_STARTED", &(now - 6).to_string()),
++            ],
++            None,
++            None,
++            &[
++                ("VELNOR_CACHE_PR_EXPORT_STATUS", "exported"),
++                ("VELNOR_CACHE_PR_SAVE_OUTCOME", "skipped"),
++            ],
++        );
++        assert!(incomplete["cache_pr_export_seconds"].is_null());
++        assert!(incomplete["cache_pr_save_seconds"].is_null());
++        assert!(incomplete["cache_save_seconds"].is_null());
+  ... (50 additions truncated)
+@@ -13040,6 +13222,7 @@ channel = "stable"
+         );
+ 
+         assert_combined_cache_saves(now, job_started, checks_started, checks_ended);
++        assert_pr_cache_saves(now, job_started, checks_ended);
+         assert_incomplete_and_skipped(now, job_started, checks_started, checks_ended);
+         assert_candidate_graph_validation(now, job_started, checks_started, checks_ended);
+         assert_malformed_cache_saves(now, job_started);
+  +186 -3
+
+crates/velnor-workflow/src/primitives/ir.rs
+@@ -18,7 +18,6 @@ use super::{
+ };
+ use crate::reuse::REQUIRED_CHECK;
+-use crate::step_block::prefix_step_block_with_if;
+ use crate::{
+     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
+     hosted_cargo_bin_toolchain_save, hosted_cargo_bin_toolchain_verify, hosted_mold_setup,
+@@ -28,16 +27,11 @@ use crate::{
+-    ProjectConfig, RunnerMode, RustToolchain, SelectionFieldSources, Unit, UnitKind,
+-    VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
++    MrBoxingtonGithubCacheMode, ProjectConfig, RunnerMode, RustToolchain, SelectionFieldSources,
++    Unit, UnitKind, VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_GITHUB_CACHE_MODE,
++    MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
+ };
+ 
+-fn compose_step_block(block: &str, guard: Option<&str>) -> Result<String, GeneratorError> {
+-    prefix_step_block_with_if(block, guard).map_err(|error| {
+-        GeneratorError::usage(format!("invalid generated workflow step block: {error}"))
+-    })
+-}
+-
+ /// GitHub rejects reusable workflow files above this size.
+ pub(crate) const GITHUB_WORKFLOW_BYTE_LIMIT: usize = 500_000;
+ 
+@@ -81,9 +75,9 @@ mod tests {
+-        lane_input, unit_owns_workflow_crate, AutomaticEvent, CachePurpose, CacheSpec,
+-        DispatchChoice::*, GraphNode, LaneAdmission, Pins, RunnerMode, Unit, UnitKind,
+-        VelnorPullRequest, VelnorRustNeeds, WorkflowIr, WorkflowKind,
++        lane_input, unit_owns_workflow_crate, AutomaticEvent, DispatchChoice::*, GraphNode,
++        LaneAdmission, Pins, RunnerMode, Unit, UnitKind, VelnorPullRequest, VelnorRustNeeds,
++        WorkflowIr, WorkflowKind,
+     };
+     use crate::{
+         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
+@@ -598,6 +592,81 @@ mod tests {
++    #[test]
++    fn same_repository_pr_mbx_writer_is_post_check_and_fail_closed() {
++        let mut ir = owner_test_ir(
++            "example/mbx-pr-writer",
++            vec![rust_unit("rust-mbx", "crates/mbx")],
++        );
++        ir.mr_boxington = true;
++        let rendered = must_render_kind(&ir);
++        let (hosted, velnor) = must_some(
++            rendered.split_once("\n  verify-velnor:\n"),
++            "both lane jobs render",
++        );
++        let start = must_some(
++            hosted.find("      - name: Export PR Mr. Boxington cache"),
++            "same-repository PR export step",
++        );
++        let end = must_some(
++            hosted.find("      - name: Report phase timings"),
++            "phase report step",
++        );
++        let writer = &hosted[start..end];
++        let checks = must_some(hosted.find("      - name: Run unit checks"), "checks step");
++        assert!(checks < start, "writer follows checks: {hosted}");
++        assert!(writer.contains("github.event_name == 'pull_request'"));
++        assert!(
++            writer.contains("github.event.pull_request.head.repo.full_name == github.repository")
++        );
++        assert!(writer.contains("github.event.pull_request.head.sha != ''"));
++        assert!(!writer.contains("pull_request_target"));
++        assert!(!writer.contains("workflow_dispatch"));
++        assert!(!writer.contains("github.event_name == 'push'"));
++        assert!(!writer.contains("github.ref == 'refs/heads/main'"));
++        assert!(writer.contains("steps.mbx-cache.outputs.cache-hit == 'false'"));
++        assert!(!writer.contains("steps.mbx-cache.outputs.cache-hit == 'true'"));
++        assert!(writer.contains("steps.mbx-cache.outputs.cache-primary-key != ''"));
++        assert!(writer.contains("success()"));
++        assert!(writer.contains(&format!(
++            "MBX_PR_CACHE_MODE: {}",
++            crate::MR_BOXINGTON_GITHUB_CACHE_MODE.as_str()
++        )));
+
+... (more changes truncated)
+  +46 -12
+[full diff: rtk git diff --no-compact]

@@ -90,6 +90,13 @@ fn render_step(step: &str, guard: Option<&str>) -> Result<String, StepBlockError
 
     // A one-line step without a trailing newline still has a first line.
     let first_line_end = first_line_end.unwrap_or(step.len());
+    if let Some(condition) = condition.as_ref()
+        && condition_has_continuation(step, condition)
+    {
+        return Err(StepBlockError::new(
+            "top-level if condition has an unsupported continuation line",
+        ));
+    }
     let parsed_condition = condition
         .as_ref()
         .map(|location| parse_condition(&step[location.value_start..location.value_end]))
@@ -186,6 +193,22 @@ fn condition_location(
     })
 }
 
+fn condition_has_continuation(step: &str, condition: &ConditionLocation) -> bool {
+    let mut line_start = condition.line_end;
+    while line_start < step.len() {
+        let line_end = next_line_end(step, line_start);
+        let line = without_line_ending(&step[line_start..line_end]);
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            line_start = line_end;
+            continue;
+        }
+        let indentation = line.len() - line.trim_start().len();
+        return indentation > 8;
+    }
+    false
+}
+
 fn parse_condition(raw: &str) -> Result<(String, String), StepBlockError> {
     // The renderer accepts only one-line scalar metadata.  Parsing happens even
     // when no new guard is requested: a malformed generated step must never be
@@ -204,7 +227,13 @@ fn parse_condition(raw: &str) -> Result<(String, String), StepBlockError> {
     }
 
     let (scalar, suffix) = split_inline_comment(value)?;
-    let scalar = decode_scalar(scalar.trim())?;
+    let scalar = scalar.trim();
+    if is_unsupported_scalar_form(scalar) {
+        return Err(StepBlockError::new(
+            "top-level if condition uses an unsupported YAML scalar form",
+        ));
+    }
+    let scalar = decode_scalar(scalar)?;
     let value = scalar.trim();
     if value.is_empty() {
         return Err(StepBlockError::new(
@@ -232,11 +261,6 @@ fn parse_condition(raw: &str) -> Result<(String, String), StepBlockError> {
         return Ok((expression.to_owned(), suffix.to_owned()));
     }
 
-    if is_unsupported_scalar_form(value) {
-        return Err(StepBlockError::new(
-            "top-level if condition uses an unsupported YAML scalar form",
-        ));
-    }
     if value.trim().is_empty() {
         return Err(StepBlockError::new(
             "top-level if expression must not be empty",
@@ -543,6 +567,14 @@ mod tests {
         );
         assert!(rendered.contains("(contains(inputs.value, 'marker'))"));
 
+        let quoted_bang =
+            "      - name: quoted bang\n        if: \"!cancelled()\"\n        run: true\n";
+        let rendered = must_render(
+            prefix_step_block_with_if(quoted_bang, Some("guard")),
+            "quoted bang expression",
+        );
+        assert!(rendered.contains("(!cancelled())"));
+
         for scalar in ["|", ">", "[ready]", "{ready: true}", "!tag"] {
             let block =
                 format!("      - name: unsupported\n        if: {scalar}\n        run: true\n");
@@ -563,5 +595,13 @@ mod tests {
     fn unterminated_quoted_condition_is_rejected_without_a_new_guard() {
         let unterminated = "      - name: invalid\n        if: \"ready\n        run: true\n";
         assert!(prefix_step_block_with_if(unterminated, None).is_err());
+    }
+
+    #[test]
+    fn rejects_plain_scalar_continuations() {
+        let block =
+            "      - name: invalid\n        if: ready\n          && other\n        run: true\n";
+        assert!(prefix_step_block_with_if(block, None).is_err());
+        assert!(prefix_step_block_with_if(block, Some("guard")).is_err());
     }
 }

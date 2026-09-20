@@ -1,0 +1,84 @@
+[
+  {
+    "file": "environment-draft.tar.gz",
+    "source": "/tmp/velnor-env-signature-impl",
+    "sha256": "8e2a79991d90a6d8d8241821faaba3ee92f42a18d5c045c397ea4b582db35002",
+    "status": "interrupted draft; not accepted"
+  },
+  {
+    "file": "cache-writer-draft.tar.gz",
+    "source": "/tmp/velnor-mbx-writer-repair",
+    "sha256": "f0ec1e573a89696bdce86cb4c749bafd5a8da94e2b8e1eb41e48c8923354bdee",
+    "status": "interrupted draft; not accepted"
+  },
+  {
+    "file": "condition-draft.tar.gz",
+    "source": "/tmp/velnor-step-condition",
+    "sha256": "6376e2b602a98c1fa8e4da3ccbecd005e0db71b333e2d7f2d685b72f7d51b315",
+    "status": "interrupted draft; not accepted"
+  },
+  {
+    "file": "velnor-mbx-writer-telemetry-repair.patch",
+    "sha256": "546db6b0e500d488e7330a69c309c0c2879c2d861a2d204afa3e0e62c8d15b25"
+  },
+  {
+    "file": "velnor-condition-final-build-2.log",
+    "sha256": "60495f0644a79eee687cde63b660c6795554149eb8f9971dce6c8ad65d6c4471"
+  },
+  {
+    "file": "velnor-condition-final-actionlint.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "file": "velnor-condition-final-parent.log",
+    "sha256": "2166bc47586e0afc0a908a7277c14f56d02d25f213b5ba0d863f36f299155b78"
+  },
+  {
+    "file": "velnor-condition-final-generate.log",
+    "sha256": "1ad36bbf8bbf8057dbde150da63f6e371f8441d8924f39513a30e8bb54bf49c4"
+  },
+  {
+    "file": "velnor-condition-final-clippy.log",
+    "sha256": "fcf96edce5416d95b7be3cd9bc5c06e919ca5d47556d85f91d32074a35c4004f"
+  },
+  {
+    "file": "velnor-condition-final-scan.log",
+    "sha256": "f139ce6c3891655f7d8c948b3839c983053e7e21915d69117049505c3d33dae3"
+  },
+  {
+    "file": "velnor-condition-final-check.log",
+    "sha256": "d0992514b70bb7ef6e9de10fe4bb0fd11ebbf5a15cf06965bc531d4c25a91a37"
+  },
+  {
+    "file": "velnor-condition-final-build.log",
+    "sha256": "767be2470bc1cbbb8e9fb9ef93ebd1886f959d9b7ad9a93edafe9ba7341bd06a"
+  },
+  {
+    "file": "velnor-condition-final-nextest.log",
+    "sha256": "6b2daf3cf2cbb8ad7b522363e87e83b8d140bbb5a0afed9c8957418e654cbfe6"
+  },
+  {
+    "file": "velnor-condition-final-nextest-3.log",
+    "sha256": "6fa95c2ae50606fec8081c64ca5777f2b898fc27acdca9a5af596ffbff6809b9"
+  },
+  {
+    "file": "velnor-condition-final-nextest-2.log",
+    "sha256": "8b46fcab0c2b7e56739e26c5977a5b9463fc1205a49b8fa358bbea1d0ce2a752"
+  },
+  {
+    "file": "velnor-condition-final-review.md",
+    "sha256": "07e513dfebaac1e7a3b9175898bd9c37b8ab2af841eed360917ba77d9b39c759"
+  },
+  {
+    "file": "velnor-candidate-runtime-design.md",
+    "sha256": "b5a0178e6e1506f79234c6f5940f600f74520d4c2d03cdb5db9e4f419f7f3baa"
+  },
+  {
+    "file": "velnor-iteration-credit-audit-20260921.md",
+    "sha256": "c9abcea71c6bfe30fb2bf05a27f1a79c61a0418f1a1b10c6856e8f601f17074c"
+  },
+  {
+    "file": "velnor-iteration-credit-audit-20260921.json",
+    "sha256": "cc7b3c5945d39b937b62b46800310665af0ab2cc91fb6227b0a0445f5b466d03"
+  }
+]

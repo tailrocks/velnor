@@ -985,7 +985,7 @@ fn regen_gate_unit_provisions_the_pinned_policy_runtime_on_the_velnor_lane_only(
     fs::write(&config, contents).unwrap();
     let generated = generate(&root);
     let unit = generated.workflow("ci-unit-rust.yml");
-    let provision = "      - name: Provision pinned Velnor workflow policy runtime\n        if: ${{ inputs.policy_runtime }}\n";
+    let provision = "      - name: Provision pinned Velnor workflow policy runtime\n        if: ${{ (inputs.policy_runtime) }}\n";
     assert_eq!(
         unit.matches(provision).count(),
         1,

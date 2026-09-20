@@ -1,0 +1,4 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling velnor-workflow v0.1.0 (/private/tmp/velnor-ci-integration/crates/velnor-workflow)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 25s
