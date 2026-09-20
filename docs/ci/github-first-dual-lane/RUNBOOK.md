@@ -50,15 +50,16 @@ the artifact or that a gate passed.
   pagination, and coverage before invoking the checker. A manual or available
   artifact is not proof until the checker consumes and validates those bindings.
 
-## Latest checkpoint: verified boundary versus pending operation
+## Historical v4 checkpoint: verified boundary versus pending operation (superseded by v5)
 
-The following are external, revision-bound observations captured on
-2026-09-20. They were not run by this records worktree and do not authorize a
-gate, mutation, merge, publication, or host operation.
+The following are historical v4 external, revision-bound observations captured
+on 2026-09-20. The later v5 disposition supersedes the v4 proposal. These
+observations were not run by this records worktree and do not authorize a gate,
+mutation, merge, publication, or host operation.
 
 | External observation | Result | Operational meaning |
 | --- | --- | --- |
-| Authority v3/v4 records | v3 remains frozen/unapproved; v4 is approval-required with no mutation (v4 Markdown SHA-256 `48b1e19ac7b9be59d78200f9e5de7b09e9a1de68fba9b41e3192b952ec022e52`) | Do not execute the authority transition. Six readiness classes remain: placeholders, real old-parser fixture, B closure/two renders, freeze/lease/watchdog/ruleset proof, complete Main-B census, and independent/owner approval with cleanup |
+| Authority v3/v4 records | v3 remains frozen/unapproved; historical v4 was approval-required with no mutation (`G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v4.md` SHA-256 `53aac3ef7c2112d0428582a74e61c4da013d026e6fb17cdae419cd209f5895dd`; matching JSON SHA-256 `1bc1d64db969519e4339b64410aa9a87b53b5cf0e9933f81ecaa16a3593078ba`) | V4 is superseded by the later v5 disposition; do not execute the authority transition. Six v4 readiness classes remain historical: placeholders, real old-parser fixture, B closure/two renders, freeze/lease/watchdog/ruleset proof, complete Main-B census, and independent/owner approval with cleanup |
 | Old-parser `static_files` feasibility | External MD/JSON hashes `8764712693e2883d05846de05a3c2137fb3d31e3ee97ab0ad129186f3ff960f4` / `01ad40d473aa26ae7e5e814ef7c3f93e854d682d2c359fa7588f0bba2b4943e9` show byte transport only | No actual B source, admission, provenance, or authority was proved |
 | Checker source rereview | Exact `ca18d01166681269b6eb5fce8d0f6175fc17aad4` closes the reusable child-matrix blocker; exact checks report 258 tests plus build/fmt/clippy/diff pass | Live authenticated collector/current API remains unwired; offline fixtures are explicitly validation-only and fail closed |
 | Bootstrap owner checkpoint | Exact `b981f43e8dfd70b4c628d29b0e7e9dce679ce537`; owner reports regenerated workflows/state and 1,727/1,727 library plus actionlint/fmt | Exact `G1/reviews/bootstrap-b981f43e-independent.md` rejects the G1 source checkpoint for archive/API-tree, freshness, provenance, legacy, fixture, and image-digest gaps; source full tests are not G1 evidence |
@@ -102,7 +103,7 @@ forever-current state or a gate result.
 | Runtime/native | Run `35481089522` succeeded; macOS job `105998930189` succeeded technically on `macos-26` | Treat as negative native-policy evidence under exact `xcode-27`; do not accept or downgrade the label |
 | Preview/CI | Preview `35481089629` failed at `105998913030` Resolve preview identity; no macOS preview jobs scheduled. CI/Main `35481089696` was in progress with no conclusion | Do not use queued/in-progress/failed output as success; recapture before any gate decision |
 | Authority v5 | v5 Markdown/JSON is approval-required/no mutation; external disposition rejects structural graph/schema/cycle/writer-freeze requirements | Do not execute authority transition or infer approval |
-| Evidence `294de951` | Packaging review passed exact remote/ancestry, 66 checksums, 63 inventory entries, no source paths; two originals changed after cutoff (`distribution/schema2-handoff-0712.md` `01:34:02Z`, `skills-adapter/integration-map.md` `01:31:01Z`) | Packaging-only pass; no attestation, current-equality, or gate approval |
+| Post-census packaging review `294de951` | Packaging review passed at cutoff `2026-09-20T01:28:49Z`: exact remote/ancestry, 66 checksums, 63 inventory entries, no source paths; later review observed `distribution/schema2-handoff-0712.md` changed at `01:34:02Z` and `skills-adapter/integration-map.md` at `01:31:01Z` | Packaging-only pass; those later observations are separate from the `01:28:35Z` census; no attestation, current-equality, or gate approval |
 | Scan/checker | `820f6509` rejected with residual detector TOCTOU, journal/recovery, typed-recovery, stale-output/D19, and authority gaps despite 1,760 tests/clippy/fmt/diff; `ca18d011` bounded child-matrix fix verified but live collector remains unwired | No G1/G0 approval; preserve exact source/review bindings |
 
 ## Current candidate-bound checkpoint

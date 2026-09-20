@@ -35,11 +35,12 @@ they do not replace the historical 78-to-77 reconciliation or claim a
 current-forever state. The historical Velnor check contract at `abe9ad82` is
 not reusable against the later live default revision.
 
-## Latest external checkpoint — 2026-09-20
+## Historical v4 external checkpoint — 2026-09-20 (superseded by v5)
 
 No gate passed. Existing v3 authority records remain frozen and unapproved;
-external v4 is approval-required and performed no mutation. The six remaining
-v4 readiness classes are tracked in `PLAN.md`: resolve all placeholders;
+this v4 checkpoint is historical and superseded by the later v5 disposition.
+V4 was approval-required and performed no mutation. Its six remaining
+readiness classes are tracked in `PLAN.md`: resolve all placeholders;
 execute the real old-parser `static_files` fixture; review B source/closure
 and two byte-stable renders; prove writer freeze/lease/watchdog/ruleset
 guards; capture the complete Main-B live census bound to B; and obtain owner
@@ -47,7 +48,7 @@ plus both independent approvals with cleanup proof.
 
 | Checkpoint | Exact observation | Boundary |
 | --- | --- | --- |
-| Authority v4 | External `G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v4.md`, observed `2026-09-20T00:27:10Z`, SHA-256 `48b1e19ac7b9be59d78200f9e5de7b09e9a1de68fba9b41e3192b952ec022e52` | Proposal only; no source edit, dispatch, App/ruleset change, release, merge, host operation, or G1 authorization |
+| Authority v4 | Historical external `G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v4.{md,json}`, observed `2026-09-20T00:27:10Z`; Markdown SHA-256 `53aac3ef7c2112d0428582a74e61c4da013d026e6fb17cdae419cd209f5895dd`, JSON SHA-256 `1bc1d64db969519e4339b64410aa9a87b53b5cf0e9933f81ecaa16a3593078ba` | Superseded proposal only; no source edit, dispatch, App/ruleset change, release, merge, host operation, or G1 authorization |
 | `static_files` feasibility | External typed-publisher feasibility MD/JSON; hashes `8764712693e2883d05846de05a3c2137fb3d31e3ee97ab0ad129186f3ff960f4` / `01ad40d473aa26ae7e5e814ef7c3f93e854d682d2c359fa7588f0bba2b4943e9` | Transports source bytes only; no actual B admission or authority |
 | Checker seam | Bounded source `ca18d01166681269b6eb5fce8d0f6175fc17aad4` closes the reusable child-matrix blocker; exact source checks report 258 tests plus build/fmt/clippy/diff pass | Live authenticated collector/API remains unwired; offline cases fail `offline-validation-only`; no G0 proof |
 | Bootstrap owner checkpoint | Exact `b981f43e8dfd70b4c628d29b0e7e9dce679ce537`; generated workflows/state regenerated; owner reports 1,727/1,727 library plus actionlint/fmt pass | `G1/reviews/bootstrap-b981f43e-independent.md` rejects the source checkpoint for archive/API-tree, freshness, provenance, legacy, fixture, and image-digest gaps; full source suite is not G1 evidence |
@@ -79,7 +80,7 @@ or any later gate.
 | Runtime / native | Runtime-products `35481089522` succeeded; macOS job `105998930189` succeeded technically on `macos-26` | Negative native-policy observation because exact `xcode-27` is required; no G1 proof |
 | Preview / CI | Preview `35481089629` failed at identity job `105998913030`; no macOS preview jobs scheduled. CI/Main `35481089696` was `in_progress` with no conclusion | Failure/incomplete; no gate result |
 | Authority v5 | Markdown/JSON pair remains approval-required with no mutation; external disposition rejects structural graph/schema/cycle/writer-freeze requirements | No authority approval or execution |
-| Evidence `294de951` | Independent packaging review passed exact remote/ancestry, 66 checksums, 63 inventory entries, and no source paths | Packaging-only pass; two originals changed after cutoff (`distribution/schema2-handoff-0712.md` at `01:34:02Z`; `skills-adapter/integration-map.md` at `01:31:01Z`); no attestation/current-equality/gate approval |
+| Post-census packaging review `294de951` | Independent packaging review passed at cutoff `2026-09-20T01:28:49Z`: exact remote/ancestry, 66 checksums, 63 inventory entries, and no source paths | Packaging-only pass; later review observed `distribution/schema2-handoff-0712.md` changed at `01:34:02Z` and `skills-adapter/integration-map.md` at `01:31:01Z`; those observations are separate from the `01:28:35Z` census, with no attestation/current-equality/gate approval |
 | Scan / checker | Scan `820f6509` is rejected despite 1,760 tests/clippy/fmt/diff; checker `ca18d011` closes the reusable child-matrix blocker with 258 tests/build/fmt/clippy | Scan residuals and live collector/API wiring remain; no G1/G0 proof |
 
 ## User native-version amendment

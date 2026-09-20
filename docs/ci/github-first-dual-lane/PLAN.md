@@ -142,15 +142,18 @@ and collector/checker binding remain unresolved; no helper output closes G0.
 The scan `38345852` reports five full-suite failures, but exact-parent baseline
 attribution remains pending and must not be called a baseline failure.
 
-## Latest external checkpoint — 2026-09-20
+## Historical v4 external checkpoint — 2026-09-20 (superseded by v5)
 
-This is a source-document checkpoint over external evidence. It does not alter
-the gate graph, authorize mutation, or claim a gate exit. Authority plan v3
-remains frozen and unapproved. Its immutable successor, v4, is also
-**approval-required with no mutation performed** (observed
+This is a historical source-document checkpoint over external evidence. It
+does not alter the gate graph, authorize mutation, or claim a gate exit. The
+later v5 pair supersedes this v4 proposal; v3 remains frozen and unapproved,
+and v4 was **approval-required with no mutation performed** (observed
 `2026-09-20T00:27:10Z`; Markdown SHA-256
-`48b1e19ac7b9be59d78200f9e5de7b09e9a1de68fba9b41e3192b952ec022e52`). The
-v4 readiness summary has six unresolved classes, not six approvals:
+`53aac3ef7c2112d0428582a74e61c4da013d026e6fb17cdae419cd209f5895dd`, JSON
+SHA-256
+`1bc1d64db969519e4339b64410aa9a87b53b5cf0e9933f81ecaa16a3593078ba`). The
+v4 readiness summary has six unresolved classes, not six approvals; consult
+the later v5 disposition below for the superseding structural result:
 
 1. Resolve every App/operator/watchdog/integration/source/PR/tree/lease and
    ruleset placeholder.
@@ -192,7 +195,7 @@ close G0 or any later gate.
 | Runtime / native | Runtime-products run `35481089522` completed successfully; macOS job `105998930189` also technically succeeded on label `macos-26` | Negative native-policy result: `macos-26` violates the exact `xcode-27` requirement; no G1 proof |
 | Preview / CI | Preview `35481089629` failed at Resolve preview identity job `105998913030`; no macOS preview jobs scheduled. CI/Main `35481089696` was still `in_progress` with no conclusion | Failure/incomplete observations; no gate result |
 | Authority v5 | Markdown/JSON pair is approval-required with no mutation; external disposition rejects structural graph/schema/cycle/writer-freeze requirements | No authority approval or execution; retain v5 as a rejected proposal record |
-| Evidence checkpoint | External evidence ref `294de951` passed packaging-only review: exact remote/ancestry, 66 checksums, 63 inventory entries, and no source paths; two originals changed after its cutoff (`distribution/schema2-handoff-0712.md` at `01:34:02Z`, `skills-adapter/integration-map.md` at `01:31:01Z`) | Packaging integrity only; no attestation, current-equality, or gate approval |
+| Post-census packaging review | External evidence ref `294de951` passed packaging-only review at cutoff `2026-09-20T01:28:49Z`: exact remote/ancestry, 66 checksums, 63 inventory entries, and no source paths. The later review observed `distribution/schema2-handoff-0712.md` changed at `01:34:02Z` and `skills-adapter/integration-map.md` at `01:31:01Z`; those are not fields in the `01:28:35Z` census | Packaging integrity only; no attestation, current-equality, or gate approval |
 | Scan / checker | Scan `820f6509fe8462265986bacf02e8e86eead26750` reports 1,760 tests, clippy, fmt, and diff pass, but is rejected for detector TOCTOU, SI-B3 fixed-point proof, journal/post-action recovery, typed recovery, stale generated state/D19, and missing authority. Checker `ca18d01166681269b6eb5fce8d0f6175fc17aad4` closes the reusable child-matrix blocker with 258 tests/build/fmt/clippy, while its authenticated live collector remains unwired | Bounded source-review results only; no G1 or G0 proof |
 
 The checker seam remains fail-closed. Harness result
