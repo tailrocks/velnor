@@ -366,6 +366,12 @@ pub(crate) struct ReleaseSection {
     enabled: Option<bool>,
     reason: Option<String>,
     kind: Option<String>,
+    /// Providers whose release verification jobs are prerequisites for
+    /// publication. Absent preserves the historical provider-universe fanout
+    /// for configs that have not adopted this explicit contract; it never
+    /// follows automatic or dispatch routing implicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verification_providers: Option<Vec<String>>,
     package: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     packages: Vec<String>,
@@ -389,6 +395,12 @@ pub(crate) struct ReleaseSection {
     platforms: Vec<String>,
     /// The trusted producer workflow a `workflow_run` event must come from.
     producer_workflow: Option<String>,
+    /// The immutable Actions workflow identity paired with
+    /// `producer_workflow`. Names are display labels and are not trust
+    /// boundaries; a bound producer must declare both its numeric ID and
+    /// repository workflow path.
+    producer_workflow_id: Option<u64>,
+    producer_workflow_path: Option<String>,
     /// The producer conclusion the publish gate requires (`success`).
     producer_conclusion: Option<String>,
     /// The dispatch modes the workflows offer. `publish` is never a dispatch
@@ -769,6 +781,10 @@ impl ReleaseSection {
         self.kind.as_deref()
     }
 
+    pub(crate) fn verification_providers(&self) -> Option<&[String]> {
+        self.verification_providers.as_deref()
+    }
+
     pub(crate) fn package(&self) -> Option<&str> {
         self.package.as_deref()
     }
@@ -827,6 +843,14 @@ impl ReleaseSection {
 
     pub(crate) fn producer_workflow(&self) -> Option<&str> {
         self.producer_workflow.as_deref()
+    }
+
+    pub(crate) fn producer_workflow_id(&self) -> Option<u64> {
+        self.producer_workflow_id
+    }
+
+    pub(crate) fn producer_workflow_path(&self) -> Option<&str> {
+        self.producer_workflow_path.as_deref()
     }
 
     pub(crate) fn producer_conclusion(&self) -> Option<&str> {
@@ -1601,6 +1625,7 @@ impl RepoGenerationConfig {
         })?;
         validate_repository_slug(repository)?;
         validate_workflow(&self.workflow)?;
+        validate_release_verification_providers(&self.workflow, &self.release)?;
         for row in &self.declare {
             validate_declare_row(row, unit_ids)?;
         }
@@ -1805,6 +1830,34 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
     if let Some(value) = workflow.concurrency_group.as_deref() {
         crate::s2::validate_config_text(value, "[workflow] concurrency_group")?;
     }
+    Ok(())
+}
+
+/// Validate the release verification lane contract independently from event
+/// routing. A release may intentionally verify on a strict subset of the
+/// workflow provider universe during hosted recovery, then expand to both
+/// providers after the local lane is qualified.
+fn validate_release_verification_providers(
+    workflow: &WorkflowSection,
+    release: &ReleaseSection,
+) -> Result<(), GeneratorError> {
+    let Some(declared) = release.verification_providers.as_deref() else {
+        return Ok(());
+    };
+    let universe = workflow
+        .providers
+        .as_deref()
+        .map(|providers| parse_provider_set(providers, "[workflow] providers"))
+        .transpose()?
+        .unwrap_or_else(|| crate::s2::provider::ProviderId::ALL.into_iter().collect());
+    let verification = parse_provider_set(declared, "[release] verification_providers")?;
+    crate::s2::provider::require_non_empty(&verification, "[release] verification_providers")?;
+    crate::s2::provider::require_subset(
+        &verification,
+        &universe,
+        "[release] verification_providers",
+        "[workflow] providers",
+    )?;
     Ok(())
 }
 
@@ -3367,6 +3420,8 @@ fn validate_release_binding_kind(release: &ReleaseSection) -> Result<(), Generat
         return Ok(());
     }
     let bound = release.producer_workflow.is_some()
+        || release.producer_workflow_id.is_some()
+        || release.producer_workflow_path.is_some()
         || !release.modes.is_empty()
         || release.archive_checksum.is_some()
         || release.archive_retention_days.is_some()
@@ -3383,6 +3438,7 @@ fn validate_release_binding_kind(release: &ReleaseSection) -> Result<(), Generat
 fn validate_release_bindings(release: &ReleaseSection) -> Result<(), GeneratorError> {
     validate_release_naming(release)?;
     validate_release_binding_kind(release)?;
+    validate_producer_workflow_identity(release)?;
     if let Some(conclusion) = release.producer_conclusion.as_deref()
         && conclusion != "success"
     {
@@ -3448,6 +3504,62 @@ fn validate_release_bindings(release: &ReleaseSection) -> Result<(), GeneratorEr
         }
     }
     Ok(())
+}
+
+fn validate_producer_workflow_identity(release: &ReleaseSection) -> Result<(), GeneratorError> {
+    match (
+        release.producer_workflow.as_deref(),
+        release.producer_workflow_id,
+        release.producer_workflow_path.as_deref(),
+    ) {
+        (Some(workflow), Some(workflow_id), Some(path))
+            if !workflow.is_empty() && workflow_id > 0 && valid_producer_workflow_path(path) => {}
+        (None, None, None) => {}
+        (Some(_), Some(_), Some(_)) => {
+            let workflow = release.producer_workflow.as_deref().unwrap_or_default();
+            let path = release
+                .producer_workflow_path
+                .as_deref()
+                .unwrap_or_default();
+            if workflow.is_empty() {
+                return Err(GeneratorError::usage(
+                    "[release] producer_workflow must be non-empty when producer binding is declared",
+                ));
+            }
+            if release.producer_workflow_id.unwrap_or_default() == 0 {
+                return Err(GeneratorError::usage(
+                    "[release] producer_workflow_id must be a positive Actions workflow ID",
+                ));
+            }
+            if !valid_producer_workflow_path(path) {
+                return Err(GeneratorError::usage(format!(
+                    "[release] producer_workflow_path must be a repository workflow path under `.github/workflows/`, found `{path}`"
+                )));
+            }
+        }
+        _ => {
+            return Err(GeneratorError::usage(
+                "[release] producer_workflow, producer_workflow_id, and producer_workflow_path must be declared together",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A workflow path is an immutable repository object identity, not a display
+/// name. Keep the accepted shape narrow because the value travels into the
+/// privileged admission command as a shell argument.
+fn valid_producer_workflow_path(path: &str) -> bool {
+    let suffix = path.strip_prefix(".github/workflows/").unwrap_or_default();
+    !suffix.is_empty()
+        && !suffix.contains('/')
+        && !suffix.chars().any(char::is_whitespace)
+        && matches!(
+            Path::new(suffix)
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("yml" | "yaml")
+        )
 }
 
 /// Whether `value` is a portable archive member name: a bare file name over
@@ -4352,6 +4464,59 @@ mod tests {
                 "[workflow] default_dispatch_providers names provider `velnor` outside [workflow] providers"
             ),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn release_verification_providers_are_explicit_and_bounded() {
+        let hosted = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n[release]\nverification_providers = [\"github-hosted\"]\n",
+        );
+        must(
+            hosted.validate(&[], &[], &BTreeSet::new()),
+            "validate hosted release verification subset",
+        );
+        assert_eq!(
+            hosted.release().verification_providers(),
+            Some(&["github-hosted".to_owned()][..])
+        );
+
+        for (declared, expected) in [
+            (
+                "verification_providers = []",
+                "[release] verification_providers must name at least one provider",
+            ),
+            (
+                "verification_providers = [\"velnor\", \"velnor\"]",
+                "[release] verification_providers lists provider `velnor` more than once",
+            ),
+            (
+                "verification_providers = [\"unknown\"]",
+                "[release] verification_providers has unknown provider `unknown`",
+            ),
+        ] {
+            let config = config_for(&format!(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n[release]\n{declared}\n"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "invalid release verification provider set must fail",
+            );
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        let unavailable = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\"]\n\n[release]\nverification_providers = [\"velnor\"]\n",
+        );
+        let error = must_fail(
+            unavailable.validate(&[], &[], &BTreeSet::new()),
+            "release verification provider outside universe must fail",
+        );
+        assert!(
+            error.to_string().contains(
+                "[release] verification_providers names provider `velnor` outside [workflow] providers"
+            ),
+            "{error}"
         );
     }
 
@@ -5469,7 +5634,7 @@ mod tests {
             ),
             (
                 "bad-conclusion",
-                "[release]\nproducer_workflow = \"CI\"\nproducer_conclusion = \"completed\"\n",
+                "[release]\nproducer_workflow = \"CI\"\nproducer_workflow_id = 42\nproducer_workflow_path = \".github/workflows/ci.yml\"\nproducer_conclusion = \"completed\"\n",
                 "must be `success`",
             ),
             (
@@ -5529,7 +5694,7 @@ mod tests {
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [release]\nenabled = true\nkind = \"rust-binary\"\npackage = \"example\"\n\
              binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n\
-             producer_workflow = \"CI\"\nproducer_conclusion = \"success\"\n\
+             producer_workflow = \"CI\"\nproducer_workflow_id = 42\nproducer_workflow_path = \".github/workflows/ci.yml\"\nproducer_conclusion = \"success\"\n\
              modes = [\"validate\", \"build\", \"rehearse\"]\n\
              archive_members = [\"example-role\"]\narchive_checksum = \"sha256\"\n\
              archive_retention_days = 14\n\

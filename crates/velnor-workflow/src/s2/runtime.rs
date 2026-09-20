@@ -3798,8 +3798,27 @@ fn resolve_mode_token(arguments: &[OsString]) -> Result<&'static str, GeneratorE
             "producer",
             "expected",
             "conclusion",
-            "rolling",
+            "status",
+            "repository",
+            "expected-repository",
+            "repository-id",
+            "expected-repository-id",
+            "head-repository",
+            "head-repository-id",
+            "workflow-id",
+            "expected-workflow-id",
+            "workflow-path",
+            "expected-workflow-path",
+            "producer-event",
+            "expected-event",
             "branch",
+            "expected-branch",
+            "expected-ref",
+            "run-id",
+            "head-sha",
+            "run-sha",
+            "source-sha",
+            "rolling",
         ],
     )?;
     let event = required_option(&options, "event")?;
@@ -3863,34 +3882,12 @@ fn resolve_mode_token(arguments: &[OsString]) -> Result<&'static str, GeneratorE
             }
             Ok(input_token(input))
         }
-        // A producer run publishes only when its workflow name equals the
-        // declared trusted producer at `success` — the same admission
-        // `admit-producer` enforces, so no caller can publish off any
-        // successful run by name alone.
+        // A producer run publishes only after the complete admission contract
+        // passes. The workflow name is one display check; repository/object,
+        // workflow ID/path, completed status, source event/ref, run ID, and
+        // exact source SHA are all required by `admit-producer`.
         "workflow_run" => {
-            let producer = options.get("producer").map_or("", String::as_str);
-            let expected = options.get("expected").map_or("", String::as_str);
-            let conclusion = options.get("conclusion").map_or("", String::as_str);
-            if producer.is_empty() {
-                return Err(GeneratorError::usage(
-                    "release publish refused: workflow_run without an admitted producer",
-                ));
-            }
-            if expected.is_empty() {
-                return Err(GeneratorError::usage(
-                    "release publish refused: workflow_run without a trusted producer to admit against",
-                ));
-            }
-            if producer != expected {
-                return Err(GeneratorError::usage(format!(
-                    "release publish refused: producer `{producer}` is not the trusted `{expected}`"
-                )));
-            }
-            if conclusion != "success" {
-                return Err(GeneratorError::usage(format!(
-                    "release publish refused: producer concluded {conclusion}, not success"
-                )));
-            }
+            validate_producer_admission(&options)?;
             Ok("publish")
         }
         other => Err(GeneratorError::usage(format!(
@@ -3916,47 +3913,215 @@ fn is_default_branch_ref(reference: &str, options: &BTreeMap<String, String>) ->
     reference == format!("refs/heads/{branch}")
 }
 
-/// Resolve the source revision the lane builds: a `workflow_run` event
-/// builds the producer run's head SHA, every other event builds its own
-/// SHA. Both must be full 40-hex revisions; anything else fails closed
-/// instead of building an unidentified tree.
+/// Resolve the source revision the lane builds. A `workflow_run` source is
+/// accepted only when its positive run identity and source SHA agree; the
+/// publish gate performs the remaining repository/workflow/event admission
+/// before any privileged consumer checks out the output.
 fn resolve_source(arguments: &[OsString]) -> Result<(), GeneratorError> {
-    let options = parse_options(arguments, &["event", "sha", "run-sha"])?;
+    let options = parse_options(
+        arguments,
+        &["event", "sha", "run-sha", "run-id", "source-sha"],
+    )?;
     let event = required_option(&options, "event")?;
     let sha = if event == "workflow_run" {
-        required_option(&options, "run-sha")?
+        let run_id = required_option(&options, "run-id")?;
+        require_positive_decimal("run-id", run_id)?;
+        let run_sha = require_full_sha("run-sha", required_option(&options, "run-sha")?)?;
+        let source_sha = require_full_sha("source-sha", required_option(&options, "source-sha")?)?;
+        if run_sha != source_sha {
+            return Err(GeneratorError::usage(format!(
+                "release source refused: producer run {run_id} head SHA {run_sha} != admitted source SHA {source_sha}"
+            )));
+        }
+        run_sha
     } else {
-        required_option(&options, "sha")?
+        require_full_sha("sha", required_option(&options, "sha")?)?
     };
-    if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(GeneratorError::usage(format!(
-            "release source must be a 40-hex revision, found `{sha}`"
-        )));
-    }
     println!("{sha}");
     Ok(())
 }
 
-/// Admit a `workflow_run` producer: the run's workflow name must equal the
-/// declared trusted producer and its conclusion must be `success`. A name
-/// or conclusion mismatch is a hard refusal, never a warning.
+/// Admit a `workflow_run` producer. Every identity field comes from the
+/// event payload or the repository's static contract; no successful workflow
+/// name alone can unlock a privileged preview.
 fn admit_producer(arguments: &[OsString]) -> Result<(), GeneratorError> {
-    let options = parse_options(arguments, &["producer", "expected", "conclusion"])?;
-    let producer = required_option(&options, "producer")?;
-    let expected = required_option(&options, "expected")?;
-    let conclusion = required_option(&options, "conclusion")?;
+    let options = parse_options(
+        arguments,
+        &[
+            "producer",
+            "expected",
+            "conclusion",
+            "status",
+            "repository",
+            "expected-repository",
+            "repository-id",
+            "expected-repository-id",
+            "head-repository",
+            "head-repository-id",
+            "workflow-id",
+            "expected-workflow-id",
+            "workflow-path",
+            "expected-workflow-path",
+            "producer-event",
+            "expected-event",
+            "branch",
+            "expected-branch",
+            "ref",
+            "expected-ref",
+            "run-id",
+            "head-sha",
+            "run-sha",
+            "source-sha",
+        ],
+    )?;
+    validate_producer_admission(&options)?;
+    println!("admitted");
+    Ok(())
+}
+
+/// The one producer admission contract shared by `resolve-mode` and the
+/// privileged `admit-producer` command. It deliberately compares both
+/// human-readable names and immutable repository/workflow object identities.
+fn validate_producer_admission(options: &BTreeMap<String, String>) -> Result<(), GeneratorError> {
+    let producer = required_option(options, "producer")?;
+    let expected = required_option(options, "expected")?;
     if producer != expected {
         return Err(GeneratorError::usage(format!(
             "release publish refused: producer `{producer}` is not the trusted `{expected}`"
         )));
     }
+    let status = required_option(options, "status")?;
+    if status != "completed" {
+        return Err(GeneratorError::usage(format!(
+            "release publish refused: producer run status is `{status}`, not completed"
+        )));
+    }
+    let conclusion = required_option(options, "conclusion")?;
     if conclusion != "success" {
         return Err(GeneratorError::usage(format!(
             "release publish refused: producer `{producer}` concluded {conclusion}, not success"
         )));
     }
-    println!("admitted");
+
+    let repository = required_option(options, "repository")?;
+    let expected_repository = required_option(options, "expected-repository")?;
+    if repository != expected_repository {
+        return Err(GeneratorError::usage(format!(
+            "release publish refused: producer repository `{repository}` is not trusted `{expected_repository}`"
+        )));
+    }
+    let repository_id =
+        require_positive_decimal("repository-id", required_option(options, "repository-id")?)?;
+    let expected_repository_id = require_positive_decimal(
+        "expected-repository-id",
+        required_option(options, "expected-repository-id")?,
+    )?;
+    if repository_id != expected_repository_id {
+        return Err(GeneratorError::usage(format!(
+            "release publish refused: producer repository object {repository_id} is not trusted object {expected_repository_id}"
+        )));
+    }
+    let head_repository = required_option(options, "head-repository")?;
+    let head_repository_id = require_positive_decimal(
+        "head-repository-id",
+        required_option(options, "head-repository-id")?,
+    )?;
+    if head_repository != expected_repository || head_repository_id != expected_repository_id {
+        return Err(GeneratorError::usage(
+            "release publish refused: producer head repository is not the trusted repository object",
+        ));
+    }
+
+    let workflow_id =
+        require_positive_decimal("workflow-id", required_option(options, "workflow-id")?)?;
+    let expected_workflow_id = require_positive_decimal(
+        "expected-workflow-id",
+        required_option(options, "expected-workflow-id")?,
+    )?;
+    if workflow_id != expected_workflow_id {
+        return Err(GeneratorError::usage(format!(
+            "release publish refused: producer workflow object {workflow_id} is not trusted object {expected_workflow_id}"
+        )));
+    }
+    let workflow_path = required_option(options, "workflow-path")?;
+    let expected_workflow_path = required_option(options, "expected-workflow-path")?;
+    if !valid_admission_workflow_path(expected_workflow_path)
+        || workflow_path != expected_workflow_path
+    {
+        return Err(GeneratorError::usage(format!(
+            "release publish refused: producer workflow path `{workflow_path}` is not trusted `{expected_workflow_path}`"
+        )));
+    }
+
+    let event = required_option(options, "producer-event")?;
+    let expected_event = required_option(options, "expected-event")?;
+    if expected_event != "push" || event != expected_event {
+        return Err(GeneratorError::usage(format!(
+            "release publish refused: producer event `{event}` is not trusted `{expected_event}`"
+        )));
+    }
+    let branch = required_option(options, "branch")?;
+    let expected_branch = required_option(options, "expected-branch")?;
+    if branch != expected_branch || expected_branch.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "release publish refused: producer branch `{branch}` is not trusted `{expected_branch}`"
+        )));
+    }
+    let reference = required_option(options, "ref")?;
+    let expected_ref = required_option(options, "expected-ref")?;
+    let expected_branch_ref = format!("refs/heads/{expected_branch}");
+    if expected_ref != expected_branch_ref || reference != expected_ref {
+        return Err(GeneratorError::usage(format!(
+            "release publish refused: workflow ref `{reference}` is not trusted `{expected_ref}`"
+        )));
+    }
+
+    require_positive_decimal("run-id", required_option(options, "run-id")?)?;
+    let head_sha = require_full_sha("head-sha", required_option(options, "head-sha")?)?;
+    let run_sha = require_full_sha("run-sha", required_option(options, "run-sha")?)?;
+    let source_sha = require_full_sha("source-sha", required_option(options, "source-sha")?)?;
+    if head_sha != run_sha || run_sha != source_sha {
+        return Err(GeneratorError::usage(format!(
+            "release publish refused: producer head/run/source SHA mismatch ({head_sha}, {run_sha}, {source_sha})"
+        )));
+    }
     Ok(())
+}
+
+fn require_full_sha(name: &str, value: &str) -> Result<String, GeneratorError> {
+    if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(GeneratorError::usage(format!(
+            "release {name} must be a 40-hex revision, found `{value}`"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn require_positive_decimal(name: &str, value: &str) -> Result<u64, GeneratorError> {
+    let parsed = value.parse::<u64>().map_err(|_| {
+        GeneratorError::usage(format!(
+            "release {name} must be a positive decimal object ID, found `{value}`"
+        ))
+    })?;
+    if parsed == 0 || parsed.to_string() != value {
+        return Err(GeneratorError::usage(format!(
+            "release {name} must be a positive canonical decimal object ID, found `{value}`"
+        )));
+    }
+    Ok(parsed)
+}
+
+fn valid_admission_workflow_path(path: &str) -> bool {
+    let suffix = path.strip_prefix(".github/workflows/").unwrap_or_default();
+    !suffix.is_empty()
+        && !suffix.contains('/')
+        && !suffix.chars().any(char::is_whitespace)
+        && matches!(
+            Path::new(suffix)
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("yml" | "yaml")
+        )
 }
 
 /// Assemble the consumer release manifest and the independent checksum
@@ -6004,6 +6169,52 @@ workspace_check = true
         options.iter().map(OsString::from).collect()
     }
 
+    fn producer_args_with(overrides: &[(&str, &str)]) -> Vec<OsString> {
+        let mut values = vec![
+            ("--producer", "CI"),
+            ("--expected", "CI"),
+            ("--conclusion", "success"),
+            ("--status", "completed"),
+            ("--repository", "example/repo"),
+            ("--expected-repository", "example/repo"),
+            ("--repository-id", "123"),
+            ("--expected-repository-id", "123"),
+            ("--head-repository", "example/repo"),
+            ("--head-repository-id", "123"),
+            ("--workflow-id", "42"),
+            ("--expected-workflow-id", "42"),
+            ("--workflow-path", ".github/workflows/ci.yml"),
+            ("--expected-workflow-path", ".github/workflows/ci.yml"),
+            ("--producer-event", "push"),
+            ("--expected-event", "push"),
+            ("--branch", "main"),
+            ("--expected-branch", "main"),
+            ("--ref", "refs/heads/main"),
+            ("--expected-ref", "refs/heads/main"),
+            ("--run-id", "77"),
+            ("--head-sha", "0123456789abcdef0123456789abcdef01234567"),
+            ("--run-sha", "0123456789abcdef0123456789abcdef01234567"),
+            ("--source-sha", "0123456789abcdef0123456789abcdef01234567"),
+        ];
+        for (name, value) in overrides {
+            let entry = values.iter_mut().find(|(key, _)| key == name);
+            assert!(entry.is_some(), "unknown producer fixture option: {name}");
+            if let Some(entry) = entry {
+                entry.1 = value;
+            }
+        }
+        values
+            .into_iter()
+            .flat_map(|(name, value)| [OsString::from(name), OsString::from(value)])
+            .collect()
+    }
+
+    fn producer_mode_args_with(event: &str, overrides: &[(&str, &str)]) -> Vec<OsString> {
+        let mut arguments = vec![OsString::from("--event"), OsString::from(event)];
+        arguments.extend(producer_args_with(overrides));
+        arguments
+    }
+
     /// Every event resolves to exactly one mode token: tag pushes and
     /// admitted producer runs publish, dispatches drill, and everything else
     /// validates. The token is the whole point (callers print it for
@@ -6066,21 +6277,6 @@ workspace_check = true
             (vec!["--event", "schedule"], "validate"),
             (vec!["--event", "pull_request"], "validate"),
             (vec!["--event", "pull_request_target"], "validate"),
-            // A producer run at success publishes only when its name equals
-            // the declared trusted producer.
-            (
-                vec![
-                    "--event",
-                    "workflow_run",
-                    "--producer",
-                    "CI",
-                    "--expected",
-                    "CI",
-                    "--conclusion",
-                    "success",
-                ],
-                "publish",
-            ),
         ];
         for (args, expected) in cases {
             let token = must(resolve_mode_token(&release_args(&args)), "mode resolves");
@@ -6090,6 +6286,11 @@ workspace_check = true
                 "mode token must be a single word: {token:?}"
             );
         }
+        let token = must(
+            resolve_mode_token(&producer_mode_args_with("workflow_run", &[])),
+            "fully admitted producer resolves",
+        );
+        assert_eq!(token, "publish");
     }
 
     /// Anything that would write externally from an untrusted context is a
@@ -6151,29 +6352,18 @@ workspace_check = true
             );
         }
         let error = must_fail(
-            resolve_mode(&release_args(&[
-                "--event",
-                "workflow_run",
-                "--conclusion",
-                "success",
-            ])),
+            resolve_mode(&release_args(&["--event", "workflow_run"])),
             "producer-less run must not publish",
         );
         assert!(
-            error.to_string().contains("without an admitted producer"),
+            error.to_string().contains("--producer needs a value"),
             "unexpected error: {error}"
         );
         let error = must_fail(
-            resolve_mode(&release_args(&[
-                "--event",
+            resolve_mode(&producer_mode_args_with(
                 "workflow_run",
-                "--producer",
-                "CI",
-                "--expected",
-                "CI",
-                "--conclusion",
-                "failure",
-            ])),
+                &[("--conclusion", "failure")],
+            )),
             "failed producer must not publish",
         );
         assert!(
@@ -6199,22 +6389,15 @@ workspace_check = true
         );
     }
 
-    /// A successful run under any other name is not the trusted producer,
-    /// and without a name to admit against there is no admission: the
-    /// `workflow_run` arm admits exactly like `admit-producer`.
+    /// A successful run under any other identity is not the trusted producer;
+    /// the `workflow_run` arm uses the same complete admission contract.
     #[test]
     fn resolve_mode_workflow_run_admits_only_the_trusted_producer() {
         let error = must_fail(
-            resolve_mode(&release_args(&[
-                "--event",
+            resolve_mode(&producer_mode_args_with(
                 "workflow_run",
-                "--producer",
-                "EVIL",
-                "--expected",
-                "CI",
-                "--conclusion",
-                "success",
-            ])),
+                &[("--producer", "EVIL")],
+            )),
             "wrong-name producer must not publish",
         );
         assert!(
@@ -6227,21 +6410,20 @@ workspace_check = true
                 "workflow_run",
                 "--producer",
                 "CI",
-                "--conclusion",
-                "success",
+                "--expected",
+                "CI",
             ])),
             "producer without a trusted name must not publish",
         );
         assert!(
-            error
-                .to_string()
-                .contains("without a trusted producer to admit against"),
+            error.to_string().contains("--status needs a value"),
             "unexpected error: {error}"
         );
     }
 
-    /// A `workflow_run` builds the producer run's head SHA; every other
-    /// event builds its own SHA. Both must be full revisions.
+    /// A `workflow_run` builds the producer run's head SHA only when the
+    /// positive run identity and source SHA agree; every other event builds
+    /// its own SHA.
     #[test]
     fn resolve_source_binds_the_producer_revision() {
         let run = "0123456789abcdef0123456789abcdef01234567";
@@ -6252,7 +6434,11 @@ workspace_check = true
                 "workflow_run",
                 "--sha",
                 own,
+                "--run-id",
+                "77",
                 "--run-sha",
+                run,
+                "--source-sha",
                 run,
             ])),
             "producer revision resolves",
@@ -6270,60 +6456,126 @@ workspace_check = true
             "unexpected error: {error}"
         );
         let error = must_fail(
-            resolve_source(&release_args(&["--event", "workflow_run", "--sha", own])),
+            resolve_source(&release_args(&[
+                "--event",
+                "workflow_run",
+                "--sha",
+                own,
+                "--run-id",
+                "77",
+            ])),
             "producer run without a run SHA",
         );
         assert!(
             error.to_string().contains("--run-sha needs a value"),
             "unexpected error: {error}"
         );
+        let error = must_fail(
+            resolve_source(&release_args(&[
+                "--event",
+                "workflow_run",
+                "--run-sha",
+                run,
+                "--run-id",
+                "77",
+                "--source-sha",
+                own,
+            ])),
+            "mismatched producer source",
+        );
+        assert!(
+            error.to_string().contains("head SHA")
+                && error.to_string().contains("admitted source SHA"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            resolve_source(&release_args(&[
+                "--event",
+                "workflow_run",
+                "--run-sha",
+                run,
+                "--run-id",
+                "0",
+                "--source-sha",
+                run,
+            ])),
+            "invalid producer run identity",
+        );
+        assert!(
+            error.to_string().contains("run-id") && error.to_string().contains("positive"),
+            "unexpected error: {error}"
+        );
     }
 
-    /// The producer name must equal the trusted producer and its conclusion
-    /// must be `success`; a mismatch is a refusal, never a warning.
+    /// Admission binds every producer identity field. A foreign repository,
+    /// same-name workflow object, wrong event/branch, mismatched source, or
+    /// invalid run identity is refused before a privileged consumer can use
+    /// the source output.
     #[test]
-    fn admit_producer_refuses_name_and_conclusion_mismatch() {
+    fn admit_producer_refuses_identity_mismatch() {
         must(
-            admit_producer(&release_args(&[
-                "--producer",
-                "CI",
-                "--expected",
-                "CI",
-                "--conclusion",
-                "success",
-            ])),
+            admit_producer(&producer_args_with(&[])),
             "trusted producer admits",
         );
+        for (name, overrides, expected) in [
+            (
+                "foreign repository",
+                vec![("--repository", "fork/repo")],
+                "producer repository",
+            ),
+            (
+                "foreign head repository",
+                vec![("--head-repository", "fork/repo")],
+                "head repository",
+            ),
+            (
+                "same-name workflow object",
+                vec![("--workflow-id", "99")],
+                "workflow object",
+            ),
+            (
+                "same-name workflow path",
+                vec![("--workflow-path", ".github/workflows/other.yml")],
+                "workflow path",
+            ),
+            (
+                "wrong event",
+                vec![("--producer-event", "workflow_dispatch")],
+                "producer event",
+            ),
+            (
+                "wrong branch",
+                vec![("--branch", "feature")],
+                "producer branch",
+            ),
+            (
+                "wrong ref",
+                vec![("--ref", "refs/heads/feature")],
+                "workflow ref",
+            ),
+            (
+                "mismatched source",
+                vec![("--source-sha", "89abcdef0123456789abcdef0123456789abcdef")],
+                "SHA mismatch",
+            ),
+            ("invalid run", vec![("--run-id", "0")], "run-id"),
+        ] {
+            let error = must_fail(admit_producer(&producer_args_with(&overrides)), name);
+            assert!(
+                error.to_string().contains(expected),
+                "{name} must name `{expected}`, got: {error}"
+            );
+        }
         let error = must_fail(
-            admit_producer(&release_args(&[
-                "--producer",
-                "Other",
-                "--expected",
-                "CI",
-                "--conclusion",
-                "success",
-            ])),
-            "untrusted producer",
+            admit_producer(&producer_args_with(&[("--status", "in_progress")])),
+            "incomplete producer",
         );
-        assert!(
-            error.to_string().contains("is not the trusted"),
-            "unexpected error: {error}"
-        );
+        assert!(error.to_string().contains("not completed"), "{error}");
         let error = must_fail(
-            admit_producer(&release_args(&[
-                "--producer",
-                "CI",
-                "--expected",
-                "CI",
-                "--conclusion",
-                "cancelled",
-            ])),
+            admit_producer(&producer_args_with(&[("--conclusion", "cancelled")])),
             "cancelled producer",
         );
-        assert!(
-            error.to_string().contains("not success"),
-            "unexpected error: {error}"
-        );
+        assert!(error.to_string().contains("not success"), "{error}");
     }
 
     /// The canonical download flags fail closed, resume, retry inside a
