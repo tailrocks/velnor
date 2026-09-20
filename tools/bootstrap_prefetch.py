@@ -27,9 +27,12 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
+from urllib.parse import urlparse
 
 
 SCHEMA = "bootstrap.prefetch.v2"
+BASE_CONTRACT_SCHEMA = "bootstrap.prefetch.contract.v1"
+BASE_CONTRACT_PRODUCER = "base-owned-prefetch-contract.v1"
 REGISTRY_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 REGISTRY_TRANSPORT = "sparse+https://index.crates.io/"
 DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin"
@@ -76,6 +79,19 @@ class BundleContract:
     toolchain_input_digest: str
     closure: Mapping[str, Any]
     recipe: Mapping[str, Any]
+    git_sources: tuple[tuple[str, str], ...] = ()
+    git_provenance: tuple[tuple[str, str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class BaseOwnedContract:
+    """A contract loaded through the isolated base-owned transport boundary."""
+
+    contract: BundleContract
+    trusted_path: Path
+    trusted_root: Path
+    candidate_root: Path
+    envelope_sha256: str
 
 
 @dataclass(frozen=True)
@@ -142,6 +158,135 @@ def _canonical(value: Any) -> bytes:
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def bundle_contract_payload(contract: BundleContract) -> dict[str, Any]:
+    """Serialize contract data; callers must still use base transport to trust it."""
+
+    if not isinstance(contract, BundleContract):
+        _fail("BundleContract is required")
+    return {
+        "source_head_sha": contract.source_head_sha,
+        "source_tree_sha": contract.source_tree_sha,
+        "dependency_contract_digest": contract.dependency_contract_digest,
+        "toolchain_input_digest": contract.toolchain_input_digest,
+        "closure": contract.closure,
+        "recipe": contract.recipe,
+        "git_sources": [
+            {"url": url, "rev": rev}
+            for url, rev in contract.git_sources
+        ],
+        "git_provenance": [
+            {"url": url, "rev": rev, "tree": tree}
+            for url, rev, tree in contract.git_provenance
+        ],
+    }
+
+
+def _contract_from_payload(value: Mapping[str, Any]) -> BundleContract:
+    expected_keys = {
+        "source_head_sha",
+        "source_tree_sha",
+        "dependency_contract_digest",
+        "toolchain_input_digest",
+        "closure",
+        "recipe",
+        "git_sources",
+        "git_provenance",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_keys:
+        _fail("base-owned contract payload schema mismatch")
+    git_sources_value = value["git_sources"]
+    if not isinstance(git_sources_value, list):
+        _fail("base-owned git_sources must be an array")
+    git_sources: list[tuple[str, str]] = []
+    for item in git_sources_value:
+        if not isinstance(item, Mapping) or set(item) != {"url", "rev"}:
+            _fail("base-owned git_sources entry schema mismatch")
+        git_sources.append((item["url"], item["rev"]))
+    provenance_value = value["git_provenance"]
+    if not isinstance(provenance_value, list):
+        _fail("base-owned git_provenance must be an array")
+    provenance: list[tuple[str, str, str]] = []
+    for item in provenance_value:
+        if not isinstance(item, Mapping) or set(item) != {"url", "rev", "tree"}:
+            _fail("base-owned git_provenance entry schema mismatch")
+        provenance.append((item["url"], item["rev"], item["tree"]))
+    return BundleContract(
+        value["source_head_sha"],
+        value["source_tree_sha"],
+        value["dependency_contract_digest"],
+        value["toolchain_input_digest"],
+        value["closure"],
+        value["recipe"],
+        tuple(git_sources),
+        tuple(provenance),
+    )
+
+
+def load_base_owned_contract(
+    path: Path,
+    *,
+    trusted_root: Path,
+    candidate_root: Path,
+    expected_sha256: str,
+) -> BaseOwnedContract:
+    """Load only a canonical contract envelope from a disjoint trusted root.
+
+    The expected digest and trusted-root placement are supplied by the
+    base-owned transport.  This loader is a boundary check, not a cryptographic
+    claim about the Python object or its producer.
+    """
+
+    _digest(expected_sha256, "base-owned contract envelope digest")
+    trusted_root = trusted_root.absolute()
+    candidate_root = candidate_root.absolute()
+    for root, field in ((trusted_root, "trusted contract root"), (candidate_root, "candidate root")):
+        try:
+            info = root.lstat()
+        except OSError as exc:
+            _fail(f"{field} is unavailable: {exc}")
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            _fail(f"{field} must be a non-symlink directory")
+    trusted_root = trusted_root.resolve()
+    candidate_root = candidate_root.resolve()
+    if (
+        trusted_root == candidate_root
+        or trusted_root.is_relative_to(candidate_root)
+        or candidate_root.is_relative_to(trusted_root)
+    ):
+        _fail("trusted and candidate contract roots must be disjoint")
+    path = path.absolute()
+    try:
+        relative = path.resolve().relative_to(trusted_root)
+    except ValueError:
+        _fail("base-owned contract path must be inside the trusted root")
+    current = trusted_root
+    for component in relative.parts[:-1]:
+        current = current / component
+        info = current.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            _fail("base-owned contract path has an unsafe parent")
+    raw = _lstat_regular(path, "base-owned contract envelope", 4 * 1024 * 1024, single_link=True, exact_mode=0o644)
+    if _sha256(raw) != expected_sha256:
+        _fail("base-owned contract envelope digest mismatch")
+    try:
+        envelope = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _fail(f"base-owned contract envelope is not valid JSON: {exc}")
+    if not isinstance(envelope, Mapping) or set(envelope) != {"schema", "producer", "contract"}:
+        _fail("base-owned contract envelope schema mismatch")
+    if envelope["schema"] != BASE_CONTRACT_SCHEMA or envelope["producer"] != BASE_CONTRACT_PRODUCER:
+        _fail("unsupported base-owned contract envelope")
+    if raw != _canonical(envelope):
+        _fail("base-owned contract envelope is not canonical JSON")
+    return BaseOwnedContract(
+        contract=_contract_from_payload(envelope["contract"]),
+        trusted_path=path,
+        trusted_root=trusted_root,
+        candidate_root=candidate_root,
+        envelope_sha256=expected_sha256,
+    )
 
 
 def _digest(value: str, field: str) -> None:
@@ -396,6 +541,31 @@ def _git_run(directory: Path, args: Sequence[str]) -> str:
     return result.stdout.strip()
 
 
+def _git_origin_value(directory: Path, field: str) -> str:
+    result = _git_process(directory, ["config", "--get-all", "remote.origin.url"])
+    if result.returncode != 0 or not result.stdout.strip():
+        _fail(f"{field} lacks a single recorded Git origin URL")
+    values = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(values) != 1:
+        _fail(f"{field} has multiple Git origin URLs")
+    return values[0]
+
+
+def _git_origin_url(directory: Path, field: str) -> str:
+    value = _git_origin_value(directory, field)
+    return _validate_git_url(value, field)
+
+
+def _git_local_origin(directory: Path, field: str) -> Path:
+    value = _git_origin_value(directory, field)
+    if value.startswith(("https://", "http://", "ssh://", "git@")):
+        _fail(f"{field} must point at its exact local Cargo Git DB")
+    path = Path(value)
+    if not path.is_absolute():
+        _fail(f"{field} local origin must be absolute")
+    return path.absolute()
+
+
 def _git_bytes(directory: Path, args: Sequence[str]) -> bytes:
     result = _git_process(directory, args, binary=True)
     if result.returncode != 0:
@@ -580,13 +750,53 @@ def _dependency_tables(
             yield "workspace.dependencies", table
 
 
+def _validate_git_url(value: str, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        _fail(f"{field} must be a URL")
+    candidate = value[4:] if value.startswith("git+") else value
+    parsed = urlparse(candidate)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "github.com"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port is not None
+        or not parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        _fail(f"{field} must be an HTTPS github.com URL without credentials/query")
+    return candidate.rstrip("/")
+
+
 def _reviewed_git_set(
     reviewed_git: Sequence[tuple[str, str]],
 ) -> set[tuple[str, str]]:
-    result = set(reviewed_git)
-    for url, rev in result:
-        if not isinstance(url, str) or not url or not isinstance(rev, str) or not _HEX40.fullmatch(rev):
+    result: set[tuple[str, str]] = set()
+    for url, rev in reviewed_git:
+        url = _validate_git_url(url, "reviewed Git URL")
+        if not isinstance(rev, str) or not _HEX40.fullmatch(rev):
             _fail("reviewed Git entries need a URL and full 40-hex revision")
+        result.add((url, rev))
+    return result
+
+
+def _git_provenance_map(
+    provenance: Sequence[tuple[str, str, str]],
+) -> dict[tuple[str, str], str]:
+    result: dict[tuple[str, str], str] = {}
+    for item in provenance:
+        if not isinstance(item, (tuple, list)) or len(item) != 3:
+            _fail("Git provenance entries need URL, revision, and tree")
+        url, rev, tree = item
+        url = _validate_git_url(url, "Git provenance URL")
+        if not isinstance(rev, str) or not _HEX40.fullmatch(rev):
+            _fail("Git provenance revision must be full lowercase 40-hex")
+        _identity(tree, "Git provenance tree")
+        key = (url, rev)
+        if key in result:
+            _fail("Git provenance contains duplicate URL/revision")
+        result[key] = tree
     return result
 
 
@@ -623,6 +833,7 @@ def _validate_dependency_table(
             rev = specification.get("rev")
             if not isinstance(url, str) or not isinstance(rev, str) or not _HEX40.fullmatch(rev):
                 _fail(f"git dependency {table_name}.{dependency_name} needs full rev")
+            url = _validate_git_url(url, f"git dependency {table_name}.{dependency_name}")
             if any(key in specification for key in ("branch", "tag")):
                 _fail(f"floating git selector in {table_name}.{dependency_name}")
             source = (url, rev)
@@ -1199,7 +1410,8 @@ def _manifest_git_records(value: Any) -> set[tuple[str, str]]:
         if not isinstance(item, dict) or set(item) != {"url", "rev"}:
             _fail("git_sources entries must have url/rev")
         url, rev = item["url"], item["rev"]
-        if not isinstance(url, str) or not isinstance(rev, str) or not _HEX40.fullmatch(rev):
+        url = _validate_git_url(url, "manifest Git URL")
+        if not isinstance(rev, str) or not _HEX40.fullmatch(rev):
             _fail("git_sources entries need URL and full 40-hex revision")
         result.add((url, rev))
     if len(result) != len(value):
@@ -1332,13 +1544,19 @@ def _validated_recipe_contract(value: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validated_bundle_contract(contract: BundleContract) -> tuple[dict[str, Any], dict[str, Any]]:
+def _validated_bundle_contract(
+    contract: BundleContract,
+) -> tuple[dict[str, Any], dict[str, Any], set[tuple[str, str]], tuple[tuple[str, str, str], ...]]:
     if not isinstance(contract, BundleContract):
         _fail("trusted BundleContract is required; manifest fields are not authority")
     _identity(contract.source_head_sha, "trusted source_head_sha")
     _identity(contract.source_tree_sha, "trusted source_tree_sha")
     _digest(contract.dependency_contract_digest, "trusted dependency_contract_digest")
     _digest(contract.toolchain_input_digest, "trusted toolchain_input_digest")
+    trusted_git = _reviewed_git_set(contract.git_sources)
+    trusted_provenance = tuple(contract.git_provenance)
+    if set(_git_provenance_map(trusted_provenance)) != trusted_git:
+        _fail("trusted Git provenance must cover every trusted Git source")
     closure = _validated_closure_contract(
         contract.closure,
         source_head_sha=contract.source_head_sha,
@@ -1351,13 +1569,13 @@ def _validated_bundle_contract(contract: BundleContract) -> tuple[dict[str, Any]
         _fail("trusted recipe and closure target triples differ")
     if recipe["features"] != closure["features"]:
         _fail("trusted recipe and closure feature selections differ")
-    return closure, recipe
+    return closure, recipe, trusted_git, trusted_provenance
 
 
 def validate_bundle(
     bundle_root: Path,
     *,
-    contract: BundleContract | None = None,
+    contract: BaseOwnedContract | None = None,
     reviewed_git: Sequence[tuple[str, str]] | None = None,
     limits: Limits = Limits(),
     cargo_home: Path | None = None,
@@ -1368,7 +1586,16 @@ def validate_bundle(
     bundle_root = bundle_root.absolute()
     if not bundle_root.is_dir() or bundle_root.is_symlink():
         _fail("bundle root must be a non-symlink directory")
-    closure_contract, recipe_contract = _validated_bundle_contract(contract)
+    if not isinstance(contract, BaseOwnedContract):
+        _fail("BaseOwnedContract is required; plain contract objects are not authority")
+    bundle_root = bundle_root.resolve()
+    if not bundle_root.is_relative_to(contract.candidate_root):
+        _fail("bundle is outside the candidate root bound to the base contract")
+    if bundle_root.is_relative_to(contract.trusted_root):
+        _fail("bundle overlaps the trusted contract root")
+    closure_contract, recipe_contract, trusted_git, trusted_provenance = _validated_bundle_contract(
+        contract.contract
+    )
     if cargo_home is None:
         _fail("trusted closure validation requires an offline Cargo home")
     manifest = _read_manifest(bundle_root)
@@ -1393,13 +1620,13 @@ def validate_bundle(
         not isinstance(item, str) for item in manifest["features"]
     ):
         _fail("features must be a string array")
-    if manifest["source_head_sha"] != contract.source_head_sha:
+    if manifest["source_head_sha"] != contract.contract.source_head_sha:
         _fail("bundle source HEAD differs from the trusted source contract")
-    if manifest["source_tree_sha"] != contract.source_tree_sha:
+    if manifest["source_tree_sha"] != contract.contract.source_tree_sha:
         _fail("bundle source tree differs from the trusted source contract")
-    if manifest["dependency_contract_digest"] != contract.dependency_contract_digest:
+    if manifest["dependency_contract_digest"] != contract.contract.dependency_contract_digest:
         _fail("bundle dependency contract differs from the trusted source contract")
-    if manifest["toolchain_input_digest"] != contract.toolchain_input_digest:
+    if manifest["toolchain_input_digest"] != contract.contract.toolchain_input_digest:
         _fail("bundle toolchain input differs from the trusted source contract")
     if manifest["target_package"] != closure_contract["target_package"]:
         _fail("bundle target package differs from the trusted closure contract")
@@ -1417,12 +1644,11 @@ def validate_bundle(
         _fail("registry source census is not exactly the reviewed crates.io source")
     if manifest["registry_transport"] != REGISTRY_TRANSPORT:
         _fail("registry transport is not the reviewed sparse endpoint")
-    if reviewed_git is None:
-        _fail("reviewed Git source policy is required for bundle validation")
+    if reviewed_git is not None and _reviewed_git_set(reviewed_git) != trusted_git:
+        _fail("caller Git source policy differs from the base-owned contract")
     manifest_git = _manifest_git_records(manifest["git_sources"])
-    reviewed_git_set = _reviewed_git_set(reviewed_git)
-    if manifest_git != reviewed_git_set:
-        _fail("manifest git-source census differs from the reviewed set")
+    if manifest_git != trusted_git:
+        _fail("manifest git-source census differs from the base-owned contract")
     policy = manifest["network_policy"]
     if not isinstance(policy, dict) or policy.get("enforced") is not False:
         _fail("network policy must remain an explicit unenforced container gate")
@@ -1545,7 +1771,7 @@ def validate_bundle(
         manifest_dir=bundle_root,
         source_root=bundle_root,
         member_dirs=member_dirs,
-        reviewed_git=reviewed_git_set,
+        reviewed_git=trusted_git,
     )
     bundle_members = _bundle_workspace_paths(bundle_root, root_data)
     expected_member_manifests = {f"{relative}/Cargo.toml" for relative in bundle_members}
@@ -1588,7 +1814,7 @@ def validate_bundle(
                 manifest_dir=(bundle_root / relative).parent,
                 source_root=bundle_root,
                 member_dirs=member_dirs,
-                reviewed_git=reviewed_git_set,
+                reviewed_git=trusted_git,
             )
         )
     if target_manifest_relative is None:
@@ -1616,7 +1842,7 @@ def validate_bundle(
         _fail("bundle directories are not exactly the sanitized workspace parents")
     lock_count, registries, git_records, lock_git = _validate_lock(
         lock_data,
-        reviewed_git=reviewed_git_set,
+        reviewed_git=trusted_git,
         member_names=member_names,
     )
     if not declared_git <= lock_git:
@@ -1659,8 +1885,8 @@ def validate_bundle(
         bundle_root,
         manifest=target_manifest_relative,
         package_name=closure_contract["target_package"],
-        source_head_sha=contract.source_head_sha,
-        source_tree_sha=contract.source_tree_sha,
+        source_head_sha=contract.contract.source_head_sha,
+        source_tree_sha=contract.contract.source_tree_sha,
         target=closure_contract["target_triple"],
         cargo_home=cargo_home,
         cargo_bin=recipe_contract["cargo"]["path"],
@@ -1673,8 +1899,8 @@ def validate_bundle(
             "offline Cargo closure differs from the trusted contract: "
             f"actual={actual_closure} expected={closure_contract}"
         )
-    if reviewed_git_set and verify_git_cache:
-        git_census(cargo_home, reviewed_git_set)
+    if trusted_git and verify_git_cache:
+        git_census(cargo_home, trusted_git, provenance=trusted_provenance)
     return manifest
 
 
@@ -1762,12 +1988,19 @@ def _checkout_directories(root: Path) -> list[Path]:
 def git_census(
     cargo_home: Path,
     reviewed_git: Sequence[tuple[str, str]] | set[tuple[str, str]],
+    *,
+    provenance: Sequence[tuple[str, str, str]] | None = None,
 ) -> list[dict[str, str]]:
-    """Require a fresh Cargo Git cache with exact, clean reviewed checkouts."""
+    """Require exact clean cache objects and trusted public Git provenance."""
 
     expected = _reviewed_git_set(tuple(reviewed_git))
     if not expected:
         _fail("reviewed Git source set must not be empty")
+    if provenance is None:
+        _fail("trusted Git URL/tree provenance is required")
+    provenance_map = _git_provenance_map(provenance)
+    if set(provenance_map) != expected:
+        _fail("trusted Git provenance differs from the reviewed source set")
     cargo_home = cargo_home.absolute()
     dbs = _direct_directories(cargo_home / "git" / "db", "Cargo git DB root")
     checkouts = _checkout_directories(cargo_home / "git" / "checkouts")
@@ -1786,6 +2019,9 @@ def git_census(
         if len(matches) != 1:
             _fail(f"Git DB census has {len(matches)} matches for reviewed revision {rev}")
         db_matches[rev] = matches[0]
+        url = next(url for url, candidate_rev in expected if candidate_rev == rev)
+        if _git_origin_url(db_matches[rev], f"Git DB {db_matches[rev]}") != url:
+            _fail(f"Git DB origin URL differs from trusted source for {url}@{rev}")
     checkout_records: list[dict[str, str]] = []
     for checkout in checkouts:
         status = _git_run(
@@ -1799,6 +2035,9 @@ def git_census(
         matching = [url for url, rev in expected if rev == head]
         if len(matching) != 1:
             _fail(f"unreviewed or duplicate Cargo checkout HEAD: {checkout} -> {head}")
+        db = db_matches[head]
+        if _git_local_origin(checkout, f"Cargo checkout {checkout}").resolve() != db.resolve():
+            _fail(f"Cargo checkout origin does not identify its reviewed Git DB: {checkout}")
         tree = _git_run(checkout, ["rev-parse", "HEAD^{tree}"])
         checkout_records.append(
             {
@@ -1811,6 +2050,9 @@ def git_census(
     for url, rev in expected:
         db = db_matches[rev]
         db_tree = _git_run(db, ["rev-parse", f"{rev}^{{tree}}"])
+        url = next(url for url, candidate_rev in expected if candidate_rev == rev)
+        if db_tree != provenance_map[(url, rev)]:
+            _fail(f"Git DB tree differs from trusted provenance for {url}@{rev}")
         checkout_tree = next(item["tree"] for item in checkout_records if item["rev"] == rev)
         if db_tree != checkout_tree:
             _fail(f"Git DB/checkout tree mismatch for {url}@{rev}")
@@ -2021,28 +2263,18 @@ def _parse_reviewed_git(value: str) -> tuple[str, str]:
     return url, rev
 
 
-def _read_bundle_contract(path: Path) -> BundleContract:
-    raw = _lstat_regular(path, "trusted bundle contract", 4 * 1024 * 1024)
-    try:
-        value = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        _fail(f"trusted bundle contract is not valid JSON: {exc}")
-    if not isinstance(value, dict) or set(value) != {
-        "source_head_sha",
-        "source_tree_sha",
-        "dependency_contract_digest",
-        "toolchain_input_digest",
-        "closure",
-        "recipe",
-    }:
-        _fail("trusted bundle contract schema mismatch")
-    return BundleContract(
-        value["source_head_sha"],
-        value["source_tree_sha"],
-        value["dependency_contract_digest"],
-        value["toolchain_input_digest"],
-        value["closure"],
-        value["recipe"],
+def _read_bundle_contract(
+    path: Path,
+    *,
+    trusted_root: Path,
+    candidate_root: Path,
+    expected_sha256: str,
+) -> BaseOwnedContract:
+    return load_base_owned_contract(
+        path,
+        trusted_root=trusted_root,
+        candidate_root=candidate_root,
+        expected_sha256=expected_sha256,
     )
 
 
@@ -2064,6 +2296,9 @@ def _parser() -> argparse.ArgumentParser:
     validate = commands.add_parser("validate")
     validate.add_argument("--bundle", type=Path, required=True)
     validate.add_argument("--contract", type=Path, required=True)
+    validate.add_argument("--trusted-root", type=Path, required=True)
+    validate.add_argument("--candidate-root", type=Path, required=True)
+    validate.add_argument("--expected-contract-sha256", required=True)
     validate.add_argument("--cargo-home", type=Path, required=True)
     validate.add_argument("--reviewed-git", action="append")
     copy = commands.add_parser("copy-cache")
@@ -2103,7 +2338,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             manifest = validate_bundle(
                 args.bundle,
-                contract=_read_bundle_contract(args.contract),
+                contract=_read_bundle_contract(
+                    args.contract,
+                    trusted_root=args.trusted_root,
+                    candidate_root=args.candidate_root,
+                    expected_sha256=args.expected_contract_sha256,
+                ),
                 reviewed_git=reviewed,
                 cargo_home=args.cargo_home,
             )

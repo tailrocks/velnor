@@ -13,9 +13,13 @@ import unittest
 from pathlib import Path
 
 from tools.bootstrap_prefetch import (
+    BaseOwnedContract,
     BundleContract,
     PrefetchError,
+    BASE_CONTRACT_PRODUCER,
+    BASE_CONTRACT_SCHEMA,
     builder_recipe_contract,
+    bundle_contract_payload,
     build_bundle,
     copy_cache_bounded,
     fetch_environment,
@@ -23,6 +27,7 @@ from tools.bootstrap_prefetch import (
     measure_closure,
     measure_closure_contract,
     network_policy,
+    load_base_owned_contract,
     validate_bundle,
 )
 
@@ -60,6 +65,22 @@ def _source_revision(directory: Path = ROOT) -> str:
 
 def _source_tree(directory: Path = ROOT) -> str:
     return _git(directory, "rev-parse", "HEAD^{tree}")
+
+
+def _cache_git_tree(url: str, revision: str) -> str:
+    db_root = Path.home() / ".cargo" / "git" / "db"
+    for database in sorted(db_root.iterdir()):
+        if not database.is_dir():
+            continue
+        probe = subprocess.run(
+            ["git", "-C", str(database), "cat-file", "-e", f"{revision}^{{commit}}"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if probe.returncode == 0:
+            return _git(database, "rev-parse", f"{revision}^{{tree}}")
+    raise AssertionError(f"missing cached Git revision {url}@{revision}")
 
 
 def _reviewed_git_sources() -> tuple[tuple[str, str], ...]:
@@ -155,8 +176,9 @@ def _trusted_contract(
     target_manifest: str,
     target_package: str,
     path: str,
+    candidate_root: Path,
     base_digest: str = TEST_BASE_IMAGE_DIGEST,
-) -> BundleContract:
+) -> BaseOwnedContract:
     cargo = _cargo_tool("cargo")
     rustc = _cargo_tool("rustc")
     head = _source_revision(source_root)
@@ -182,13 +204,41 @@ def _trusted_contract(
         target_triple="x86_64-unknown-linux-gnu",
         manifest=target_manifest,
     )
-    return BundleContract(
+    git_sources = GIT_SOURCE if source_root == ROOT else ()
+    git_provenance = tuple(
+        (url, revision, _cache_git_tree(url, revision))
+        for url, revision in git_sources
+    )
+    data = BundleContract(
         head,
         tree,
         str(manifest["dependency_contract_digest"]),
         str(manifest["toolchain_input_digest"]),
         closure,
         recipe,
+        tuple(git_sources),
+        git_provenance,
+    )
+    trusted_root = Path(tempfile.mkdtemp(prefix="bootstrap-base-contract-"))
+    envelope = {
+        "schema": BASE_CONTRACT_SCHEMA,
+        "producer": BASE_CONTRACT_PRODUCER,
+        "contract": bundle_contract_payload(data),
+    }
+    raw = json.dumps(
+        envelope,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    contract_path = trusted_root / "contract.json"
+    contract_path.write_bytes(raw)
+    contract_path.chmod(0o644)
+    return load_base_owned_contract(
+        contract_path,
+        trusted_root=trusted_root,
+        candidate_root=candidate_root,
+        expected_sha256=hashlib.sha256(raw).hexdigest(),
     )
 
 
@@ -250,6 +300,7 @@ class BootstrapPrefetchTests(unittest.TestCase):
                     target_manifest=TARGET_MANIFEST.relative_to(ROOT).as_posix(),
                     target_package=TARGET_PACKAGE,
                     path=os.environ["PATH"],
+                    candidate_root=temporary,
                 ),
                 reviewed_git=GIT_SOURCE,
                 cargo_home=Path.home() / ".cargo",
@@ -408,6 +459,7 @@ class BootstrapPrefetchTests(unittest.TestCase):
                 target_manifest="member/Cargo.toml",
                 target_package="member",
                 path=os.environ["PATH"],
+                candidate_root=temporary,
             )
 
             forged_count = temporary / "forged-count"
@@ -457,6 +509,7 @@ class BootstrapPrefetchTests(unittest.TestCase):
                 target_manifest="member/Cargo.toml",
                 target_package="member",
                 path="/recipe/different",
+                candidate_root=temporary,
             )
             with self.assertRaises(PrefetchError):
                 validate_bundle(
@@ -464,6 +517,52 @@ class BootstrapPrefetchTests(unittest.TestCase):
                     contract=recipe_mismatch,
                     reviewed_git=(),
                     cargo_home=Path.home() / ".cargo",
+                )
+
+    def test_base_contract_transport_rejects_plain_objects_and_candidate_paths(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="bootstrap-contract-transport-") as name:
+            temporary = Path(name)
+            source = temporary / "source"
+            source.mkdir()
+            revision = _fixture(source)
+            bundle = temporary / "bundle"
+            manifest = _fixture_build(source, bundle, revision)
+            trusted = _trusted_contract(
+                source,
+                manifest,
+                target_manifest="member/Cargo.toml",
+                target_package="member",
+                path=os.environ["PATH"],
+                candidate_root=temporary,
+            )
+            with self.assertRaises(PrefetchError):
+                validate_bundle(
+                    bundle,
+                    contract=trusted.contract,
+                    reviewed_git=(),
+                    cargo_home=Path.home() / ".cargo",
+                )
+
+            envelope = {
+                "schema": BASE_CONTRACT_SCHEMA,
+                "producer": BASE_CONTRACT_PRODUCER,
+                "contract": bundle_contract_payload(trusted.contract),
+            }
+            raw = json.dumps(
+                envelope,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            candidate_contract_path = bundle / "contract.json"
+            candidate_contract_path.write_bytes(raw)
+            candidate_contract_path.chmod(0o644)
+            with self.assertRaises(PrefetchError):
+                load_base_owned_contract(
+                    candidate_contract_path,
+                    trusted_root=bundle,
+                    candidate_root=temporary,
+                    expected_sha256=hashlib.sha256(raw).hexdigest(),
                 )
 
     def test_self_excluding_digest_and_numeric_schema(self) -> None:
@@ -477,6 +576,7 @@ class BootstrapPrefetchTests(unittest.TestCase):
                 target_manifest=TARGET_MANIFEST.relative_to(ROOT).as_posix(),
                 target_package=TARGET_PACKAGE,
                 path=os.environ["PATH"],
+                candidate_root=Path(name),
             )
             value["workspace_manifest_count"] = "10"
             manifest_path.write_text(json.dumps(value), encoding="utf-8")
@@ -534,13 +634,27 @@ class BootstrapPrefetchTests(unittest.TestCase):
             checkout.parent.mkdir(parents=True)
             subprocess.run(["git", "clone", "-q", "--bare", str(source), str(db)], check=True)
             subprocess.run(["git", "clone", "-q", str(db), str(checkout)], check=True)
-            reviewed = (("https://example.invalid/fixture.git", revision),)
-            records = git_census(cargo_home, reviewed)
+            reviewed = (("https://github.com/example/fixture.git", revision),)
+            subprocess.run(
+                ["git", "-C", str(db), "remote", "set-url", "origin", reviewed[0][0]],
+                check=True,
+            )
+            tree = _git(db, "rev-parse", f"{revision}^{{tree}}")
+            provenance = ((reviewed[0][0], revision, tree),)
+            records = git_census(cargo_home, reviewed, provenance=provenance)
             self.assertEqual(records[0]["rev"], revision)
+
+            wrong_url = ("https://github.com/other/fixture.git", revision)
+            with self.assertRaises(PrefetchError):
+                git_census(
+                    cargo_home,
+                    (wrong_url,),
+                    provenance=((wrong_url[0], revision, tree),),
+                )
 
             (checkout / "untracked").write_text("unsafe\n", encoding="utf-8")
             with self.assertRaises(PrefetchError):
-                git_census(cargo_home, reviewed)
+                git_census(cargo_home, reviewed, provenance=provenance)
 
     def test_bounded_cache_copy_rejects_links_and_quota(self) -> None:
         with tempfile.TemporaryDirectory(prefix="bootstrap-copy-") as name:
