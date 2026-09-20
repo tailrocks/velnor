@@ -17,8 +17,8 @@ use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 // Approved remote action kinds introduced v8; the native GitHub App token adapter is v9;
 // Kache v0.14.2 admission is v10; mr-boxington-action v1.3.0 admission is v11;
 // explicit planner dispatch classes are v12; legacy provider removal is v13;
-// mr-boxington-action v1.3.1 admission is v14.
-pub const MANIFEST_VERSION: u32 = 14;
+// mr-boxington-action v1.4.0 admission is v15.
+pub const MANIFEST_VERSION: u32 = 15;
 const MAX_MANIFEST_STEPS: usize = 4096;
 const MAX_MANIFEST_INPUTS: usize = 256;
 
@@ -452,8 +452,8 @@ pub static ACTIONS: &[ActionCapability] = &[
         repository: "jdx/mr-boxington-action",
         adapter: ActionAdapter::JavaScript,
         allowed_refs: &[allowed(
-            "a20e1ffcd962370fb2b6045c13b7b349f7b03386",
-            "v1.3.1",
+            "867fc530102eec5b756075d70d850dc8330d2272",
+            "v1.4.0",
         )],
         allowed_subpaths: &[],
         inputs: MR_BOXINGTON_INPUTS,
@@ -2807,11 +2807,11 @@ mod tests {
 
     #[test]
     fn mr_boxington_admits_github_server_and_local_backends() {
-        const SHA: &str = "a20e1ffcd962370fb2b6045c13b7b349f7b03386";
+        const SHA: &str = "867fc530102eec5b756075d70d850dc8330d2272";
         let capability = find("jdx/mr-boxington-action").expect("Mr. Boxington capability");
         assert_eq!(capability.allowed_refs.len(), 1);
         assert_eq!(capability.allowed_refs[0].value, SHA);
-        assert_eq!(capability.allowed_refs[0].release, "v1.3.1");
+        assert_eq!(capability.allowed_refs[0].release, "v1.4.0");
 
         // `local` is the generated Velnor-lane backend: the job image pins
         // mbx and the runner mounts its host-persistent store.
@@ -2865,7 +2865,7 @@ mod tests {
         validate_action_runtime(
             "cache",
             "jdx/mr-boxington-action",
-            "a20e1ffcd962370fb2b6045c13b7b349f7b03386",
+            "867fc530102eec5b756075d70d850dc8330d2272",
             &ActionRuntime::JavaScript {
                 node: "node24".to_string(),
                 main: "dist/index.js".to_string(),
