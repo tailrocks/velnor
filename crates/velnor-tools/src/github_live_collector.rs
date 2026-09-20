@@ -3126,6 +3126,12 @@ mod tests {
             dependencies.actions[0].resolved_path.as_deref(),
             Some("action.yml")
         );
+        assert_eq!(
+            dependencies.actions[0].source_url.as_deref(),
+            Some(
+                "https://api.github.com/repos/actions/checkout/contents/action.yml?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )
+        );
         assert!(dependencies.actions[0].source_bytes_base64.is_some());
         assert_eq!(dependencies.actions[0].source_raw_object_refs.len(), 1);
         assert_eq!(ledger.raw_objects.len(), 3);
@@ -3466,6 +3472,17 @@ jobs:
             vec![]
         )
         .is_err());
+    }
+
+    #[test]
+    fn checkout_observation_does_not_promote_api_head_to_checkout_proof() {
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned();
+        let observation =
+            LiveCheckoutObservation::api_head_only(sha.clone(), vec!["raw".to_owned()]);
+        assert_eq!(observation.api_head_sha, sha);
+        assert_eq!(observation.api_raw_object_refs, vec!["raw"]);
+        assert_eq!(observation.actual_checkout_sha(), None);
+        assert!(observation.proof.is_none());
     }
 
     #[test]
