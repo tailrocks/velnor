@@ -1932,6 +1932,20 @@ fn check_g0_inventory(
         &collector.raw_objects,
         findings,
     );
+    if !g0_typed_raw_binding(
+        &collector.workload_artifact.raw_object_refs,
+        &collector.raw_objects,
+        "workload.artifact",
+        &collector.workload_artifact,
+    ) {
+        finding(
+            findings,
+            "g0-workload-artifact",
+            "",
+            "collector_snapshot.workload_artifact.raw_object_refs",
+            "workload artifact metadata must be parsed from a collector-owned workload.artifact raw object",
+        );
+    }
     check_g0_repositories(
         manifest,
         snapshot,
@@ -1942,9 +1956,21 @@ fn check_g0_inventory(
         findings,
     );
     check_g0_reconciliation(manifest, snapshot, collector, &raw_ids, findings);
-    check_g0_dependency_graph(manifest, collector, &raw_ids, findings);
-    check_g0_model_session(collector, &raw_ids, findings);
-    check_g0_access(collector, &raw_ids, findings);
+    check_g0_dependency_graph(
+        manifest,
+        collector,
+        &raw_ids,
+        &collector.raw_objects,
+        findings,
+    );
+    check_g0_model_session(collector, &raw_ids, &collector.raw_objects, findings);
+    check_g0_access(
+        collector,
+        &raw_ids,
+        &collector.requests,
+        &collector.raw_objects,
+        findings,
+    );
 }
 
 fn check_g0_collector_identity(collector: &G0CollectorSnapshot, findings: &mut Vec<Finding>) {
@@ -2188,7 +2214,8 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
     for raw in &collector.raw_objects {
         let decoded = BASE64.decode(&raw.bytes_base64);
         if !raw_ids.insert(raw.raw_id.clone())
-            || !request_ids.contains(&raw.request_id)
+            || raw.request_id.trim().is_empty()
+            || (!g0_local_raw_kind(&raw.object_kind) && !request_ids.contains(&raw.request_id))
             || raw.object_kind.trim().is_empty()
             || raw.canonicalization.trim().is_empty()
             || !valid_digest(&raw.sha256)
@@ -2280,6 +2307,13 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
         &raw_ids,
         findings,
     );
+}
+
+fn g0_local_raw_kind(object_kind: &str) -> bool {
+    matches!(
+        object_kind,
+        "model.session" | "workload.source" | "workload.artifact"
+    )
 }
 
 fn g0_page_members(value: &Value, response_schema: G0RawResponseSchema) -> Option<(u64, &[Value])> {
@@ -2497,6 +2531,43 @@ fn check_g0_artifact_reference(
             "artifact digest must match bytes from one of its referenced raw objects",
         );
     }
+}
+
+/// Local collector objects are still evidence, not typed self-attestation.
+/// The collector mapper accepts these only after parsing the exact raw bytes;
+/// keep the checker boundary equally strict so a caller cannot replace a
+/// malformed/raw object with a populated `model_session` or artifact field.
+fn g0_raw_object_matches_typed<T: Serialize>(
+    raw: &G0RawObjectRef,
+    expected_kind: &str,
+    expected: &T,
+) -> bool {
+    if raw.object_kind != expected_kind {
+        return false;
+    }
+    let Ok(bytes) = BASE64.decode(&raw.bytes_base64) else {
+        return false;
+    };
+    if reject_duplicate_json_keys(&bytes).is_err() {
+        return false;
+    }
+    let Ok(actual) = serde_json::from_slice::<Value>(&bytes) else {
+        return false;
+    };
+    serde_json::to_value(expected).is_ok_and(|expected| actual == expected)
+}
+
+fn g0_typed_raw_binding<T: Serialize>(
+    refs: &[String],
+    raw_objects: &[G0RawObjectRef],
+    expected_kind: &str,
+    expected: &T,
+) -> bool {
+    refs.iter().any(|raw_id| {
+        raw_objects.iter().any(|raw| {
+            raw.raw_id == *raw_id && g0_raw_object_matches_typed(raw, expected_kind, expected)
+        })
+    })
 }
 
 fn g0_valid_applicability(value: &str) -> bool {
@@ -2911,7 +2982,7 @@ fn check_g0_workflow_source(
             .raw_object_refs
             .iter()
             .all(|raw_id| raw_ids.contains(raw_id));
-    let raw_binding = source_has_raw_binding(source, raw_objects);
+    let raw_binding = source_has_raw_binding(source, raw_objects, "workflow.source");
     if !valid || !raw_binding {
         finding(
             findings,
@@ -2990,7 +3061,7 @@ fn check_g0_dependency_source(
             .raw_object_refs
             .iter()
             .any(|raw_id| !raw_ids.contains(raw_id))
-        || !source_has_raw_binding(source, raw_objects)
+        || !source_has_raw_binding(source, raw_objects, "workflow.dependency.source")
     {
         finding(
             findings,
@@ -3002,13 +3073,18 @@ fn check_g0_dependency_source(
     }
 }
 
-fn source_has_raw_binding(source: &G0WorkflowSource, raw_objects: &[G0RawObjectRef]) -> bool {
+fn source_has_raw_binding(
+    source: &G0WorkflowSource,
+    raw_objects: &[G0RawObjectRef],
+    expected_kind: &str,
+) -> bool {
     let Ok(bytes) = BASE64.decode(&source.bytes_base64) else {
         return false;
     };
     source.raw_object_refs.iter().any(|raw_id| {
         raw_objects.iter().any(|raw| {
             raw.raw_id == *raw_id
+                && raw.object_kind == expected_kind
                 && raw.sha256 == source.sha256
                 && BASE64
                     .decode(&raw.bytes_base64)
@@ -3654,7 +3730,9 @@ fn check_g0_repositories(
                 pr,
                 &manifest_contexts,
                 snapshot,
+                &repo.workflows,
                 raw_ids,
+                raw_objects,
                 findings,
             );
             check_g0_check_raw_evidence(
@@ -4180,7 +4258,7 @@ fn g0_endpoint_contract(object_kind: &str, endpoint: &str) -> Result<G0EndpointC
     let repository_path =
         parts.len() >= 3 && parts[0] == "repos" && !parts[1].is_empty() && !parts[2].is_empty();
     let contract = match object_kind {
-        "github-response" if repository_path && parts.len() == 3 => G0EndpointContract {
+        "repository" if repository_path && parts.len() == 3 => G0EndpointContract {
             kind: G0EndpointKind::Repository,
             coverage: G0CoveragePurpose::RepositorySnapshot,
             response_schema: G0RawResponseSchema::Singular,
@@ -4681,12 +4759,18 @@ fn check_g0_main_checks_against_snapshot(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "PR validation keeps snapshot, source, request, and raw bindings explicit"
+)]
 fn check_g0_pull_request(
     repository: &str,
     pr: &G0PullRequestInventory,
     expected_contexts: &BTreeSet<(String, String)>,
     snapshot: &SnapshotDocument,
+    workflows: &[G0WorkflowInventory],
     raw_ids: &BTreeSet<String>,
+    raw_objects: &[G0RawObjectRef],
     findings: &mut Vec<Finding>,
 ) {
     if pr.number == 0
@@ -4789,6 +4873,20 @@ fn check_g0_pull_request(
             raw_ids,
             findings,
         );
+        let source_bound = workflows.iter().any(|workflow| {
+            workflow.source.path == binding.workflow_path
+                && workflow.source.revision == binding.workflow_revision
+                && source_has_raw_binding(&workflow.source, raw_objects, "workflow.source")
+        });
+        if !source_bound {
+            finding(
+                findings,
+                "g0-pr-workflow-binding",
+                repository,
+                "open_prs.workflow_bindings.workflow_path/workflow_revision",
+                "PR workflow binding must resolve to an immutable captured workflow source",
+            );
+        }
     }
     if pr.required_check_producers.is_empty() {
         finding(
@@ -5243,6 +5341,7 @@ fn check_g0_dependency_graph(
     manifest: &ManifestDocument,
     collector: &G0CollectorSnapshot,
     raw_ids: &BTreeSet<String>,
+    raw_objects: &[G0RawObjectRef],
     findings: &mut Vec<Finding>,
 ) {
     let graph = &collector.dependency_graph;
@@ -5261,6 +5360,15 @@ fn check_g0_dependency_graph(
         raw_ids,
         findings,
     );
+    if !g0_has_workflow_source_raw(&graph.raw_object_refs, raw_objects) {
+        finding(
+            findings,
+            "g0-dependency-source",
+            "",
+            "collector_snapshot.dependency_graph.raw_object_refs",
+            "dependency graph must bind immutable workflow/dependency source bytes, not only generic raw objects",
+        );
+    }
     let mut node_ids = BTreeSet::new();
     let mut adjacency = BTreeMap::<String, Vec<String>>::new();
     let mut node_edges = BTreeSet::new();
@@ -5308,6 +5416,15 @@ fn check_g0_dependency_graph(
             raw_ids,
             findings,
         );
+        if !g0_graph_node_raw_binding(node, raw_objects) {
+            finding(
+                findings,
+                "g0-dependency-source",
+                &node.repository,
+                "dependency_graph.nodes.raw_object_refs",
+                "every dependency node must bind the raw source appropriate to its typed kind",
+            );
+        }
     }
     let node_by_id = graph
         .nodes
@@ -5391,6 +5508,15 @@ fn check_g0_dependency_graph(
             raw_ids,
             findings,
         );
+        if !g0_has_workflow_source_raw(&edge.raw_object_refs, raw_objects) {
+            finding(
+                findings,
+                "g0-dependency-source",
+                "",
+                "dependency_graph.edges.raw_object_refs",
+                "every dependency edge must bind source bytes from the immutable workflow graph",
+            );
+        }
     }
     for node in graph.nodes.iter().filter(|node| node.kind == "workload") {
         if !node_edges.contains(&node.id) {
@@ -5490,6 +5616,32 @@ fn check_g0_dependency_graph(
     }
 }
 
+fn g0_has_workflow_source_raw(refs: &[String], raw_objects: &[G0RawObjectRef]) -> bool {
+    refs.iter().any(|raw_id| {
+        raw_objects.iter().any(|raw| {
+            raw.raw_id == *raw_id
+                && matches!(
+                    raw.object_kind.as_str(),
+                    "workflow.source" | "workflow.dependency.source"
+                )
+        })
+    })
+}
+
+fn g0_graph_node_raw_binding(node: &G0GraphNode, raw_objects: &[G0RawObjectRef]) -> bool {
+    let kinds: &[&str] = match node.kind.as_str() {
+        "check" => &["rulesets", "ruleset", "workflow.source"],
+        "release" | "package" => &["workload.artifact", "workload.source"],
+        "artifact" => &["workflow_artifacts"],
+        _ => &["workflow.source", "workflow.dependency.source"],
+    };
+    node.raw_object_refs.iter().any(|raw_id| {
+        raw_objects
+            .iter()
+            .any(|raw| raw.raw_id == *raw_id && kinds.contains(&raw.object_kind.as_str()))
+    })
+}
+
 fn g0_graph_edge_shape_is_bound(
     edge: &G0GraphEdge,
     from: Option<&&G0GraphNode>,
@@ -5570,6 +5722,7 @@ fn g0_graph_source_matches_manifest(source_sha: &str, repo: &ManifestRepository)
 fn check_g0_model_session(
     collector: &G0CollectorSnapshot,
     raw_ids: &BTreeSet<String>,
+    raw_objects: &[G0RawObjectRef],
     findings: &mut Vec<Finding>,
 ) {
     let session = &collector.model_session;
@@ -5593,6 +5746,20 @@ fn check_g0_model_session(
         raw_ids,
         findings,
     );
+    if !g0_typed_raw_binding(
+        &session.raw_object_refs,
+        raw_objects,
+        "model.session",
+        session,
+    ) {
+        finding(
+            findings,
+            "g0-model-session",
+            "",
+            "collector_snapshot.model_session.raw_object_refs",
+            "effective runtime model settings must be parsed from a collector-owned model.session raw object",
+        );
+    }
     let mut ids = BTreeSet::new();
     for agent in &session.agents {
         if agent.agent_id.trim().is_empty()
@@ -5615,12 +5782,28 @@ fn check_g0_model_session(
             raw_ids,
             findings,
         );
+        if !agent.raw_object_refs.iter().any(|raw_id| {
+            session
+                .raw_object_refs
+                .iter()
+                .any(|session_raw_id| raw_id == session_raw_id)
+        }) {
+            finding(
+                findings,
+                "g0-model-session",
+                "",
+                "collector_snapshot.model_session.agents.raw_object_refs",
+                "each effective agent setting must remain bound to the captured model.session object",
+            );
+        }
     }
 }
 
 fn check_g0_access(
     collector: &G0CollectorSnapshot,
     raw_ids: &BTreeSet<String>,
+    requests: &[G0RequestRecord],
+    raw_objects: &[G0RawObjectRef],
     findings: &mut Vec<Finding>,
 ) {
     let expected = canonical_scope();
@@ -5665,7 +5848,49 @@ fn check_g0_access(
             raw_ids,
             findings,
         );
+        if !g0_access_raw_binding(
+            &access.repository,
+            &access.raw_object_refs,
+            requests,
+            raw_objects,
+        ) {
+            finding(
+                findings,
+                "g0-access",
+                &access.repository,
+                "collector_snapshot.access.raw_object_refs",
+                "access must bind the repository's successful /repos/{owner}/{repo} API response",
+            );
+        }
     }
+}
+
+fn g0_access_raw_binding(
+    repository: &str,
+    refs: &[String],
+    requests: &[G0RequestRecord],
+    raw_objects: &[G0RawObjectRef],
+) -> bool {
+    let endpoint = format!("/repos/{repository}");
+    refs.iter().any(|raw_id| {
+        raw_objects.iter().any(|raw| {
+            raw.raw_id == *raw_id
+                && raw.object_kind == "repository"
+                && requests.iter().any(|request| {
+                    request.request_id == raw.request_id
+                        && request.response_raw_ref == raw.raw_id
+                        && request.api == G0ApiKind::Rest
+                        && request.method == "GET"
+                        && request.endpoint_or_operation == endpoint
+                        && request.http_status == 200
+                        && request.complete
+                        && request.state == G0RequestState::Complete
+                        && BASE64
+                            .decode(&request.query_base64)
+                            .is_ok_and(|query| query.is_empty())
+                })
+        })
+    })
 }
 
 fn check_pull_requests(repo: &SnapshotRepository, findings: &mut Vec<Finding>) {
@@ -8800,7 +9025,7 @@ mod tests {
             raw_objects.push(G0RawObjectRef {
                 raw_id: raw_id.clone(),
                 request_id: request_id.clone(),
-                object_kind: "github-response".to_owned(),
+                object_kind: "repository".to_owned(),
                 canonicalization: "jcs".to_owned(),
                 sha256: raw_digest.clone(),
                 byte_length: raw_bytes.len() as u64,
@@ -8860,7 +9085,7 @@ mod tests {
             raw_objects.push(G0RawObjectRef {
                 raw_id: workflow_raw_id.clone(),
                 request_id: request_id.clone(),
-                object_kind: "github-workflow-source".to_owned(),
+                object_kind: "workflow.source".to_owned(),
                 canonicalization: "raw-utf8".to_owned(),
                 sha256: workflow_raw_digest.clone(),
                 byte_length: workflow_bytes.len() as u64,
@@ -9358,12 +9583,14 @@ mod tests {
                 state: "complete".to_owned(),
                 scopes: vec!["metadata:read".to_owned()],
                 gaps: Vec::new(),
-                raw_object_refs: vec!["raw-repository-1".to_owned()],
+                raw_object_refs: vec![format!("raw-repository-{repository_id}")],
             });
         }
         let nodes = CANONICAL_REPOSITORIES
             .iter()
-            .flat_map(|repository| {
+            .enumerate()
+            .flat_map(|(index, repository)| {
+                let workflow_raw_id = format!("raw-workflow-{}", index + 1);
                 [
                     G0GraphNode {
                         id: format!("workload:{repository}:scan"),
@@ -9373,7 +9600,7 @@ mod tests {
                         applicability: "required".to_owned(),
                         source_sha: source_sha.clone(),
                         source_ref: "refs/heads/main".to_owned(),
-                        raw_object_refs: vec!["raw-repository-1".to_owned()],
+                        raw_object_refs: vec![workflow_raw_id.clone()],
                     },
                     G0GraphNode {
                         id: format!("check:{repository}:ci"),
@@ -9383,14 +9610,15 @@ mod tests {
                         applicability: "required".to_owned(),
                         source_sha: source_sha.clone(),
                         source_ref: "refs/heads/main".to_owned(),
-                        raw_object_refs: vec!["raw-repository-1".to_owned()],
+                        raw_object_refs: vec![workflow_raw_id],
                     },
                 ]
             })
             .collect::<Vec<_>>();
         let edges = CANONICAL_REPOSITORIES
             .iter()
-            .map(|repository| G0GraphEdge {
+            .enumerate()
+            .map(|(index, repository)| G0GraphEdge {
                 from: format!("workload:{repository}:scan"),
                 to: format!("check:{repository}:ci"),
                 kind: "workload-to-check".to_owned(),
@@ -9399,13 +9627,61 @@ mod tests {
                 source_ref: "refs/heads/main".to_owned(),
                 target_source_sha: source_sha.clone(),
                 target_source_ref: "refs/heads/main".to_owned(),
-                raw_object_refs: vec!["raw-repository-1".to_owned()],
+                raw_object_refs: vec![format!("raw-workflow-{}", index + 1)],
             })
             .collect::<Vec<_>>();
-        let first_raw_digest = raw_objects
-            .first()
-            .map(|raw| raw.sha256.clone())
-            .expect("complete fixture has a first raw object");
+        let model_session = G0ModelSession {
+            session_id: "session".to_owned(),
+            effective: true,
+            orchestrator_model: EXPECTED_ORCHESTRATOR_MODEL.to_owned(),
+            orchestrator_effort: EXPECTED_ORCHESTRATOR_EFFORT.to_owned(),
+            agents: vec![G0AgentModel {
+                agent_id: "agent".to_owned(),
+                model: EXPECTED_AGENT_MODEL.to_owned(),
+                effort: EXPECTED_AGENT_EFFORT.to_owned(),
+                effective: true,
+                raw_object_refs: vec!["raw-model-session".to_owned()],
+            }],
+            raw_object_refs: vec!["raw-model-session".to_owned()],
+        };
+        let model_session_bytes =
+            serde_json::to_vec(&model_session).expect("serialize model session fixture");
+        raw_objects.push(captured_raw_reference(
+            "raw-model-session",
+            "local-model-session",
+            "model.session",
+            &model_session_bytes,
+        ));
+        let workload_source_bytes = b"reviewed workload source fixture";
+        let workload_source_raw = captured_raw_reference(
+            "raw-workload-source",
+            "local-workload-source",
+            "workload.source",
+            workload_source_bytes,
+        );
+        let workload_artifact = G0ArtifactReference {
+            name: "workload-matrix".to_owned(),
+            schema: "velnor.workload-matrix.v1".to_owned(),
+            source_url: "https://github.com/tailrocks/velnor/blob/reviewed/matrix.json".to_owned(),
+            sha256: workload_source_raw.sha256.clone(),
+            storage_ref: workload_source_raw.storage_ref.clone(),
+            source_revision: source_sha.clone(),
+            source_digest: workload_source_raw.sha256.clone(),
+            observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+            raw_object_refs: vec![
+                workload_source_raw.raw_id.clone(),
+                "raw-workload-artifact".to_owned(),
+            ],
+        };
+        raw_objects.push(workload_source_raw);
+        let workload_artifact_bytes =
+            serde_json::to_vec(&workload_artifact).expect("serialize workload artifact fixture");
+        raw_objects.push(captured_raw_reference(
+            "raw-workload-artifact",
+            "local-workload-artifact",
+            "workload.artifact",
+            &workload_artifact_bytes,
+        ));
         let collector = G0CollectorSnapshot {
             schema_version: EVIDENCE_SCHEMA_VERSION,
             snapshot_id: "snapshot".to_owned(),
@@ -9450,40 +9726,11 @@ mod tests {
             dependency_graph: G0DependencyGraph {
                 nodes,
                 edges,
-                raw_object_refs: vec!["raw-repository-1".to_owned()],
+                raw_object_refs: vec!["raw-workflow-1".to_owned()],
             },
-            model_session: G0ModelSession {
-                session_id: "session".to_owned(),
-                effective: true,
-                orchestrator_model: EXPECTED_ORCHESTRATOR_MODEL.to_owned(),
-                orchestrator_effort: EXPECTED_ORCHESTRATOR_EFFORT.to_owned(),
-                agents: vec![G0AgentModel {
-                    agent_id: "agent".to_owned(),
-                    model: EXPECTED_AGENT_MODEL.to_owned(),
-                    effort: EXPECTED_AGENT_EFFORT.to_owned(),
-                    effective: true,
-                    raw_object_refs: vec!["raw-repository-1".to_owned()],
-                }],
-                raw_object_refs: vec!["raw-repository-1".to_owned()],
-            },
+            model_session,
             access,
-            workload_artifact: G0ArtifactReference {
-                name: "workload-matrix".to_owned(),
-                schema: "velnor.workload-matrix.v1".to_owned(),
-                source_url: "https://github.com/tailrocks/velnor/blob/reviewed/matrix.json"
-                    .to_owned(),
-                sha256: first_raw_digest.clone(),
-                storage_ref: format!(
-                    "sha256://{}",
-                    first_raw_digest
-                        .strip_prefix("sha256:")
-                        .expect("digest has prefix")
-                ),
-                source_revision: source_sha,
-                source_digest: digest('c'),
-                observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
-                raw_object_refs: vec!["raw-repository-1".to_owned()],
-            },
+            workload_artifact,
         };
         let manifest = ManifestDocument {
             schema_version: MANIFEST_SCHEMA_VERSION,
@@ -9550,7 +9797,7 @@ mod tests {
             .iter_mut()
             .find(|raw| raw.object_kind == "workflow_artifacts")
             .expect("complete fixture artifact page")
-            .object_kind = "github-response".to_owned();
+            .object_kind = "repository".to_owned();
         refresh_typed_inventory_bytes(&mut unknown_paginated);
         findings.clear();
         check_g0_inventory(
@@ -9584,7 +9831,7 @@ mod tests {
             .iter_mut()
             .find(|raw| raw.request_id == artifact_request_id)
             .expect("artifact page raw object")
-            .object_kind = "github-response".to_owned();
+            .object_kind = "repository".to_owned();
         refresh_typed_inventory_bytes(&mut unknown_collection_path);
         findings.clear();
         check_g0_inventory(
@@ -9945,6 +10192,78 @@ mod tests {
         findings.clear();
         check_g0_inventory(&manifest, &snapshot, Some(&evil_api), &mut findings);
         assert!(g0_codes(&findings).contains("g0-collector-source"));
+    }
+
+    #[test]
+    fn g0_source_join_bindings_are_typed_and_repository_specific() {
+        let (manifest, snapshot, inventory) = complete_g0_fixture();
+        let mut baseline_findings = Vec::new();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&inventory),
+            &mut baseline_findings,
+        );
+        assert!(
+            baseline_findings.is_empty(),
+            "unexpected findings: {baseline_findings:?}"
+        );
+
+        let assert_rejected = |mut candidate: G0InventoryEvidence, code: &str| {
+            refresh_typed_inventory_bytes(&mut candidate);
+            let mut findings = Vec::new();
+            check_g0_inventory(&manifest, &snapshot, Some(&candidate), &mut findings);
+            assert!(
+                g0_codes(&findings).contains(code),
+                "expected {code}, got {findings:?}"
+            );
+        };
+
+        let mut wrong_model_kind = inventory.clone();
+        wrong_model_kind
+            .collector_snapshot
+            .raw_objects
+            .iter_mut()
+            .find(|raw| raw.raw_id == "raw-model-session")
+            .expect("model session raw object")
+            .object_kind = "repository".to_owned();
+        assert_rejected(wrong_model_kind, "g0-model-session");
+
+        let mut wrong_artifact_kind = inventory.clone();
+        wrong_artifact_kind
+            .collector_snapshot
+            .raw_objects
+            .iter_mut()
+            .find(|raw| raw.raw_id == "raw-workload-artifact")
+            .expect("workload artifact raw object")
+            .object_kind = "repository".to_owned();
+        assert_rejected(wrong_artifact_kind, "g0-workload-artifact");
+
+        let mut cross_repository_access = inventory.clone();
+        cross_repository_access.collector_snapshot.access[0].raw_object_refs =
+            vec!["raw-repository-2".to_owned()];
+        assert_rejected(cross_repository_access, "g0-access");
+
+        let mut generic_graph_raw = inventory.clone();
+        generic_graph_raw.collector_snapshot.dependency_graph.nodes[0].raw_object_refs =
+            vec!["raw-repository-1".to_owned()];
+        assert_rejected(generic_graph_raw, "g0-dependency-source");
+
+        let mut generic_workflow_raw = inventory;
+        generic_workflow_raw
+            .collector_snapshot
+            .raw_objects
+            .iter_mut()
+            .find(|raw| raw.raw_id == "raw-workflow-1")
+            .expect("workflow source raw object")
+            .object_kind = "repository".to_owned();
+        assert_rejected(generic_workflow_raw, "g0-workflow-source");
+
+        let (_, _, mut missing_pr_source_binding) = complete_g0_fixture();
+        missing_pr_source_binding.collector_snapshot.repositories[0].open_prs[0]
+            .workflow_bindings[0]
+            .workflow_revision = sha('f');
+        assert_rejected(missing_pr_source_binding, "g0-pr-workflow-binding");
     }
 
     #[test]
@@ -10371,7 +10690,7 @@ mod tests {
             .push(G0RawObjectRef {
                 raw_id: child_raw_id.clone(),
                 request_id: child_request_id.clone(),
-                object_kind: "github-workflow-source".to_owned(),
+                object_kind: "workflow.dependency.source".to_owned(),
                 canonicalization: "raw-utf8".to_owned(),
                 sha256: child_digest.clone(),
                 byte_length: child_yaml.len() as u64,
@@ -11301,7 +11620,7 @@ mod tests {
         let check_endpoint = format!("/repos/tailrocks/velnor/commits/{source}/check-runs");
         let cases = [
             (
-                "github-response",
+                "repository",
                 "/repos/tailrocks/velnor",
                 G0EndpointKind::Repository,
                 G0CoveragePurpose::RepositorySnapshot,
@@ -11371,9 +11690,9 @@ mod tests {
         ));
 
         for (object_kind, endpoint) in [
-            ("github-response", "/repos/tailrocks/velnor/issues"),
+            ("repository", "/repos/tailrocks/velnor/issues"),
             (
-                "github-response",
+                "repository",
                 "/repos/tailrocks/velnor/actions/runs/1/artifacts-unknown",
             ),
             (
@@ -12518,12 +12837,18 @@ mod tests {
         };
         let raw_ids = BTreeSet::from(["raw-graph".to_owned(), "raw-model".to_owned()]);
         let mut findings = Vec::new();
-        check_g0_dependency_graph(&manifest, &collector, &raw_ids, &mut findings);
-        check_g0_model_session(&collector, &raw_ids, &mut findings);
+        check_g0_dependency_graph(
+            &manifest,
+            &collector,
+            &raw_ids,
+            &collector.raw_objects,
+            &mut findings,
+        );
+        check_g0_model_session(&collector, &raw_ids, &collector.raw_objects, &mut findings);
         assert!(findings
             .iter()
             .any(|finding| finding.code == "g0-dependency-edge"));
-        assert!(!findings
+        assert!(findings
             .iter()
             .any(|finding| finding.code == "g0-model-session"));
     }
