@@ -4081,6 +4081,7 @@ dependencies = [
  "globset",
  "noyalib",
  "ratatui",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",

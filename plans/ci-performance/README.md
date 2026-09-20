@@ -83,6 +83,21 @@ Current bounded queue (2026-09-20, after `56017bac`):
 
 See [upstream integration review](reviews/upstream-9e5-integration-review.md).
 
+Latest pushed integration `3a7da430` has an exact clean build and generation
+check, but PR run `35506628393` failed. Its generator job received SIGTERM during
+new cancellation fixtures; required gates failed. The fixture's external process
+signal parser matches a documented Ubuntu procps defect. The typed `rustix`
+repair preserves cancellation coverage and passes 1,943 local tests; independent
+review and new Linux CI remain required. See
+[signal ownership experiment](experiments/V-ROLLBACK-SIGNAL-001.md).
+
+The failed PR took 577 seconds (1,368 aggregate execution seconds). Runner crate
+job: 546 seconds, with 506-second checks and no recorded crate downloads. Its
+compiler/cache counters remain under investigation. These failed-run numbers do
+not establish a speedup. Separate policy run `35506627126` failed acquisition
+after 582 seconds when the PR finished without publishing its candidate; it did
+not consume the full fifteen-minute deadline.
+
 Latest completed successful PR run `35493166478` (`df9fb272`) had 68 recorded
 jobs: 614 seconds trigger to final completion, 2,813 seconds aggregate execution.
 Largest job: generator, 574 seconds. Separate policy run `35493165389` failed.

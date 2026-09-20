@@ -4146,11 +4146,94 @@ trap 'cleanup_publication "$?"' EXIT
     }
 
     #[cfg(unix)]
+    fn validate_owned_process_group(
+        child_pid: rustix::process::Pid,
+        process_group: rustix::process::Pid,
+        parent_group: rustix::process::Pid,
+    ) -> Result<rustix::process::Pid, String> {
+        if child_pid.is_init() {
+            return Err("fixture child unexpectedly has init PID".to_owned());
+        }
+        if process_group != child_pid {
+            return Err(format!(
+                "fixture child group {process_group} does not equal child PID {child_pid}"
+            ));
+        }
+        if process_group == parent_group {
+            return Err(format!(
+                "fixture child group {process_group} is the test process group"
+            ));
+        }
+        Ok(process_group)
+    }
+
+    #[cfg(unix)]
+    fn owned_fixture_group(child: &std::process::Child) -> Result<rustix::process::Pid, String> {
+        let child_pid = rustix::process::Pid::from_child(child);
+        let process_group = rustix::process::getpgid(Some(child_pid))
+            .map_err(|error| format!("read fixture process group: {error}"))?;
+        let parent_group = rustix::process::getpgid(None)
+            .map_err(|error| format!("read test process group: {error}"))?;
+        validate_owned_process_group(child_pid, process_group, parent_group)
+    }
+
+    #[cfg(unix)]
+    fn owned_fixture_process(
+        child: &std::process::Child,
+        raw_pid: i32,
+    ) -> Result<rustix::process::Pid, String> {
+        let process = validated_fixture_process(raw_pid)?;
+        let fixture_group = owned_fixture_group(child)?;
+        let process_group = rustix::process::getpgid(Some(process))
+            .map_err(|error| format!("read verifier process group: {error}"))?;
+        if process_group != fixture_group {
+            return Err(format!(
+                "verifier group {process_group} does not equal fixture group {fixture_group}"
+            ));
+        }
+        Ok(process)
+    }
+
+    #[cfg(unix)]
+    fn validated_fixture_process(raw_pid: i32) -> Result<rustix::process::Pid, String> {
+        if raw_pid <= 1 {
+            return Err(format!("invalid verifier PID {raw_pid}"));
+        }
+        let process = rustix::process::Pid::from_raw(raw_pid)
+            .ok_or_else(|| format!("invalid verifier PID {raw_pid}"))?;
+        if process.is_init() {
+            return Err("verifier unexpectedly has init PID".to_owned());
+        }
+        Ok(process)
+    }
+
+    #[cfg(unix)]
+    fn signal_fixture(
+        child: &std::process::Child,
+        verifier_pid: i32,
+        signal_group: bool,
+        signal: rustix::process::Signal,
+    ) -> Result<(), String> {
+        if signal_group {
+            let process_group = owned_fixture_group(child)?;
+            rustix::process::kill_process_group(process_group, signal)
+                .map_err(|error| format!("signal fixture process group {process_group}: {error}"))
+        } else {
+            let process = owned_fixture_process(child, verifier_pid)?;
+            rustix::process::kill_process(process, signal)
+                .map_err(|error| format!("signal verifier process {process}: {error}"))
+        }
+    }
+
+    #[cfg(unix)]
     fn terminate_fixture_group(child: &mut std::process::Child) {
-        let target = format!("-{}", child.id());
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", &target])
-            .status();
+        let process_group = owned_fixture_group(child).ok();
+        if let Some(process_group) = process_group {
+            let _ =
+                rustix::process::kill_process_group(process_group, rustix::process::Signal::TERM);
+        } else {
+            let _ = child.kill();
+        }
         for _ in 0..200 {
             match child.try_wait() {
                 Ok(Some(_)) => return,
@@ -4158,9 +4241,12 @@ trap 'cleanup_publication "$?"' EXIT
                 Err(_) => break,
             }
         }
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", &target])
-            .status();
+        if let Some(process_group) = process_group {
+            let _ =
+                rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL);
+        } else {
+            let _ = child.kill();
+        }
         let _ = child.wait();
     }
 
@@ -4281,24 +4367,19 @@ trap 'cleanup_publication "$?"' EXIT
         signal_group: bool,
     ) {
         use std::fs;
-        use std::process::Command;
-
         let (root, mut child, verifier_pid) =
             spawn_rolling_cancellation_fixture(shell, fragment, lock_script, cleanup, signal_group);
-        let target = if signal_group {
-            format!("-{}", child.id())
-        } else {
-            verifier_pid.to_string()
-        };
-        let signal = Command::new("kill")
-            .args(["-TERM", &target])
-            .status()
-            .expect("send cancellation signal");
-        if !signal.success() {
+        let signal_result = signal_fixture(
+            &child,
+            verifier_pid,
+            signal_group,
+            rustix::process::Signal::TERM,
+        );
+        if let Err(error) = &signal_result {
             terminate_fixture_group(&mut child);
             assert!(
-                signal.success(),
-                "kill failed for {shell} group={signal_group}"
+                signal_result.is_ok(),
+                "signal failed for {shell} group={signal_group}: {error}"
             );
             return;
         }
@@ -4345,6 +4426,29 @@ trap 'cleanup_publication "$?"' EXIT
             );
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_validation_rejects_broadcast_and_shared_groups() {
+        let child_pid = rustix::process::Pid::from_raw(4_321).expect("positive fixture PID");
+        let private_group = rustix::process::Pid::from_raw(4_321).expect("positive group PID");
+        let other_group = rustix::process::Pid::from_raw(9_876).expect("positive parent PID");
+        assert_eq!(
+            validate_owned_process_group(child_pid, private_group, other_group),
+            Ok(private_group)
+        );
+        assert!(validate_owned_process_group(child_pid, other_group, other_group).is_err());
+        assert!(validate_owned_process_group(child_pid, private_group, private_group).is_err());
+        assert!(validate_owned_process_group(
+            rustix::process::Pid::INIT,
+            rustix::process::Pid::INIT,
+            other_group
+        )
+        .is_err());
+        assert!(validated_fixture_process(-1).is_err());
+        assert!(validated_fixture_process(0).is_err());
+        assert!(validated_fixture_process(1).is_err());
     }
 
     #[cfg(unix)]
