@@ -10,7 +10,7 @@ on:
       providers:
         description: Comma-separated provider subset of [github-hosted, velnor]
         required: false
-        default: github-hosted,velnor
+        default: github-hosted
         type: string
       scope:
         description: Verification scope
