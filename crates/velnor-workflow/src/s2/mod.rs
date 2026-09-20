@@ -4645,6 +4645,7 @@ fn policy_candidate_step(revision: &str) -> String {
           test "$(grep -Fxc "          name: {artifact}" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "        id: candidate_upload" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "        uses: {upload}" <<<"$candidate_block")" = 1
+          test "$(grep -Ec '^[[:space:]]+uses: .*upload-artifact@' <<<"$candidate_block")" = 1
           test "$(grep -Fxc "          path: ${{{{ runner.temp }}}}/velnor-workflow-candidate" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "          name: {artifact}" "$contract")" = 1
           contract_sha256="$(sha256sum "$contract" | awk '{{print $1}}')"
@@ -4756,6 +4757,7 @@ fn policy_candidate_step(revision: &str) -> String {
             --argjson job_id "$job_id" \
             --arg job_name "$job_name" \
             --arg event pull_request \
+            --argjson pr_number "$PR_NUMBER" \
             --arg target_repository "$GITHUB_REPOSITORY" \
             --argjson target_repository_id "$TARGET_REPOSITORY_ID" \
             --arg head_repository "$HEAD_REPOSITORY" \
@@ -4780,7 +4782,7 @@ fn policy_candidate_step(revision: &str) -> String {
             --arg source_archive_sha256 "$source_archive_sha256" \
             --arg candidate_closure "$candidate_closure" \
             --arg contract_sha256 "$contract_sha256" \
-            '{{role: $role, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, job_id: $job_id, job_name: $job_name, event: $event, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, profile: $profile, platform: $platform, features: $features, build_image_repository: $build_image_repository, build_image_digest: $build_image_digest, build_image_platform_digest: $build_image_platform_digest, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_expires_at: $artifact_expires_at, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, contract_sha256: $contract_sha256}}' > "$handoff/handoff.json"
+            '{{role: $role, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, job_id: $job_id, job_name: $job_name, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, profile: $profile, platform: $platform, features: $features, build_image_repository: $build_image_repository, build_image_digest: $build_image_digest, build_image_platform_digest: $build_image_platform_digest, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_expires_at: $artifact_expires_at, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, contract_sha256: $contract_sha256}}' > "$handoff/handoff.json"
       - name: Upload candidate handoff
         id: handoff_upload
         uses: {upload}
@@ -4848,6 +4850,7 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
           SANDBOX_IMAGE_REPOSITORY: {image_repository}
           SANDBOX_IMAGE_DIGEST: {image_digest}
           DEFAULT_BRANCH: {default_branch}
+          PR_NUMBER: ${{{{ github.event.pull_request.number }}}}
         run: |
           set -euo pipefail
           test "${{RUNNER_OS:-}}" = Linux
@@ -4867,13 +4870,15 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
           test -f "$HANDOFF/velnor-workflow"
           test -f "$HANDOFF/source.tar"
           test "$(find -P "$HANDOFF" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 4
-          jq -e '
+          case "$PR_NUMBER" in ''|*[!0-9]*) exit 1 ;; esac
+          jq -e --argjson expected_pr "$PR_NUMBER" '
             .role == "handoff" and
             (.workflow_path == ".github/workflows/ci-pr.yml") and
             (.workflow_id | numbers) and (.run_id | numbers) and
             (.run_attempt | numbers and . >= 1) and
             (.job_id | numbers) and (.job_name == "candidate_producer") and
             (.event == "pull_request") and
+            (.pr_number == $expected_pr) and
             (.target_repository | strings) and (.target_repository_id | numbers) and
             (.head_repository | strings) and (.head_repository_id | numbers) and
             (.target_repository_id == .head_repository_id) and
@@ -5039,6 +5044,7 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
             --argjson job_id "$(jq -er .job_id "$handoff_json")" \
             --arg job_name "$(jq -er .job_name "$handoff_json")" \
             --arg event "$(jq -er .event "$handoff_json")" \
+            --argjson pr_number "$(jq -er .pr_number "$handoff_json")" \
             --arg target_repository "$(jq -er .target_repository "$handoff_json")" \
             --argjson target_repository_id "$(jq -er .target_repository_id "$handoff_json")" \
             --arg head_repository "$(jq -er .head_repository "$handoff_json")" \
@@ -5068,7 +5074,7 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
             --arg sandbox_index_digest "$SANDBOX_IMAGE_DIGEST" \
             --arg sandbox_platform_digest "$platform_digest" \
             --arg sandbox_config_digest "$config_digest" \
-            '{{role: $role, render_sha256: $render_sha256, handoff_id: $handoff_id, handoff_digest: $handoff_digest, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, job_id: $job_id, job_name: $job_name, event: $event, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, profile: $profile, platform: $platform, features: $features, build_image_repository: $build_image_repository, build_image_digest: $build_image_digest, build_image_platform_digest: $build_image_platform_digest, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_expires_at: $artifact_expires_at, execution_run_id: $execution_run_id, execution_run_attempt: $execution_run_attempt, execution_job: $execution_job, sandbox_index_digest: $sandbox_index_digest, sandbox_platform_digest: $sandbox_platform_digest, sandbox_config_digest: $sandbox_config_digest}}' > "$result/result.json"
+            '{{role: $role, render_sha256: $render_sha256, handoff_id: $handoff_id, handoff_digest: $handoff_digest, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, job_id: $job_id, job_name: $job_name, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, profile: $profile, platform: $platform, features: $features, build_image_repository: $build_image_repository, build_image_digest: $build_image_digest, build_image_platform_digest: $build_image_platform_digest, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_expires_at: $artifact_expires_at, execution_run_id: $execution_run_id, execution_run_attempt: $execution_run_attempt, execution_job: $execution_job, sandbox_index_digest: $sandbox_index_digest, sandbox_platform_digest: $sandbox_platform_digest, sandbox_config_digest: $sandbox_config_digest}}' > "$result/result.json"
       - name: Upload candidate verification result
         id: result_upload
         uses: {upload}
@@ -5144,6 +5150,7 @@ fn policy_candidate_result_verification_step() -> String {
           RESULT_DIGEST: ${{{{ needs.candidate_execute.outputs.result_digest }}}}
           HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
           BASE_SHA: ${{{{ github.event.pull_request.base.sha }}}}
+          PR_NUMBER: ${{{{ github.event.pull_request.number }}}}
           HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name }}}}
           HEAD_REPOSITORY_ID: ${{{{ github.event.pull_request.head.repo.id }}}}
           TARGET_REPOSITORY_ID: ${{{{ github.repository_id }}}}
@@ -5151,6 +5158,7 @@ fn policy_candidate_result_verification_step() -> String {
           set -euo pipefail
           case "$RESULT_ID" in ''|*[!0-9]*) exit 1 ;; esac
           case "$RESULT_DIGEST" in sha256:[0-9a-f]{{64}}) ;; *) exit 1 ;; esac
+          case "$PR_NUMBER" in ''|*[!0-9]*) exit 1 ;; esac
           test "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY"
           test "$HEAD_REPOSITORY_ID" = "$TARGET_REPOSITORY_ID"
           result_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RESULT_ID")"
@@ -5211,13 +5219,14 @@ fn policy_candidate_result_verification_step() -> String {
           jq -e --argjson result_id "$RESULT_ID" --arg result_digest "$RESULT_DIGEST" \
             --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg repo "$GITHUB_REPOSITORY" \
             --arg head_repo "$HEAD_REPOSITORY" --argjson head_repo_id "$HEAD_REPOSITORY_ID" \
-            --argjson target_repo_id "$TARGET_REPOSITORY_ID" --arg execution_run "$GITHUB_RUN_ID" \
+            --argjson target_repo_id "$TARGET_REPOSITORY_ID" --argjson pr "$PR_NUMBER" --arg execution_run "$GITHUB_RUN_ID" \
             --arg execution_attempt "$GITHUB_RUN_ATTEMPT" '
             .role == "result" and (.render_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
             (.handoff_id | strings | test("^[0-9]+$")) and (.handoff_digest | strings | test("^sha256:[0-9a-f]{{64}}$")) and
             (.workflow_path == ".github/workflows/ci-pr.yml") and (.workflow_id | numbers) and
             (.run_id | numbers) and (.run_attempt | numbers and . >= 1) and (.job_id | numbers) and
             (.job_name == "candidate_producer") and (.event == "pull_request") and
+            (.pr_number == $pr) and
             (.target_repository == $repo) and (.target_repository_id == $target_repo_id) and
             (.head_repository == $head_repo) and (.head_repository_id == $head_repo_id) and
             (.head_sha == $head) and (.base_sha == $base) and
@@ -5282,6 +5291,7 @@ fn policy_candidate_result_verification_step() -> String {
             $h.role == "handoff" and $r.handoff_id == ($handoff_id|tostring) and
             $h.workflow_path == $r.workflow_path and $h.workflow_id == $r.workflow_id and $h.run_id == $r.run_id and $h.run_attempt == $r.run_attempt and
             $h.job_id == $r.job_id and $h.job_name == $r.job_name and $h.event == $r.event and
+            $h.pr_number == $r.pr_number and
             $h.target_repository == $repo and $h.target_repository_id == $target_repo_id and
             $h.head_repository == $head_repo and $h.head_repository_id == $head_repo_id and
             $h.head_sha == $head and $h.base_sha == $base and $h.base_revision == $r.base_revision and
@@ -5368,10 +5378,12 @@ fn policy_candidate_result_verification_step() -> String {
           workflow_id="$(jq -er .workflow_id "$handoff_json")"
           run_attempt="$(jq -er .run_attempt "$handoff_json")"
           run_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
-          jq -e --argjson id "$run_id" --argjson workflow_id "$workflow_id" --argjson target_repo_id "$TARGET_REPOSITORY_ID" --argjson run_attempt "$run_attempt" --arg head "$HEAD_SHA" --arg repo "$GITHUB_REPOSITORY" '
+          jq -e --argjson id "$run_id" --argjson workflow_id "$workflow_id" --argjson target_repo_id "$TARGET_REPOSITORY_ID" --argjson head_repo_id "$HEAD_REPOSITORY_ID" --arg head_repo "$HEAD_REPOSITORY" --argjson pr "$PR_NUMBER" --argjson run_attempt "$run_attempt" --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg repo "$GITHUB_REPOSITORY" '
             .id == $id and .workflow_id == $workflow_id and .path == ".github/workflows/ci-pr.yml" and .event == "pull_request" and
             .status == "completed" and .conclusion == "success" and .head_sha == $head and
             ((.repository.id | tonumber) == $target_repo_id) and .repository.full_name == $repo and
+            ((.head_repository.id | tonumber) == $head_repo_id) and .head_repository.full_name == $head_repo and
+            (.pull_requests | any((.number | tonumber) == $pr and .base.sha == $base)) and
             .run_attempt == $run_attempt
           ' <<<"$run_api" >/dev/null
           job_id="$(jq -er .job_id "$handoff_json")"

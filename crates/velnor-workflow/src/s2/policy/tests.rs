@@ -669,6 +669,16 @@ fn owner_entrypoint_renders_the_isolated_candidate_transport() {
     assert!(job.contains("actions: read\n      contents: read"), "{job}");
     assert!(job.contains("run_attempt"), "{job}");
     assert!(job.contains("target_repository_id"), "{job}");
+    assert!(job.contains(".pr_number == $expected_pr"), "{job}");
+    assert!(job.contains(".pr_number == $pr"), "{job}");
+    assert!(
+        job.contains(".head_repository.full_name == $head_repo"),
+        "{job}"
+    );
+    assert!(
+        job.contains("grep -Ec '^[[:space:]]+uses: .*upload-artifact@'"),
+        "{job}"
+    );
     assert!(job.contains("PR_NUMBER:"), "{job}");
     assert!(job.contains(".pull_requests | any"), "{job}");
     assert!(
