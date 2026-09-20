@@ -31,7 +31,6 @@ mod policy;
 mod primitives;
 mod promote;
 mod renovate_renderer;
-mod native_contract;
 mod reuse;
 mod runners;
 pub(crate) mod runtime;
