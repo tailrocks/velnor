@@ -674,7 +674,7 @@ mod tests {
         let mut producer = unit("rust-ffi", UnitKind::Rust);
         producer.products = vec![product(
             "xcframework",
-            &["native/out/JackinFFI.xcframework", "native/out/JackinFFI.h"],
+            &["native/out/BridgeFFI.xcframework", "native/out/BridgeFFI.h"],
         )];
         let mut consumer = unit("swift-app", UnitKind::Swift);
         consumer.prerequisites = vec![requires("rust-ffi", "xcframework")];
@@ -685,7 +685,7 @@ mod tests {
     fn product_output_accepts_normal_repo_relative_paths() {
         for accepted in [
             "out/lib.a",
-            "native/out/JackinFFI.xcframework",
+            "native/out/BridgeFFI.xcframework",
             "a",
             "a/b/c",
             "with-dash/under_score/file.tar.gz",
