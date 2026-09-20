@@ -63,6 +63,8 @@ pub(crate) struct G0AuthIdentity {
     pub provider: String,
     pub viewer_id: String,
     pub viewer_login: String,
+    /// Exact, unique subset of the checker's supported read-only GitHub
+    /// repository permissions. Write-only and unknown permissions are invalid.
     pub safe_scopes: Vec<String>,
     pub secret_excluded: bool,
 }
@@ -85,6 +87,9 @@ pub(crate) struct G0RequestRecord {
     pub api: G0ApiKind,
     pub method: String,
     pub endpoint_or_operation: String,
+    /// Media type requested from the provider. Raw repository contents require
+    /// GitHub's documented raw media type so the response bytes are file bytes.
+    pub accept: String,
     /// Canonical read-only query text (REST query or GraphQL document),
     /// encoded so its digest can be recomputed without storing secrets.
     pub query_base64: String,
@@ -110,6 +115,7 @@ pub(crate) struct G0RequestRecord {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum G0ApiKind {
     Rest,
+    /// Rejected until schema v2 defines exact authorized query/variable pairs.
     Graphql,
 }
 
@@ -131,7 +137,9 @@ pub(crate) enum G0RequestState {
 #[serde(deny_unknown_fields)]
 pub(crate) struct G0Page {
     pub number: u32,
-    pub per_page: u32,
+    /// Explicit page size for paginated endpoints. `None` means the endpoint
+    /// does not support page-size pagination.
+    pub per_page: Option<u32>,
     pub link_next: Option<String>,
     pub cursor_in: Option<String>,
     pub cursor_out: Option<String>,
@@ -200,8 +208,9 @@ pub(crate) struct G0RepositoryInventory {
 #[serde(deny_unknown_fields)]
 pub(crate) struct G0ArtifactObservation {
     pub artifact_id: u64,
+    /// Artifact listing exposes run_id and workflow_run.head_sha, but no
+    /// run_attempt. Attempt binding stays an explicit live evidence blocker.
     pub run_id: u64,
-    pub run_attempt: u32,
     pub run_head_sha: String,
     pub name: String,
     pub digest: String,
@@ -296,7 +305,9 @@ pub(crate) struct G0PullRequestInventory {
     pub head_repository: String,
     pub head_sha: String,
     pub base_sha: String,
-    pub tested_merge_sha: String,
+    /// Optional open-PR merge candidate. Its absence is valid in G0 and it
+    /// never proves an execution's merge tree or checkout.
+    pub tested_merge_sha: Option<String>,
     pub merge_group_sha: Option<String>,
     pub trust: G0TrustObservation,
     pub applicability: String,
@@ -322,8 +333,17 @@ pub(crate) struct G0WorkflowBinding {
     pub event: String,
     pub source_sha: String,
     pub actual_checkout_sha: String,
-    pub run_ids: Vec<u64>,
+    /// Workflow execution identities include attempt because GitHub re-runs
+    /// retain the same run ID while receiving a new attempt number.
+    pub runs: Vec<G0WorkflowRunIdentity>,
     pub raw_object_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct G0WorkflowRunIdentity {
+    pub run_id: u64,
+    pub run_attempt: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -387,7 +407,8 @@ pub(crate) struct G0PullRequestRevision {
     pub number: u64,
     pub head_sha: String,
     pub base_sha: String,
-    pub tested_merge_sha: String,
+    /// Optional PR merge candidate; it does not prove an execution tree.
+    pub tested_merge_sha: Option<String>,
     pub merge_group_sha: Option<String>,
     pub raw_object_refs: Vec<String>,
 }
@@ -453,6 +474,8 @@ pub(crate) struct G0AgentModel {
 pub(crate) struct G0AccessObservation {
     pub repository: String,
     pub state: String,
+    /// Unique read permissions, each bound to a repository-specific captured
+    /// request whose endpoint requires that permission.
     pub scopes: Vec<String>,
     pub gaps: Vec<String>,
     pub raw_object_refs: Vec<String>,
