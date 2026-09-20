@@ -7,7 +7,7 @@
 //!   commit the binary was built from.
 //! * `VELNOR_WORKFLOW_CLOSURE_DIGEST`: the source-closure digest of the
 //!   checkout's `HEAD` tree (`velnor-workflow --closure`, see
-//!   `src/closure.rs`). Product identity: binaries built from different
+//!   `src/s2/closure.rs`). Product identity: binaries built from different
 //!   commits with the same closure are interchangeable renderers.
 //! * `VELNOR_WORKFLOW_FEATURES`: the sorted enabled-feature list the closure
 //!   footer hashed (see `cargo_features`).
@@ -17,11 +17,11 @@
 //!   the render-with-X-stamp-X binding holds for release products and
 //!   development builds alike.
 //!
-//! The closure duplicates the canonicalization in `src/closure.rs` (a build
+//! The closure duplicates the canonicalization in `src/s2/closure.rs` (a build
 //! script cannot import the crate it builds): `git ls-tree -r HEAD` over the
 //! closure paths, re-sorted in byte order, plus the footer, hashed with
 //! SHA-256. The footer version and path list are pinned by unit tests against
-//! `src/closure.rs`, so the two implementations cannot drift silently: any
+//! `src/s2/closure.rs`, so the two implementations cannot drift silently: any
 //! drift fails closed (digests mismatch, no product is accepted).
 //!
 //! A tree without git (or a git failure) stamps `unknown` for both values,

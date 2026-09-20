@@ -1,12 +1,12 @@
-//! The synthetic-workspace contract of the primitive registry.
+//! The schema-2 synthetic-workspace contract of the scanner and primitive registry.
 //!
 //! The fixture is a small polyglot repository — three Rust crates with
 //! different shapes, a Bun package, a root Dockerfile, and Markdown docs. It
 //! pins two properties: one unit kind is exactly one reusable workflow file,
 //! and nothing about the repository's name, path, or unit ids is known to the
 //! renderer. Units of a kind share one kind reusable while aggregate callers
-//! fan out per (unit, lane) so GitHub's unique-reusable-workflow limit stays a
-//! function of kind count, not unit count.
+//! fan out per (unit, provider) so GitHub's unique-reusable-workflow limit
+//! stays a function of kind count, not unit count.
 
 #![expect(
     clippy::unwrap_used,
@@ -61,6 +61,7 @@ fn copy_fixture(destination: &Path) -> PathBuf {
         "config:\n  default: true\n",
     )
     .unwrap();
+    write_config(destination, &base_config("example/synthetic"));
     destination.to_path_buf()
 }
 
@@ -91,8 +92,6 @@ fn generate(root: &Path) -> Generated {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -125,6 +124,81 @@ fn write_config(root: &Path, config: &str) {
     let directory = root.join(".github-gen");
     fs::create_dir_all(&directory).unwrap();
     fs::write(directory.join("velnor-workflow.toml"), config).unwrap();
+}
+
+fn base_config(repository: &str) -> String {
+    format!(
+        r#"schema = 2
+
+[generator]
+repository = "{repository}"
+
+[workflow]
+providers = ["github-hosted", "velnor"]
+automatic_providers = ["github-hosted", "velnor"]
+default_dispatch_providers = ["github-hosted", "velnor"]
+default_branch = "main"
+
+[workflow.selectors.github-hosted]
+runs_on = ["ubuntu-24.04"]
+
+[workflow.selectors.velnor]
+runs_on = ["self-hosted", "example-lane"]
+"#
+    )
+}
+
+const FULL_DECLARATIONS: &str = r#"
+[[declare]]
+primitive = "bun-package-pipeline"
+units = ["bun-synthetic-app"]
+
+[[declare]]
+primitive = "docker-image-pipeline"
+units = ["docker"]
+
+[[declare]]
+primitive = "docs-lint-pipeline"
+units = ["docs"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-alpha"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-beta"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-gamma"]
+
+[[declare]]
+primitive = "provider-matrix"
+
+[[declare]]
+primitive = "cache-contract"
+
+[[declare]]
+primitive = "affected-plan"
+
+[[declare]]
+primitive = "unit-aggregation"
+file = "ci-pr.yml"
+
+[[declare]]
+primitive = "unit-aggregation"
+file = "ci-main.yml"
+
+[[declare]]
+primitive = "unit-aggregation"
+file = "nightly.yml"
+"#;
+
+fn full_config() -> String {
+    let mut config = base_config("example/synthetic");
+    config.push_str(FULL_DECLARATIONS);
+    config
 }
 
 #[test]
@@ -242,13 +316,16 @@ fn adding_a_crate_reuses_the_kind_reusable_and_adds_a_unit() {
 #[test]
 fn the_repository_name_never_reaches_the_renderer() {
     let workspace = tempfile();
-    let one = generate(&copy_fixture(&workspace.join("all-the-worlds-a-repo-one")));
-    let other = generate(&copy_fixture(&workspace.join("totally-different-name-two")));
+    let one_root = copy_fixture(&workspace.join("all-the-worlds-a-repo-one"));
+    let other_root = copy_fixture(&workspace.join("totally-different-name-two"));
+    write_config(&one_root, &base_config("example/repo-one"));
+    write_config(&other_root, &base_config("example/repo-two"));
+    let one = generate(&one_root);
+    let other = generate(&other_root);
 
-    // Different fixture directories, same shape, same bytes: every generated
-    // workflow and the actionlint contract are identical. The project config
-    // is the one place the repository records its own identity, so only the
-    // `repository` line may differ.
+    // Different fixture directories and configured repository identities,
+    // same shape: generated workflows and actionlint stay independent of the
+    // repository identity. The runtime project config records that identity.
     assert_eq!(one.workflow_files(), other.workflow_files());
     for file in one.workflow_files() {
         assert_eq!(one.workflow(&file), other.workflow(&file), "{file}");
@@ -263,67 +340,13 @@ fn the_repository_name_never_reaches_the_renderer() {
     }
 }
 
-const FULL_CONFIG: &str = r#"schema = 1
-
-[generator]
-repository = "example/synthetic"
-
-[workflow]
-velnor_labels = ["self-hosted", "example-lane"]
-
-[[declare]]
-primitive = "bun-package-pipeline"
-units = ["bun-synthetic-app"]
-
-[[declare]]
-primitive = "docker-image-pipeline"
-units = ["docker"]
-
-[[declare]]
-primitive = "docs-lint-pipeline"
-units = ["docs"]
-
-[[declare]]
-primitive = "rust-crate-pipeline"
-units = ["rust-alpha"]
-
-[[declare]]
-primitive = "rust-crate-pipeline"
-units = ["rust-beta"]
-
-[[declare]]
-primitive = "rust-crate-pipeline"
-units = ["rust-gamma"]
-
-[[declare]]
-primitive = "lane-matrix"
-
-[[declare]]
-primitive = "cache-contract"
-
-[[declare]]
-primitive = "affected-plan"
-
-[[declare]]
-primitive = "unit-aggregation"
-file = "ci-pr.yml"
-
-[[declare]]
-primitive = "unit-aggregation"
-file = "ci-main.yml"
-
-[[declare]]
-primitive = "unit-aggregation"
-file = "nightly.yml"
-"#;
-
 #[test]
 fn a_declared_config_reproduces_the_default_surface() {
     let workspace = tempfile();
     let root = copy_fixture(&workspace.join("fixture"));
     let default = generate(&root);
 
-    write_config(&root, FULL_CONFIG);
+    write_config(&root, &full_config());
     let declared = generate(&root);
 
     assert_eq!(declared.workflow_files(), default.workflow_files());
@@ -335,6 +358,30 @@ fn a_declared_config_reproduces_the_default_surface() {
         );
     }
     assert_eq!(declared.unit_ids(), default.unit_ids());
+}
+
+#[test]
+fn pipeline_declaration_order_does_not_change_the_surface() {
+    let workspace = tempfile();
+    let root = copy_fixture(&workspace.join("fixture"));
+    let canonical = full_config();
+    write_config(&root, &canonical);
+    let first = generate(&root);
+
+    // S2 resolves each per-unit row by scanned unit id, then renders in scan
+    // order, so declaration order does not control the generated workflows.
+    let reversed = canonical.replace(
+        "[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-alpha\"]\n\n[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-beta\"]\n\n[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-gamma\"]",
+        "[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-gamma\"]\n\n[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-beta\"]\n\n[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-alpha\"]",
+    );
+    assert_ne!(canonical, reversed, "the declarations must be reordered");
+    write_config(&root, &reversed);
+    let second = generate(&root);
+
+    assert_eq!(first.workflow_files(), second.workflow_files());
+    for file in first.workflow_files() {
+        assert_eq!(first.workflow(&file), second.workflow(&file), "{file}");
+    }
 }
 
 #[test]
@@ -357,21 +404,23 @@ fn a_config_that_fails_validation_stops_generation() {
         (
             "wrong kind",
             format!(
-                "[[declare]]\nprimitive = \"bun-package-pipeline\"\nunits = [\"rust-alpha\"]\nfile = \"ci-rust-alpha.yml\"\n\n{}",
+                "{}\n[[declare]]\nprimitive = \"bun-package-pipeline\"\nunits = [\"rust-alpha\"]\nfile = \"ci-unit-rust.yml\"\n",
                 config_without_declares()
             ),
         ),
         (
             "incomplete family",
-            "[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-alpha\"]\n\n[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-beta\"]\n\n[[declare]]\nprimitive = \"affected-plan\"\n\n[[declare]]\nprimitive = \"unit-aggregation\"\nfile = \"ci-pr.yml\"\n".to_owned(),
-        ),
-        (
-            "non-canonical order",
-            "[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-beta\"]\n\n[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-alpha\"]\n\n[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-gamma\"]\n\n[[declare]]\nprimitive = \"affected-plan\"\n\n[[declare]]\nprimitive = \"unit-aggregation\"\nfile = \"ci-pr.yml\"\n".to_owned(),
+            format!(
+                "{}\n[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-alpha\"]\n\n[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-beta\"]\n",
+                config_without_declares()
+            ),
         ),
         (
             "renamed file",
-            "[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-alpha\"]\nfile = \"renamed.yml\"\n\n[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-beta\"]\n\n[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-gamma\"]\n\n[[declare]]\nprimitive = \"affected-plan\"\n\n[[declare]]\nprimitive = \"unit-aggregation\"\nfile = \"ci-pr.yml\"\n".to_owned(),
+            format!(
+                "{}\n[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-alpha\"]\nfile = \"renamed.yml\"\n",
+                config_without_declares()
+            ),
         ),
     ];
     for (name, config) in cases {
@@ -396,14 +445,9 @@ fn a_config_that_fails_validation_stops_generation() {
     }
 }
 
-/// The full config minus every row that covers a unit or the plan, so a single
-/// appended row can be tested in isolation.
+/// A valid schema-2 repository config for validation probes that add one row.
 fn config_without_declares() -> String {
-    FULL_CONFIG
-        .lines()
-        .filter(|line| !line.starts_with("primitive =") && !line.starts_with("units ="))
-        .collect::<Vec<_>>()
-        .join("\n")
+    base_config("example/synthetic")
 }
 
 fn tempfile() -> PathBuf {
@@ -428,36 +472,25 @@ fn tempfile() -> PathBuf {
 fn copy_release_fixture(destination: &Path) -> PathBuf {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/synthetic-release");
     copy_tree(&source, destination);
+    write_config(destination, &base_config("example/synthetic-release"));
     destination.to_path_buf()
 }
 
-const RELEASE_CONFIG: &str = r#"schema = 1
+fn release_bindings_config() -> String {
+    fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/release-bindings/velnor-workflow.toml"),
+    )
+    .unwrap()
+}
 
-[generator]
-repository = "example/synthetic-release"
-
-[workflow]
-velnor_labels = ["self-hosted", "example-lane"]
-
-[[declare]]
-primitive = "release"
-file = "release.yml"
-
-[declare.args]
-kind = "rust-binary"
-package = "app"
-binary = "app"
-targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
-
-[[declare]]
-primitive = "preview"
-file = "preview.yml"
-
-[declare.args]
-package = "app"
-binary = "app"
-targets = ["x86_64-unknown-linux-gnu"]
-"#;
+fn pin_release_targets(root: &Path) {
+    fs::write(
+        root.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.91.1\"\ntargets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n",
+    )
+    .unwrap();
+}
 
 #[test]
 fn a_declared_release_lane_adds_exactly_the_release_files() {
@@ -474,7 +507,8 @@ fn a_declared_release_lane_adds_exactly_the_release_files() {
         "preview.yml must not exist before the lane is declared"
     );
 
-    write_config(&root, RELEASE_CONFIG);
+    pin_release_targets(&root);
+    write_config(&root, &release_bindings_config());
     let with = generate(&root);
     let files = with.workflow_files();
     assert!(files.contains(&"release.yml".to_owned()), "{files:?}");
@@ -507,7 +541,8 @@ fn a_declared_release_lane_adds_exactly_the_release_files() {
 fn tool_provisioning_is_pinned_and_minimal() {
     let workspace = tempfile();
     let root = copy_release_fixture(&workspace.join("fixture"));
-    write_config(&root, RELEASE_CONFIG);
+    pin_release_targets(&root);
+    write_config(&root, &release_bindings_config());
     let with = generate(&root);
 
     let release = with.workflow("release.yml");
@@ -538,28 +573,17 @@ fn tool_provisioning_is_pinned_and_minimal() {
         .filter(|id| id.starts_with("rust-"))
     {
         let workflow = with.workflow(&kind_file(&unit));
-        let install_args = workflow
-            .lines()
-            .filter(|line| line.trim_start().starts_with("install_args:"))
-            .collect::<Vec<_>>();
-        for line in &install_args {
-            let tools = line
-                .trim()
-                .strip_prefix("install_args:")
-                .unwrap()
-                .split_whitespace();
-            assert!(
-                !tools.clone().any(|tool| tool == "rust"),
-                "{unit} must never install the Rust toolchain through mise: {line}"
-            );
-        }
+        assert!(
+            !workflow.contains("install_args: rust") && !workflow.contains("mise_tools: \"rust\""),
+            "{unit} must never install the Rust toolchain through mise: {workflow}"
+        );
         let checks_envs = workflow
             .lines()
             .filter(|line| line.trim() == "MISE_AUTO_INSTALL: \"false\"")
             .count();
         assert!(
             checks_envs >= 2,
-            "{unit} runs two lanes and both must switch mise auto-install off: {workflow}"
+            "{unit} runs on two providers and both must switch mise auto-install off: {workflow}"
         );
     }
 }
@@ -569,8 +593,11 @@ fn the_declared_release_surface_is_repo_name_independent() {
     let workspace = tempfile();
     let one = copy_release_fixture(&workspace.join("release-lane-one"));
     let other = copy_release_fixture(&workspace.join("release-lane-two"));
-    write_config(&one, RELEASE_CONFIG);
-    write_config(&other, RELEASE_CONFIG);
+    pin_release_targets(&one);
+    pin_release_targets(&other);
+    let config = release_bindings_config();
+    write_config(&one, &config);
+    write_config(&other, &config);
     let one = generate(&one);
     let other = generate(&other);
     assert_eq!(one.workflow_files(), other.workflow_files());
@@ -585,19 +612,10 @@ fn the_declared_release_surface_is_repo_name_independent() {
 /// contract carries none of the generation-time-only keys.
 #[test]
 fn declared_release_bindings_render() {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/release-bindings/velnor-workflow.toml");
-    let bindings = fs::read_to_string(&fixture).unwrap();
     let workspace = tempfile();
     let root = copy_release_fixture(&workspace.join("fixture"));
-    // The `[release]` contract validates its targets against the pinned
-    // toolchain, so the test copy pins the targets the binding builds for.
-    fs::write(
-        root.join("rust-toolchain.toml"),
-        "[toolchain]\nchannel = \"1.91.1\"\ntargets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n",
-    )
-    .unwrap();
-    write_config(&root, &bindings);
+    pin_release_targets(&root);
+    write_config(&root, &release_bindings_config());
     let with = generate(&root);
     let files = with.workflow_files();
     assert!(files.contains(&"release.yml".to_owned()), "{files:?}");
@@ -653,13 +671,14 @@ fn declared_release_bindings_render() {
 
 #[test]
 fn an_incomplete_declared_release_stops_generation() {
-    let incomplete = RELEASE_CONFIG
+    let incomplete = release_bindings_config()
         .lines()
         .filter(|line| !line.starts_with("targets ="))
         .collect::<Vec<_>>()
         .join("\n");
     let workspace = tempfile();
     let root = copy_release_fixture(&workspace.join("fixture"));
+    pin_release_targets(&root);
     write_config(&root, &incomplete);
     let status = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
         .args([

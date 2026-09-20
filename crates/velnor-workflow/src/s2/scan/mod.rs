@@ -25,25 +25,54 @@ use serde::Serialize;
 use crate::s2::provider::{
     Capabilities, Platform, ProviderId, ProviderSelector, ProviderSet, TrustReq,
 };
+use crate::s2::safe_fs::SafeRoot;
 use crate::s2::{
-    default_workflow_files, identifier_suffix, AnalysisSummary, CacheSpec, GeneratorError,
-    MaintenanceSpec, ProjectConfig, Unit, UnitKind,
+    default_workflow_files, AnalysisSummary, CacheSpec, GeneratorError, MaintenanceSpec,
+    ProjectConfig, Unit, UnitKind,
 };
 
 /// Run the detector pipeline over `root` and return what it proved.
 ///
 /// # Errors
 /// Returns filesystem errors with the affected path.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn scan_shape(
     root: &Path,
     providers: &ProviderSet,
     default_branch: &str,
     exclude: &[String],
 ) -> Result<RepositoryShape, GeneratorError> {
-    let files = file_walk::repository_files(root, exclude)?;
+    scan_shape_with_owned_paths(root, providers, default_branch, exclude, &BTreeSet::new())
+}
+
+/// Run the detector pipeline while excluding only ownership paths that the
+/// caller has independently verified against the current renderer.
+pub(crate) fn scan_shape_with_owned_paths(
+    root: &Path,
+    providers: &ProviderSet,
+    default_branch: &str,
+    exclude: &[String],
+    owned_paths: &BTreeSet<std::path::PathBuf>,
+) -> Result<RepositoryShape, GeneratorError> {
+    let safe_root = SafeRoot::open(root)?;
+    scan_shape_with_safe_root(&safe_root, providers, default_branch, exclude, owned_paths)
+}
+
+/// Scan through the repository descriptor captured by the enclosing
+/// scan-and-render transaction.
+pub(crate) fn scan_shape_with_safe_root(
+    safe_root: &SafeRoot,
+    providers: &ProviderSet,
+    default_branch: &str,
+    exclude: &[String],
+    owned_paths: &BTreeSet<std::path::PathBuf>,
+) -> Result<RepositoryShape, GeneratorError> {
+    let root = safe_root.command_directory();
+    let files = file_walk::repository_files_with_safe_root(safe_root, exclude, owned_paths)?;
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
     let context = ScanContext {
         root,
+        safe_root,
         files: &files,
         file_set: &file_set,
     };
@@ -67,7 +96,7 @@ pub(crate) fn scan_shape(
     signals::detect(&context, &mut shape);
     gradle::detect(&context, &mut shape)?;
     node::detect(&context, &mut shape)?;
-    swift::detect(&context, &mut shape);
+    swift::detect(&context, &mut shape)?;
     opentofu::detect(&context, &mut shape);
     docker::detect(&context, &mut shape);
     homebrew::detect(&context, &mut shape);
@@ -141,8 +170,49 @@ pub(crate) struct RepositoryShape {
 /// Read-only view of the walked repository that every detector receives.
 pub(crate) struct ScanContext<'a> {
     root: &'a Path,
+    safe_root: &'a SafeRoot,
     files: &'a [String],
     file_set: &'a BTreeSet<String>,
+}
+
+impl ScanContext<'_> {
+    /// Read one repository input through the descriptor-pinned root, without
+    /// following symlinks in any path component.
+    pub(crate) fn read_text(&self, relative: &str) -> Result<String, GeneratorError> {
+        read_repository_text(self.safe_root, self.root, relative)
+    }
+}
+
+/// Read UTF-8 text through the pinned repository root. Lower-level detector
+/// helpers use this when they need the same safe access outside `ScanContext`.
+pub(crate) fn read_repository_text(
+    safe_root: &SafeRoot,
+    root: &Path,
+    relative: &str,
+) -> Result<String, GeneratorError> {
+    let path = root.join(relative);
+    let bytes = safe_root.read_file(Path::new(relative))?;
+    String::from_utf8(bytes).map_err(|error| {
+        GeneratorError::usage(format!(
+            "repository file is not valid UTF-8 at {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn identifier_suffix(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned()
 }
 
 /// Build a verification unit with the shared id, label, and command contract.
@@ -322,5 +392,42 @@ impl From<RepositoryShape> for ProjectConfig {
             velnor_host_cache: crate::s2::config::CacheVelnorSection::default(),
             check_profiles: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::{read_repository_text, SafeRoot};
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_keeps_reading_pinned_root_after_display_path_switches_to_another_tree() {
+        let base = std::env::temp_dir().join(format!(
+            "velnor-scan-root-swap-{}-{}",
+            std::process::id(),
+            crate::s2::unique_suffix()
+        ));
+        let display_path = base.join("repository");
+        let displaced_a = base.join("repository-a");
+        fs::create_dir_all(&display_path).expect("create repository A");
+        fs::write(display_path.join("source-a.txt"), "A").expect("write repository A marker");
+        let safe_root = SafeRoot::open(&display_path).expect("pin repository A");
+
+        fs::rename(&display_path, &displaced_a).expect("move repository A aside");
+        fs::create_dir(&display_path).expect("create repository B at the old display path");
+        fs::write(display_path.join("source-b.txt"), "B").expect("write repository B marker");
+
+        assert_eq!(
+            fs::read(display_path.join("source-b.txt")).expect("display path now names B"),
+            b"B"
+        );
+        assert_eq!(
+            read_repository_text(&safe_root, &display_path, "source-a.txt")
+                .expect("scan input reader still reads pinned A"),
+            "A"
+        );
+        let _ = fs::remove_dir_all(base);
     }
 }

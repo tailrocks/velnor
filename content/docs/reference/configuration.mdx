@@ -79,9 +79,11 @@ must select `docker` or `microvm`; missing or invalid selection is an error.
 | `routing_policy_file` | Optional exact routing-policy override |
 
 Labels are sorted and deduplicated. Empty labels become `self-hosted,velnor`.
-Target-MVP labels add `hetzner-sentry-ci`, `ubuntu-24.04`, `ubuntu-latest`, and
-`velnor-target-mvp`; the ARM option adds `ubuntu-24.04-arm`. macOS labels are
-rejected; execution is Linux-only.
+Target-MVP labels add `hetzner-sentry-ci`, `ubuntu-latest`, and
+`velnor-target-mvp`; the ARM option adds `ubuntu-24.04-arm`. The exact label
+`ubuntu-24.04` is reserved for GitHub-hosted workflow placement and is rejected
+case-insensitively from manual `--labels` and `VELNOR_LABELS` inputs. macOS
+labels are rejected; execution is Linux-only.
 
 ## Scope and registration
 

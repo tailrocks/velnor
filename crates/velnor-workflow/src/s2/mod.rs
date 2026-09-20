@@ -10,9 +10,12 @@ use std::env;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{self, IsTerminal, Read as _, Write as _};
+#[cfg(test)]
+use std::io::Write as _;
+use std::io::{self, IsTerminal};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
@@ -22,17 +25,22 @@ use serde_yaml::Value;
 mod capability_tests;
 mod closure;
 mod config;
+#[cfg(test)]
+mod consumer_negatives;
 pub(crate) mod dispatch;
 mod estate;
 mod planner;
 pub(crate) mod platform;
 pub(crate) mod policy;
 mod primitives;
+mod promote;
 pub(crate) mod provider;
+mod renovate_renderer;
 mod results;
 mod reuse;
 mod routing;
 pub(crate) mod runtime;
+mod safe_fs;
 mod scan;
 mod template_memory;
 mod trust;
@@ -111,22 +119,14 @@ const VELNOR_WORKFLOW_INSTALL_GIT_URL: &str = "https://github.com/tailrocks/veln
 pub const SOURCE_REVISION: &str = env!("VELNOR_WORKFLOW_SOURCE_SHA");
 /// The source-closure digest of the tree this binary was built from (see
 /// [`closure`]), stamped by `build.rs` (`unknown` when the build tree had
-/// no git). `velnor-workflow --closure` prints it; the D19 guard accepts a
-/// renderer whose closure equals the declared pin's closure.
+/// no git). `velnor-workflow --closure` prints it; D19 verification compares
+/// it with the declared pin's independently derived closure.
 pub const SOURCE_CLOSURE: &str = env!("VELNOR_WORKFLOW_CLOSURE_DIGEST");
-/// Names a `velnor-workflow` binary built at the pinned policy revision. The
-/// D19 guard consults it first; generated hosted jobs export it after
-/// installing the runtime artifact's policy binary so `--check` never needs
-/// the network.
+/// Names the trusted provisioned renderer used by explicit `--verify-pinned`.
 pub const VELNOR_WORKFLOW_PINNED_BINARY_ENV: &str = "VELNOR_WORKFLOW_PINNED_BINARY";
-/// Names the candidate manifest binding the env-slot candidate binary: the
-/// `candidate-manifest.json` the policy job's acquire step downloaded beside
-/// the candidate binary. The `velnor-workflow policy` candidate exception
-/// executes an env-slot binary only when this manifest's closure equals the
-/// audited tree's candidate closure and its digest matches the binary bytes.
-/// `--candidate-manifest` overrides this fallback; empty or missing disables
-/// the env-slot candidate.
-pub const VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV: &str = "VELNOR_WORKFLOW_CANDIDATE_MANIFEST";
+/// Carries the independently attested source closure paired with the
+/// provisioned renderer; the resolver checks it before opening the binary.
+pub(crate) const VELNOR_WORKFLOW_PINNED_CLOSURE_ENV: &str = "VELNOR_WORKFLOW_PINNED_CLOSURE";
 // The D19 generator pin is not a source literal: a constant naming the commit
 // that carries it can never equal that commit, so a tree rendered by the
 // pinned generator could never be byte-identical to the tree that declares the
@@ -209,18 +209,10 @@ pub enum ActionPin {
     Gradle,
     Sccache,
     MrBoxington,
-    // d2a-parity vocabulary: unconstructed in d2a too, where the crate-root
-    // `pub` enum is lint-exempt as external API.
-    #[allow(dead_code)]
-    Mold,
     GithubRuntime,
     DockerBuildx,
     DockerLogin,
-    #[allow(dead_code)]
-    DockerQemu,
     DockerBuild,
-    #[allow(dead_code)]
-    Cosign,
     Attest,
     CratesAuth,
     ConfigurePages,
@@ -280,8 +272,6 @@ impl ActionPin {
             Self::MrBoxington => {
                 "jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1"
             }
-            // rui314/setup-mold v1 (current v1 tag)
-            Self::Mold => "rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1",
             // crazy-max/ghaction-github-runtime v4.0.0
             Self::GithubRuntime => {
                 "crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0"
@@ -294,17 +284,9 @@ impl ActionPin {
             Self::DockerBuildx => {
                 "docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0"
             }
-            // docker/setup-qemu-action v4.3.0
-            Self::DockerQemu => {
-                "docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0"
-            }
             // docker/build-push-action v7
             Self::DockerBuild => {
                 "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0"
-            }
-            // sigstore/cosign-installer v4.1.2
-            Self::Cosign => {
-                "sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2"
             }
             // actions/attest-build-provenance v4.2.2
             Self::Attest => {
@@ -358,6 +340,7 @@ pub struct Cli {
     providers: Option<provider::ProviderSet>,
     dry_run: bool,
     check: bool,
+    verify_pinned: bool,
     force: bool,
     plain: bool,
     pin_build: bool,
@@ -402,12 +385,19 @@ struct RawCli {
     providers: Vec<String>,
 
     /// Inspect changes without writing files.
-    #[arg(long, conflicts_with = "check")]
+    #[arg(long, conflicts_with_all = ["check", "verify_pinned"])]
     dry_run: bool,
 
-    /// Fail if generated files would change.
-    #[arg(long, conflicts_with = "dry_run")]
+    /// Fail if this renderer would change generated files. Does not resolve
+    /// or execute the generator pin declared in repository config.
+    #[arg(long, conflicts_with_all = ["dry_run", "verify_pinned"])]
     check: bool,
+
+    /// Verify the checked-in files against the generator pin declared in the
+    /// repository config. Uses only the trusted provisioned renderer unless
+    /// local source building is explicitly enabled with `--pin-build`.
+    #[arg(long, conflicts_with_all = ["dry_run", "check", "force"])]
+    verify_pinned: bool,
 
     /// Replace recorded unmodified generator-owned files, and replace unowned
     /// workflow files with generated output. Never imports foreign bodies.
@@ -418,11 +408,10 @@ struct RawCli {
     #[arg(long)]
     plain: bool,
 
-    /// Allow `--check`'s D19 guard to compile the declared generator pin from
+    /// Allow `--verify-pinned` to compile the declared generator pin from
     /// source when no pinned renderer is provisioned. Local development only;
-    /// never emitted into generated CI. Accepted alongside `--check` (its
-    /// only consumer); accepted-and-ignored otherwise.
-    #[arg(long)]
+    /// never emitted into generated CI.
+    #[arg(long, requires = "verify_pinned")]
     pin_build: bool,
 
     /// Print the source commit this binary was built from and exit.
@@ -439,10 +428,8 @@ impl Cli {
     ///
     /// # Errors
     /// Returns an error for invalid command-line syntax or target forms.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn parse_args(
-        arguments: impl IntoIterator<Item = OsString>,
-    ) -> Result<Self, GeneratorError> {
+    #[cfg(test)]
+    fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Self, GeneratorError> {
         parse_clap(arguments)?.try_into()
     }
 }
@@ -483,6 +470,7 @@ impl TryFrom<RawCli> for Cli {
             providers,
             dry_run: raw.dry_run,
             check: raw.check,
+            verify_pinned: raw.verify_pinned,
             force: raw.force,
             plain: raw.plain,
             pin_build: raw.pin_build,
@@ -496,6 +484,7 @@ fn parse_raw_clap(arguments: impl IntoIterator<Item = OsString>) -> Result<RawCl
     RawCli::try_parse_from(values)
 }
 
+#[cfg(test)]
 fn parse_clap(arguments: impl IntoIterator<Item = OsString>) -> Result<RawCli, GeneratorError> {
     parse_raw_clap(arguments).map_err(|error| clap_usage_error(&error))
 }
@@ -807,8 +796,6 @@ impl CacheSpec {
 pub(crate) struct RenovateSpec {
     pub(crate) enabled: bool,
     pub(crate) reason: String,
-    pub(crate) schedule: String,
-    pub(crate) schedules: Vec<String>,
     pub(crate) token: String,
     pub(crate) config_path: String,
     pub(crate) validate: bool,
@@ -824,13 +811,14 @@ pub(crate) struct RenovateSpec {
 /// `scheduled-checks` primitive renders. The spec carries the schedule, the
 /// lane, and the job shell; the named tasks own every product assertion and
 /// threshold, so the generator passes `env` through without interpreting it.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CheckProfileSpec {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) schedule: String,
-    /// The lane the job runs on: `github`, `macos`, or `velnor`.
-    pub(crate) runner: String,
+    /// Typed execution provider and platform; aliases cannot leak into render.
+    pub(crate) provider: provider::ProviderId,
+    pub(crate) platform: provider::Platform,
     pub(crate) tools: Vec<String>,
     pub(crate) tasks: Vec<String>,
     pub(crate) needs: Vec<String>,
@@ -840,6 +828,25 @@ pub(crate) struct CheckProfileSpec {
     /// `continue-on-error`.
     pub(crate) advisory: bool,
     pub(crate) env: BTreeMap<String, String>,
+}
+
+impl Default for CheckProfileSpec {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            schedule: String::new(),
+            provider: provider::ProviderId::GithubHosted,
+            platform: provider::Platform::LinuxX64,
+            tools: Vec::new(),
+            tasks: Vec::new(),
+            needs: Vec::new(),
+            timeout_minutes: 0,
+            artifacts: Vec::new(),
+            advisory: false,
+            env: BTreeMap::new(),
+        }
+    }
 }
 
 /// The documentation-site contract the `docs-site` primitive renders. Every
@@ -903,6 +910,27 @@ pub(crate) struct ReleaseSpec {
     /// `release-manifest.json`. A consumer-contract value the repository
     /// declares; the generic renderer never invents one.
     pub(crate) manifest_schema: String,
+    /// APT architectures. Empty selects exactly `amd64` and `arm64`.
+    /// Generation-time only.
+    pub(crate) apt_arches: Vec<String>,
+    /// Full OpenPGP signing fingerprint; the APT contract normalizes it to
+    /// uppercase. Generation-time only.
+    pub(crate) signer_fingerprint: String,
+    /// Secret names, never secret values. Generation-time only.
+    pub(crate) passphrase_secret: String,
+    pub(crate) signing_key_secret: String,
+    /// Relative signing keyring path. Empty selects `<package>.gpg`.
+    /// Generation-time only.
+    pub(crate) keyring_path: String,
+    /// Repository metadata values. Empty selects package and source repo name.
+    /// Generation-time only.
+    pub(crate) apt_origin: String,
+    pub(crate) apt_identity_dir: String,
+    /// HTTPS feed URL. Generation-time only.
+    pub(crate) apt_feed_url: String,
+    /// APT metadata retention. Zero/unset selects the supported default, one.
+    /// Generation-time only.
+    pub(crate) retention: u32,
     /// The consumer-owned Dockerfile the `docker` publisher builds, relative
     /// to the repository root. Empty selects the `Dockerfile` convention.
     /// Generation-time only: pinned runtimes never consume it.
@@ -956,19 +984,39 @@ pub(crate) struct ReleaseSpec {
 /// One typed named-task release job. Product build, sign, and publication
 /// logic stays in the named mise tasks; the generator owns the job graph,
 /// event gates, runner routing, and protected execution metadata.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReleaseJobSpec {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) tasks: Vec<String>,
     pub(crate) needs: Vec<String>,
-    pub(crate) runner: String,
+    pub(crate) provider: provider::ProviderId,
+    pub(crate) platform: provider::Platform,
     pub(crate) modes: Vec<String>,
     pub(crate) timeout_minutes: u32,
     pub(crate) environment: String,
     pub(crate) attest_subjects: Vec<String>,
     pub(crate) permissions: BTreeMap<String, String>,
     pub(crate) env: BTreeMap<String, String>,
+}
+
+impl Default for ReleaseJobSpec {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            tasks: Vec::new(),
+            needs: Vec::new(),
+            provider: provider::ProviderId::GithubHosted,
+            platform: provider::Platform::LinuxX64,
+            modes: Vec::new(),
+            timeout_minutes: 0,
+            environment: String::new(),
+            attest_subjects: Vec::new(),
+            permissions: BTreeMap::new(),
+            env: BTreeMap::new(),
+        }
+    }
 }
 
 /// One credential the release lane mounts and must unmount: the setup
@@ -1005,8 +1053,8 @@ pub struct ProjectConfig {
     pub(crate) repository: String,
     /// D19 generator pin: the generator-repository commit whose
     /// `velnor-workflow` renders and audits this tree. It is the single
-    /// literal behind every generated pin (policy runtime `--rev`,
-    /// `setup-velnor-workflow` `rev:`, runtime artifact names), read from
+    /// literal behind the generated setup-action `rev:` and runtime artifact
+    /// names, read from
     /// `[generator] revision` in the generation config and defaulting to the
     /// running binary's own [`SOURCE_REVISION`]. It never enters
     /// `project.toml`: that runtime contract is parsed by pinned runtimes
@@ -1202,12 +1250,11 @@ impl ProjectConfig {
             if !release.description.is_empty() {
                 write_toml_string(&mut output, "description", &release.description);
             }
-            // `manifest_schema` is generation-time only. The config-to-spec
-            // path carries it to the release renderer; pinned runtimes reject
-            // it as an unknown field before Planning can start. The `docker`
-            // publisher's `dockerfile`, `context`, and `platforms` stay
-            // generation-time only for the same reason: no runtime command
-            // consumes them.
+            // `manifest_schema`, the APT signing/feed fields, and the docker
+            // publisher's `dockerfile`, `context`, and `platforms` are
+            // generation-time only. The config-to-spec path carries them to
+            // their release renderers; pinned runtimes reject them as unknown
+            // fields, and no runtime command consumes them.
         }
         for unit in &self.units {
             output.push_str("\n[[unit]]\n");
@@ -1276,15 +1323,15 @@ fn write_toml_array(output: &mut String, name: &str, values: &[String]) {
 ///
 /// # Errors
 /// Returns filesystem errors with the affected path.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn scan_repository(
+#[cfg(test)]
+fn scan_repository(
     root: &Path,
     providers: Option<provider::ProviderSet>,
 ) -> Result<ProjectConfig, GeneratorError> {
     scan_repository_with_default_branch(root, providers, "main")
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn scan_repository_with_default_branch(
     root: &Path,
     providers: Option<provider::ProviderSet>,
@@ -1295,20 +1342,41 @@ fn scan_repository_with_default_branch(
 
 /// One scan pass over a repository: the shape, the optional repo-owned
 /// generation config, and the generation inputs they pin together.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 struct ScannedTarget {
+    safe_root: Arc<safe_fs::SafeRoot>,
     shape: scan::RepositoryShape,
     config: ProjectConfig,
     generation: Option<config::RepoGenerationConfig>,
     inputs: GenerationInputs,
 }
 
+#[cfg(test)]
 fn scan_target(
     root: &Path,
     providers: Option<provider::ProviderSet>,
     default_branch: &str,
 ) -> Result<ScannedTarget, GeneratorError> {
-    let generation = config::discover(root)?;
+    let safe_root = Arc::new(safe_fs::SafeRoot::open(root)?);
+    let generation = config::discover_with_safe_root(&safe_root)?;
+    scan_target_with_generation(safe_root, providers, default_branch, generation)
+}
+
+fn scan_target_with_safe_root(
+    safe_root: Arc<safe_fs::SafeRoot>,
+    providers: Option<provider::ProviderSet>,
+    default_branch: &str,
+) -> Result<ScannedTarget, GeneratorError> {
+    let generation = config::require_with_safe_root(&safe_root)?;
+    scan_target_with_generation(safe_root, providers, default_branch, Some(generation))
+}
+
+fn scan_target_with_generation(
+    safe_root: Arc<safe_fs::SafeRoot>,
+    providers: Option<provider::ProviderSet>,
+    default_branch: &str,
+    generation: Option<config::RepoGenerationConfig>,
+) -> Result<ScannedTarget, GeneratorError> {
     let exclude = generation
         .as_ref()
         .map(config::RepoGenerationConfig::scan_exclude)
@@ -1330,10 +1398,45 @@ fn scan_target(
         .as_ref()
         .and_then(config::RepoGenerationConfig::default_branch)
         .unwrap_or(default_branch);
-    let shape = scan::scan_shape(root, &scan_providers, scan_default_branch, exclude)?;
+    // The sidecar is an untrusted claim until its paths are checked against a
+    // render from the current scanned shape. Start with only fixed generator
+    // artifacts excluded, then converge once the renderer proves the sidecar's
+    // paths and recorded preimages.
+    let recorded = recorded_ownership_state(&safe_root)?;
+    let mut owned_paths = BTreeSet::new();
+    for _ in 0..2 {
+        let shape = scan::scan_shape_with_safe_root(
+            &safe_root,
+            &scan_providers,
+            scan_default_branch,
+            exclude,
+            &owned_paths,
+        )?;
+        let scanned = resolve_scanned_target(Arc::clone(&safe_root), generation.as_ref(), shape)?;
+        let Some(state) = recorded.as_ref() else {
+            return Ok(scanned);
+        };
+        let rendered = rendered_files_for_scanned(&scanned)?;
+        let verified = verified_recorded_output_paths(&safe_root, &state.outputs, &rendered)?;
+        if verified == owned_paths {
+            return Ok(scanned);
+        }
+        owned_paths = verified;
+    }
+    Err(GeneratorError::usage(
+        "generated ownership did not stabilize against the current renderer; rerun generation after reconciling the sidecar",
+    ))
+}
+
+fn resolve_scanned_target(
+    safe_root: Arc<safe_fs::SafeRoot>,
+    generation: Option<&config::RepoGenerationConfig>,
+    shape: scan::RepositoryShape,
+) -> Result<ScannedTarget, GeneratorError> {
+    let root = safe_root.command_directory();
     let mut config = ProjectConfig::from(shape.clone());
-    if let Some(generation) = &generation {
-        apply_generation_config(&mut config, generation, root)?;
+    if let Some(generation) = generation {
+        apply_generation_config(&mut config, generation, &safe_root)?;
     }
     // Prerequisites compile into the selection graph and prepare commands, and
     // placement is rejected before any byte renders, so every later stage —
@@ -1361,27 +1464,29 @@ fn scan_target(
     // Rust unit, so the parsed pin is stamped onto any Rust unit that lacks
     // one; a repository with no pin leaves them unstamped for generation to
     // refuse.
-    if let Some(toolchain) = scan::rust::parse_rust_toolchain_from_dir(root)? {
+    if let Some(toolchain) =
+        scan::rust::parse_rust_toolchain_for_files(&safe_root, root, shape.files())?
+    {
         for unit in &mut config.units {
             if unit.kind == UnitKind::Rust && unit.toolchain.is_none() {
                 unit.toolchain = Some(toolchain.clone());
             }
         }
     }
-    let mut config = load_workflow_templates(root, config, generation.as_ref())?;
+    let mut config = load_workflow_templates(&safe_root, config, generation)?;
     // The root lock's tool keys pin every mise id the surface may install:
     // `mise --locked` requires install args to equal the lock keys, so both
     // validation and rendering resolve against these instead of mandating a
     // spelling. Only the root lock is consulted; see
     // `config::mise_lock_keys_for_root` for the per-unit-lock gap.
-    let mise_lock_keys = config::mise_lock_keys_for_root(root)?;
+    let mise_lock_keys = config::mise_lock_keys_for_root_with_safe_root(&safe_root)?;
     config.mise_lock_keys.clone_from(&mise_lock_keys);
-    validate_actionlint_pin_coherence(root)?;
+    validate_actionlint_pin_coherence_with_safe_root(&safe_root)?;
     // The repo-owned config is validated against the resolved surface before
     // it can influence anything: a declared unit the scan did not find, or a
     // channel grant for an owner block the render does not declare, is a hard
     // error, never a silent no-op.
-    if let Some(generation) = &generation {
+    if let Some(generation) = generation {
         config.package_update_channels = generation.package_update_channels();
         let unit_ids = config
             .units
@@ -1400,13 +1505,33 @@ fn scan_target(
     // whether the rest of the contract is scanned or declared.
     validate_provider_selectors(&config)?;
     validate_unit_capabilities(&config)?;
-    let inputs = GenerationInputs::current(generation.as_ref(), &shape)?;
+    let inputs = GenerationInputs::current(generation, &shape)?;
     Ok(ScannedTarget {
+        safe_root,
         shape,
         config,
-        generation,
+        generation: generation.cloned(),
         inputs,
     })
+}
+
+fn rendered_files_for_scanned(
+    scanned: &ScannedTarget,
+) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
+    let surface = primitives::generate_with_safe_root(
+        &scanned.safe_root,
+        &scanned.shape,
+        &scanned.config,
+        scanned.generation.as_ref(),
+    )?;
+    let mut config = scanned.config.clone();
+    config.units.clone_from(&surface.units);
+    for file in &surface.added_files {
+        if !config.workflow_files.contains(file) {
+            config.workflow_files.push(file.clone());
+        }
+    }
+    generated_files_with_surface(&config, Some(&surface))
 }
 
 pub(crate) fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
@@ -1796,7 +1921,7 @@ fn refresh_static_mr_boxington_commands(template: &str) -> String {
 }
 
 fn load_workflow_templates(
-    root: &Path,
+    safe_root: &safe_fs::SafeRoot,
     config: ProjectConfig,
     generation: Option<&config::RepoGenerationConfig>,
 ) -> Result<ProjectConfig, GeneratorError> {
@@ -1805,8 +1930,11 @@ fn load_workflow_templates(
             "[workflow] templates = \"{declared}\" is not supported; imported workflow bodies are not a generation input"
         )));
     }
-    let directory = root.join(WORKFLOW_TEMPLATE_DIR);
-    if directory.is_dir() {
+    let directory = safe_root.command_directory().join(WORKFLOW_TEMPLATE_DIR);
+    if safe_root
+        .open_directory(Path::new(WORKFLOW_TEMPLATE_DIR))?
+        .is_some()
+    {
         return Err(GeneratorError::usage(format!(
             "{} is not a generation input; remove the directory and regenerate from repository evidence plus typed config",
             directory.display()
@@ -1900,7 +2028,7 @@ fn apply_provider_generation_config(
 fn apply_generation_config(
     config: &mut ProjectConfig,
     generation: &config::RepoGenerationConfig,
-    root: &Path,
+    safe_root: &safe_fs::SafeRoot,
 ) -> Result<(), GeneratorError> {
     if let Some(repository) = generation.repository() {
         repository.clone_into(&mut config.repository);
@@ -1944,14 +2072,14 @@ fn apply_generation_config(
     if let Some(null) = generation.actionlint_config_variables_null() {
         config.actionlint_config_variables_null = null;
     }
-    apply_release(config, generation.release(), root)?;
-    apply_renovate(config, generation.renovate(), root)?;
+    apply_release(config, generation.release(), safe_root)?;
+    apply_renovate(config, generation.renovate(), safe_root)?;
     apply_docs(config, generation.docs())?;
-    apply_check_profiles(config, generation.check_profiles(), root)?;
+    apply_check_profiles(config, generation.check_profiles(), safe_root)?;
     apply_maintenance(config, generation.maintenance())?;
-    apply_unit_rows(config, generation.units(), root)?;
-    materialize_capability_commands(config, root)?;
-    read_static_files(config, generation.static_files(), root)?;
+    apply_unit_rows(config, generation.units(), safe_root)?;
+    materialize_capability_commands_with_safe_root(config, safe_root)?;
+    read_static_files_with_safe_root(config, generation.static_files(), safe_root)?;
     config.github_cache = generation.cache_github().clone();
     config.velnor_host_cache = generation.cache_velnor().clone();
     refresh_mr_boxington_note(config);
@@ -1960,7 +2088,10 @@ fn apply_generation_config(
     Ok(())
 }
 
-fn discover_renovate_config(root: &Path, explicit: Option<&str>) -> Result<String, GeneratorError> {
+fn discover_renovate_config(
+    safe_root: &safe_fs::SafeRoot,
+    explicit: Option<&str>,
+) -> Result<String, GeneratorError> {
     const CANDIDATES: &[&str] = &[
         "renovate.json",
         "renovate.json5",
@@ -1968,8 +2099,7 @@ fn discover_renovate_config(root: &Path, explicit: Option<&str>) -> Result<Strin
         ".github/renovate.json5",
     ];
     if let Some(path) = explicit {
-        let full = root.join(path);
-        if !full.is_file() {
+        if !safe_root.has_regular_file(Path::new(path))? {
             return Err(GeneratorError::usage(format!(
                 "[renovate] config path `{path}` does not exist in the repository"
             )));
@@ -1977,7 +2107,7 @@ fn discover_renovate_config(root: &Path, explicit: Option<&str>) -> Result<Strin
         return Ok(path.to_owned());
     }
     for candidate in CANDIDATES {
-        if root.join(candidate).is_file() {
+        if safe_root.has_regular_file(Path::new(candidate))? {
             return Ok((*candidate).to_owned());
         }
     }
@@ -1989,7 +2119,7 @@ fn discover_renovate_config(root: &Path, explicit: Option<&str>) -> Result<Strin
 fn apply_renovate(
     config: &mut ProjectConfig,
     renovate: &config::RenovateSection,
-    root: &Path,
+    safe_root: &safe_fs::SafeRoot,
 ) -> Result<(), GeneratorError> {
     if let Some(enabled) = renovate.enabled() {
         config.renovate_enabled = enabled;
@@ -2000,7 +2130,7 @@ fn apply_renovate(
     if renovate.enabled() != Some(true) {
         return Ok(());
     }
-    let config_path = discover_renovate_config(root, renovate.config())?;
+    let config_path = discover_renovate_config(safe_root, renovate.config())?;
     if !config
         .analysis
         .detected
@@ -2017,15 +2147,6 @@ fn apply_renovate(
     });
     let token = renovate.token().unwrap_or("GH_RENOVATE_TOKEN").to_owned();
     config::validate_renovate_token_name(&token)?;
-    let schedule = renovate.schedule().unwrap_or("0 6 * * *").to_owned();
-    config::validate_renovate_cron(&schedule)?;
-    let mut schedules = Vec::new();
-    for extra in renovate.schedules() {
-        config::validate_renovate_cron(extra)?;
-        if extra != &schedule && !schedules.contains(extra) {
-            schedules.push(extra.clone());
-        }
-    }
     let mut repositories = Vec::new();
     for repository in renovate.repositories() {
         config::validate_renovate_repository_target(repository)?;
@@ -2063,8 +2184,6 @@ fn apply_renovate(
     config.renovate = Some(RenovateSpec {
         enabled: true,
         reason: config.renovate_reason.clone(),
-        schedule,
-        schedules,
         token,
         config_path,
         validate: renovate.validate().unwrap_or(true),
@@ -2164,12 +2283,12 @@ fn default_docs_paths() -> Vec<String> {
 fn apply_check_profiles(
     config: &mut ProjectConfig,
     rows: &[config::CheckProfileSection],
-    root: &Path,
+    safe_root: &safe_fs::SafeRoot,
 ) -> Result<(), GeneratorError> {
     if rows.is_empty() {
         return Ok(());
     }
-    let mise_tasks = parse_mise_task_names(root)?;
+    let mise_tasks = parse_mise_task_names_with_safe_root(safe_root)?;
     let mut profiles = Vec::new();
     for row in rows {
         let id = row.id().unwrap_or_default();
@@ -2184,7 +2303,8 @@ fn apply_check_profiles(
             id: id.to_owned(),
             name: row.name().unwrap_or(id).to_owned(),
             schedule: row.schedule().unwrap_or_default().to_owned(),
-            runner: row.runner().unwrap_or("github").to_owned(),
+            provider: row.provider(),
+            platform: row.platform(),
             tools: row.tools().unwrap_or_default().to_vec(),
             tasks: row.tasks().unwrap_or_default().to_vec(),
             needs: row.needs().unwrap_or_default().to_vec(),
@@ -2239,7 +2359,7 @@ fn apply_maintenance(
 fn apply_release(
     config: &mut ProjectConfig,
     release: &config::ReleaseSection,
-    root: &Path,
+    safe_root: &safe_fs::SafeRoot,
 ) -> Result<(), GeneratorError> {
     if let Some(enabled) = release.enabled() {
         config.release_enabled = enabled;
@@ -2258,6 +2378,15 @@ fn apply_release(
         || release.artifact_path().is_some()
         || release.description().is_some()
         || release.manifest_schema().is_some()
+        || !release.apt_arches().is_empty()
+        || release.signer_fingerprint().is_some()
+        || release.passphrase_secret().is_some()
+        || release.signing_key_secret().is_some()
+        || release.keyring_path().is_some()
+        || release.apt_origin().is_some()
+        || release.apt_identity_dir().is_some()
+        || release.apt_feed_url().is_some()
+        || release.retention().is_some()
         || release.dockerfile().is_some()
         || release.context().is_some()
         || !release.platforms().is_empty()
@@ -2313,6 +2442,35 @@ fn apply_release(
     if let Some(schema) = release.manifest_schema() {
         schema.clone_into(&mut spec.manifest_schema);
     }
+    if !release.apt_arches().is_empty() {
+        spec.apt_arches = release.apt_arches().to_vec();
+    }
+    if let Some(fingerprint) = release.signer_fingerprint() {
+        fingerprint.clone_into(&mut spec.signer_fingerprint);
+    }
+    if let Some(secret) = release.passphrase_secret() {
+        secret.clone_into(&mut spec.passphrase_secret);
+    }
+    if let Some(secret) = release.signing_key_secret() {
+        secret.clone_into(&mut spec.signing_key_secret);
+    }
+    if let Some(path) = release.keyring_path() {
+        path.clone_into(&mut spec.keyring_path);
+    }
+    if let Some(origin) = release.apt_origin() {
+        origin.clone_into(&mut spec.apt_origin);
+    }
+    if let Some(identity_dir) = release.apt_identity_dir() {
+        identity_dir.clone_into(&mut spec.apt_identity_dir);
+    }
+    if let Some(url) = release.apt_feed_url() {
+        url.clone_into(&mut spec.apt_feed_url);
+    }
+    if let Some(retention) = release.retention() {
+        spec.retention = u32::try_from(retention).map_err(|_| {
+            GeneratorError::usage("[release] apt retention must be a non-negative integer")
+        })?;
+    }
     if let Some(dockerfile) = release.dockerfile() {
         dockerfile.clone_into(&mut spec.dockerfile);
     }
@@ -2364,7 +2522,7 @@ fn apply_release(
         secret.clone_into(&mut spec.registry_password_secret);
     }
     if !release.jobs().is_empty() {
-        let mise_tasks = parse_mise_task_names(root)?;
+        let mise_tasks = parse_mise_task_names_with_safe_root(safe_root)?;
         let mut jobs = Vec::new();
         for row in release.jobs() {
             let id = row.id().unwrap_or_default();
@@ -2380,7 +2538,8 @@ fn apply_release(
                 name: row.name().unwrap_or(id).to_owned(),
                 tasks: row.tasks().unwrap_or_default().to_vec(),
                 needs: row.needs().unwrap_or_default().to_vec(),
-                runner: row.runner().unwrap_or("github").to_owned(),
+                provider: row.provider(),
+                platform: row.platform(),
                 modes: row.modes().unwrap_or_default().to_vec(),
                 timeout_minutes: row
                     .timeout_minutes()
@@ -2408,10 +2567,10 @@ fn apply_release(
 fn apply_unit_rows(
     config: &mut ProjectConfig,
     rows: &[config::UnitSection],
-    root: &Path,
+    safe_root: &safe_fs::SafeRoot,
 ) -> Result<(), GeneratorError> {
     for row in rows {
-        apply_unit_row(config, row, root)?;
+        apply_unit_row(config, row, safe_root)?;
     }
     Ok(())
 }
@@ -2420,7 +2579,7 @@ fn apply_unit_rows(
 fn apply_unit_row(
     config: &mut ProjectConfig,
     row: &config::UnitSection,
-    root: &Path,
+    safe_root: &safe_fs::SafeRoot,
 ) -> Result<(), GeneratorError> {
     let Some(id) = row.id() else {
         return Ok(());
@@ -2442,7 +2601,7 @@ fn apply_unit_row(
         }
         let products = row.named_products(id)?;
         let prerequisites = row.declared_prerequisites(id)?;
-        let docker_contexts = row.named_docker_contexts(id, root)?;
+        let docker_contexts = row.named_docker_contexts_with_safe_root(id, safe_root)?;
         let env = row.validated_env(id)?.unwrap_or_default();
         config.units.push(Unit {
             id: id.to_owned(),
@@ -2573,7 +2732,7 @@ fn apply_unit_row(
                 "[[units.docker_contexts]] {id} applies to a non-Docker unit"
             )));
         }
-        unit.docker_contexts = row.named_docker_contexts(id, root)?;
+        unit.docker_contexts = row.named_docker_contexts_with_safe_root(id, safe_root)?;
     }
     if let Some(env) = row.validated_env(id)? {
         unit.env = env;
@@ -2819,11 +2978,11 @@ fn append_docker_contexts_to_commands(
 
 /// Fill unit commands from typed capabilities. Generation config cannot supply
 /// shell command arrays; this is the only writer of the runtime command lists.
-fn materialize_capability_commands(
+fn materialize_capability_commands_with_safe_root(
     config: &mut ProjectConfig,
-    root: &Path,
+    safe_root: &safe_fs::SafeRoot,
 ) -> Result<(), GeneratorError> {
-    let mise_tasks = parse_mise_task_names(root)?;
+    let mise_tasks = parse_mise_task_names_with_safe_root(safe_root)?;
     for unit in &mut config.units {
         if unit.kind == UnitKind::Docker
             && unit
@@ -2907,14 +3066,22 @@ fn materialize_capability_commands(
     Ok(())
 }
 
-fn parse_mise_task_names(root: &Path) -> Result<Vec<String>, GeneratorError> {
-    let path = root.join("mise.toml");
-    if !path.is_file() {
+fn parse_mise_task_names_with_safe_root(
+    safe_root: &safe_fs::SafeRoot,
+) -> Result<Vec<String>, GeneratorError> {
+    let root = safe_root.command_directory();
+    let preimage = safe_root.capture_file_preimage(Path::new("mise.toml"))?;
+    let Some(bytes) = preimage.bytes() else {
         return Ok(Vec::new());
-    }
-    let contents = fs::read_to_string(&path)
-        .map_err(|error| GeneratorError::io("read mise.toml", &path, &error))?;
-    let document = toml::from_str::<toml::Value>(&contents).map_err(|error| {
+    };
+    let contents = std::str::from_utf8(bytes).map_err(|error| {
+        GeneratorError::usage(format!(
+            "mise.toml is not valid UTF-8: {}: {error}",
+            root.join("mise.toml").display()
+        ))
+    })?;
+    let path = root.join("mise.toml");
+    let document = toml::from_str::<toml::Value>(contents).map_err(|error| {
         GeneratorError::usage(format!("parse mise.toml {}: {error}", path.display()))
     })?;
     let Some(tasks) = document.get("tasks") else {
@@ -2939,18 +3106,31 @@ fn parse_mise_task_names(root: &Path) -> Result<Vec<String>, GeneratorError> {
 /// # Errors
 /// Returns errors for a declared source that is missing, unreadable, or not
 /// UTF-8.
-fn read_static_files(
+fn read_static_files_with_safe_root(
     config: &mut ProjectConfig,
     rows: &[config::StaticFileSection],
-    root: &Path,
+    safe_root: &safe_fs::SafeRoot,
 ) -> Result<(), GeneratorError> {
+    config::validate_static_files(rows)?;
+    let root = safe_root.command_directory();
     for row in rows {
         let (Some(file), Some(source)) = (row.file(), row.source()) else {
             continue;
         };
-        let path = root.join(source);
-        let content = fs::read_to_string(&path).map_err(|error| {
-            GeneratorError::io("read declared static file source", &path, &error)
+        // `apply_generation_config` reads static sources before the complete
+        // config validation pass. Validate this path at the I/O boundary too.
+        config::validate_static_file_source(source)?;
+        let normalized = config::normalize_repository_relative_path(source).ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "[[static_file]] source must be a repository-relative path, found `{source}`"
+            ))
+        })?;
+        let bytes = safe_root.read_file(&normalized)?;
+        let content = String::from_utf8(bytes).map_err(|error| {
+            GeneratorError::usage(format!(
+                "declared static file source is not UTF-8: {}: {error}",
+                root.join(&normalized).display()
+            ))
         })?;
         config.static_files.push(StaticFile {
             path: file.to_owned(),
@@ -3004,7 +3184,7 @@ fn validate_unit_capabilities(config: &ProjectConfig) -> Result<(), GeneratorErr
     Ok(())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn strip_workflow_generator_header(content: &str) -> &str {
     if let Some(body) = content.strip_prefix(GENERATED_HEADER) {
         return body;
@@ -3022,21 +3202,6 @@ fn strip_workflow_generator_header(content: &str) -> &str {
 pub(crate) fn parent_path(path: &str) -> String {
     path.rsplit_once('/')
         .map_or_else(|| ".".to_owned(), |(parent, _)| parent.to_owned())
-}
-
-fn identifier_suffix(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_owned()
 }
 
 pub(crate) fn shell_quote(value: &str) -> String {
@@ -3296,10 +3461,9 @@ pub(crate) fn render_pinned_toolchain_fill(
 /// unit without a recorded pin would silently render steps that provision
 /// whatever rustup resolves. The scan refuses an unpinned Rust repository, so
 /// generation is the last point at which a hand-built config can be caught.
-/// Every generated pin (policy runtime `--rev`, `setup-velnor-workflow`
-/// `rev:`, runtime artifact names) is rendered from
-/// `ProjectConfig::workflow_revision`; a tree rendered from anything but a
-/// full commit SHA could never be regenerated by the policy validator.
+/// The setup-action `rev:` and runtime artifact names use
+/// `ProjectConfig::workflow_revision`; `--verify-pinned` requires it to be a
+/// full commit SHA.
 fn validate_workflow_revision(config: &ProjectConfig) -> Result<(), GeneratorError> {
     if is_full_revision(&config.workflow_revision) {
         return Ok(());
@@ -3379,12 +3543,6 @@ pub(crate) fn render_static_template_for_config(
         if let Some(selector) = config.selectors.get(provider) {
             template = template.replace(&token, &selector_runs_on_yaml(selector));
         }
-    }
-    if let Some(selector) = config.selectors.get(&provider::ProviderId::Velnor) {
-        template = template.replace(
-            crate::s2::estate::LEGACY_VELNOR_RUNNER_SELECTOR,
-            &selector_runs_on_expression(selector),
-        );
     }
     let template = if workflow_file == PACKAGE_UPDATER_WORKFLOW {
         estate::render_apt_package_updater_template(
@@ -3801,6 +3959,58 @@ pub(crate) fn validate_provider_admission_single_source(
                 )));
             };
             let provider_selector = format!("inputs.provider == '{provider}'");
+            let callee_blocks = static_workflow_job_blocks(callee_rendered);
+            if provider == "control" {
+                // `prepare-cargo` is one control caller that invokes the
+                // reusable with `provider: control`; inside that reusable,
+                // each local provider gets a separate store-warming job.
+                // Validate every provider-specific callee job against that
+                // shared caller input and its own required-check admission.
+                // Matching only one `control`-gated job would allow the
+                // caller/callee fanout to drift while another local store
+                // silently stops warming.
+                let prep_jobs = callee_blocks
+                    .iter()
+                    .filter_map(|(callee_job, block)| {
+                        let provider_name = callee_job.strip_suffix("-prepare-cargo-sources")?;
+                        let callee_provider = provider::ProviderId::parse(provider_name).ok()?;
+                        callee_provider
+                            .is_local()
+                            .then_some((callee_job, block, callee_provider))
+                    })
+                    .collect::<Vec<_>>();
+                if prep_jobs.is_empty() {
+                    return Err(GeneratorError::usage(format!(
+                        "{callee}: `{path}` caller `{job}` passes `provider: control`, but the \
+                         callee has no local `*-prepare-cargo-sources` jobs"
+                    )));
+                }
+                for (callee_job, callee_block, callee_provider) in &prep_jobs {
+                    let callee_if = job_level_if(callee_block).unwrap_or_default();
+                    if !callee_if.contains(&provider_selector) {
+                        return Err(GeneratorError::usage(format!(
+                            "{callee}: control caller `{job}` invokes local prep job `{callee_job}` \
+                             with `provider: control`, but its `if:` does not select \
+                             `{provider_selector}`: `{callee_if}`"
+                        )));
+                    }
+                    let admission_name =
+                        primitives::ProviderAdmission::ProviderTrusted(*callee_provider).env_name();
+                    let Some(admission) = admissions.get(admission_name) else {
+                        return Err(GeneratorError::usage(format!(
+                            "{callee}: control caller `{job}` warms `{callee_job}`, but `{path}` \
+                             `{gate_job}` does not evaluate `{admission_name}`"
+                        )));
+                    };
+                    let clause = format!("({admission})");
+                    if !callee_if.contains(&clause) {
+                        return Err(GeneratorError::usage(format!(
+                            "{callee}: control caller `{job}` warms `{callee_job}` under `{callee_if}`, \
+                             but the required check admits `{callee_provider}` with `{admission}`"
+                        )));
+                    }
+                }
+            }
             // The `control` provider warms every local provider's stores: its
             // callee jobs carry their own provider's admission, so any
             // evaluated admission is accepted for them.
@@ -3819,7 +4029,7 @@ pub(crate) fn validate_provider_admission_single_source(
             let mut carries_caller_predicate = false;
             let mut callee_jobs = 0_usize;
             let mut carried: Vec<String> = Vec::new();
-            for (callee_job, callee_block) in static_workflow_job_blocks(callee_rendered) {
+            for (callee_job, callee_block) in callee_blocks {
                 let callee_if = job_level_if(&callee_block).unwrap_or_default();
                 if !callee_if.contains(&provider_selector) {
                     continue;
@@ -4062,9 +4272,7 @@ fn expand_block_variables(value: &str, variables: &BTreeMap<String, String>) -> 
     expanded
 }
 
-/// Whether a script line names the runtime binary `velnor-workflow` itself
-/// (not `velnor-workflow-policy`, the Velnor lane's distinctly named
-/// host-persistent copy) inside the shared cargo bin directory.
+/// Whether a script line names `velnor-workflow` inside the shared cargo bin.
 fn names_shared_cargo_bin_runtime(line: &str) -> bool {
     [
         ".cargo/bin/velnor-workflow",
@@ -4528,10 +4736,10 @@ fn refresh_velnor_action_pins(template: &str) -> String {
 }
 
 /// One rendering of the policy job: the base-owned `ci-policy.yml`
-/// entrypoint (`Policy`, `pull_request_target` + `workflow_dispatch`) and the
-/// same job inside the trusted aggregates (`ci-main.yml`, `nightly.yml`),
-/// where a push to the default branch proves the validator the branch now
-/// carries passes on its own tree.
+/// entrypoint (`Policy`, `pull_request_target`) and the same job inside the
+/// trusted aggregates (`ci-main.yml`, `nightly.yml`), where a push to the
+/// default branch proves the validator the branch now carries passes on its
+/// own tree.
 pub(crate) struct PolicyJobSpec<'a> {
     pub(crate) name: &'a str,
     /// The validator pin: the `velnor-workflow` commit whose `policy`
@@ -4539,16 +4747,10 @@ pub(crate) struct PolicyJobSpec<'a> {
     /// value as `[generator] revision`; the validator's `entrypoint-pin`
     /// rule requires the two to agree.
     pub(crate) revision: &'a str,
-    pub(crate) runner: &'a str,
     /// The repository the generated tree belongs to: the setup action runs
     /// from the owner's own checkout, or from the published pin for
     /// consumers.
     pub(crate) repository: &'a str,
-    /// Mr. Boxington backend: `github` on hosted runners, `local` on Velnor
-    /// runners. The Velnor lane resolves no live ruleset; like every lane,
-    /// it never passes `--pin-build`, so an unprovisioned pin fails closed.
-    pub(crate) cache_backend: &'a str,
-    pub(crate) trusted_gate: Option<&'a str>,
     /// The branch whose rulesets are the required status-check contexts.
     pub(crate) default_branch: &'a str,
     /// Declared `[policy]` contexts passed to `--ruleset-contexts` when the
@@ -4556,164 +4758,9 @@ pub(crate) struct PolicyJobSpec<'a> {
     pub(crate) declared_ruleset_contexts: &'a str,
 }
 
-/// Shell fragment reading the audited tree's declared generator pin into
-/// `$pin` (fails closed when the tree declares none): `[generator]
-/// revision` first, the entrypoint literal second. Callers treat the pin as
-/// a locator hint; `velnor-workflow policy` parses the tree authoritatively
-/// and fails closed on any disagreement.
-fn audited_pin_script() -> &'static str {
-    r#"          pin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"
-          test "$pin" != '' || pin="$(sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{40}).*/\1/p' .github/workflows/ci-policy.yml | head -n 1)"
-          test "$pin" != '' || { echo "::error::audited tree declares no generator pin" >&2; exit 1; }
-"#
-}
-
-/// Owner policy step acquiring the PR run's candidate generator product.
-/// When the audited pin shares the base validator's closure AND the tree
-/// matches the pin's render the step exits immediately (the Stage-0
-/// validator renders). A same-closure tree that differs from the pin's
-/// render falls through to the candidate path: that is a generator change
-/// in flight, and exiting early would strand the validator with no
-/// candidate binding (manifest cleared, pin leg red). Otherwise the step
-/// waits for the same-repository PR run at the audited head to publish the
-/// candidate artifact the Rust unit job packaged, verifies its manifest
-/// bindings and digest, requires the manifest closure to equal the audited
-/// head's candidate closure in full (not just the artifact-name prefix),
-/// and exports the binary as the pinned binary plus its manifest for the
-/// validator's manifest binding. The poll name and the manifest gate both
-/// key off the head closure — the same identity the publisher names the
-/// artifact by and the validator's `wanted` binding checks — so the three
-/// legs rendezvous on one digest. The `--closure` probe runs with
-/// `GH_TOKEN` and `GITHUB_TOKEN` emptied: the probe needs no auth, so the
-/// exec point holds no token even though the API steps above it use the job
-/// token. Fork generator changes fail closed: only same-repository runs
-/// are even considered. The same-repository select compares the embedded
-/// `.head_repository.id` object: the runs-list endpoint exposes no
-/// `.head_repository_id` scalar, and selecting on it matches nothing.
-/// The artifact check pipes the listing through real jq for the same
-/// class of reason: gh api has no `-e` flag, so gh-side evaluation can
-/// never report the match.
-fn policy_candidate_step(revision: &str) -> String {
-    format!(
-        r#"      - name: Acquire candidate generator product
-        working-directory: policy-checkout
-        env:
-          GH_TOKEN: ${{{{ github.token }}}}
-          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}
-          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}
-          BASE_PIN: {revision}
-        run: |
-          set -euo pipefail
-{pin_script}          base_closure="$(velnor-workflow closure --rev="$BASE_PIN")"
-          pin_closure="$(velnor-workflow closure --rev="$pin")"
-          if [[ "$pin_closure" == "$base_closure" ]]; then
-            # Same closure means the running base validator IS the pin's
-            # renderer, so --check decides tree==pin-render with no extra
-            # provisioning. A match exits early; a differ falls through to
-            # the candidate path (a generator change in flight) instead of
-            # stranding the validator with a cleared manifest and a red pin
-            # leg. The check output stays visible: on a fall-through it is
-            # the diagnosis, on a match it is one line.
-            if velnor-workflow --plain --check; then
-              echo "pin $pin shares the base closure and renders the tree; the Stage-0 validator renders"
-              echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"
-              exit 0
-            fi
-            echo "pin $pin shares the base closure but the tree differs from its render; falling through to the candidate path"
-          fi
-          [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || {{ echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }}
-          if ! git cat-file -e "$HEAD_SHA^{{commit}}" 2>/dev/null; then
-            git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"
-          fi
-          head_candidate="$(velnor-workflow closure --rev="$HEAD_SHA" --candidate)"
-          name="velnor-workflow-candidate-${{head_candidate:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
-          deadline=$((SECONDS + 900))
-          run_id=""
-          while (( SECONDS < deadline )); do
-            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)]')"
-            waiting=false
-            seen=false
-            while read -r candidate_run; do
-              test "$candidate_run" != '' || continue
-              seen=true
-              status="$(jq -r .status <<<"$candidate_run")"
-              id="$(jq -r .id <<<"$candidate_run")"
-              # $name in the filter is a jq variable, not a shell expansion.
-              # shellcheck disable=SC2016
-              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" | jq -e --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
-                run_id="$id"
-                break 2
-              fi
-              [[ "$status" == "completed" ]] || waiting=true
-            done <<<"$(jq -c '.[]' <<<"$runs")"
-            # No runs yet means the API has not indexed the sibling run, not
-            # that it will never come: keep polling until the deadline.
-            [[ "$seen" == "true" ]] || waiting=true
-            [[ "$waiting" == "true" ]] || {{ echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }}
-            sleep 15
-          done
-          [[ -n "$run_id" ]] || {{ echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }}
-          candidate="$RUNNER_TEMP/velnor-workflow-candidate"
-          rm -rf "$candidate"
-          mkdir -p "$candidate"
-          gh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"
-          jq -e --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
-          if command -v sha256sum >/dev/null 2>&1; then
-            actual="$(sha256sum "$candidate/velnor-workflow" | awk '{{print $1}}')"
-          else
-            actual="$(shasum -a 256 "$candidate/velnor-workflow" | awk '{{print $1}}')"
-          fi
-          expected="$(jq -er .binary_sha256 "$candidate/candidate-manifest.json")"
-          [[ "$actual" == "$expected" ]] || {{ echo "::error::candidate digest mismatch" >&2; exit 1; }}
-          chmod 0755 "$candidate/velnor-workflow"
-          manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
-          [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
-          reported="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --closure)"
-          [[ "$reported" == "$manifest_closure" ]] || {{ echo "::error::candidate reports closure $reported, manifest claims $manifest_closure" >&2; exit 1; }}
-          echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
-          echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
-"#,
-        pin_script = audited_pin_script(),
-    )
-}
-
-/// Consumer policy steps acquiring the audited tree's declared generator as
-/// a release product. Consumer pins always name released generators, so a
-/// second setup call with the runtime-read pin suffices; when the pin equals
-/// the base validator the steps skip and the validator renders directly.
-fn policy_renderer_steps(repository: &str, revision: &str) -> String {
-    format!(
-        r#"      - name: Read declared generator pin
-        id: pin
-        working-directory: policy-checkout
-        run: |
-          set -euo pipefail
-{pin_script}          echo "value=$pin" >> "$GITHUB_OUTPUT"
-      - name: Set up declared generator product
-        id: renderer
-        if: steps.pin.outputs.value != '{revision}'
-        uses: {setup_uses}
-        with:
-          rev: ${{{{ steps.pin.outputs.value }}}}
-          checkout-path: ${{{{ github.workspace }}}}/policy-checkout
-      - name: Resolve declared generator product
-        if: steps.pin.outputs.value != '{revision}'
-        run: |
-          set -euo pipefail
-          binary="$HOME/.cache/velnor/workflow-runtime/${{{{ steps.renderer.outputs.closure }}}}/bin/velnor-workflow"
-          test -x "$binary"
-          echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary" >> "$GITHUB_ENV"
-"#,
-        pin_script = audited_pin_script(),
-        setup_uses = workflow_setup_action_uses(repository, revision),
-    )
-}
-
-/// The policy job body. It is deliberately a `steps` job, not a
-/// reusable-workflow call: a same-repository reusable call pinned to another
-/// revision stops GitHub from dispatching any job of the caller on push,
-/// schedule, and `workflow_dispatch` events (the run stays `pending` with
-/// zero jobs until the next push cancels it).
+/// The policy job body always runs on the fixed hosted control-plane image.
+/// It is a `steps` job, not a reusable-workflow call, so generated main and
+/// nightly aggregates do not depend on a ref-matched reusable workflow.
 ///
 /// The job checks out the base repository's full history (so pin ancestry
 /// is decidable), fetches and checks out the audited head, acquires the
@@ -4721,41 +4768,26 @@ fn policy_renderer_steps(repository: &str, revision: &str) -> String {
 /// ruleset contexts, and runs `velnor-workflow policy` with explicit
 /// `--head-sha` / `--base-sha`. The owner lane additionally checks out the
 /// base tree's setup-action directory sparsely under `policy-setup-action/`
-/// first, so the local `./…` setup step resolves. The validator regenerates the
-/// tree with the generator the tree declares and evaluates its own semantic
-/// rules; see `policy.rs`.
+/// first, so the local `./…` setup step resolves. The base-pinned validator
+/// statically audits candidate configuration and workflows; it does not
+/// obtain or execute the candidate's declared generator.
 ///
-/// Nothing here compiles: hosted lanes acquire products through
-/// `setup-velnor-workflow` (and, when the audited tree declares a different
-/// generator than the base, the PR run's candidate product or the declared
-/// release product); the Velnor lane provisions its host-persistent slot.
+/// Nothing here compiles or runs PR-produced code. The only generator binary
+/// is the base-pinned validator acquired by the trusted setup action.
 pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     let PolicyJobSpec {
         name,
         revision,
-        runner,
         repository,
-        cache_backend,
-        trusted_gate,
         default_branch,
         declared_ruleset_contexts,
     } = *spec;
-    let trusted_gate = trusted_gate.unwrap_or_default();
-    let hosted = cache_backend == "github";
     let owner = !repository.is_empty() && repository == workflow_setup_action_repository();
-    let ruleset_step = if hosted {
-        format!(
+    let ruleset_step = format!(
             "      - name: Resolve required status checks\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          DEFAULT_BRANCH: {default_branch}\n          DECLARED_RULESET_CONTEXTS: {declared_ruleset_contexts}\n        run: |\n          set -euo pipefail\n          stderr=\"$(mktemp)\"\n          trap 'rm -f \"$stderr\"' EXIT\n          if contexts=\"$(gh api \"repos/$GITHUB_REPOSITORY/rulesets?includes_parents=true\" 2>\"$stderr\" \\\n            | jq -r '.[] | select(.target == \"branch\" and .enforcement == \"active\") | .id' \\\n            | while read -r id; do gh api \"repos/$GITHUB_REPOSITORY/rulesets/$id\"; done \\\n            | jq -r --arg branch \"refs/heads/$DEFAULT_BRANCH\" 'select(.conditions.ref_name.include | any(. == \"~DEFAULT_BRANCH\" or . == \"~ALL\" or . == $branch)) | .rules[] | select(.type == \"required_status_checks\") | .parameters.required_status_checks[].context' \\\n            | sort -u | paste -sd, -)\"; then\n            :\n          elif grep -qE '(HTTP 403|Upgrade to GitHub Team)' \"$stderr\"; then\n            echo \"::warning::rulesets API returned 403; falling back to declared contexts [$DECLARED_RULESET_CONTEXTS]\"\n            contexts=\"$DECLARED_RULESET_CONTEXTS\"\n          else\n            cat \"$stderr\" >&2\n            exit 1\n          fi\n          echo \"RULESET_CONTEXTS=$contexts\" >> \"$GITHUB_ENV\"\n"
-        )
-    } else {
-        String::new()
-    };
-    let policy_arguments = if hosted {
-        "            --ruleset-contexts \"$RULESET_CONTEXTS\"\n"
-    } else {
-        ""
-    };
-    let validator = if hosted {
+        );
+    let policy_arguments = { " \\\n            --ruleset-contexts \"$RULESET_CONTEXTS\"\n" };
+    let validator = {
         let setup_uses = if owner {
             VELNOR_WORKFLOW_POLICY_SETUP_ACTION.to_owned()
         } else {
@@ -4764,8 +4796,6 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
         format!(
             "      - name: Set up Velnor workflow runtime\n        uses: {setup_uses}\n        with:\n          rev: {revision}\n          checkout-path: ${{{{ github.workspace }}}}/policy-checkout\n"
         )
-    } else {
-        workflow_pinned_policy_runtime_local(revision, "${{ github.workspace }}/policy-checkout")
     };
     // The owner runs the setup action from its own checkout (`./…`), but the
     // policy job checks the repository out only under `policy-checkout/`, so
@@ -4776,10 +4806,9 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     // `policy-checkout/`, either of which would execute fork-controlled
     // action code under pull_request_target. It must not land at the
     // workspace root: a root checkout wipes `policy-checkout/` under
-    // `clean: true` and the Acquire step then has no working directory.
-    // Consumers pin the published action and the Velnor lane provisions its
-    // slot, so neither needs this checkout.
-    let setup_checkout = if hosted && owner {
+    // `clean: true` and the Enforce step then has no working directory.
+    // Consumers pin the published action, so they do not need this checkout.
+    let setup_checkout = if owner {
         format!(
             "      - name: Check out base setup action\n        uses: {}\n        with:\n          ref: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          path: policy-setup-action\n          sparse-checkout: .github/actions/setup-velnor-workflow\n          fetch-depth: 1\n          persist-credentials: false\n",
             ActionPin::Checkout.reference()
@@ -4787,52 +4816,33 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     } else {
         String::new()
     };
-    let renderer = if hosted {
-        if owner {
-            policy_candidate_step(revision)
-        } else {
-            policy_renderer_steps(repository, revision)
-        }
-    } else {
-        String::new()
-    };
     format!(
-        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: this job runs the base branch's Stage-0 validator\n    # product against the audited tree under pull_request_target. It holds\n    # `contents: read` only, references no secrets, persists no credentials,\n    # and never compiles. When the audited tree differs from the declared\n    # pin's render, it additionally EXECUTES the PR run's prebuilt\n    # candidate generator — PR-built code, same-repository runs only, bound\n    # to the audited tree by manifest closure plus binary digest before\n    # execution — with no secret references, no persisted credentials, the\n    # read-only github.token confined to the Acquire/Ruleset API steps,\n    # and both candidate exec points tokenless.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{setup_checkout}{validator}{renderer}{ruleset_step}      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\" \\\n            --candidate-manifest \"${{VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}}\" \\\n{policy_arguments}\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
+        "  policy:\n    name: {name}\n    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: only the base branch's Stage-0 validator runs. The\n    # job holds `contents: read` only, references no secrets, persists no\n    # credentials, and never compiles. It never acquires or executes candidate code or artifacts.\n    # Candidate workflows and config are inspected statically. The read-only\n    # github.token stays confined to the API steps.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{setup_checkout}{validator}{ruleset_step}      - name: Enforce workflow policy\n        shell: bash\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\"{policy_arguments}\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
         ActionPin::Checkout.reference(),
-        actionlint_setup = actionlint_setup_step(cache_backend),
+        runner = control_plane_runner(),
+        actionlint_setup = actionlint_setup_step(),
     )
 }
 
-/// The step that provisions the pinned actionlint for the policy job. The
-/// hosted lane installs it through `jdx/mise-action` (no `mise.toml` sits in
-/// the workspace; the checkout lives under `policy-checkout`, so
-/// `install_args` names the exact tool); the Velnor lane uses the host's mise
-/// directly because `mise-action` is not admitted there. Both lanes run the
-/// binary through `mise exec actionlint@<version>` with `MISE_NO_CONFIG=1`:
-/// the pin on the command line selects the tool, but mise would still load
-/// the fork tree's `mise.toml` `[env]` (including `_.path` prepends) for the
-/// lint's working directory — the env var, not the explicit version, is what
-/// neutralizes fork-controlled config. (`mise exec` has no `--no-config`
-/// flag; the env form is the only confinement.)
-fn actionlint_setup_step(cache_backend: &str) -> String {
-    if cache_backend == "github" {
-        format!(
-            "      - name: Set up actionlint\n        uses: {}\n        with:\n          install_args: actionlint@{ACTIONLINT_VERSION}\n          cache: false\n",
-            ActionPin::Mise.reference()
-        )
-    } else {
-        format!(
-            "      - name: Set up actionlint\n        run: mise --yes install actionlint@{ACTIONLINT_VERSION}\n"
-        )
-    }
+/// The step that provisions the pinned actionlint for the policy job. It
+/// installs actionlint through the pinned mise action. Running `mise exec` inside the
+/// audited checkout would load fork-controlled `mise.toml` environment and
+/// PATH changes, so the step disables config loading explicitly.
+fn actionlint_setup_step() -> String {
+    format!(
+        "      - name: Set up actionlint\n        uses: {}\n        with:\n          install_args: actionlint@{ACTIONLINT_VERSION}\n          cache: false\n",
+        ActionPin::Mise.reference()
+    )
 }
 
 /// Refuse a root `mise.lock` that pins actionlint at a version other than the
 /// one the policy job installs: two pins for one tool with no coherence check
 /// is the P0-5 bug class, and the local `mise run actionlint` task must lint
 /// with the same release the policy job enforces.
-fn validate_actionlint_pin_coherence(root: &Path) -> Result<(), GeneratorError> {
-    let Some(version) = config::mise_lock_actionlint_version(root)? else {
+fn validate_actionlint_pin_coherence_with_safe_root(
+    safe_root: &safe_fs::SafeRoot,
+) -> Result<(), GeneratorError> {
+    let Some(version) = config::mise_lock_actionlint_version_with_safe_root(safe_root)? else {
         return Ok(());
     };
     if version == ACTIONLINT_VERSION {
@@ -4851,41 +4861,24 @@ pub(crate) fn hosted_runs_on(config: &ProjectConfig) -> Result<String, Generator
         .map(runs_on_labels_yaml)
 }
 
-/// The control plane always runs on hosted, regardless of `[workflow]`
-/// providers.
-fn control_plane_runner(config: &ProjectConfig) -> String {
-    config
-        .selectors
-        .get(&provider::ProviderId::GithubHosted)
-        .map_or_else(|| yaml_scalar("ubuntu-24.04"), selector_runs_on_yaml)
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn control_plane_trusted_gate(default_branch: &str) -> String {
-    format!(
-        "    if: ${{{{ github.event_name == 'pull_request_target' || (github.ref == 'refs/heads/{default_branch}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}}}\n"
-    )
+/// The control plane always runs on a fixed GitHub-hosted image. The
+/// repository config being audited must not choose the policy job's runner.
+fn control_plane_runner() -> String {
+    yaml_scalar("ubuntu-24.04")
 }
 
 pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> String {
-    let runner = control_plane_runner(config);
     let declared_ruleset_contexts = declared_ruleset_contexts_literal(config);
     let policy_job = policy_job(&PolicyJobSpec {
         name: "Policy",
         revision: &config.workflow_revision,
-        runner: &runner,
         repository: &config.repository,
-        cache_backend: "github",
-        trusted_gate: None,
         default_branch: &config.default_branch,
         declared_ruleset_contexts: &declared_ruleset_contexts,
     });
     let concurrency = policy_concurrency_block(config);
-    // `workflow_dispatch` lets a maintainer prove the validator the base
-    // branch carries passes on the base tree itself (head = base = the
-    // dispatched commit), which is how a bootstrap is confirmed after merge.
     format!(
-        "{GENERATED_HEADER}name: Velnor workflow policy\n\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\n  workflow_dispatch:\n\n{concurrency}permissions:\n  contents: read\n\njobs:\n{policy_job}"
+        "{GENERATED_HEADER}name: Velnor workflow policy\n\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\n\n{concurrency}permissions:\n  contents: read\n\njobs:\n{policy_job}"
     )
 }
 
@@ -4912,10 +4905,6 @@ fn concurrency_group_expression(config: &ProjectConfig) -> Option<String> {
 /// `group-rust`.
 pub(crate) fn stack_group_job_id(kind: UnitKind) -> String {
     format!("group-{}", kind.id_prefix())
-}
-
-pub(crate) fn unit_group_job_id(unit: &Unit) -> String {
-    format!("group-unit-{}", identifier_suffix(&unit.id))
 }
 
 /// Whether `provider` can statically execute `unit`: platform and
@@ -5082,18 +5071,6 @@ pub(crate) fn runs_on_labels_yaml(labels: &[String]) -> String {
     format!("[{labels}]")
 }
 
-/// The `runs-on:` expression form of one selector, for templates that embed
-/// the legacy `fromJSON(...)` selector shape.
-pub(crate) fn selector_runs_on_expression(selector: &provider::ProviderSelector) -> String {
-    let labels = selector
-        .runs_on
-        .iter()
-        .map(|label| format!("\\\"{label}\\\""))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("fromJSON('[{labels}]')")
-}
-
 pub(crate) fn github_expression(expression: &str) -> String {
     format!("${{{{ {expression} }}}}")
 }
@@ -5208,9 +5185,9 @@ pub(crate) fn workflow_setup_action_repository() -> &'static str {
 /// synthetic `refs/pull/<n>/merge` commit; no trusted default-branch product
 /// can ever have been built at that SHA, so resolving the runtime through it
 /// misses by construction and every consumer falls back to compiling from
-/// source. The pin is the Stage-0 product every lane consumes; a candidate
-/// generator under test is produced at most once by the producer job and
-/// shared as an artifact, never rebuilt inside consumers.
+/// source. The pin is the trusted Stage-0 product every lane consumes. A
+/// generator change remains fail-closed until its declared pin has a trusted
+/// release; policy jobs never acquire PR-built generator artifacts.
 pub(crate) fn workflow_setup_install_rev(_repository: &str, revision: &str) -> String {
     revision.to_owned()
 }
@@ -5259,59 +5236,17 @@ fn workflow_runtime_setup_with_install_rev_at_checkout_path(
 /// whatever `~/.cargo/bin` holds.
 pub(crate) const HOSTED_WORKFLOW_RUNTIME_HOME: &str = "$HOME/.cache/velnor/workflow-runtime";
 
-/// Velnor lane: the job home is the packaged runtime, whose revision follows
-/// the fleet release rather than the generator pin, so a unit that runs the
-/// generator's `--check` provisions the pinned binary itself. `$CARGO_HOME/bin`
-/// is the host-persistent (trust-scoped) executable store, so one download per
-/// slot per closure serves every later job. Nothing here compiles: the step
-/// resolves the pin's source-closure digest from the job checkout (fetching
-/// the pin commit when a shallow checkout does not contain it), downloads and
-/// attests the manifest, and compares the slot binary's digest against the
-/// manifest before executing anything: a digest mismatch takes the slow path
-/// (download the asset, verify attestation and digest, install), and only
-/// then — against bytes the digest just proved — does the step execute the
-/// slot binary for its `--closure` self-report gate. Digest decides reuse;
-/// the self-report only confirms. The step exports the slot for the guard
-/// (`VELNOR_WORKFLOW_PINNED_BINARY`) so the offline check never compiles.
-/// The reuse path stays online (one manifest download plus one attestation
-/// verification per run; the asset downloads only on mismatch): offline reuse
-/// of a persistent-host slot on self-report alone is the planted-binary hole
-/// this manifest-first shape closes.
-///
-/// Residual Velnor-lane trust scope (documented, not fixed here):
-/// * `verify-velnor` executes `velnor-workflow run` from the fleet image at
-///   whatever revision the fleet ships; a stale or divergent fleet runtime
-///   silently changes check semantics for **all** Velnor units, with no
-///   per-job digest or self-report gate.
-/// * Only the `velnor-workflow-policy` slot is pinned and verified, and only
-///   when the dispatched unit runs `--plain --check` (today: the generator
-///   owner unit only). Non-owner Velnor units run fully ambient.
-/// * The slot is host-persistent and trust-scoped: reuse spans jobs on the
-///   host, and the check step relies on `VELNOR_WORKFLOW_PINNED_BINARY`,
-///   never `PATH`, for the guard.
-/// * Fleet-vs-pin drift for the `run` binary has no alarm by design; if that
-///   becomes unacceptable, the fix is a new feature (provision and verify
-///   `velnor-workflow` on Velnor per job, mirroring the GitHub
-///   `Download`→`Verify`→`Add to PATH` triple), not a parity restoration.
-pub(crate) fn workflow_pinned_policy_runtime_local(revision: &str, checkout: &str) -> String {
-    format!(
-        "      - name: Provision pinned Velnor workflow policy runtime\n        shell: bash\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          PINNED_REVISION: {revision}\n          CHECKOUT_PATH: {checkout}\n        run: |\n          set -euo pipefail\n          if ! git -C \"$CHECKOUT_PATH\" cat-file -e \"$PINNED_REVISION^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$PINNED_REVISION\"\n          fi\n          listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$PINNED_REVISION\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n          test \"$listing\" != '' || {{ echo \"::error::revision $PINNED_REVISION has no closure inputs\" >&2; exit 1; }}\n          if command -v sha256sum >/dev/null 2>&1; then\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | sha256sum | awk '{{print $1}}')\"\n          else\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | shasum -a 256 | awk '{{print $1}}')\"\n          fi\n          binary=\"${{CARGO_HOME:-$HOME/.cargo}}/bin/velnor-workflow-policy\"\n          tag=\"velnor-workflow-runtime-v1-${{closure:0:16}}\"\n          asset=\"velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}\"\n          temporary=\"$(mktemp -d)\"\n          trap 'rm -rf \"$temporary\"' EXIT\n          if ! gh release download \"$tag\" --repo tailrocks/velnor --pattern manifest.json --dir \"$temporary\"; then\n            echo \"::error::no policy runtime product for revision $PINNED_REVISION (closure ${{closure:0:16}}); the mainline runtime-product publisher builds it after merge\" >&2\n            exit 1\n          fi\n          gh attestation verify \"$temporary/manifest.json\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml\n          jq -e --arg closure \"$closure\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg asset \"$asset\" '.closure == $closure and (.revision | test(\"^[0-9a-f]{{40}}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{{64}}$\")) and .products[$platform].asset == $asset' \"$temporary/manifest.json\" >/dev/null\n          expected=\"$(jq -er --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" '.products[$platform].binary' \"$temporary/manifest.json\")\"\n          existing=\"\"\n          if [[ -x \"$binary\" ]]; then\n            if command -v sha256sum >/dev/null 2>&1; then\n              existing=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n            else\n              existing=\"$(shasum -a 256 \"$binary\" | awk '{{print $1}}')\"\n            fi\n          fi\n          if [[ \"$existing\" != \"$expected\" ]]; then\n            gh release download \"$tag\" --repo tailrocks/velnor --pattern \"$asset\" --dir \"$temporary\"\n            gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml\n            if command -v sha256sum >/dev/null 2>&1; then\n              actual=\"$(sha256sum \"$temporary/$asset\" | awk '{{print $1}}')\"\n            else\n              actual=\"$(shasum -a 256 \"$temporary/$asset\" | awk '{{print $1}}')\"\n            fi\n            [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n            install -Dm0755 \"$temporary/$asset\" \"$binary\"\n          fi\n          reported=\"$(\"$binary\" --closure)\"\n          [[ \"$reported\" == \"$closure\" ]] || {{ echo \"::error::pinned workflow policy runtime reports closure $reported, expected $closure\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\"\n"
-    )
-}
-
-/// Where a hosted unit job places the runtime pair it downloads from the
-/// Planning artifact (`bin/velnor-workflow` at the event revision,
-/// `bin/velnor-workflow-policy` at the pin). Job-scoped and never
-/// `~/.cargo/bin`: that directory is restored from the cargo-bin toolchain
-/// cache, so a runtime copied there would be saved into a cache keyed by
-/// `mise.lock` and resurface at a stale revision in later jobs.
+/// Where a hosted unit job places the verified runtime downloaded from the
+/// Planning artifact. Job-scoped and never `~/.cargo/bin`: that directory is
+/// restored from the cargo-bin toolchain cache and could resurface a stale
+/// runtime in later jobs.
 pub(crate) const HOSTED_WORKFLOW_RUNTIME_ARTIFACT_HOME: &str =
     "$RUNNER_TEMP/velnor-workflow-runtime-artifact";
 
 fn workflow_runtime_download(provider: provider::ProviderId, revision: &str) -> String {
     if provider == provider::ProviderId::GithubHosted {
         format!(
-            "      - name: Download Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{revision}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: .velnor-workflow-runtime\n      - name: Verify Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          manifest=.velnor-workflow-runtime/manifest.json\n          jq -e --arg revision \"$EXPECTED_REVISION\" --arg repository \"$GITHUB_REPOSITORY\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg run_id \"$GITHUB_RUN_ID\" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test(\"^[0-9]+$\")) and .job_id != \"\" and (.binary_sha256 | test(\"^[0-9a-f]{{64}}$\")) and (.policy_binary_sha256 | test(\"^[0-9a-f]{{64}}$\")) and (.closure | test(\"^[0-9a-f]{{64}}$\")) and (.policy_closure | test(\"^[0-9a-f]{{64}}$\"))' \"$manifest\" >/dev/null\n          expected=\"$(jq -er '.binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::runtime digest mismatch\" >&2; exit 1; }}\n          expected=\"$(jq -er '.policy_binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n      - name: Add Velnor workflow runtime to PATH\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          home=\"{HOSTED_WORKFLOW_RUNTIME_ARTIFACT_HOME}\"\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow \"$home/bin/velnor-workflow\"\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy \"$home/bin/velnor-workflow-policy\"\n          expected_closure=\"$(jq -er '.policy_closure' .velnor-workflow-runtime/manifest.json)\"\n          reported=\"$(\"$home/bin/velnor-workflow-policy\" --closure)\"\n          [[ \"$reported\" == \"$expected_closure\" ]] || {{ echo \"::error::policy runtime reports closure $reported, expected $expected_closure\" >&2; exit 1; }}\n          echo \"$home/bin\" >> \"$GITHUB_PATH\"\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$home/bin/velnor-workflow-policy\" >> \"$GITHUB_ENV\"\n",
+            "      - name: Download Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{revision}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: .velnor-workflow-runtime\n      - name: Verify Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          manifest=.velnor-workflow-runtime/manifest.json\n          jq -e --arg revision \"$EXPECTED_REVISION\" --arg repository \"$GITHUB_REPOSITORY\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg run_id \"$GITHUB_RUN_ID\" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test(\"^[0-9]+$\")) and .job_id != \"\" and (.binary_sha256 | test(\"^[0-9a-f]{{64}}$\")) and (.closure | test(\"^[0-9a-f]{{64}}$\"))' \"$manifest\" >/dev/null\n          expected=\"$(jq -er '.binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::runtime digest mismatch\" >&2; exit 1; }}\n      - name: Add Velnor workflow runtime to PATH\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          home=\"{HOSTED_WORKFLOW_RUNTIME_ARTIFACT_HOME}\"\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow \"$home/bin/velnor-workflow\"\n          echo \"$home/bin\" >> \"$GITHUB_PATH\"\n",
             ActionPin::DownloadArtifact.reference()
         )
     } else {
@@ -5321,7 +5256,7 @@ fn workflow_runtime_download(provider: provider::ProviderId, revision: &str) -> 
 
 fn workflow_runtime_artifact_upload(revision: &str) -> String {
     format!(
-        "      - name: Prepare Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-workflow-runtime\"\n          rm -rf \"$stage\"\n          mkdir -p \"$stage\"\n          src=\"$(command -v velnor-workflow)\"\n          install -m 0755 \"$src\" \"$stage/velnor-workflow\"\n          digest=\"$(sha256sum \"$stage/velnor-workflow\" | awk '{{print $1}}')\"\n          policy_src=\"${{{VELNOR_WORKFLOW_PINNED_BINARY_ENV}:-$src}}\"\n          install -m 0755 \"$policy_src\" \"$stage/velnor-workflow-policy\"\n          policy_revision=\"$(\"$stage/velnor-workflow-policy\" --revision)\"\n          policy_closure=\"$(\"$stage/velnor-workflow-policy\" --closure)\"\n          [[ \"$policy_closure\" == \"${{{{ steps.runtime.outputs.closure }}}}\" ]] || {{ echo \"::error::policy runtime reports closure $policy_closure, expected ${{{{ steps.runtime.outputs.closure }}}}\" >&2; exit 1; }}\n          policy_digest=\"$(sha256sum \"$stage/velnor-workflow-policy\" | awk '{{print $1}}')\"\n          jq -n --arg repository \"$GITHUB_REPOSITORY\" --arg revision \"$EXPECTED_REVISION\" --arg closure \"${{{{ steps.runtime.outputs.closure }}}}\" --arg head_branch \"${{{{ github.ref_name }}}}\" --arg platform \"${{{{ runner.os }}}}-${{{{ runner.arch }}}}\" --arg run_id \"$GITHUB_RUN_ID\" --arg job_id \"${{{{ github.job }}}}\" --arg binary_sha256 \"$digest\" --arg policy_revision \"$policy_revision\" --arg policy_closure \"$policy_closure\" --arg policy_binary_sha256 \"$policy_digest\" '{{repository: $repository, revision: $revision, closure: $closure, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256, policy_revision: $policy_revision, policy_closure: $policy_closure, policy_binary_sha256: $policy_binary_sha256}}' > \"$stage/manifest.json\"\n      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{revision}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: ${{{{ runner.temp }}}}/velnor-workflow-runtime\n          if-no-files-found: error\n          retention-days: 7\n",
+        "      - name: Prepare Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-workflow-runtime\"\n          rm -rf \"$stage\"\n          mkdir -p \"$stage\"\n          src=\"$(command -v velnor-workflow)\"\n          install -m 0755 \"$src\" \"$stage/velnor-workflow\"\n          digest=\"$(sha256sum \"$stage/velnor-workflow\" | awk '{{print $1}}')\"\n          jq -n --arg repository \"$GITHUB_REPOSITORY\" --arg revision \"$EXPECTED_REVISION\" --arg closure \"${{{{ steps.runtime.outputs.closure }}}}\" --arg head_branch \"${{{{ github.ref_name }}}}\" --arg platform \"${{{{ runner.os }}}}-${{{{ runner.arch }}}}\" --arg run_id \"$GITHUB_RUN_ID\" --arg job_id \"${{{{ github.job }}}}\" --arg binary_sha256 \"$digest\" '{{repository: $repository, revision: $revision, closure: $closure, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}}' > \"$stage/manifest.json\"\n      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{revision}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: ${{{{ runner.temp }}}}/velnor-workflow-runtime\n          if-no-files-found: error\n          retention-days: 7\n",
         ActionPin::UploadArtifact.reference()
     )
 }
@@ -5484,17 +5419,17 @@ pub(crate) fn rendered_cache_values(cache: &CacheSpec) -> (String, String) {
     (paths, key)
 }
 
-/// Run the generator from the process argument vector.
+/// Run a generator invocation whose source and output roots were captured by
+/// typed dispatch before any consumer opens them.
 ///
 /// # Errors
 /// Reports parsing, clone, scanning, and write failures without replacing a
 /// manually edited file unless explicit adoption was requested. Individual
 /// generated files are replaced atomically.
-pub fn run_from_env() -> Result<(), GeneratorError> {
+pub(crate) fn run_from_env_with_selection(
+    selection: GeneratorSelection,
+) -> Result<(), GeneratorError> {
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
-    if runtime::try_run(&arguments)? {
-        return Ok(());
-    }
     let raw = match parse_raw_clap(arguments) {
         Ok(raw) => raw,
         Err(error)
@@ -5516,15 +5451,149 @@ pub fn run_from_env() -> Result<(), GeneratorError> {
         println!("{SOURCE_CLOSURE}");
         return Ok(());
     }
-    let cli = raw.try_into()?;
-    run(&cli)
+    let cli: Cli = raw.try_into()?;
+    let inherited_source_root = inherited_source_root_spec_from_env()?;
+    let inherited_output_root = inherited_output_root_from_env(&cli, Some(&selection.output))?;
+    run_with_output_root(
+        &cli,
+        selection,
+        inherited_source_root.as_ref(),
+        inherited_output_root.as_ref(),
+    )
+}
+
+struct InheritedSourceRootSpec {
+    descriptor: std::os::fd::RawFd,
+    display_path: PathBuf,
+}
+
+fn inherited_source_root_spec_from_env() -> Result<Option<InheritedSourceRootSpec>, GeneratorError>
+{
+    let descriptor = env::var_os(safe_fs::pinned_command::SOURCE_ROOT_FD_ENV);
+    let display_path = env::var_os(safe_fs::pinned_command::SOURCE_ROOT_PATH_ENV);
+    let (descriptor, display_path) = match (descriptor, display_path) {
+        (Some(descriptor), Some(display_path)) => (descriptor, display_path),
+        (None, None) => return Ok(None),
+        _ => {
+            return Err(GeneratorError::usage(format!(
+                "{} and {} must be set together",
+                safe_fs::pinned_command::SOURCE_ROOT_FD_ENV,
+                safe_fs::pinned_command::SOURCE_ROOT_PATH_ENV,
+            )));
+        }
+    };
+    let descriptor = descriptor
+        .to_str()
+        .ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "{} must be a decimal file descriptor",
+                safe_fs::pinned_command::SOURCE_ROOT_FD_ENV,
+            ))
+        })?
+        .parse::<std::os::fd::RawFd>()
+        .map_err(|_| {
+            GeneratorError::usage(format!(
+                "{} must be a decimal file descriptor",
+                safe_fs::pinned_command::SOURCE_ROOT_FD_ENV,
+            ))
+        })?;
+    if descriptor < 3 {
+        return Err(GeneratorError::usage(format!(
+            "{} must refer to an inherited directory descriptor above stderr",
+            safe_fs::pinned_command::SOURCE_ROOT_FD_ENV,
+        )));
+    }
+    let display_path = PathBuf::from(display_path);
+    if !display_path.is_absolute() {
+        return Err(GeneratorError::usage(format!(
+            "{} must be an absolute diagnostic path",
+            safe_fs::pinned_command::SOURCE_ROOT_PATH_ENV,
+        )));
+    }
+    Ok(Some(InheritedSourceRootSpec {
+        descriptor,
+        display_path,
+    }))
+}
+
+/// The D19 launcher hands its private render directory to this process by
+/// descriptor. The CLI path remains a display and handoff-consistency check;
+/// all output reads, locking, and writes use the inherited directory handle.
+fn inherited_output_root_from_env(
+    cli: &Cli,
+    selection: Option<&OutputSelection>,
+) -> Result<Option<safe_fs::SafeRoot>, GeneratorError> {
+    let Some(raw_fd) = env::var_os(safe_fs::pinned_command::OUTPUT_ROOT_FD_ENV) else {
+        return Ok(None);
+    };
+    let raw_fd = raw_fd.to_str().ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "{} must be a decimal file descriptor",
+            safe_fs::pinned_command::OUTPUT_ROOT_FD_ENV
+        ))
+    })?;
+    let raw_fd = raw_fd.parse::<std::os::fd::RawFd>().map_err(|_| {
+        GeneratorError::usage(format!(
+            "{} must be a decimal file descriptor",
+            safe_fs::pinned_command::OUTPUT_ROOT_FD_ENV
+        ))
+    })?;
+    if raw_fd < 3 {
+        return Err(GeneratorError::usage(format!(
+            "{} must refer to an inherited directory descriptor above stderr",
+            safe_fs::pinned_command::OUTPUT_ROOT_FD_ENV
+        )));
+    }
+    let output_path = cli.output.as_deref().ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "{} requires an explicit --output path",
+            safe_fs::pinned_command::OUTPUT_ROOT_FD_ENV
+        ))
+    })?;
+    let display_path = match selection {
+        Some(selection) => selection.root.clone(),
+        None => resolve_output_path(output_path)?,
+    };
+    let inherited = open_inherited_output_root(raw_fd, &display_path)?;
+    verify_inherited_output_path(&inherited, &display_path)?;
+    Ok(Some(inherited))
+}
+
+fn open_inherited_output_root(
+    raw_fd: std::os::fd::RawFd,
+    display_path: &Path,
+) -> Result<safe_fs::SafeRoot, GeneratorError> {
+    let inherited = safe_fs::SafeRoot::from_inherited_directory_fd(raw_fd, display_path)?;
+    safe_fs::pinned_command::mark_close_on_exec(raw_fd).map_err(|error| {
+        GeneratorError::io("protect inherited output descriptor", display_path, &error)
+    })?;
+    Ok(inherited)
+}
+
+fn verify_inherited_output_path(
+    inherited: &safe_fs::SafeRoot,
+    output_path: &Path,
+) -> Result<(), GeneratorError> {
+    let path_root = safe_fs::SafeRoot::open_existing_output(output_path)?.ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "inherited output path disappeared after resolution: {}",
+            output_path.display()
+        ))
+    })?;
+    if inherited.identity()? != path_root.identity()? {
+        return Err(GeneratorError::usage(format!(
+            "inherited output descriptor differs from --output path: {}",
+            output_path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Interactive dispatch: the TUI owns attached terminals unless `--plain`
 /// forces the line-oriented report. Builds without the `tui` feature always
 /// take the headless path.
 fn use_tui(cli: &Cli) -> bool {
-    if cli.plain {
+    if cli.plain || cli.verify_pinned {
         return false;
     }
     #[cfg(feature = "tui")]
@@ -5539,27 +5608,43 @@ fn use_tui(cli: &Cli) -> bool {
 
 /// One in-memory render of a repository root: the resolved config, the
 /// generated files, and the generation inputs the ownership state records.
-/// The generator CLI and `promote` share this path, so a promoted tree is
-/// byte-identical to a plain regeneration of the same stamped tree.
+/// The generator CLI uses this path to produce the files compared by policy
+/// and written by normal generation.
 pub(crate) struct RenderedTree {
     pub(crate) config: ProjectConfig,
     pub(crate) files: BTreeMap<PathBuf, String>,
     pub(crate) inputs: GenerationInputs,
+    pub(crate) source_identity: safe_fs::SafeRootIdentity,
 }
 
+#[cfg(test)]
 pub(crate) fn render_tree(
     root: &Path,
     providers: Option<provider::ProviderSet>,
     default_branch: &str,
 ) -> Result<RenderedTree, GeneratorError> {
-    let scanned = scan_target(root, providers, default_branch)?;
+    let safe_root = Arc::new(safe_fs::SafeRoot::open(root)?);
+    render_tree_with_safe_root(safe_root, providers, default_branch)
+}
+
+fn render_tree_with_safe_root(
+    safe_root: Arc<safe_fs::SafeRoot>,
+    providers: Option<provider::ProviderSet>,
+    default_branch: &str,
+) -> Result<RenderedTree, GeneratorError> {
+    let scanned = scan_target_with_safe_root(safe_root, providers, default_branch)?;
     if scanned.config.units.is_empty() && scanned.config.workflow_templates.is_empty() {
         return Err(GeneratorError::usage(
             "scanner found no supported manifest or project shape; add project.toml manually only after defining a safe command",
         ));
     }
     let mut config = scanned.config;
-    let surface = primitives::generate(root, &scanned.shape, &config, scanned.generation.as_ref())?;
+    let surface = primitives::generate_with_safe_root(
+        &scanned.safe_root,
+        &scanned.shape,
+        &config,
+        scanned.generation.as_ref(),
+    )?;
     config.units.clone_from(&surface.units);
     // A declared release-side family can add a workflow file the scan did not
     // own; declaring it is what makes it part of the owned surface.
@@ -5574,57 +5659,261 @@ pub(crate) fn render_tree(
         config,
         files,
         inputs,
+        source_identity: scanned.safe_root.identity()?,
     })
 }
 
-fn run(cli: &Cli) -> Result<(), GeneratorError> {
+#[cfg(test)]
+fn run(cli: &Cli, selection: GeneratorSelection) -> Result<(), GeneratorError> {
+    run_with_output_root(cli, selection, None, None)
+}
+
+fn run_with_output_root(
+    cli: &Cli,
+    selected: GeneratorSelection,
+    inherited_source_root: Option<&InheritedSourceRootSpec>,
+    inherited_output_root: Option<&safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
     #[cfg(feature = "tui")]
-    if use_tui(cli) {
-        return tui::run(cli);
+    let interactive = use_tui(cli);
+    #[cfg(feature = "tui")]
+    if interactive && (inherited_source_root.is_some() || inherited_output_root.is_some()) {
+        return Err(GeneratorError::usage(
+            "descriptor-bound root handoff requires the plain renderer",
+        ));
     }
     #[cfg(not(feature = "tui"))]
     debug_assert!(
         !use_tui(cli),
-        "builds without the `tui` feature always take the headless path"
+        "builds without the tui feature always take the headless path"
     );
-    let source = RepositorySource::parse(&cli.target)?;
-    let checkout = source.checkout()?;
+
+    // Dispatch captures source class, root handle, and output binding as one
+    // selection. Retries and rendering reuse it instead of interpreting
+    // target or output paths again.
+    let selected_source = selected.source;
+    let source = selected_source.source.clone();
+    let captured_local_root = match (&source, selected_source.local_root.as_ref()) {
+        (RepositorySource::Local(target), Some(root)) => {
+            if let Some(inherited) = inherited_source_root {
+                let inherited_root = open_inherited_source_root(&source, target, inherited, None)?;
+                if inherited_root.identity()? != root.identity()? {
+                    return Err(GeneratorError::usage(
+                        "inherited source root differs from the dispatch-selected root",
+                    ));
+                }
+                Some(inherited_root)
+            } else {
+                Some(Arc::clone(root))
+            }
+        }
+        (RepositorySource::Local(_), None) => {
+            return Err(GeneratorError::usage(
+                "local source root was not captured before checkout",
+            ));
+        }
+        (RepositorySource::GitHub { .. }, _) => None,
+    };
+    let output_selection = selected.output;
+    let output_root = output_selection.root.clone();
+    if let Some(inherited) = inherited_output_root {
+        verify_inherited_output_path(inherited, &output_root)?;
+    }
+    #[cfg(feature = "tui")]
+    if interactive {
+        if inherited_output_root.is_some() {
+            return Err(GeneratorError::usage(
+                "interactive generation requires a captured output binding",
+            ));
+        }
+        return tui::run(cli, selected_source, output_selection);
+    }
+
+    let output_binding = output_selection.binding.clone();
+    // Local sources already have a captured directory handle. Reopening their
+    // path after dispatch would select a second repository identity. Remote
+    // targets retain their captured GitHub classification and clone only after
+    // the output path is bound.
+    let checkout =
+        checkout_with_source_handoff(&source, inherited_source_root, |source| match source {
+            RepositorySource::Local(_) => Ok(None),
+            RepositorySource::GitHub { .. } => source.checkout().map(Some),
+        })?;
+    let source_root = if let Some(captured) = captured_local_root {
+        captured
+    } else {
+        let checkout = checkout.as_ref().ok_or_else(|| {
+            GeneratorError::usage("remote checkout was not created for the selected source")
+        })?;
+        open_source_root(checkout.path(), None)?
+    };
     let default_branch = match cli.default_branch.as_deref() {
         Some(branch) => validate_default_branch(branch)?.to_owned(),
-        None => source.default_branch(checkout.path())?,
+        None => source.default_branch_with_safe_root(&source_root)?,
     };
-    let output_root = match cli.output.as_deref() {
-        Some(path) => resolve_output_path(path)?,
-        None => source.output_root(checkout.path())?,
-    };
-    let rendered = render_tree(checkout.path(), cli.providers.clone(), &default_branch)?;
+    let rendered = render_tree_with_safe_root(
+        Arc::clone(&source_root),
+        cli.providers.clone(),
+        &default_branch,
+    )?;
     let config = rendered.config;
     let files = rendered.files;
     let inputs = rendered.inputs;
-    let outcome = write_generated_with_options(
-        &output_root,
-        &files,
-        &inputs,
-        cli.dry_run,
-        cli.check,
-        cli.force,
-        cli.force && !cli.check,
-    )?;
-    if cli.check {
-        // D19: the generator this tree declares must render it byte-identically.
-        // `--check` above proved the running binary agrees with the tree; this
-        // proves the declared pin does too, which is what the base branch's
-        // policy validator will regenerate the tree with. Without `--pin-build`
-        // an unprovisioned pin fails closed; see `resolve_pinned_binary`.
-        policy::verify_declared_pin_renders_tree(
-            &output_root,
-            checkout.path(),
+    let source_identity = (matches!(&source, RepositorySource::Local(_))
+        && output_root == source_root.command_directory())
+    .then_some(rendered.source_identity);
+
+    if cli.verify_pinned {
+        let checked_output_root = if let Some(inherited) = inherited_output_root {
+            Arc::new(inherited.duplicate()?)
+        } else if source_identity.is_some() && output_root == source_root.command_directory() {
+            Arc::clone(&source_root)
+        } else {
+            Arc::new(
+                safe_fs::SafeRoot::open_existing_output_bound(&output_root, &output_binding)?
+                    .ok_or_else(|| {
+                        GeneratorError::usage(
+                            "pinned verification requires an existing generated output root",
+                        )
+                    })?,
+            )
+        };
+        policy::verify_declared_pin_renders_tree_with_safe_roots(
+            checked_output_root.as_ref(),
+            source_root.as_ref(),
             &config,
             cli.pin_build,
         )?;
+        println!(
+            "Pinned generator revision {} reproduces the checked-in generated files.",
+            config.workflow_revision
+        );
+        return Ok(());
     }
+
+    let outcome = if cli.check {
+        if let Some(inherited) = inherited_output_root {
+            check_generated_with_root(
+                &output_root,
+                &files,
+                &inputs,
+                source_identity.as_ref(),
+                inherited,
+            )?
+        } else {
+            let (outcome, _binding) = check_generated_with_source_identity_and_binding(
+                &output_root,
+                &files,
+                &inputs,
+                source_identity.as_ref(),
+                Some(&output_binding),
+            )?;
+            outcome
+        }
+    } else {
+        if let Some(inherited) = inherited_output_root {
+            write_generated_with_root(
+                &output_root,
+                &files,
+                &inputs,
+                cli.dry_run,
+                cli.force,
+                source_identity.as_ref(),
+                inherited,
+            )?
+        } else {
+            write_generated_with_source_identity_and_binding(
+                &output_root,
+                &files,
+                &inputs,
+                cli.dry_run,
+                false,
+                cli.force,
+                cli.force,
+                source_identity.as_ref(),
+                &output_binding,
+            )?
+        }
+    };
     print_report(&cli.target, &config, &files, &outcome, &output_root);
     Ok(())
+}
+
+pub(super) fn open_source_root(
+    path: &Path,
+    expected_source_root: Option<&safe_fs::SafeRootIdentity>,
+) -> Result<Arc<safe_fs::SafeRoot>, GeneratorError> {
+    let source_root = Arc::new(safe_fs::SafeRoot::open(path)?);
+    if let Some(expected) = expected_source_root
+        && source_root.identity()? != *expected
+    {
+        return Err(GeneratorError::usage(format!(
+            "repository root changed after schema dispatch: {}",
+            source_root.command_directory().display()
+        )));
+    }
+    Ok(source_root)
+}
+
+fn open_inherited_source_root(
+    source: &RepositorySource,
+    target_path: &Path,
+    inherited: &InheritedSourceRootSpec,
+    expected_source_root: Option<&safe_fs::SafeRootIdentity>,
+) -> Result<Arc<safe_fs::SafeRoot>, GeneratorError> {
+    ensure_local_source_handoff(source, true)?;
+    let pinned = safe_fs::SafeRoot::from_inherited_directory_fd(
+        inherited.descriptor,
+        &inherited.display_path,
+    )?;
+    safe_fs::pinned_command::mark_close_on_exec(inherited.descriptor).map_err(|error| {
+        GeneratorError::io(
+            "protect inherited source descriptor",
+            &inherited.display_path,
+            &error,
+        )
+    })?;
+    // The descriptor is authoritative for all reads. Open the CLI target only
+    // to prove that it names the handed-off root before accepting the request.
+    let named = safe_fs::SafeRoot::open(target_path)?;
+    if pinned.identity()? != named.identity()? {
+        return Err(GeneratorError::usage(format!(
+            "inherited source descriptor differs from target path: {}",
+            target_path.display()
+        )));
+    }
+    if let Some(expected) = expected_source_root
+        && pinned.identity()? != *expected
+    {
+        return Err(GeneratorError::usage(format!(
+            "repository root changed after schema dispatch: {}",
+            inherited.display_path.display()
+        )));
+    }
+    Ok(Arc::new(pinned))
+}
+
+fn ensure_local_source_handoff(
+    source: &RepositorySource,
+    has_inherited_source_root: bool,
+) -> Result<(), GeneratorError> {
+    if has_inherited_source_root && !matches!(source, RepositorySource::Local(_)) {
+        return Err(GeneratorError::usage(
+            "descriptor-bound source handoff requires a local repository target",
+        ));
+    }
+    Ok(())
+}
+
+fn checkout_with_source_handoff<T>(
+    source: &RepositorySource,
+    inherited_source_root: Option<&InheritedSourceRootSpec>,
+    checkout: impl FnOnce(&RepositorySource) -> Result<T, GeneratorError>,
+) -> Result<T, GeneratorError> {
+    // Remote checkout clones before a source-root descriptor can be compared;
+    // reject that combination before invoking any checkout side effects.
+    ensure_local_source_handoff(source, inherited_source_root.is_some())?;
+    checkout(source)
 }
 
 #[cfg(any(feature = "tui", test))]
@@ -5742,7 +6031,14 @@ fn generated_files_with_surface(
         files.entry(path).or_insert(content);
     }
     for owned in &config.static_files {
-        files.insert(PathBuf::from(&owned.path), owned.content.clone());
+        let path = PathBuf::from(&owned.path);
+        if files.contains_key(&path) {
+            return Err(GeneratorError::usage(format!(
+                "declared static file `{}` collides with an already-rendered output",
+                path.display()
+            )));
+        }
+        files.insert(path, owned.content.clone());
     }
     files.insert(
         PathBuf::from("config/fleet/velnor-host.env"),
@@ -5760,8 +6056,8 @@ fn generated_files_with_surface(
     Ok(files)
 }
 
-/// Composite actions the generator always emits; repository `static_files`
-/// rows may override these paths when a consumer owns a forked copy.
+/// Composite action outputs the generator can emit; static files cannot shadow
+/// paths that another renderer already owns.
 fn builtin_generated_actions() -> BTreeMap<PathBuf, String> {
     BTreeMap::new()
 }
@@ -5783,13 +6079,16 @@ fn report_velnor_ci_outcomes_action_template() -> String {
 // `generated_files` stay a pure dispatch table over renderers.
 
 fn generated_ci_pr(workflow: &WorkflowIr) -> String {
-    workflow.render_nested(WorkflowKind::PullRequest, &legacy_plan(workflow), None)
+    workflow.render_nested(
+        WorkflowKind::PullRequest,
+        &default_plan_nodes(workflow),
+        None,
+    )
 }
 
-/// The graph the legacy renderer composes itself — the plan job plus one node
-/// per scanned unit — for the surfaces that have not moved behind the declared
-/// primitives yet.
-fn legacy_plan(workflow: &WorkflowIr) -> Vec<crate::s2::primitives::GraphNode> {
+/// The default graph for aggregate workflows: the plan job plus one node per
+/// scanned unit.
+fn default_plan_nodes(workflow: &WorkflowIr) -> Vec<crate::s2::primitives::GraphNode> {
     let mut job = String::new();
     workflow.render_plan(&mut job);
     let mut nodes = vec![crate::s2::primitives::GraphNode::Plan { job }];
@@ -5816,7 +6115,7 @@ fn generated_release_package_signer(config: &ProjectConfig) -> String {
 }
 
 fn generated_ci_main(workflow: &WorkflowIr) -> String {
-    workflow.render_nested(WorkflowKind::Main, &legacy_plan(workflow), None)
+    workflow.render_nested(WorkflowKind::Main, &default_plan_nodes(workflow), None)
 }
 
 fn generated_nightly(workflow: &WorkflowIr) -> String {
@@ -5906,14 +6205,41 @@ struct PlannedFile {
     preimage: FilePreimage,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 enum FilePreimage {
     Missing,
     Regular {
         identity: FileIdentity,
         bytes: Box<[u8]>,
+        // Keep a captured file inode alive while a generated-write plan uses
+        // its saved device/inode identity. Stage preimages may omit this
+        // because their StageFileGuard owns the descriptor through commit.
+        _identity_hold: Option<Arc<fs::File>>,
     },
 }
+
+impl PartialEq for FilePreimage {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Missing, Self::Missing) => true,
+            (
+                Self::Regular {
+                    identity: left_identity,
+                    bytes: left_bytes,
+                    ..
+                },
+                Self::Regular {
+                    identity: right_identity,
+                    bytes: right_bytes,
+                    ..
+                },
+            ) => left_identity == right_identity && left_bytes == right_bytes,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for FilePreimage {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileIdentity {
@@ -5924,12 +6250,34 @@ struct FileIdentity {
     inode: u64,
 }
 
+fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        FileIdentity {
+            length: metadata.len(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        FileIdentity {
+            length: metadata.len(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct GeneratedWritePlan {
     files: Vec<PlannedFile>,
     changed: Vec<PathBuf>,
     stale: Vec<PathBuf>,
     conflicts: Vec<PathBuf>,
+    /// Existing output-prefix identity, or the absent suffix that must remain
+    /// absent until apply acquires the pinned output root.
+    output_binding: Option<safe_fs::OutputPathBinding>,
     ownership_present: bool,
     ownership_needs_refresh: bool,
     /// Inputs recorded by the state file, when it parsed as schema 2.
@@ -5964,6 +6312,16 @@ impl FilePreimage {
 
     fn has_bytes(&self, expected: &[u8]) -> bool {
         self.bytes().is_some_and(|bytes| bytes == expected)
+    }
+}
+
+fn capture_safe_file_preimage(
+    root: Option<&safe_fs::SafeRoot>,
+    relative: &Path,
+) -> Result<FilePreimage, GeneratorError> {
+    match root {
+        Some(root) => root.capture_file_preimage(relative),
+        None => Ok(FilePreimage::Missing),
     }
 }
 
@@ -6343,22 +6701,52 @@ fn write_generated(
     check: bool,
     force: bool,
 ) -> Result<WriteOutcome, GeneratorError> {
-    write_generated_with_options(
-        root,
+    let output_root = safe_fs::SafeRoot::open(root)?;
+    write_generated_with_safe_root(
+        &output_root,
         files,
         &GenerationInputs::parts(0, 0),
-        dry_run,
-        check,
-        force,
-        false,
+        TestWriteOptions {
+            dry_run,
+            check,
+            force,
+            adopt: false,
+        },
     )
 }
 
-#[expect(
-    clippy::fn_params_excessive_bools,
-    reason = "these independent switches are the stable CLI generation contract"
-)]
-pub(crate) fn write_generated_with_options(
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct TestWriteOptions {
+    dry_run: bool,
+    check: bool,
+    force: bool,
+    adopt: bool,
+}
+
+#[cfg(test)]
+fn write_generated_with_safe_root(
+    output_root: &safe_fs::SafeRoot,
+    files: &BTreeMap<PathBuf, String>,
+    inputs: &GenerationInputs,
+    options: TestWriteOptions,
+) -> Result<WriteOutcome, GeneratorError> {
+    let root = output_root.command_directory();
+    write_generated_with_optional_root(
+        root,
+        files,
+        inputs,
+        options.dry_run,
+        options.check,
+        options.force,
+        options.adopt,
+        None,
+        Some(output_root),
+        None,
+    )
+}
+
+fn write_generated_with_source_identity_and_binding(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
     inputs: &GenerationInputs,
@@ -6366,41 +6754,228 @@ pub(crate) fn write_generated_with_options(
     check: bool,
     force: bool,
     adopt: bool,
+    source_identity: Option<&safe_fs::SafeRootIdentity>,
+    output_binding: &safe_fs::OutputPathBinding,
 ) -> Result<WriteOutcome, GeneratorError> {
-    let plan = plan_generated_write_with_options(root, files, inputs, adopt)?;
-    apply_generated_write_plan(root, files, inputs, dry_run, check, force, &plan)
+    write_generated_with_optional_root(
+        root,
+        files,
+        inputs,
+        dry_run,
+        check,
+        force,
+        adopt,
+        source_identity,
+        None,
+        Some(output_binding),
+    )
 }
 
-#[cfg(any(feature = "tui", test))]
+fn write_generated_with_root(
+    root: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    inputs: &GenerationInputs,
+    dry_run: bool,
+    force: bool,
+    source_identity: Option<&safe_fs::SafeRootIdentity>,
+    output_root: &safe_fs::SafeRoot,
+) -> Result<WriteOutcome, GeneratorError> {
+    write_generated_with_optional_root(
+        root,
+        files,
+        inputs,
+        dry_run,
+        false,
+        force,
+        force,
+        source_identity,
+        Some(output_root),
+        None,
+    )
+}
+
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "these independent switches are the stable CLI generation contract"
+)]
+fn write_generated_with_optional_root(
+    root: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    inputs: &GenerationInputs,
+    dry_run: bool,
+    check: bool,
+    force: bool,
+    adopt: bool,
+    source_identity: Option<&safe_fs::SafeRootIdentity>,
+    output_root: Option<&safe_fs::SafeRoot>,
+    output_binding: Option<&safe_fs::OutputPathBinding>,
+) -> Result<WriteOutcome, GeneratorError> {
+    let plan = plan_generated_write_with_root_and_binding(
+        root,
+        files,
+        inputs,
+        adopt,
+        source_identity,
+        output_root,
+        output_binding,
+    )?;
+    apply_generated_write_plan_with_root(
+        root,
+        files,
+        inputs,
+        dry_run,
+        check,
+        force,
+        &plan,
+        output_root,
+    )
+}
+
+fn check_generated_with_source_identity_and_binding(
+    root: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    inputs: &GenerationInputs,
+    source_identity: Option<&safe_fs::SafeRootIdentity>,
+    output_binding: Option<&safe_fs::OutputPathBinding>,
+) -> Result<(WriteOutcome, safe_fs::OutputPathBinding), GeneratorError> {
+    let plan = plan_generated_write_with_root_and_binding(
+        root,
+        files,
+        inputs,
+        false,
+        source_identity,
+        None,
+        output_binding,
+    )?;
+    let binding = plan
+        .output_binding
+        .clone()
+        .ok_or_else(|| GeneratorError::usage("generation check has no output binding"))?;
+    let outcome = apply_generated_write_plan(root, files, inputs, false, true, false, &plan)?;
+    Ok((outcome, binding))
+}
+
+fn check_generated_with_root(
+    root: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    inputs: &GenerationInputs,
+    source_identity: Option<&safe_fs::SafeRootIdentity>,
+    output_root: &safe_fs::SafeRoot,
+) -> Result<WriteOutcome, GeneratorError> {
+    let plan = plan_generated_write_with_root(
+        root,
+        files,
+        inputs,
+        false,
+        source_identity,
+        Some(output_root),
+    )?;
+    apply_generated_write_plan_with_root(
+        root,
+        files,
+        inputs,
+        false,
+        true,
+        false,
+        &plan,
+        Some(output_root),
+    )
+}
+
+#[cfg(test)]
 fn plan_generated_write(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
     inputs: &GenerationInputs,
 ) -> Result<GeneratedWritePlan, GeneratorError> {
-    plan_generated_write_with_options(root, files, inputs, false)
+    plan_generated_write_with_root(root, files, inputs, false, None, None)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "write-plan assembly has to inspect every recorded output class"
-)]
-fn plan_generated_write_with_options(
+fn plan_generated_write_with_source_identity_and_binding(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
     inputs: &GenerationInputs,
     adopt: bool,
+    source_identity: Option<&safe_fs::SafeRootIdentity>,
+    output_binding: &safe_fs::OutputPathBinding,
 ) -> Result<GeneratedWritePlan, GeneratorError> {
-    reject_symlinked_output_root(root)?;
-    reject_managed_symlink_ancestors(root, files.keys())?;
+    plan_generated_write_with_root_and_binding(
+        root,
+        files,
+        inputs,
+        adopt,
+        source_identity,
+        None,
+        Some(output_binding),
+    )
+}
+
+fn plan_generated_write_with_root(
+    root: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    inputs: &GenerationInputs,
+    adopt: bool,
+    source_identity: Option<&safe_fs::SafeRootIdentity>,
+    pinned_output_root: Option<&safe_fs::SafeRoot>,
+) -> Result<GeneratedWritePlan, GeneratorError> {
+    plan_generated_write_with_root_and_binding(
+        root,
+        files,
+        inputs,
+        adopt,
+        source_identity,
+        pinned_output_root,
+        None,
+    )
+}
+
+fn plan_generated_write_with_root_and_binding(
+    root: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    inputs: &GenerationInputs,
+    adopt: bool,
+    source_identity: Option<&safe_fs::SafeRootIdentity>,
+    pinned_output_root: Option<&safe_fs::SafeRoot>,
+    pinned_output_binding: Option<&safe_fs::OutputPathBinding>,
+) -> Result<GeneratedWritePlan, GeneratorError> {
+    let (output_binding, opened_root) = if let Some(pinned) = pinned_output_root {
+        if pinned_output_binding.is_some() {
+            return Err(GeneratorError::usage(
+                "output root cannot use both a pinned directory and a path binding",
+            ));
+        }
+        pinned.validate_root_binding()?;
+        if let Some(source_identity) = source_identity
+            && pinned.identity()? != *source_identity
+        {
+            return Err(GeneratorError::usage(format!(
+                "output root differs from the repository captured for scanning: {}",
+                root.display()
+            )));
+        }
+        (None, None)
+    } else {
+        let binding = if let Some(binding) = pinned_output_binding {
+            binding.clone()
+        } else {
+            safe_fs::OutputPathBinding::capture(root)?
+        };
+        if let Some(source_identity) = source_identity {
+            binding.ensure_same_root(source_identity)?;
+        }
+        let opened = safe_fs::SafeRoot::open_existing_output_bound(root, &binding)?;
+        (Some(binding), opened)
+    };
+    let safe_root = pinned_output_root.or(opened_root.as_ref());
     let preimages = files
         .keys()
         .map(|relative| {
-            capture_file_preimage(&root.join(relative), relative)
+            capture_safe_file_preimage(safe_root, relative)
                 .map(|preimage| (relative.clone(), preimage))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
     let ownership_path = PathBuf::from(OWNERSHIP_STATE);
-    let ownership_preimage = capture_file_preimage(&root.join(&ownership_path), &ownership_path)?;
+    let ownership_preimage = capture_safe_file_preimage(safe_root, &ownership_path)?;
     let state_file = parse_ownership_state(root, &ownership_preimage)?;
     let foreign_schema = match &state_file {
         OwnershipStateFile::ForeignSchema { message } => Some(message.clone()),
@@ -6417,7 +6992,7 @@ fn plan_generated_write_with_options(
         adopt,
     )? || !ownership_preimage
         .has_bytes(ownership_state_content(files, inputs).as_bytes());
-    let stale_files = stale_owned_files(root, files, ownership.map(|state| &state.outputs))?;
+    let stale_files = stale_owned_files(safe_root, files, ownership.map(|state| &state.outputs))?;
     let stale = stale_files
         .iter()
         .map(|file| file.path.clone())
@@ -6431,10 +7006,14 @@ fn plan_generated_write_with_options(
         })
         .map(|(relative, _)| relative.clone())
         .collect::<Vec<_>>();
-    let legacy = direct_legacy_workflows(root, files)?;
+    let legacy = direct_legacy_workflows(safe_root, files, ownership.map(|state| &state.outputs))?;
     let conflicts = changed
         .iter()
-        .filter(|relative| root.join(relative).exists())
+        .filter(|relative| {
+            preimages
+                .get(*relative)
+                .is_some_and(|preimage| !matches!(preimage, FilePreimage::Missing))
+        })
         .cloned()
         .collect::<Vec<_>>();
 
@@ -6450,7 +7029,10 @@ fn plan_generated_write_with_options(
         .keys()
         .map(|path| {
             let action = if changed.contains(path) {
-                if root.join(path).exists() {
+                if preimages
+                    .get(path)
+                    .is_some_and(|preimage| !matches!(preimage, FilePreimage::Missing))
+                {
                     PlannedAction::Update
                 } else {
                     PlannedAction::Create
@@ -6471,7 +7053,7 @@ fn plan_generated_write_with_options(
     planned_files.extend(stale_files);
     if adopt {
         for path in legacy {
-            let preimage = capture_file_preimage(&root.join(&path), &path)?;
+            let preimage = capture_safe_file_preimage(safe_root, &path)?;
             planned_files.push(PlannedFile {
                 path,
                 action: PlannedAction::Delete,
@@ -6496,6 +7078,7 @@ fn plan_generated_write_with_options(
         changed,
         stale,
         conflicts,
+        output_binding,
         ownership_present: matches!(state_file, OwnershipStateFile::Present(_)),
         ownership_needs_refresh,
         recorded_inputs: ownership.map(|state| state.inputs.clone()),
@@ -6555,7 +7138,25 @@ fn apply_generated_write_plan(
     force: bool,
     plan: &GeneratedWritePlan,
 ) -> Result<WriteOutcome, GeneratorError> {
-    validate_plan_preimages(root, plan)?;
+    apply_generated_write_plan_with_root(root, files, inputs, dry_run, check, force, plan, None)
+}
+
+fn apply_generated_write_plan_with_root(
+    root: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    inputs: &GenerationInputs,
+    dry_run: bool,
+    check: bool,
+    force: bool,
+    plan: &GeneratedWritePlan,
+    pinned_output_root: Option<&safe_fs::SafeRoot>,
+) -> Result<WriteOutcome, GeneratorError> {
+    if let Some(pinned) = pinned_output_root {
+        pinned.validate_root_binding()?;
+        validate_plan_preimages_at(Some(pinned), plan)?;
+    } else {
+        validate_plan_preimages(root, plan)?;
+    }
     // A state file written by another schema is never parsed, so its recorded
     // provenance cannot support a check verdict: refuse to conclude instead of
     // silently treating it as absent.
@@ -6582,8 +7183,15 @@ fn apply_generated_write_plan(
     if !plan.has_drift() {
         return Ok(WriteOutcome::Unchanged);
     }
-    let _generation_lock = GenerationLock::acquire(root, files.keys())?;
-    validate_plan_preimages(root, plan)?;
+    let generation_lock = if let Some(pinned) = pinned_output_root {
+        GenerationLock::acquire_pinned(pinned, files.keys())?
+    } else {
+        match plan.output_binding.as_ref() {
+            Some(binding) => GenerationLock::acquire_bound(root, files.keys(), binding)?,
+            None => GenerationLock::acquire(root, files.keys())?,
+        }
+    };
+    validate_plan_preimages_at(Some(&generation_lock.root), plan)?;
     // A pre-state version is safe to adopt only when every existing generated
     // file exactly matches this renderer's output. `verify_generated_ownership`
     // rejects any divergent file before this point, including under `--force`.
@@ -6591,7 +7199,7 @@ fn apply_generated_write_plan(
         && plan.stale.is_empty()
         && (!plan.ownership_present || plan.ownership_needs_refresh)
     {
-        return apply_ownership_refresh(root, files, inputs, plan);
+        return apply_ownership_refresh(&generation_lock.root, files, inputs, plan);
     }
     let created = plan
         .files
@@ -6617,7 +7225,14 @@ fn apply_generated_write_plan(
             .iter()
             .find(|file| &file.path == relative)
             .ok_or_else(|| GeneratorError::usage("generated plan has no file preimage"))?;
-        write_reviewed_file(&root.join(relative), relative, content, &planned.preimage)?;
+        safe_fs::write_reviewed_file_observed(
+            &generation_lock.root,
+            relative,
+            content,
+            &planned.preimage,
+            |_| Ok(()),
+            |_| Ok(()),
+        )?;
     }
     for relative in &plan.stale {
         let planned = plan
@@ -6625,18 +7240,20 @@ fn apply_generated_write_plan(
             .iter()
             .find(|file| &file.path == relative)
             .ok_or_else(|| GeneratorError::usage("generated plan has no stale-file preimage"))?;
-        delete_reviewed_file(&root.join(relative), relative, &planned.preimage)?;
+        safe_fs::delete_reviewed_file(&generation_lock.root, relative, &planned.preimage)?;
     }
     let ownership_file = plan
         .files
         .iter()
         .find(|file| file.path == ownership_path)
         .ok_or_else(|| GeneratorError::usage("generated plan has no ownership preimage"))?;
-    write_reviewed_file(
-        &root.join(&ownership_path),
+    safe_fs::write_reviewed_file_observed(
+        &generation_lock.root,
         &ownership_path,
         &ownership_state_content(files, inputs),
         &ownership_file.preimage,
+        |_| Ok(()),
+        |_| Ok(()),
     )?;
     Ok(WriteOutcome::Written {
         changed: written,
@@ -6645,7 +7262,7 @@ fn apply_generated_write_plan(
 }
 
 fn apply_ownership_refresh(
-    root: &Path,
+    root: &safe_fs::SafeRoot,
     files: &BTreeMap<PathBuf, String>,
     inputs: &GenerationInputs,
     plan: &GeneratedWritePlan,
@@ -6660,11 +7277,13 @@ fn apply_ownership_refresh(
         .then(|| ownership_path.clone())
         .into_iter()
         .collect();
-    write_reviewed_file(
-        &root.join(&ownership_path),
+    safe_fs::write_reviewed_file_observed(
+        root,
         &ownership_path,
         &ownership_state_content(files, inputs),
         &ownership_file.preimage,
+        |_| Ok(()),
+        |_| Ok(()),
     )?;
     Ok(WriteOutcome::Written {
         changed: vec![ownership_path],
@@ -6672,141 +7291,21 @@ fn apply_ownership_refresh(
     })
 }
 
-fn reject_symlinked_output_root(root: &Path) -> Result<(), GeneratorError> {
-    match fs::symlink_metadata(root) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(GeneratorError::usage(format!(
-            "refusing symlinked output root: {}",
-            root.display()
-        ))),
-        Ok(metadata) if !metadata.is_dir() => Err(GeneratorError::usage(format!(
-            "output root is not a directory: {}",
-            root.display()
-        ))),
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(GeneratorError::io("inspect output root", root, &error)),
-    }
-}
-
-/// Generated paths are intentionally constrained beneath the target repository.
-/// Refuse a symlinked managed directory instead of letting normal filesystem
-/// resolution redirect a write outside that repository. The managed set is
-/// derived from the emitted paths so owned files outside `.github/workflows`
-/// (composite actions, workflow templates) get the same protection.
-fn reject_managed_symlink_ancestors<'a>(
-    root: &Path,
-    generated: impl IntoIterator<Item = &'a PathBuf>,
-) -> Result<(), GeneratorError> {
-    let mut managed = BTreeSet::from([PathBuf::from(".github")]);
-    for relative in generated {
-        managed.extend(
-            relative
-                .ancestors()
-                .skip(1)
-                .filter(|ancestor| ancestor.starts_with(".github"))
-                .map(Path::to_path_buf),
-        );
-    }
-    for relative in managed {
-        let path = root.join(relative);
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(GeneratorError::usage(format!(
-                    "refusing symlinked managed directory: {}",
-                    path.display()
-                )));
-            }
-            Ok(metadata) if !metadata.is_dir() => {
-                return Err(GeneratorError::usage(format!(
-                    "managed path is not a directory: {}",
-                    path.display()
-                )));
-            }
-            Ok(_) => (),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
-            Err(error) => {
-                return Err(GeneratorError::io(
-                    "inspect managed directory",
-                    &path,
-                    &error,
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn capture_file_preimage(path: &Path, relative: &Path) -> Result<FilePreimage, GeneratorError> {
-    let observed = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(FilePreimage::Missing);
-        }
-        Err(error) => return Err(GeneratorError::io("inspect generated file", path, &error)),
-    };
-    if !observed.file_type().is_file() {
-        return Err(GeneratorError::usage(format!(
-            "refusing non-regular generated file: {}",
-            relative.display()
-        )));
-    }
-    let observed_identity = file_identity(&observed);
-    let mut file = fs::File::open(path)
-        .map_err(|error| GeneratorError::io("open generated file", path, &error))?;
-    let opened_identity = file
-        .metadata()
-        .map(|metadata| file_identity(&metadata))
-        .map_err(|error| GeneratorError::io("inspect opened generated file", path, &error))?;
-    if opened_identity != observed_identity {
-        return Err(GeneratorError::usage(format!(
-            "generated file changed during preflight: {}",
-            relative.display()
-        )));
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|error| GeneratorError::io("read generated file", path, &error))?;
-    let final_identity = file
-        .metadata()
-        .map(|metadata| file_identity(&metadata))
-        .map_err(|error| GeneratorError::io("reinspect generated file", path, &error))?;
-    if final_identity != observed_identity || final_identity.length != bytes.len() as u64 {
-        return Err(GeneratorError::usage(format!(
-            "generated file changed during preflight: {}",
-            relative.display()
-        )));
-    }
-    Ok(FilePreimage::Regular {
-        identity: observed_identity,
-        bytes: bytes.into_boxed_slice(),
-    })
-}
-
-fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-
-        FileIdentity {
-            length: metadata.len(),
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        FileIdentity {
-            length: metadata.len(),
-        }
-    }
-}
-
 fn validate_plan_preimages(root: &Path, plan: &GeneratedWritePlan) -> Result<(), GeneratorError> {
-    reject_symlinked_output_root(root)?;
-    reject_managed_symlink_ancestors(root, plan.files.iter().map(|file| &file.path))?;
+    let safe_root = match plan.output_binding.as_ref() {
+        Some(binding) => safe_fs::SafeRoot::open_existing_output_bound(root, binding)?,
+        None => safe_fs::SafeRoot::open_existing_output(root)?,
+    };
+    validate_plan_preimages_at(safe_root.as_ref(), plan)
+}
+
+fn validate_plan_preimages_at(
+    root: Option<&safe_fs::SafeRoot>,
+    plan: &GeneratedWritePlan,
+) -> Result<(), GeneratorError> {
     let mut changed = Vec::new();
     for file in &plan.files {
-        let current = capture_file_preimage(&root.join(&file.path), &file.path)?;
+        let current = capture_safe_file_preimage(root, &file.path)?;
         if current != file.preimage {
             changed.push(file.path.clone());
         }
@@ -6885,11 +7384,14 @@ fn is_known_legacy_workflows_agents_md(relative: &Path, current: &[u8]) -> bool 
 }
 
 fn stale_owned_files(
-    root: &Path,
+    root: Option<&safe_fs::SafeRoot>,
     files: &BTreeMap<PathBuf, String>,
     ownership: Option<&BTreeMap<PathBuf, u64>>,
 ) -> Result<Vec<PlannedFile>, GeneratorError> {
     let Some(ownership) = ownership else {
+        return Ok(Vec::new());
+    };
+    let Some(root) = root else {
         return Ok(Vec::new());
     };
     let mut stale = Vec::new();
@@ -6897,14 +7399,7 @@ fn stale_owned_files(
         if files.contains_key(relative) {
             continue;
         }
-        let path = root.join(relative);
-        if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-            return Err(GeneratorError::usage(format!(
-                "refusing to remove symlinked stale generated file: {}",
-                path.display()
-            )));
-        }
-        let preimage = capture_file_preimage(&path, relative)?;
+        let preimage = root.capture_file_preimage(relative)?;
         let Some(current) = preimage.bytes() else {
             continue;
         };
@@ -6996,6 +7491,50 @@ enum OwnershipStateFile {
     Absent,
     Present(OwnershipState),
     ForeignSchema { message: String },
+}
+
+fn recorded_ownership_state(
+    safe_root: &safe_fs::SafeRoot,
+) -> Result<Option<OwnershipState>, GeneratorError> {
+    let root = safe_root.command_directory();
+    let state_path = PathBuf::from(OWNERSHIP_STATE);
+    let preimage = safe_root.capture_file_preimage(&state_path)?;
+    match parse_ownership_state(root, &preimage)? {
+        OwnershipStateFile::Present(state) => Ok(Some(state)),
+        OwnershipStateFile::Absent | OwnershipStateFile::ForeignSchema { .. } => Ok(None),
+    }
+}
+
+/// Bind sidecar claims to the current renderer before they can affect scan
+/// provenance. The path must be one the current renderer owns, and an existing
+/// file must still be either the recorded preimage or the exact current render.
+/// This preserves ordinary generator upgrades while rejecting a sidecar that
+/// names an arbitrary user workflow/action with an attacker-chosen digest.
+fn verified_recorded_output_paths(
+    safe_root: &safe_fs::SafeRoot,
+    ownership: &BTreeMap<PathBuf, u64>,
+    rendered: &BTreeMap<PathBuf, String>,
+) -> Result<BTreeSet<PathBuf>, GeneratorError> {
+    let mut verified = BTreeSet::new();
+    for (relative, expected) in ownership {
+        let Some(wanted) = rendered.get(relative) else {
+            return Err(GeneratorError::usage(format!(
+                "generated ownership state names a path outside the current renderer: {}",
+                relative.display()
+            )));
+        };
+        if let Some(current) = safe_root.capture_file_preimage(relative)?.bytes() {
+            let current_digest = content_digest_bytes(current);
+            if current_digest != *expected && current != wanted.as_bytes() {
+                return Err(GeneratorError::usage(format!(
+                    "generated ownership state cannot prove current output bytes: {}",
+                    relative.display()
+                )));
+            }
+        }
+        verified.insert(relative.clone());
+    }
+    Ok(verified)
 }
 
 fn parse_ownership_state(
@@ -7165,36 +7704,31 @@ fn display_paths<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> String {
 }
 
 fn direct_legacy_workflows(
-    root: &Path,
+    root: Option<&safe_fs::SafeRoot>,
     generated: &BTreeMap<PathBuf, String>,
+    ownership: Option<&BTreeMap<PathBuf, u64>>,
 ) -> Result<Vec<PathBuf>, GeneratorError> {
-    let workflows = root.join(".github/workflows");
-    if !workflows.exists() {
+    let Some(root) = root else {
         return Ok(Vec::new());
-    }
-    let entries = fs::read_dir(&workflows)
-        .map_err(|error| GeneratorError::io("read workflows", &workflows, &error))?;
+    };
+    let Some(workflows) = root.open_directory(Path::new(".github/workflows"))? else {
+        return Ok(Vec::new());
+    };
     let mut legacy = Vec::new();
-    for entry in entries {
-        let entry =
-            entry.map_err(|error| GeneratorError::io("read workflow entry", &workflows, &error))?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| GeneratorError::io("read workflow type", &path, &error))?;
-        let extension = path.extension().and_then(|value| value.to_str());
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|error| {
-                GeneratorError::usage(format!("make workflow path relative: {error}"))
-            })?
-            .to_path_buf();
-        let generated_by_velnor =
-            fs::read_to_string(&path).is_ok_and(|content| content.starts_with(GENERATED_HEADER));
-        if file_type.is_file()
+    for entry in workflows.entries()? {
+        let relative = PathBuf::from(".github/workflows").join(&entry.name);
+        let extension = Path::new(&entry.name)
+            .extension()
+            .and_then(|value| value.to_str());
+        // Current outputs are authoritative from the render plan; stale
+        // outputs are authoritative only from the recorded sidecar. Their
+        // digest is verified before deletion, so a changed stale file still
+        // fails closed instead of being silently adopted.
+        let owned_by_state = ownership.is_some_and(|outputs| outputs.contains_key(&relative));
+        if matches!(entry.kind, safe_fs::SafeEntryKind::File)
             && matches!(extension, Some("yml" | "yaml"))
             && !generated.contains_key(&relative)
-            && !generated_by_velnor
+            && !owned_by_state
         {
             legacy.push(relative);
         }
@@ -7204,7 +7738,7 @@ fn direct_legacy_workflows(
 }
 
 struct GenerationLock {
-    _directory: fs::File,
+    root: safe_fs::SafeRoot,
 }
 
 impl GenerationLock {
@@ -7212,158 +7746,43 @@ impl GenerationLock {
         root: &Path,
         generated: impl IntoIterator<Item = &'a PathBuf>,
     ) -> Result<Self, GeneratorError> {
-        reject_symlinked_output_root(root)?;
-        fs::create_dir_all(root)
-            .map_err(|error| GeneratorError::io("create output root", root, &error))?;
-        reject_managed_symlink_ancestors(root, generated)?;
-        let directory = fs::File::open(root)
-            .map_err(|error| GeneratorError::io("open output root for locking", root, &error))?;
+        let safe_root = safe_fs::SafeRoot::open_output(root)?;
+        for relative in generated {
+            safe_root.validate_parent(relative)?;
+        }
         // Blocking acquisition is the contract: concurrent mutators of one
         // output root serialize, they never fail spuriously. A failed
         // attempt would turn benign contention (parallel tests, overlapping
         // CLI invocations) into a hard error even though the second writer
         // could proceed safely once the first finishes.
-        directory
-            .lock()
-            .map_err(|error| GeneratorError::io("lock output root for generation", root, &error))?;
-        Ok(Self {
-            _directory: directory,
-        })
+        safe_root.lock(root)?;
+        Ok(Self { root: safe_root })
     }
-}
 
-fn write_reviewed_file(
-    path: &Path,
-    relative: &Path,
-    content: &str,
-    expected: &FilePreimage,
-) -> Result<(), GeneratorError> {
-    write_reviewed_file_observed(path, relative, content, expected, |_| Ok(()))
-}
+    fn acquire_bound<'a>(
+        root: &Path,
+        generated: impl IntoIterator<Item = &'a PathBuf>,
+        binding: &safe_fs::OutputPathBinding,
+    ) -> Result<Self, GeneratorError> {
+        let safe_root = safe_fs::SafeRoot::open_output_bound(root, binding)?;
+        for relative in generated {
+            safe_root.validate_parent(relative)?;
+        }
+        safe_root.lock(root)?;
+        Ok(Self { root: safe_root })
+    }
 
-fn write_reviewed_file_observed<F>(
-    path: &Path,
-    relative: &Path,
-    content: &str,
-    expected: &FilePreimage,
-    before_replace: F,
-) -> Result<(), GeneratorError>
-where
-    F: FnOnce(&Path) -> Result<(), GeneratorError>,
-{
-    let current = capture_file_preimage(path, relative)?;
-    if &current != expected {
-        return Err(preimage_changed(relative));
-    }
-    let staged = stage_generated_file(path, content)?;
-    match expected {
-        FilePreimage::Missing => {
-            if let Err(error) = fs::hard_link(&staged, path) {
-                let _ = fs::remove_file(&staged);
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    return Err(preimage_changed(relative));
-                }
-                return Err(GeneratorError::io(
-                    "install new generated file",
-                    path,
-                    &error,
-                ));
-            }
-            fs::remove_file(&staged)
-                .map_err(|error| GeneratorError::io("remove staged file", &staged, &error))?;
-            Ok(())
+    fn acquire_pinned<'a>(
+        root: &safe_fs::SafeRoot,
+        generated: impl IntoIterator<Item = &'a PathBuf>,
+    ) -> Result<Self, GeneratorError> {
+        let safe_root = root.duplicate()?;
+        for relative in generated {
+            safe_root.validate_parent(relative)?;
         }
-        FilePreimage::Regular { .. } => {
-            let (backup_dir, backup) = reserve_backup_path(path)?;
-            if let Err(error) = fs::hard_link(path, &backup) {
-                let _ = fs::remove_file(&staged);
-                let _ = fs::remove_dir(&backup_dir);
-                return Err(GeneratorError::io(
-                    "back up reviewed generated file",
-                    path,
-                    &error,
-                ));
-            }
-            let backed_up = match capture_file_preimage(&backup, relative) {
-                Ok(backed_up) => backed_up,
-                Err(error) => {
-                    let _ = fs::remove_file(&backup);
-                    let _ = fs::remove_dir(&backup_dir);
-                    let _ = fs::remove_file(&staged);
-                    return Err(error);
-                }
-            };
-            let live_matches =
-                capture_file_preimage(path, relative).is_ok_and(|current| &current == expected);
-            if &backed_up != expected || !live_matches {
-                let _ = fs::remove_file(&backup);
-                let _ = fs::remove_dir(&backup_dir);
-                let _ = fs::remove_file(&staged);
-                return Err(preimage_changed(relative));
-            }
-            if let Err(error) = before_replace(path) {
-                let _ = fs::remove_file(&backup);
-                let _ = fs::remove_dir(&backup_dir);
-                let _ = fs::remove_file(&staged);
-                return Err(error);
-            }
-            if let Err(error) = fs::rename(&staged, path) {
-                let _ = fs::remove_file(&staged);
-                let _ = fs::remove_file(&backup);
-                let _ = fs::remove_dir(&backup_dir);
-                return Err(GeneratorError::io(
-                    "atomically replace reviewed generated file",
-                    path,
-                    &error,
-                ));
-            }
-            // The atomic rename is the commit point. Cleanup cannot turn a
-            // successful replacement into a reported failure that skips the
-            // ownership-state update; a leftover backup remains recoverable.
-            let _ = fs::remove_file(&backup);
-            let _ = fs::remove_dir(&backup_dir);
-            Ok(())
-        }
+        safe_root.lock(safe_root.command_directory())?;
+        Ok(Self { root: safe_root })
     }
-}
-
-fn delete_reviewed_file(
-    path: &Path,
-    relative: &Path,
-    expected: &FilePreimage,
-) -> Result<(), GeneratorError> {
-    if matches!(expected, FilePreimage::Missing) {
-        return Err(preimage_changed(relative));
-    }
-    let current = capture_file_preimage(path, relative)?;
-    if &current != expected {
-        return Err(preimage_changed(relative));
-    }
-    let (backup_dir, backup) = reserve_backup_path(path)?;
-    if let Err(error) = fs::rename(path, &backup) {
-        let _ = fs::remove_dir(&backup_dir);
-        return Err(GeneratorError::io(
-            "reserve stale generated file",
-            path,
-            &error,
-        ));
-    }
-    let moved = match capture_file_preimage(&backup, relative) {
-        Ok(moved) => moved,
-        Err(error) => {
-            restore_reviewed_backup(path, &backup, &backup_dir)?;
-            return Err(error);
-        }
-    };
-    if &moved != expected {
-        restore_reviewed_backup(path, &backup, &backup_dir)?;
-        return Err(preimage_changed(relative));
-    }
-    // Removal of the reviewed pathname is committed. Keep ownership-state
-    // progress monotonic even if cleanup leaves a recoverable hidden backup.
-    let _ = fs::remove_file(&backup);
-    let _ = fs::remove_dir(&backup_dir);
-    Ok(())
 }
 
 /// Test helper: replace a path with new content through the same staged
@@ -7376,6 +7795,7 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), GeneratorError> {
         .map_err(|error| GeneratorError::io("install generated file", path, &error))
 }
 
+#[cfg(test)]
 fn stage_generated_file(path: &Path, content: &str) -> Result<PathBuf, GeneratorError> {
     let parent = path
         .parent()
@@ -7422,62 +7842,6 @@ fn stage_generated_file(path: &Path, content: &str) -> Result<PathBuf, Generator
     )))
 }
 
-fn reserve_backup_path(path: &Path) -> Result<(PathBuf, PathBuf), GeneratorError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| GeneratorError::usage(format!("path has no parent: {}", path.display())))?;
-    let filename = path
-        .file_name()
-        .ok_or_else(|| GeneratorError::usage("invalid generated output filename"))?;
-    for attempt in 0..16_u8 {
-        let directory = parent.join(format!(
-            ".velnor-workflow-backup-{}-{}-{attempt}",
-            std::process::id(),
-            unique_suffix()
-        ));
-        match fs::create_dir(&directory) {
-            Ok(()) => return Ok((directory.clone(), directory.join(filename))),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
-            Err(error) => {
-                return Err(GeneratorError::io(
-                    "reserve generated backup directory",
-                    &directory,
-                    &error,
-                ));
-            }
-        }
-    }
-    Err(GeneratorError::usage(format!(
-        "could not reserve a backup for {}",
-        path.display()
-    )))
-}
-
-fn restore_reviewed_backup(
-    path: &Path,
-    backup: &Path,
-    backup_dir: &Path,
-) -> Result<(), GeneratorError> {
-    fs::hard_link(backup, path).map_err(|error| {
-        GeneratorError::usage(format!(
-            "generated file changed concurrently; preserved reviewed bytes at {} and refused to overwrite {}: {error}",
-            backup.display(),
-            path.display()
-        ))
-    })?;
-    fs::remove_file(backup)
-        .map_err(|error| GeneratorError::io("remove restored backup", backup, &error))?;
-    fs::remove_dir(backup_dir)
-        .map_err(|error| GeneratorError::io("remove restored backup directory", backup_dir, &error))
-}
-
-fn preimage_changed(relative: &Path) -> GeneratorError {
-    GeneratorError::usage(format!(
-        "generated file changed after preflight: {}; review again",
-        relative.display()
-    ))
-}
-
 /// Uniqueness must never depend on clock resolution: parallel tests that
 /// start in the same instant previously collided on one temporary root and
 /// spuriously failed generation with "another generation is in progress".
@@ -7494,28 +7858,31 @@ pub(crate) fn unique_suffix() -> u128 {
         | u128::from(SEQUENCE.fetch_add(1, Ordering::Relaxed))
 }
 
-enum RepositorySource {
+#[derive(Clone)]
+pub(crate) enum RepositorySource {
     Local(PathBuf),
     GitHub { owner: String, repository: String },
 }
 
+#[derive(Clone)]
+pub(crate) struct SourceSelection {
+    pub(crate) source: RepositorySource,
+    pub(crate) local_root: Option<Arc<safe_fs::SafeRoot>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct GeneratorSelection {
+    pub(crate) source: SourceSelection,
+    pub(crate) output: OutputSelection,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OutputSelection {
+    pub(crate) root: PathBuf,
+    pub(crate) binding: safe_fs::OutputPathBinding,
+}
+
 impl RepositorySource {
-    fn parse(value: &str) -> Result<Self, GeneratorError> {
-        Self::parse_with_candidate_path(value, PathBuf::from(value))
-    }
-
-    fn parse_with_candidate_path(value: &str, path: PathBuf) -> Result<Self, GeneratorError> {
-        if path.is_dir() {
-            return Ok(Self::Local(path));
-        }
-        if let Some((owner, repository)) = github_coordinates(value) {
-            return Ok(Self::GitHub { owner, repository });
-        }
-        Err(GeneratorError::usage(format!(
-            "target must be a local directory, https://github.com/owner/repository, or owner/repository: {value}",
-        )))
-    }
-
     fn checkout(&self) -> Result<Checkout, GeneratorError> {
         match self {
             Self::Local(path) => {
@@ -7527,39 +7894,25 @@ impl RepositorySource {
         }
     }
 
-    fn default_branch(&self, checkout: &Path) -> Result<String, GeneratorError> {
+    fn default_branch_with_safe_root(
+        &self,
+        safe_root: &safe_fs::SafeRoot,
+    ) -> Result<String, GeneratorError> {
         let _ = self;
-        resolve_default_branch(checkout)
-    }
-
-    fn output_root(&self, local_checkout: &Path) -> Result<PathBuf, GeneratorError> {
-        match self {
-            Self::Local(_) => Ok(local_checkout.to_path_buf()),
-            Self::GitHub { owner, repository } => {
-                let directory = env::current_dir().map_err(|error| {
-                    GeneratorError::usage(format!(
-                        "read current directory for remote output: {error}"
-                    ))
-                })?;
-                let directory = directory.canonicalize().map_err(|error| {
-                    GeneratorError::io(
-                        "canonicalize current directory for remote output",
-                        &directory,
-                        &error,
-                    )
-                })?;
-                remote_output_root(&directory, owner, repository)
-            }
-        }
+        resolve_default_branch_with_safe_root(safe_root)
     }
 }
 
-fn resolve_default_branch(repository: &Path) -> Result<String, GeneratorError> {
-    let symbolic_ref = Command::new("git")
-        .arg("-C")
-        .arg(repository)
-        .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-        .output();
+fn resolve_default_branch_with_safe_root(
+    safe_root: &safe_fs::SafeRoot,
+) -> Result<String, GeneratorError> {
+    safe_root.validate_root_binding()?;
+    let symbolic_ref = safe_fs::pinned_command::output(
+        safe_root,
+        "git",
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    );
+    safe_root.validate_root_binding()?;
     if let Ok(output) = symbolic_ref
         && output.status.success()
     {
@@ -7569,12 +7922,13 @@ fn resolve_default_branch(repository: &Path) -> Result<String, GeneratorError> {
         }
     }
 
-    let remote_head = Command::new("git")
-        .arg("-C")
-        .arg(repository)
-        .args(["ls-remote", "--symref", "origin", "HEAD"])
-        .output()
-        .map_err(|error| {
+    let remote_head = safe_fs::pinned_command::output(
+        safe_root,
+        "git",
+        &["ls-remote", "--symref", "origin", "HEAD"],
+    );
+    safe_root.validate_root_binding()?;
+    let remote_head = remote_head.map_err(|error| {
             GeneratorError::usage(format!(
                 "resolve repository default branch from Git metadata: {error}; pass --default-branch explicitly"
             ))
@@ -7631,18 +7985,13 @@ fn validate_default_branch(branch: &str) -> Result<&str, GeneratorError> {
     }
 }
 
-fn remote_output_root(
-    launch_directory: &Path,
+fn remote_output_root_from_root(
+    launch_root: &safe_fs::SafeRoot,
     owner: &str,
     repository: &str,
 ) -> Result<PathBuf, GeneratorError> {
-    let launch_directory = launch_directory.canonicalize().map_err(|error| {
-        GeneratorError::io(
-            "canonicalize launch directory for remote output",
-            launch_directory,
-            &error,
-        )
-    })?;
+    launch_root.validate_root_binding()?;
+    let launch_directory = launch_root.command_directory();
     output_root_for_repository(&launch_directory.join("repositories"), owner, repository)
 }
 
@@ -7657,16 +8006,16 @@ fn output_root_for_repository(
 }
 
 fn resolve_output_path(path: &Path) -> Result<PathBuf, GeneratorError> {
-    let current_directory = env::current_dir().map_err(|error| {
-        GeneratorError::usage(format!("resolve current directory for output: {error}"))
-    })?;
-    let current_directory = current_directory.canonicalize().map_err(|error| {
-        GeneratorError::io(
-            "canonicalize current directory for output",
-            &current_directory,
-            &error,
-        )
-    })?;
+    let launch_root = safe_fs::SafeRoot::open(Path::new("."))?;
+    resolve_output_path_from(path, &launch_root)
+}
+
+fn resolve_output_path_from(
+    path: &Path,
+    launch_root: &safe_fs::SafeRoot,
+) -> Result<PathBuf, GeneratorError> {
+    launch_root.validate_root_binding()?;
+    let current_directory = launch_root.command_directory();
     let candidate = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -7677,26 +8026,124 @@ fn resolve_output_path(path: &Path) -> Result<PathBuf, GeneratorError> {
     Ok(output)
 }
 
+fn selected_output_path(
+    source: &RepositorySource,
+    explicit_output: Option<&Path>,
+    local_root: Option<&safe_fs::SafeRoot>,
+    launch_root: &safe_fs::SafeRoot,
+) -> Result<PathBuf, GeneratorError> {
+    if let Some(path) = explicit_output {
+        return resolve_output_path_from(path, launch_root);
+    }
+    match source {
+        RepositorySource::Local(_) => local_root
+            .map(|root| root.command_directory().to_path_buf())
+            .ok_or_else(|| GeneratorError::usage("local source root was not captured")),
+        RepositorySource::GitHub { owner, repository } => {
+            remote_output_root_from_root(launch_root, owner, repository)
+        }
+    }
+}
+
+fn capture_output_selection(
+    source: &RepositorySource,
+    explicit_output: Option<&Path>,
+    local_root: Option<&safe_fs::SafeRoot>,
+    launch_root: &safe_fs::SafeRoot,
+) -> Result<OutputSelection, GeneratorError> {
+    let root = selected_output_path(source, explicit_output, local_root, launch_root)?;
+    let anchor = local_root
+        .filter(|local| root.starts_with(local.command_directory()))
+        .unwrap_or(launch_root);
+    let binding = if root.starts_with(anchor.command_directory()) {
+        safe_fs::OutputPathBinding::capture_under(&root, anchor)?
+    } else {
+        safe_fs::OutputPathBinding::capture(&root)?
+    };
+    if let Some(local_root) = local_root
+        && root == local_root.command_directory()
+    {
+        binding.ensure_same_root(&local_root.identity()?)?;
+    }
+    Ok(OutputSelection { root, binding })
+}
+
+fn capture_source_selection(target: &str) -> Result<SourceSelection, GeneratorError> {
+    let path = PathBuf::from(target);
+    match fs::symlink_metadata(&path) {
+        Ok(observed) if observed.file_type().is_symlink() => Err(GeneratorError::usage(format!(
+            "refusing symlinked repository root: {}",
+            path.display()
+        ))),
+        Ok(observed) if observed.is_dir() => {
+            let root = Arc::new(safe_fs::SafeRoot::open(&path)?);
+            if !root.identity()?.matches_metadata(&observed) {
+                return Err(GeneratorError::usage(format!(
+                    "repository root changed while selecting target: {}",
+                    path.display()
+                )));
+            }
+            Ok(SourceSelection {
+                source: RepositorySource::Local(path),
+                local_root: Some(root),
+            })
+        }
+        Ok(_) => {
+            if let Some((owner, repository)) = github_coordinates(target) {
+                Ok(SourceSelection {
+                    source: RepositorySource::GitHub { owner, repository },
+                    local_root: None,
+                })
+            } else {
+                Err(GeneratorError::usage(format!(
+                    "repository root is not a directory: {}",
+                    path.display()
+                )))
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if let Some((owner, repository)) = github_coordinates(target) {
+                Ok(SourceSelection {
+                    source: RepositorySource::GitHub { owner, repository },
+                    local_root: None,
+                })
+            } else {
+                Err(GeneratorError::io("inspect repository root", &path, &error))
+            }
+        }
+        Err(error) => Err(GeneratorError::io(
+            "inspect repository target",
+            &path,
+            &error,
+        )),
+    }
+}
+
+pub(crate) fn capture_generator_selection(
+    target: &str,
+    explicit_output: Option<&Path>,
+) -> Result<GeneratorSelection, GeneratorError> {
+    let source = capture_source_selection(target)?;
+    let launch_root = safe_fs::SafeRoot::open(Path::new("."))?;
+    let output = capture_output_selection(
+        &source.source,
+        explicit_output,
+        source.local_root.as_deref(),
+        &launch_root,
+    )?;
+    Ok(GeneratorSelection { source, output })
+}
+
 fn canonicalize_existing_output_prefix(path: &Path) -> Result<PathBuf, GeneratorError> {
     let mut existing = path.to_path_buf();
     let mut missing = Vec::new();
     loop {
         match fs::symlink_metadata(&existing) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                if missing.is_empty() {
-                    return Err(GeneratorError::usage(format!(
-                        "refusing symlinked output root: {}",
-                        existing.display()
-                    )));
-                }
-                let canonical = existing.canonicalize().map_err(|error| {
-                    GeneratorError::io("canonicalize output path", &existing, &error)
-                })?;
-                let mut output = canonical;
-                for component in missing.iter().rev() {
-                    output.push(component);
-                }
-                return Ok(output);
+                return Err(GeneratorError::usage(format!(
+                    "refusing symlinked output ancestor: {}",
+                    existing.display()
+                )));
             }
             Ok(metadata) if !metadata.is_dir() => {
                 return Err(GeneratorError::usage(format!(
@@ -8082,7 +8529,7 @@ mod tests {
             ),
             "write test toolchain pin",
         );
-        root
+        must(root.canonicalize(), "canonicalize test repository")
     }
 
     /// An empty scratch directory: for assertions that a refused write left a
@@ -8090,7 +8537,7 @@ mod tests {
     fn temporary_directory(name: &str) -> PathBuf {
         let root = env::temp_dir().join(format!("velnor-workflow-test-{name}-{}", unique_suffix()));
         must(fs::create_dir_all(&root), "create test directory");
-        root
+        must(root.canonicalize(), "canonicalize test directory")
     }
 
     #[expect(
@@ -8118,26 +8565,37 @@ mod tests {
         ));
         let pin_build = Cli::parse_args([
             OsString::from("--plain"),
-            OsString::from("--check"),
+            OsString::from("--verify-pinned"),
             OsString::from("--pin-build"),
         ]);
         assert!(matches!(
             pin_build,
             Ok(Cli {
-                check: true,
+                check: false,
+                verify_pinned: true,
                 pin_build: true,
                 ..
             })
         ));
-        let accepted_without_check = Cli::parse_args([OsString::from("--pin-build")]);
+        let verify_pinned = Cli::parse_args([OsString::from("--verify-pinned")]);
         assert!(matches!(
-            accepted_without_check,
+            verify_pinned,
             Ok(Cli {
                 check: false,
-                pin_build: true,
+                verify_pinned: true,
+                pin_build: false,
                 ..
             })
         ));
+        assert!(
+            Cli::parse_args([OsString::from("--pin-build")]).is_err(),
+            "the local build escape hatch requires --verify-pinned"
+        );
+        assert!(
+            Cli::parse_args([OsString::from("--check"), OsString::from("--verify-pinned"),])
+                .is_err(),
+            "renderer check and pinned verification are separate modes"
+        );
         let plain = Cli::parse_args([OsString::from("--plain")]);
         assert!(matches!(
             plain,
@@ -8313,53 +8771,6 @@ mod tests {
     }
 
     #[test]
-    fn premerge_generator_changes_bootstrap_from_published_base_runtime() {
-        const PUBLISHED_BASE_REVISION: &str = "0dc79895ff1c5e88be7c3822c437e1c5b5282e12";
-        let mut config = scanned_fixture(provider_set([ProviderId::GithubHosted]));
-        config.repository = workflow_setup_action_repository().to_owned();
-        config.workflow_revision = PUBLISHED_BASE_REVISION.to_owned();
-        assert_ne!(
-            SOURCE_REVISION, PUBLISHED_BASE_REVISION,
-            "the test must model an unpublished generator revision"
-        );
-
-        let workflow = WorkflowIr::from_config(&config);
-        let pull_request = generated_ci_pr(&workflow);
-        assert!(
-            pull_request.contains(&format!("rev: {PUBLISHED_BASE_REVISION}")),
-            "PR planning must use the published base runtime: {pull_request}"
-        );
-        assert!(
-            !pull_request.contains(SOURCE_REVISION),
-            "PR planning must not bootstrap an unpublished generator revision: {pull_request}"
-        );
-
-        let policy = generated_ci_policy(&config);
-        assert!(
-            policy.contains(&format!("rev: {PUBLISHED_BASE_REVISION}")),
-            "policy must use the published base runtime: {policy}"
-        );
-        assert!(
-            policy.contains(&format!("BASE_PIN: {PUBLISHED_BASE_REVISION}")),
-            "candidate acquisition must compare against the published base runtime: {policy}"
-        );
-        assert!(
-            !policy.contains(SOURCE_REVISION),
-            "policy must not acquire an unpublished Stage-0 runtime: {policy}"
-        );
-        assert!(
-            policy.contains("name: Acquire candidate generator product"),
-            "policy must retain the candidate acquisition path: {policy}"
-        );
-        assert!(
-            policy.contains(
-                "head_candidate=\"$(velnor-workflow closure --rev=\"$HEAD_SHA\" --candidate)\""
-            ),
-            "candidate verification must remain anchored to the audited head: {policy}"
-        );
-    }
-
-    #[test]
     fn install_rev_is_always_the_declared_pin() {
         assert_eq!(
             workflow_setup_install_rev(workflow_setup_action_repository(), FIXTURE_REVISION),
@@ -8506,169 +8917,49 @@ mod tests {
     }
 
     #[test]
-    fn hosted_runtime_artifact_carries_a_proven_policy_binary() {
+    fn hosted_runtime_artifact_contains_only_the_event_runtime() {
         let publish = workflow_runtime_artifact_upload(FIXTURE_REVISION);
-        assert!(publish.contains("velnor-workflow-policy"), "{publish}");
+        assert!(publish.contains("stage/velnor-workflow"), "{publish}");
+        assert!(publish.contains("binary_sha256"), "{publish}");
+        assert!(publish.contains("--arg closure"), "{publish}");
+        assert!(!publish.contains("velnor-workflow-policy"), "{publish}");
+        assert!(!publish.contains("policy_binary"), "{publish}");
         assert!(
-            publish.contains(&format!("${{{VELNOR_WORKFLOW_PINNED_BINARY_ENV}:-$src}}")),
-            "the policy binary is the staged pin, or the event runtime when both are the pin: {publish}"
-        );
-        assert!(publish.contains("--revision"), "{publish}");
-        assert!(
-            publish.contains("policy_revision: $policy_revision"),
+            !publish.contains(VELNOR_WORKFLOW_PINNED_BINARY_ENV),
             "{publish}"
         );
-        assert!(publish.contains("policy_binary_sha256"), "{publish}");
 
         let mut download = String::new();
         WorkflowIr::from_config(&scanned_fixture(provider_set([ProviderId::GithubHosted])))
             .render_workflow_runtime_download(&mut download, ProviderId::GithubHosted);
+        for required in [
+            ".revision == $revision",
+            ".repository == $repository",
+            ".run_id == $run_id",
+            ".platform == $platform",
+            "runtime digest mismatch",
+            "install -Dm0755 .velnor-workflow-runtime/velnor-workflow ",
+            "echo \"$home/bin\" >> \"$GITHUB_PATH\"",
+        ] {
+            assert!(
+                download.contains(required),
+                "missing {required}: {download}"
+            );
+        }
+        assert!(!download.contains("policy_"), "{download}");
+        assert!(!download.contains("velnor-workflow-policy"), "{download}");
         assert!(
-            download.contains(".revision == $revision"),
-            "the artifact is manifest-bound to the event revision: {download}"
-        );
-        assert!(
-            download.contains(".repository == $repository"),
-            "the artifact is manifest-bound to this repository: {download}"
-        );
-        assert!(
-            download.contains(".run_id == $run_id"),
-            "the artifact is manifest-bound to this run: {download}"
-        );
-        assert!(
-            download.contains(".policy_closure"),
-            "the manifest carries the policy closure: {download}"
-        );
-        assert!(
-            download.contains(".policy_binary_sha256"),
-            "the manifest carries the policy binary digest: {download}"
-        );
-        assert!(
-            download.contains("policy runtime digest mismatch"),
+            !download.contains(VELNOR_WORKFLOW_PINNED_BINARY_ENV),
             "{download}"
         );
+        assert!(
+            !download.contains(VELNOR_WORKFLOW_PINNED_CLOSURE_ENV),
+            "{download}"
+        );
+        assert!(!download.contains("--verify-pinned"), "{download}");
         assert!(
             download.contains(&format!("home=\"{HOSTED_WORKFLOW_RUNTIME_ARTIFACT_HOME}\"")),
             "{download}"
-        );
-        assert!(
-            download.contains("install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy"),
-            "the pair stages the policy binary beside the event binary: {download}"
-        );
-        assert!(
-            download.contains("\"$home/bin/velnor-workflow-policy\" --closure"),
-            "the staged policy binary self-reports its closure: {download}"
-        );
-        assert!(
-            download.contains("policy runtime reports closure"),
-            "the self-report is checked against the manifest closure: {download}"
-        );
-        assert!(
-            download.contains("echo \"$home/bin\" >> \"$GITHUB_PATH\""),
-            "{download}"
-        );
-        assert!(
-            download.contains(&format!(
-                "echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$home/bin/velnor-workflow-policy\" >> \"$GITHUB_ENV\""
-            )),
-            "unit jobs export the pinned binary for the D19 guard: {download}"
-        );
-        assert!(
-            !download.contains(".cargo/bin"),
-            "the runtime pair never enters the shared cargo bin: {download}"
-        );
-        assert!(
-            !download.contains("cargo install"),
-            "unit jobs never install from the network: {download}"
-        );
-    }
-
-    #[test]
-    fn velnor_provisioner_reuses_the_slot_only_on_manifest_digest_match() {
-        let step = workflow_pinned_policy_runtime_local(FIXTURE_REVISION, "checkout");
-        let repository = workflow_setup_action_repository();
-        // Manifest-first: every run downloads and attests the manifest before
-        // any reuse decision, so a planted slot binary cannot self-report its
-        // way into reuse.
-        assert!(
-            step.contains(&format!(
-                "gh release download \"$tag\" --repo {repository} --pattern manifest.json"
-            )),
-            "the manifest is fetched fresh every run: {step}"
-        );
-        assert!(
-            step.contains("gh attestation verify \"$temporary/manifest.json\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml"),
-            "the manifest attestation is verified before the manifest is trusted: {step}"
-        );
-        assert!(
-            step.contains("expected=\"$(jq -er --arg platform \"${RUNNER_OS}-${RUNNER_ARCH}\" '.products[$platform].binary' \"$temporary/manifest.json\")\""),
-            "the expected digest comes from the proven manifest: {step}"
-        );
-        assert!(
-            step.contains("if [[ -x \"$binary\" ]]; then"),
-            "a missing slot falls through instead of dying: {step}"
-        );
-        assert!(
-            step.contains("sha256sum \"$binary\"") && step.contains("shasum -a 256 \"$binary\""),
-            "the slot binary's digest is recomputed on both toolchains: {step}"
-        );
-        // Digest-before-exec: the digest comparison alone decides reuse, and
-        // the slot binary is executed exactly once, after the digest has
-        // proven the bytes — never probed before the comparison.
-        assert!(
-            step.contains("if [[ \"$existing\" != \"$expected\" ]]; then"),
-            "reuse requires the manifest digest, decided before any execution: {step}"
-        );
-        assert!(
-            !step.contains("--closure 2>/dev/null || true"),
-            "no probe runs before the digest comparison: {step}"
-        );
-        assert_eq!(
-            step.matches("\"$binary\" --closure").count(),
-            1,
-            "the slot binary is executed exactly once: {step}"
-        );
-        let attested = must_some(
-            step.find("gh attestation verify \"$temporary/manifest.json\""),
-            "manifest attestation renders",
-        );
-        let gate = must_some(
-            step.find("if [[ \"$existing\" != \"$expected\" ]]; then"),
-            "digest reuse gate renders",
-        );
-        let installed = must_some(
-            step.find("install -Dm0755 \"$temporary/$asset\" \"$binary\""),
-            "slow-path install renders",
-        );
-        let probe = must_some(
-            step.find("reported=\"$(\"$binary\" --closure)\""),
-            "post-install self-report probe renders",
-        );
-        let confirmed = must_some(
-            step.find("[[ \"$reported\" == \"$closure\" ]]"),
-            "final self-report gate renders",
-        );
-        assert!(
-            attested < gate && gate < installed && installed < probe && probe < confirmed,
-            "attest precedes the reuse gate precedes the install precedes the probe precedes the final gate: {step}"
-        );
-        assert!(
-            step.contains(&format!(
-                "gh release download \"$tag\" --repo {repository} --pattern \"$asset\""
-            )),
-            "the slow path downloads the asset: {step}"
-        );
-        assert!(
-            step.contains("::error::policy runtime digest mismatch"),
-            "the slow path still gates the install on the digest: {step}"
-        );
-        assert!(
-            step.contains("::error::no policy runtime product for revision"),
-            "a revision with no published product fails closed naming the revision: {step}"
-        );
-        assert!(
-            step.contains("mainline runtime-product publisher"),
-            "the failure names the producer that publishes the product: {step}"
         );
     }
 
@@ -8684,8 +8975,8 @@ mod tests {
             "the runtime step is present: {owner}"
         );
         assert!(
-            !owner.contains("pinned Velnor workflow policy runtime"),
-            "the pin is the runtime: no second revision is provisioned next to it: {owner}"
+            !owner.contains(VELNOR_WORKFLOW_PINNED_BINARY_ENV),
+            "the setup action exports no alternate pinned renderer: {owner}"
         );
         assert!(
             owner.contains(&format!("rev: {FIXTURE_REVISION}")),
@@ -8713,8 +9004,8 @@ mod tests {
             FIXTURE_REVISION,
         );
         assert!(
-            !foreign.contains("pinned Velnor workflow policy runtime"),
-            "a consumer installs the pin as its runtime, so PATH already is the pin: {foreign}"
+            !foreign.contains(VELNOR_WORKFLOW_PINNED_BINARY_ENV),
+            "a consumer setup action exports no alternate pinned renderer: {foreign}"
         );
         assert_eq!(
             foreign,
@@ -9653,6 +9944,89 @@ mod tests {
     }
 
     #[test]
+    fn apt_contract_moves_through_generation_config_without_entering_runtime_toml() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"apt\"\npackage = \"velnor\"\nbinary = \"velnor\"\nsource_repository = \"example/velnor\"\nconsumer_repository = \"example/apt\"\nmanifest_schema = \"urn:example:apt:v1\"\napt_arches = [\"amd64\", \"arm64\"]\nsigner_fingerprint = \"0123456789ABCDEF0123456789ABCDEF01234567\"\npassphrase_secret = \"APT_PASSPHRASE\"\nsigning_key_secret = \"APT_SIGNING_KEY\"\nkeyring_path = \"keys/velnor.gpg\"\napt_origin = \"Velnor\"\napt_identity_dir = \"velnor\"\napt_feed_url = \"https://example.com/apt\"\nretention = 1\n";
+        let root = configured_repository("apt-generation-contract", Some(config));
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(std::collections::BTreeSet::from([ProviderId::GithubHosted])),
+                "main",
+            ),
+            "scan configured APT release",
+        );
+        let release = must_some(scanned.config.release.as_ref(), "APT release contract");
+        assert_eq!(release.kind, "apt");
+        assert_eq!(release.package, "velnor");
+        assert_eq!(release.binary, "velnor");
+        assert_eq!(release.source_repository, "example/velnor");
+        assert_eq!(release.consumer_repository, "example/apt");
+        assert_eq!(release.manifest_schema, "urn:example:apt:v1");
+        assert_eq!(
+            release.apt_arches,
+            vec!["amd64".to_owned(), "arm64".to_owned()]
+        );
+        assert_eq!(
+            release.signer_fingerprint,
+            "0123456789ABCDEF0123456789ABCDEF01234567"
+        );
+        assert_eq!(release.passphrase_secret, "APT_PASSPHRASE");
+        assert_eq!(release.signing_key_secret, "APT_SIGNING_KEY");
+        assert_eq!(release.keyring_path, "keys/velnor.gpg");
+        assert_eq!(release.apt_origin, "Velnor");
+        assert_eq!(release.apt_identity_dir, "velnor");
+        assert_eq!(release.apt_feed_url, "https://example.com/apt");
+        assert_eq!(release.retention, 1);
+
+        let emitted = scanned.config.toml();
+        for field in [
+            "apt_arches",
+            "signer_fingerprint",
+            "passphrase_secret",
+            "signing_key_secret",
+            "keyring_path",
+            "apt_origin",
+            "apt_identity_dir",
+            "apt_feed_url",
+            "retention",
+        ] {
+            assert!(
+                !emitted.contains(&format!("{field} =")),
+                "generation-only field `{field}` cannot enter pinned runtime config: {emitted}"
+            );
+        }
+        assert!(!emitted.contains("APT_PASSPHRASE"), "{emitted}");
+        assert!(!emitted.contains("APT_SIGNING_KEY"), "{emitted}");
+        let path = root.join(".github/ci/project.toml");
+        must(
+            fs::create_dir_all(must_some(path.parent(), "runtime config parent")),
+            "create runtime config directory",
+        );
+        must(fs::write(&path, emitted), "write emitted runtime config");
+        must(
+            runtime::read_config_for_test(&path),
+            "APT generation fields remain outside the pinned runtime contract",
+        );
+        let _ = fs::remove_dir_all(root);
+
+        let without_hosted = format!(
+            "{config}\n[workflow]\nproviders = [\"velnor\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-runner\"]\n"
+        );
+        let root = configured_repository("apt-generation-without-hosted", Some(&without_hosted));
+        let error = must_fail(
+            scan_target(&root, None, "main"),
+            "APT releases require a declared hosted provider",
+        );
+        assert!(
+            error.to_string().contains(
+                "[release] kind = \"apt\" requires `github-hosted` in [workflow] providers"
+            ),
+            "unexpected missing-hosted-provider error: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn workspace_check_metadata_round_trips_through_runtime_config() {
         let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"rust-fixture\"\nworkspace_check = true\n";
         let root = configured_repository("workspace-check-runtime-roundtrip", Some(config));
@@ -9902,6 +10276,7 @@ mod tests {
     fn trust_gated_velnor_docker_is_judged_by_the_trusted_class() {
         let (mut config, index) = both_runner_docker_config();
         config.units[index].trust = provider::TrustReq::TrustedOnly;
+        config.repository = "example/polyglot".to_owned();
         let docker_id = config.units[index].id.clone();
         let workflow = WorkflowIr::from_config(&config);
         let pr = generated_ci_pr(&workflow);
@@ -9923,9 +10298,14 @@ mod tests {
             "ci-required evaluates the trusted class",
         );
         assert!(
-            trusted.contains("github.event.pull_request.head.repo.fork"),
-            "the trusted class gates on the event: {trusted}"
+            trusted.contains("github.repository == 'example/polyglot'")
+                && trusted
+                    .contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"),
+            "trusted local capacity admits only the same-repository default-branch push: {trusted}"
         );
+        assert!(!trusted.contains("workflow_dispatch"), "{trusted}");
+        assert!(!trusted.contains("pull_request"), "{trusted}");
+        assert!(!trusted.contains("schedule"), "{trusted}");
         assert_eq!(
             trusted,
             &workflow.provider_admission_expression(ProviderAdmission::ProviderTrusted(
@@ -10028,51 +10408,99 @@ mod tests {
         }
     }
 
-    /// A `workflow_dispatch` selecting a provider is admitted on any ref:
-    /// dispatch authorship is write-authorized, so the predicate never reads
-    /// `github.ref`.
+    /// Local capacity admits only a push from this repository to its default
+    /// branch. Dispatch selection, tag pushes, schedules, and pull requests
+    /// never admit a local runner.
     #[test]
-    fn provider_admits_workflow_dispatch_on_any_ref() {
-        for (universe, automatic) in [
-            (all_providers(), all_providers()),
+    fn local_provider_admission_is_same_repository_default_branch_push_only() {
+        let mut config = scanned_fixture(all_providers());
+        config.automatic_providers = ProviderId::LOCAL.into_iter().collect();
+        config.default_dispatch_providers = ProviderId::LOCAL.into_iter().collect();
+        let workflow = WorkflowIr::from_config(&config);
+        let default_ref = format!("refs/heads/{}", config.default_branch);
+        let expected_expression = format!(
+            "github.repository == '{}' && (github.event_name == 'push' && github.ref == '{default_ref}')",
+            config.repository
+        );
+        let contexts = [
             (
-                provider_set([ProviderId::Velnor]),
-                provider_set([ProviderId::Velnor]),
+                "same-repository default-branch push",
+                config.repository.as_str(),
+                "push",
+                default_ref.as_str(),
+                true,
             ),
             (
-                provider_set([ProviderId::Velnor]),
-                provider_set([ProviderId::GithubHosted]),
+                "workflow_dispatch",
+                config.repository.as_str(),
+                "workflow_dispatch",
+                default_ref.as_str(),
+                false,
             ),
-        ] {
-            let mut config = scanned_fixture(universe.clone());
-            config.automatic_providers = automatic.clone();
-            let workflow = WorkflowIr::from_config(&config);
-            let velnor = workflow.provider_admission_expression(
-                ProviderAdmission::ProviderTrusted(ProviderId::Velnor),
-            );
-            assert!(
-                !velnor.contains("github.ref =="),
-                "{universe:?}/{automatic:?}: dispatch is not ref-gated: {velnor}"
-            );
-            assert!(
-                velnor.contains(
-                    "github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')"
-                ),
-                "{universe:?}/{automatic:?}: dispatch selecting the provider admits it: {velnor}"
-            );
-            let automatic_velnor = automatic.contains(&ProviderId::Velnor);
-            assert_eq!(
-                velnor.contains("github.event_name != 'workflow_dispatch'"),
-                automatic_velnor,
-                "{universe:?}/{automatic:?}: an automatic provider runs automatic events, a manual one runs dispatch alone: {velnor}"
-            );
-            let hosted = workflow.provider_admission_expression(ProviderAdmission::Provider(
-                ProviderId::GithubHosted,
-            ));
-            assert!(
-                hosted.contains("',github-hosted,')") && !hosted.contains("',velnor,')"),
-                "a velnor-only dispatch denies the hosted class: {hosted}"
-            );
+            (
+                "tag push",
+                config.repository.as_str(),
+                "push",
+                "refs/tags/v1.2.3",
+                false,
+            ),
+            (
+                "schedule",
+                config.repository.as_str(),
+                "schedule",
+                default_ref.as_str(),
+                false,
+            ),
+            (
+                "same-repository pull request",
+                config.repository.as_str(),
+                "pull_request",
+                "refs/pull/7/merge",
+                false,
+            ),
+            (
+                "fork pull request",
+                config.repository.as_str(),
+                "pull_request",
+                "refs/pull/8/merge",
+                false,
+            ),
+            (
+                "fork default-branch push",
+                "example/fork",
+                "push",
+                default_ref.as_str(),
+                false,
+            ),
+            (
+                "non-default branch push",
+                config.repository.as_str(),
+                "push",
+                "refs/heads/topic",
+                false,
+            ),
+        ];
+        for provider in ProviderId::LOCAL {
+            for admission in [
+                ProviderAdmission::Provider(provider),
+                ProviderAdmission::ProviderTrusted(provider),
+            ] {
+                let expression = workflow.provider_admission_expression(admission);
+                assert_eq!(
+                    expression, expected_expression,
+                    "{provider:?} local gate is exactly repository, event, and ref"
+                );
+                assert!(!expression.contains("github.event.inputs.providers"));
+                for (name, repository, event, reference, expected) in contexts {
+                    let admitted = repository == config.repository
+                        && event == "push"
+                        && reference == default_ref;
+                    assert_eq!(
+                        admitted, expected,
+                        "test context `{name}` expresses the local admission contract"
+                    );
+                }
+            }
         }
     }
 
@@ -10105,6 +10533,17 @@ mod tests {
             concat!("automatic", " = \""),
         ];
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let negative_runner_input = concat!("github.event.", "inputs.", "runner");
+        let negative_runner_fixtures = [
+            (
+                root.join("src/s2/policy/tests.rs"),
+                "fn hosted_selectors_cannot_alias_local_or_self_hosted_labels()",
+            ),
+            (
+                root.join("src/s2/provider.rs"),
+                "fn hosted_selector_is_static_and_disjoint_from_local_labels()",
+            ),
+        ];
         assert!(
             !root
                 .join(concat!("src/s2/primitives/lanes", ".rs"))
@@ -10115,8 +10554,8 @@ mod tests {
             !root.join(concat!("src/s2/runners", ".rs")).exists(),
             concat!("runners", ".rs", " must stay deleted")
         );
-        // The schema-1 tree beside this module legitimately keeps the
-        // legacy lane path; the sweep covers the schema-2 fork only.
+        // The only active source tree is schema 2; no parallel legacy engine
+        // may carry retired provider or lane vocabulary.
         let mut sources = vec![root.join("src/s2")];
         let mut checked = 0_usize;
         while let Some(dir) = sources.pop() {
@@ -10127,9 +10566,30 @@ mod tests {
                     sources.push(path);
                 } else if path.extension().is_some_and(|ext| ext == "rs") {
                     let content = must(fs::read_to_string(&path), "read generator source");
+                    // Policy and provider tests each carry one invalid
+                    // selector as a negative fixture. Remove only that exact
+                    // test input from the product-source sweep; any other use
+                    // of the retired provider syntax still fails this proof.
+                    let content_for_scan = if let Some((_, test_name)) = negative_runner_fixtures
+                        .iter()
+                        .find(|(fixture, _)| fixture.as_path() == path.as_path())
+                    {
+                        assert!(
+                            content.contains(*test_name),
+                            "the scoped negative runner-input fixture remains in its named test"
+                        );
+                        assert_eq!(
+                            content.matches(negative_runner_input).count(),
+                            1,
+                            "the named test carries one scoped negative runner-input fixture"
+                        );
+                        content.replace(negative_runner_input, "")
+                    } else {
+                        content
+                    };
                     for pattern in LEGACY {
                         assert!(
-                            !content.contains(pattern),
+                            !content_for_scan.contains(pattern),
                             "{} carries legacy vocabulary `{pattern}`",
                             path.display()
                         );
@@ -10205,25 +10665,46 @@ mod tests {
             generated_files(&restricted_fixture_config()),
             "render restricted fixture",
         );
+        let caller = must_some(
+            files
+                .get(&PathBuf::from(".github/workflows/ci-pr.yml"))
+                .map(|workflow| {
+                    static_workflow_job_blocks(workflow)
+                        .into_iter()
+                        .find(|(job, _)| job == "prepare-cargo")
+                        .map(|(_, block)| block)
+                })
+                .flatten(),
+            "prepare-cargo caller",
+        );
+        assert!(
+            caller.contains("provider: control"),
+            "the aggregate invokes the Rust reusable as control: {caller}"
+        );
         let callee = PathBuf::from(".github/workflows/ci-unit-rust.yml");
-        // Mislabeled control job: velnor-prepare selects as a velnor job, so
-        // its gate still carries an evaluated admission and the per-job check
-        // passes — but no control-gated job carries velnor's admission, and
-        // the union the caller evaluates is no longer enforced.
-        let gate = job_gate(&files[&callee], "velnor-prepare-cargo-sources");
-        assert!(gate.contains("inputs.provider == 'control'"), "{gate}");
+        let reusable = &files[&callee];
+        for provider in ProviderId::LOCAL {
+            let prep_job = format!("{}-prepare-cargo-sources", provider.as_str());
+            let gate = job_gate(reusable, &prep_job);
+            assert!(
+                gate.contains("inputs.provider == 'control'"),
+                "every local store warmer matches the control caller; {prep_job}: {gate}"
+            );
+        }
+        // Break only the callee's input contract. The validator must catch
+        // the mismatch before it can mistake the remaining local job for the
+        // complete control fanout.
+        let gate = job_gate(reusable, "velnor-prepare-cargo-sources");
         let mut drifted = files.clone();
         drifted.insert(
             callee.clone(),
-            files[&callee].replace(
-                &format!("{gate}\n"),
-                &format!(
-                    "{}\n",
-                    gate.replacen(
-                        "inputs.provider == 'control'",
-                        "inputs.provider == 'velnor'",
-                        1
-                    )
+            replace_job_gate(
+                reusable,
+                "velnor-prepare-cargo-sources",
+                &gate.replacen(
+                    "inputs.provider == 'control'",
+                    "inputs.provider == 'velnor'",
+                    1,
                 ),
             ),
         );
@@ -10232,9 +10713,10 @@ mod tests {
             "uncarried union member",
         );
         assert!(
-            error
-                .to_string()
-                .contains("no `control` provider job carries the admission"),
+            error.to_string().contains(
+                "control caller `prepare-cargo` invokes local prep job \
+                            `velnor-prepare-cargo-sources`"
+            ),
             "{error}"
         );
     }
@@ -10252,16 +10734,23 @@ mod tests {
         );
         let pr = PathBuf::from(".github/workflows/ci-pr.yml");
         let callee = PathBuf::from(".github/workflows/ci-unit-rust.yml");
-        let dispatch = "(github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')";
-        let ref_gated = "(github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')";
+        let admission = WorkflowIr::from_config(&config)
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        let admission_clause = format!("({admission})");
+        let drifted_admission = admission.replace("refs/heads/main", "refs/heads/release");
+        let drifted_clause = format!("({drifted_admission})");
 
-        // The callee re-introduces the default-branch dispatch gate.
+        // The callee admits the local runner on the wrong branch.
         let mut drifted = files.clone();
         let velnor_job = job_gate(&files[&callee], "verify-velnor");
-        assert!(velnor_job.contains(dispatch), "{velnor_job}");
+        assert!(velnor_job.contains(&admission_clause), "{velnor_job}");
         drifted.insert(
             callee.clone(),
-            files[&callee].replace(&velnor_job, &velnor_job.replace(dispatch, ref_gated)),
+            replace_job_gate(
+                &files[&callee],
+                "verify-velnor",
+                &velnor_job.replace(&admission_clause, &drifted_clause),
+            ),
         );
         let error = must_fail(
             validate_provider_admission_single_source(&drifted),
@@ -10278,10 +10767,14 @@ mod tests {
         // The caller drifts from the check.
         let mut drifted = files.clone();
         let caller_job = job_gate(&files[&pr], "velnor-rust-fixture");
-        assert!(caller_job.contains(dispatch), "{caller_job}");
+        assert!(caller_job.contains(&admission_clause), "{caller_job}");
         drifted.insert(
             pr.clone(),
-            files[&pr].replace(&caller_job, &caller_job.replace(dispatch, ref_gated)),
+            replace_job_gate(
+                &files[&pr],
+                "velnor-rust-fixture",
+                &caller_job.replace(&admission_clause, &drifted_clause),
+            ),
         );
         let error = must_fail(
             validate_provider_admission_single_source(&drifted),
@@ -10326,10 +10819,8 @@ mod tests {
     /// `skipped`, check red) nor skips for one its callee needs.
     #[test]
     fn prepare_cargo_caller_and_callee_select_the_same_restricted_units() {
-        let files = must(
-            generated_files(&restricted_fixture_config()),
-            "render restricted fixture",
-        );
+        let config = restricted_fixture_config();
+        let files = must(generated_files(&config), "render restricted fixture");
         let pr = must_some(
             files.get(&PathBuf::from(".github/workflows/ci-pr.yml")),
             "ci-pr.yml",
@@ -10389,12 +10880,20 @@ mod tests {
             gate.contains(&format!("({union})")),
             "the caller skips exactly when no local provider is admitted: {gate}"
         );
-        // The union admits velnor-only dispatches too: keying the caller to
-        // one local provider would skip warming on the other.
-        assert!(
-            union.contains("',velnor,'") && union.contains("',github-self-hosted,'"),
-            "the union admission must name every local provider: {union}"
+        let expected_union = WorkflowIr::from_config(&config)
+            .provider_admission_expression(ProviderAdmission::AnyLocalTrusted);
+        assert_eq!(
+            union, &expected_union,
+            "the caller and required check use the exact union of local admissions"
         );
+        assert!(
+            union.contains("github.repository == 'example/polyglot'")
+                && union.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"),
+            "the union admits only a same-repository default-branch push: {union}"
+        );
+        assert!(!union.contains("workflow_dispatch"), "{union}");
+        assert!(!union.contains("schedule"), "{union}");
+        assert!(!union.contains("pull_request"), "{union}");
     }
 
     #[test]
@@ -10488,15 +10987,27 @@ mod tests {
         let trusted = workflow
             .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
         assert!(
-            trusted.contains("github.event.pull_request.head.repo.fork"),
-            "a trusted class gates on the event: {trusted}"
+            trusted.contains("github.repository == 'example/polyglot'")
+                && trusted
+                    .contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"),
+            "local capacity gates on the same-repository default-branch push: {trusted}"
         );
+        assert!(!trusted.contains("pull_request"), "{trusted}");
+        assert!(!trusted.contains("workflow_dispatch"), "{trusted}");
         let plain = workflow
             .provider_admission_expression(ProviderAdmission::Provider(ProviderId::GithubHosted));
         assert!(
             !plain.contains("head.repo.fork"),
             "an untrusted class carries no event gate: {plain}"
         );
+        let trusted_hosted = workflow.provider_admission_expression(
+            ProviderAdmission::ProviderTrusted(ProviderId::GithubHosted),
+        );
+        assert!(
+            trusted_hosted.contains("github.event.pull_request.head.repo.fork"),
+            "the hosted provider still trust-gates trusted-only units: {trusted_hosted}"
+        );
+        assert_ne!(trusted_hosted, plain);
         let rendered = generated_ci_pr(&workflow);
         assert!(
             !rendered.contains("example-trusted"),
@@ -10699,7 +11210,7 @@ path-only = { path = "../path-only" }
     }
 
     #[test]
-    fn scanner_does_not_treat_generated_github_output_as_include_str_input() {
+    fn scanner_treats_forged_generated_github_output_as_include_str_input() {
         let root = temporary_repository("generated-github-include-str");
         must(
             fs::create_dir_all(root.join("src")),
@@ -10728,19 +11239,26 @@ path-only = { path = "../path-only" }
             "write generated GitHub output",
         );
 
-        let error = must_some(
+        let config = must(
             scan_repository(
                 &root,
                 Some(std::collections::BTreeSet::from([
                     crate::s2::provider::ProviderId::GithubHosted,
                 ])),
-            )
-            .err(),
-            "generated GitHub output must not satisfy include_str",
+            ),
+            "forged generated GitHub output is a scan input",
         );
-        assert!(error
-            .to_string()
-            .contains("include_str! target does not exist"));
+        let unit = must_some(
+            config.units.iter().find(|unit| unit.id == "rust-fixture"),
+            "generated fixture unit",
+        );
+        assert!(
+            unit.watch
+                .iter()
+                .any(|path| path == ".github/workflows/ci.yml"),
+            "a header claim must not hide an unmanaged workflow input: {:?}",
+            unit.watch
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -10894,6 +11412,42 @@ const INCLUDED: &str = include_str!("fixture.txt");
             .iter()
             .any(|note| note.contains("build scripts")));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mise_tasks_follow_toml_table_semantics() {
+        let root = temporary_repository("mise-task-table-semantics");
+        let mise_path = root.join("mise.toml");
+        must(
+            fs::write(
+                &mise_path,
+                "[tasks]\n\"build:all\" = { run = \"echo build\" }\n\n[tasks.\"lint:ci\"]\nrun = \"echo lint\"\n\n[tasks.\"lint:ci\".env]\nRUST_LOG = \"warn\"\n\n[other]\ntasks = { ignored = { run = \"echo ignored\" } }\n",
+            ),
+            "write TOML task table",
+        );
+        let safe_root = must(
+            safe_fs::SafeRoot::open(&root),
+            "capture repository root for mise task parsing",
+        );
+        assert_eq!(
+            must(
+                parse_mise_task_names_with_safe_root(&safe_root),
+                "parse TOML task table",
+            ),
+            vec!["build:all", "lint:ci"]
+        );
+
+        must(
+            fs::write(&mise_path, "tasks = []\n"),
+            "write invalid non-table tasks value",
+        );
+        let error = must_fail(
+            parse_mise_task_names_with_safe_root(&safe_root),
+            "reject a non-table tasks value",
+        )
+        .to_string();
+        assert!(error.contains("`tasks` must be a table"), "{error}");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -11580,7 +12134,7 @@ channel = "stable"
         );
         rust.mise_tools = vec!["github:open-telemetry/weaver".to_owned()];
         let ir = WorkflowIr::from_config(&config);
-        let aggregate = ir.render_nested(WorkflowKind::PullRequest, &legacy_plan(&ir), None);
+        let aggregate = ir.render_nested(WorkflowKind::PullRequest, &default_plan_nodes(&ir), None);
         assert!(
             aggregate.contains(
                 "mise_tools: \"aqua:nextest-rs/nextest/cargo-nextest github:open-telemetry/weaver\""
@@ -11663,7 +12217,7 @@ lockfile = true
             "Swift unit",
         );
         let ir = WorkflowIr::from_config(&config);
-        let aggregate = ir.render_nested(WorkflowKind::PullRequest, &legacy_plan(&ir), None);
+        let aggregate = ir.render_nested(WorkflowKind::PullRequest, &default_plan_nodes(&ir), None);
         assert!(
             aggregate
                 .contains("mise_tools: \"cargo-binstall rust cargo:sccache cargo:boltffi_cli\""),
@@ -11919,7 +12473,7 @@ lockfile = true
         );
         config.units[index].mise_tools = vec!["cargo:example-tool".to_owned()];
         let ir = WorkflowIr::from_config(&config);
-        let aggregate = ir.render_nested(WorkflowKind::PullRequest, &legacy_plan(&ir), None);
+        let aggregate = ir.render_nested(WorkflowKind::PullRequest, &default_plan_nodes(&ir), None);
         assert!(
             aggregate.contains("mise_tools: \"cargo:example-tool\""),
             "declared tools provision a mise step on any kind: {aggregate}"
@@ -12689,9 +13243,8 @@ lockfile = true
     }
 
     /// Every file the generator writes for the schema-2 polyglot fixture.
-    /// The bridge keeps the dogfood repository on schema 1, so fixture
-    /// renders — not repository renders — carry the surface-wide
-    /// assertions.
+    /// The synthetic fixture has no declared dogfood workflow surface, so
+    /// its own renders carry the surface-wide assertions.
     fn rendered_fixture_files() -> BTreeMap<PathBuf, String> {
         must(
             generated_files(&scanned_fixture(all_providers())),
@@ -13244,13 +13797,6 @@ lockfile = true
         )
         .to_string();
         assert!(message.contains("shared cargo bin directory"), "{message}");
-        must(
-            validate_workflow_runtime_install_roots(&job(
-                "          binary=\"${CARGO_HOME:-$HOME/.cargo}/bin/velnor-workflow-policy\"\n",
-            )),
-            "the Velnor lane's distinctly named policy copy is not the runtime",
-        );
-
         // Composite actions are judged as one block.
         let action = BTreeMap::from([(
             PathBuf::from(".github/actions/setup-velnor-workflow/action.yml"),
@@ -13352,7 +13898,7 @@ lockfile = true
     fn preview_static_surface_saves_guest_seed_on_trusted_exact_miss() {
         // A synthetic microvm repository: the guest-seed lifecycle needs a
         // microvm-watching unit plus scanned guest-agent/guest-image bins,
-        // which the schema-1 dogfood tree can no longer lend this suite.
+        // which the dogfood release contract does not declare.
         let root = temporary_repository("preview-guest-seed");
         must(
             fs::write(
@@ -13689,8 +14235,9 @@ lockfile = true
             path: ".".to_owned(),
         }];
         let root = temporary_repository("docker-context-lanes");
+        let safe_root = must(safe_fs::SafeRoot::open(&root), "open Docker context root");
         must(
-            materialize_capability_commands(&mut config, &root),
+            materialize_capability_commands_with_safe_root(&mut config, &safe_root),
             "materialize Docker contexts across schema-2 lanes",
         );
         let unit = &config.units[index];
@@ -13751,8 +14298,9 @@ lockfile = true
         config.units[index].full_commands =
             vec!["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'".to_owned()];
         let root = temporary_repository("docker-token-secret");
+        let safe_root = must(safe_fs::SafeRoot::open(&root), "open Docker token root");
         must(
-            materialize_capability_commands(&mut config, &root),
+            materialize_capability_commands_with_safe_root(&mut config, &safe_root),
             "materialize",
         );
         for command in config.units[index]
@@ -13795,8 +14343,13 @@ lockfile = true
             "no untrusted split exists for a trusted-only unit: {rendered}"
         );
         assert!(
-            rendered.contains("github.event.pull_request.head.repo.fork"),
-            "the trusted job gates on the event: {rendered}"
+            job_gate(&rendered, "verify-velnor-trusted").contains(&format!(
+                "({})",
+                WorkflowIr::from_config(&config).provider_admission_expression(
+                    ProviderAdmission::ProviderTrusted(ProviderId::Velnor)
+                )
+            )),
+            "the trusted local job gates on the same-repository default-branch push: {rendered}"
         );
     }
 
@@ -14236,8 +14789,8 @@ lockfile = true
         let generator = WorkflowIr::from_config(&config);
         let workflows = [
             generated_ci_main(&generator),
-            generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator), None),
-            generator.render_nested(WorkflowKind::Nightly, &legacy_plan(&generator), None),
+            generator.render_nested(WorkflowKind::Main, &default_plan_nodes(&generator), None),
+            generator.render_nested(WorkflowKind::Nightly, &default_plan_nodes(&generator), None),
         ];
 
         for workflow in &workflows {
@@ -14299,8 +14852,11 @@ lockfile = true
             large_config.units.push(unit);
         }
         let large_generator = WorkflowIr::from_config(&large_config);
-        let large_workflow =
-            large_generator.render_nested(WorkflowKind::Main, &legacy_plan(&large_generator), None);
+        let large_workflow = large_generator.render_nested(
+            WorkflowKind::Main,
+            &default_plan_nodes(&large_generator),
+            None,
+        );
         let required_block = must_some(
             large_workflow
                 .split_once("  ci-required:\n")
@@ -14339,7 +14895,8 @@ lockfile = true
     fn plan_matrix_jq_compiles_and_defaults_a_missing_key() {
         let config = scanned_fixture(all_providers());
         let generator = WorkflowIr::from_config(&config);
-        let workflow = generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator), None);
+        let workflow =
+            generator.render_nested(WorkflowKind::Main, &default_plan_nodes(&generator), None);
         assert!(
             !workflow.contains(r#"// \"[]\""#),
             "jq empty default must not be over-escaped inside single quotes"
@@ -14504,10 +15061,6 @@ lockfile = true
             workflow.contains("velnor-workflow cache-plan"),
             "maintenance must use the generated cache planner: {workflow}"
         );
-        assert!(
-            workflow.contains("github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '')"),
-            "closed-PR prune must stay live: {workflow}"
-        );
         let cache_budget = yaml_job(workflow, "cache-budget");
         assert!(
             cache_budget.contains("name: Cache retention"),
@@ -14524,13 +15077,27 @@ lockfile = true
             "Cache retention stays on the Velnor lane: {cache_budget}"
         );
         assert!(!cache_budget.contains("setup-velnor-workflow"));
+        let local_admission = WorkflowIr::from_config(&config)
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        for job in ["prune-pr-cache", "cache-budget"] {
+            assert!(
+                yaml_job(workflow, job).contains(&format!("if: ${{{{ {local_admission} }}}}")),
+                "Velnor maintenance job `{job}` uses the canonical local gate: {workflow}"
+            );
+        }
         assert!(
-            workflow.contains(
-                "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
-            ),
-            "cache retention must stay on the trusted Velnor lane: {workflow}"
+            workflow.contains(&format!(
+                "\n  push:\n    branches:\n      - {}",
+                yaml_scalar(&config.default_branch)
+            )),
+            "maintenance must trigger on the configured default-branch push: {workflow}"
         );
-        assert!(!workflow.contains("\n  push:"));
+        assert!(
+            !local_admission.contains("workflow_dispatch")
+                && !local_admission.contains("schedule")
+                && !local_admission.contains("pull_request"),
+            "local maintenance admission excludes dispatch, schedule, and PR events: {local_admission}"
+        );
     }
 
     #[test]
@@ -14569,10 +15136,24 @@ lockfile = true
                 cache_budget.contains("runs-on: ubuntu-24.04"),
                 "Cache retention stays GitHub-hosted ubuntu-24.04: {cache_budget}"
             );
-            assert!(workflow.contains(
-                "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
-            ));
-            assert!(!workflow.contains("\n  push:"));
+            assert!(
+                yaml_job(workflow, "prune-pr-cache").contains(&format!(
+                    "if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}",
+                    config.default_branch
+                )),
+                "hosted merged-PR pruning stays on the default-branch push: {workflow}"
+            );
+            assert!(
+                cache_budget.contains("if: ${{ github.event_name == 'schedule' }}"),
+                "hosted cache retention stays scheduled: {cache_budget}"
+            );
+            assert!(
+                workflow.contains(&format!(
+                    "\n  push:\n    branches:\n      - {}",
+                    yaml_scalar(&config.default_branch)
+                )) && workflow.contains("\n  schedule:\n"),
+                "hosted maintenance triggers on default-branch push and schedule: {workflow}"
+            );
         }
     }
 
@@ -14771,23 +15352,7 @@ lockfile = true
         policy_job(&PolicyJobSpec {
             name: "Policy",
             revision,
-            runner: "ubuntu-24.04",
             repository,
-            cache_backend: "github",
-            trusted_gate: None,
-            default_branch: "main",
-            declared_ruleset_contexts: "ci-required,DCO,Policy",
-        })
-    }
-
-    fn velnor_policy_job(revision: &str, runner: &str) -> String {
-        policy_job(&PolicyJobSpec {
-            name: "Policy",
-            revision,
-            runner,
-            repository: regen_repository_marker(),
-            cache_backend: "local",
-            trusted_gate: None,
             default_branch: "main",
             declared_ruleset_contexts: "ci-required,DCO,Policy",
         })
@@ -14803,14 +15368,6 @@ lockfile = true
             )),
             "{hosted}"
         );
-        let velnor = velnor_policy_job("0".repeat(40).as_str(), "[self-hosted]");
-        assert!(
-            velnor.contains(&format!(
-                "      - name: Set up actionlint\n        run: mise --yes install actionlint@{ACTIONLINT_VERSION}\n      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n"
-            )),
-            "{velnor}"
-        );
-        assert!(!velnor.contains("jdx/mise-action"), "{velnor}");
     }
 
     /// The lint step runs with cwd inside the fork-controlled tree, where mise
@@ -14821,31 +15378,28 @@ lockfile = true
     /// resolves the pinned tool without any config lookup.
     #[test]
     fn policy_lint_step_neutralizes_fork_mise_config() {
-        for job in [
-            hosted_policy_job("0".repeat(40).as_str()),
-            velnor_policy_job("0".repeat(40).as_str(), "[self-hosted]"),
-        ] {
-            let lint = must_some(
-                job.split_once("      - name: Lint caller workflows\n")
-                    .map(|(_, lint)| lint),
-                "the lint step renders",
-            );
-            assert!(
-                lint.starts_with(
-                    "        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n"
-                ),
-                "the lint step disables mise config loading first: {job}"
-            );
-            assert!(
-                !job.contains("mise exec --no-config"),
-                "mise exec has no such flag; the env form is the only confinement: {job}"
-            );
-        }
+        let job = hosted_policy_job("0".repeat(40).as_str());
+        let lint = must_some(
+            job.split_once("      - name: Lint caller workflows\n")
+                .map(|(_, lint)| lint),
+            "the lint step renders",
+        );
+        assert!(
+            lint.starts_with(
+                "        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n"
+            ),
+            "the lint step disables mise config loading first: {job}"
+        );
+        assert!(
+            !job.contains("mise exec --no-config"),
+            "mise exec has no such flag; the env form is the only confinement: {job}"
+        );
     }
 
     #[test]
     fn actionlint_pin_coherence_refuses_a_drifted_lock() {
         let root = temporary_repository("actionlint-pin");
+        let safe_root = must(safe_fs::SafeRoot::open(&root), "open actionlint pin root");
         must(
             fs::write(
                 root.join("mise.lock"),
@@ -14854,7 +15408,7 @@ lockfile = true
             "write mise.lock",
         );
         let error = must_fail(
-            validate_actionlint_pin_coherence(&root),
+            validate_actionlint_pin_coherence_with_safe_root(&safe_root),
             "a drifted actionlint pin must be refused",
         )
         .to_string();
@@ -14871,12 +15425,12 @@ lockfile = true
             "write mise.lock",
         );
         must(
-            validate_actionlint_pin_coherence(&root),
+            validate_actionlint_pin_coherence_with_safe_root(&safe_root),
             "a matching qualified pin passes",
         );
         must(fs::remove_file(root.join("mise.lock")), "remove mise.lock");
         must(
-            validate_actionlint_pin_coherence(&root),
+            validate_actionlint_pin_coherence_with_safe_root(&safe_root),
             "an absent lock has nothing to contradict",
         );
     }
@@ -15002,9 +15556,23 @@ lockfile = true
         assert!(crate_workflow.contains("selected_units:\n        required: true"));
         assert!(crate_workflow.contains("BASE_SHA: ${{ inputs.base_sha }}"));
         assert!(crate_workflow.contains("HEAD_SHA: ${{ inputs.head_sha }}"));
-        assert!(crate_workflow.contains("github.event.inputs.providers"));
-        assert!(crate_workflow.contains("',velnor,')"));
-        assert!(crate_workflow.contains("',github-hosted,')"));
+        let local_admission = WorkflowIr::from_config(&config)
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        let velnor_gate = job_gate(crate_workflow, "verify-velnor");
+        assert!(
+            velnor_gate.contains(&format!("({local_admission})")),
+            "the local reusable checks use the protected default-branch push gate: {velnor_gate}"
+        );
+        assert!(
+            !velnor_gate.contains("github.event.inputs.providers"),
+            "dispatch selection never admits the local reusable job: {velnor_gate}"
+        );
+        let hosted_gate = job_gate(crate_workflow, "verify-github-hosted");
+        assert!(
+            hosted_gate.contains("github.event.inputs.providers")
+                && hosted_gate.contains("',github-hosted,'"),
+            "explicit dispatch selection remains available to the hosted reusable job: {hosted_gate}"
+        );
     }
 
     #[test]
@@ -15180,8 +15748,12 @@ lockfile = true
             "VELNOR_PROVIDERS: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers || '{automatic}' }}}}"
         );
         for aggregate in [
-            generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator), None),
-            generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator), None),
+            generator.render_nested(
+                WorkflowKind::PullRequest,
+                &default_plan_nodes(&generator),
+                None,
+            ),
+            generator.render_nested(WorkflowKind::Main, &default_plan_nodes(&generator), None),
             generated_ci_main(&generator),
         ] {
             assert!(aggregate.contains(&consumer), "{aggregate}");
@@ -15201,8 +15773,12 @@ lockfile = true
             let config = scanned_fixture(providers);
             let generator = WorkflowIr::from_config(&config);
             for aggregate in [
-                generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator), None),
-                generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator), None),
+                generator.render_nested(
+                    WorkflowKind::PullRequest,
+                    &default_plan_nodes(&generator),
+                    None,
+                ),
+                generator.render_nested(WorkflowKind::Main, &default_plan_nodes(&generator), None),
             ] {
                 assert!(
                     aggregate.contains(&format!("VELNOR_PROVIDERS: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers {expected} }}}}")),
@@ -15549,42 +16125,38 @@ lockfile = true
     /// branch is decidable for same-repository and fork pull requests alike.
     #[test]
     fn policy_job_checks_out_full_history_and_the_audited_head() {
-        for job in [
-            hosted_policy_job("revision"),
-            velnor_policy_job("revision", "[self-hosted, velnor]"),
-        ] {
-            assert!(job.contains("          fetch-depth: 0\n"), "{job}");
-            assert!(
-                job.contains("          persist-credentials: false\n"),
-                "{job}"
-            );
-            assert!(job.contains("path: policy-checkout"), "{job}");
-            assert!(!job.contains("allow-unsafe-pr-checkout"), "{job}");
-            assert!(
-                !job.contains("          repository: ${{ github.event.pull_request.head.repo"),
-                "the checkout is the base repository; the head is fetched into it: {job}"
-            );
-            assert!(
-                job.contains(
-                    "git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\""
-                ),
-                "{job}"
-            );
-            assert!(
-                job.contains("git checkout --quiet --detach \"$HEAD_SHA\""),
-                "{job}"
-            );
-            assert!(
-                job.contains("--head-sha \"$HEAD_SHA\"")
-                    && job.contains("--base-sha \"$BASE_SHA\""),
-                "the validator receives explicit head and base commits: {job}"
-            );
-            assert!(
-                job.contains("BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}"),
-                "{job}"
-            );
-            assert!(job.contains("timeout-minutes: 20"), "{job}");
-        }
+        let job = hosted_policy_job("revision");
+        assert!(job.contains("runs-on: ubuntu-24.04"), "{job}");
+        assert!(job.contains("          fetch-depth: 0\n"), "{job}");
+        assert!(
+            job.contains("          persist-credentials: false\n"),
+            "{job}"
+        );
+        assert!(job.contains("path: policy-checkout"), "{job}");
+        assert!(!job.contains("allow-unsafe-pr-checkout"), "{job}");
+        assert!(
+            !job.contains("          repository: ${{ github.event.pull_request.head.repo"),
+            "the checkout is the base repository; the head is fetched into it: {job}"
+        );
+        assert!(
+            job.contains(
+                "git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\""
+            ),
+            "{job}"
+        );
+        assert!(
+            job.contains("git checkout --quiet --detach \"$HEAD_SHA\""),
+            "{job}"
+        );
+        assert!(
+            job.contains("--head-sha \"$HEAD_SHA\"") && job.contains("--base-sha \"$BASE_SHA\""),
+            "the validator receives explicit head and base commits: {job}"
+        );
+        assert!(
+            job.contains("BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}"),
+            "{job}"
+        );
+        assert!(job.contains("timeout-minutes: 20"), "{job}");
     }
 
     /// The owner policy job runs the setup action from its own checkout
@@ -15595,8 +16167,7 @@ lockfile = true
     /// tree under the sibling `policy-setup-action/` — never the PR head,
     /// and never resolved out of `policy-checkout/`, either of which would
     /// execute fork-controlled action code under `pull_request_target`.
-    /// Consumers pin the published action and the Velnor lane provisions its
-    /// slot, so neither carries this checkout.
+    /// Consumers pin the published action, so they do not carry this checkout.
     #[test]
     fn owner_policy_job_checks_out_base_setup_action_before_setup() {
         let owner = hosted_policy_job("abc123");
@@ -15645,21 +16216,17 @@ lockfile = true
             !owner.contains("policy-checkout/.github/actions"),
             "the setup action never resolves out of the audited tree: {owner}"
         );
-        for job in [
-            hosted_policy_job_for_repository("abc123", "example/consumer"),
-            velnor_policy_job("abc123", "[self-hosted, velnor]"),
-        ] {
-            assert!(
-                !job.contains("Check out base setup action"),
-                "only the owner lane checks out the setup action: {job}"
-            );
-            assert!(!job.contains("sparse-checkout"), "{job}");
-        }
+        let consumer = hosted_policy_job_for_repository("abc123", "example/consumer");
+        assert!(
+            !consumer.contains("Check out base setup action"),
+            "only the owner lane checks out the setup action: {consumer}"
+        );
+        assert!(!consumer.contains("sparse-checkout"), "{consumer}");
     }
 
     /// Every checkout in the owner policy job lands in a sibling directory:
     /// a root checkout wipes `policy-checkout/` under `clean: true` and the
-    /// Acquire step then dies with "No such file or directory". The setup
+    /// Enforce step then dies with "No such file or directory". The setup
     /// step resolves the composite out of the sibling checkout.
     #[test]
     fn owner_policy_job_never_checks_out_workspace_root() {
@@ -15683,13 +16250,9 @@ lockfile = true
     }
 
     /// No generated policy job passes `--pin-build`: an unprovisioned pin
-    /// fails closed in every lane. Only hosted jobs resolve the live ruleset.
+    /// fails closed in the hosted policy job.
     #[test]
-    fn no_policy_job_builds_pull_request_code() {
-        let velnor = velnor_policy_job("revision", "[self-hosted, velnor]");
-        assert!(!velnor.contains("--pin-build"), "{velnor}");
-        assert!(!velnor.contains("--ruleset-contexts"), "{velnor}");
-        assert!(!velnor.contains("gh api"), "{velnor}");
+    fn policy_job_never_builds_pull_request_code() {
         let hosted = hosted_policy_job("revision");
         assert!(!hosted.contains("--pin-build"), "{hosted}");
         assert!(
@@ -15730,8 +16293,27 @@ lockfile = true
         );
         assert!(policy.contains("          rev: abc123\n"), "{policy}");
         assert!(
-            policy.contains("Acquire candidate generator product"),
+            !policy.contains(VELNOR_WORKFLOW_PINNED_BINARY_ENV),
+            "the static policy command does not select a pinned renderer: {policy}"
+        );
+        assert!(
+            !policy.contains(VELNOR_WORKFLOW_PINNED_CLOSURE_ENV),
+            "the static policy command does not consume a provisioned closure: {policy}"
+        );
+        assert!(!policy.contains("candidate-manifest"), "{policy}");
+        assert!(!policy.contains("candidate generator"), "{policy}");
+        assert!(!policy.contains("gh run download"), "{policy}");
+        assert!(!policy.contains("VELNOR_WORKFLOW_CANDIDATE"), "{policy}");
+        assert!(
+            !policy.contains(".github-gen/velnor-workflow.toml"),
             "{policy}"
+        );
+        assert_eq!(
+            policy
+                .matches("name: Set up Velnor workflow runtime")
+                .count(),
+            1,
+            "Policy installs exactly one statically pinned validator: {policy}"
         );
         assert!(
             policy.contains(&format!("{VELNOR_POLICY_REVISION_ENV}: abc123")),
@@ -15741,16 +16323,38 @@ lockfile = true
         assert!(!consumer.contains("cargo install"), "{consumer}");
         assert!(!consumer.contains("cargo build"), "{consumer}");
         assert!(
-            consumer.contains("Read declared generator pin"),
+            !consumer.contains(VELNOR_WORKFLOW_PINNED_CLOSURE_ENV),
+            "the static policy command has no runtime closure environment: {consumer}"
+        );
+        assert!(
+            !consumer.contains("Read declared generator pin"),
             "{consumer}"
         );
         assert!(
-            consumer.contains("Set up declared generator product"),
+            !consumer.contains("Set up declared generator product"),
             "{consumer}"
         );
         assert!(
-            !consumer.contains("Acquire candidate generator product"),
+            !consumer.contains(VELNOR_WORKFLOW_PINNED_BINARY_ENV),
             "{consumer}"
+        );
+        assert!(!consumer.contains("candidate-manifest"), "{consumer}");
+        assert!(!consumer.contains("gh run download"), "{consumer}");
+        assert!(
+            !consumer.contains(".github-gen/velnor-workflow.toml"),
+            "{consumer}"
+        );
+        assert!(!consumer.contains("steps.pin.outputs.value"), "{consumer}");
+        assert_eq!(
+            consumer
+                .matches("name: Set up Velnor workflow runtime")
+                .count(),
+            1,
+            "consumer Policy installs exactly one statically pinned validator: {consumer}"
+        );
+        assert!(
+            consumer.contains(&format!("uses: {VELNOR_WORKFLOW_SETUP_ACTION}@abc123\n")),
+            "the sole validator action is pinned in the generated base workflow: {consumer}"
         );
     }
 
@@ -15781,15 +16385,23 @@ lockfile = true
             fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
             "repository root",
         );
-        let default_branch = must(resolve_default_branch(&root), "resolve default branch");
+        let safe_root = Arc::new(must(safe_fs::SafeRoot::open(&root), "open repository root"));
+        let default_branch = must(
+            resolve_default_branch_with_safe_root(&safe_root),
+            "resolve default branch",
+        );
+        let generation = must(
+            config::discover_with_safe_root(&safe_root),
+            "discover generation config",
+        );
         let scanned = must(
-            scan_target(&root, None, &default_branch),
+            scan_target_with_generation(Arc::clone(&safe_root), None, &default_branch, generation),
             "scan this repository",
         );
         let mut config = scanned.config;
         let surface = must(
-            crate::s2::primitives::generate(
-                &root,
+            crate::s2::primitives::generate_with_safe_root(
+                scanned.safe_root.as_ref(),
                 &scanned.shape,
                 &config,
                 scanned.generation.as_ref(),
@@ -15808,15 +16420,12 @@ lockfile = true
         )
     }
 
-    /// The schema-2 pipeline refuses a schema-1 repository: the dogfood
-    /// tree flipped to schema 2 (R2m), so the refusal now runs against a
-    /// synthetic schema-1 config instead of the repository itself. The
-    /// scan must fail closed on the foreign config instead of rendering
-    /// a mixed surface.
+    /// A scan must reject any schema value outside the declared schema-2
+    /// contract before rendering a surface.
     #[test]
-    fn schema2_pipeline_refuses_a_schema1_repository() {
+    fn schema2_pipeline_rejects_a_non_schema2_config() {
         let root = configured_repository(
-            "schema1-refusal",
+            "unsupported-schema",
             Some(
                 "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [workflow]\nrunners = \"both\"\n",
@@ -15828,11 +16437,11 @@ lockfile = true
                 Some(crate::s2::provider::ProviderId::ALL.into_iter().collect()),
                 "main",
             ),
-            "scanning a schema-1 repository with the schema-2 pipeline must fail",
+            "scanning a non-schema-2 repository config must fail",
         );
         assert!(
             error.to_string().contains("invalid generation config"),
-            "the refusal must reject the schema-1 config: {error}"
+            "the refusal must reject the config: {error}"
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -15888,229 +16497,153 @@ lockfile = true
         }
     }
 
-    /// The acquire step, the unit-job publisher, and the validator's
-    /// `wanted` binding rendezvous on one digest: the audited head's
-    /// candidate closure. Polling by the pin's candidate closure while the
-    /// other two legs bind the head's is jointly satisfiable only when
-    /// pin..head is closure-clean, so no render-changing generator PR can
-    /// land green. The step therefore derives the poll name and the
-    /// manifest gate from `closure --rev $HEAD_SHA --candidate`, and no
-    /// `pin_candidate` derivation survives anywhere in the job.
     #[test]
-    fn policy_candidate_step_binds_manifest_to_head_and_exports_it() {
-        let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
-        assert!(
-            owner.contains(
-                "head_candidate=\"$(velnor-workflow closure --rev=\"$HEAD_SHA\" --candidate)\""
-            ),
-            "the acquire step derives the candidate from the audited head: {owner}"
-        );
-        assert!(
-            owner.contains("name=\"velnor-workflow-candidate-${head_candidate:0:16}-${RUNNER_OS}-${RUNNER_ARCH}\""),
-            "the polled artifact name keys off the head candidate, as published: {owner}"
-        );
-        assert!(
-            !owner.contains("pin_candidate"),
-            "no pin-anchored candidate derivation survives the rendezvous: {owner}"
-        );
-        assert!(
-            owner.contains("\"$manifest_closure\" == \"$head_candidate\""),
-            "the acquire step requires the manifest closure to equal the head's candidate in full: {owner}"
-        );
-        assert!(
-            owner.contains(
-                "candidate manifest closure $manifest_closure is not the head's candidate $head_candidate"
-            ),
-            "a closure mismatch fails closed with both digests: {owner}"
-        );
-        assert!(
-            owner.contains(
-                "echo \"VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json\" >> \"$GITHUB_ENV\""
-            ),
-            "the acquire step exports the manifest for the validator's binding: {owner}"
-        );
-        assert!(
-            owner.contains("echo \"VELNOR_WORKFLOW_CANDIDATE_MANIFEST=\" >> \"$GITHUB_ENV\""),
-            "the early exit clears the manifest so no stale binding survives: {owner}"
-        );
-        assert!(
-            owner.contains(&format!(
-                "--candidate-manifest \"${{{VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV}:-}}\""
-            )),
-            "the Enforce step passes the manifest through the unset-safe fallback: {owner}"
-        );
-        assert!(
-            owner.contains("::error::candidate digest mismatch"),
-            "a binary whose digest disagrees with the manifest fails closed: {owner}"
-        );
-        assert!(
-            owner.contains("\"$reported\" == \"$manifest_closure\""),
-            "the self-report gate requires the binary to report the manifest closure: {owner}"
-        );
-        for clause in [
-            ".platform == $platform",
-            ".repository == $repo",
-            ".run_id == $run",
-        ] {
-            assert!(
-                owner.contains(clause),
-                "the manifest accept filter binds {clause}: {owner}"
-            );
-        }
-        assert!(
-            owner.contains("generator changes from forks cannot be verified here"),
-            "the fork gate still fails closed before any candidate fetch: {owner}"
-        );
-    }
-
-    /// The same-closure early exit fires only when the tree matches the
-    /// pin's render: same closure makes the running base validator the
-    /// pin's own renderer, so `--plain --check` decides tree==pin-render
-    /// with no extra provisioning. A same-closure tree that differs is a
-    /// generator change in flight and must fall through to the candidate
-    /// path — exiting early would clear the manifest and strand the
-    /// validator with a red pin leg and no candidate binding.
-    #[test]
-    fn policy_acquire_same_closure_exit_requires_pin_render_match() {
-        let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
-        assert!(
-            owner.contains("if velnor-workflow --plain --check; then"),
-            "the same-closure branch proves tree==pin-render before exiting: {owner}"
-        );
-        assert!(
-            owner.contains(
-                "echo \"pin $pin shares the base closure and renders the tree; the Stage-0 validator renders\""
-            ),
-            "the early exit names both conditions it proved: {owner}"
-        );
-        assert!(
-            !owner.contains(
-                "echo \"pin $pin shares the base closure; the Stage-0 validator renders\""
-            ),
-            "no unconditional same-closure exit survives: {owner}"
-        );
-        assert!(
-            owner.contains("falling through to the candidate path"),
-            "a same-closure render differ falls through instead of exiting: {owner}"
-        );
-        let check = must_some(
-            owner.find("if velnor-workflow --plain --check; then"),
-            "the render gate is present",
-        );
-        let fork = must_some(
-            owner.find("generator changes from forks cannot be verified here"),
-            "the fork gate is present",
-        );
-        let head = must_some(
-            owner.find("head_candidate=\"$(velnor-workflow closure"),
-            "the head derivation is present",
-        );
-        assert!(
-            check < fork && fork < head,
-            "the render gate precedes the fork gate precedes the head derivation: {owner}"
-        );
-    }
-
-    /// The acquire step finds the sibling PR run through the runs-list API,
-    /// whose items carry `.head_repository` as an object — there is no
-    /// `.head_repository_id` scalar, so selecting on it matches nothing and
-    /// the candidate path fails systematically. An empty list means the API
-    /// has not indexed the sibling run yet, so the loop keeps polling until
-    /// the deadline instead of failing fast. The artifact check pipes
-    /// through real `jq`: `gh api` has no `-e` flag, so `gh api --jq -e`
-    /// exits 1 with "unknown shorthand flag" and the artifact is never
-    /// detected.
-    #[test]
-    fn policy_acquire_step_selects_same_repository_runs_by_object_id() {
-        let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
-        assert!(
-            owner.contains("select(.head_repository.id == .repository.id)"),
-            "the same-repository select compares the embedded objects: {owner}"
-        );
-        assert!(
-            !owner.contains(".head_repository_id"),
-            "the list endpoint has no head_repository_id scalar: {owner}"
-        );
-        assert!(
-            owner.contains("[[ \"$seen\" == \"true\" ]] || waiting=true"),
-            "an unindexed sibling run keeps polling until the deadline: {owner}"
-        );
-        assert!(
-            owner.contains(
-                "| jq -e --arg name \"$name\" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0'"
-            ),
-            "the artifact check evaluates through real jq: {owner}"
-        );
-        assert!(
-            !owner.contains("--jq --arg name"),
-            "no gh api call smuggles jq flags gh does not accept: {owner}"
-        );
-    }
-
-    /// The acquire step's `--closure` probe executes the candidate binary in a
-    /// step whose env carries the read-scoped job token for the artifact API
-    /// calls above it. The probe needs no auth, so the invocation prefixes
-    /// both token variables with empty values: the exec point holds no
-    /// token. The values are quoted (`VAR=""`) so shellcheck's SC1007 does
-    /// not flag the prefix assignments as suspicious spacing.
-    #[test]
-    fn policy_candidate_closure_probe_holds_no_token() {
-        let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
-        assert!(
-            owner.contains(
-                "reported=\"$(GH_TOKEN=\"\" GITHUB_TOKEN=\"\" \"$candidate/velnor-workflow\" --closure)\""
-            ),
-            "the candidate probe strips both tokens from its own invocation: {owner}"
-        );
-    }
-
-    #[test]
-    fn policy_trust_comment_states_candidate_execution() {
-        for job in [
-            hosted_policy_job("abc123"),
-            velnor_policy_job("abc123", "[self-hosted, velnor]"),
-        ] {
-            assert!(
-                job.contains("additionally EXECUTES the PR run's prebuilt"),
-                "the comment states that PR-built code executes: {job}"
-            );
-            assert!(
-                job.contains("same-repository runs only, bound"),
-                "the comment states the same-repo confinement: {job}"
-            );
-            assert!(
-                job.contains("by manifest closure plus binary digest before"),
-                "the comment states the pre-execution binding: {job}"
-            );
-            assert!(
-                job.contains("and never compiles"),
-                "the compile claim stays: {job}"
-            );
-            assert!(
-                job.contains("with no secret references, no persisted credentials, the"),
-                "the comment states the credential absence precisely: {job}"
-            );
-            assert!(
-                job.contains("read-only github.token confined to the Acquire/Ruleset API steps,"),
-                "the comment confines the job token to the API steps: {job}"
-            );
-            assert!(
-                job.contains("and both candidate exec points tokenless."),
-                "the comment states both exec points hold no token: {job}"
-            );
-            assert!(
-                !job.contains("never by building pull-request code here"),
-                "the misleading implication that no PR code runs is gone: {job}"
-            );
-            assert!(
-                !job.contains("secretless, credentialless confinement"),
-                "the false secretless claim is gone: {job}"
-            );
+    fn generated_workflows_do_not_emit_candidate_or_pinned_runtime_paths() {
+        let files = rendered_repository_files();
+        for (path, content) in &files {
+            if !path.starts_with(".github/workflows")
+                || path.extension().is_none_or(|extension| extension != "yml")
+            {
+                continue;
+            }
+            for forbidden in [
+                VELNOR_WORKFLOW_PINNED_BINARY_ENV,
+                VELNOR_WORKFLOW_PINNED_CLOSURE_ENV,
+                "velnor-workflow-policy",
+                "Provision pinned Velnor workflow policy runtime",
+                "Fetch D19 pin history",
+                "VELNOR_WORKFLOW_CANDIDATE",
+                "candidate-manifest",
+                "gh run download",
+                "--verify-pinned",
+            ] {
+                assert!(
+                    !content.contains(forbidden),
+                    "{} emits obsolete generated check path {forbidden}",
+                    path.display()
+                );
+            }
         }
     }
 
     #[test]
-    fn both_runner_policy_entrypoint_stays_on_hosted_runner() {
+    fn policy_jobs_fail_closed_without_pr_candidate_artifacts() {
+        let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
+        for forbidden in [
+            "candidate-manifest",
+            "VELNOR_WORKFLOW_CANDIDATE",
+            "candidate generator",
+            "gh run download",
+            "head_candidate",
+            "velnor-workflow-candidate-",
+        ] {
+            assert!(
+                !owner.contains(forbidden),
+                "owner policy job emits forbidden PR artifact path {forbidden}: {owner}"
+            );
+        }
+        assert!(
+            owner.contains("never acquires or executes candidate code or artifacts"),
+            "the trust comment states that candidate code and artifacts are not used: {owner}"
+        );
+        assert!(
+            owner.contains("inspected statically"),
+            "the trust comment states that candidate files are static inputs: {owner}"
+        );
+        assert!(
+            owner.contains(&format!("uses: {VELNOR_WORKFLOW_POLICY_SETUP_ACTION}\n")),
+            "the owner runs its setup action from the base checkout: {owner}"
+        );
+        assert!(
+            owner.contains("ref: ${{ github.event.pull_request.base.sha || github.sha }}"),
+            "the setup action checkout is pinned to the base ref: {owner}"
+        );
+        assert!(
+            !owner.contains("uses: ./policy-checkout/.github/actions/setup-velnor-workflow"),
+            "the owner never runs an action from the audited tree: {owner}"
+        );
+
+        let consumer = hosted_policy_job_for_repository("abc123", "example/consumer");
+        for forbidden in [
+            "candidate-manifest",
+            "VELNOR_WORKFLOW_CANDIDATE",
+            "candidate generator",
+            "gh run download",
+            "velnor-workflow-candidate-",
+        ] {
+            assert!(
+                !consumer.contains(forbidden),
+                "consumer policy job emits forbidden PR artifact path {forbidden}: {consumer}"
+            );
+        }
+        assert!(
+            !consumer.contains("Read declared generator pin"),
+            "{consumer}"
+        );
+        assert!(
+            !consumer.contains("Set up declared generator product"),
+            "{consumer}"
+        );
+        assert!(
+            !consumer.contains(VELNOR_WORKFLOW_PINNED_BINARY_ENV),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("tailrocks/velnor/.github/actions/setup-velnor-workflow@abc123"),
+            "the validator remains pinned to the base trusted release: {consumer}"
+        );
+    }
+
+    #[test]
+    fn checked_in_policy_workflows_do_not_acquire_pr_candidate_artifacts() {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for name in ["ci-main.yml", "ci-policy.yml"] {
+            let path = repository.join(".github/workflows").join(name);
+            let workflow = must(
+                fs::read_to_string(&path),
+                &format!("read checked-in {name}"),
+            );
+            for forbidden in [
+                "candidate-manifest",
+                "VELNOR_WORKFLOW_CANDIDATE",
+                "candidate generator",
+                "candidate binary",
+                "gh run download",
+                "velnor-workflow-candidate-",
+                "candidate sandbox",
+            ] {
+                assert!(
+                    !workflow.contains(forbidden),
+                    "{name} contains forbidden PR artifact flow {forbidden}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn policy_trust_comment_states_fail_closed_boundary() {
+        let job = hosted_policy_job("abc123");
+        assert!(
+            job.contains("never acquires or executes candidate code or artifacts"),
+            "the comment excludes candidate code and artifacts: {job}"
+        );
+        assert!(job.contains("never compiles"), "{job}");
+        assert!(
+            job.contains("inspected statically"),
+            "the comment states the static audit boundary: {job}"
+        );
+        assert!(
+            !job.contains("manifest closure plus binary digest"),
+            "no candidate-manifest trust claim remains: {job}"
+        );
+        assert!(
+            !job.contains("candidate sandbox"),
+            "no PR code execution boundary remains: {job}"
+        );
+    }
+
+    #[test]
+    fn policy_entrypoint_uses_the_fixed_hosted_renderer() {
         let policy = generated_ci_policy(&scanned_fixture(all_providers()));
         assert!(policy.contains("runs-on: ubuntu-24.04"));
         assert!(policy.contains("fetch-depth: 0"));
@@ -16133,15 +16666,15 @@ lockfile = true
             policy.contains(&format!("{VELNOR_POLICY_REVISION_ENV}: {FIXTURE_REVISION}")),
             "the validator runs with the declared policy revision: {policy}"
         );
+        assert!(!policy.contains("Read declared generator pin"), "{policy}");
         assert!(
-            policy.contains("Read declared generator pin"),
-            "the consumer entrypoint renders through the declared generator product: {policy}"
+            !policy.contains(VELNOR_WORKFLOW_PINNED_BINARY_ENV),
+            "{policy}"
         );
         assert!(!policy.contains("cargo install"), "{policy}");
         assert!(!policy.contains("cargo build"), "{policy}");
         assert!(!policy.contains("Mr. Boxington"), "{policy}");
-        assert!(!policy.contains("backend: github"), "{policy}");
-        assert!(!policy.contains("backend: local"));
+        assert!(!policy.contains("runs-on: self-hosted"), "{policy}");
     }
 
     #[test]
@@ -16173,9 +16706,9 @@ lockfile = true
         assert!(nightly.contains("name: \"Control / Dispatch ci-main\""));
 
         let nested_main =
-            generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator), None);
+            generator.render_nested(WorkflowKind::Main, &default_plan_nodes(&generator), None);
         let nested_nightly =
-            generator.render_nested(WorkflowKind::Nightly, &legacy_plan(&generator), None);
+            generator.render_nested(WorkflowKind::Nightly, &default_plan_nodes(&generator), None);
         assert!(nested_main.contains("cancel-in-progress: false"));
         assert!(nested_nightly.contains("cancel-in-progress: false"));
         assert!(nested_nightly.contains("name: \"Control / Nightly aggregate\""));
@@ -16210,8 +16743,11 @@ lockfile = true
                 !pr.contains("merge_group:"),
                 "PR triggers must not carry the dead merge_group trigger: {pr}"
             );
-            let nested =
-                generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator), None);
+            let nested = generator.render_nested(
+                WorkflowKind::PullRequest,
+                &default_plan_nodes(&generator),
+                None,
+            );
             assert!(
                 !nested.contains("merge_group:"),
                 "the nested PR render must omit merge_group too: {nested}"
@@ -16264,8 +16800,11 @@ lockfile = true
             !velnor_pr.contains("merge_group:\n"),
             "a velnor-only surface has no github lane to validate the merge queue: {velnor_pr}"
         );
-        let velnor_nested =
-            generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator), None);
+        let velnor_nested = generator.render_nested(
+            WorkflowKind::PullRequest,
+            &default_plan_nodes(&generator),
+            None,
+        );
         assert!(
             !velnor_nested.contains("merge_group:\n"),
             "the nested velnor-only PR render skips merge_group too: {velnor_nested}"
@@ -16311,6 +16850,37 @@ lockfile = true
         String::new()
     }
 
+    /// Replace only the named job's job-level gate. Local provider predicates
+    /// are intentionally identical, so whole-file string replacement would
+    /// mutate neighboring jobs and weaken the drift regression.
+    fn replace_job_gate(surface: &str, job: &str, replacement: &str) -> String {
+        assert!(replacement.starts_with("    if: "));
+        let header = format!("  {job}:");
+        let mut in_job = false;
+        let mut replaced = false;
+        let lines = surface
+            .lines()
+            .map(|line| {
+                if line.starts_with("  ") && !line.starts_with("   ") {
+                    in_job = line == header;
+                    return line.to_owned();
+                }
+                if in_job && !replaced && line.starts_with("    if: ") {
+                    replaced = true;
+                    return replacement.to_owned();
+                }
+                line.to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert!(replaced, "job `{job}` has a replaceable job-level gate");
+        let replaced = lines.join("\n");
+        if surface.ends_with('\n') {
+            format!("{replaced}\n")
+        } else {
+            replaced
+        }
+    }
+
     #[test]
     fn explicit_provider_universes_select_exact_ci_jobs() {
         let github = generated_ci_main(&WorkflowIr::from_config(&must(
@@ -16327,31 +16897,49 @@ lockfile = true
         assert!(github.contains("runs-on: ubuntu-24.04"));
         assert!(!github.contains(&fixture_lane_selector()));
 
-        let velnor = generated_ci_main(&WorkflowIr::from_config(&scanned_fixture(provider_set([
-            ProviderId::Velnor,
-        ]))));
+        let velnor_config = scanned_fixture(provider_set([ProviderId::Velnor]));
+        let velnor_ir = WorkflowIr::from_config(&velnor_config);
+        let velnor = generated_ci_main(&velnor_ir);
         assert!(!velnor.contains("  github-hosted-"));
         assert!(velnor.contains("  velnor-"));
         let velnor_rust = must_some(
             must(
-                WorkflowIr::from_config(&scanned_fixture(provider_set([ProviderId::Velnor])))
-                    .render_kind_unit_workflow(UnitKind::Rust, None),
+                velnor_ir.render_kind_unit_workflow(UnitKind::Rust, None),
                 "render rust kind reusable",
             ),
             "rust kind has members",
         )
         .1;
         assert!(velnor_rust.contains(&fixture_lane_selector()));
-        assert!(velnor.contains(
-            "github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')"
-        ));
+        let local_admission = velnor_ir
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        let velnor_rust_id = must_some(
+            velnor_config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Rust),
+            "Rust fixture unit",
+        )
+        .id
+        .clone();
+        let main_local_gate = job_gate(&velnor, &format!("velnor-{velnor_rust_id}"));
+        assert!(
+            main_local_gate.contains(&format!("({local_admission})")),
+            "explicit provider selection still carries the local default-branch push gate: {main_local_gate}"
+        );
+        assert!(
+            !main_local_gate.contains("github.event.inputs.providers"),
+            "dispatch selection does not admit local capacity: {main_local_gate}"
+        );
+        let reusable_local_gate = job_gate(&velnor_rust, "verify-velnor");
+        assert!(
+            reusable_local_gate.contains(&format!("({local_admission})")),
+            "the reusable applies the same local admission: {reusable_local_gate}"
+        );
         assert!(velnor.contains("default: velnor"));
         assert!(!velnor.contains("default: github-hosted"));
 
-        let velnor_pr =
-            generated_ci_pr(&WorkflowIr::from_config(&scanned_fixture(provider_set([
-                ProviderId::Velnor,
-            ]))));
+        let velnor_pr = generated_ci_pr(&velnor_ir);
         assert!(velnor_pr.contains("on:\n  pull_request:"));
         assert!(
             !velnor_pr.contains("merge_group:"),
@@ -16362,6 +16950,11 @@ lockfile = true
         // reusable (asserted above through `velnor_rust`) while callers pass
         // the provider input.
         assert!(velnor_pr.contains("provider: velnor"));
+        assert!(
+            job_gate(&velnor_pr, &format!("velnor-{velnor_rust_id}"))
+                .contains(&format!("({local_admission})")),
+            "PR aggregate callers use the same default-branch push admission: {velnor_pr}"
+        );
         assert!(velnor_pr.contains("default: velnor"));
         assert!(velnor_pr.contains("default: affected"));
 
@@ -16441,9 +17034,18 @@ lockfile = true
             files.get(&PathBuf::from(".github/workflows/ci-pr.yml")),
             "ci-pr.yml",
         );
+        let local_admission = WorkflowIr::from_config(&config)
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        let rust_unit_id = must_some(
+            config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
+            "Rust fixture unit",
+        )
+        .id
+        .clone();
+        let local_caller_gate = job_gate(pr, &format!("velnor-{rust_unit_id}"));
         assert!(
-            pr.contains("github.event.pull_request.head.repo.fork"),
-            "local providers gate pull_request on the trusted event: {pr}"
+            local_caller_gate.contains(&format!("({local_admission})")),
+            "local providers gate the caller on a same-repository default-branch push: {local_caller_gate}"
         );
     }
 
@@ -16460,56 +17062,52 @@ lockfile = true
         assert!(main.contains("  velnor-"), "{main}");
         assert!(
             main.contains("github.event_name != 'workflow_dispatch'"),
-            "automatic providers run automatic events: {main}"
+            "the hosted provider runs automatic events: {main}"
         );
-        let pr = generated_ci_pr(&WorkflowIr::from_config(&config));
+        let workflow = WorkflowIr::from_config(&config);
+        let rust_unit_id = must_some(
+            config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
+            "Rust fixture unit",
+        )
+        .id
+        .clone();
+        let local_admission = workflow
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        let main_local_gate = job_gate(&main, &format!("velnor-{rust_unit_id}"));
         assert!(
-            pr.contains("github.event.pull_request.head.repo.fork"),
-            "local providers gate pull_request on the trusted event: {pr}"
+            main_local_gate.contains(&format!("({local_admission})")),
+            "Velnor runs only on a same-repository default-branch push: {main_local_gate}"
+        );
+        let pr = generated_ci_pr(&workflow);
+        let pr_local_gate = job_gate(&pr, &format!("velnor-{rust_unit_id}"));
+        assert!(
+            pr_local_gate.contains(&format!("({local_admission})"))
+                && !pr_local_gate.contains("pull_request"),
+            "a PR trigger never admits the local provider: {pr_local_gate}"
         );
     }
 
     #[test]
-    fn apt_adopted_templates_migrate_legacy_velnor_selector() {
-        let mut apt = scanned_fixture(all_providers());
-        apt.repository = "example/apt".to_owned();
-        apt.workflow_files = vec!["package-updater.yml".to_owned()];
-        let legacy_selector = crate::s2::estate::LEGACY_VELNOR_RUNNER_SELECTOR;
-        apt.workflow_templates.insert(
-            "package-updater.yml".to_owned(),
-            format!(
-                "name: Package updater\njobs:\n  update:\n    runs-on: ${{{{ inputs.provider == 'github' && 'ubuntu-24.04' || {legacy_selector} }}}}\n"
-            ),
+    fn adopted_template_resolves_typed_provider_runner_placeholder() {
+        let config = scanned_fixture(all_providers());
+        let template =
+            "name: Static surface\njobs:\n  verify:\n    runs-on: __VELNOR_RUNS_ON_VELNOR__\n";
+        let rendered = must(
+            render_static_template_for_config(&config, "static.yml", template),
+            "render typed provider placeholder",
         );
-        apt.adopted_workflow_surface = true;
-
-        let generated = must(generated_files(&apt), "generate");
-        let rendered = must_some(
-            generated.get(&PathBuf::from(".github/workflows/package-updater.yml")),
-            "generated APT package updater",
+        let selector = selector_runs_on_yaml(must_some(
+            config.selectors.get(&ProviderId::Velnor),
+            "declared Velnor selector",
+        ));
+        assert!(
+            rendered.contains(&format!("runs-on: {selector}")),
+            "the declared provider selector is rendered into the typed placeholder: {rendered}"
         );
-        let declared_selector = format!(
-            "fromJSON('[{}]')",
-            FIXTURE_LABELS
-                .iter()
-                .map(|label| format!("\\\"{label}\\\""))
-                .collect::<Vec<_>>()
-                .join(",")
+        assert!(
+            !rendered.contains("__VELNOR_RUNS_ON_VELNOR__"),
+            "the declared placeholder is fully resolved: {rendered}"
         );
-        assert!(rendered.contains(&declared_selector), "{rendered}");
-        assert!(!rendered.contains(crate::s2::estate::LEGACY_VELNOR_RUNNER_SELECTOR));
-
-        // Without a Velnor selector the legacy token survives the pass.
-        apt.selectors.remove(&ProviderId::Velnor);
-        apt.providers = provider_set([ProviderId::GithubHosted]);
-        apt.automatic_providers = provider_set([ProviderId::GithubHosted]);
-        apt.default_dispatch_providers = provider_set([ProviderId::GithubHosted]);
-        let preserved = must(generated_files(&apt), "generate");
-        let rendered = must_some(
-            preserved.get(&PathBuf::from(".github/workflows/package-updater.yml")),
-            "generated generic package updater",
-        );
-        assert!(rendered.contains(crate::s2::estate::LEGACY_VELNOR_RUNNER_SELECTOR));
     }
 
     #[test]
@@ -17159,7 +17757,7 @@ lockfile = true
             "PR aggregate must not declare cache-mode on reusable-workflow callers; \
              pull_request already defaults to read-only cache access"
         );
-        let main = ir.render_nested(WorkflowKind::Main, &legacy_plan(&ir), None);
+        let main = ir.render_nested(WorkflowKind::Main, &default_plan_nodes(&ir), None);
         assert!(
             !main.contains("cache-mode: read"),
             "main producers must not declare read-only cache mode"
@@ -17493,7 +18091,7 @@ lockfile = true
             "# output cache retained alongside mbx: bench baselines read raw target artifacts the object transport drops"
         ));
         assert!(kind.contains("name: Restore unit cache"));
-        let aggregate = ir.render_nested(WorkflowKind::Main, &legacy_plan(&ir), None);
+        let aggregate = ir.render_nested(WorkflowKind::Main, &default_plan_nodes(&ir), None);
         assert!(
             aggregate.contains("target"),
             "the caller passes the retained paths: {aggregate}"
@@ -17630,7 +18228,7 @@ lockfile = true
         assert!(rust_facts.cargo_net_offline);
         // The aggregate passes the per-unit cargo facts; the policy caller
         // carries no offline input.
-        let aggregate = ir.render_nested(WorkflowKind::Main, &legacy_plan(&ir), None);
+        let aggregate = ir.render_nested(WorkflowKind::Main, &default_plan_nodes(&ir), None);
         assert!(aggregate.contains("cargo_net_offline: true"));
     }
 
@@ -17709,7 +18307,7 @@ lockfile = true
             !kind.contains("export CARGO_NET_OFFLINE=true"),
             "kind jobs must not carry the union offline run prelude"
         );
-        let pr = ir.render_nested(WorkflowKind::PullRequest, &legacy_plan(&ir), None);
+        let pr = ir.render_nested(WorkflowKind::PullRequest, &default_plan_nodes(&ir), None);
         let policy_caller = must_some(
             pr.find("  github-hosted-rust-dependency-policy:"),
             "policy caller job",
@@ -17892,7 +18490,7 @@ lockfile = true
             ..header_fixture_config()
         };
         let ir = WorkflowIr::from_config(&config);
-        let workflow = ir.render_nested(WorkflowKind::Main, &legacy_plan(&ir), None);
+        let workflow = ir.render_nested(WorkflowKind::Main, &default_plan_nodes(&ir), None);
         let job_needs = |job: &str| {
             let start = must_some(
                 workflow.find(&format!("  {job}:\n")),
@@ -18032,7 +18630,7 @@ lockfile = true
             ..header_fixture_config()
         };
         let ir = WorkflowIr::from_config(&config);
-        let workflow = ir.render_nested(WorkflowKind::Main, &legacy_plan(&ir), None);
+        let workflow = ir.render_nested(WorkflowKind::Main, &default_plan_nodes(&ir), None);
         let job_needs = |job: &str| {
             let start = must_some(
                 workflow.find(&format!("  {job}:\n")),
@@ -18170,7 +18768,7 @@ lockfile = true
         };
         let pr = WorkflowIr::from_config(&config).render_nested(
             WorkflowKind::PullRequest,
-            &legacy_plan(&WorkflowIr::from_config(&config)),
+            &default_plan_nodes(&WorkflowIr::from_config(&config)),
             None,
         );
         assert!(
@@ -18254,6 +18852,49 @@ lockfile = true
         assert!(
             !policy.contains("group: example-${{ github.repository }}-main"),
             "policy must not share the ci-main concurrency group: {policy}"
+        );
+    }
+
+    #[test]
+    fn policy_control_plane_runner_is_independent_of_audited_config() {
+        let mut config = header_fixture_config();
+        config.selectors.insert(
+            provider::ProviderId::GithubHosted,
+            provider::ProviderSelector {
+                runs_on: vec!["self-hosted".to_owned(), "candidate-runner".to_owned()],
+                ..provider::ProviderSelector::default()
+            },
+        );
+
+        let policy = render_policy_entrypoint(&config);
+        assert!(
+            policy.contains("runs-on: ubuntu-24.04\n"),
+            "Policy must use its trusted fixed hosted runner: {policy}"
+        );
+        assert!(
+            !policy.contains("candidate-runner") && !policy.contains("self-hosted"),
+            "candidate selectors must not choose the policy runner: {policy}"
+        );
+        assert!(
+            !policy.contains(VELNOR_WORKFLOW_PINNED_BINARY_ENV),
+            "Policy does not select a provisioned renderer: {policy}"
+        );
+
+        let workflow = WorkflowIr::from_config(&config);
+        let mut aggregate_policy = String::new();
+        workflow.render_policy(&mut aggregate_policy);
+        assert!(
+            aggregate_policy.contains("runs-on: ubuntu-24.04\n"),
+            "aggregate Policy must use the same trusted fixed hosted runner: {aggregate_policy}"
+        );
+        assert!(
+            !aggregate_policy.contains("candidate-runner")
+                && !aggregate_policy.contains("self-hosted"),
+            "aggregate Policy cannot use candidate selectors: {aggregate_policy}"
+        );
+        assert!(
+            !aggregate_policy.contains(VELNOR_WORKFLOW_PINNED_BINARY_ENV),
+            "aggregate Policy does not select a provisioned renderer: {aggregate_policy}"
         );
     }
 
@@ -18612,12 +19253,13 @@ lockfile = true
                 );
             }
         }
+        let output_root = must(safe_fs::SafeRoot::open(&root), "open generated output root");
+        let ownership_preimage = must(
+            output_root.capture_file_preimage(Path::new(OWNERSHIP_STATE)),
+            "capture ownership state preimage",
+        );
         let ownership = must(
-            parse_ownership_state(
-                &root,
-                &capture_file_preimage(&root.join(OWNERSHIP_STATE), Path::new(OWNERSHIP_STATE))
-                    .unwrap_or(FilePreimage::Missing),
-            ),
+            parse_ownership_state(output_root.command_directory(), &ownership_preimage),
             "parse complete ownership state",
         );
         let ownership = schema_two_state(ownership);
@@ -18725,6 +19367,55 @@ lockfile = true
             .contains("manually modified generated file"));
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn stale_delete_restores_changed_backup_without_losing_the_entry() {
+        let root = temporary_repository("stale-delete-recovery");
+        let relative = PathBuf::from(".github/workflows/ci-old.yml");
+        let path = root.join(&relative);
+        let workflows = must_some(path.parent(), "workflow parent");
+        must(fs::create_dir_all(workflows), "create workflow directory");
+        must(
+            fs::write(&path, "reviewed bytes\n"),
+            "write reviewed stale file",
+        );
+        let safe_root = must(safe_fs::SafeRoot::open(&root), "open reviewed output root");
+        let expected = must(
+            safe_root.capture_file_preimage(&relative),
+            "capture reviewed stale file",
+        );
+
+        let error = must_some(
+            safe_fs::delete_reviewed_file_observed(&safe_root, &relative, &expected, |backup| {
+                fs::write(backup, "changed after move\n")
+                    .map_err(|error| GeneratorError::io("modify moved stale file", backup, &error))
+            })
+            .err(),
+            "reject changed stale file",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("stale generated file changed after preflight"),
+            "{error}"
+        );
+        assert_eq!(
+            must(fs::read_to_string(&path), "read restored stale file"),
+            "changed after move\n"
+        );
+        assert!(
+            must(fs::read_dir(workflows), "read workflow directory").all(|entry| {
+                entry.is_ok_and(|entry| {
+                    !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".velnor-workflow-backup-")
+                })
+            })
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn preflight_reports_stale_deletion_and_ownership_update_without_writing() {
         let root = temporary_repository("preflight-stale-generated-workflow");
@@ -18754,6 +19445,435 @@ lockfile = true
         assert!(root.join(&stale).is_file());
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn same_target_output_plan_rejects_a_root_rebound_after_scan() {
+        let root = temporary_repository("same-target-output-swap");
+        let safe_root = must(safe_fs::SafeRoot::open(&root), "capture source root");
+        let identity = must(safe_root.identity(), "capture source identity");
+        let displaced = root.with_extension("source-a");
+        must(fs::rename(&root, &displaced), "move source A");
+        must(fs::create_dir(&root), "create repository B at source path");
+        must(
+            fs::write(root.join("marker.txt"), "repository B\n"),
+            "write repository B marker",
+        );
+
+        let error = must_some(
+            plan_generated_write_with_root(
+                &root,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+                false,
+                Some(&identity),
+                None,
+            )
+            .err(),
+            "same-target plan must reject a different output directory identity",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("output root differs from the repository captured for scanning"),
+            "{error}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(displaced);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dispatch_selection_rejects_symlinked_local_source_roots() {
+        let root = temporary_directory("local-source-root-symlink");
+        let alias = root.with_extension("alias");
+        must(
+            std::os::unix::fs::symlink(&root, &alias),
+            "create symlinked local source root",
+        );
+        for suffix in ["", "/", "/."] {
+            let target = PathBuf::from(format!("{}{suffix}", alias.display()));
+            let error = must_fail(
+                capture_generator_selection(target.to_string_lossy().as_ref(), None),
+                "dispatch must reject a symlinked local source root",
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("refusing symlinked repository root"),
+                "{error}"
+            );
+        }
+        let _ = fs::remove_file(&alias);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dispatch_selection_keeps_captured_source_identity_after_path_replacement() {
+        let root = temporary_directory("local-source-root-replacement");
+        must(
+            fs::write(root.join("marker.txt"), "source A\n"),
+            "seed source A",
+        );
+        let captured = must_some(
+            must(
+                capture_generator_selection(root.to_string_lossy().as_ref(), None),
+                "capture source A during dispatch selection",
+            )
+            .source
+            .local_root,
+            "local source must yield a captured root",
+        );
+
+        let displaced = root.with_extension("captured-a");
+        must(fs::rename(&root, &displaced), "move source A");
+        must(fs::create_dir(&root), "create replacement source B");
+        must(
+            fs::write(root.join("marker.txt"), "source B\n"),
+            "write source B marker",
+        );
+        let replacement = must(
+            safe_fs::SafeRoot::open(&root),
+            "open replacement source B through the safe-root API",
+        );
+        assert_ne!(
+            must(captured.identity(), "read captured source A identity"),
+            must(replacement.identity(), "read replacement source B identity"),
+            "dispatch keeps source A's identity after the original path names source B"
+        );
+        assert_eq!(
+            must(
+                captured.read_file(Path::new("marker.txt")),
+                "read captured source A marker"
+            ),
+            b"source A\n"
+        );
+        assert_eq!(
+            must(
+                replacement.read_file(Path::new("marker.txt")),
+                "read source B marker"
+            ),
+            b"source B\n"
+        );
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(displaced);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn inherited_output_writer_keeps_using_captured_directory_after_path_swap() {
+        use std::os::fd::AsRawFd as _;
+
+        let root = temporary_directory("inherited-output-root-swap");
+        let captured = must(safe_fs::SafeRoot::open(&root), "capture output root A");
+        let inherited_fd = must(
+            captured.clone_directory_handle(),
+            "duplicate output root A for child handoff",
+        );
+        let mut descriptor_flags = must(
+            rustix::io::fcntl_getfd(&inherited_fd),
+            "read inherited output descriptor flags",
+        );
+        descriptor_flags.remove(rustix::io::FdFlags::CLOEXEC);
+        must(
+            rustix::io::fcntl_setfd(&inherited_fd, descriptor_flags),
+            "model launcher making output descriptor inheritable",
+        );
+        let inherited = must(
+            open_inherited_output_root(inherited_fd.as_raw_fd(), &root),
+            "reopen output root from inherited descriptor",
+        );
+        assert!(must(
+            rustix::io::fcntl_getfd(&inherited_fd),
+            "read protected output descriptor flags",
+        )
+        .contains(rustix::io::FdFlags::CLOEXEC));
+        let fd_probe = format!("test ! -e /proc/self/fd/{}", inherited_fd.as_raw_fd());
+        let child = must(
+            safe_fs::pinned_command::output(&captured, "sh", ["-c", fd_probe.as_str()]),
+            "check that renderer descriptor does not leak to a child",
+        );
+        assert!(
+            child.status.success(),
+            "renderer descriptor leaked to child: {}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+
+        let path = PathBuf::from(".github/workflows/ci-pr.yml");
+        let initial = BTreeMap::from([(path.clone(), "repository A\n".to_owned())]);
+        must(
+            write_generated_with_safe_root(
+                &captured,
+                &initial,
+                &GenerationInputs::parts(0, 0),
+                TestWriteOptions {
+                    dry_run: false,
+                    check: false,
+                    force: true,
+                    adopt: false,
+                },
+            ),
+            "seed output root A",
+        );
+        let wanted = BTreeMap::from([(path.clone(), "updated from repository A\n".to_owned())]);
+        let inputs = GenerationInputs::parts(0, 0);
+        let plan = must(
+            plan_generated_write_with_root(&root, &wanted, &inputs, false, None, Some(&inherited)),
+            "plan update through inherited output root",
+        );
+
+        let displaced = root.with_extension("captured-a");
+        must(fs::rename(&root, &displaced), "move captured output A");
+        must(fs::create_dir(&root), "create replacement output B");
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create replacement output B workflow directory",
+        );
+        must(
+            fs::write(root.join(&path), "replacement B\n"),
+            "write replacement output B",
+        );
+        must(
+            apply_generated_write_plan_with_root(
+                &root,
+                &wanted,
+                &inputs,
+                false,
+                false,
+                true,
+                &plan,
+                Some(&inherited),
+            ),
+            "apply update through captured output root",
+        );
+
+        assert_eq!(
+            must(
+                fs::read_to_string(displaced.join(&path)),
+                "read captured output A"
+            ),
+            "updated from repository A\n"
+        );
+        assert_eq!(
+            must(
+                fs::read_to_string(root.join(&path)),
+                "read replacement output B"
+            ),
+            "replacement B\n"
+        );
+        assert_eq!(
+            must(
+                fs::read_to_string(displaced.join(OWNERSHIP_STATE)),
+                "read captured output A ownership sidecar"
+            ),
+            ownership_state_content(&wanted, &inputs)
+        );
+        assert!(
+            !root.join(OWNERSHIP_STATE).exists(),
+            "replacement output B must not receive captured output A ownership state"
+        );
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(displaced);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn inherited_output_descriptor_must_match_explicit_output_path() {
+        use std::os::fd::AsRawFd as _;
+
+        let source = temporary_directory("inherited-output-fd-source");
+        let output = temporary_directory("inherited-output-fd-target");
+        let source_root = must(safe_fs::SafeRoot::open(&source), "capture source directory");
+        let inherited_fd = must(
+            source_root.clone_directory_handle(),
+            "duplicate source directory for handoff",
+        );
+        let inherited = must(
+            safe_fs::SafeRoot::from_inherited_directory_fd(inherited_fd.as_raw_fd(), &output),
+            "open mismatched inherited output root",
+        );
+        let error = must_fail(
+            verify_inherited_output_path(&inherited, &output),
+            "descriptor for another directory must be rejected",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("inherited output descriptor differs from --output path"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(source);
+        let _ = fs::remove_dir_all(output);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn inherited_source_root_reads_captured_directory_after_path_swap() {
+        use std::os::fd::AsRawFd as _;
+
+        let root = temporary_directory("inherited-source-root-swap");
+        must(
+            fs::write(root.join("marker.txt"), "source A\n"),
+            "seed source A",
+        );
+        let captured = must(safe_fs::SafeRoot::open(&root), "capture source root A");
+        let descriptor = must(
+            captured.clone_directory_handle(),
+            "duplicate source root A for child handoff",
+        );
+        let mut descriptor_flags = must(
+            rustix::io::fcntl_getfd(&descriptor),
+            "read inherited source descriptor flags",
+        );
+        descriptor_flags.remove(rustix::io::FdFlags::CLOEXEC);
+        must(
+            rustix::io::fcntl_setfd(&descriptor, descriptor_flags),
+            "model launcher making source descriptor inheritable",
+        );
+        let source = RepositorySource::Local(root.clone());
+        let inherited = must(
+            open_inherited_source_root(
+                &source,
+                &root,
+                &InheritedSourceRootSpec {
+                    descriptor: descriptor.as_raw_fd(),
+                    display_path: root.clone(),
+                },
+                None,
+            ),
+            "consume captured source root",
+        );
+        assert!(must(
+            rustix::io::fcntl_getfd(&descriptor),
+            "read protected source descriptor flags",
+        )
+        .contains(rustix::io::FdFlags::CLOEXEC));
+        let fd_probe = format!("test ! -e /proc/self/fd/{}", descriptor.as_raw_fd());
+        let child = must(
+            safe_fs::pinned_command::output(&inherited, "sh", ["-c", fd_probe.as_str()]),
+            "check that source descriptor does not leak to a child",
+        );
+        assert!(
+            child.status.success(),
+            "source descriptor leaked to child: {}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+
+        let displaced = root.with_extension("captured-source-a");
+        must(fs::rename(&root, &displaced), "move captured source A");
+        must(fs::create_dir(&root), "create replacement source B");
+        must(
+            fs::write(root.join("marker.txt"), "source B\n"),
+            "write replacement source B",
+        );
+        assert_eq!(
+            must(
+                inherited.read_file(Path::new("marker.txt")),
+                "read captured source A"
+            )
+            .as_slice(),
+            b"source A\n"
+        );
+        assert_eq!(
+            must(
+                fs::read(root.join("marker.txt")),
+                "read replacement source B"
+            )
+            .as_slice(),
+            b"source B\n"
+        );
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(displaced);
+    }
+
+    #[test]
+    fn inherited_source_root_rejects_remote_target_before_checkout() {
+        let source = RepositorySource::GitHub {
+            owner: "example-org".to_owned(),
+            repository: "example-repo".to_owned(),
+        };
+        let inherited = InheritedSourceRootSpec {
+            descriptor: 42,
+            display_path: PathBuf::from("/captured/repository"),
+        };
+        let checkout_called = std::cell::Cell::new(false);
+        let error = must_fail(
+            checkout_with_source_handoff(&source, Some(&inherited), |_| {
+                checkout_called.set(true);
+                Ok(())
+            }),
+            "remote source must be rejected before checkout",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("descriptor-bound source handoff requires a local repository target"),
+            "{error}"
+        );
+        assert!(!checkout_called.get(), "remote checkout must not start");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn inherited_source_root_rejects_replacement_before_binding() {
+        use std::os::fd::AsRawFd as _;
+
+        let root = temporary_directory("inherited-source-root-reject-swap");
+        must(
+            fs::write(root.join("marker.txt"), "source A\n"),
+            "seed source A",
+        );
+        let captured = must(safe_fs::SafeRoot::open(&root), "capture source root A");
+        let descriptor = must(
+            captured.clone_directory_handle(),
+            "duplicate source root A for child handoff",
+        );
+        let displaced = root.with_extension("captured-source-a");
+        must(fs::rename(&root, &displaced), "move captured source A");
+        must(fs::create_dir(&root), "create replacement source B");
+        must(
+            fs::write(root.join("marker.txt"), "source B\n"),
+            "write replacement source B",
+        );
+
+        let error = must_fail(
+            open_inherited_source_root(
+                &RepositorySource::Local(root.clone()),
+                &root,
+                &InheritedSourceRootSpec {
+                    descriptor: descriptor.as_raw_fd(),
+                    display_path: root.clone(),
+                },
+                None,
+            ),
+            "reject a CLI target rebound away from the inherited source",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("inherited source descriptor differs from target path"),
+            "{error}"
+        );
+        assert_eq!(
+            must(
+                fs::read(root.join("marker.txt")),
+                "verify source B untouched"
+            )
+            .as_slice(),
+            b"source B\n"
+        );
+        assert_eq!(
+            must(
+                fs::read(displaced.join("marker.txt")),
+                "verify source A untouched"
+            )
+            .as_slice(),
+            b"source A\n"
+        );
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(displaced);
+    }
+
     #[test]
     fn reviewed_preimages_reject_same_action_concurrent_replacement() {
         let root = temporary_repository("reviewed-preimage-replacement");
@@ -18859,20 +19979,28 @@ lockfile = true
             "create workflow directory",
         );
         must(fs::write(&path, "old bytes\n"), "write reviewed bytes");
+        let safe_root = must(safe_fs::SafeRoot::open(&root), "open reviewed output root");
         let expected = must(
-            capture_file_preimage(&path, &relative),
+            safe_root.capture_file_preimage(&relative),
             "capture reviewed bytes",
         );
         let live_was_present = std::cell::Cell::new(false);
 
         must(
-            write_reviewed_file_observed(&path, &relative, "new bytes\n", &expected, |live| {
-                live_was_present.set(
-                    live.is_file()
-                        && fs::read_to_string(live).is_ok_and(|value| value == "old bytes\n"),
-                );
-                Ok(())
-            }),
+            safe_fs::write_reviewed_file_observed(
+                &safe_root,
+                &relative,
+                "new bytes\n",
+                &expected,
+                |live| {
+                    live_was_present.set(
+                        live.is_file()
+                            && fs::read_to_string(live).is_ok_and(|value| value == "old bytes\n"),
+                    );
+                    Ok(())
+                },
+                |_| Ok(()),
+            ),
             "atomically replace reviewed bytes",
         );
         assert!(live_was_present.get());
@@ -18882,6 +20010,401 @@ lockfile = true
         );
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn reviewed_create_rejects_stage_entry_replacement_before_commit() {
+        let root = temporary_repository("reviewed-create-stage-replacement");
+        let relative = PathBuf::from(".github/workflows/ci-pr.yml");
+        let safe_root = must(safe_fs::SafeRoot::open(&root), "open reviewed output root");
+        let expected = must(
+            safe_root.capture_file_preimage(&relative),
+            "capture missing output",
+        );
+
+        let error = must_some(
+            safe_fs::write_reviewed_file_observed(
+                &safe_root,
+                &relative,
+                "requested bytes\n",
+                &expected,
+                |_| Ok(()),
+                |staged| {
+                    fs::remove_file(staged).map_err(|error| {
+                        GeneratorError::io("replace staged file", staged, &error)
+                    })?;
+                    fs::write(staged, "unexpected bytes\n").map_err(|error| {
+                        GeneratorError::io("write replacement stage", staged, &error)
+                    })
+                },
+            )
+            .err(),
+            "writer must reject a replaced staged file",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("staged generated file changed before install"),
+            "{error}"
+        );
+        assert!(!root.join(&relative).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reviewed_update_rejects_stage_entry_replacement_before_commit() {
+        let root = temporary_repository("reviewed-update-stage-replacement");
+        let relative = PathBuf::from(".github/workflows/ci-pr.yml");
+        let path = root.join(&relative);
+        must(
+            fs::create_dir_all(path.parent().unwrap_or(&root)),
+            "create workflow directory",
+        );
+        must(
+            fs::write(&path, "reviewed bytes\n"),
+            "write reviewed output",
+        );
+        let safe_root = must(safe_fs::SafeRoot::open(&root), "open reviewed output root");
+        let expected = must(
+            safe_root.capture_file_preimage(&relative),
+            "capture reviewed output",
+        );
+
+        let error = must_some(
+            safe_fs::write_reviewed_file_observed(
+                &safe_root,
+                &relative,
+                "requested bytes\n",
+                &expected,
+                |_| Ok(()),
+                |staged| {
+                    fs::remove_file(staged).map_err(|error| {
+                        GeneratorError::io("replace staged file", staged, &error)
+                    })?;
+                    fs::write(staged, "unexpected bytes\n").map_err(|error| {
+                        GeneratorError::io("write replacement stage", staged, &error)
+                    })
+                },
+            )
+            .err(),
+            "writer must reject a replaced staged file",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("staged generated file changed before replacement"),
+            "{error}"
+        );
+        assert_eq!(
+            must(
+                fs::read_to_string(&path),
+                "read reviewed output after rejection"
+            ),
+            "reviewed bytes\n"
+        );
+        let workflows = must_some(path.parent(), "workflow parent");
+        let backup_directory = must_some(
+            must(fs::read_dir(workflows), "read workflow directory")
+                .filter_map(|entry| entry.ok())
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".velnor-workflow-backup-")
+                })
+                .map(|entry| entry.path()),
+            "preserved recovery directory",
+        );
+        let recovery_path = backup_directory.join("ci-pr.yml");
+        assert!(
+            error
+                .to_string()
+                .contains(&recovery_path.display().to_string()),
+            "failure must report its recovery path: {error}"
+        );
+        assert_eq!(
+            must(fs::read_to_string(recovery_path), "read recovery copy"),
+            "reviewed bytes\n"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reviewed_update_rejects_parent_swap_to_outside_symlink() {
+        let root = temporary_repository("reviewed-parent-swap");
+        let outside = temporary_directory("reviewed-parent-swap-outside");
+        let relative = PathBuf::from(".github/workflows/ci-pr.yml");
+        let path = root.join(&relative);
+        let workflows = must_some(path.parent(), "workflow parent");
+        must(fs::create_dir_all(workflows), "create workflow directory");
+        must(fs::write(&path, "old bytes\n"), "write reviewed bytes");
+        let outside_file = outside.join("ci-pr.yml");
+        must(
+            fs::write(&outside_file, "outside sentinel\n"),
+            "write outside sentinel",
+        );
+        let safe_root = must(safe_fs::SafeRoot::open(&root), "open reviewed output root");
+        let expected = must(
+            safe_root.capture_file_preimage(&relative),
+            "capture reviewed bytes",
+        );
+        let moved_workflows = root.join(".github/workflows-reviewed");
+
+        let error = must_some(
+            safe_fs::write_reviewed_file_observed(
+                &safe_root,
+                &relative,
+                "new bytes\n",
+                &expected,
+                |_| {
+                    fs::rename(workflows, &moved_workflows).map_err(|error| {
+                        GeneratorError::io("move workflow directory", workflows, &error)
+                    })?;
+                    std::os::unix::fs::symlink(&outside, workflows).map_err(|error| {
+                        GeneratorError::io("swap workflow parent", workflows, &error)
+                    })
+                },
+                |_| Ok(()),
+            )
+            .err(),
+            "writer must reject swapped output parent",
+        );
+        assert!(
+            error.to_string().contains("symlinked path ancestor"),
+            "{error}"
+        );
+        assert_eq!(
+            must(fs::read_to_string(&outside_file), "read outside sentinel"),
+            "outside sentinel\n"
+        );
+        assert_eq!(
+            must(
+                fs::read_to_string(moved_workflows.join("ci-pr.yml")),
+                "read original output"
+            ),
+            "old bytes\n"
+        );
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reviewed_update_rechecks_parent_after_commit_hook() {
+        let root = temporary_repository("reviewed-parent-swap-at-commit");
+        let outside = temporary_directory("reviewed-parent-swap-at-commit-outside");
+        let relative = PathBuf::from(".github/workflows/ci-pr.yml");
+        let path = root.join(&relative);
+        let workflows = must_some(path.parent(), "workflow parent");
+        must(fs::create_dir_all(workflows), "create workflow directory");
+        must(
+            fs::write(&path, "reviewed bytes\n"),
+            "write reviewed output",
+        );
+        let outside_file = outside.join("ci-pr.yml");
+        must(
+            fs::write(&outside_file, "outside sentinel\n"),
+            "write outside sentinel",
+        );
+        let safe_root = must(safe_fs::SafeRoot::open(&root), "open reviewed output root");
+        let expected = must(
+            safe_root.capture_file_preimage(&relative),
+            "capture reviewed output",
+        );
+        let moved_workflows = root.join(".github/workflows-reviewed");
+
+        let error = must_some(
+            safe_fs::write_reviewed_file_observed(
+                &safe_root,
+                &relative,
+                "new bytes\n",
+                &expected,
+                |_| Ok(()),
+                |_| {
+                    fs::rename(workflows, &moved_workflows).map_err(|error| {
+                        GeneratorError::io("move workflow directory", workflows, &error)
+                    })?;
+                    std::os::unix::fs::symlink(&outside, workflows).map_err(|error| {
+                        GeneratorError::io("swap workflow parent", workflows, &error)
+                    })
+                },
+            )
+            .err(),
+            "writer must reject swapped output parent at commit",
+        );
+        assert!(
+            error.to_string().contains("symlinked path ancestor"),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("may be stale if the parent directory was moved or replaced"),
+            "recovery diagnostic must not claim the pre-swap path is stable: {error}"
+        );
+        assert_eq!(
+            must(fs::read_to_string(&outside_file), "read outside sentinel"),
+            "outside sentinel\n"
+        );
+        assert_eq!(
+            must(
+                fs::read_to_string(moved_workflows.join("ci-pr.yml")),
+                "read output after rejected commit"
+            ),
+            "reviewed bytes\n"
+        );
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_parent_symlink_swap_after_resolution_is_rejected() {
+        let launch = temporary_directory("output-parent-resolution-swap");
+        let parent = launch.join("approved-parent");
+        must(fs::create_dir_all(&parent), "create approved output parent");
+        let approved_root = must(
+            resolve_output_path(&parent.join("generated")),
+            "resolve output path",
+        );
+        let outside = temporary_directory("output-parent-resolution-outside");
+        let sentinel = outside.join("sentinel");
+        must(
+            fs::write(&sentinel, "outside sentinel\n"),
+            "write outside sentinel",
+        );
+        let mut files = BTreeMap::new();
+        files.insert(
+            PathBuf::from(".github/workflows/ci-pr.yml"),
+            "new\n".to_owned(),
+        );
+        let inputs = GenerationInputs::parts(0, 0);
+        let plan = must(
+            plan_generated_write(&approved_root, &files, &inputs),
+            "plan output before parent swap",
+        );
+
+        let moved_parent = launch.join("approved-parent-original");
+        must(fs::rename(&parent, &moved_parent), "move approved parent");
+        must(
+            std::os::unix::fs::symlink(&outside, &parent),
+            "replace approved parent with symlink",
+        );
+        let error = must_some(
+            apply_generated_write_plan(&approved_root, &files, &inputs, false, false, false, &plan)
+                .err(),
+            "writer must reject output parent swap",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("output path changed after planning"),
+            "{error}"
+        );
+        assert_eq!(
+            must(fs::read_to_string(&sentinel), "read outside sentinel"),
+            "outside sentinel\n"
+        );
+        assert!(
+            !outside.join(".github/workflows/ci-pr.yml").exists(),
+            "the replacement directory must not receive the generated file"
+        );
+        assert!(
+            !outside.join(OWNERSHIP_STATE).exists(),
+            "the replacement directory must not receive ownership state"
+        );
+        assert!(
+            !moved_parent.join("generated").exists(),
+            "the captured output tree must remain untouched after path rebinding"
+        );
+        let _ = fs::remove_dir_all(launch);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn output_parent_directory_swap_after_resolution_is_rejected() {
+        let launch = temporary_directory("output-parent-normal-resolution-swap");
+        let parent = launch.join("approved-parent");
+        must(fs::create_dir_all(&parent), "create approved output parent");
+        let approved_root = must(
+            resolve_output_path(&parent.join("generated")),
+            "resolve output path",
+        );
+        let mut files = BTreeMap::new();
+        files.insert(
+            PathBuf::from(".github/workflows/ci-pr.yml"),
+            "new\n".to_owned(),
+        );
+        let inputs = GenerationInputs::parts(0, 0);
+        let plan = must(
+            plan_generated_write(&approved_root, &files, &inputs),
+            "plan output before parent swap",
+        );
+
+        let moved_parent = launch.join("approved-parent-original");
+        must(fs::rename(&parent, &moved_parent), "move approved parent");
+        must(
+            fs::create_dir_all(&parent),
+            "replace approved parent directory",
+        );
+        let error = must_some(
+            apply_generated_write_plan(&approved_root, &files, &inputs, false, false, false, &plan)
+                .err(),
+            "writer must reject replaced output parent directory",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("output path changed after planning"),
+            "{error}"
+        );
+        assert!(!parent.join("generated").exists());
+        assert!(!moved_parent.join("generated").exists());
+        let _ = fs::remove_dir_all(launch);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_plan_validation_rejects_rebound_output_root() {
+        let root = temporary_directory("read-only-output-root-rebind");
+        let binding = must(
+            safe_fs::OutputPathBinding::capture(&root),
+            "capture output binding",
+        );
+        let plan = GeneratedWritePlan {
+            files: vec![PlannedFile {
+                path: PathBuf::from("generated.yml"),
+                action: PlannedAction::Create,
+                preimage: FilePreimage::Missing,
+            }],
+            changed: vec![PathBuf::from("generated.yml")],
+            stale: Vec::new(),
+            conflicts: Vec::new(),
+            output_binding: Some(binding),
+            ownership_present: false,
+            ownership_needs_refresh: false,
+            recorded_inputs: None,
+            foreign_schema: None,
+        };
+        let moved = root.with_extension("reviewed");
+        must(fs::rename(&root, &moved), "move reviewed output root");
+        must(fs::create_dir(&root), "replace output root");
+
+        let error = must_some(
+            validate_plan_preimages(&root, &plan).err(),
+            "read-only validation must reject rebound output root",
+        )
+        .to_string();
+        assert!(
+            error.contains("output path changed after planning"),
+            "{error}"
+        );
+
+        must(fs::remove_dir(&root), "remove replacement output root");
+        must(fs::rename(moved, &root), "restore reviewed output root");
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn generation_lock_serializes_mutating_writers() {
         use std::sync::mpsc;
@@ -19187,7 +20710,7 @@ lockfile = true
             write_generated(&root, &current, false, false, false).err(),
             "reject symlinked legacy guide",
         );
-        assert!(error.to_string().contains("symlinked stale generated file"));
+        assert!(error.to_string().contains("symlink"));
         assert!(fs::symlink_metadata(root.join(&guide)).is_ok());
         assert!(must(fs::read_dir(&outside), "read outside directory")
             .next()
@@ -19196,13 +20719,29 @@ lockfile = true
         let _ = fs::remove_dir_all(outside);
     }
     #[test]
-    fn local_owner_repository_directory_beats_remote_shorthand() {
+    fn dispatch_selection_classifies_local_and_remote_targets() {
         let local = temporary_repository("owner-repository-local");
-        let source = must(
-            RepositorySource::parse_with_candidate_path("owner/repository", local.clone()),
-            "parse existing local owner/repository directory",
+        let local_source = must(
+            capture_source_selection(local.to_string_lossy().as_ref()),
+            "capture local repository target",
         );
-        assert!(matches!(source, RepositorySource::Local(path) if path == local));
+        assert!(matches!(
+            local_source.source,
+            RepositorySource::Local(path) if path == local
+        ));
+        assert!(local_source.local_root.is_some());
+
+        let remote_owner = format!("owner-{}", unique_suffix());
+        let remote_target = format!("{remote_owner}/repository");
+        let remote_source = must(
+            capture_source_selection(&remote_target),
+            "capture remote shorthand target",
+        );
+        assert!(matches!(
+            remote_source.source,
+            RepositorySource::GitHub { owner, repository }
+                if owner == remote_owner && repository == "repository"
+        ));
         let _ = fs::remove_dir_all(local);
     }
     #[test]
@@ -19228,10 +20767,6 @@ lockfile = true
             ),
             "write manifest",
         );
-        must(
-            std::os::unix::fs::symlink(&outside, root.join(".github")),
-            "create managed directory symlink",
-        );
         let config = must(
             scan_repository(
                 &root,
@@ -19242,13 +20777,18 @@ lockfile = true
             "scan symlinked repository",
         );
         let files = must(generated_files(&config), "generate");
+        must(
+            std::os::unix::fs::symlink(&outside, root.join(".github")),
+            "create managed directory symlink",
+        );
         let error = must_some(
             write_generated(&root, &files, false, false, true).err(),
             "symlinked managed directory must be rejected",
         );
-        assert!(error
-            .to_string()
-            .contains("refusing symlinked managed directory"));
+        assert!(
+            error.to_string().contains("symlinked path ancestor"),
+            "{error}"
+        );
         assert!(must(fs::read_dir(&outside), "read outside directory")
             .next()
             .is_none());
@@ -19343,9 +20883,10 @@ lockfile = true
             write_generated(&root, &files, false, false, true).err(),
             "symlinked owned static ancestor must be rejected",
         );
-        assert!(error
-            .to_string()
-            .contains("refusing symlinked managed directory"));
+        assert!(
+            error.to_string().contains("symlinked path ancestor"),
+            "{error}"
+        );
         assert!(must(fs::read_dir(&outside), "read outside directory")
             .next()
             .is_none());
@@ -19362,8 +20903,9 @@ lockfile = true
             std::os::unix::fs::symlink(&outside, launch.join("repositories")),
             "create output directory symlink",
         );
+        let launch_root = must(safe_fs::SafeRoot::open(&launch), "open launch root");
         let error = must_some(
-            remote_output_root(&launch, "owner", "repository").err(),
+            remote_output_root_from_root(&launch_root, "owner", "repository").err(),
             "symlinked output ancestor must be rejected",
         );
         assert!(error
@@ -19382,6 +20924,17 @@ lockfile = true
         let output_parent = temporary_repository("explicit-output-destination");
         let output = output_parent.join("nested-output");
         must(
+            fs::create_dir_all(source.join(".github-gen")),
+            "create generation config directory",
+        );
+        must(
+            fs::write(
+                source.join(".github-gen/velnor-workflow.toml"),
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n",
+            ),
+            "write required schema-2 generation config",
+        );
+        must(
             fs::write(
                 source.join("Cargo.toml"),
                 "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
@@ -19397,12 +20950,17 @@ lockfile = true
             ])),
             dry_run: false,
             check: false,
+            verify_pinned: false,
             force: false,
             plain: true,
             pin_build: false,
         };
 
-        must(run(&cli), "generate into explicit output path");
+        let selection = must(
+            capture_generator_selection(&cli.target, cli.output.as_deref()),
+            "capture explicit output path selection",
+        );
+        must(run(&cli, selection), "generate into explicit output path");
 
         assert!(output.join(".github/ci/project.toml").is_file());
         assert!(output.join(".github/workflows/ci-pr.yml").is_file());
@@ -19467,8 +21025,9 @@ lockfile = true
         );
         must(fs::write(&path, "old template\n"), "write template");
 
+        let output_root = must(safe_fs::SafeRoot::open(&root), "open template output root");
         let preimage = must(
-            capture_file_preimage(&path, &relative),
+            output_root.capture_file_preimage(&relative),
             "capture template preimage",
         );
         let mut files = BTreeMap::new();
@@ -20011,8 +21570,10 @@ lockfile = true
         assert!(renovate.contains("runs-on: [self-hosted, example-lane]"));
         assert!(!renovate.contains("example-trusted"));
         assert!(renovate.contains(
-            "github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')"
+            "if: ${{ github.repository == 'example/fixture' && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}"
         ));
+        assert!(!renovate.contains("  schedule:"));
+        assert!(!renovate.contains("  workflow_dispatch:"));
         assert!(renovate.contains("velnor-renovate-"));
         assert!(renovate.contains("44.93.6"));
         assert!(!renovate.contains("pull_request"));
@@ -20032,7 +21593,6 @@ lockfile = true
         let config = RENOVATE_GENERATION_CONFIG.replace(
             "reason = \"Self-hosted Renovate for repository dependencies.\"\n",
             "reason = \"Self-hosted Renovate for repository dependencies.\"\n\
-             schedules = [\"0 18 * * *\"]\n\
              repositories = [\"example/one\", \"example/two\"]\n\
              host_rules_secret = \"RENOVATE_HOST_RULES_JSON\"\n\
              author = \"Renovate Bot <bot@example.com>\"\n\
@@ -20052,7 +21612,6 @@ lockfile = true
             scanned.config.renovate.as_ref(),
             "the full contract produces a renovate spec",
         );
-        assert_eq!(spec.schedules, vec!["0 18 * * *".to_owned()]);
         assert_eq!(
             spec.repositories,
             vec!["example/one".to_owned(), "example/two".to_owned()]
@@ -20079,7 +21638,7 @@ lockfile = true
             "generated renovate.yml",
         );
         for marker in [
-            "- cron: \"0 18 * * *\"",
+            "if: ${{ github.repository == 'example/fixture' && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}",
             "RENOVATE_AUTODISCOVER: \"false\"",
             "RENOVATE_REPOSITORIES: \"example/one,example/two\"",
             "RENOVATE_HOST_RULES: ${{ secrets.RENOVATE_HOST_RULES_JSON }}",
@@ -20176,7 +21735,7 @@ lockfile = true
         format!(
              "schema = 2\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
              [policy]\nci_required = true\ndco_required = false\nruleset_external_status_checks = [\"DCO\"]\n\n\
-             [[declare]]\nprimitive = \"rust-crate\"\nunits = [\"{unit}\"]\nfile = \"rust-crate.yml\"\n"
+             [[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"{unit}\"]\nfile = \"ci-unit-rust.yml\"\n"
         )
     }
 
@@ -20289,7 +21848,17 @@ lockfile = true
         );
         let files = must(generated_files(&scanned.config), "generate");
         must(
-            write_generated_with_options(root, &files, &scanned.inputs, false, false, force, false),
+            write_generated_with_safe_root(
+                scanned.safe_root.as_ref(),
+                &files,
+                &scanned.inputs,
+                TestWriteOptions {
+                    dry_run: false,
+                    check: false,
+                    force,
+                    adopt: false,
+                },
+            ),
             "generate repository",
         )
     }
@@ -20303,16 +21872,26 @@ lockfile = true
             "main",
         )?;
         let files = must(generated_files(&scanned.config), "generate");
-        write_generated_with_options(root, &files, &scanned.inputs, false, true, false, false)
+        write_generated_with_safe_root(
+            scanned.safe_root.as_ref(),
+            &files,
+            &scanned.inputs,
+            TestWriteOptions {
+                dry_run: false,
+                check: true,
+                force: false,
+                adopt: false,
+            },
+        )
     }
 
-    fn recorded_state(root: &Path) -> OwnershipState {
+    fn recorded_state(root: &safe_fs::SafeRoot) -> OwnershipState {
         let preimage = must(
-            capture_file_preimage(&root.join(OWNERSHIP_STATE), Path::new(OWNERSHIP_STATE)),
+            root.capture_file_preimage(Path::new(OWNERSHIP_STATE)),
             "capture ownership state preimage",
         );
         schema_two_state(must(
-            parse_ownership_state(root, &preimage),
+            parse_ownership_state(root.command_directory(), &preimage),
             "parse ownership state",
         ))
     }
@@ -20368,7 +21947,7 @@ lockfile = true
         );
         assert!(state.contains("[outputs]\n"), "{state}");
         assert_eq!(
-            recorded_state(&root).inputs,
+            recorded_state(&scanned.safe_root).inputs,
             scanned.inputs,
             "recorded inputs must match the current run"
         );
@@ -20404,11 +21983,412 @@ lockfile = true
     }
 
     #[test]
+    fn generated_output_churn_is_not_scan_provenance_but_handwritten_github_is() {
+        let root = configured_repository("github-scan-provenance", None);
+        let provider = Some(std::collections::BTreeSet::from([
+            crate::s2::provider::ProviderId::GithubHosted,
+        ]));
+        generate_repository(&root, false);
+        let initial = must(
+            scan_target(&root, provider.clone(), "main"),
+            "scan initial repository",
+        )
+        .inputs
+        .scan;
+        let generated = root.join(".github/workflows/ci-main.yml");
+        assert!(generated.is_file(), "generated workflow fixture is missing");
+        must(fs::remove_file(&generated), "remove generated workflow");
+        let after_generated_removal = must(
+            scan_target(&root, provider.clone(), "main"),
+            "scan after generated workflow removal",
+        )
+        .inputs
+        .scan;
+        assert_eq!(
+            after_generated_removal, initial,
+            "recorded generated output removal changed scan input"
+        );
+        let missing_error = must_some(
+            check_repository(&root).err(),
+            "check must report missing generated output",
+        );
+        assert!(
+            missing_error.to_string().contains("ci-main.yml"),
+            "missing generated output must remain a generation error: {missing_error}"
+        );
+        generate_repository(&root, false);
+
+        let forged = root.join(".github/workflows/forged.yml");
+        must(
+            fs::write(
+                &forged,
+                format!("{GENERATED_HEADER}name: forged\non:\n  workflow_dispatch:\n"),
+            ),
+            "write forged generated-header workflow",
+        );
+        let with_forged = must(
+            scan_target(&root, provider.clone(), "main"),
+            "scan forged generated-header workflow",
+        )
+        .inputs
+        .scan;
+        assert_ne!(with_forged, initial, "forged header hid unmanaged workflow");
+        let forged_error = must_some(
+            check_repository(&root).err(),
+            "check must reject forged generated-header workflow",
+        );
+        assert!(
+            forged_error.to_string().contains("forged.yml"),
+            "forged workflow must be named: {forged_error}"
+        );
+        must(fs::remove_file(&forged), "remove forged workflow");
+
+        let handwritten = root.join(".github/workflows/handwritten.yml");
+        must(
+            fs::write(&handwritten, "name: handwritten\n"),
+            "write handwritten workflow",
+        );
+        let with_handwritten = must(
+            scan_target(&root, provider, "main"),
+            "scan with handwritten workflow",
+        )
+        .inputs
+        .scan;
+        assert_ne!(with_handwritten, initial, "handwritten workflow was hidden");
+        let handwritten_error = must_some(
+            check_repository(&root).err(),
+            "check must reject unmanaged handwritten workflow",
+        );
+        assert!(
+            handwritten_error.to_string().contains("handwritten.yml"),
+            "unmanaged workflow must be named: {handwritten_error}"
+        );
+        must(fs::remove_file(handwritten), "remove handwritten workflow");
+        assert!(
+            matches!(check_repository(&root), Ok(WriteOutcome::Unchanged)),
+            "removing unmanaged workflows must restore the recorded scan"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn forged_sidecar_cannot_hide_workflow_or_action_inputs() {
+        for (suffix, relative, content, initialize_git) in [
+            (
+                "tracked-workflow",
+                ".github/workflows/user.yml",
+                "name: user\non:\n  workflow_dispatch:\n",
+                true,
+            ),
+            (
+                "untracked-action",
+                ".github/actions/user/action.yml",
+                "name: user\nruns:\n  using: composite\n  steps: []\n",
+                false,
+            ),
+        ] {
+            let root = configured_repository(&format!("forged-sidecar-{suffix}"), None);
+            generate_repository(&root, false);
+            let path = root.join(relative);
+            must(
+                fs::create_dir_all(must_some(path.parent(), "input parent")),
+                "create input parent",
+            );
+            must(fs::write(&path, content), "write unmanaged input");
+            if initialize_git {
+                let status = must(
+                    Command::new("git")
+                        .current_dir(&root)
+                        .args(["init", "-q"])
+                        .status(),
+                    "initialize input repository",
+                );
+                assert!(status.success(), "git init failed: {status}");
+                let status = must(
+                    Command::new("git")
+                        .current_dir(&root)
+                        .args(["add", "."])
+                        .status(),
+                    "stage tracked input",
+                );
+                assert!(status.success(), "git add failed: {status}");
+                let status = must(
+                    Command::new("git")
+                        .current_dir(&root)
+                        .args([
+                            "-c",
+                            "user.name=velnor-workflow",
+                            "-c",
+                            "user.email=test@example.com",
+                            "commit",
+                            "-qm",
+                            "fixture",
+                        ])
+                        .status(),
+                    "commit tracked input",
+                );
+                assert!(status.success(), "git commit failed: {status}");
+            }
+            let state_path = root.join(OWNERSHIP_STATE);
+            let mut state = must(fs::read_to_string(&state_path), "read ownership state");
+            if !state.ends_with('\n') {
+                state.push('\n');
+            }
+            state.push_str(&format!(
+                "{relative}\t{:016x}\n",
+                content_digest_bytes(content.as_bytes())
+            ));
+            must(fs::write(&state_path, state), "forge ownership state");
+            let error = must_some(
+                scan_target(
+                    &root,
+                    Some(std::collections::BTreeSet::from([
+                        crate::s2::provider::ProviderId::GithubHosted,
+                    ])),
+                    "main",
+                )
+                .err(),
+                "forged sidecar must fail closed",
+            )
+            .to_string();
+            assert!(
+                error.contains("outside the current renderer") && error.contains(relative),
+                "forged sidecar must name its untrusted path: {error}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn declared_static_output_is_excluded_before_and_after_first_generation() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \".github/workflows/owned-static.yml\"\nsource = \".github-gen/sources/owned-static.yml\"\n";
+        let root = configured_repository("static-output-provenance", Some(config));
+        must(
+            fs::create_dir_all(root.join(".github-gen/sources")),
+            "create static source directory",
+        );
+        must(
+            fs::write(
+                root.join(".github-gen/sources/owned-static.yml"),
+                "name: owned static\n",
+            ),
+            "write static source",
+        );
+        let provider = Some(std::collections::BTreeSet::from([
+            crate::s2::provider::ProviderId::GithubHosted,
+        ]));
+        let before = must(
+            scan_target(&root, provider.clone(), "main"),
+            "scan before static generation",
+        )
+        .inputs
+        .scan;
+        generate_repository(&root, false);
+        assert!(root.join(".github/workflows/owned-static.yml").is_file());
+        let after = must(
+            scan_target(&root, provider, "main"),
+            "scan after static generation",
+        )
+        .inputs
+        .scan;
+        assert_eq!(after, before, "static output changed scan provenance");
+        assert!(
+            matches!(check_repository(&root), Ok(WriteOutcome::Unchanged)),
+            "repeat generation must be drift-free"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn static_release_workflow_cannot_replace_typed_renderer() {
+        let mut config = scanned_release_config();
+        let toolchain = RustToolchain {
+            channel: "1.84.0".to_owned(),
+            targets: vec!["x86_64-unknown-linux-gnu".to_owned()],
+            ..RustToolchain::default()
+        };
+        for unit in &mut config.units {
+            if unit.kind == UnitKind::Rust {
+                unit.toolchain = Some(toolchain.clone());
+            }
+        }
+        config.workflow_files.push("release.yml".to_owned());
+        let release_path = PathBuf::from(".github/workflows/release.yml");
+        let rendered = must(generated_files(&config), "render typed release workflow");
+        let typed_release = must_some(rendered.get(&release_path), "typed release workflow");
+        assert!(typed_release.contains("  verify:"), "{typed_release}");
+
+        config.static_files.push(StaticFile {
+            path: release_path.to_string_lossy().into_owned(),
+            source: ".github-gen/sources/static-release.yml".to_owned(),
+            content: "name: shadow release\n".to_owned(),
+        });
+        let error = must_fail(
+            generated_files(&config),
+            "static release output must not replace the typed renderer",
+        )
+        .to_string();
+        assert!(
+            error.contains("collides with an already-rendered output")
+                && error.contains(".github/workflows/release.yml"),
+            "collision must identify the protected renderer output: {error}"
+        );
+    }
+
+    #[test]
+    fn static_source_cannot_hide_workflow_inputs_or_self_reference() {
+        for (suffix, source) in [
+            ("exact", ".github/workflows/self.yml"),
+            ("dot", "./.github/workflows/self.yml"),
+            ("repeated-separator", ".//.github/workflows/self.yml"),
+        ] {
+            let config = format!(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \".github/workflows/self.yml\"\nsource = \"{source}\"\n"
+            );
+            let root =
+                configured_repository(&format!("static-self-source-{suffix}"), Some(&config));
+            must(
+                fs::create_dir_all(root.join(".github/workflows")),
+                "create workflow directory",
+            );
+            must(
+                fs::write(
+                    root.join(".github/workflows/self.yml"),
+                    "name: self-source\non:\n  workflow_dispatch:\n",
+                ),
+                "write self-source workflow",
+            );
+            let error = must_some(
+                scan_target(
+                    &root,
+                    Some(std::collections::BTreeSet::from([
+                        crate::s2::provider::ProviderId::GithubHosted,
+                    ])),
+                    "main",
+                )
+                .err(),
+                "static workflow source must be rejected",
+            )
+            .to_string();
+            assert!(
+                error.contains("source must stay outside `.github/"),
+                "static workflow source must fail closed: {error}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn static_source_symlink_cannot_reach_github_inputs() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \".github/actions/self/action.yml\"\nsource = \".github-gen/source.yml\"\n";
+        let root = configured_repository("static-symlink-source", Some(config));
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create workflow directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github-gen")),
+            "create config source directory",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/self.yml"),
+                "name: self-source\non:\n  workflow_dispatch:\n",
+            ),
+            "write self-source workflow",
+        );
+        must(
+            std::os::unix::fs::symlink(
+                "../.github/workflows/self.yml",
+                root.join(".github-gen/source.yml"),
+            ),
+            "link source into .github",
+        );
+        let error = must_some(
+            scan_target(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+                "main",
+            )
+            .err(),
+            "static source symlink must be rejected",
+        )
+        .to_string();
+        assert!(
+            error.contains("symlink"),
+            "static source symlink must fail closed: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn static_source_symlinks_cannot_escape_repository() {
+        let outside = temporary_directory("static-source-escape-outside");
+        must(
+            fs::write(outside.join("source.yml"), "name: external source\n"),
+            "write outside source",
+        );
+        for (suffix, source, link_path, target) in [
+            (
+                "file-link",
+                ".github-gen/source.yml",
+                ".github-gen/source.yml",
+                outside.join("source.yml"),
+            ),
+            (
+                "ancestor-link",
+                "source-link/source.yml",
+                "source-link",
+                outside.clone(),
+            ),
+        ] {
+            let config = format!(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \".github/workflows/owned.yml\"\nsource = \"{source}\"\n"
+            );
+            let root =
+                configured_repository(&format!("static-source-escape-{suffix}"), Some(&config));
+            if link_path == ".github-gen/source.yml" {
+                must(
+                    fs::create_dir_all(root.join(".github-gen")),
+                    "create source directory",
+                );
+            }
+            must(
+                std::os::unix::fs::symlink(target, root.join(link_path)),
+                "create external source symlink",
+            );
+            let error = must_some(
+                scan_target(
+                    &root,
+                    Some(std::collections::BTreeSet::from([
+                        crate::s2::provider::ProviderId::GithubHosted,
+                    ])),
+                    "main",
+                )
+                .err(),
+                "static source symlink must be rejected",
+            )
+            .to_string();
+            assert!(
+                error.contains("symlink") || error.contains("non-regular"),
+                "static source must fail at no-follow boundary: {error}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
     fn check_fails_when_config_inputs_change_but_output_does_not() {
         let before = configured_repository_config("rust-fixture");
         let root = configured_repository("config-input-drift", Some(&before));
         generate_repository(&root, false);
-        let recorded = recorded_state(&root).inputs.config;
+        let safe_root = must(safe_fs::SafeRoot::open(&root), "open configured repository");
+        let recorded = recorded_state(&safe_root).inputs.config;
 
         let after = before.replace("dco_required = false", "dco_required = true");
         assert_ne!(after, before, "the flip must change the config");
@@ -20433,7 +22413,7 @@ lockfile = true
             "regeneration must refresh the recorded config input"
         );
         assert_ne!(
-            recorded_state(&root).inputs.config,
+            recorded_state(&safe_root).inputs.config,
             recorded,
             "the config digest must move"
         );
@@ -20484,6 +22464,36 @@ lockfile = true
     }
 
     #[test]
+    fn renderer_check_does_not_verify_a_stale_declared_pin() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"tailrocks/velnor\"\nrevision = \"0123456789abcdef0123456789abcdef01234567\"\n\n[workflow]\nproviders = [\"github-hosted\"]\n";
+        let root = configured_repository("stale-pin-renderer-check", Some(config));
+        assert!(matches!(
+            generate_repository(&root, false),
+            WriteOutcome::Written { .. }
+        ));
+
+        let cli = must(
+            Cli::parse_args([
+                OsString::from(root.to_string_lossy().as_ref()),
+                OsString::from("--check"),
+                OsString::from("--plain"),
+                OsString::from("--default-branch"),
+                OsString::from("main"),
+            ]),
+            "parse renderer-only check",
+        );
+        let selection = must(
+            capture_generator_selection(&cli.target, cli.output.as_deref()),
+            "capture renderer-only check target",
+        );
+        must(
+            run(&cli, selection),
+            "a stale declared pin cannot block the current renderer check",
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn state_schema_one_is_rejected_with_the_schema_move() {
         let root = configured_repository("schema-one-state", None);
         generate_repository(&root, false);
@@ -20497,7 +22507,7 @@ lockfile = true
 
         let error = must_some(
             check_repository(&root).err(),
-            "schema 1 state must fail check",
+            "non-schema-2 state must fail check",
         )
         .to_string();
         assert!(
@@ -20508,11 +22518,15 @@ lockfile = true
         generate_repository(&root, false);
         let state = must(fs::read_to_string(&state_path), "reread ownership state");
         assert!(state.contains("schema = 2\n[inputs]"), "{state}");
-        assert_eq!(
-            generated_tree(&root),
-            before,
-            "migration must not move generated bytes"
-        );
+        let mut after = generated_tree(&root);
+        let mut before_outputs = before;
+        // A foreign state file cannot authorize output paths for the first
+        // migration scan. The rewritten state therefore records the fail-
+        // closed scan boundary; rendered outputs themselves must stay byte
+        // identical while that provenance record moves.
+        after.remove(OWNERSHIP_STATE);
+        before_outputs.remove(OWNERSHIP_STATE);
+        assert_eq!(after, before_outputs, "migration moved generated outputs");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -20525,9 +22539,14 @@ lockfile = true
         );
         generate_repository(&bare, false);
         generate_repository(&declared, false);
+        let bare_root = must(safe_fs::SafeRoot::open(&bare), "open bare repository");
+        let declared_root = must(
+            safe_fs::SafeRoot::open(&declared),
+            "open declared repository",
+        );
 
-        let empty = recorded_state(&bare).inputs;
-        let declared_inputs = recorded_state(&declared).inputs;
+        let empty = recorded_state(&bare_root).inputs;
+        let declared_inputs = recorded_state(&declared_root).inputs;
         assert_eq!(
             empty.config,
             must(

@@ -8,19 +8,22 @@ repository = "tailrocks/velnor"
 # last generator change (see the plan ledger).
 # The branch changes the generator, so keep Stage 0 on the published base
 # product until the generator change is merged and published. The policy
-# candidate path verifies the checked-in tree with this branch's renderer.
+# check remains pinned to the published base product; no pull-request-built
+# generator artifact is passed into the credentialed Policy workflow.
 revision = "0dc79895ff1c5e88be7c3822c437e1c5b5282e12"
 
 [scan]
 exclude = ["migrations/**"]
 
 # Provider placement: `providers` is the available backends.
-# `automatic_providers` run on PR/push/schedule without a dispatch choice.
-# Recovery: hosted runs automatically; Velnor is manual opt-in.
+# `automatic_providers` enable only routes admitted by provider policy.
+# Hosted keeps its automatic event behavior; Velnor runs only on an exact
+# same-repository default-branch push when listed here, never on schedule,
+# tags, pull requests, or workflow_dispatch. Hosted remains dispatch recovery.
 [workflow]
 providers = ["github-hosted", "velnor"]
 automatic_providers = ["github-hosted"]
-default_dispatch_providers = ["github-hosted", "velnor"]
+default_dispatch_providers = ["github-hosted"]
 default_branch = "main"
 # Routing contract: the release-side guest-payload producer builds Linux
 # cross-target guest agents and Firecracker kernel/rootfs images, so the
@@ -199,7 +202,6 @@ docker_closure = [
   "Dockerfile",
   "docker/build-mise.*",
   "crates/velnor-workflow/README.md",
-  "crates/velnor-workflow/src/runtime.rs",
   "crates/velnor-workflow/templates/**",
 ]
 "rust-velnor-runner" = [
@@ -219,7 +221,7 @@ primitive = "regen-gate"
 units = ["rust-velnor-workflow"]
 
 [declare.args]
-command = "cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../.."
+command = "cd -- 'crates/velnor-workflow' && cargo run --locked -- --plain --check ../.."
 
 # Release-side surface: typed native release, rolling preview, and signer.
 

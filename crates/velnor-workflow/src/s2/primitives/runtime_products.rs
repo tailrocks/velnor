@@ -764,7 +764,7 @@ mod tests {
     fn scanned_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-runtime-products-{name}-{}",
-            crate::s2::unique_suffix()
+            crate::unique_suffix()
         ));
         must(fs::create_dir_all(&root), "create test repository");
         must(
@@ -1128,28 +1128,6 @@ mod tests {
             content.contains("profile: \"release\", features: \"\""),
             "the manifest footer matches the build: {content}"
         );
-        // The Velnor policy provisioner is the second consumer: it must accept
-        // the same manifest and the same attestation the setup action does.
-        let velnor = crate::s2::workflow_pinned_policy_runtime_local(FIXTURE_REVISION, "checkout");
-        assert!(
-            velnor.contains(MANIFEST_ACCEPT_FILTER),
-            "the Velnor consumer evaluates the same filter"
-        );
-        let repository = workflow_setup_action_repository();
-        assert!(
-            velnor.contains(&format!(
-                "--signer-workflow {repository}/.github/workflows/{RUNTIME_PRODUCTS_FILE}"
-            )),
-            "the Velnor consumer pins the same producer workflow"
-        );
-        assert!(
-            velnor.contains("gh attestation verify \"$temporary/manifest.json\""),
-            "the Velnor consumer verifies the manifest it trusts"
-        );
-        assert!(
-            velnor.contains("\"$existing\" != \"$expected\""),
-            "the Velnor consumer reuses its slot only on a manifest digest match"
-        );
     }
 
     #[test]
@@ -1185,43 +1163,27 @@ mod tests {
                 "the setup action verifies the same {flag}"
             );
         }
-        // Subject-level: both consumers verify the manifest as well as the
-        // asset, against the same pinned producer workflow.
-        let velnor = crate::s2::workflow_pinned_policy_runtime_local(FIXTURE_REVISION, "checkout");
-        for (name, consumer) in [
-            ("setup action", action.as_str()),
-            ("velnor", velnor.as_str()),
+        for subject in [
+            "gh attestation verify \"$temporary/$asset\"",
+            "gh attestation verify \"$temporary/manifest.json\"",
         ] {
-            for subject in [
-                "gh attestation verify \"$temporary/$asset\"",
-                "gh attestation verify \"$temporary/manifest.json\"",
-            ] {
-                assert!(
-                    consumer.contains(subject),
-                    "the {name} consumer verifies {subject}"
-                );
-            }
+            assert!(
+                action.contains(subject),
+                "the setup action verifies {subject}"
+            );
         }
     }
 
     #[test]
     fn all_consumers_pin_the_same_producer_ref() {
-        // The setup action, the Velnor provisioner, and the producer smoke
-        // test verify the same two subjects against the same signer
-        // workflow: an attestation minted anywhere but the runtime-products
-        // publisher verifies nowhere.
+        // The setup action and producer smoke test verify the same two
+        // subjects against the same signer workflow.
         let signer = "--signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml";
         let action = setup_action_source();
         assert_eq!(
             action.matches(signer).count(),
             2,
             "the setup action pins the signer on the asset and the manifest"
-        );
-        let velnor = crate::s2::workflow_pinned_policy_runtime_local(FIXTURE_REVISION, "checkout");
-        assert_eq!(
-            velnor.matches(signer).count(),
-            2,
-            "the Velnor provisioner pins the signer on the asset and the manifest"
         );
         let content = owner_content(&[]);
         assert_eq!(
@@ -1726,7 +1688,7 @@ mod tests {
         for (index, (name, body)) in bodies.iter().enumerate() {
             let path = std::env::temp_dir().join(format!(
                 "velnor-workflow-producer-shell-{index}-{}",
-                crate::s2::unique_suffix()
+                crate::unique_suffix()
             ));
             must(fs::write(&path, body), "write the shell body");
             let output = must(
@@ -1764,7 +1726,7 @@ mod tests {
         ] {
             let path = std::env::temp_dir().join(format!(
                 "velnor-workflow-producer-guard-{}",
-                crate::s2::unique_suffix()
+                crate::unique_suffix()
             ));
             must(fs::write(&path, guard), "write the guard body");
             let output = must(

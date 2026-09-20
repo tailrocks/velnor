@@ -3,10 +3,9 @@
 //! was deleted from the crate during the estate ports; if one reaches the
 //! generic engine again, the scan + config split is broken.
 //!
-//! The one admitted code boundary is `src/estate.rs`: it still carries the
-//! legacy runner selector the earliest generated surfaces embedded, which
-//! static-template adoption replaces with the adopting repository's own
-//! selector.
+//! The one admitted code boundary is `src/s2/estate.rs`: it carries the
+//! adopted-template selector forms that repository config replaces with its
+//! own provider selectors.
 
 #![expect(clippy::panic, reason = "a test whose setup fails should panic loudly")]
 
@@ -75,7 +74,6 @@ const DENY_LIST: &[&str] = &[
 /// engine behavior. This test is one of them: the deny list has to spell out
 /// what it forbids.
 const ADMITTED_FILES: &[&str] = &[
-    "src/estate.rs",
     "src/s2/estate.rs",
     "tests/generic_surface_literals.rs",
     "AGENTS.md",
@@ -88,12 +86,11 @@ const ADMITTED_FILES: &[&str] = &[
 const CARGO_TOML: &str = "Cargo.toml";
 const ADMITTED_CARGO_LINE_MARKERS: &[&str] = &["termrock = { git"];
 
-/// The generator's own distribution paths (`tailrocks/velnor/.github/...`) and
-/// the regeneration marker are generator identity, not consumer knowledge. The
-/// bare slug may appear exactly `BARE_GENERATOR_SLUG_OCCURRENCES` times: the
-/// pinned install URL and the regeneration marker constant in each of the
-/// schema-1 engine and the schema-2 fork.
-const BARE_GENERATOR_SLUG_OCCURRENCES: usize = 4;
+/// The generator's own distribution paths (`tailrocks/velnor/.github/...`)
+/// and regeneration marker are generator identity, not consumer knowledge.
+/// The two production identity values and three explicit source-pin fixtures
+/// are the only bare-slug sites.
+const BARE_GENERATOR_SLUG_OCCURRENCES: usize = 5;
 
 /// Everything the deny list applies to: the crate's Rust sources, its
 /// templates, its tests and fixtures, its build scripts, benches, examples,

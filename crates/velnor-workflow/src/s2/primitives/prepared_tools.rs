@@ -34,6 +34,7 @@ use std::time::Duration;
 use sha2::{Digest as _, Sha256};
 
 use super::{Args, Primitive, RenderCtx, Rendered, PREPARED_TOOL};
+use crate::s2::safe_fs::SafeRoot;
 use crate::s2::{GeneratorError, RustToolchain, Unit};
 
 /// The prepared-tool key schema. Bumping it abandons every previously saved
@@ -1437,16 +1438,14 @@ pub(crate) fn render_consumer_steps(
 /// # Errors
 /// Returns an I/O error naming the lockfile that cannot be read.
 fn inputs_facts_for(
-    root: &Path,
+    safe_root: &SafeRoot,
     locks: &BTreeMap<LockKind, String>,
     recipe: &[String],
     unit: &Unit,
 ) -> Result<InputsFacts, GeneratorError> {
     let mut lock_inputs = Vec::new();
     for path in locks.values() {
-        let full = root.join(path);
-        let bytes = std::fs::read(&full)
-            .map_err(|error| GeneratorError::io("read governing lockfile", &full, &error))?;
+        let bytes = safe_root.read_file(Path::new(path))?;
         lock_inputs.push((path.clone(), bytes));
     }
     Ok(InputsFacts {
@@ -1482,7 +1481,7 @@ impl Primitive for PreparedTool {
             let mut needs = Vec::new();
             for declaration in &declarations {
                 let locks = governing_locks(ctx.shape.files(), &unit.root);
-                let facts = inputs_facts_for(ctx.root, &locks, &declaration.recipe, &unit)?;
+                let facts = inputs_facts_for(ctx.safe_root, &locks, &declaration.recipe, &unit)?;
                 needs.push(PreparedToolNeed {
                     tool_id: declaration.tool_id.clone(),
                     authorized_producers: declaration.authorized_producers.clone(),
@@ -2637,7 +2636,7 @@ mod tests {
     fn prepared_tool_fixture(name: &str, declare: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-prepared-tool-e2e-{name}-{}",
-            crate::s2::unique_suffix()
+            crate::unique_suffix()
         ));
         let _ = std::fs::remove_dir_all(&root);
         must(std::fs::create_dir_all(&root), "create fixture repository");

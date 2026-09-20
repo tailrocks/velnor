@@ -1,10 +1,12 @@
-schema = 1
+schema = 2
 
 [generator]
 repository = "example/app"
 
 [workflow]
-files = ["release.yml"]
+providers = ["github-hosted"]
+automatic_providers = ["github-hosted"]
+default_dispatch_providers = ["github-hosted"]
 
 [release]
 enabled = true
@@ -12,5 +14,8 @@ reason = "multi-arch container publication for the service image"
 kind = "docker"
 image = "ghcr.io/example/app"
 dockerfile = "Dockerfile"
-context = "."
 platforms = ["linux/amd64", "linux/arm64"]
+
+[[declare]]
+primitive = "release"
+file = "release.yml"

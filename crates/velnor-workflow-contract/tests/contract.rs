@@ -122,20 +122,31 @@ fn hosted_lane_uses_the_github_mb_boxington_backend() {
     }
 }
 
-/// The regeneration gate stays wired: the workflow crate's own unit watches
-/// the runtime and the declared gate command checks the checked-out surface
-/// with the same generator that produced it.
+/// The regeneration gate stays wired: the workflow crate's source tree stays
+/// watched across module moves, and the declared gate checks the checked-out
+/// surface with the same generator that produced it.
 #[test]
 fn the_regeneration_gate_is_declared() {
     let config = read(".github-gen/velnor-workflow.toml");
     assert!(config.contains("primitive = \"regen-gate\""));
     assert!(config.contains("--plain --check ../.."));
+    assert!(
+        !config.contains("crates/velnor-workflow/src/runtime.rs"),
+        "the config must not watch the deleted S1 runtime module"
+    );
     let project = read(".github/ci/project.toml");
-    let runtime_watched = project.lines().any(|line| {
+    let workflow_source_watched = project.lines().any(|line| {
+        line.starts_with("watch = [") && line.contains("crates/velnor-workflow/src/**")
+    });
+    assert!(
+        workflow_source_watched,
+        "the workflow crate unit must watch its source tree"
+    );
+    let stale_runtime_watched = project.lines().any(|line| {
         line.starts_with("watch = [") && line.contains("crates/velnor-workflow/src/runtime.rs")
     });
     assert!(
-        runtime_watched,
-        "the workflow crate unit must watch its runtime module"
+        !stale_runtime_watched,
+        "the rendered watch graph must not include the deleted S1 runtime module"
     );
 }

@@ -12,13 +12,19 @@
 # (`check-example-tool-version`, `assert-example-tool-published`,
 # `build-example-tool`): generic code renders placement, gates, fetch depth,
 # and failure propagation only, never the product checks or the compile.
-schema = 1
+schema = 2
 
 [generator]
 repository = "example/synthetic-release"
 
 [workflow]
-velnor_labels = ["self-hosted", "example-lane"]
+providers = ["github-hosted"]
+automatic_providers = ["github-hosted"]
+default_dispatch_providers = ["github-hosted"]
+default_branch = "main"
+
+[workflow.selectors.github-hosted]
+runs_on = ["ubuntu-24.04"]
 
 [[declare]]
 primitive = "release"

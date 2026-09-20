@@ -15,8 +15,8 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
     }
     if context.file_set.contains("renovate.json")
         || context.file_set.contains("renovate.json5")
-        || context.root.join(".github/renovate.json").is_file()
-        || context.root.join(".github/renovate.json5").is_file()
+        || context.file_set.contains(".github/renovate.json")
+        || context.file_set.contains(".github/renovate.json5")
     {
         shape.detected.push("renovate-configuration".to_owned());
         shape.limitations.push(

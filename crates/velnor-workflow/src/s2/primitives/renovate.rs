@@ -1,5 +1,5 @@
-//! Self-hosted Renovate workflows: scheduled dependency updates and optional
-//! configuration validation.
+//! Self-hosted Renovate workflows on admitted default-branch pushes, with
+//! optional hosted configuration validation.
 
 use super::{Args, Primitive, RenderCtx, Rendered};
 use crate::s2::provider::ProviderId;
@@ -10,7 +10,7 @@ use crate::s2::{
 
 /// The pinned Renovate OSS version rendered into `renovate-version`.
 #[cfg(test)]
-pub(crate) use crate::renovate_renderer::RENOVATE_OSS_VERSION;
+pub(crate) use crate::s2::renovate_renderer::RENOVATE_OSS_VERSION;
 
 /// Sidecar workflow families the generator may emit for Renovate.
 pub(crate) const RENOVATE_SIDE_FILES: &[(&str, &str)] = &[
@@ -146,19 +146,20 @@ fn renovate_runner(config: &ProjectConfig) -> Result<String, GeneratorError> {
 
 fn render_renovate(config: &ProjectConfig, spec: &RenovateSpec) -> Result<String, GeneratorError> {
     let runner = renovate_runner(config)?;
-    Ok(crate::renovate_renderer::render_writer(
-        &crate::renovate_renderer::WriterInput {
+    let admission_gate = super::WorkflowIr::from_config(config).provider_admission_expression(
+        super::ProviderAdmission::ProviderTrusted(ProviderId::Velnor),
+    );
+    Ok(crate::s2::renovate_renderer::render_writer(
+        &crate::s2::renovate_renderer::WriterInput {
             checkout: ActionPin::Checkout.reference(),
             cache_restore: ActionPin::CacheRestore.reference(),
             cache_save: ActionPin::CacheSave.reference(),
             renovate_action: ActionPin::Renovate.reference(),
             runner: &runner,
-            dispatch_inputs: "",
+            admission_gate: &admission_gate,
             default_branch: &config.default_branch,
             token: &spec.token,
             config_path: &spec.config_path,
-            schedule: &spec.schedule,
-            schedules: &spec.schedules,
             repositories: &spec.repositories,
             host_rules_secret: spec.host_rules_secret.as_deref(),
             author: spec.author.as_deref(),
@@ -176,7 +177,7 @@ fn render_renovate_validate(config: &ProjectConfig, spec: &RenovateSpec) -> Stri
         .map(selector_runs_on_yaml)
         .unwrap_or_default();
     let default_branch = yaml_scalar(&config.default_branch);
-    crate::renovate_renderer::render_validate(&crate::renovate_renderer::ValidateInput {
+    crate::s2::renovate_renderer::render_validate(&crate::s2::renovate_renderer::ValidateInput {
         checkout: ActionPin::Checkout.reference(),
         runner: &runner,
         default_branch: &default_branch,
@@ -215,7 +216,7 @@ mod tests {
 
     fn renovate_config() -> ProjectConfig {
         let mut config = ProjectConfig {
-            repository: String::new(),
+            repository: "example/owner".to_owned(),
             workflow_revision: crate::s2::SOURCE_REVISION.to_owned(),
             profile: "generic".to_owned(),
             analysis: crate::s2::AnalysisSummary {
@@ -228,9 +229,12 @@ mod tests {
             notes: Vec::new(),
             version_bump_units: Vec::new(),
             default_branch: "main".to_owned(),
-            providers: std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
-            automatic_providers: std::collections::BTreeSet::from([
+            providers: std::collections::BTreeSet::from([
+                crate::s2::provider::ProviderId::GithubHosted,
                 crate::s2::provider::ProviderId::Velnor,
+            ]),
+            automatic_providers: std::collections::BTreeSet::from([
+                crate::s2::provider::ProviderId::GithubHosted,
             ]),
             selectors: crate::s2::scan::default_selectors(),
             release_enabled: false,
@@ -265,8 +269,6 @@ mod tests {
         config.renovate = Some(RenovateSpec {
             enabled: true,
             reason: "Repository-local Renovate via GH_RENOVATE_TOKEN".to_owned(),
-            schedule: "0 6 * * *".to_owned(),
-            schedules: Vec::new(),
             token: "GH_RENOVATE_TOKEN".to_owned(),
             config_path: "renovate.json".to_owned(),
             validate: true,
@@ -291,8 +293,10 @@ mod tests {
         assert!(workflow.contains("secrets.GH_RENOVATE_TOKEN"));
         assert!(workflow.contains(ActionPin::Renovate.reference()));
         assert!(workflow.contains("renovate-version: \"44.93.6\""));
-        assert!(workflow.contains("workflow_dispatch"));
-        assert!(workflow.contains("0 6 * * *"));
+        assert!(workflow.contains("on:\n  push:\n    branches: [main]"));
+        assert!(!workflow.contains("  schedule:"));
+        assert!(!workflow.contains("  workflow_dispatch:"));
+        assert!(!workflow.contains("0 6 * * *"));
         assert!(!workflow.contains("pull_request"));
         assert!(
             workflow.contains("/tmp/renovate/cache/${{ github.repository }}/renovate/repository")
@@ -366,6 +370,51 @@ mod tests {
     }
 
     #[test]
+    fn renovate_writer_uses_canonical_local_provider_admission() {
+        let mut config = renovate_config();
+        let spec = must_some(
+            config.renovate.as_ref(),
+            "renovate_config must include a renovate spec",
+        );
+        let denied = must(
+            render_renovate(&config, spec),
+            "render denied renovate workflow",
+        );
+        assert!(
+            denied.contains("if: ${{ github.repository == 'example/owner' && (false) }}"),
+            "Velnor outside automatic_providers is disabled: {denied}"
+        );
+
+        config.automatic_providers.insert(ProviderId::Velnor);
+        let spec = must_some(
+            config.renovate.as_ref(),
+            "renovate_config must include a renovate spec",
+        );
+        let admitted = must(
+            render_renovate(&config, spec),
+            "render admitted renovate workflow",
+        );
+        assert!(
+            admitted.contains(
+                "if: ${{ github.repository == 'example/owner' && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}"
+            ),
+            "admitted Velnor runs only for this repository's default-branch push: {admitted}"
+        );
+        for forbidden in [
+            "schedule",
+            "workflow_dispatch",
+            "pull_request",
+            "pull_request_target",
+            "refs/tags/",
+        ] {
+            assert!(
+                !admitted.contains(forbidden),
+                "the local writer cannot be admitted by {forbidden}: {admitted}"
+            );
+        }
+    }
+
+    #[test]
     fn renovate_validate_uses_docker_validator_without_secrets() {
         let config = renovate_config();
         let spec = must_some(
@@ -375,6 +424,8 @@ mod tests {
         let workflow = render_renovate_validate(&config, spec);
         assert!(workflow.contains("renovate-config-validator --strict --no-global renovate.json"));
         assert!(workflow.contains("ghcr.io/renovatebot/renovate:44.93.6"));
+        assert!(workflow.contains("runs-on: ubuntu-24.04"));
+        assert!(workflow.contains("  workflow_dispatch:"));
         assert!(!workflow.contains("GH_RENOVATE_TOKEN"));
         assert!(!workflow.contains("RENOVATE_TOKEN"));
     }
@@ -383,8 +434,6 @@ mod tests {
         RenovateSpec {
             enabled: true,
             reason: "Repository-local Renovate via GH_RENOVATE_TOKEN".to_owned(),
-            schedule: "0 6 * * *".to_owned(),
-            schedules: vec!["0 18 * * *".to_owned()],
             token: "GH_RENOVATE_TOKEN".to_owned(),
             config_path: "renovate.json".to_owned(),
             validate: true,
@@ -404,8 +453,6 @@ mod tests {
             render_renovate(&config, &full_spec()),
             "render renovate workflow",
         );
-        assert!(workflow.contains("- cron: \"0 6 * * *\""), "{workflow}");
-        assert!(workflow.contains("- cron: \"0 18 * * *\""), "{workflow}");
         assert!(
             workflow.contains("RENOVATE_AUTODISCOVER: \"false\""),
             "{workflow}"
@@ -454,7 +501,7 @@ mod tests {
         ] {
             assert!(!workflow.contains(absent), "{workflow}");
         }
-        assert_eq!(workflow.matches("- cron:").count(), 1, "{workflow}");
+        assert!(!workflow.contains("- cron:"), "{workflow}");
     }
 
     #[test]
@@ -529,7 +576,7 @@ mod tests {
         must(
             std::fs::write(
                 root.join(".github-gen/velnor-workflow.toml"),
-                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                "schema = 2\n\n[generator]\nrepository = \"example/owner\"\n\n\
                  [workflow]\nproviders = [\"velnor\"]\n\n\
                  [workflow.selectors.velnor]\nruns_on = [\"velnor-native\"]\n",
             ),

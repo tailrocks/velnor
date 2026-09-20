@@ -1,28 +1,25 @@
-//! Canonical Renovate workflow rendering shared by schema 1 and schema 2.
+//! Canonical Renovate workflow rendering for the schema-2 provider pipeline.
 //!
-//! The schema modules adapt their runner and dispatch contracts into these
-//! inputs. Keeping the workflow templates and cache-key construction here
-//! prevents one schema from silently retaining a stale renderer.
+//! Rendering inputs come from the typed provider config. Keeping the workflow
+//! templates and cache-key construction here prevents stale parallel renderers.
 
 use std::fmt::Write as _;
 
 /// The pinned Renovate OSS version rendered into `renovate-version`.
 pub(crate) const RENOVATE_OSS_VERSION: &str = "44.93.6";
 
-/// Schema-specific runner and dispatch values plus the shared Renovate
-/// contract consumed by the canonical writer renderer.
+/// Runner, provider-admission values, and the Renovate contract consumed by
+/// the writer renderer.
 pub(crate) struct WriterInput<'a> {
     pub(crate) checkout: &'a str,
     pub(crate) cache_restore: &'a str,
     pub(crate) cache_save: &'a str,
     pub(crate) renovate_action: &'a str,
     pub(crate) runner: &'a str,
-    pub(crate) dispatch_inputs: &'a str,
+    pub(crate) admission_gate: &'a str,
     pub(crate) default_branch: &'a str,
     pub(crate) token: &'a str,
     pub(crate) config_path: &'a str,
-    pub(crate) schedule: &'a str,
-    pub(crate) schedules: &'a [String],
     pub(crate) repositories: &'a [String],
     pub(crate) host_rules_secret: Option<&'a str>,
     pub(crate) author: Option<&'a str>,
@@ -39,17 +36,16 @@ pub(crate) struct ValidateInput<'a> {
     pub(crate) config_path: &'a str,
 }
 
-/// Render the Renovate writer workflow for both schema generations.
+/// Render the Renovate writer workflow.
 #[expect(
     clippy::too_many_lines,
     reason = "the canonical workflow template stays contiguous for byte-level review"
 )]
 pub(crate) fn render_writer(input: &WriterInput<'_>) -> String {
-    let gate = trusted_renovate_gate(input.default_branch);
     let token_secret = format!("secrets.{}", input.token);
-    let cache_save_gate = crate::primitives::trusted_cache_save_expression(input.default_branch);
+    let cache_save_gate = input.admission_gate;
+    let default_branch = crate::s2::yaml_scalar(input.default_branch);
     let config_env = renovate_config_env(input.config_path);
-    let schedules = renovate_schedules(input.schedule, input.schedules);
     let target_env = renovate_target_env(input.repositories);
     let host_rules_env = renovate_host_rules_env(input.host_rules_secret);
     let author_env = renovate_author_env(input.author);
@@ -104,8 +100,8 @@ pub(crate) fn render_writer(input: &WriterInput<'_>) -> String {
 run-name: Renovate · ${{{{ github.event_name }}}}
 
 on:
-  schedule:
-{schedules}  workflow_dispatch:{dispatch_inputs}
+  push:
+    branches: [{default_branch}]
 
 permissions:
   contents: read
@@ -118,7 +114,7 @@ concurrency:
 jobs:
   renovate:
     name: Renovate dependencies
-    if: ${{{{ {gate} }}}}
+    if: ${{{{ {admission_gate} }}}}
     runs-on: {runner}
     timeout-minutes: 120
     env:
@@ -148,15 +144,14 @@ jobs:
         run: |
           echo "::notice::Renovate skipped because '{token}' is not configured for this repository" >> "$GITHUB_STEP_SUMMARY"
 {cache_save_step}"#,
-        dispatch_inputs = input.dispatch_inputs,
-        schedules = schedules,
-        gate = gate,
+        default_branch = default_branch,
+        admission_gate = input.admission_gate,
         runner = input.runner,
         token_secret = token_secret,
         checkout = input.checkout,
         cache_steps = cache_steps,
         renovate_action = input.renovate_action,
-        version = crate::yaml_scalar(RENOVATE_OSS_VERSION),
+        version = crate::s2::yaml_scalar(RENOVATE_OSS_VERSION),
         token = input.token,
         config_env = config_env,
         target_env = target_env,
@@ -168,7 +163,7 @@ jobs:
     )
 }
 
-/// Render the Renovate configuration validator for both schema generations.
+/// Render the Renovate configuration validator.
 pub(crate) fn render_validate(input: &ValidateInput<'_>) -> String {
     let config_arg = shell_escape(input.config_path);
 
@@ -225,12 +220,6 @@ jobs:
     )
 }
 
-fn trusted_renovate_gate(default_branch: &str) -> String {
-    format!(
-        "github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{default_branch}')"
-    )
-}
-
 fn renovate_repository_cache_path() -> &'static str {
     "/tmp/renovate/cache/${{ github.repository }}/renovate/repository"
 }
@@ -241,21 +230,9 @@ fn renovate_config_env(config_path: &str) -> String {
     } else {
         format!(
             "          RENOVATE_CONFIG_FILE: {}\n",
-            crate::yaml_scalar(config_path)
+            crate::s2::yaml_scalar(config_path)
         )
     }
-}
-
-/// The `on.schedule` cron list: the primary schedule plus every declared
-/// extra, each once.
-fn renovate_schedules(schedule: &str, extras: &[String]) -> String {
-    let mut schedules = format!("    - cron: {}\n", crate::yaml_scalar(schedule));
-    for extra in extras {
-        if extra != schedule {
-            let _ = writeln!(schedules, "    - cron: {}", crate::yaml_scalar(extra));
-        }
-    }
-    schedules
 }
 
 /// Repository targets: explicit targets disable autodiscovery, so the writer
@@ -266,7 +243,7 @@ fn renovate_target_env(repositories: &[String]) -> String {
     } else {
         format!(
             "          RENOVATE_AUTODISCOVER: \"false\"\n          RENOVATE_REPOSITORIES: {}\n",
-            crate::yaml_scalar(&repositories.join(","))
+            crate::s2::yaml_scalar(&repositories.join(","))
         )
     }
 }
@@ -284,7 +261,7 @@ fn renovate_author_env(author: Option<&str>) -> String {
     author.map_or_else(String::new, |author| {
         format!(
             "          RENOVATE_GIT_AUTHOR: {}\n",
-            crate::yaml_scalar(author)
+            crate::s2::yaml_scalar(author)
         )
     })
 }
@@ -299,7 +276,7 @@ fn renovate_signoff_env(author: Option<&str>, signoff: bool) -> String {
     author.map_or_else(String::new, |author| {
         format!(
             "          RENOVATE_COMMIT_BODY: {}\n",
-            crate::yaml_scalar(&format!("Signed-off-by: {author}"))
+            crate::s2::yaml_scalar(&format!("Signed-off-by: {author}"))
         )
     })
 }
@@ -313,7 +290,7 @@ fn renovate_allowed_commands_env(allowed_commands: &[String]) -> String {
     let json = serde_json::to_string(allowed_commands).unwrap_or_else(|_| "[]".to_owned());
     format!(
         "          RENOVATE_ALLOWED_COMMANDS: {}\n",
-        crate::yaml_scalar(&json)
+        crate::s2::yaml_scalar(&json)
     )
 }
 

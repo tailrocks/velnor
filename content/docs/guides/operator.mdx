@@ -85,6 +85,32 @@ to run a job carrying user secrets, and its persistent stores move to the
 `VELNOR_TRUST_SCOPE=trusted` explicitly if that is what the pool is for. See
 [Trust scope](/reference/trust-scope).
 
+## Required Policy workflow runner check
+
+Before relying on the S2 required `Policy` workflow's hosted-isolation claim,
+complete this inventory and repeat it after any runner, scale-set, label,
+group, or repository-access change:
+
+1. In this repository's **Settings → Actions → Runners**, inspect every
+   available self-hosted runner and ARC scale set. Confirm none has the
+   `ubuntu-24.04` label, case-insensitively. The
+   [repository runner inventory guide](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/use-in-a-workflow)
+   says this view includes ARC scale sets.
+2. Review every organization or enterprise runner group available to this
+   repository. Limit this repository to approved groups and each group to an
+   explicit repository allowlist. See GitHub's
+   [runner-group access guide](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/manage-access).
+3. Do not use repository-scoped self-hosted runners for this boundary. Keep
+   runner registration, group, and label administration limited to trusted
+   admins.
+
+Velnor no longer assigns `ubuntu-24.04` to Target-MVP runners and rejects
+manual or environment attempts to configure that label. Existing GitHub or
+ARC registrations may retain it; remove every Policy-visible occurrence
+before relying on hosted isolation. See the
+[runner-boundary contract](/operations/security-and-data#required-ci-policy-runner-boundary)
+and [Target-MVP runner labels](/reference/configuration).
+
 Start the services explicitly:
 
 ```sh

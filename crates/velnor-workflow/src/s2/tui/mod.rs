@@ -9,6 +9,7 @@ mod view;
 use std::collections::BTreeSet;
 use std::io;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -25,10 +26,12 @@ use termrock::style::{ColorCapability, DesignSystem};
 use termrock::widgets::{ListRow, ListState, ScrollAreaState};
 
 use super::provider::ProviderSet;
+use super::safe_fs::{OutputPathBinding, SafeRootIdentity};
 use super::{
-    apply_generated_write_plan, generated_files, plan_generated_write, scan_target, Checkout, Cli,
-    GeneratedWritePlan, GenerationInputs, GeneratorError, ProjectConfig, RepositorySource,
-    WriteOutcome,
+    apply_generated_write_plan, generated_files,
+    plan_generated_write_with_source_identity_and_binding, scan_target_with_safe_root, Checkout,
+    Cli, GeneratedWritePlan, GenerationInputs, GeneratorError, OutputSelection, ProjectConfig,
+    RepositorySource, SourceSelection, WriteOutcome,
 };
 
 const MIN_WIDTH: u16 = 52;
@@ -51,6 +54,16 @@ struct PreparedProject {
     config: ProjectConfig,
     inputs: GenerationInputs,
     output_root: std::path::PathBuf,
+    output_binding: OutputPathBinding,
+    source_identity: Option<super::safe_fs::SafeRootIdentity>,
+}
+
+#[derive(Clone)]
+struct ScanRequest {
+    source: SourceSelection,
+    output: OutputSelection,
+    providers: Option<ProviderSet>,
+    default_branch: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,7 +93,7 @@ enum Overlay {
 
 struct App {
     cli: Cli,
-    target: String,
+    scan_request: Option<ScanRequest>,
     phase: Phase,
     receiver: Receiver<ScanResult>,
     generation_receiver: Option<Receiver<GenerationResult>>,
@@ -88,6 +101,8 @@ struct App {
     config: Option<ProjectConfig>,
     inputs: Option<GenerationInputs>,
     output_root: Option<std::path::PathBuf>,
+    output_binding: Option<OutputPathBinding>,
+    source_identity: Option<SafeRootIdentity>,
     selector: Option<ListState<String>>,
     scroll: ScrollAreaState,
     files: Option<std::collections::BTreeMap<std::path::PathBuf, String>>,
@@ -101,10 +116,14 @@ struct App {
 }
 
 impl App {
-    fn new(cli: Cli, receiver: Receiver<ScanResult>) -> Self {
+    fn new_with_scan_request(
+        cli: Cli,
+        receiver: Receiver<ScanResult>,
+        scan_request: Option<ScanRequest>,
+    ) -> Self {
         Self {
-            target: cli.target.clone(),
             cli,
+            scan_request,
             phase: Phase::Scanning,
             receiver,
             generation_receiver: None,
@@ -112,6 +131,8 @@ impl App {
             config: None,
             inputs: None,
             output_root: None,
+            output_binding: None,
+            source_identity: None,
             selector: None,
             scroll: ScrollAreaState::new().axes(true, false),
             files: None,
@@ -209,6 +230,8 @@ impl App {
         }
         self.checkout = Some(prepared.checkout);
         self.output_root = Some(prepared.output_root);
+        self.output_binding = Some(prepared.output_binding);
+        self.source_identity = prepared.source_identity;
         self.config = Some(prepared.config);
         self.inputs = Some(prepared.inputs);
         self.selector = Some(selector);
@@ -501,17 +524,14 @@ impl App {
     }
 
     fn retry_scan(&mut self) {
-        let Ok(source) = RepositorySource::parse(&self.target) else {
+        let Some(scan_request) = self.scan_request.clone() else {
             return;
         };
-        let receiver = spawn_scan(
-            source,
-            self.cli.providers.clone(),
-            self.cli.output.clone(),
-            self.cli.default_branch.clone(),
-        );
+        let receiver = spawn_scan(scan_request);
         self.receiver = receiver;
         self.phase = Phase::Scanning;
+        self.output_binding = None;
+        self.source_identity = None;
         self.overlay = None;
         self.error = None;
         self.notice = None;
@@ -545,7 +565,21 @@ impl App {
             );
             return;
         };
-        let plan = match plan_generated_write(output_root, &files, &inputs) {
+        let Some(output_binding) = self.output_binding.as_ref() else {
+            self.fail(
+                FailedOperation::Review,
+                "output root binding was not captured".to_owned(),
+            );
+            return;
+        };
+        let plan = match plan_generated_write_with_source_identity_and_binding(
+            output_root,
+            &files,
+            &inputs,
+            false,
+            self.source_identity.as_ref(),
+            output_binding,
+        ) {
             Ok(plan) => plan,
             Err(error) => {
                 self.fail(FailedOperation::Review, error.to_string());
@@ -595,6 +629,7 @@ impl App {
             );
             return;
         };
+        let source_identity = self.source_identity.clone();
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             let result = complete_generation(
@@ -605,6 +640,7 @@ impl App {
                 check,
                 force,
                 &reviewed_plan,
+                source_identity.as_ref(),
             )
             .map_err(|error| error.to_string());
             let _ = sender.send(result);
@@ -672,8 +708,20 @@ fn complete_generation(
     check: bool,
     force: bool,
     reviewed_plan: &GeneratedWritePlan,
+    source_identity: Option<&SafeRootIdentity>,
 ) -> Result<GenerationCompletion, GeneratorError> {
-    let plan = plan_generated_write(output_root, files, inputs)?;
+    let output_binding = reviewed_plan
+        .output_binding
+        .as_ref()
+        .ok_or_else(|| GeneratorError::usage("reviewed output root has no captured binding"))?;
+    let plan = plan_generated_write_with_source_identity_and_binding(
+        output_root,
+        files,
+        inputs,
+        false,
+        source_identity,
+        output_binding,
+    )?;
     if &plan != reviewed_plan {
         return Ok(GenerationCompletion::PlanChanged(plan));
     }
@@ -810,30 +858,47 @@ fn required_dependencies(config: &ProjectConfig, selected: &[String], id: &str) 
     required.into_iter().collect()
 }
 
-fn spawn_scan(
-    source: RepositorySource,
-    providers: Option<ProviderSet>,
-    output: Option<std::path::PathBuf>,
-    default_branch: Option<String>,
-) -> Receiver<ScanResult> {
+fn spawn_scan(request: ScanRequest) -> Receiver<ScanResult> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let result = (|| {
-            let checkout = source.checkout()?;
+            let ScanRequest {
+                source: selected_source,
+                output: output_selection,
+                providers,
+                default_branch,
+            } = request;
+            let source = selected_source.source;
+            let (checkout, safe_root) = if let Some(captured) = selected_source.local_root {
+                let checkout = Checkout::Local(captured.command_directory().to_path_buf());
+                (checkout, captured)
+            } else {
+                let checkout = source.checkout()?;
+                let safe_root = super::open_source_root(checkout.path(), None)?;
+                (checkout, safe_root)
+            };
             let default_branch = match default_branch.as_deref() {
                 Some(branch) => super::validate_default_branch(branch)?.to_owned(),
-                None => source.default_branch(checkout.path())?,
+                None => source.default_branch_with_safe_root(&safe_root)?,
             };
-            let scanned = scan_target(checkout.path(), providers, &default_branch)?;
-            let output_root = match output.as_deref() {
-                Some(path) => super::resolve_output_path(path)?,
-                None => source.output_root(checkout.path())?,
-            };
+            let output_root = output_selection.root.clone();
+            let output_binding = output_selection.binding.clone();
+            let source_identity = (matches!(source, RepositorySource::Local(_))
+                && output_root == safe_root.command_directory())
+            .then(|| safe_root.identity())
+            .transpose()?;
+            if let Some(source_identity) = source_identity.as_ref() {
+                output_binding.ensure_same_root(source_identity)?;
+            }
+            let scanned =
+                scan_target_with_safe_root(Arc::clone(&safe_root), providers, &default_branch)?;
             Ok(PreparedProject {
                 checkout,
                 config: scanned.config,
                 inputs: scanned.inputs,
                 output_root,
+                output_binding,
+                source_identity,
             })
         })()
         .map_err(|error: GeneratorError| error.to_string());
@@ -842,15 +907,19 @@ fn spawn_scan(
     receiver
 }
 
-pub(super) fn run(cli: &Cli) -> Result<(), GeneratorError> {
-    let source = RepositorySource::parse(&cli.target)?;
-    let receiver = spawn_scan(
+pub(super) fn run(
+    cli: &Cli,
+    source: SourceSelection,
+    output: OutputSelection,
+) -> Result<(), GeneratorError> {
+    let scan_request = ScanRequest {
         source,
-        cli.providers.clone(),
-        cli.output.clone(),
-        cli.default_branch.clone(),
-    );
-    let mut app = App::new(cli.clone(), receiver);
+        output,
+        providers: cli.providers.clone(),
+        default_branch: cli.default_branch.clone(),
+    };
+    let receiver = spawn_scan(scan_request.clone());
+    let mut app = App::new_with_scan_request(cli.clone(), receiver, Some(scan_request));
     let system = design_system();
     let mut session = Session::enter(io::stdout(), SessionOptions::default())
         .map_err(|error| GeneratorError::usage(format!("start TUI session: {error}")))?;
@@ -944,8 +1013,8 @@ mod tests {
     };
 
     use super::{
-        dependent_ids, required_dependencies, selection_status, App, FailedOperation, Overlay,
-        Phase,
+        dependent_ids, required_dependencies, selection_status, App, FailedOperation,
+        OutputPathBinding, Overlay, Phase, PreparedProject, ScanRequest,
     };
 
     fn unit(id: &str, dependencies: &[&str]) -> crate::s2::Unit {
@@ -1051,7 +1120,7 @@ mod tests {
 
     fn configured_app() -> App {
         let (_sender, receiver) = std::sync::mpsc::channel();
-        let mut app = App::new(
+        let mut app = App::new_with_scan_request(
             crate::s2::Cli {
                 target: ".".to_owned(),
                 default_branch: None,
@@ -1059,11 +1128,13 @@ mod tests {
                 providers: None,
                 dry_run: true,
                 check: false,
+                verify_pinned: false,
                 force: false,
                 plain: false,
                 pin_build: false,
             },
             receiver,
+            None,
         );
         let config = config();
         let ids = config
@@ -1079,7 +1150,13 @@ mod tests {
         app.config = Some(config);
         app.selector = Some(selector);
         app.inputs = Some(test_inputs());
-        app.output_root = Some(PathBuf::from("."));
+        app.output_root = std::env::current_dir()
+            .ok()
+            .and_then(|root| root.canonicalize().ok());
+        app.output_binding = app
+            .output_root
+            .as_deref()
+            .and_then(|root| OutputPathBinding::capture(root).ok());
         app.phase = Phase::Configure;
         app
     }
@@ -1190,6 +1267,7 @@ mod tests {
             changed: Vec::new(),
             stale: Vec::new(),
             conflicts: Vec::new(),
+            output_binding: None,
             ownership_present: true,
             ownership_needs_refresh: true,
             recorded_inputs: None,
@@ -1221,6 +1299,7 @@ mod tests {
             changed: vec![PathBuf::from(".github/workflows/ci-pr.yml")],
             stale: Vec::new(),
             conflicts: vec![PathBuf::from(".github/workflows/ci-pr.yml")],
+            output_binding: None,
             ownership_present: true,
             ownership_needs_refresh: false,
             recorded_inputs: None,
@@ -1257,6 +1336,12 @@ mod tests {
         let content = format!("{}name: CI\n", crate::s2::GENERATED_HEADER);
         let files = BTreeMap::from([(relative.clone(), content.clone())]);
         assert!(fs::create_dir_all(root.join(".github/workflows")).is_ok());
+        let canonical_root = fs::canonicalize(&root);
+        assert!(
+            canonical_root.is_ok(),
+            "canonicalize test output root: {canonical_root:?}"
+        );
+        let root = canonical_root.unwrap_or_default();
         let reviewed = crate::s2::plan_generated_write(&root, &files, &test_inputs());
         assert!(reviewed.is_ok());
         let Some(reviewed) = reviewed.ok() else {
@@ -1272,12 +1357,195 @@ mod tests {
             false,
             false,
             &reviewed,
+            None,
         );
         assert!(matches!(
             result,
             Ok(super::GenerationCompletion::PlanChanged(_))
         ));
         assert!(fs::remove_dir_all(root).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn review_rejects_output_parent_replacement_after_scan_resolution() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let launch = std::env::temp_dir().join(format!(
+            "velnor-tui-output-binding-{}-{nonce}",
+            std::process::id()
+        ));
+        let parent = launch.join("approved-parent");
+        assert!(fs::create_dir_all(&parent).is_ok());
+        let output_root = crate::s2::resolve_output_path(&parent.join("generated"));
+        assert!(output_root.is_ok(), "resolve output root: {output_root:?}");
+        let output_root = output_root.unwrap_or_default();
+        let output_binding = OutputPathBinding::capture(&output_root);
+        assert!(
+            output_binding.is_ok(),
+            "capture output binding: {output_binding:?}"
+        );
+        let Ok(output_binding) = output_binding else {
+            return;
+        };
+
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let mut app = App::new_with_scan_request(
+            crate::s2::Cli {
+                target: ".".to_owned(),
+                default_branch: None,
+                output: None,
+                providers: None,
+                dry_run: true,
+                check: false,
+                verify_pinned: false,
+                force: false,
+                plain: false,
+                pin_build: false,
+            },
+            receiver,
+            None,
+        );
+        app.finish_scan(PreparedProject {
+            checkout: crate::s2::Checkout::Local(launch.clone()),
+            config: config(),
+            inputs: test_inputs(),
+            output_root: output_root.clone(),
+            output_binding,
+            source_identity: None,
+        });
+
+        let moved_parent = launch.join("approved-parent-original");
+        assert!(fs::rename(&parent, &moved_parent).is_ok());
+        assert!(fs::create_dir(&parent).is_ok());
+        app.prepare_review();
+
+        assert_eq!(app.phase, Phase::Error(FailedOperation::Review));
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("output path changed after planning")));
+        assert!(
+            !parent.join("generated").exists(),
+            "replacement B must not receive output"
+        );
+        assert!(
+            !moved_parent.join("generated").exists(),
+            "approved A must not be modified after the path binding moved"
+        );
+        let _ = fs::remove_dir_all(launch);
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "the adversarial retry fixture must report setup failures"
+    )]
+    #[test]
+    #[cfg(unix)]
+    fn retry_reuses_captured_source_and_output_bindings_after_path_replacement() {
+        let launch = std::env::temp_dir().join(format!(
+            "velnor-tui-retry-binding-{}-{}",
+            std::process::id(),
+            crate::s2::unique_suffix()
+        ));
+        let source = launch.join("source");
+        let output = source.join("generated");
+        assert!(fs::create_dir_all(source.join(".github-gen")).is_ok());
+        assert!(fs::write(
+            source.join(".github-gen/velnor-workflow.toml"),
+            "schema = 2\n",
+        )
+        .is_ok());
+        let target = source.to_string_lossy();
+        let selection = match crate::s2::capture_generator_selection(&target, Some(&output)) {
+            Ok(selection) => selection,
+            Err(error) => panic!("capture source/output before scan: {error}"),
+        };
+        let captured_root = match selection.source.local_root.as_ref() {
+            Some(root) => std::sync::Arc::clone(root),
+            None => panic!("local selection must retain the captured root handle"),
+        };
+        let captured_identity = match captured_root.identity() {
+            Ok(identity) => identity,
+            Err(error) => panic!("capture source identity: {error}"),
+        };
+        let captured_binding = selection.output.binding.clone();
+        let captured_output = selection.output.root.clone();
+        let request = ScanRequest {
+            source: selection.source,
+            output: selection.output,
+            providers: None,
+            default_branch: Some("main".to_owned()),
+        };
+        let expected_request = request.clone();
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let mut app = App::new_with_scan_request(
+            crate::s2::Cli {
+                target: target.into_owned(),
+                default_branch: Some("main".to_owned()),
+                output: Some(output.clone()),
+                providers: None,
+                dry_run: true,
+                check: false,
+                verify_pinned: false,
+                force: false,
+                plain: false,
+                pin_build: false,
+            },
+            receiver,
+            Some(request),
+        );
+        app.phase = Phase::Error(FailedOperation::Scan);
+
+        let displaced = launch.join("source-original");
+        assert!(fs::rename(&source, &displaced).is_ok());
+        assert!(fs::create_dir_all(source.join(".github-gen")).is_ok());
+        assert!(fs::write(
+            source.join(".github-gen/velnor-workflow.toml"),
+            "schema = 2\n",
+        )
+        .is_ok());
+        assert!(fs::write(source.join("sentinel"), "replacement B").is_ok());
+
+        app.retry_scan();
+        let retry = match app.scan_request.as_ref() {
+            Some(retry) => retry,
+            None => panic!("retry must keep the invocation selection"),
+        };
+        assert!(matches!(
+            &retry.source.source,
+            crate::s2::RepositorySource::Local(_)
+        ));
+        let retry_root = match retry.source.local_root.as_ref() {
+            Some(root) => root,
+            None => panic!("retry must keep the original local root handle"),
+        };
+        assert!(std::sync::Arc::ptr_eq(retry_root, &captured_root));
+        assert_eq!(retry_root.identity().ok(), Some(captured_identity));
+        assert_eq!(retry.output.root, captured_output);
+        assert_eq!(retry.output.binding, captured_binding);
+        assert_eq!(
+            retry.output.binding, expected_request.output.binding,
+            "the retry must not capture output from replacement B"
+        );
+
+        let result = app.receiver.recv_timeout(std::time::Duration::from_secs(5));
+        assert!(
+            matches!(result, Ok(Err(error)) if error.contains("changed")),
+            "retry rejects the moved source instead of reopening replacement B"
+        );
+        assert!(
+            fs::read_to_string(source.join("sentinel")).is_ok_and(|value| value == "replacement B"),
+            "replacement B remains untouched"
+        );
+        assert!(
+            !output.exists(),
+            "the captured output binding must not write to replacement B"
+        );
+        let _ = fs::remove_dir_all(&source);
+        let _ = fs::remove_dir_all(&displaced);
+        let _ = fs::remove_dir_all(&launch);
     }
 
     #[test]

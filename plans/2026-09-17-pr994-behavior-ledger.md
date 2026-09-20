@@ -283,7 +283,7 @@ Findings and dispositions:
   the generator closure is dispatched per #914 precedent (`release ...
   for the proof PR's generator`); two superseded closure releases are
   orphaned by later fix commits (immutable, content-addressed, unused).
-- CI-found, fixed in-PR: (a) `migration_contract` plan probe inherited
+- CI-found, fixed in-PR: (a) `s2_contract` plan probe inherited
   the CI job's repo-relative `VELNOR_SELECTION_FILE` (local/CI split —
   local runs never set it); test now scrubs it. (b) Q1 law-probe
   `include_str!` is a genuine new compile input the scanner truthfully
@@ -393,20 +393,21 @@ Findings and dispositions:
   ran, so no generated release workflow could satisfy Jackin's
   `release_workflow_invokes_canonical_mise_tasks` contract (red on
   main since #992 removed the file). New `kind = "tasks"` publisher
-  renders `[[release.job]]` rows (id/tasks/needs/runner/modes/timeout)
+  renders `[[release.job]]` rows (id/tasks/needs/provider/platform/modes/timeout)
   into `release.yml` with tag+dispatch triggers, mode gates
   (`validate` = dispatch-only, `publish` = tag-only), and
-  github/macos/velnor lanes — mirroring the `[[check_profile]]`
+  GitHub-hosted platforms — mirroring the `[[check_profile]]`
   task-reference shape, reusing its validators and the versioned-tool
-  `mise run` step shape. Producer/archive/credential bindings stay
-  `rust-binary`/`native`-only; every task must be declared in the
-  repository's `mise.toml` like every unit `mise run` command.
-- Verification: 4 config tests (accept/shape matrix incl. shell-task,
-  self/unknown needs, velnor-without-labels, kind restriction,
-  duplicates), 5 render tests (jobs/gates/lanes, gate matrix,
-  jobless omission, binding backstop, velnor labels), 4 end-to-end
-  tests over neutral `example/*` fixtures (render, byte-identical
-  regen, undeclared-task and wrong-kind fail-closed). Full suite
+  `mise run` step shape. Task-release jobs are host-only: tag pushes and
+  `workflow_dispatch` do not satisfy the exact same-repository default-branch
+  push gate required for local jobs, so config validation rejects both `velnor`
+  and `github-self-hosted` providers until a separate trusted-push contract is
+  defined. Producer/archive/credential bindings stay `rust-binary`/`native`-only;
+  every task must be declared in the repository's `mise.toml` like every unit
+  `mise run` command.
+- Verification covers provider/config rejection, hosted job rendering, and
+  end-to-end generation over neutral `example/*` fixtures, including local
+  provider failure before workflow emission. Full suite
   773 lib + all integration green, clippy/fmt clean, genericity gate
   green. Jackin step-3 (declare `[[release.job]]`, regen
   `release.yml`, xtask green) pending the merge pin.

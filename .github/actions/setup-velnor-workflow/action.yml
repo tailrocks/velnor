@@ -4,7 +4,7 @@
 #
 # Resolution: `rev` (a generator commit) -> source-closure digest. The closure
 # is the canonical `git ls-tree` bytes of the closure inputs plus the footer
-# (see `crates/velnor-workflow/src/closure.rs`): computed from the local
+# (see `crates/velnor-workflow/src/s2/closure.rs`): computed from the local
 # checkout when it contains the revision, else via the repository trees API
 # over the same canonical bytes. Two commits with the same closure name the
 # same product.

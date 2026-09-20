@@ -1,14 +1,11 @@
 //! Swift detector: Swift packages and Xcode shared schemes.
 
-use std::fs;
-use std::path::Path;
-
 use super::file_walk::{
     files_named, join_repo_path, path_prefix, resolve_repo_path, roots_for_manifests,
 };
-use super::{unit, RepositoryShape, ScanContext};
+use super::{identifier_suffix, unit, RepositoryShape, ScanContext};
 use crate::s2::{
-    identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec, Unit,
+    parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec, GeneratorError, Unit,
     UnitKind,
 };
 
@@ -64,7 +61,10 @@ fn xcode_project_is_ios(contents: &str) -> bool {
     contents.contains("IPHONEOS_DEPLOYMENT_TARGET") || contents.contains("SDKROOT = iphoneos")
 }
 
-fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
+fn xcode_scheme_units(
+    context: &ScanContext<'_>,
+    files: &[String],
+) -> Result<Vec<Unit>, GeneratorError> {
     let mut units = Vec::new();
     for scheme in files
         .iter()
@@ -82,7 +82,7 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
         } else {
             continue;
         };
-        let scheme_contents = fs::read_to_string(root.join(scheme)).unwrap_or_default();
+        let scheme_contents = context.read_text(scheme)?;
         let referenced_project = if extension == "xcworkspace" {
             xcode_scheme_referenced_container(&scheme_contents)
                 .and_then(|path| resolve_repo_path(&container_root, &path))
@@ -96,7 +96,8 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
                     .iter()
                     .find(|file| file.as_str() == format!("{project}/project.pbxproj"))
             })
-            .and_then(|project| fs::read_to_string(root.join(project)).ok())
+            .map(|project| context.read_text(project))
+            .transpose()?
             .unwrap_or_default();
         let ios_destination = xcode_project_is_ios(&project_contents);
         let build_destination = if ios_destination {
@@ -180,30 +181,36 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
         unit.watch.dedup();
         units.push(unit);
     }
-    units
+    Ok(units)
 }
 
 /// Whether the package manifest consumes an `XCFramework` binary target: the
 /// bundle only resolves where the Apple SDK exists, so the unit is
 /// Apple-bound even without an Xcode project. A remote (URL) binary target
 /// without an `.xcframework` reference carries no such need.
-fn package_manifest_needs_xcframework(root: &Path, package_root: &str) -> bool {
-    let manifest = root.join(join_repo_path(package_root, "Package.swift"));
-    let contents = fs::read_to_string(manifest).unwrap_or_default();
-    contents.contains(".binaryTarget") && contents.contains(".xcframework")
+fn package_manifest_needs_xcframework(
+    context: &ScanContext<'_>,
+    package_root: &str,
+) -> Result<bool, GeneratorError> {
+    let manifest = join_repo_path(package_root, "Package.swift");
+    let contents = context.read_text(&manifest)?;
+    Ok(contents.contains(".binaryTarget") && contents.contains(".xcframework"))
 }
 
-pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
+pub(crate) fn detect(
+    context: &ScanContext<'_>,
+    shape: &mut RepositoryShape,
+) -> Result<(), GeneratorError> {
     for package_root in roots_for_manifests(&files_named(context.files, "Package.swift")) {
         shape.detected.push(format!("swift-package:{package_root}"));
         let mut unit = swift_package_unit(&package_root);
-        if package_manifest_needs_xcframework(context.root, &package_root) {
+        if package_manifest_needs_xcframework(context, &package_root)? {
             unit.platform = crate::s2::provider::Platform::MacosArm64;
             unit.capabilities.native_macos_arm64 = true;
         }
         shape.units.push(unit);
     }
-    let mut xcode_units = xcode_scheme_units(context.root, context.files);
+    let mut xcode_units = xcode_scheme_units(context, context.files)?;
     let has_xcode_schemes = !xcode_units.is_empty();
     if has_xcode_schemes {
         shape
@@ -225,4 +232,5 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
             "Apple test destinations use platform defaults; review the generated simulator destination when a project requires a named device or OS version.".to_owned(),
         );
     }
+    Ok(())
 }

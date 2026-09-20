@@ -52,7 +52,7 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-use super::GeneratorError;
+use super::{safe_fs::SafeRoot, GeneratorError};
 
 /// Closure algorithm version. Bump when the inputs or canonical form change;
 /// digests minted under different versions never compare equal because the
@@ -61,8 +61,7 @@ pub(crate) const CLOSURE_VERSION: u8 = 1;
 
 /// Cargo profile of Stage-0 release products.
 pub(crate) const PROFILE_RELEASE: &str = "release";
-/// Cargo profile of candidate products (verified against the unit job's test
-/// build before any reuse).
+/// Cargo profile of debug products.
 pub(crate) const PROFILE_DEBUG: &str = "debug";
 
 /// Feature set CI products are built with: none (`--no-default-features`).
@@ -70,10 +69,9 @@ pub(crate) const PROFILE_DEBUG: &str = "debug";
 /// with a CI product.
 pub(crate) const CI_FEATURES: &str = "";
 
-/// Feature set the candidate build stamps (default features): the
-/// candidate product. Pinned by test against the crate manifest. Unit jobs
-/// may build with wider features, so reuse is verified, never assumed.
-pub(crate) const DEV_FEATURES: &str = "tui";
+/// Feature set stamped by a default-feature build. Pinned against the crate
+/// manifest because policy verifies the debug product alongside CI products.
+pub(crate) const DEFAULT_FEATURES: &str = "tui";
 
 /// Release tag prefix for runtime products.
 pub(crate) const PRODUCT_TAG_PREFIX: &str = "velnor-workflow-runtime-v1-";
@@ -168,13 +166,38 @@ pub(crate) fn closure_of_tree(
     Ok(canonical_digest(&lines, features, profile))
 }
 
-/// Digest identifying the candidate product for `rev`: the debug binary the
-/// Rust unit job builds with default features. The unit job (publisher) and
-/// the policy job (consumer) both name the candidate artifact through
-/// `velnor-workflow closure --rev <sha> --candidate`, so the two can never
-/// disagree about which product a revision's candidate is.
-pub(crate) fn candidate_closure_of_tree(repo: &Path, rev: &str) -> Result<String, GeneratorError> {
-    closure_of_tree(repo, rev, DEV_FEATURES, PROFILE_DEBUG)
+/// Digest the closure inputs from a repository handle captured by the caller.
+/// The child process inherits that directory descriptor as its working root,
+/// so a renamed/replaced checkout path cannot redirect the tree lookup.
+pub(crate) fn closure_of_tree_with_safe_root(
+    repo: &SafeRoot,
+    rev: &str,
+    features: &str,
+    profile: &str,
+) -> Result<String, GeneratorError> {
+    let mut arguments = vec!["ls-tree", "-r", rev, "--"];
+    arguments.extend_from_slice(CLOSURE_PATHS);
+    let output =
+        super::safe_fs::pinned_command::output(repo, "git", &arguments).map_err(|error| {
+            GeneratorError::usage(format!("run git {}: {error}", arguments.join(" ")))
+        })?;
+    if !output.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "revision {rev} is not a commit of {}",
+            repo.command_directory().display()
+        )));
+    }
+    let lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    if lines.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "revision {rev} has no closure inputs in {}",
+            repo.command_directory().display()
+        )));
+    }
+    Ok(canonical_digest(&lines, features, profile))
 }
 
 #[cfg(test)]
@@ -262,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn dev_features_pin_the_candidate_build() {
+    fn default_features_pin_the_debug_product() {
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         let content = must(
             std::fs::read_to_string(&manifest),
@@ -270,27 +293,24 @@ mod tests {
         );
         assert!(
             content.contains("default = [\"tui\"]"),
-            "DEV_FEATURES names the default feature set the candidate build stamps: {DEV_FEATURES}"
+            "DEFAULT_FEATURES names the default feature set: {DEFAULT_FEATURES}"
         );
-        assert_eq!(DEV_FEATURES, "tui");
+        assert_eq!(DEFAULT_FEATURES, "tui");
         assert_ne!(
-            canonical_digest(&fixture_lines(), DEV_FEATURES, PROFILE_DEBUG),
+            canonical_digest(&fixture_lines(), DEFAULT_FEATURES, PROFILE_DEBUG),
             canonical_digest(&fixture_lines(), CI_FEATURES, PROFILE_DEBUG),
-            "the candidate identity never collides with the lean debug product"
+            "default-feature identity never collides with the lean debug product"
         );
     }
 
     #[test]
-    fn stamped_features_match_dev_features() {
-        // The candidate gate compares a binary's stamped features closure
-        // against `candidate_closure_of_tree`, so a default build must stamp
-        // exactly DEV_FEATURES: if `build.rs` spelled the set any other way
-        // (for example by keeping cargo's synthetic `default` marker), no
-        // default build would ever match its own closure and every candidate
-        // publish would fail closed.
+    fn stamped_features_match_default_features() {
+        // A default-feature build must stamp exactly DEFAULT_FEATURES: if
+        // `build.rs` spelled the set any other way, policy could not match its
+        // reported closure to the trusted tree.
         assert_eq!(
             env!("VELNOR_WORKFLOW_FEATURES"),
-            DEV_FEATURES,
+            DEFAULT_FEATURES,
             "build.rs and the canonical closure form must spell the default feature set identically"
         );
     }
@@ -306,79 +326,6 @@ mod tests {
         );
         assert!(output.status.success());
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
-    }
-
-    #[test]
-    fn candidate_closure_of_merge_matches_head_unless_main_touches_closure_paths() {
-        // Pins the candidate fast-path condition: the publisher reuses the
-        // merge-tree build iff the merge and head candidate closures agree,
-        // which holds iff main's side of the merge avoids `CLOSURE_PATHS`.
-        let root =
-            std::env::temp_dir().join(format!("velnor-closure-merge-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        write_closure_fixture(&root);
-        git_in(&root, &["init", "--quiet", "-b", "main"]);
-        git_in(&root, &["config", "user.email", "closure@test"]);
-        git_in(&root, &["config", "user.name", "closure"]);
-        git_in(&root, &["add", "-A"]);
-        git_in(&root, &["commit", "--quiet", "--message", "base"]);
-        git_in(&root, &["checkout", "--quiet", "-b", "pr"]);
-        must(
-            std::fs::write(
-                root.join("crates/velnor-workflow/src/apple.rs"),
-                "apple-changed\n",
-            ),
-            "change a closure path on the head side",
-        );
-        git_in(&root, &["commit", "--quiet", "--all", "--message", "head"]);
-        let head = git_output(&root, &["rev-parse", "HEAD"]);
-        let head_closure = must(candidate_closure_of_tree(&root, &head), "head closure");
-        // Main advances outside the closure paths: the merge tree carries
-        // the head's closure inputs, so the fast path applies.
-        git_in(&root, &["checkout", "--quiet", "main"]);
-        must(
-            std::fs::write(root.join("UNRELATED.md"), "unrelated-changed\n"),
-            "change a non-closure path on main",
-        );
-        git_in(&root, &["commit", "--quiet", "--all", "--message", "main"]);
-        git_in(&root, &["merge", "--quiet", "--no-edit", "pr"]);
-        let merge = git_output(&root, &["rev-parse", "HEAD"]);
-        assert_eq!(
-            must(candidate_closure_of_tree(&root, &merge), "merge closure"),
-            head_closure,
-            "a merge whose other parent avoids closure paths shares the head closure"
-        );
-        // Main advances inside the closure paths: the merge tree differs, so
-        // the publisher must build the head.
-        git_in(
-            &root,
-            &["checkout", "--quiet", "-b", "main-lock", "main@{1}"],
-        );
-        must(
-            std::fs::write(root.join("Cargo.lock"), "# lock-changed\n"),
-            "change a closure path on main",
-        );
-        git_in(
-            &root,
-            &["commit", "--quiet", "--all", "--message", "main-lock"],
-        );
-        git_in(&root, &["merge", "--quiet", "--no-edit", "pr"]);
-        let merge = git_output(&root, &["rev-parse", "HEAD"]);
-        assert_ne!(
-            must(candidate_closure_of_tree(&root, &merge), "merge closure"),
-            head_closure,
-            "a merge whose other parent touches closure paths diverges from head"
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn product_tag_carries_a_digest_locator() {
-        let digest = canonical_digest(&fixture_lines(), "", PROFILE_RELEASE);
-        assert_eq!(
-            product_tag(&digest),
-            format!("velnor-workflow-runtime-v1-{}", &digest[..16])
-        );
     }
 
     #[test]
@@ -478,7 +425,13 @@ mod tests {
             closure_of_tree(&root, &head, "", PROFILE_RELEASE),
             "closure of fixture",
         );
+        let safe_root = must(SafeRoot::open(&root), "capture closure fixture root");
+        let captured_digest = must(
+            closure_of_tree_with_safe_root(&safe_root, &head, "", PROFILE_RELEASE),
+            "closure of captured fixture",
+        );
         assert_eq!(rust_digest, shell_digest);
+        assert_eq!(captured_digest, shell_digest);
         // An unrelated file never enters the digest: committing one more
         // unrelated file under a new commit keeps no input, and removing it
         // from the listing is covered by construction (the pathspec).

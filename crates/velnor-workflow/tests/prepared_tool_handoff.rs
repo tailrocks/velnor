@@ -31,6 +31,7 @@ fn tempfile() -> PathBuf {
 fn copy_fixture(destination: &Path) -> PathBuf {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/synthetic-workspace");
     copy_tree(&source, destination);
+    write_config(destination, BASE_CONFIG);
     destination.to_path_buf()
 }
 
@@ -64,8 +65,6 @@ fn generate(root: &Path) -> PathBuf {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -101,7 +100,8 @@ fn generated_text(output: &Path) -> String {
     text
 }
 
-const PREPARED_TOOL_CONFIG: &str = "schema = 1\n\n[generator]\nrepository = \"example/synthetic\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n\n[[declare]]\nprimitive = \"prepared-tool\"\nunits = [\"rust-alpha\"]\n\n[declare.args.tools]\ntest-runner = [\"producer-job\"]\n\n[declare.args.recipes]\ntest-runner = [\"cargo build --locked\"]\n";
+const BASE_CONFIG: &str = "schema = 2\n\n[generator]\nrepository = \"example/synthetic\"\n\n[workflow]\nproviders = [\"github-hosted\"]\nautomatic_providers = [\"github-hosted\"]\ndefault_dispatch_providers = [\"github-hosted\"]\ndefault_branch = \"main\"\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n";
+const PREPARED_TOOL_CONFIG: &str = "schema = 2\n\n[generator]\nrepository = \"example/synthetic\"\n\n[workflow]\nproviders = [\"github-hosted\"]\nautomatic_providers = [\"github-hosted\"]\ndefault_dispatch_providers = [\"github-hosted\"]\ndefault_branch = \"main\"\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[[declare]]\nprimitive = \"prepared-tool\"\nunits = [\"rust-alpha\"]\n\n[declare.args.tools]\ntest-runner = [\"producer-job\"]\n\n[declare.args.recipes]\ntest-runner = [\"cargo build --locked\"]\n";
 
 #[test]
 fn declared_prepared_tool_renders_consumer_steps() {

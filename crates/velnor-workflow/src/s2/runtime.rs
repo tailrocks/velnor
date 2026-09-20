@@ -11,8 +11,8 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::path::{Component, Path, PathBuf};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -30,9 +30,10 @@ use super::primitives::prepared_tools::{
 use super::primitives::snapshot::{
     budget_report, plan_evictions, CacheEntry as SnapshotCacheEntry, RetentionPolicy,
 };
+use super::primitives::ProviderAdmission;
 use super::provider::{
     check_capabilities, eligibility, parse_provider_set, plan_digest, Capabilities,
-    ExclusionReason, Platform, ProviderId, ProviderSet, TrustReq,
+    ExclusionReason, Platform, ProviderId, ProviderSelectionSource, ProviderSet, TrustReq,
 };
 use super::{GeneratorError, UnitKind};
 
@@ -265,8 +266,7 @@ impl Scope {
 }
 
 /// `velnor-workflow version [--json]`: the crate version and the source
-/// revision stamped at build time (the same value `--revision` prints), so a
-/// candidate binary can prove which commit it was built from.
+/// revision stamped at build time (the same value `--revision` prints).
 fn print_version(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let json = match arguments {
         [] => false,
@@ -302,39 +302,34 @@ fn print_version(arguments: &[OsString]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
-/// `velnor-workflow closure --rev SHA [--profile release|debug] [--repo PATH] [--candidate]`:
-/// print the source-closure digest of `SHA` in the repository at `--repo`
-/// (the current directory by default). CI jobs use it to name the product
-/// they need; policy resolves the same digest when it verifies.
-/// `--candidate` names the unit job's own debug build (default features); it
-/// cannot combine with `--profile`.
-fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
-    let (candidate, rest): (Vec<&OsString>, Vec<&OsString>) =
-        arguments.iter().partition(|argument| {
-            argument
-                .to_str()
-                .is_some_and(|value| value == "--candidate")
-        });
-    if candidate.len() > 1 {
-        return Err(GeneratorError::usage(
-            "duplicate option: --candidate".to_owned(),
-        ));
+/// Run a command that needs no repository config or root.
+pub(crate) fn run_rootless_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    match arguments.first().and_then(|value| value.to_str()) {
+        Some("version") => print_version(&arguments[1..]),
+        _ => Err(GeneratorError::usage(
+            "unsupported rootless runtime command",
+        )),
     }
-    let candidate = !candidate.is_empty();
-    let rest: Vec<OsString> = rest.into_iter().cloned().collect();
-    let options = parse_options(&rest, &["rev", "profile", "repo"])?;
-    let rev = options
+}
+
+/// `velnor-workflow closure --rev SHA [--profile release|debug] [--repo PATH]`
+/// prints a repository tree's source-closure digest. Dispatch captures the
+/// requested repository root once and passes its handle here; this code never
+/// reopens `--repo` by pathname.
+struct ClosureRequest {
+    revision: String,
+    profile: String,
+}
+
+fn parse_closure_request(arguments: &[OsString]) -> Result<ClosureRequest, GeneratorError> {
+    let options = parse_options(arguments, &["rev", "profile", "repo"])?;
+    let revision = options
         .get("rev")
         .ok_or_else(|| GeneratorError::usage("closure requires --rev SHA".to_owned()))?;
-    if !crate::s2::is_full_revision(rev) {
+    if !crate::s2::is_full_revision(revision) {
         return Err(GeneratorError::usage(format!(
-            "closure --rev must be a full 40-character commit SHA, got {rev:?}"
+            "closure --rev must be a full 40-character commit SHA, got {revision:?}"
         )));
-    }
-    if candidate && options.contains_key("profile") {
-        return Err(GeneratorError::usage(
-            "closure --candidate cannot combine with --profile".to_owned(),
-        ));
     }
     let profile = options
         .get("profile")
@@ -347,42 +342,104 @@ fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
             "closure --profile must be release or debug, got {profile:?}"
         )));
     }
-    let repo = match options.get("repo") {
-        Some(path) => PathBuf::from(path.as_str()),
-        None => env::current_dir()
-            .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?,
-    };
-    let digest = if candidate {
-        crate::s2::closure::candidate_closure_of_tree(&repo, rev)?
-    } else {
-        crate::s2::closure::closure_of_tree(&repo, rev, crate::s2::closure::CI_FEATURES, profile)?
-    };
+    Ok(ClosureRequest {
+        revision: revision.clone(),
+        profile: profile.to_owned(),
+    })
+}
+
+fn print_closure_with_safe_root(
+    arguments: &[OsString],
+    captured_root: &super::safe_fs::SafeRoot,
+) -> Result<(), GeneratorError> {
+    let request = parse_closure_request(arguments)?;
+    let digest = closure_digest_with_safe_root(captured_root, &request.revision, &request.profile)?;
     println!("{digest}");
     Ok(())
 }
 
+fn closure_digest_with_safe_root(
+    root: &super::safe_fs::SafeRoot,
+    rev: &str,
+    profile: &str,
+) -> Result<String, GeneratorError> {
+    root.validate_root_binding()?;
+    let digest = crate::s2::closure::closure_of_tree_with_safe_root(
+        root,
+        rev,
+        crate::s2::closure::CI_FEATURES,
+        profile,
+    );
+    root.validate_root_binding()?;
+    digest
+}
+
 /// Dispatch the binary-only subcommands. `false` means the arguments belong
 /// to the workflow generator CLI proper.
-pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
+pub(crate) fn run_policy_with_safe_root(
+    arguments: &[OsString],
+    safe_root: super::safe_fs::SafeRoot,
+) -> Result<(), GeneratorError> {
+    crate::s2::policy::run_policy_with_safe_root(arguments, safe_root)
+}
+
+/// Execute a closure query against the repository descriptor captured by dispatch.
+pub(crate) fn run_closure_with_safe_root(
+    arguments: &[OsString],
+    safe_root: super::safe_fs::SafeRoot,
+) -> Result<(), GeneratorError> {
+    safe_root.validate_root_binding()?;
+    let result = print_closure_with_safe_root(arguments, &safe_root);
+    safe_root.validate_root_binding()?;
+    result
+}
+
+/// Dispatch a schema-2 runtime command with the directory handle captured by
+/// schema probing. Keep it alive and verify its displayed binding at both
+/// sides of command processing.
+pub(crate) fn run_with_safe_root(
+    arguments: &[OsString],
+    safe_root: super::safe_fs::SafeRoot,
+) -> Result<(), GeneratorError> {
+    safe_root.validate_root_binding()?;
+    // Dispatch already parsed this root's schema to select S2. Re-check the
+    // typed config through the captured handle so a config removed between
+    // selection and command processing cannot enter the runtime.
+    crate::s2::config::require_with_safe_root(&safe_root)?;
+    let result = try_run_with_safe_root(arguments, &safe_root);
+    // Check even when command processing failed: an observed root swap should
+    // not be hidden by an earlier read or subprocess error.
+    safe_root.validate_root_binding()?;
+    if !result? {
+        return Err(GeneratorError::usage(
+            "schema-2 runtime dispatch did not recognize the command",
+        ));
+    }
+    Ok(())
+}
+
+fn try_run_with_safe_root(
+    arguments: &[OsString],
+    safe_root: &super::safe_fs::SafeRoot,
+) -> Result<bool, GeneratorError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Ok(false);
     };
     match command {
         "plan" => {
             let options = parse_options(&arguments[1..], &["config"])?;
-            plan(&resolve_config_path(options.get("config")))?;
+            let config = resolve_config_path(options.get("config"));
+            plan_with_working_root(WorkingRoot::Safe(safe_root), &config)?;
             Ok(true)
         }
         "run" => {
             let options = parse_options(&arguments[1..], &["config", "scope", "unit"])?;
-            let root = env::current_dir()
-                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
             let config = resolve_config_path(options.get("config"));
             let scope = options
                 .get("scope")
                 .map_or(Ok(Scope::Full), |value| Scope::parse(value))?;
-            run_units(
-                &root,
+            run_units_with_working_root(
+                WorkingRoot::Safe(safe_root),
                 &config,
                 scope,
                 options.get("unit").map(String::as_str),
@@ -391,17 +448,18 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
         }
         "test-crates" => {
             let options = parse_options(&arguments[1..], &["config"])?;
-            let root = env::current_dir()
-                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
-            test_crates(&root, &resolve_config_path(options.get("config")), None)?;
+            test_crates_with_working_root(
+                WorkingRoot::Safe(safe_root),
+                &resolve_config_path(options.get("config")),
+                None,
+            )?;
             Ok(true)
         }
-        "policy" => {
-            crate::s2::policy::run_cli(&arguments[1..])?;
-            Ok(true)
-        }
+        "policy" => Err(GeneratorError::usage(
+            "policy dispatch requires its captured workflow root",
+        )),
         "release" => {
-            release(&arguments[1..])?;
+            release_with_safe_root(&arguments[1..], safe_root)?;
             Ok(true)
         }
         "version" => {
@@ -409,7 +467,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             Ok(true)
         }
         "closure" => {
-            print_closure(arguments.get(1..).unwrap_or_default())?;
+            print_closure_with_safe_root(arguments.get(1..).unwrap_or_default(), safe_root)?;
             Ok(true)
         }
         "prepared-tool-install" => {
@@ -426,26 +484,32 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             }
             if mode == "budget" {
                 if let Some(entries_path) = options.get("entries") {
-                    cache_budget_report(entries_path)?;
+                    cache_budget_report_with_safe_root(entries_path, Some(safe_root))?;
                 } else {
-                    println!("{}", retention_policy_for_plan().total_bytes);
+                    let policy = retention_policy_for_plan_with_safe_root(Some(safe_root))?;
+                    println!("{}", policy.total_bytes);
                 }
                 return Ok(true);
             }
-            cache_plan(
+            cache_plan_with_safe_root(
                 options.get("entries").map(String::as_str),
                 options.get("now").map(String::as_str),
+                Some(safe_root),
             )?;
             Ok(true)
         }
-        _ => try_run_reuse(command, arguments),
+        _ => try_run_reuse_with_safe_root(command, arguments, safe_root),
     }
 }
 
 /// Dispatch the slice-C subcommands (`aggregate`, `select`, `fingerprint`,
 /// `reuse-decision`). `false` means the arguments belong to the workflow
 /// generator CLI proper.
-fn try_run_reuse(command: &str, arguments: &[OsString]) -> Result<bool, GeneratorError> {
+fn try_run_reuse_with_safe_root(
+    command: &str,
+    arguments: &[OsString],
+    safe_root: &super::safe_fs::SafeRoot,
+) -> Result<bool, GeneratorError> {
     match command {
         "aggregate" => {
             let options = parse_options(&arguments[1..], &["expected", "results"])?;
@@ -460,8 +524,6 @@ fn try_run_reuse(command: &str, arguments: &[OsString]) -> Result<bool, Generato
         }
         "select" => {
             let options = parse_options(&arguments[1..], &["config", "base", "head", "scope"])?;
-            let root = env::current_dir()
-                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
             let config = resolve_config_path(options.get("config"));
             let scope = options
                 .get("scope")
@@ -471,23 +533,29 @@ fn try_run_reuse(command: &str, arguments: &[OsString]) -> Result<bool, Generato
                 .get("head")
                 .cloned()
                 .unwrap_or_else(|| "HEAD".to_owned());
-            select_command(&root, &config, scope, &base, &head)?;
+            select_command_with_working_root(
+                WorkingRoot::Safe(safe_root),
+                &config,
+                scope,
+                &base,
+                &head,
+            )?;
             Ok(true)
         }
         "fingerprint" => {
             let options = parse_options(&arguments[1..], &["config", "unit", "rev", "live"])?;
-            let root = env::current_dir()
-                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
             let config = resolve_config_path(options.get("config"));
             let rev = options
                 .get("rev")
                 .cloned()
                 .unwrap_or_else(|| "HEAD".to_owned());
-            fingerprint_command(
-                &root,
+            let only_unit = options.get("unit").map(String::as_str);
+            let live = options.get("live").map(String::as_str);
+            fingerprint_command_with_working_root(
+                WorkingRoot::Safe(safe_root),
                 &config,
-                options.get("unit").map(String::as_str),
-                options.get("live").map(String::as_str),
+                only_unit,
+                live,
                 &rev,
             )?;
             Ok(true)
@@ -570,13 +638,36 @@ where
     deserializer.deserialize_any(CacheIdVisitor)
 }
 
-fn read_cache_entries(entries_path: &str) -> Result<Vec<SnapshotCacheEntry>, GeneratorError> {
-    let entries_text = fs::read_to_string(entries_path).map_err(|error| {
-        GeneratorError::io(
-            "read cache account snapshot",
-            Path::new(entries_path),
-            &error,
-        )
+fn read_cache_entries_with_safe_root(
+    entries_path: &str,
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<Vec<SnapshotCacheEntry>, GeneratorError> {
+    let path = Path::new(entries_path);
+    let bytes = if let Some(root) = safe_root {
+        let relative = if path.is_absolute() {
+            path.strip_prefix(root.command_directory()).ok()
+        } else if path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+        {
+            Some(path)
+        } else {
+            None
+        };
+        match relative {
+            Some(relative) => root.read_file(relative)?,
+            None => fs::read(path)
+                .map_err(|error| GeneratorError::io("read cache account snapshot", path, &error))?,
+        }
+    } else {
+        fs::read(path)
+            .map_err(|error| GeneratorError::io("read cache account snapshot", path, &error))?
+    };
+    let entries_text = String::from_utf8(bytes).map_err(|error| {
+        GeneratorError::usage(format!(
+            "cache account snapshot {} is not UTF-8: {error}",
+            path.display()
+        ))
     })?;
     let records: Vec<CacheEntryRecord> = serde_json::from_str(&entries_text).map_err(|error| {
         GeneratorError::usage(format!(
@@ -594,18 +685,25 @@ fn read_cache_entries(entries_path: &str) -> Result<Vec<SnapshotCacheEntry>, Gen
         .collect())
 }
 
-/// Resolve the GitHub Actions retention policy from `.github-gen/velnor-workflow.toml`
-/// when present, otherwise the generator default.
-fn retention_policy_for_plan() -> RetentionPolicy {
-    let discovered = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| crate::s2::config::discover(&cwd).ok().flatten());
+fn retention_policy_for_plan_with_safe_root(
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<RetentionPolicy, GeneratorError> {
+    let discovered = if let Some(root) = safe_root {
+        crate::s2::config::discover_with_safe_root(root)?
+    } else {
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| crate::s2::config::discover(&cwd).ok().flatten())
+    };
     let policy = discovered
         .as_ref()
         .map_or_else(RetentionPolicy::default_policy, |config| {
             RetentionPolicy::from_config(config.cache_github())
         });
-    retention_policy_with_declared_tools(policy, discovered.as_ref())
+    Ok(retention_policy_with_declared_tools(
+        policy,
+        discovered.as_ref(),
+    ))
 }
 
 /// Extend a retention policy with the prepared-tools class when the
@@ -910,6 +1008,11 @@ fn curl_producer_run(
             &endpoint,
         ])
         .env("GH_TOKEN", token)
+        // The process CWD is the captured runtime root identity. Keep these
+        // common workspace hints relative so curl cannot pass a stale alias
+        // to helpers if the root's old pathname now names another tree.
+        .env("PWD", ".")
+        .env("GITHUB_WORKSPACE", ".")
         .output()
         .map_err(|error| format!("run {curl}: {error}"))?;
     if !output.status.success() {
@@ -948,10 +1051,13 @@ fn append_step_output(path: &Path, text: &str) -> std::io::Result<()> {
     file.write_all(text.as_bytes())
 }
 
-/// Emit per-class totals and headroom for the maintenance budget step.
-fn cache_budget_report(entries_path: &str) -> Result<(), GeneratorError> {
-    let entries = read_cache_entries(entries_path)?;
-    let report = budget_report(&entries, &retention_policy_for_plan());
+fn cache_budget_report_with_safe_root(
+    entries_path: &str,
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    let entries = read_cache_entries_with_safe_root(entries_path, safe_root)?;
+    let policy = retention_policy_for_plan_with_safe_root(safe_root)?;
+    let report = budget_report(&entries, &policy);
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     serde_json::to_writer(&mut handle, &report)
@@ -961,16 +1067,13 @@ fn cache_budget_report(entries_path: &str) -> Result<(), GeneratorError> {
     Ok(())
 }
 
-/// Compute the retention eviction plan for the Actions cache account: the same
-/// [`RetentionPolicy`] and the same `plan_evictions` the generator's tests
-/// exercise, run against the account snapshot the maintenance job collects.
-/// The plan is the workflow's only eviction decision — the job applies it
-/// verbatim and records every eviction's class and reason in the summary.
-///
-/// `--now` pins the clock for tests; a live run uses the system clock.
-fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), GeneratorError> {
+fn cache_plan_with_safe_root(
+    entries_path: Option<&str>,
+    now: Option<&str>,
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
     let entries = if let Some(path) = entries_path {
-        read_cache_entries(path)?
+        read_cache_entries_with_safe_root(path, safe_root)?
     } else {
         let mut text = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).map_err(|error| {
@@ -999,7 +1102,8 @@ fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), Gener
             .as_secs()
             .cast_signed(),
     };
-    let plan = plan_evictions(&entries, &retention_policy_for_plan(), now_epoch);
+    let policy = retention_policy_for_plan_with_safe_root(safe_root)?;
+    let plan = plan_evictions(&entries, &policy, now_epoch);
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     serde_json::to_writer(&mut handle, &plan)
@@ -1034,14 +1138,14 @@ fn aggregate_command(expected: &Path, results: &Path) -> Result<(), GeneratorErr
 /// [`crate::s2::reuse::select_affected`] core over the runtime's own unit table.
 /// Unlike `plan`, this command answers one question only — which units a
 /// change list affects — without lane filtering, workspace gates, or outputs.
-fn select_command(
-    root: &Path,
+fn select_command_with_working_root(
+    root: WorkingRoot<'_>,
     config_path: &Path,
     scope: Scope,
     base: &str,
     head: &str,
 ) -> Result<(), GeneratorError> {
-    let config = read_config(config_path)?;
+    let config = root.root_config(config_path)?;
     let watched: Vec<crate::s2::reuse::WatchedUnit> = config
         .unit
         .iter()
@@ -1068,7 +1172,7 @@ fn select_command(
             "no affected base; fell back to full",
         ));
     }
-    let Some(lines) = git_name_status(root, base, head)? else {
+    let Some(lines) = git_name_status_with_working_root(root, base, head)? else {
         return print_selection(&crate::s2::reuse::fallback_selection(
             &watched,
             "git diff unavailable; fell back to full",
@@ -1099,18 +1203,12 @@ fn print_selection(selection: &crate::s2::reuse::AffectedSelection) -> Result<()
     Ok(())
 }
 
-fn git_name_status(
-    root: &Path,
+fn git_name_status_with_working_root(
+    root: WorkingRoot<'_>,
     base: &str,
     head: &str,
 ) -> Result<Option<Vec<String>>, GeneratorError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--name-status", "-M"])
-        .arg(format!("{base}...{head}"))
-        .output()
-        .map_err(|error| GeneratorError::usage(format!("run git diff: {error}")))?;
+    let output = root.git_output(&["diff", "--name-status", "-M", &format!("{base}...{head}")])?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -1135,14 +1233,14 @@ struct FingerprintOutput {
 /// artifact identity over the runtime's own unit table at one revision.
 /// `--unit` reports one unit; `--live` names the live-state units explicitly,
 /// since the runtime table cannot observe that property.
-fn fingerprint_command(
-    root: &Path,
+fn fingerprint_command_with_working_root(
+    root: WorkingRoot<'_>,
     config_path: &Path,
     only_unit: Option<&str>,
     live: Option<&str>,
     rev: &str,
 ) -> Result<(), GeneratorError> {
-    let config = read_config(config_path)?;
+    let config = root.root_config(config_path)?;
     let known: BTreeSet<&str> = config.unit.iter().map(|unit| unit.id.as_str()).collect();
     if let Some(id) = only_unit
         && !known.contains(id)
@@ -1150,14 +1248,14 @@ fn fingerprint_command(
         return Err(GeneratorError::usage(format!("unknown unit: {id}")));
     }
     let live_ids = resolve_live_ids(live, &known)?;
-    let tree = git_ls_tree(root, rev)?;
+    let tree = git_ls_tree_with_working_root(root, rev)?;
     let ordered = ordered_units(&config.unit, None)?;
     let check_impl = crate::s2::reuse::current_check_impl();
     let mut fingerprints: BTreeMap<String, String> = BTreeMap::new();
     let mut reports = Vec::new();
     for unit in ordered {
         // One command vector per scope: every provider runs the same spec,
-        // so the lane-qualified keys of the schema-1 fingerprint collapse.
+        // so recipe keys are scope-qualified and provider-independent.
         let commands = BTreeMap::from([
             ("affected".to_owned(), unit.pr_commands.clone()),
             ("full".to_owned(), unit.full_commands.clone()),
@@ -1255,13 +1353,11 @@ fn resolve_live_ids<'a>(
     Ok(ids)
 }
 
-fn git_ls_tree(root: &Path, rev: &str) -> Result<String, GeneratorError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["ls-tree", "-r", rev])
-        .output()
-        .map_err(|error| GeneratorError::usage(format!("run git ls-tree: {error}")))?;
+fn git_ls_tree_with_working_root(
+    root: WorkingRoot<'_>,
+    rev: &str,
+) -> Result<String, GeneratorError> {
+    let output = root.git_output(&["ls-tree", "-r", rev])?;
     if !output.status.success() {
         return Err(GeneratorError::usage(format!(
             "revision {rev} is not available for fingerprinting"
@@ -1359,6 +1455,128 @@ fn resolve_config_path(config: Option<&String>) -> PathBuf {
     config.map_or_else(|| PathBuf::from(DEFAULT_CONFIG), PathBuf::from)
 }
 
+#[derive(Clone, Copy)]
+enum WorkingRoot<'a> {
+    Path(&'a Path),
+    Safe(&'a super::safe_fs::SafeRoot),
+}
+
+impl<'a> WorkingRoot<'a> {
+    fn path(self) -> &'a Path {
+        match self {
+            Self::Path(path) => path,
+            Self::Safe(root) => root.command_directory(),
+        }
+    }
+
+    fn read_file(self, relative: &Path, operation: &str) -> Result<Vec<u8>, GeneratorError> {
+        match self {
+            Self::Path(root) => {
+                let path = root.join(relative);
+                fs::read(&path).map_err(|error| GeneratorError::io(operation, &path, &error))
+            }
+            Self::Safe(root) => root.read_file(relative),
+        }
+    }
+
+    fn read_input_file(self, path: &Path, operation: &str) -> Result<Vec<u8>, GeneratorError> {
+        match self {
+            Self::Path(_) => {
+                fs::read(path).map_err(|error| GeneratorError::io(operation, path, &error))
+            }
+            Self::Safe(root) => {
+                let relative = if path.is_absolute() {
+                    path.strip_prefix(root.command_directory()).ok()
+                } else {
+                    Some(path)
+                };
+                match relative {
+                    Some(relative) => root.read_file(relative),
+                    None => {
+                        fs::read(path).map_err(|error| GeneratorError::io(operation, path, &error))
+                    }
+                }
+            }
+        }
+    }
+
+    fn has_regular_file(self, relative: &Path) -> Result<bool, GeneratorError> {
+        match self {
+            Self::Path(root) => Ok(root.join(relative).is_file()),
+            Self::Safe(root) => root.has_regular_file(relative),
+        }
+    }
+
+    fn git_output(self, arguments: &[&str]) -> Result<Output, GeneratorError> {
+        match self {
+            Self::Path(root) => Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(arguments)
+                .output()
+                .map_err(|error| {
+                    GeneratorError::usage(format!("run git {}: {error}", arguments.join(" ")))
+                }),
+            Self::Safe(root) => super::safe_fs::pinned_command::output(root, "git", arguments)
+                .map_err(|error| {
+                    GeneratorError::usage(format!("run git {}: {error}", arguments.join(" ")))
+                }),
+        }
+    }
+
+    fn spawn(self, mut command: Command) -> std::io::Result<std::process::Child> {
+        match self {
+            Self::Path(root) => {
+                command.current_dir(root);
+                command.spawn()
+            }
+            Self::Safe(root) => super::safe_fs::pinned_command::spawn(root, command),
+        }
+    }
+
+    fn output(self, mut command: Command) -> std::io::Result<Output> {
+        match self {
+            Self::Path(root) => {
+                command.current_dir(root);
+                command.output()
+            }
+            Self::Safe(root) => {
+                super::safe_fs::pinned_command::spawn(root, command)?.wait_with_output()
+            }
+        }
+    }
+
+    fn status(self, command: Command) -> std::io::Result<ExitStatus> {
+        self.spawn(command)?.wait()
+    }
+
+    fn root_config(self, path: &Path) -> Result<CiConfig, GeneratorError> {
+        match self {
+            Self::Path(_) => read_config(path),
+            Self::Safe(root) => {
+                let relative = if path.is_absolute() {
+                    path.strip_prefix(root.command_directory()).ok()
+                } else {
+                    Some(path)
+                };
+                let Some(relative) = relative else {
+                    // An absolute --config outside the workflow root is an
+                    // explicit external input, not a root-relative read.
+                    return read_config(path);
+                };
+                let bytes = root.read_file(relative)?;
+                let text = String::from_utf8(bytes).map_err(|error| {
+                    GeneratorError::usage(format!(
+                        "parse CI configuration {} as UTF-8: {error}",
+                        root.command_directory().join(relative).display()
+                    ))
+                })?;
+                parse_config_contents(&text, &root.command_directory().join(relative))
+            }
+        }
+    }
+}
+
 /// Parse a generated `project.toml` through the real runtime contract.
 /// Emitter tests use it to prove the generator never ships a field the
 /// runtime rejects.
@@ -1370,7 +1588,11 @@ pub(crate) fn read_config_for_test(path: &Path) -> Result<(), GeneratorError> {
 pub(crate) fn read_config(path: &Path) -> Result<CiConfig, GeneratorError> {
     let contents = fs::read_to_string(path)
         .map_err(|error| GeneratorError::io("read CI configuration", path, &error))?;
-    let config: CiConfig = toml::from_str(&contents).map_err(|error| {
+    parse_config_contents(&contents, path)
+}
+
+fn parse_config_contents(contents: &str, path: &Path) -> Result<CiConfig, GeneratorError> {
+    let config: CiConfig = toml::from_str(contents).map_err(|error| {
         GeneratorError::usage(format!(
             "parse CI configuration {}: {error}",
             path.display()
@@ -1488,24 +1710,18 @@ struct PlannedExclusion {
     reason: ExclusionReason,
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "d2a shape: one complete plan command"
-)]
-fn plan(config_path: &Path) -> Result<(), GeneratorError> {
-    let config = read_config(config_path)?;
+fn plan_with_working_root(root: WorkingRoot<'_>, config_path: &Path) -> Result<(), GeneratorError> {
+    let config = root.root_config(config_path)?;
     let scope = match scope_for_event()? {
         Some(value) => Scope::parse(&value)?,
         None => Scope::Full,
     };
-    let root = env::current_dir()
-        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
     let base = env::var("BASE_SHA").unwrap_or_default();
     let head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
     let universe = parse_provider_set(&config.providers, "providers")?;
     let effective = plan_providers(&universe)?;
     let event_trusted = event_is_trusted();
-    let selection = selection_for_diff(&root, &config, scope, &base, &head)?;
+    let selection = selection_for_working_root(root, &config, scope, &base, &head)?;
     let selected: BTreeSet<&str> = selection
         .units
         .iter()
@@ -1770,16 +1986,22 @@ fn scope_name(scope: Scope) -> &'static str {
     }
 }
 
-/// The effective providers for this plan, from the `VELNOR_PROVIDERS`
-/// environment the generated plan step renders (the dispatch `providers:`
-/// input on dispatch events, the automatic set otherwise). Absent means the
-/// full universe (local runs). Dispatch narrows, never widens.
+/// The effective providers for this plan. The generated plan step sends the
+/// dispatch `providers:` input on dispatch events and the automatic set
+/// otherwise. Local provider admission values come from the same generated
+/// predicates used by their jobs and `ci-required`.
 fn plan_providers(universe: &ProviderSet) -> Result<ProviderSet, GeneratorError> {
     let value = env::var("VELNOR_PROVIDERS").unwrap_or_default();
-    plan_providers_for_value(&value, universe)
+    let requested = requested_providers_for_value(&value, universe)?;
+    let admitted = plan_admitted_providers(&requested)?;
+    super::provider::apply_provider_admission(
+        &requested,
+        &admitted,
+        plan_provider_selection_source(),
+    )
 }
 
-fn plan_providers_for_value(
+fn requested_providers_for_value(
     value: &str,
     universe: &ProviderSet,
 ) -> Result<ProviderSet, GeneratorError> {
@@ -1794,6 +2016,75 @@ fn plan_providers_for_value(
     let providers = parse_provider_set(&values, "VELNOR_PROVIDERS")?;
     super::provider::require_subset(&providers, universe, "VELNOR_PROVIDERS", "providers")?;
     Ok(providers)
+}
+
+/// Parse a provider request and constrain it to the typed set whose generated
+/// admission predicates are true for this event. `value == ""` still means
+/// the full universe; the admission set remains a separate input, so an empty
+/// filter cannot accidentally expand a local-only plan.
+#[cfg(test)]
+pub(crate) fn plan_providers_for_value(
+    value: &str,
+    universe: &ProviderSet,
+    admitted: &ProviderSet,
+    source: ProviderSelectionSource,
+) -> Result<ProviderSet, GeneratorError> {
+    let requested = requested_providers_for_value(value, universe)?;
+    super::provider::apply_provider_admission(&requested, admitted, source)
+}
+
+/// Read the local-provider admission booleans rendered by the workflow IR.
+/// When running the plan command directly outside Actions, a missing value
+/// keeps local providers available. Inside a generated workflow, a missing
+/// predicate is a hard error so the plan cannot silently diverge from its
+/// callers or `ci-required`.
+fn plan_admitted_providers(requested: &ProviderSet) -> Result<ProviderSet, GeneratorError> {
+    let in_workflow = env::var_os("EVENT_NAME").is_some();
+    let mut admitted = requested.clone();
+    for provider in ProviderId::LOCAL {
+        if !requested.contains(&provider) {
+            continue;
+        }
+        let admission = ProviderAdmission::ProviderTrusted(provider);
+        let variable = admission.env_name();
+        match env::var(variable) {
+            Ok(value) => match value.trim() {
+                "true" => {}
+                "false" => {
+                    admitted.remove(&provider);
+                }
+                other => {
+                    return Err(GeneratorError::usage(format!(
+                        "local provider admission `{variable}` must be `true` or `false`, got `{other}`"
+                    )));
+                }
+            },
+            Err(env::VarError::NotPresent) if !in_workflow => {}
+            Err(env::VarError::NotPresent) => {
+                return Err(GeneratorError::usage(format!(
+                    "generated plan is missing local provider admission `{variable}`"
+                )));
+            }
+            Err(error) => {
+                return Err(GeneratorError::usage(format!(
+                    "read local provider admission `{variable}`: {error}"
+                )));
+            }
+        }
+    }
+    Ok(admitted)
+}
+
+/// Workflow dispatch is the only generated workflow event with a caller
+/// selected provider set. Local CLI runs with `VELNOR_PROVIDERS` also count as
+/// explicit; generated automatic events always set `EVENT_NAME`.
+fn plan_provider_selection_source() -> ProviderSelectionSource {
+    match env::var("EVENT_NAME") {
+        Ok(event) if event == "workflow_dispatch" => ProviderSelectionSource::Explicit,
+        Ok(_) => ProviderSelectionSource::Automatic,
+        Err(_) if env::var_os("VELNOR_PROVIDERS").is_some() => ProviderSelectionSource::Explicit,
+        Err(_) => ProviderSelectionSource::Automatic,
+    }
 }
 
 /// Whether the current event is trusted. The generated plan step renders
@@ -1886,12 +2177,14 @@ mod runner_lane_tests {
     use super::{
         collect_manifests, expand_affected_units, plan_providers_for_value, CiUnit, Scope,
     };
+    use crate::s2::provider::ProviderSelectionSource;
     use std::path::Path;
 
     #[test]
     fn plan_providers_defaults_to_the_universe_and_dispatch_narrows() {
         use crate::s2::provider::{ProviderId, ProviderSet};
         let universe: ProviderSet = ProviderId::ALL.into_iter().collect();
+        let all_admitted = universe.clone();
         assert_eq!(
             super::super::provider::parse_provider_set(&[] as &[String], "test")
                 .unwrap_or_default(),
@@ -1899,23 +2192,72 @@ mod runner_lane_tests {
             "sanity: empty parses empty"
         );
         assert_eq!(
-            plan_providers_for_value("", &universe).unwrap_or_default(),
+            plan_providers_for_value(
+                "",
+                &universe,
+                &all_admitted,
+                ProviderSelectionSource::Automatic
+            )
+            .unwrap_or_default(),
             universe,
             "absent VELNOR_PROVIDERS means the full universe (local runs)"
         );
         let narrowed: ProviderSet = [ProviderId::Velnor].into_iter().collect();
         assert_eq!(
-            plan_providers_for_value("velnor", &universe).unwrap_or_default(),
+            plan_providers_for_value(
+                "velnor",
+                &universe,
+                &all_admitted,
+                ProviderSelectionSource::Explicit
+            )
+            .unwrap_or_default(),
             narrowed,
             "dispatch narrows to the selected provider"
         );
         assert!(
-            plan_providers_for_value("github-hosted,velnor", &narrowed).is_err(),
+            plan_providers_for_value(
+                "github-hosted,velnor",
+                &narrowed,
+                &narrowed,
+                ProviderSelectionSource::Explicit
+            )
+            .is_err(),
             "dispatch narrows, never widens beyond the universe"
         );
         assert!(
-            plan_providers_for_value("both", &universe).is_err(),
+            plan_providers_for_value(
+                "both",
+                &universe,
+                &all_admitted,
+                ProviderSelectionSource::Explicit
+            )
+            .is_err(),
             "legacy lane aliases are not providers"
+        );
+    }
+
+    #[test]
+    fn plan_keeps_empty_selection_as_universe_then_applies_typed_admission() {
+        use crate::s2::provider::{ProviderId, ProviderSet};
+        let universe: ProviderSet = ProviderId::ALL.into_iter().collect();
+        let admitted = ProviderSet::from([ProviderId::GithubHosted]);
+        assert_eq!(
+            plan_providers_for_value("", &universe, &admitted, ProviderSelectionSource::Automatic)
+                .unwrap_or_default(),
+            admitted,
+            "empty VELNOR_PROVIDERS means the full universe before admission is applied"
+        );
+
+        let local_only = ProviderSet::from([ProviderId::Velnor]);
+        let error = plan_providers_for_value(
+            "velnor",
+            &local_only,
+            &ProviderSet::new(),
+            ProviderSelectionSource::Automatic,
+        );
+        assert!(
+            error.is_err(),
+            "an unadmitted local-only automatic plan must fail instead of producing no jobs"
         );
     }
 
@@ -2105,19 +2447,7 @@ mod runner_lane_tests {
     }
 }
 
-pub(crate) fn run_units(
-    root: &Path,
-    config_path: &Path,
-    scope: Scope,
-    only_unit: Option<&str>,
-) -> Result<(), GeneratorError> {
-    let selection_file = env::var_os("VELNOR_SELECTION_FILE").map_or_else(
-        || root.join(".velnor-ci-selection/velnor-ci-selection"),
-        PathBuf::from,
-    );
-    run_units_with_selection_file(root, config_path, scope, only_unit, &selection_file)
-}
-
+#[cfg(test)]
 pub(crate) fn run_units_with_selection_file(
     root: &Path,
     config_path: &Path,
@@ -2125,14 +2455,42 @@ pub(crate) fn run_units_with_selection_file(
     only_unit: Option<&str>,
     selection_file: &Path,
 ) -> Result<(), GeneratorError> {
-    let config = read_config(config_path)?;
+    run_units_with_selection_file_and_root(
+        WorkingRoot::Path(root),
+        config_path,
+        scope,
+        only_unit,
+        selection_file,
+    )
+}
+
+fn run_units_with_working_root(
+    root: WorkingRoot<'_>,
+    config_path: &Path,
+    scope: Scope,
+    only_unit: Option<&str>,
+) -> Result<(), GeneratorError> {
+    let selection_file = env::var_os("VELNOR_SELECTION_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".velnor-ci-selection/velnor-ci-selection"));
+    run_units_with_selection_file_and_root(root, config_path, scope, only_unit, &selection_file)
+}
+
+fn run_units_with_selection_file_and_root(
+    root: WorkingRoot<'_>,
+    config_path: &Path,
+    scope: Scope,
+    only_unit: Option<&str>,
+    selection_file: &Path,
+) -> Result<(), GeneratorError> {
+    let config = root.root_config(config_path)?;
     if matches!(env::var("EVENT_NAME").as_deref(), Ok("push" | "schedule")) && scope != Scope::Full
     {
         return Err(GeneratorError::usage(
             "trusted events require full CI scope",
         ));
     }
-    let selection = read_selection_file(selection_file)?;
+    let selection = read_selection_file_with_root(root, selection_file)?;
     validate_selection_sha(&selection)?;
     if selection.scope != scope {
         return Err(GeneratorError::usage(format!(
@@ -2158,7 +2516,7 @@ pub(crate) fn run_units_with_selection_file(
     }
     let full_units = selection.full_units;
     let selected = select_units_for_job(selected, only_unit)?;
-    run_layers(root, &selected, scope, &full_units)
+    run_layers_with_working_root(root, &selected, scope, &full_units)
 }
 
 fn select_units_for_job<'a>(
@@ -2212,9 +2570,28 @@ fn write_selection_file(
         .map_err(|error| GeneratorError::io("write CI selection", path, &error))
 }
 
+#[cfg(test)]
 fn read_selection_file(path: &Path) -> Result<PlannedSelection, GeneratorError> {
     let contents = fs::read_to_string(path)
         .map_err(|error| GeneratorError::io("read CI selection", path, &error))?;
+    parse_selection_contents(&contents)
+}
+
+fn read_selection_file_with_root(
+    root: WorkingRoot<'_>,
+    path: &Path,
+) -> Result<PlannedSelection, GeneratorError> {
+    let bytes = root.read_input_file(path, "read CI selection")?;
+    let contents = String::from_utf8(bytes).map_err(|error| {
+        GeneratorError::usage(format!(
+            "CI selection {} is not UTF-8: {error}",
+            path.display()
+        ))
+    })?;
+    parse_selection_contents(&contents)
+}
+
+fn parse_selection_contents(contents: &str) -> Result<PlannedSelection, GeneratorError> {
     let mut fields = BTreeMap::new();
     for line in contents.lines() {
         let (key, value) = line
@@ -2322,8 +2699,19 @@ fn selected_units_for_diff<'a>(
     Ok(selection_for_diff(root, config, scope, base, head)?.units)
 }
 
+#[cfg(test)]
 fn selection_for_diff<'a>(
     root: &Path,
+    config: &'a CiConfig,
+    scope: Scope,
+    base: &str,
+    head: &str,
+) -> Result<UnitSelection<'a>, GeneratorError> {
+    selection_for_working_root(WorkingRoot::Path(root), config, scope, base, head)
+}
+
+fn selection_for_working_root<'a>(
+    root: WorkingRoot<'_>,
     config: &'a CiConfig,
     scope: Scope,
     base: &str,
@@ -2335,7 +2723,7 @@ fn selection_for_diff<'a>(
     if base.is_empty() || base.chars().all(|character| character == '0') {
         return full_selection(config);
     }
-    let Some(changed) = git_changed_files(root, base, head)? else {
+    let Some(changed) = git_changed_files_with_working_root(root, base, head)? else {
         return full_selection(config);
     };
     if changed.is_empty() {
@@ -2347,7 +2735,7 @@ fn selection_for_diff<'a>(
     if changed.iter().any(|file| file.starts_with(".github/")) {
         return full_selection(config);
     }
-    if version_bump_matches(
+    if version_bump_matches_with_working_root(
         root,
         base,
         head,
@@ -2440,8 +2828,8 @@ fn full_selection(config: &CiConfig) -> Result<UnitSelection<'_>, GeneratorError
     })
 }
 
-fn version_bump_matches(
-    root: &Path,
+fn version_bump_matches_with_working_root(
+    root: WorkingRoot<'_>,
     base: &str,
     head: &str,
     changed: &[String],
@@ -2477,19 +2865,14 @@ fn version_bump_matches(
         }
         diff_files.push(file.clone());
     }
-    let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--unified=0"])
-        .arg(format!("{base}...{head}"))
-        .arg("--");
+    let mut arguments = vec!["diff", "--unified=0"];
+    let revision_range = format!("{base}...{head}");
+    arguments.push(&revision_range);
+    arguments.push("--");
     for file in &diff_files {
-        command.arg(file);
+        arguments.push(file);
     }
-    let output = command
-        .output()
-        .map_err(|error| GeneratorError::usage(format!("run version diff: {error}")))?;
+    let output = root.git_output(&arguments)?;
     if !output.status.success() {
         return Ok(false);
     }
@@ -2548,18 +2931,22 @@ fn expand_affected_units(units: &[CiUnit], changed: BTreeSet<String>) -> BTreeSe
     expand_affected_units_with_full(units, changed).0
 }
 
+#[cfg(test)]
 fn git_changed_files(
     root: &Path,
     base: &str,
     head: &str,
 ) -> Result<Option<Vec<String>>, GeneratorError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--name-only"])
-        .arg(format!("{base}...{head}"))
-        .output()
-        .map_err(|error| GeneratorError::usage(format!("run git diff: {error}")))?;
+    git_changed_files_with_working_root(WorkingRoot::Path(root), base, head)
+}
+
+fn git_changed_files_with_working_root(
+    root: WorkingRoot<'_>,
+    base: &str,
+    head: &str,
+) -> Result<Option<Vec<String>>, GeneratorError> {
+    let range = format!("{base}...{head}");
+    let output = root.git_output(&["diff", "--name-only", &range])?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -2609,8 +2996,8 @@ fn ordered_units<'a>(
     Ok(result)
 }
 
-fn run_layers(
-    root: &Path,
+fn run_layers_with_working_root(
+    root: WorkingRoot<'_>,
     units: &[&CiUnit],
     run_scope: Scope,
     full_units: &BTreeSet<String>,
@@ -2646,7 +3033,7 @@ fn run_layers(
                     prerequisite_commands(unit, run_scope)
                 };
                 thread_scope.spawn(move || {
-                    let result = run_unit(root, unit, &commands);
+                    let result = run_unit_with_working_root(root, unit, &commands);
                     let _ = sender.send((unit.id.clone(), result));
                 });
             }
@@ -2759,19 +3146,30 @@ fn check_unit_command_status(unit_id: &str, status: ExitStatus) -> Result<(), Ge
 /// byte for `stall_limit` while the child is still alive. Every output byte
 /// resets the timer; a silent exit inside the deadline race counts as
 /// completion, not a stall.
+#[cfg(test)]
 fn run_command_with_stall_guard(
     root: &Path,
     unit_id: &str,
     command: &str,
     stall_limit: Duration,
 ) -> Result<(), GeneratorError> {
-    let mut child = Command::new("bash")
+    run_command_with_stall_guard_at(WorkingRoot::Path(root), unit_id, command, stall_limit)
+}
+
+fn run_command_with_stall_guard_at(
+    root: WorkingRoot<'_>,
+    unit_id: &str,
+    command: &str,
+    stall_limit: Duration,
+) -> Result<(), GeneratorError> {
+    let mut child_command = Command::new("bash");
+    child_command
         .args(["-euo", "pipefail", "-c", command])
-        .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    let mut child = root
+        .spawn(child_command)
         .map_err(|error| GeneratorError::usage(format!("run CI command {unit_id}: {error}")))?;
     let (sender, receiver) = mpsc::channel();
     let mut expected_eof = 0;
@@ -2848,11 +3246,15 @@ fn run_command_with_stall_guard(
     check_unit_command_status(unit_id, status)
 }
 
-fn run_unit(root: &Path, unit: &CiUnit, commands: &[String]) -> Result<(), GeneratorError> {
+fn run_unit_with_working_root(
+    root: WorkingRoot<'_>,
+    unit: &CiUnit,
+    commands: &[String],
+) -> Result<(), GeneratorError> {
     let stall_limit = run_cmd_stall_limit();
     for command in commands {
         println!("::group::{}: {}", unit.id, command);
-        let outcome = run_command_with_stall_guard(root, &unit.id, command, stall_limit);
+        let outcome = run_command_with_stall_guard_at(root, &unit.id, command, stall_limit);
         println!("::endgroup::");
         outcome?;
     }
@@ -2957,34 +3359,56 @@ mod run_cmd_stall_tests {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn test_crates(
     root: &Path,
     config_path: &Path,
     cargo_program: Option<&Path>,
 ) -> Result<(), GeneratorError> {
-    let config = read_config(config_path)?;
+    test_crates_with_working_root(WorkingRoot::Path(root), config_path, cargo_program)
+}
+
+fn test_crates_with_working_root(
+    root: WorkingRoot<'_>,
+    config_path: &Path,
+    cargo_program: Option<&Path>,
+) -> Result<(), GeneratorError> {
+    let config = root.root_config(config_path)?;
     let mut manifests = Vec::new();
-    collect_manifests(root, root, &mut manifests)?;
+    match root {
+        WorkingRoot::Path(path) => collect_manifests(path, path, &mut manifests)?,
+        WorkingRoot::Safe(safe_root) => {
+            collect_manifests_with_safe_root(safe_root, Path::new(""), &mut manifests)?;
+        }
+    }
     manifests.sort();
-    let locked = root.join("Cargo.lock").is_file();
+    let locked = root.has_regular_file(Path::new("Cargo.lock"))?;
     let nextest = config
         .analysis
         .detected
         .iter()
         .any(|item| item == "cargo-nextest-policy");
     for manifest in manifests {
-        let contents = fs::read_to_string(&manifest)
-            .map_err(|error| GeneratorError::io("read Cargo manifest", &manifest, &error))?;
+        let contents = String::from_utf8(root.read_file(&manifest, "read Cargo manifest")?)
+            .map_err(|error| {
+                GeneratorError::usage(format!(
+                    "parse Cargo manifest {} as UTF-8: {error}",
+                    root.path().join(&manifest).display()
+                ))
+            })?;
         let value: toml::Value = toml::from_str(&contents).map_err(|error| {
             GeneratorError::usage(format!(
                 "parse Cargo manifest {}: {error}",
-                manifest.display()
+                root.path().join(&manifest).display()
             ))
         })?;
         if !value.get("package").is_some_and(toml::Value::is_table) {
             continue;
         }
-        println!("::group::cargo tests: {}", manifest.display());
+        println!(
+            "::group::cargo tests: {}",
+            root.path().join(&manifest).display()
+        );
         let default_cargo =
             if env::var(super::MR_BOXINGTON_ENABLED_ENV).is_ok_and(|value| value == "1") {
                 Path::new("mbx")
@@ -3001,17 +3425,52 @@ pub(crate) fn test_crates(
         if locked {
             command.arg("--locked");
         }
-        command.arg("--manifest-path").arg(&manifest);
-        let status = command
-            .current_dir(root)
-            .status()
+        command.arg("--manifest-path");
+        match root {
+            WorkingRoot::Path(_) => command.arg(root.path().join(&manifest)),
+            WorkingRoot::Safe(_) => command.arg(&manifest),
+        };
+        let status = root
+            .spawn(command)
+            .and_then(|mut child| child.wait())
             .map_err(|error| GeneratorError::usage(format!("run Cargo tests: {error}")))?;
         println!("::endgroup::");
         if !status.success() {
             return Err(GeneratorError::usage(format!(
                 "Cargo tests failed: {}",
-                manifest.display()
+                root.path().join(&manifest).display()
             )));
+        }
+    }
+    Ok(())
+}
+
+fn collect_manifests_with_safe_root(
+    directory: &super::safe_fs::SafeRoot,
+    relative_directory: &Path,
+    manifests: &mut Vec<PathBuf>,
+) -> Result<(), GeneratorError> {
+    for entry in directory.entries()? {
+        let relative = relative_directory.join(&entry.name);
+        match entry.kind {
+            super::safe_fs::SafeEntryKind::Directory(child) => {
+                if !matches!(relative.to_str(), Some(".git" | "target")) {
+                    collect_manifests_with_safe_root(&child, &relative, manifests)?;
+                }
+            }
+            super::safe_fs::SafeEntryKind::File
+                if entry.name == "Cargo.toml"
+                    && relative
+                        .to_str()
+                        .is_none_or(|path| !super::is_test_support_path(path)) =>
+            {
+                manifests.push(relative);
+            }
+            // Match the path walker: symlinks are not traversed or accepted
+            // as Cargo manifests, but unrelated repository symlinks do not
+            // prevent crate discovery.
+            super::safe_fs::SafeEntryKind::Symlink => {}
+            super::safe_fs::SafeEntryKind::File | super::safe_fs::SafeEntryKind::Other => {}
         }
     }
     Ok(())
@@ -3049,19 +3508,31 @@ fn collect_manifests(
     Ok(())
 }
 
-fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
+fn release_with_safe_root(
+    arguments: &[OsString],
+    safe_root: &super::safe_fs::SafeRoot,
+) -> Result<(), GeneratorError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(GeneratorError::usage(
-            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed | release verify-digests | release resolve-mode | release resolve-source | release admit-producer | release assemble-manifest",
+            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed | release apt-resolve-commit | release apt-fetch | release apt-verify | release apt-publish | release apt-previous-pointer | release apt-channel-update | release apt-deploy-guard | release verify-digests | release resolve-mode | release resolve-source | release admit-producer | release assemble-manifest",
         ));
     };
     match command {
-        "verify-tag" => verify_tag(&arguments[1..]),
-        "package-binary" => package_binary(&arguments[1..]),
-        "package-deb" => package_deb(&arguments[1..]),
-        "package-guest" => package_guest(&arguments[1..]),
-        "verify-feed" => verify_feed(&arguments[1..]),
-        "update-feed" => update_feed(&arguments[1..]),
+        "verify-tag" => verify_tag_with_safe_root(&arguments[1..], Some(safe_root)),
+        "package-binary" => package_binary_with_safe_root(&arguments[1..], Some(safe_root)),
+        "package-deb" => package_deb_with_safe_root(&arguments[1..], Some(safe_root)),
+        "package-guest" => package_guest_with_safe_root(&arguments[1..], Some(safe_root)),
+        "verify-feed" => verify_feed_with_safe_root(&arguments[1..], Some(safe_root)),
+        "update-feed" => update_feed_with_safe_root(&arguments[1..], Some(safe_root)),
+        "apt-resolve-commit" => apt_resolve_commit(&arguments[1..]),
+        "apt-fetch" => apt_fetch_with_safe_root(&arguments[1..], Some(safe_root)),
+        "apt-verify" => apt_verify_with_safe_root(&arguments[1..], Some(safe_root)),
+        "apt-publish" => apt_publish_with_safe_root(&arguments[1..], Some(safe_root)),
+        "apt-previous-pointer" => {
+            apt_previous_pointer_with_safe_root(&arguments[1..], Some(safe_root))
+        }
+        "apt-channel-update" => apt_channel_update_with_safe_root(&arguments[1..], Some(safe_root)),
+        "apt-deploy-guard" => apt_deploy_guard_with_safe_root(&arguments[1..], Some(safe_root)),
         "verify-digests" => verify_digests(&arguments[1..]),
         "resolve-mode" => resolve_mode(&arguments[1..]),
         "resolve-source" => resolve_source(&arguments[1..]),
@@ -3073,7 +3544,22 @@ fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
     }
 }
 
-fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
+fn verify_tag_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    if let Some(root) = safe_root {
+        return verify_tag_with_working_root(arguments, WorkingRoot::Safe(root));
+    }
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    verify_tag_with_working_root(arguments, WorkingRoot::Path(&root))
+}
+
+fn verify_tag_with_working_root(
+    arguments: &[OsString],
+    root: WorkingRoot<'_>,
+) -> Result<(), GeneratorError> {
     let options = parse_options(arguments, &["branch", "package"])?;
     let reference = env::var("GITHUB_REF").unwrap_or_default();
     let tag = reference
@@ -3091,8 +3577,8 @@ fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
         return Err(GeneratorError::usage("invalid release branch"));
     }
     let branch_reference = format!("refs/remotes/origin/{branch}");
-    let tag_commit = git_revision(&reference)?;
-    let branch_commit = git_revision(&branch_reference)?;
+    let tag_commit = git_revision_with_working_root(root, &reference)?;
+    let branch_commit = git_revision_with_working_root(root, &branch_reference)?;
     if tag_commit != branch_commit {
         return Err(GeneratorError::usage(format!(
             "release tag must equal current origin/{branch} tip"
@@ -3102,9 +3588,10 @@ fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
         if !valid_package(package) {
             return Err(GeneratorError::usage("invalid release package"));
         }
-        let metadata = Command::new("cargo")
-            .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
-            .output()
+        let mut command = Command::new("cargo");
+        command.args(["metadata", "--no-deps", "--format-version", "1", "--locked"]);
+        let metadata = root
+            .output(command)
             .map_err(|error| GeneratorError::usage(format!("cargo metadata failed: {error}")))?;
         if !metadata.status.success() {
             return Err(GeneratorError::usage("cargo metadata failed"));
@@ -3126,7 +3613,27 @@ fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+#[cfg(test)]
 fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    package_binary_with_safe_root(arguments, None)
+}
+
+fn package_binary_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    if let Some(root) = safe_root {
+        return package_binary_with_working_root(arguments, WorkingRoot::Safe(root));
+    }
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    package_binary_with_working_root(arguments, WorkingRoot::Path(&root))
+}
+
+fn package_binary_with_working_root(
+    arguments: &[OsString],
+    root: WorkingRoot<'_>,
+) -> Result<(), GeneratorError> {
     let options = parse_options(
         arguments,
         &[
@@ -3153,30 +3660,25 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
     }
     let members = package_archive_members(&options, binary)?;
     let deterministic = package_deterministic(&options)?;
-    let root = env::current_dir()
-        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
-    let source = root
-        .join("target")
+    let source = PathBuf::from("target")
         .join(target)
         .join("release")
         .join(binary);
-    if !source.is_file() {
+    if !root.has_regular_file(&source)? {
         return Err(GeneratorError::usage(format!(
             "built binary is missing: {}",
             source.display()
         )));
     }
-    let directory = source
-        .parent()
-        .map_or_else(|| root.clone(), Path::to_path_buf);
+    let directory = source.parent().unwrap_or_else(|| Path::new("."));
     for member in &members {
-        if !directory.join(member).is_file() {
+        if !root.has_regular_file(&directory.join(member))? {
             return Err(GeneratorError::usage(format!(
                 "declared archive member is missing: {member}"
             )));
         }
     }
-    let dist = root.join("dist");
+    let dist = PathBuf::from("dist");
     fs::create_dir_all(&dist)
         .map_err(|error| GeneratorError::io("create release directory", &dist, &error))?;
     let archive = dist.join(format!("{binary}-{version}-{target}.tar.gz"));
@@ -3187,22 +3689,24 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
     // guidance instead of shipping a silently skewed archive.
     if deterministic {
         require_gnu_tar()?;
-        write_deterministic_archive(&directory, binary, &members, &archive)?;
+        write_deterministic_archive(root, directory, binary, &members, &archive)?;
     } else {
-        let status = Command::new("tar")
+        let mut command = Command::new("tar");
+        command
             .arg("-C")
-            .arg(&directory)
+            .arg(directory)
             .arg("-czf")
             .arg(&archive)
             .arg(binary)
-            .args(&members)
-            .status()
+            .args(&members);
+        let status = root
+            .status(command)
             .map_err(|error| GeneratorError::usage(format!("package binary: {error}")))?;
         if !status.success() {
             return Err(GeneratorError::usage("tar failed while packaging binary"));
         }
     }
-    let digest = sha256_file(&archive)?;
+    let digest = sha256_file_with_working_root(root, &archive)?;
     // Append, never `with_extension`: the sidecar sits next to its subject
     // as `<subject>.sha256`, the name consumer lanes download it under.
     let checksum = archive.with_file_name(format!(
@@ -3266,6 +3770,7 @@ fn package_deterministic(options: &BTreeMap<String, String>) -> Result<bool, Gen
 /// and ownership onto stdout, and `gzip -n` strips the timestamp. The
 /// caller probes for GNU tar first.
 fn write_deterministic_archive(
+    root: WorkingRoot<'_>,
     directory: &Path,
     binary: &str,
     members: &[String],
@@ -3283,9 +3788,9 @@ fn write_deterministic_archive(
         binary,
     ]);
     command.args(members);
-    let tar = command
-        .stdout(Stdio::piped())
-        .spawn()
+    command.stdout(Stdio::piped());
+    let tar = root
+        .spawn(command)
         .map_err(|error| GeneratorError::usage(format!("package binary: {error}")))?;
     let Some(tar_stdout) = tar.stdout else {
         return Err(GeneratorError::usage("tar produced no archive stream"));
@@ -3303,7 +3808,27 @@ fn write_deterministic_archive(
     Ok(())
 }
 
+#[cfg(test)]
 fn package_deb(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    package_deb_with_safe_root(arguments, None)
+}
+
+fn package_deb_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    if let Some(root) = safe_root {
+        return package_deb_with_working_root(arguments, WorkingRoot::Safe(root));
+    }
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    package_deb_with_working_root(arguments, WorkingRoot::Path(&root))
+}
+
+fn package_deb_with_working_root(
+    arguments: &[OsString],
+    root: WorkingRoot<'_>,
+) -> Result<(), GeneratorError> {
     let options = parse_options(
         arguments,
         &[
@@ -3345,7 +3870,8 @@ fn package_deb(arguments: &[OsString]) -> Result<(), GeneratorError> {
                 guest.display()
             )));
         }
-        let dest = cargo_package_manifest_dir(package)?.join("release/microvm");
+        let dest =
+            cargo_package_manifest_dir_with_working_root(package, root)?.join("release/microvm");
         copy_dir_files(guest, &dest)?;
     }
     let mut command = Command::new("cargo");
@@ -3366,8 +3892,8 @@ fn package_deb(arguments: &[OsString]) -> Result<(), GeneratorError> {
         }
         command.args(["--target", target]);
     }
-    let status = command
-        .status()
+    let status = root
+        .status(command)
         .map_err(|error| GeneratorError::usage(format!("cargo deb: {error}")))?;
     if !status.success() {
         return Err(GeneratorError::usage("cargo deb failed"));
@@ -3378,30 +3904,52 @@ fn package_deb(arguments: &[OsString]) -> Result<(), GeneratorError> {
     )
 }
 
-fn cargo_package_manifest_dir(package: &str) -> Result<PathBuf, GeneratorError> {
-    let metadata = Command::new("cargo")
-        .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
-        .output()
+fn cargo_package_manifest_dir_with_working_root(
+    package: &str,
+    root: WorkingRoot<'_>,
+) -> Result<PathBuf, GeneratorError> {
+    let mut command = Command::new("cargo");
+    command.args(["metadata", "--no-deps", "--format-version", "1", "--locked"]);
+    let metadata = root
+        .output(command)
         .map_err(|error| GeneratorError::usage(format!("cargo metadata failed: {error}")))?;
     if !metadata.status.success() {
         return Err(GeneratorError::usage("cargo metadata failed"));
     }
     let document: serde_json::Value = serde_json::from_slice(&metadata.stdout)
         .map_err(|error| GeneratorError::usage(format!("parse cargo metadata: {error}")))?;
-    document["packages"]
+    let manifest = document["packages"]
         .as_array()
         .and_then(|packages| {
             packages.iter().find_map(|item| {
-                (item["name"].as_str() == Some(package)).then(|| {
-                    item["manifest_path"]
-                        .as_str()
-                        .map(PathBuf::from)
-                        .and_then(|path| path.parent().map(Path::to_path_buf))
-                })
+                (item["name"].as_str() == Some(package))
+                    .then(|| item["manifest_path"].as_str().map(PathBuf::from))
             })
         })
         .flatten()
-        .ok_or_else(|| GeneratorError::usage(format!("cargo package `{package}` was not found")))
+        .ok_or_else(|| GeneratorError::usage(format!("cargo package `{package}` was not found")))?;
+    let relative_manifest = if manifest.is_absolute() {
+        // Cargo reports absolute manifest paths. Convert that metadata back
+        // into a CWD-relative path, then use only relative file operations;
+        // reopening Cargo's display path could hit a replacement at the old
+        // root pathname.
+        let cwd = env::current_dir()
+            .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+        manifest
+            .strip_prefix(&cwd)
+            .map(PathBuf::from)
+            .map_err(|_| {
+                GeneratorError::usage(format!(
+                    "cargo package `{package}` is outside the captured workflow root"
+                ))
+            })?
+    } else {
+        manifest
+    };
+    relative_manifest
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| GeneratorError::usage(format!("cargo package `{package}` has no directory")))
 }
 
 fn copy_dir_files(src: &Path, dest: &Path) -> Result<(), GeneratorError> {
@@ -3531,7 +4079,22 @@ echo "$sha  linux.tar.xz" | sha256sum -c -
     )
 }
 
-fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
+fn package_guest_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    if let Some(root) = safe_root {
+        return package_guest_with_working_root(arguments, WorkingRoot::Safe(root));
+    }
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    package_guest_with_working_root(arguments, WorkingRoot::Path(&root))
+}
+
+fn package_guest_with_working_root(
+    arguments: &[OsString],
+    root: WorkingRoot<'_>,
+) -> Result<(), GeneratorError> {
     let options = parse_options(arguments, &["arch", "package", "bin", "agent"])?;
     let arch = required_option(&options, "arch")?;
     if !matches!(arch, "x86_64" | "aarch64") {
@@ -3540,7 +4103,7 @@ fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
         ));
     }
     let pins = Path::new("microvm/pins.json");
-    if pins.is_file() {
+    if root.has_regular_file(pins)? {
         let package = required_option(&options, "package")?;
         let bin = required_option(&options, "bin")?;
         let agent = required_option(&options, "agent")?;
@@ -3549,10 +4112,10 @@ fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
                 "invalid guest package, bin, or agent",
             ));
         }
-        let status = Command::new("bash")
-            .arg("-c")
-            .arg(guest_kernel_download_script())
-            .status()
+        let mut command = Command::new("bash");
+        command.arg("-c").arg(guest_kernel_download_script());
+        let status = root
+            .status(command)
             .map_err(|error| GeneratorError::usage(format!("download guest kernel: {error}")))?;
         if !status.success() {
             return Err(GeneratorError::usage("guest kernel download failed"));
@@ -3560,27 +4123,28 @@ fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
         fs::create_dir_all("dist/microvm").map_err(|error| {
             GeneratorError::io("create guest output", Path::new("dist/microvm"), &error)
         })?;
-        let status = Command::new("cargo")
-            .args([
-                "run",
-                "--locked",
-                "--release",
-                "--package",
-                package,
-                "--bin",
-                bin,
-                "--",
-                "build",
-                "--arch",
-                arch,
-                "--out",
-                "dist/microvm",
-                "--tarball",
-                "linux.tar.xz",
-                "--guest-agent",
-                agent,
-            ])
-            .status()
+        let mut command = Command::new("cargo");
+        command.args([
+            "run",
+            "--locked",
+            "--release",
+            "--package",
+            package,
+            "--bin",
+            bin,
+            "--",
+            "build",
+            "--arch",
+            arch,
+            "--out",
+            "dist/microvm",
+            "--tarball",
+            "linux.tar.xz",
+            "--guest-agent",
+            agent,
+        ]);
+        let status = root
+            .status(command)
             .map_err(|error| GeneratorError::usage(format!("build guest image: {error}")))?;
         if !status.success() {
             return Err(GeneratorError::usage("guest image build failed"));
@@ -3588,14 +4152,15 @@ fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
         return Ok(());
     }
     let script = Path::new("microvm/build.sh");
-    if !script.is_file() {
+    if !root.has_regular_file(script)? {
         return Err(GeneratorError::usage(
             "guest image requires microvm/pins.json or a repository-owned microvm/build.sh",
         ));
     }
-    let status = Command::new("bash")
-        .args(["microvm/build.sh", arch])
-        .status()
+    let mut command = Command::new("bash");
+    command.args(["microvm/build.sh", arch]);
+    let status = root
+        .status(command)
         .map_err(|error| GeneratorError::usage(format!("build guest image: {error}")))?;
     if !status.success() {
         return Err(GeneratorError::usage("guest image build failed"));
@@ -3711,8 +4276,30 @@ fn valid_arch(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
 }
 
-fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
+fn verify_feed_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    if let Some(root) = safe_root {
+        return verify_feed_with_working_root(arguments, WorkingRoot::Safe(root));
+    }
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    verify_feed_with_working_root(arguments, WorkingRoot::Path(&root))
+}
+
+fn verify_feed_with_working_root(
+    arguments: &[OsString],
+    root: WorkingRoot<'_>,
+) -> Result<(), GeneratorError> {
     let options = parse_options(arguments, &["kind", "package", "coordinate"])?;
+    verify_feed_options(&options, root)
+}
+
+fn verify_feed_options(
+    options: &BTreeMap<String, String>,
+    root: WorkingRoot<'_>,
+) -> Result<(), GeneratorError> {
     let kind = required_option(&options, "kind")?;
     let package = required_option(&options, "package")?;
     if !valid_package(package) {
@@ -3721,18 +4308,11 @@ fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
     match kind {
         "homebrew" => {
             let formula = Path::new("Formula").join(format!("{package}.rb"));
-            if !formula.is_file() {
+            if !root.has_regular_file(&formula)? {
                 return Err(GeneratorError::usage(format!(
                     "homebrew feed requires {}",
                     formula.display()
                 )));
-            }
-        }
-        "apt" => {
-            if !Path::new("conf/distributions").is_file() && !Path::new("debian").is_dir() {
-                return Err(GeneratorError::usage(
-                    "apt feed requires conf/distributions or debian/",
-                ));
             }
         }
         other => {
@@ -3744,16 +4324,31 @@ fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
-fn update_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
+fn update_feed_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    if let Some(root) = safe_root {
+        return update_feed_with_working_root(arguments, WorkingRoot::Safe(root));
+    }
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    update_feed_with_working_root(arguments, WorkingRoot::Path(&root))
+}
+
+fn update_feed_with_working_root(
+    arguments: &[OsString],
+    root: WorkingRoot<'_>,
+) -> Result<(), GeneratorError> {
     let options = parse_options(arguments, &["kind", "package", "coordinate", "channel"])?;
-    verify_feed(arguments)?;
+    verify_feed_options(&options, root)?;
     let kind = required_option(&options, "kind")?;
     let channel = options.get("channel").map_or("stable", String::as_str);
     if !matches!(channel, "stable" | "preview") {
         return Err(GeneratorError::usage("channel must be stable or preview"));
     }
     match kind {
-        "homebrew" | "apt" => {
+        "homebrew" => {
             println!("feed {kind} channel {channel} verified; mutation is GitHub-writer only");
             Ok(())
         }
@@ -3761,6 +4356,522 @@ fn update_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
             "unsupported feed kind: {other}"
         ))),
     }
+}
+
+/// APT paths are repository-relative inputs. The domain implementation uses
+/// ordinary paths while building a staged feed, so validate the entire path
+/// shape and pin every existing directory before handing it over.
+#[derive(Clone, Copy)]
+enum AptDirectoryMode {
+    /// The command creates this path before it uses it.
+    Create,
+    /// The command requires an existing directory.
+    Existing,
+    /// The command creates or replaces this output path itself.
+    Output,
+}
+
+enum AptCommandRoot<'a> {
+    Safe(&'a super::safe_fs::SafeRoot),
+    Path(PathBuf),
+}
+
+impl AptCommandRoot<'_> {
+    fn working_root(&self) -> WorkingRoot<'_> {
+        match self {
+            Self::Safe(root) => WorkingRoot::Safe(root),
+            Self::Path(root) => WorkingRoot::Path(root),
+        }
+    }
+}
+
+fn apt_command_root(
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<AptCommandRoot<'_>, GeneratorError> {
+    if let Some(root) = safe_root {
+        return Ok(AptCommandRoot::Safe(root));
+    }
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    Ok(AptCommandRoot::Path(root))
+}
+
+fn apt_relative_path(raw: &str, label: &str) -> Result<PathBuf, GeneratorError> {
+    if raw.is_empty()
+        || raw.starts_with('/')
+        || raw.contains('\\')
+        || !raw
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
+        || raw
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        return Err(GeneratorError::usage(format!(
+            "APT {label} must be a normalized repository-relative path"
+        )));
+    }
+    Ok(PathBuf::from(raw))
+}
+
+fn apt_directory_argument(
+    root: WorkingRoot<'_>,
+    raw: &str,
+    label: &str,
+    mode: AptDirectoryMode,
+) -> Result<PathBuf, GeneratorError> {
+    let relative = apt_relative_path(raw, label)?;
+    let names = relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => Ok(name.to_os_string()),
+            _ => Err(GeneratorError::usage(format!(
+                "APT {label} must be a normalized repository-relative path"
+            ))),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    match root {
+        WorkingRoot::Path(base) => {
+            let mut current = base.to_path_buf();
+            for name in &names {
+                current.push(name);
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        return Err(GeneratorError::usage(format!(
+                            "APT {label} refuses symlinked paths: {}",
+                            relative.display()
+                        )));
+                    }
+                    Ok(metadata) if metadata.is_dir() => {}
+                    Ok(_) => {
+                        return Err(GeneratorError::usage(format!(
+                            "APT {label} path component is not a directory: {}",
+                            relative.display()
+                        )));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => match mode {
+                        AptDirectoryMode::Create => fs::create_dir(&current).map_err(|error| {
+                            GeneratorError::io("create APT directory", &current, &error)
+                        })?,
+                        AptDirectoryMode::Existing => {
+                            return Err(GeneratorError::usage(format!(
+                                "APT {label} directory is missing: {}",
+                                relative.display()
+                            )));
+                        }
+                        AptDirectoryMode::Output => break,
+                    },
+                    Err(error) => {
+                        return Err(GeneratorError::io(
+                            "inspect APT directory",
+                            &current,
+                            &error,
+                        ));
+                    }
+                }
+            }
+        }
+        WorkingRoot::Safe(safe_root) => {
+            let mut current = safe_root.duplicate()?;
+            for name in &names {
+                current = match current.open_directory_child(name)? {
+                    Some(directory) => directory,
+                    None => match mode {
+                        AptDirectoryMode::Create => current.create_directory_child(name)?,
+                        AptDirectoryMode::Existing => {
+                            return Err(GeneratorError::usage(format!(
+                                "APT {label} directory is missing: {}",
+                                relative.display()
+                            )));
+                        }
+                        AptDirectoryMode::Output => {
+                            // The domain publisher creates this output. All
+                            // existing ancestors were opened without following
+                            // links; later components were already checked
+                            // lexically above.
+                            break;
+                        }
+                    },
+                };
+            }
+        }
+    }
+    Ok(relative)
+}
+
+fn apt_file_argument(
+    root: WorkingRoot<'_>,
+    raw: &str,
+    label: &str,
+) -> Result<PathBuf, GeneratorError> {
+    let relative = apt_relative_path(raw, label)?;
+    let regular = match root {
+        WorkingRoot::Path(base) => {
+            let path = base.join(&relative);
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata.is_file() && !metadata.file_type().is_symlink(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(GeneratorError::io("inspect APT file", &path, &error));
+                }
+            }
+        }
+        WorkingRoot::Safe(safe_root) => safe_root.has_regular_file(&relative)?,
+    };
+    if !regular {
+        return Err(GeneratorError::usage(format!(
+            "APT {label} must name an existing regular repository file: {}",
+            relative.display()
+        )));
+    }
+    Ok(relative)
+}
+
+fn apt_option_bool(options: &BTreeMap<String, String>, name: &str) -> Result<bool, GeneratorError> {
+    match options.get(name).map(String::as_str) {
+        None | Some("false") => Ok(false),
+        Some("true") => Ok(true),
+        Some(value) => Err(GeneratorError::usage(format!(
+            "--{name} must be `true` or `false`, found `{value}`"
+        ))),
+    }
+}
+
+fn apt_resolve_commit(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["source-repo", "version"])?;
+    let commit = crate::s2::primitives::release::apt::run_resolve_commit(
+        required_option(&options, "source-repo")?,
+        required_option(&options, "version")?,
+        None,
+    )?;
+    println!("{commit}");
+    Ok(())
+}
+
+fn apt_fetch_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &["suite", "source-repo", "package", "version", "dir"],
+    )?;
+    let suite =
+        crate::s2::primitives::release::apt::Suite::parse(required_option(&options, "suite")?)?;
+    let source = required_option(&options, "source-repo")?;
+    let package = required_option(&options, "package")?;
+    let version = required_option(&options, "version")?;
+    // Validate every no-side-effect input before creating the target directory.
+    if !crate::s2::primitives::release::apt::valid_repository_slug(source) {
+        return Err(GeneratorError::usage(
+            "fetch needs an `owner/name` source repository",
+        ));
+    }
+    crate::s2::primitives::release::apt::download_patterns(suite, package, version)?;
+    let root = apt_command_root(safe_root)?;
+    let dir = apt_directory_argument(
+        root.working_root(),
+        required_option(&options, "dir")?,
+        "fetch directory",
+        AptDirectoryMode::Create,
+    )?;
+    crate::s2::primitives::release::apt::run_fetch(suite, source, package, version, &dir, None)?;
+    println!("fetched {} coherence inputs for {version}", suite.as_str());
+    Ok(())
+}
+
+fn apt_verify_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "suite",
+            "source-repo",
+            "package",
+            "binary",
+            "identity-dir",
+            "manifest-schema",
+            "version",
+            "incoming",
+            "commit",
+            "signer",
+            "expect-signer",
+            "verify-oci",
+        ],
+    )?;
+    let root = apt_command_root(safe_root)?;
+    let incoming = apt_directory_argument(
+        root.working_root(),
+        required_option(&options, "incoming")?,
+        "incoming directory",
+        AptDirectoryMode::Existing,
+    )?;
+    let inputs = crate::s2::primitives::release::apt::VerifyInputs {
+        suite: crate::s2::primitives::release::apt::Suite::parse(required_option(
+            &options, "suite",
+        )?)?,
+        source_repo: required_option(&options, "source-repo")?.to_owned(),
+        package: required_option(&options, "package")?.to_owned(),
+        binary: required_option(&options, "binary")?.to_owned(),
+        manifest_schema: required_option(&options, "manifest-schema")?.to_owned(),
+        identity_dir: required_option(&options, "identity-dir")?.to_owned(),
+        version: required_option(&options, "version")?.to_owned(),
+        commit: options.get("commit").cloned(),
+        incoming: &incoming,
+        signer_live: required_option(&options, "signer")?.to_owned(),
+        signer_pinned: required_option(&options, "expect-signer")?.to_owned(),
+        verify_oci: apt_option_bool(&options, "verify-oci")?,
+        backend: crate::s2::primitives::release::apt::DebBackend::Auto,
+        path_overlay: None,
+    };
+    crate::s2::primitives::release::apt::verify_suite(&inputs)?;
+    println!("{} feed inputs are coherent", inputs.suite.as_str());
+    Ok(())
+}
+
+fn apt_publish_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "suite",
+            "source-repo",
+            "package",
+            "binary",
+            "consumer-repo",
+            "manifest-schema",
+            "signer",
+            "passphrase-env",
+            "key-env",
+            "keyring",
+            "origin",
+            "identity-dir",
+            "feed-url",
+            "description",
+            "version",
+            "incoming",
+            "prev-dir",
+            "previous-pointer",
+            "staging",
+            "bootstrap",
+        ],
+    )?;
+    let apt_spec = crate::s2::primitives::release::apt::AptReleaseSpec {
+        kind: "apt".to_owned(),
+        package: required_option(&options, "package")?.to_owned(),
+        binary: required_option(&options, "binary")?.to_owned(),
+        source_repository: required_option(&options, "source-repo")?.to_owned(),
+        consumer_repository: required_option(&options, "consumer-repo")?.to_owned(),
+        manifest_schema: required_option(&options, "manifest-schema")?.to_owned(),
+        apt_arches: Vec::new(),
+        signer_fingerprint: required_option(&options, "signer")?.to_owned(),
+        passphrase_secret: required_option(&options, "passphrase-env")?.to_owned(),
+        signing_key_secret: required_option(&options, "key-env")?.to_owned(),
+        keyring_path: required_option(&options, "keyring")?.to_owned(),
+        apt_origin: required_option(&options, "origin")?.to_owned(),
+        apt_identity_dir: required_option(&options, "identity-dir")?.to_owned(),
+        apt_feed_url: required_option(&options, "feed-url")?.to_owned(),
+        retention: 0,
+        description: required_option(&options, "description")?.to_owned(),
+    };
+    let contract = crate::s2::primitives::release::apt::AptContract::resolve(&apt_spec)?;
+    let root = apt_command_root(safe_root)?;
+    let incoming = apt_directory_argument(
+        root.working_root(),
+        required_option(&options, "incoming")?,
+        "incoming directory",
+        AptDirectoryMode::Existing,
+    )?;
+    let previous_pointer = apt_file_argument(
+        root.working_root(),
+        required_option(&options, "previous-pointer")?,
+        "previous pointer",
+    )?;
+    let previous_directory = options
+        .get("prev-dir")
+        .map(|raw| {
+            apt_directory_argument(
+                root.working_root(),
+                raw,
+                "previous pair directory",
+                AptDirectoryMode::Existing,
+            )
+        })
+        .transpose()?;
+    let staging = apt_directory_argument(
+        root.working_root(),
+        required_option(&options, "staging")?,
+        "staging directory",
+        AptDirectoryMode::Output,
+    )?;
+    let passphrase_env = required_option(&options, "passphrase-env")?.to_owned();
+    let passphrase = env::var(&passphrase_env).ok();
+    let key_env = required_option(&options, "key-env")?.to_owned();
+    let key_material = env::var(&key_env).ok();
+    let inputs = crate::s2::primitives::release::apt::PublishInputs {
+        suite: crate::s2::primitives::release::apt::Suite::parse(required_option(
+            &options, "suite",
+        )?)?,
+        contract,
+        version: required_option(&options, "version")?.to_owned(),
+        incoming: &incoming,
+        prev_dir: previous_directory.as_deref(),
+        previous_pointer: &previous_pointer,
+        staging: &staging,
+        bootstrap: apt_option_bool(&options, "bootstrap")?,
+        passphrase_env,
+        passphrase,
+        key_env,
+        key_material,
+        backend: crate::s2::primitives::release::apt::DebBackend::Auto,
+        path_overlay: None,
+    };
+    crate::s2::primitives::release::apt::publish_suite(&inputs)?;
+    println!("{} suite staged", inputs.suite.as_str());
+    Ok(())
+}
+
+fn apt_previous_pointer_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "suite",
+            "published",
+            "prior",
+            "candidate",
+            "candidate-sha",
+            "bootstrap",
+        ],
+    )?;
+    let suite =
+        crate::s2::primitives::release::apt::Suite::parse(required_option(&options, "suite")?)?;
+    let bootstrap = apt_option_bool(&options, "bootstrap")?;
+    let pointer = match suite {
+        crate::s2::primitives::release::apt::Suite::Stable => {
+            if bootstrap {
+                return Err(GeneratorError::usage(
+                    "previous pointer: --bootstrap applies only to --suite preview",
+                ));
+            }
+            let root = apt_command_root(safe_root)?;
+            let published = apt_file_argument(
+                root.working_root(),
+                required_option(&options, "published")?,
+                "published record",
+            )?;
+            let bytes = root
+                .working_root()
+                .read_file(&published, "read published record")?;
+            let document: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+                GeneratorError::usage(format!("published record is not valid JSON: {error}"))
+            })?;
+            crate::s2::primitives::release::apt::derive_previous_pointer(
+                &document,
+                required_option(&options, "prior")?,
+                required_option(&options, "candidate")?,
+                required_option(&options, "candidate-sha")?,
+            )?
+        }
+        crate::s2::primitives::release::apt::Suite::Preview => {
+            if bootstrap {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(
+                    crate::s2::primitives::release::apt::PREVIEW_TAG.to_owned(),
+                )
+            }
+        }
+    };
+    println!("{pointer}");
+    Ok(())
+}
+
+fn apt_channel_update_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "suite",
+            "source-repo",
+            "source-ref",
+            "commit",
+            "version",
+            "package",
+            "manifest",
+            "staging",
+        ],
+    )?;
+    let root = apt_command_root(safe_root)?;
+    let manifest = apt_file_argument(
+        root.working_root(),
+        required_option(&options, "manifest")?,
+        "manifest",
+    )?;
+    let staging = apt_directory_argument(
+        root.working_root(),
+        required_option(&options, "staging")?,
+        "staging directory",
+        AptDirectoryMode::Existing,
+    )?;
+    let inputs = crate::s2::primitives::release::apt::ChannelUpdateInputs {
+        suite: crate::s2::primitives::release::apt::Suite::parse(required_option(
+            &options, "suite",
+        )?)?,
+        source_repo: required_option(&options, "source-repo")?.to_owned(),
+        source_ref: required_option(&options, "source-ref")?.to_owned(),
+        commit: required_option(&options, "commit")?.to_owned(),
+        version: required_option(&options, "version")?.to_owned(),
+        package: required_option(&options, "package")?.to_owned(),
+        manifest: &manifest,
+        staging: &staging,
+    };
+    crate::s2::primitives::release::apt::run_channel_update(&inputs)?;
+    println!("{} channel state updated", inputs.suite.as_str());
+    Ok(())
+}
+
+fn apt_deploy_guard_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["suite", "staged", "live-version"])?;
+    let suite =
+        crate::s2::primitives::release::apt::Suite::parse(required_option(&options, "suite")?)?;
+    let root = apt_command_root(safe_root)?;
+    let staged = apt_directory_argument(
+        root.working_root(),
+        required_option(&options, "staged")?,
+        "staged directory",
+        AptDirectoryMode::Existing,
+    )?;
+    let last_publish = staged.join(suite.last_publish_file());
+    let last_publish = last_publish
+        .to_str()
+        .ok_or_else(|| GeneratorError::usage("APT staged last-publish path is not UTF-8"))?;
+    let last_publish = apt_relative_path(last_publish, "last-publish file")?;
+    let staged_text = String::from_utf8(
+        root.working_root()
+            .read_file(&last_publish, "read staged last-publish")?,
+    )
+    .map_err(|_| GeneratorError::usage("staged last-publish is not UTF-8"))?;
+    let live = required_option(&options, "live-version")?;
+    let live = match live.trim() {
+        "" | "unknown" => None,
+        version => Some(version),
+    };
+    crate::s2::primitives::release::apt::check_deploy_guard(suite, &staged_text, live)?;
+    println!("{} deploy guard passed", suite.as_str());
+    Ok(())
 }
 
 /// Resolve the release mode for one event: the total event×mode matrix.
@@ -4113,12 +5224,12 @@ fn required_option<'a>(
         .ok_or_else(|| GeneratorError::usage(format!("--{name} needs a value")))
 }
 
-fn git_revision(reference: &str) -> Result<String, GeneratorError> {
+fn git_revision_with_working_root(
+    root: WorkingRoot<'_>,
+    reference: &str,
+) -> Result<String, GeneratorError> {
     let revision_reference = format!("{reference}^{{commit}}");
-    let output = Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", &revision_reference])
-        .output()
-        .map_err(|error| GeneratorError::usage(format!("run git: {error}")))?;
+    let output = root.git_output(&["rev-parse", "--verify", "--quiet", &revision_reference])?;
     if !output.status.success() {
         return Err(GeneratorError::usage(format!(
             "git could not resolve release reference {reference}"
@@ -4136,13 +5247,25 @@ fn git_revision(reference: &str) -> Result<String, GeneratorError> {
 fn sha256_file(path: &Path) -> Result<String, GeneratorError> {
     let contents =
         fs::read(path).map_err(|error| GeneratorError::io("read release archive", path, &error))?;
+    Ok(sha256_contents(&contents))
+}
+
+fn sha256_file_with_working_root(
+    root: WorkingRoot<'_>,
+    path: &Path,
+) -> Result<String, GeneratorError> {
+    let contents = root.read_input_file(path, "read release archive")?;
+    Ok(sha256_contents(&contents))
+}
+
+fn sha256_contents(contents: &[u8]) -> String {
     let digest = Sha256::digest(contents);
     let mut output = String::with_capacity(digest.len() * 2);
     for byte in digest {
         output.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
         output.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
     }
-    Ok(output)
+    output
 }
 
 fn is_semver(value: &str) -> bool {
@@ -4280,12 +5403,33 @@ pub(crate) fn valid_registry_host(value: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::error::Error;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+pub(crate) fn selection_fixture_root(name: &str) -> std::path::PathBuf {
+    selection_fixture_root_with(name, crate::unique_suffix)
+}
 
+#[cfg(test)]
+pub(crate) fn selection_fixture_root_at(name: &str, nanos: u128) -> std::path::PathBuf {
+    selection_fixture_root_with(name, || crate::unique_suffix_at(nanos))
+}
+
+#[cfg(test)]
+pub(crate) fn selection_fixture_root_with(
+    name: &str,
+    suffix: impl FnOnce() -> u128,
+) -> std::path::PathBuf {
+    let suffix = suffix();
+    std::env::temp_dir().join(format!(
+        "velnor-workflow-selection-{name}-{}-{suffix}",
+        std::process::id()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
     use super::*;
     use crate::s2::primitives::prepared_tools::{ProducerIdentity, ToolFile, ToolOutcome};
+    use std::error::Error;
+    use std::sync::atomic::Ordering;
 
     #[expect(
         clippy::panic,
@@ -4325,10 +5469,159 @@ mod tests {
     fn digest_fixture(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-digests-{name}-{}",
-            crate::s2::unique_suffix()
+            crate::unique_suffix()
         ));
         must(std::fs::create_dir_all(&root), "create digest fixture");
         root
+    }
+
+    #[test]
+    fn generic_feed_update_rejects_apt_instead_of_claiming_success() {
+        let root = digest_fixture("apt-update-feed");
+        let arguments = ["--kind", "apt", "--package", "example"]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        let error = must_fail(
+            super::update_feed_with_working_root(&arguments, WorkingRoot::Path(&root)),
+            "generic feed update must reject APT",
+        );
+        assert!(
+            error.to_string().contains("unsupported feed kind: apt"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apt_deploy_guard_handler_refuses_to_replace_a_newer_live_suite() {
+        let root = digest_fixture("apt-deploy-guard");
+        let staged = root.join("public");
+        must(fs::create_dir_all(&staged), "create staged feed");
+        must(
+            fs::write(staged.join("last-publish"), "v1.2.2\n"),
+            "write staged stable pointer",
+        );
+        {
+            let safe_root = must(
+                super::super::safe_fs::SafeRoot::open(&root),
+                "pin APT test root",
+            );
+            let rollback = [
+                "--suite",
+                "stable",
+                "--staged",
+                "public",
+                "--live-version",
+                "v1.2.3",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+            let error = must_fail(
+                super::apt_deploy_guard_with_safe_root(&rollback, Some(&safe_root)),
+                "APT deploy guard must refuse rollback",
+            );
+            assert!(
+                error.to_string().contains("refusing to roll back"),
+                "{error}"
+            );
+
+            let forward = [
+                "--suite",
+                "stable",
+                "--staged",
+                "public",
+                "--live-version",
+                "v1.2.1",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+            must(
+                super::apt_deploy_guard_with_safe_root(&forward, Some(&safe_root)),
+                "APT deploy guard must allow forward publication",
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apt_directory_arguments_reject_traversal_and_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = digest_fixture("apt-paths");
+        let traversal = must_fail(
+            super::apt_directory_argument(
+                WorkingRoot::Path(&root),
+                "../outside",
+                "test directory",
+                super::AptDirectoryMode::Existing,
+            ),
+            "APT paths must reject parent traversal",
+        );
+        assert!(
+            traversal
+                .to_string()
+                .contains("normalized repository-relative path"),
+            "{traversal}"
+        );
+        let target = root.join("target");
+        must(fs::create_dir(&target), "create symlink target");
+        let linked = root.join("linked");
+        must(symlink(&target, &linked), "create symlinked directory");
+        let symlink_error = must_fail(
+            super::apt_directory_argument(
+                WorkingRoot::Path(&root),
+                "linked",
+                "test directory",
+                super::AptDirectoryMode::Existing,
+            ),
+            "APT paths must reject symlinked directories",
+        );
+        assert!(
+            symlink_error.to_string().contains("symlinked paths"),
+            "{symlink_error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn same_name_fixture_roots_share_the_allocator_even_with_a_fixed_clock() {
+        const FIXED_NANOS: u128 = 17;
+        const FIXTURE_NAME: &str = "allocator-collision";
+
+        let sequence = crate::unique_suffix_sequence();
+        let before = sequence.load(Ordering::Relaxed);
+        let first_root = super::selection_fixture_root_at(FIXTURE_NAME, FIXED_NANOS);
+        let second_root = super::selection_fixture_root_at(FIXTURE_NAME, FIXED_NANOS);
+        let after = sequence.load(Ordering::Relaxed);
+
+        assert_ne!(first_root, second_root);
+        assert!(
+            after >= before + 2,
+            "each root must consume the shared sequence"
+        );
+
+        let low_sequence = |root: &std::path::Path| {
+            let name = must_some(
+                root.file_name().and_then(|value| value.to_str()),
+                "fixture root filename",
+            );
+            let suffix = must_some(
+                name.rsplit('-')
+                    .next()
+                    .and_then(|value| value.parse::<u128>().ok()),
+                "numeric fixture suffix",
+            );
+            (suffix & u128::from(u32::MAX)) as u32
+        };
+        assert_ne!(
+            low_sequence(&first_root),
+            low_sequence(&second_root),
+            "clock bits cannot hide repeated allocator values"
+        );
     }
 
     fn write_digest(dir: &Path, arch: &str, digest: &str) {
@@ -4678,12 +5971,7 @@ mod tests {
         name: &str,
         changed: &str,
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "velnor-workflow-selection-{name}-{}-{id}",
-            std::process::id()
-        ));
+        let root = super::selection_fixture_root(name);
         std::fs::create_dir_all(&root)?;
         let init = |args: &[&str]| -> Result<(), Box<dyn Error>> {
             let status = std::process::Command::new("git")
@@ -4742,8 +6030,7 @@ mod tests {
 
     fn stale_base_selection_git_fixture(
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-stale-base-selection-{}-{id}",
             std::process::id()
@@ -4807,8 +6094,7 @@ mod tests {
 
     fn lockfile_version_selection_git_fixture(
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-version-selection-{}-{id}",
             std::process::id()
@@ -5018,8 +6304,7 @@ workspace_check = true
         changes: &[(&str, &str, &str)],
         config_text: &str,
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-current-project-selection-{name}-{}-{id}",
             std::process::id()
@@ -5162,8 +6447,7 @@ workspace_check = true
 
     #[test]
     fn plan_output_without_swift_empties_its_matrix() -> Result<(), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let path = std::env::temp_dir().join(format!(
             "velnor-workflow-runner-matrices-{}-{id}",
             std::process::id()
@@ -5213,8 +6497,7 @@ workspace_check = true
 
     #[test]
     fn selection_artifact_round_trips_scope_and_sha() -> Result<(), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let path = std::env::temp_dir().join(format!(
             "velnor-workflow-selection-artifact-{}-{id}",
             std::process::id()
@@ -6371,8 +7654,7 @@ workspace_check = true
     }
 
     fn manifest_fixture(name: &str) -> std::path::PathBuf {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let dir = std::env::temp_dir().join(format!(
             "velnor-workflow-manifest-{name}-{pid}-{id}",
             pid = std::process::id()
@@ -6659,12 +7941,11 @@ workspace_check = true
     }
 
     fn install_fixture(name: &str, manifest: &ToolManifest) -> InstallFixture {
-        static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
-            "velnor-prepared-tool-install-{name}-{}-{}",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            "velnor-prepared-tool-install-{name}-{}",
+            crate::unique_suffix()
         ));
+
         let dir = root.join("bundle");
         must(
             fs::create_dir_all(dir.join("bin")),
@@ -7045,5 +8326,35 @@ workspace_check = true
         assert_eq!(response.status, 403);
         assert!(split_curl_response("no trailer here").is_none());
         assert!(split_curl_response("body\n__PREPARED_TOOL_STATUS:banana\n").is_none());
+    }
+
+    #[test]
+    fn closure_rejects_unknown_options_and_profiles() {
+        let unknown = vec![OsString::from("--unexpected")];
+        let error = must_fail(
+            parse_closure_request(&unknown),
+            "unsupported closure option",
+        );
+        assert!(
+            error.to_string().contains("unsupported CI argument"),
+            "{error}"
+        );
+
+        let invalid_profile = vec![
+            OsString::from("--rev"),
+            OsString::from("a".repeat(40)),
+            OsString::from("--profile"),
+            OsString::from("experimental"),
+        ];
+        let error = must_fail(
+            parse_closure_request(&invalid_profile),
+            "unsupported closure profile",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("--profile must be release or debug"),
+            "{error}"
+        );
     }
 }

@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use super::file_walk::is_test_support_path;
-use super::{unit, RepositoryShape, ScanContext};
-use crate::s2::{identifier_suffix, parent_path, shell_quote, UnitKind};
+use super::{identifier_suffix, unit, RepositoryShape, ScanContext};
+use crate::s2::{parent_path, shell_quote, UnitKind};
 
 pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
     let mut dockerfiles_by_root: BTreeMap<String, Vec<&String>> = BTreeMap::new();

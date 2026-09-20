@@ -1,10 +1,10 @@
 //! The tasks release publisher, end to end.
 //!
-//! The fixture declares a `kind = "tasks"` release over neutral `example/*`
-//! names with two named-task jobs. It pins that the jobs render into
-//! `release.yml` with tag-plus-dispatch triggers, sibling ordering, mode
-//! gates, and lanes — and that unknown tasks, jobs on other publishers, and
-//! artifact bindings fail closed with errors naming the row.
+//! The schema-2 config declares a `kind = "tasks"` release over neutral
+//! `example/*` names with two named-task jobs. It pins that the jobs render
+//! into `release.yml` with tag-plus-dispatch triggers, sibling ordering, mode
+//! gates, and hosted platforms — and that local providers, unknown tasks, and
+//! jobs on other publishers fail closed.
 
 #![expect(
     clippy::unwrap_used,
@@ -96,6 +96,55 @@ fn fixture_config() -> String {
     .unwrap()
 }
 
+fn local_task_release_config(provider: &str) -> String {
+    fixture_config()
+        .replace(
+            "[workflow]\nproviders = [\"github-hosted\"]\nautomatic_providers",
+            &format!(
+                "[workflow]\nproviders = [\"github-hosted\", \"{provider}\"]\nautomatic_providers"
+            ),
+        )
+        .replace(
+            "[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]",
+            &format!(
+                "[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.{provider}]\nruns_on = [\"example-{provider}\"]"
+            ),
+        )
+        .replacen(
+            "provider = \"github-hosted\"\nplatform = \"macos-arm64\"\nmodes = [\"publish\"]",
+            &format!(
+                "provider = \"{provider}\"\nplatform = \"linux-x64\"\nmodes = [\"publish\"]"
+            ),
+            1,
+        )
+}
+
+fn generic_tasks_release_config() -> String {
+    r#"schema = 2
+
+[generator]
+repository = "example/synthetic-release"
+
+[workflow]
+providers = ["github-hosted"]
+automatic_providers = ["github-hosted"]
+default_dispatch_providers = ["github-hosted"]
+default_branch = "main"
+files = ["release.yml"]
+
+[workflow.selectors.github-hosted]
+runs_on = ["ubuntu-24.04"]
+
+[[declare]]
+primitive = "release"
+file = "release.yml"
+
+[declare.args]
+kind = "tasks"
+"#
+    .to_owned()
+}
+
 fn generate(root: &Path) -> Generated {
     let output = root.parent().unwrap().join(format!(
         "{}-out",
@@ -107,8 +156,6 @@ fn generate(root: &Path) -> Generated {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -130,8 +177,6 @@ fn generate_failure(root: &Path, out: &Path) -> String {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
             "--output",
             out.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -159,10 +204,27 @@ fn tasks_release_renders_end_to_end() {
         "the tasks publisher must render release.yml: {files:?}"
     );
     let workflow = generated.workflow("release.yml");
+    let triggers = workflow
+        .split_once("\non:\n")
+        .and_then(|(_, after_on)| after_on.split_once("\n\nconcurrency:\n"))
+        .map(|(triggers, _)| triggers)
+        .expect("release workflow has one top-level trigger block");
+    assert!(
+        triggers.starts_with("  push:\n    tags: [\"v[0-9]*\"]\n  workflow_dispatch:\n"),
+        "tag filter must be nested under the push event and dispatch must be present: {triggers}"
+    );
+    let event_keys = triggers
+        .lines()
+        .filter(|line| line.starts_with("  ") && !line.starts_with("    "))
+        .map(|line| line.trim().trim_end_matches(':'))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        event_keys,
+        ["push", "workflow_dispatch"],
+        "task releases emit only tag-push and manual-dispatch event keys: {triggers}"
+    );
     for expected in [
         "name: Release",
-        "tags: [\"v[0-9]*\"]",
-        "workflow_dispatch:",
         "default: validate",
         "group: release-${{ github.ref }}",
         "  build:\n",
@@ -172,7 +234,7 @@ fn tasks_release_renders_end_to_end() {
         "run: mise run build-release",
         "run: mise run verify-release",
         "run: mise run sign-release",
-        "runs-on: macos-15",
+        "runs-on: macos-26",
         "environment: example-signing",
         "id-token: write",
         "DEVELOPER_DIR:",
@@ -202,8 +264,6 @@ fn tasks_release_regenerates_identical_bytes() {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -232,25 +292,23 @@ fn tasks_release_rejects_undeclared_mise_tasks() {
     .unwrap();
     let error = generate_failure(&root, &workspace.join("out"));
     assert!(
-        error.contains("mise task `verify-release`, which mise.toml does not declare"),
+        error.contains(
+            "[[release.job]] build names mise task verify-release, which mise.toml does not declare"
+        ),
         "the error must name the undeclared task: {error}"
     );
     let _ = fs::remove_dir_all(workspace);
 }
 
 #[test]
-fn tasks_release_rejects_declare_row_kind() {
+fn tasks_release_rejects_generic_declare_kind() {
     let workspace = tempfile();
     let root = copy_release_fixture(&workspace.join("fixture"));
-    write_config(
-        &root,
-        "schema = 1\n\n[generator]\nrepository = \"example/synthetic-release\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n\n[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n[declare.args]\nkind = \"tasks\"\n",
-    );
-    write_mise_tasks(&root);
+    write_config(&root, &generic_tasks_release_config());
     let error = generate_failure(&root, &workspace.join("out"));
     assert!(
-        error.contains("declare rows carry no job tables"),
-        "the error must point tasks at the config table: {error}"
+        error.contains("`kind` must be"),
+        "the error must direct task releases to the typed [release] contract: {error}"
     );
     let _ = fs::remove_dir_all(workspace);
 }
@@ -259,15 +317,43 @@ fn tasks_release_rejects_declare_row_kind() {
 fn tasks_release_rejects_jobs_on_other_publishers() {
     let workspace = tempfile();
     let root = copy_release_fixture(&workspace.join("fixture"));
-    write_config(
-        &root,
-        "schema = 1\n\n[generator]\nrepository = \"example/synthetic-release\"\n\n[release]\nenabled = true\nkind = \"pages\"\nartifact_path = \"dist\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"build-release\"]\n",
-    );
+    let config = fixture_config().replace("kind = \"tasks\"", "kind = \"pages\"");
+    write_config(&root, &config);
     write_mise_tasks(&root);
     let error = generate_failure(&root, &workspace.join("out"));
     assert!(
-        error.contains("only for kind `tasks`"),
+        error.contains("rows render only for kind tasks"),
         "the error must name the kind restriction: {error}"
     );
     let _ = fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn tasks_release_rejects_local_publishers_before_rendering() {
+    for provider in ["velnor", "github-self-hosted"] {
+        let workspace = tempfile();
+        let root = copy_release_fixture(&workspace.join("fixture"));
+        write_config(&root, &local_task_release_config(provider));
+        write_mise_tasks(&root);
+        let error = generate_failure(&root, &workspace.join("out"));
+        assert!(
+            error.contains(&format!(
+                "[[release.job]] sign uses local provider `{provider}`"
+            )),
+            "the error must identify the rejected publisher: {error}"
+        );
+        assert!(
+            error.contains("tag pushes and `workflow_dispatch`"),
+            "the error must name the task-release events: {error}"
+        );
+        assert!(
+            error.contains("same-repository default-branch push gate"),
+            "the error must state the missing trusted event: {error}"
+        );
+        assert!(
+            !workspace.join("out/.github/workflows/release.yml").exists(),
+            "invalid local task-release workflow must not be emitted"
+        );
+        let _ = fs::remove_dir_all(workspace);
+    }
 }

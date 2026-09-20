@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const PLAN_BASE_SHA: &str = "plan-base";
 const PLAN_HEAD_SHA: &str = "plan-head";
+const GENERATION_CONFIG: &str = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n";
 
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
@@ -26,8 +27,13 @@ impl Fixture {
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(root.join(".github/ci"))?;
+        fs::create_dir_all(root.join(".github-gen"))?;
         fs::create_dir_all(root.join(".velnor-ci-selection"))?;
         fs::create_dir_all(root.join("fake-bin"))?;
+        fs::write(
+            root.join(".github-gen/velnor-workflow.toml"),
+            GENERATION_CONFIG,
+        )?;
         fs::write(root.join(".github/ci/project.toml"), CONFIG)?;
         fs::write(
             root.join(".velnor-ci-selection/velnor-ci-selection"),

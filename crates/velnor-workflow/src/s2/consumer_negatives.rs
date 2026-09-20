@@ -3,15 +3,13 @@
     reason = "tests need setup failures to name their root cause"
 )]
 
-//! Executable consumer verification suite: bastion A2 gaps G6 (consumer
-//! negatives) and G7 (cold consumer).
+//! Executable consumer verification suite for the runtime setup action.
 //!
-//! The static tests in `lib.rs` and `runtime_products.rs` pin the consumer
-//! scripts' text. These tests execute the scripts: each case runs the real
+//! The static tests in `runtime_products.rs` pin the shipped action
+//! scripts' text. These tests execute the real
 //! `setup-velnor-workflow` step bodies (extracted from the shipped
-//! `action.yml`), the real rendered Velnor provisioner, or the real
-//! candidate-acquire verification tail under `bash`, with a stub `gh`, a
-//! logging `jq` shim, and fixture git history. Rejections exit nonzero with
+//! `action.yml`) under `bash`, with a
+//! stub `gh`, a logging `jq` shim, and fixture git history. Rejections exit nonzero with
 //! the scripts' precise errors, and the stub logs prove which trust gates
 //! ran.
 //!
@@ -25,22 +23,18 @@
 //!   for real, and the shim log proves they ran (a stubbed `jq` would weaken
 //!   every manifest proof).
 //! * `git` is real, over fixture history only. Closure expectations come
-//!   from `crate::closure`, so script/Rust agreement is asserted, never
+//!   from the S2 closure implementation, so script/Rust agreement is asserted, never
 //!   assumed.
 //! * `install` is a shim implementing exactly the `install -Dm0755 <src>
-//!   <dst>` form the Velnor provisioner uses (macOS `install` lacks `-D`);
+//!   <dst>` form the setup action uses (macOS `install` lacks `-D`);
 //!   its log proves whether the slow-path install ran.
 //! * The network is unreachable by construction: the pin resolves from
-//!   fixture history (or the stubbed product-repo trees API for the
-//!   remote-resolution cases), and the default `GITHUB_SERVER_URL` points
-//!   at a nonexistent local path, so an unexpected outbound call fails
-//!   fast instead of dialing out.
+//!   fixture history or a fixture Git remote, and the default
+//!   `GITHUB_SERVER_URL` points at a nonexistent local path, so an unexpected
+//!   outbound call fails fast instead of dialing out.
 //!
-//! The candidate-acquire case executes the verification tail of
-//! `policy_candidate_step` (artifact download through manifest binding) with
-//! the locally computed head candidate supplied as `$head_candidate`. The head
-//! of that step (PR-run polling plus `velnor-workflow closure` calls) is
-//! liveness, not trust: the tail is the whole trust decision.
+//! The candidate-binary artifact flow is intentionally absent. S2 consumers
+//! accept only attested release products selected by source closure.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -49,10 +43,8 @@ use std::process::{Command, Output};
 
 use sha2::{Digest, Sha256};
 
-use crate::closure::{
-    candidate_closure_of_tree, closure_of_tree, is_full_closure, CI_FEATURES, PROFILE_RELEASE,
-};
-use crate::primitives::runtime_products::RUNTIME_PRODUCTS_FILE;
+use super::closure::{closure_of_tree, is_full_closure, CI_FEATURES, PROFILE_RELEASE};
+use super::primitives::runtime_products::RUNTIME_PRODUCTS_FILE;
 
 /// `RUNNER_OS`-`RUNNER_ARCH` platform the fixtures serve.
 const FIXTURE_PLATFORM: &str = "Linux-X64";
@@ -131,49 +123,20 @@ if [[ "$command" == "attestation" && "$subcommand" == "verify" ]]; then
       exit 1
       ;;
   esac
-  case "$*" in
-    *"--source-ref refs/heads/main"*) ;;
-    *)
-      echo "stub refuses attestation without the pinned --source-ref" >&2
-      exit 1
-      ;;
-  esac
+  if [[ "${GH_STUB_REQUIRE_SOURCE_REF:-1}" == "1" ]]; then
+    case "$*" in
+      *"--source-ref refs/heads/main"*) ;;
+      *)
+        echo "stub refuses attestation without the pinned --source-ref" >&2
+        exit 1
+        ;;
+    esac
+  fi
   fail="${GH_STUB_ATTEST_FAIL:-0}"
   if [[ "$fail" == "1" || "$fail" == "$(basename "$subject")" ]]; then
     echo "attestation verification failed for $subject" >&2
     exit 1
   fi
-  exit 0
-fi
-if [[ "$command" == "run" && "$subcommand" == "download" ]]; then
-  run_id="${3:-}"
-  shift 3
-  name=""
-  dir=""
-  repo=""
-  while [[ $# -gt 0 ]]; do
-    case "${1:-}" in
-      --name)
-        name="${2:-}"
-        shift 2
-        ;;
-      --dir)
-        dir="${2:-}"
-        shift 2
-        ;;
-      --repo)
-        repo="${2:-}"
-        shift 2
-        ;;
-      *)
-        shift
-        ;;
-    esac
-  done
-  log "run-download id=$run_id name=$name repo=$repo"
-  for file in velnor-workflow candidate-manifest.json; do
-    cp "$GH_STUB_DIR/$file" "$dir/$file"
-  done
   exit 0
 fi
 if [[ "$command" == "api" ]]; then
@@ -248,8 +211,10 @@ fn find_on_path(tool: &str) -> PathBuf {
     let path = must_some(std::env::var_os("PATH"), "PATH is set for tests");
     must_some(
         std::env::split_paths(&path)
-            .map(|dir| dir.join(tool))
-            .find(|candidate| candidate.is_file()),
+            .filter_map(|dir| dir.join(tool).canonicalize().ok())
+            .find(|candidate| {
+                candidate.is_file() && candidate.file_name() == Some(std::ffi::OsStr::new(tool))
+            }),
         &format!("{tool} is a test prerequisite on PATH"),
     )
 }
@@ -278,7 +243,7 @@ fn git_in(dir: &Path, arguments: &[&str]) {
 }
 
 /// Fixture product history: one commit carrying every closure path, so the
-/// shell `ls-tree` pathspec and `crate::closure` resolve the same bytes.
+/// shell `ls-tree` pathspec and the S2 closure implementation resolve the same bytes.
 fn init_closure_checkout(root: &Path) -> (PathBuf, String) {
     let checkout = root.join("checkout");
     must(
@@ -338,33 +303,6 @@ fn init_closure_checkout(root: &Path) -> (PathBuf, String) {
     (checkout, revision)
 }
 
-/// A repository whose history never contains the pin: the remote-resolution
-/// side of the lookup-confusion cases.
-fn init_unrelated_checkout(root: &Path, name: &str) -> PathBuf {
-    let checkout = root.join(name);
-    must(fs::create_dir_all(&checkout), "create unrelated checkout");
-    must(
-        fs::write(checkout.join("README.md"), "unrelated consumer tree\n"),
-        "write unrelated file",
-    );
-    git_in(&checkout, &["init", "--quiet"]);
-    git_in(&checkout, &["add", "-A"]);
-    git_in(
-        &checkout,
-        &[
-            "-c",
-            "user.email=consumer@test",
-            "-c",
-            "user.name=consumer",
-            "commit",
-            "--quiet",
-            "--message",
-            "unrelated",
-        ],
-    );
-    checkout
-}
-
 fn setup_action_source() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
@@ -405,54 +343,6 @@ fn composite_step_block<'a>(action: &'a str, name: &str) -> &'a str {
         .find("\n    - name: ")
         .map_or(rest.len(), |index| index + 1);
     &action[start..start + header.len() + end]
-}
-
-/// The rendered Velnor provisioner body as a runnable script. The checkout
-/// path renders into the script as a literal, exactly as the generated job
-/// carries it; the pin itself is parsed at runtime from the audited
-/// checkout's `.github-gen/velnor-workflow.toml`, so the extraction asserts
-/// the script carries the checkout and parses the pin from the audited tree.
-fn velnor_provisioner_script(checkout: &str) -> String {
-    let step = crate::workflow_pinned_policy_runtime_velnor(checkout);
-    assert!(
-        step.contains(&format!("CHECKOUT_PATH: {checkout}")),
-        "the env block carries the checkout"
-    );
-    assert!(
-        step.contains(".github-gen/velnor-workflow.toml"),
-        "the pin is parsed from the audited checkout"
-    );
-    let marker = "run: |\n";
-    let at = must_some(step.find(marker), "locate provisioner body");
-    dedent(&step[at + marker.len()..], 10)
-}
-
-/// The candidate-acquire verification tail: artifact download through
-/// manifest binding. The extraction point is pinned — the tail must open
-/// with the download block and still contain every trust gate — so script
-/// drift fails here instead of silently testing less.
-fn candidate_verify_tail(revision: &str) -> String {
-    let step = crate::policy_candidate_step(revision);
-    let marker = "candidate=\"$RUNNER_TEMP/velnor-workflow-candidate\"";
-    let at = must_some(step.find(marker), "locate candidate download block");
-    let line_start = step[..at].rfind('\n').map_or(0, |index| index + 1);
-    let tail = dedent(&step[line_start..], 10);
-    assert!(
-        tail.starts_with("candidate=\"$RUNNER_TEMP/velnor-workflow-candidate\"\n"),
-        "the tail opens with the download block"
-    );
-    for gate in [
-        "gh run download",
-        "candidate digest mismatch",
-        "is not the head's candidate",
-        "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=",
-    ] {
-        assert!(
-            tail.contains(gate),
-            "the candidate tail still contains the {gate} gate"
-        );
-    }
-    tail
 }
 
 fn github_output_value(path: &Path, key: &str) -> String {
@@ -550,7 +440,6 @@ struct ConsumerFixture {
     checkout: PathBuf,
     revision: String,
     closure: String,
-    candidate_closure: String,
     gh_log: PathBuf,
     jq_log: PathBuf,
     install_log: PathBuf,
@@ -577,14 +466,6 @@ impl ConsumerFixture {
             "closure of fixture",
         );
         assert!(is_full_closure(&closure), "fixture closure is full hex");
-        let candidate_closure = must(
-            candidate_closure_of_tree(&checkout, &revision),
-            "candidate closure of fixture",
-        );
-        assert!(
-            is_full_closure(&candidate_closure),
-            "fixture candidate closure is full hex"
-        );
         let real_jq = find_on_path("jq");
         write_executable(&bin.join("gh"), STUB_GH);
         write_executable(&bin.join("jq"), STUB_JQ);
@@ -600,7 +481,6 @@ impl ConsumerFixture {
             checkout,
             revision,
             closure,
-            candidate_closure,
             gh_log,
             jq_log,
             install_log,
@@ -631,14 +511,6 @@ impl ConsumerFixture {
 
     fn install_log_text(&self) -> String {
         fs::read_to_string(&self.install_log).unwrap_or_default()
-    }
-
-    fn cargo_home(&self) -> PathBuf {
-        self.root.join("cargo-home")
-    }
-
-    fn slot_binary(&self) -> PathBuf {
-        self.cargo_home().join("bin/velnor-workflow-policy")
     }
 
     fn installed_binary(&self) -> PathBuf {
@@ -685,46 +557,6 @@ impl ConsumerFixture {
         );
     }
 
-    /// Serve the product-repo trees API response for the fixture revision:
-    /// the committed tree converted entry-for-entry, so API resolution
-    /// yields the same listing — and closure — as a local `ls-tree`.
-    fn serve_trees(&self) {
-        let output = must(
-            Command::new("git")
-                .arg("-C")
-                .arg(&self.checkout)
-                .args(["ls-tree", "-r", "-t", &self.revision])
-                .output(),
-            "ls-tree fixture revision",
-        );
-        assert!(output.status.success(), "ls-tree fixture revision");
-        let mut tree = Vec::new();
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let (meta, path) = must_some(line.split_once('\t'), "fixture ls-tree shape");
-            let mut fields = meta.split(' ');
-            let mode = must_some(fields.next(), "entry mode");
-            let kind = must_some(fields.next(), "entry type");
-            let sha = must_some(fields.next(), "entry sha");
-            tree.push(serde_json::json!({
-                "mode": mode,
-                "type": kind,
-                "sha": sha,
-                "path": path,
-            }));
-        }
-        assert!(!tree.is_empty(), "the fixture revision has a tree");
-        let response = serde_json::json!({
-            "sha": self.revision,
-            "truncated": false,
-            "tree": tree,
-        });
-        let rendered = must(serde_json::to_string(&response), "render trees response");
-        must(
-            fs::write(self.serve.join("trees.json"), rendered),
-            "serve trees response",
-        );
-    }
-
     /// Serve a release asset whose bytes report `reported_closure` (and the
     /// fixture revision), and return the bytes' digest for the manifest.
     fn serve_asset(&self, reported_closure: &str) -> String {
@@ -747,7 +579,7 @@ impl ConsumerFixture {
             .root
             .join(format!("velnor-test-{name}-{}.sh", crate::unique_suffix()));
         must(fs::write(&path, script), "write test script");
-        let repository = crate::workflow_setup_action_repository();
+        let repository = super::workflow_setup_action_repository();
         let owner = must_some(
             repository.split_once('/').map(|(owner, _)| owner),
             "action coordinate has an owner",
@@ -795,7 +627,7 @@ impl ConsumerFixture {
                 ("CHECKOUT_PATH", checkout_str),
                 (
                     "PRODUCT_REPOSITORY",
-                    crate::workflow_setup_action_repository(),
+                    super::workflow_setup_action_repository(),
                 ),
                 ("GITHUB_OUTPUT", output_str),
             ],
@@ -812,7 +644,7 @@ impl ConsumerFixture {
             ("CLOSURE", closure),
             (
                 "PRODUCT_REPOSITORY",
-                crate::workflow_setup_action_repository(),
+                super::workflow_setup_action_repository(),
             ),
         ];
         env.extend_from_slice(extra);
@@ -840,114 +672,10 @@ impl ConsumerFixture {
         );
         (output, path_file)
     }
-
-    fn run_velnor_provisioner(&self, checkout: &Path, extra: &[(&str, &str)]) -> (Output, PathBuf) {
-        let checkout_str = must_some(checkout.to_str(), "checkout path is UTF-8");
-        let script = velnor_provisioner_script(checkout_str);
-        // The provisioner parses its pin at runtime from the audited
-        // checkout's `.github-gen/velnor-workflow.toml`: pin the fixture
-        // revision there. The file sits outside the closure pathspec and
-        // stays uncommitted, so the committed closure is unaffected.
-        let pin_dir = checkout.join(".github-gen");
-        must(fs::create_dir_all(&pin_dir), "create fixture pin dir");
-        must(
-            fs::write(
-                pin_dir.join("velnor-workflow.toml"),
-                format!("revision = \"{}\"\n", self.revision),
-            ),
-            "write fixture pin",
-        );
-        let cargo_home = self.cargo_home();
-        let cargo_home_str = must_some(cargo_home.to_str(), "cargo home is UTF-8");
-        let env_file = self
-            .root
-            .join(format!("github-env-{}", crate::unique_suffix()));
-        let env_str = must_some(env_file.to_str(), "env file is UTF-8");
-        let dead_server = self.root.join("dead-server");
-        let dead_server_str = must_some(dead_server.to_str(), "dead server is UTF-8");
-        let mut env: Vec<(&str, &str)> = vec![
-            ("CHECKOUT_PATH", checkout_str),
-            (
-                "PRODUCT_REPOSITORY",
-                crate::workflow_setup_action_repository(),
-            ),
-            ("GITHUB_SERVER_URL", dead_server_str),
-            ("GITHUB_REPOSITORY", "example/consumer"),
-            ("CARGO_HOME", cargo_home_str),
-            ("GITHUB_ENV", env_str),
-        ];
-        env.extend_from_slice(extra);
-        // In CI the step runs at the workspace root, so the run mirrors
-        // that working directory.
-        (
-            self.run_script("provision", &script, &env, Some(checkout)),
-            env_file,
-        )
-    }
-
-    fn run_candidate_tail(
-        &self,
-        name: &str,
-        run_id: &str,
-        head_candidate: &str,
-        extra: &[(&str, &str)],
-    ) -> (Output, PathBuf) {
-        let tail = candidate_verify_tail(&self.revision);
-        let runner_temp = self.root.join("runner-temp");
-        must(fs::create_dir_all(&runner_temp), "create runner temp");
-        let runner_temp_str = must_some(runner_temp.to_str(), "runner temp is UTF-8");
-        let env_file = self
-            .root
-            .join(format!("github-env-{}", crate::unique_suffix()));
-        let env_str = must_some(env_file.to_str(), "env file is UTF-8");
-        let mut env: Vec<(&str, &str)> = vec![
-            ("RUNNER_TEMP", runner_temp_str),
-            ("GITHUB_ENV", env_str),
-            (
-                "GITHUB_REPOSITORY",
-                crate::workflow_setup_action_repository(),
-            ),
-            ("name", name),
-            ("run_id", run_id),
-            ("head_candidate", head_candidate),
-        ];
-        env.extend_from_slice(extra);
-        (self.run_script("candidate", &tail, &env, None), env_file)
-    }
-}
-
-fn candidate_manifest(fixture: &ConsumerFixture, closure: &str, digest: &str) -> serde_json::Value {
-    serde_json::json!({
-        "profile": "debug",
-        "platform": FIXTURE_PLATFORM,
-        "repository": crate::workflow_setup_action_repository(),
-        "run_id": "12345678",
-        "revision": fixture.revision.as_str(),
-        "closure": closure,
-        "binary_sha256": digest,
-    })
-}
-
-fn serve_candidate(fixture: &ConsumerFixture, reported_closure: &str, closure: &str) {
-    let bytes = stub_binary_script(reported_closure, &fixture.revision);
-    must(
-        fs::write(fixture.serve.join("velnor-workflow"), &bytes),
-        "serve candidate binary",
-    );
-    let digest = sha256_hex(bytes.as_bytes());
-    let manifest = candidate_manifest(fixture, closure, &digest);
-    let rendered = must(
-        serde_json::to_string(&manifest),
-        "render candidate manifest",
-    );
-    must(
-        fs::write(fixture.serve.join("candidate-manifest.json"), rendered),
-        "serve candidate manifest",
-    );
 }
 
 fn pinned_signer_flags() -> (String, String) {
-    let repository = crate::workflow_setup_action_repository();
+    let repository = super::workflow_setup_action_repository();
     let owner = must_some(
         repository.split_once('/').map(|(owner, _)| owner),
         "action coordinate has an owner",
@@ -995,7 +723,7 @@ fn setup_action_missing_product_fails_closed_naming_the_producer() {
         "the error names the producer: {stderr}"
     );
     let log = fixture.gh_log_text();
-    let repository = crate::workflow_setup_action_repository();
+    let repository = super::workflow_setup_action_repository();
     assert!(
         log.contains(&format!(
             "release-download tag=velnor-workflow-runtime-v1-{prefix} repo={repository}"
@@ -1195,350 +923,6 @@ fn setup_action_declares_no_checksum_input() {
     );
 }
 
-#[test]
-fn velnor_provisioner_missing_product_fails_closed() {
-    let fixture = ConsumerFixture::open("velnor-missing");
-    let (output, _) =
-        fixture.run_velnor_provisioner(&fixture.checkout, &[("GH_STUB_RELEASE_FAIL", "1")]);
-    assert!(!output.status.success(), "a missing product fails");
-    let stderr = stderr_of(&output);
-    let revision = &fixture.revision;
-    let prefix = &fixture.closure[..16];
-    assert!(
-        stderr.contains(&format!(
-            "no policy runtime product for revision {revision}"
-        )),
-        "the error names the revision: {stderr}"
-    );
-    assert!(
-        stderr.contains(&format!("(closure {prefix})")),
-        "the error carries the resolved closure: {stderr}"
-    );
-    assert!(
-        stderr.contains("mainline runtime-product publisher"),
-        "the error names the producer: {stderr}"
-    );
-    let log = fixture.gh_log_text();
-    assert!(
-        log.contains("patterns= manifest.json"),
-        "the manifest goes first: {log}"
-    );
-    assert!(
-        !log.contains("attestation-verify"),
-        "nothing is trusted before the download: {log}"
-    );
-    assert!(!fixture.slot_binary().exists(), "no product means no slot");
-}
-
-#[test]
-fn velnor_provisioner_wrong_digest_rejects() {
-    let fixture = ConsumerFixture::open("velnor-digest");
-    let digest = fixture.serve_asset(&fixture.closure);
-    let wrong = flipped_hex(&digest, 5);
-    let asset = ConsumerFixture::asset();
-    let manifest = ConsumerFixture::release_manifest(
-        &fixture.closure,
-        &fixture.revision,
-        "release",
-        "",
-        &wrong,
-        &asset,
-    );
-    fixture.serve_manifest(&manifest);
-    let (output, _) = fixture.run_velnor_provisioner(&fixture.checkout, &[]);
-    assert!(!output.status.success(), "a wrong digest rejects");
-    let stderr = stderr_of(&output);
-    assert!(
-        stderr.contains("policy runtime digest mismatch"),
-        "the error names the mismatch: {stderr}"
-    );
-    assert!(
-        !fixture.slot_binary().exists(),
-        "unproven bytes never install"
-    );
-    assert!(
-        fixture.install_log_text().is_empty(),
-        "the digest gate precedes the install"
-    );
-}
-
-#[test]
-fn velnor_provisioner_wrong_manifest_rejects() {
-    let fixture = ConsumerFixture::open("velnor-manifest");
-    let digest = fixture.serve_asset(&fixture.closure);
-    let asset = ConsumerFixture::asset();
-    for (case, mutate) in MANIFEST_CASES.iter().copied() {
-        let mut manifest = ConsumerFixture::release_manifest(
-            &fixture.closure,
-            &fixture.revision,
-            "release",
-            "",
-            &digest,
-            &asset,
-        );
-        mutate(&fixture, &mut manifest);
-        fixture.serve_manifest(&manifest);
-        let (output, _) = fixture.run_velnor_provisioner(&fixture.checkout, &[]);
-        assert!(!output.status.success(), "{case}: the manifest rejects");
-        assert!(
-            !fixture.slot_binary().exists(),
-            "{case}: rejection installs no slot"
-        );
-    }
-    assert!(
-        fixture.install_log_text().is_empty(),
-        "no case reached the install"
-    );
-}
-
-#[test]
-fn velnor_provisioner_untrusted_signer_rejects() {
-    let fixture = ConsumerFixture::open("velnor-signer");
-    let digest = fixture.serve_asset(&fixture.closure);
-    let asset = ConsumerFixture::asset();
-    let manifest = ConsumerFixture::release_manifest(
-        &fixture.closure,
-        &fixture.revision,
-        "release",
-        "",
-        &digest,
-        &asset,
-    );
-    fixture.serve_manifest(&manifest);
-    let (output, _) = fixture.run_velnor_provisioner(
-        &fixture.checkout,
-        &[("GH_STUB_ATTEST_FAIL", "manifest.json")],
-    );
-    assert!(!output.status.success(), "an untrusted manifest rejects");
-    assert!(
-        !fixture.slot_binary().exists(),
-        "untrusted bytes never install"
-    );
-    assert!(
-        fixture.install_log_text().is_empty(),
-        "the attestation gate precedes the install"
-    );
-    let log = fixture.gh_log_text();
-    assert!(
-        log.contains("attestation-verify subject=") && log.contains("manifest.json"),
-        "the manifest attestation ran: {log}"
-    );
-    let (owner_flag, signer_flag) = pinned_signer_flags();
-    assert!(
-        log.contains(&owner_flag),
-        "the rejecting gate pinned the owner: {log}"
-    );
-    assert!(
-        log.contains(&signer_flag),
-        "the rejecting gate pinned the producer workflow: {log}"
-    );
-    assert!(
-        log.contains(PINNED_SOURCE_REF_FLAG),
-        "the rejecting gate pinned the default-branch ref: {log}"
-    );
-}
-
-#[test]
-fn velnor_provisioner_fails_closed_when_pin_unresolvable() {
-    let fixture = ConsumerFixture::open("velnor-unresolvable");
-    let checkout = init_unrelated_checkout(&fixture.root, "consumer-checkout");
-    let (output, _) = fixture.run_velnor_provisioner(&checkout, &[]);
-    assert!(!output.status.success(), "an unresolvable pin fails");
-    assert!(
-        !fixture.gh_log_text().contains("release-download"),
-        "no trust decision without a resolved closure"
-    );
-    assert!(!fixture.slot_binary().exists(), "failure installs no slot");
-}
-
-#[test]
-fn velnor_provisioner_resolves_remote_pin_to_its_true_closure() {
-    let fixture = ConsumerFixture::open("velnor-remote");
-    let checkout = init_unrelated_checkout(&fixture.root, "consumer-checkout");
-    // The pin is absent from the consumer checkout: resolution goes to the
-    // product-repo trees API, which serves the pin's committed tree.
-    fixture.serve_trees();
-    let (output, _) = fixture.run_velnor_provisioner(&checkout, &[("GH_STUB_RELEASE_FAIL", "1")]);
-    assert!(!output.status.success(), "the missing product fails");
-    let stderr = stderr_of(&output);
-    let prefix = &fixture.closure[..16];
-    assert!(
-        stderr.contains(&format!("(closure {prefix})")),
-        "resolution yields the pin's true closure, not the checkout's tree: {stderr}"
-    );
-    let log = fixture.gh_log_text();
-    let endpoint = format!(
-        "repos/{}/git/trees/{}?recursive=1",
-        crate::workflow_setup_action_repository(),
-        fixture.revision,
-    );
-    assert!(
-        log.contains(&endpoint),
-        "the closure resolves over the product repository API: {log}"
-    );
-}
-
-#[test]
-fn velnor_provisioner_self_report_mismatch_rejects() {
-    let fixture = ConsumerFixture::open("velnor-self-report");
-    let wrong_report = flipped_hex(&fixture.closure, 9);
-    let digest = fixture.serve_asset(&wrong_report);
-    let asset = ConsumerFixture::asset();
-    let manifest = ConsumerFixture::release_manifest(
-        &fixture.closure,
-        &fixture.revision,
-        "release",
-        "",
-        &digest,
-        &asset,
-    );
-    fixture.serve_manifest(&manifest);
-    let (output, _) = fixture.run_velnor_provisioner(&fixture.checkout, &[]);
-    assert!(!output.status.success(), "a lying self-report rejects");
-    let stderr = stderr_of(&output);
-    assert!(stderr.contains("reports closure"), "{stderr}");
-    assert!(
-        !fixture.install_log_text().is_empty(),
-        "the self-report gates the installed slot"
-    );
-    assert!(
-        fixture.slot_binary().exists(),
-        "digest-good bytes installed before the report failed"
-    );
-}
-
-#[test]
-fn velnor_provisioner_reuses_slot_only_on_digest_match() {
-    let fixture = ConsumerFixture::open("velnor-reuse");
-    let slot = fixture.slot_binary();
-    must(
-        fs::create_dir_all(must_some(slot.parent(), "slot dir")),
-        "create slot dir",
-    );
-    let bytes = stub_binary_script(&fixture.closure, &fixture.revision);
-    write_executable(&slot, &bytes);
-    let before = sha256_hex(bytes.as_bytes());
-    let asset = ConsumerFixture::asset();
-    let manifest = ConsumerFixture::release_manifest(
-        &fixture.closure,
-        &fixture.revision,
-        "release",
-        "",
-        &before,
-        &asset,
-    );
-    fixture.serve_manifest(&manifest);
-    let (output, env_file) = fixture.run_velnor_provisioner(&fixture.checkout, &[]);
-    assert!(
-        output.status.success(),
-        "a digest-matching slot reuses: {}",
-        stderr_of(&output)
-    );
-    let log = fixture.gh_log_text();
-    assert!(
-        log.contains("patterns= manifest.json"),
-        "the manifest still downloads fresh: {log}"
-    );
-    assert!(
-        !log.contains(&asset),
-        "no asset fetch on the reuse path: {log}"
-    );
-    assert!(
-        fixture.install_log_text().is_empty(),
-        "reuse installs nothing"
-    );
-    let after = sha256_hex(&must(fs::read(&slot), "read slot"));
-    assert_eq!(before, after, "the slot bytes are untouched");
-    let env = must(fs::read_to_string(&env_file), "read github env");
-    assert!(
-        env.contains(&format!("VELNOR_WORKFLOW_PINNED_BINARY={}", slot.display())),
-        "the slot exports for the guard: {env}"
-    );
-}
-
-#[test]
-fn candidate_acquire_recomputes_the_digest() {
-    let fixture = ConsumerFixture::open("candidate-digest");
-    let bytes = stub_binary_script(&fixture.candidate_closure, &fixture.revision);
-    must(
-        fs::write(fixture.serve.join("velnor-workflow"), &bytes),
-        "serve candidate binary",
-    );
-    let digest = sha256_hex(bytes.as_bytes());
-    let manifest = candidate_manifest(
-        &fixture,
-        &fixture.candidate_closure,
-        &flipped_hex(&digest, 2),
-    );
-    let rendered = must(serde_json::to_string(&manifest), "render manifest");
-    must(
-        fs::write(fixture.serve.join("candidate-manifest.json"), rendered),
-        "serve candidate manifest",
-    );
-    let prefix = &fixture.candidate_closure[..16];
-    let name = format!("velnor-workflow-candidate-{prefix}-{FIXTURE_PLATFORM}");
-    let candidate = fixture.candidate_closure.clone();
-    let (output, _) = fixture.run_candidate_tail(&name, "12345678", &candidate, &[]);
-    assert!(!output.status.success(), "a wrong candidate digest rejects");
-    let stderr = stderr_of(&output);
-    assert!(
-        stderr.contains("candidate digest mismatch"),
-        "the error names the mismatch: {stderr}"
-    );
-}
-
-#[test]
-fn candidate_checksum_alone_confers_no_trust() {
-    let fixture = ConsumerFixture::open("candidate-checksum");
-    let foreign = flipped_hex(&fixture.candidate_closure, 21);
-    serve_candidate(&fixture, &foreign, &foreign);
-    let prefix = &fixture.candidate_closure[..16];
-    let name = format!("velnor-workflow-candidate-{prefix}-{FIXTURE_PLATFORM}");
-    let candidate = fixture.candidate_closure.clone();
-    let (output, _) = fixture.run_candidate_tail(&name, "12345678", &candidate, &[]);
-    assert!(
-        !output.status.success(),
-        "a foreign closure rejects despite a matching checksum"
-    );
-    let stderr = stderr_of(&output);
-    assert!(
-        !stderr.contains("digest mismatch"),
-        "the digest gate passed, so the binding must reject: {stderr}"
-    );
-    assert!(
-        stderr.contains("is not the head's candidate"),
-        "the closure binding rejects: {stderr}"
-    );
-}
-
-#[test]
-fn candidate_acquire_exports_bound_product() {
-    let fixture = ConsumerFixture::open("candidate-good");
-    let candidate = fixture.candidate_closure.clone();
-    serve_candidate(&fixture, &candidate, &candidate);
-    let prefix = &candidate[..16];
-    let name = format!("velnor-workflow-candidate-{prefix}-{FIXTURE_PLATFORM}");
-    let (output, env_file) = fixture.run_candidate_tail(&name, "12345678", &candidate, &[]);
-    assert!(
-        output.status.success(),
-        "a bound candidate acquires: {}",
-        stderr_of(&output)
-    );
-    let env = must(fs::read_to_string(&env_file), "read github env");
-    assert!(
-        env.contains("VELNOR_WORKFLOW_PINNED_BINARY="),
-        "the binary exports: {env}"
-    );
-    assert!(
-        env.contains("VELNOR_WORKFLOW_CANDIDATE_MANIFEST="),
-        "the manifest exports for the validator binding: {env}"
-    );
-    assert!(
-        fixture.gh_log_text().contains("run-download"),
-        "the artifact came from the run download"
-    );
-}
-
 #[expect(
     clippy::too_many_lines,
     reason = "the cold-consumer proof keeps the whole verify path in one test"
@@ -1557,7 +941,7 @@ fn cold_consumer_verifies_everything_with_zero_waivers() {
         !verify_block.contains("\n      if:"),
         "verification is unconditional: {verify_block}"
     );
-    let repository = crate::workflow_setup_action_repository();
+    let repository = super::workflow_setup_action_repository();
     assert!(
         action.contains(&format!("PRODUCT_REPOSITORY: {repository}")),
         "the product comes from the product repository"
@@ -1621,7 +1005,7 @@ fn cold_consumer_verifies_everything_with_zero_waivers() {
         path_text.contains(&fixture.closure),
         "the closure bin dir joins PATH: {path_text}"
     );
-    let tag = crate::closure::product_tag(&fixture.closure);
+    let tag = super::closure::product_tag(&fixture.closure);
     let log = fixture.gh_log_text();
     assert!(
         log.contains(&format!("release-download tag={tag} repo={repository}")),

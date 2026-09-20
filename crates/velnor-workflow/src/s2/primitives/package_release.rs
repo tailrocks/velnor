@@ -75,7 +75,7 @@ impl Primitive for PackageRelease {
 
     fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
         let spec = parse_spec(args)?;
-        validate_mise_tasks(ctx.root, "verify_tasks", &spec.verify_tasks)?;
+        validate_mise_tasks(ctx.safe_root, "verify_tasks", &spec.verify_tasks)?;
         if !ctx.config.providers.contains(&ProviderId::GithubHosted) {
             return Err(GeneratorError::usage(
                 "package-release requires the github-hosted provider for GitHub release and attestation APIs",
@@ -218,11 +218,15 @@ fn validate_workflow_file(file: Option<&str>) -> Result<String, GeneratorError> 
     Ok(file.to_owned())
 }
 
-fn validate_mise_tasks(root: &Path, key: &str, tasks: &[String]) -> Result<(), GeneratorError> {
+fn validate_mise_tasks(
+    safe_root: &crate::s2::safe_fs::SafeRoot,
+    key: &str,
+    tasks: &[String],
+) -> Result<(), GeneratorError> {
     if tasks.is_empty() {
         return Ok(());
     }
-    let declared = crate::s2::parse_mise_task_names(root)?;
+    let declared = crate::s2::parse_mise_task_names_with_safe_root(safe_root)?;
     for task in tasks {
         if !declared.iter().any(|candidate| candidate == task) {
             return Err(GeneratorError::usage(format!(
@@ -2615,13 +2619,14 @@ concurrency_group = "package-release-preview"
             "[tasks]\nverify-preview-package = \"echo verify\"\n\n[tasks.header-task]\nrun = \"echo header\"\n",
         )
         .expect("write mise fixture");
+        let safe_root = crate::s2::safe_fs::SafeRoot::open(&root).expect("open mise fixture");
         let tasks = vec![
             "verify-preview-package".to_owned(),
             "header-task".to_owned(),
         ];
-        validate_mise_tasks(&root, "verify_tasks", &tasks).expect("declared task validates");
+        validate_mise_tasks(&safe_root, "verify_tasks", &tasks).expect("declared task validates");
         let missing = vec!["missing-task".to_owned()];
-        let error = validate_mise_tasks(&root, "verify_tasks", &missing)
+        let error = validate_mise_tasks(&safe_root, "verify_tasks", &missing)
             .expect_err("missing task must fail closed");
         assert!(error.to_string().contains("missing-task"));
         let _ = std::fs::remove_dir_all(root);

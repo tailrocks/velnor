@@ -1,17 +1,17 @@
 //! Rust detector: Cargo manifests, workspace graph, and Rust source facts.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io;
 use std::path::Path;
 
 use super::file_walk::{
     files_named, has_extension, join_repo_path, path_prefix, resolve_repo_path,
 };
-use super::{RepositoryShape, ScanContext};
+use super::read_repository_text;
+use super::{identifier_suffix, RepositoryShape, ScanContext};
+use crate::s2::safe_fs::SafeRoot;
 use crate::s2::{
-    identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec,
-    GeneratorError, RustToolchain, Unit, UnitKind,
+    parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec, GeneratorError,
+    RustToolchain, Unit, UnitKind,
 };
 
 /// The scanner's Rust dependency-policy unit. Its commands resolve the
@@ -23,18 +23,18 @@ const POLICY_UNIT_ID: &str = "rust-policy";
 /// other value fails the install, so the scan rejects it up front.
 const RUSTUP_PROFILES: [&str; 3] = ["minimal", "default", "complete"];
 
-/// Read the repository's pinned toolchain from a repository directory,
-/// statting the two candidate files. For callers that already hold the walked
-/// file set, prefer [`parse_rust_toolchain`].
-pub(crate) fn parse_rust_toolchain_from_dir(
+/// Parse the toolchain using the file set already observed by a scan.
+pub(crate) fn parse_rust_toolchain_for_files(
+    safe_root: &SafeRoot,
     root: &Path,
+    files: &[String],
 ) -> Result<Option<RustToolchain>, GeneratorError> {
-    if root.join("rust-toolchain.toml").is_file() || root.join("rust-toolchain").is_file() {
-        let files = super::file_walk::repository_files(root, &[])?;
-        let file_set: BTreeSet<String> = files.iter().cloned().collect();
-        return parse_rust_toolchain(root, &file_set);
+    let file_set: BTreeSet<String> = files.iter().cloned().collect();
+    if file_set.contains("rust-toolchain.toml") || file_set.contains("rust-toolchain") {
+        parse_rust_toolchain(safe_root, root, &file_set)
+    } else {
+        Ok(None)
     }
-    Ok(None)
 }
 
 /// Parse the repository's pinned Rust toolchain, if it declares one.
@@ -45,19 +45,18 @@ pub(crate) fn parse_rust_toolchain_from_dir(
 /// here, so an unparsable pin fails the scan instead of failing a workflow
 /// step on a runner.
 pub(crate) fn parse_rust_toolchain(
+    safe_root: &SafeRoot,
     root: &Path,
     file_set: &BTreeSet<String>,
 ) -> Result<Option<RustToolchain>, GeneratorError> {
     if file_set.contains("rust-toolchain.toml") {
         let path = root.join("rust-toolchain.toml");
-        let contents = fs::read_to_string(&path)
-            .map_err(|error| GeneratorError::io("read rust-toolchain.toml", &path, &error))?;
+        let contents = read_repository_text(safe_root, root, "rust-toolchain.toml")?;
         return parse_toolchain_table(&contents, &path).map(Some);
     }
     if file_set.contains("rust-toolchain") {
         let path = root.join("rust-toolchain");
-        let contents = fs::read_to_string(&path)
-            .map_err(|error| GeneratorError::io("read rust-toolchain", &path, &error))?;
+        let contents = read_repository_text(safe_root, root, "rust-toolchain")?;
         return Ok(Some(RustToolchain {
             channel: validate_toolchain_value("channel", contents.trim(), &path)?,
             components: Vec::new(),
@@ -206,12 +205,20 @@ fn validate_toolchain_value(
     }
 }
 
-fn cargo_deny_has_license_policy(root: &Path, file_set: &BTreeSet<String>) -> bool {
-    ["deny.toml", ".cargo/deny.toml"].into_iter().any(|path| {
-        file_set.contains(path)
-            && fs::read_to_string(root.join(path))
-                .is_ok_and(|contents| contents.lines().any(|line| line.trim() == "[licenses]"))
-    })
+fn cargo_deny_has_license_policy(
+    safe_root: &SafeRoot,
+    root: &Path,
+    file_set: &BTreeSet<String>,
+) -> Result<bool, GeneratorError> {
+    for path in ["deny.toml", ".cargo/deny.toml"] {
+        if file_set.contains(path) {
+            let contents = read_repository_text(safe_root, root, path)?;
+            if contents.lines().any(|line| line.trim() == "[licenses]") {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -277,6 +284,7 @@ fn workspace_pattern_matches(pattern: &str, workspace_root: &str, package_root: 
     reason = "Rust evidence normalization keeps graph construction together"
 )]
 fn analyze_rust_manifests(
+    safe_root: &SafeRoot,
     root: &Path,
     files: &[String],
     file_set: &BTreeSet<String>,
@@ -286,8 +294,7 @@ fn analyze_rust_manifests(
     for manifest in manifests {
         let manifest_root = parent_path(manifest);
         let path = root.join(manifest);
-        let contents = fs::read_to_string(&path)
-            .map_err(|error| GeneratorError::io("read Cargo manifest", &path, &error))?;
+        let contents = read_repository_text(safe_root, root, manifest)?;
         let parsed = parse_cargo_manifest(&manifest_root, &contents);
         for (field, value) in parsed
             .package_name
@@ -330,7 +337,7 @@ fn analyze_rust_manifests(
         file_set.contains(".config/nextest.toml") || file_set.contains("nextest.toml");
     let has_cargo_deny = file_set.contains("deny.toml") || file_set.contains(".cargo/deny.toml");
     let has_cargo_audit = file_set.contains("audit.toml") || file_set.contains(".cargo/audit.toml");
-    let toolchain = match parse_rust_toolchain(root, file_set)? {
+    let toolchain = match parse_rust_toolchain(safe_root, root, file_set)? {
         Some(toolchain) => toolchain,
         // A Rust repository without a pin has no toolchain contract to
         // render: provisioning would silently fall back to whatever mise or
@@ -548,7 +555,13 @@ fn analyze_rust_manifests(
                 ));
             }
         }
-        watch.extend(include_str_paths(root, files, file_set, &manifest.root)?);
+        watch.extend(include_str_paths(
+            safe_root,
+            root,
+            files,
+            file_set,
+            &manifest.root,
+        )?);
         let local_lock = join_repo_path(&manifest.root, "Cargo.lock");
         if file_set.contains(&local_lock) {
             watch.push(local_lock.clone());
@@ -622,7 +635,7 @@ fn analyze_rust_manifests(
     if has_cargo_deny || has_cargo_audit {
         let mut commands = Vec::new();
         if has_cargo_deny {
-            let command = if cargo_deny_has_license_policy(root, file_set) {
+            let command = if cargo_deny_has_license_policy(safe_root, root, file_set)? {
                 "cargo deny check"
             } else {
                 result.limitations.push(
@@ -734,6 +747,7 @@ fn analyze_rust_manifests(
 }
 
 fn include_str_paths(
+    safe_root: &SafeRoot,
     root: &Path,
     files: &[String],
     file_set: &BTreeSet<String>,
@@ -744,8 +758,7 @@ fn include_str_paths(
     for source in files.iter().filter(|file| {
         has_extension(file, "rs") && (package_root == "." || file.starts_with(&prefix))
     }) {
-        let source_contents = fs::read_to_string(root.join(source))
-            .map_err(|error| GeneratorError::io("read Rust source", &root.join(source), &error))?;
+        let source_contents = read_repository_text(safe_root, root, source)?;
         let included_paths = parse_include_str_literals(&source_contents).map_err(|error| {
             GeneratorError::usage(format!("{error} in {}", root.join(source).display()))
         })?;
@@ -756,57 +769,23 @@ fn include_str_paths(
                     root.join(source).display()
                 ))
             })?;
-            let target = if file_set.contains(&target) || static_github_input_exists(root, &target)?
-            {
-                target
-            } else if let Some(resolved) = resolve_tracked_include_path(root, &target, file_set)? {
-                resolved
+            let target_exists = if file_set.contains(&target) {
+                safe_root.has_regular_file(Path::new(&target))?
+            } else {
+                static_github_input_exists(safe_root, &target)?
+            };
+            if target_exists {
+                targets.insert(target);
             } else {
                 return Err(GeneratorError::usage(format!(
-                    "include_str! target does not exist: {} -> {}",
+                    "include_str! target does not exist or uses symlink components: {} -> {}",
                     root.join(source).display(),
                     target
                 )));
-            };
-            targets.insert(target);
+            }
         }
     }
     Ok(targets.into_iter().collect())
-}
-
-/// Resolve an include path through a symlink to the tracked path that owns its
-/// bytes. The final canonical path must stay under the repository root; an
-/// existing but untracked or external target is not valid scan input.
-fn resolve_tracked_include_path(
-    root: &Path,
-    target: &str,
-    file_set: &BTreeSet<String>,
-) -> Result<Option<String>, GeneratorError> {
-    let canonical_root = fs::canonicalize(root)
-        .map_err(|error| GeneratorError::io("canonicalize repository root", root, &error))?;
-    let path = root.join(target);
-    let canonical_target = match fs::canonicalize(&path) {
-        Ok(path) => path,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(GeneratorError::io(
-                "resolve include_str target",
-                &path,
-                &error,
-            ));
-        }
-    };
-    let Ok(relative) = canonical_target.strip_prefix(&canonical_root) else {
-        return Ok(None);
-    };
-    let relative = relative
-        .to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/");
-    if file_set.contains(&relative) {
-        Ok(Some(relative))
-    } else {
-        Ok(None)
-    }
 }
 
 pub(crate) fn parse_include_str_literals(source: &str) -> Result<Vec<String>, String> {
@@ -962,7 +941,7 @@ fn skip_quoted_literal(bytes: &[u8], mut cursor: usize, delimiter: u8) -> Result
 }
 
 pub(crate) fn static_github_input_exists(
-    root: &Path,
+    safe_root: &SafeRoot,
     target: &str,
 ) -> Result<bool, GeneratorError> {
     if !target.starts_with(".github/")
@@ -972,16 +951,7 @@ pub(crate) fn static_github_input_exists(
     {
         return Ok(false);
     }
-    let path = root.join(target);
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) => Ok(metadata.is_file() && !metadata.file_type().is_symlink()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(GeneratorError::io(
-            "inspect include_str target",
-            &path,
-            &error,
-        )),
-    }
+    safe_root.has_regular_file(Path::new(target))
 }
 
 pub(crate) fn cargo_dependency_name(key: &str) -> &str {
@@ -1210,6 +1180,7 @@ pub(crate) fn detect(
         return Ok(());
     }
     let rust = analyze_rust_manifests(
+        context.safe_root,
         context.root,
         context.files,
         context.file_set,
@@ -1228,6 +1199,8 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
+
+    use crate::s2::safe_fs::SafeRoot;
 
     #[test]
     fn lib_crate_types_mark_ffi_evidence() {
@@ -1275,7 +1248,7 @@ mod tests {
     }
 
     #[test]
-    fn include_str_through_symlinked_directory_watches_resolved_tracked_file() {
+    fn include_str_through_symlinked_directory_is_rejected() {
         let root = scratch("symlinked-include");
         must(
             fs::create_dir_all(root.join("src")),
@@ -1303,12 +1276,13 @@ mod tests {
 
         let files = vec!["assets/manifest.yml".to_owned(), "src/lib.rs".to_owned()];
         let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
-        let targets = must(
-            include_str_paths(&root, &files, &file_set, "."),
-            "resolve symlinked include target",
-        );
+        let safe_root = must(SafeRoot::open(&root), "open safe root");
+        let error = match include_str_paths(&safe_root, &root, &files, &file_set, ".") {
+            Ok(targets) => panic!("symlinked include target was accepted: {targets:?}"),
+            Err(error) => error,
+        };
 
-        assert_eq!(targets, vec!["assets/manifest.yml"]);
+        assert!(error.to_string().contains("symlink components"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1346,8 +1320,9 @@ mod tests {
             "rust-toolchain.toml".to_owned(),
         ];
         let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let safe_root = must(SafeRoot::open(&root), "open safe root");
         let analysis = must(
-            super::analyze_rust_manifests(&root, &files, &file_set, &files[..2]),
+            super::analyze_rust_manifests(&safe_root, &root, &files, &file_set, &files[..2]),
             "analyze manifests",
         );
         assert!(
@@ -1398,7 +1373,8 @@ mod tests {
 
         let files = vec!["src/lib.rs".to_owned()];
         let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
-        let error = match include_str_paths(&root, &files, &file_set, ".") {
+        let safe_root = must(SafeRoot::open(&root), "open safe root");
+        let error = match include_str_paths(&safe_root, &root, &files, &file_set, ".") {
             Ok(targets) => panic!("external include target was accepted: {targets:?}"),
             Err(error) => error,
         };
@@ -1406,6 +1382,42 @@ mod tests {
         assert!(error
             .to_string()
             .contains("include_str! target does not exist"));
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "the test must distinguish an accepted source from the expected symlink rejection"
+    )]
+    #[test]
+    fn rust_source_read_rejects_a_symlinked_ancestor() {
+        let root = scratch("source-symlink-ancestor");
+        let outside = scratch("source-symlink-ancestor-target");
+        must(
+            fs::create_dir_all(outside.join("src")),
+            "create external source directory",
+        );
+        must(
+            fs::write(outside.join("src/lib.rs"), "include_str!(\"asset.txt\");\n"),
+            "write external Rust source",
+        );
+        must(
+            symlink(&outside, root.join("alias")),
+            "create source ancestor symlink",
+        );
+
+        let files = vec!["alias/src/lib.rs".to_owned()];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let safe_root = must(SafeRoot::open(&root), "open safe root");
+        let error = match include_str_paths(&safe_root, &root, &files, &file_set, ".") {
+            Ok(targets) => panic!("source through symlink ancestor was read: {targets:?}"),
+            Err(error) => error,
+        };
+
+        assert!(error
+            .to_string()
+            .contains("refusing symlinked path ancestor"));
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
     }

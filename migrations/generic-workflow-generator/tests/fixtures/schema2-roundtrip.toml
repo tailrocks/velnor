@@ -1,0 +1,79 @@
+schema = 2
+
+[generator]
+repository = "example/legacy"
+revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[workflow]
+default_branch = "release/candidate"
+concurrency_group = "velnor-${{ github.ref }}"
+providers = [
+  "github-hosted",
+  "velnor",
+]
+automatic_providers = [
+  "github-hosted",
+]
+default_dispatch_providers = [
+  "github-hosted",
+]
+
+[workflow.selectors]
+
+[workflow.selectors.github-hosted]
+runs_on = [
+  "ubuntu-26.04",
+]
+
+[workflow.selectors.velnor]
+runs_on = [
+  "self-hosted",
+  "velnor-migration-fixture",
+]
+
+[release]
+enabled = false
+kind = "tasks"
+reason = "First line.\nSecond line # this hash is content, not a TOML comment.\n"
+
+[[release.job]]
+id = "build"
+tasks = [
+  "build-release",
+]
+provider = "github-hosted"
+platform = "linux-x64"
+
+[[check_profile]]
+id = "hosted-smoke"
+schedule = "17 2 * * *"
+tasks = [
+  "check-smoke",
+]
+provider = "github-hosted"
+platform = "linux-x64"
+
+[[check_profile]]
+id = "macos-smoke"
+schedule = "17 2 * * *"
+tasks = [
+  "check-macos",
+]
+provider = "github-hosted"
+platform = "macos-arm64"
+
+[[check_profile]]
+id = "velnor-smoke"
+schedule = "17 2 * * *"
+tasks = [
+  "check-velnor",
+]
+provider = "velnor"
+platform = "linux-x64"
+
+[[declare]]
+primitive = "scheduled-checks"
+file = "scheduled-checks.yml"
+
+[declare.args]
+name = "Migration fixture checks"

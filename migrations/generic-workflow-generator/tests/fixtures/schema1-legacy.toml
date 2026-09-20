@@ -1,0 +1,57 @@
+schema = 1
+
+[generator]
+repository = "example/legacy"
+
+[workflow]
+runners = "both" # both old execution lanes
+automatic = "both"
+automatic_lanes = [
+  "github", # lane list overrides automatic in schema 1
+]
+default_dispatch_runner = "github"
+github_runner = "ubuntu-26.04" # legacy selector becomes runs_on
+velnor_labels = [
+  "self-hosted",
+  "velnor-migration-fixture",
+]
+default_branch = "release/candidate"
+concurrency_group = "velnor-${{ github.ref }}"
+
+[release]
+enabled = false
+kind = "tasks"
+reason = """First line.
+Second line # this hash is content, not a TOML comment.
+"""
+
+[[release.job]]
+id = "build"
+tasks = [
+  "build-release", # keep array comments out of the value
+]
+runner = "github"
+
+[[check_profile]]
+id = "hosted-smoke"
+schedule = "17 2 * * *"
+tasks = ["check-smoke"]
+runner = "github"
+
+[[check_profile]]
+id = "macos-smoke"
+schedule = "17 2 * * *"
+tasks = ["check-macos"]
+runner = "macos"
+
+[[check_profile]]
+id = "velnor-smoke"
+schedule = "17 2 * * *"
+tasks = ["check-velnor"]
+runner = "velnor"
+
+[[declare]]
+primitive = "scheduled-checks"
+file = "scheduled-checks.yml"
+[declare.args]
+name = "Migration fixture checks"

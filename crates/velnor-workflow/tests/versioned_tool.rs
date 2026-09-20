@@ -1,6 +1,6 @@
 //! The main-branch-driven versioned-tool publisher, end to end.
 //!
-//! The fixture declares one `versioned-tool` release row over neutral
+//! The schema-2 fixture declares one `versioned-tool` release row over neutral
 //! `example/*` names. It pins that the row renders its own workflow file
 //! with its own name, triggers, concurrency, and five-job version graph —
 //! and that identity collisions and incomplete contracts fail closed with
@@ -109,8 +109,8 @@ fn generate(root: &Path) -> Generated {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
+            "--providers",
+            "github-hosted",
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -132,8 +132,8 @@ fn generate_failure(root: &Path, out: &Path) -> String {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
+            "--providers",
+            "github-hosted",
             "--output",
             out.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -168,7 +168,7 @@ fn versioned_tool_renders_end_to_end() {
         workflow.contains("name: example-tool\n")
             && workflow.contains("  push:\n    branches: [main]\n")
             && workflow.contains("  pull_request:\n")
-            && workflow.contains("      lanes:\n")
+            && workflow.contains("      providers:\n")
             && workflow.contains("cancel-in-progress: ${{ github.event_name == 'pull_request' }}"),
         "the row must render its own name, triggers, and concurrency: {workflow}"
     );
@@ -301,9 +301,8 @@ fn declared_release_row_suppresses_the_default_row() {
     );
 }
 
-/// Only the writer lane attests and uploads: the matrix fans out per lane
-/// but the tarball name is per target, so an ungated upload would publish
-/// the same name twice in `both` mode.
+/// Only the writer lane attests and uploads: the hosted provider is the sole
+/// elected writer in this single-provider config.
 #[test]
 fn versioned_tool_build_uploads_only_from_the_writer_lane() {
     let workspace = tempfile();
@@ -323,8 +322,9 @@ fn versioned_tool_build_uploads_only_from_the_writer_lane() {
         "the writer gates must sit on the attest and upload steps: {workflow}"
     );
     assert_eq!(
-        workflow.matches("\"writer\":false").count(),
+        workflow.matches("\"writer\":true").count(),
         1,
-        "only the both-mode github arm must be a non-writer: {workflow}"
+        "the hosted provider is the single elected writer: {workflow}"
     );
+    assert!(!workflow.contains("\"writer\":false"), "{workflow}");
 }

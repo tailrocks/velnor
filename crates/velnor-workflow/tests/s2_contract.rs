@@ -1,17 +1,15 @@
-//! Migration contract for the PR #994 capability extraction.
+//! S2 contract for a neutral cross-kind consumer.
 //!
 //! The `swift-ffi-consumer` fixture is a neutral second consumer shaped
 //! differently from `synthetic-workspace`: a Rust workspace under
 //! `packages/` (not `crates/`), a standalone nested crate, a Swift package
 //! under `clients/apple/` (not `native/`), no Dockerfile, no docs surface,
-//! and a `[renovate]` declaration with writer lanes. It pins the behaviors
-//! the migration depends on: Swift units land on macOS while Rust stays on
-//! Linux, a declared cross-kind `depends_on` selects the Swift consumer when
-//! only FFI files change, Renovate renders on a github-runners repository,
-//! generation is byte-stable, and no consumer name leaks into output. The
-//! deny probe declares the release, preview, docs, scheduled, and
-//! maintenance surfaces on its own temp copy, so every rendered family is
-//! scanned, not just the default file set.
+//! and a `[renovate]` declaration with a Velnor writer and hosted validator.
+//! It checks S2 platform placement, cross-kind `depends_on` selection for FFI
+//! changes, Renovate provider selectors, byte-stable generation, and generic
+//! output. The deny probe declares the release, preview, docs, scheduled,
+//! and maintenance surfaces on its own temp copy, so every rendered family
+//! is scanned, not just the default file set.
 
 #![expect(
     clippy::unwrap_used,
@@ -31,7 +29,7 @@ static NEXT_ROOT: AtomicUsize = AtomicUsize::new(0);
 
 fn temp_root(case: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
-        "velnor-migration-contract-{}-{}-{}",
+        "velnor-s2-contract-{}-{}-{}",
         std::process::id(),
         NEXT_ROOT.fetch_add(1, Ordering::Relaxed),
         case
@@ -119,6 +117,8 @@ fn generate(repo: &Path, case: &str) -> PathBuf {
             "--plain",
             "--default-branch",
             "main",
+            "--providers",
+            "github-hosted,velnor",
             "--output",
             output.to_str().unwrap(),
             repo.to_str().unwrap(),
@@ -182,13 +182,13 @@ fn collect_files(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 }
 
 #[test]
-fn swift_kind_renders_macos_while_rust_stays_linux() {
-    let repo = fixture_root("swift-runners");
-    let output = generate(&repo, "swift-runners");
+fn swift_binary_target_renders_macos_while_rust_stays_linux() {
+    let repo = fixture_root("swift-platforms");
+    let output = generate(&repo, "swift-platforms");
 
     let swift = workflow(&output, "ci-unit-swift.yml");
     assert!(
-        swift.contains("runs-on: macos-15"),
+        swift.contains("runs-on: macos-26"),
         "swift kind must land on macOS:\n{swift}"
     );
     assert!(
@@ -202,28 +202,20 @@ fn swift_kind_renders_macos_while_rust_stays_linux() {
         "rust kind must stay on Linux:\n{rust}"
     );
     assert!(
-        !rust.contains("runs-on: macos-15"),
+        !rust.contains("runs-on: macos-26"),
         "rust kind must not move to macOS:\n{rust}"
     );
 }
 
 #[test]
-fn renovate_lanes_render_on_a_github_runners_repository() {
-    let repo = fixture_root("reno-lanes");
-    let output = generate(&repo, "reno-lanes");
+fn renovate_writer_uses_velnor_and_validator_uses_hosted_selector() {
+    let repo = fixture_root("renovate-providers");
+    let output = generate(&repo, "renovate-providers");
 
     let writer = workflow(&output, "renovate.yml");
     assert!(
-        writer.contains("options: [velnor, github]"),
-        "writer must offer the declared lane choice:\n{writer}"
-    );
-    assert!(
-        writer.contains("inputs.lanes == 'github'"),
-        "writer must route manual dispatch by lane choice:\n{writer}"
-    );
-    assert!(
-        writer.contains("fromJSON('[\"self-hosted\",\"example-lane\",\"example-trusted\"]')"),
-        "scheduled runs must stay on the declared Velnor labels:\n{writer}"
+        writer.contains("runs-on: [self-hosted, example-lane]"),
+        "writer must use the configured Velnor selector:\n{writer}"
     );
 
     let validate = workflow(&output, "renovate-validate.yml");
@@ -311,7 +303,7 @@ fn ffi_change_selects_the_swift_consumer() {
         .env("BASE_SHA", &base)
         .env("HEAD_SHA", &head)
         .env("EVENT_NAME", "pull_request")
-        .env("VELNOR_LANES", "github")
+        .env("VELNOR_PROVIDERS", "github-hosted")
         .env("GITHUB_OUTPUT", &github_output)
         // The CI unit job exports a repo-relative VELNOR_SELECTION_FILE;
         // an inheriting child would try to write it under the fixture
@@ -337,14 +329,6 @@ fn ffi_change_selects_the_swift_consumer() {
     assert!(
         units.contains("swift-package-clients-apple"),
         "Swift consumer must be selected by its FFI prerequisite:\n{plan_output}"
-    );
-    let matrix = plan_output
-        .lines()
-        .find_map(|line| line.strip_prefix("swift_matrix="))
-        .unwrap_or_default();
-    assert!(
-        matrix.contains("swift-package-clients-apple"),
-        "Swift matrix must be non-empty:\n{plan_output}"
     );
 }
 
@@ -392,6 +376,8 @@ file = "docs.yml"
 id = "smoke"
 name = "Smoke probe"
 schedule = "23 2 * * *"
+provider = "github-hosted"
+platform = "linux-x64"
 tasks = ["check-smoke"]
 timeout_minutes = 30
 

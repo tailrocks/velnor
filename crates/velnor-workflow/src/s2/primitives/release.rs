@@ -7,16 +7,18 @@
 //! publishers render only what a config or catalog declares, never a guess
 //! from a manifest.
 
+pub(crate) mod apt;
+
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use super::{
     checks_env, docker_build_token_env_for_members, render_cargo_source_preparation,
     render_pinned_toolchain_steps, render_retained_output_cache_note, Args, CacheBackend,
-    Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, PACKAGE_RELEASE, PREVIEW, RELEASE,
-    RELEASE_SIGNER, STATIC_WORKFLOW,
+    Primitive, ProviderAdmission, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, PACKAGE_RELEASE,
+    PREVIEW, RELEASE, RELEASE_SIGNER, STATIC_WORKFLOW,
 };
-use crate::s2::provider::{runs_on_for, ProviderId};
+use crate::s2::provider::{Platform, ProviderId};
 use crate::s2::{
     github_expression, provider_supports_unit, rendered_cache_values, selector_runs_on_yaml,
     shell_quote, unit_display_label, workflow_runtime_setup,
@@ -124,29 +126,39 @@ impl Primitive for Release {
             "archive_members",
             "archive_retention_days",
             "artifact_path",
+            "apt_arches",
+            "apt_feed_url",
+            "apt_identity_dir",
+            "apt_origin",
             "assert_tasks",
             "binary",
             "build_tasks",
             "consumer_repository",
             "context",
+            "description",
             "dockerfile",
             "image",
             "image_package",
+            "keyring_path",
             "kind",
             "manifest_schema",
             "modes",
             "name",
             "package",
             "packages",
+            "passphrase_secret",
             "platforms",
             "producer_conclusion",
             "producer_workflow",
             "publish_group",
             "pull_request_paths",
+            "retention",
             "push_paths",
             "registry",
             "registry_password_secret",
             "registry_username_secret",
+            "signer_fingerprint",
+            "signing_key_secret",
             "source_repository",
             "tag_pattern",
             "targets",
@@ -305,7 +317,30 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         args.string("registry_username_secret")?.as_deref(),
         args.string("registry_password_secret")?.as_deref(),
     )?;
-    Ok(ReleaseSpec {
+    let apt_arches = args.strings("apt_arches")?.unwrap_or_default();
+    let signer_fingerprint = args.string("signer_fingerprint")?.unwrap_or_default();
+    let passphrase_secret = args.string("passphrase_secret")?.unwrap_or_default();
+    let signing_key_secret = args.string("signing_key_secret")?.unwrap_or_default();
+    let keyring_path = args.string("keyring_path")?.unwrap_or_default();
+    let apt_origin = args.string("apt_origin")?.unwrap_or_default();
+    let apt_identity_dir = args.string("apt_identity_dir")?.unwrap_or_default();
+    let apt_feed_url = args.string("apt_feed_url")?.unwrap_or_default();
+    let retention = declared_apt_retention(family, args.integer("retention")?)?;
+    let apt_fields_declared = !apt_arches.is_empty()
+        || !signer_fingerprint.is_empty()
+        || !passphrase_secret.is_empty()
+        || !signing_key_secret.is_empty()
+        || !keyring_path.is_empty()
+        || !apt_origin.is_empty()
+        || !apt_identity_dir.is_empty()
+        || !apt_feed_url.is_empty()
+        || retention != 0;
+    if kind != "apt" && apt_fields_declared {
+        return Err(GeneratorError::usage(format!(
+            "`{family}` APT fields render only for `kind = \"apt\"`, found `{kind}`"
+        )));
+    }
+    let spec = ReleaseSpec {
         kind,
         package: args.string("package")?.unwrap_or_default(),
         packages: args.strings("packages")?.unwrap_or_default(),
@@ -316,8 +351,17 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         source_repository: args.string("source_repository")?.unwrap_or_default(),
         consumer_repository: args.string("consumer_repository")?.unwrap_or_default(),
         artifact_path: args.string("artifact_path")?.unwrap_or_default(),
-        description: String::new(),
+        description: args.string("description")?.unwrap_or_default(),
         manifest_schema: args.string("manifest_schema")?.unwrap_or_default(),
+        apt_arches,
+        signer_fingerprint,
+        passphrase_secret,
+        signing_key_secret,
+        keyring_path,
+        apt_origin,
+        apt_identity_dir,
+        apt_feed_url,
+        retention,
         dockerfile: args.string("dockerfile")?.unwrap_or_default(),
         context: args.string("context")?.unwrap_or_default(),
         platforms: args.strings("platforms")?.unwrap_or_default(),
@@ -346,6 +390,41 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         registry_username_secret,
         registry_password_secret,
         jobs: Vec::new(),
+    };
+    if spec.kind == "apt" {
+        apt_contract(&spec)?;
+    }
+    Ok(spec)
+}
+
+fn declared_apt_retention(family: &str, value: Option<i64>) -> Result<u32, GeneratorError> {
+    value.map_or(Ok(0), |value| {
+        u32::try_from(value).map_err(|_| {
+            GeneratorError::usage(format!(
+                "`{family}` APT retention must be a non-negative integer, found `{value}`"
+            ))
+        })
+    })
+}
+
+fn apt_contract(release: &ReleaseSpec) -> Result<apt::AptContract, GeneratorError> {
+    apt::AptContract::resolve(&apt::AptReleaseSpec {
+        kind: release.kind.clone(),
+        package: release.package.clone(),
+        binary: release.binary.clone(),
+        source_repository: release.source_repository.clone(),
+        consumer_repository: release.consumer_repository.clone(),
+        manifest_schema: release.manifest_schema.clone(),
+        apt_arches: release.apt_arches.clone(),
+        signer_fingerprint: release.signer_fingerprint.clone(),
+        passphrase_secret: release.passphrase_secret.clone(),
+        signing_key_secret: release.signing_key_secret.clone(),
+        keyring_path: release.keyring_path.clone(),
+        apt_origin: release.apt_origin.clone(),
+        apt_identity_dir: release.apt_identity_dir.clone(),
+        apt_feed_url: release.apt_feed_url.clone(),
+        retention: release.retention,
+        description: release.description.clone(),
     })
 }
 
@@ -397,6 +476,7 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
         registry_username_secret: String::new(),
         registry_password_secret: String::new(),
         jobs: Vec::new(),
+        ..ReleaseSpec::default()
     })
 }
 
@@ -864,7 +944,10 @@ pub(crate) fn release_contract_complete(release: &ReleaseSpec) -> bool {
         }
         "pages" => !release.artifact_path.is_empty(),
         "homebrew" => !release.package.is_empty() && !release.source_repository.is_empty(),
-        "apt" => !release.package.is_empty() && !release.consumer_repository.is_empty(),
+        // APT enables an external publication pipeline with signing keys and
+        // multiple filesystem transitions. Reuse its typed resolver here so
+        // direct ReleaseSpec callers cannot bypass the complete contract.
+        "apt" => apt_contract(release).is_ok(),
         "docker" => {
             !release.image.is_empty()
                 && crate::s2::config::valid_docker_platforms(&release.platforms)
@@ -2273,8 +2356,8 @@ fn workflow_runtime_setup_for_config(config: &ProjectConfig) -> String {
 /// Release and preview artifact builders are one writer: hosted. Core CI
 /// still fans out over the universe, and release verification jobs run per
 /// provider, while the release-side matrix must not carry a self-hosted
-/// value behind `matrix.runner`: the pinned policy runtime validates that
-/// raw value and cannot prove a matrix entry is the approved runner mapping.
+/// value behind `matrix.runner`: the policy validator checks that raw value
+/// against the approved runner mapping.
 /// The one-writer release-side provider: hosted when the universe contains
 /// it, otherwise the canonical-first local provider, so no hosted `runs-on`
 /// leaks into a local-only surface. Explicit local-only repositories retain
@@ -2616,7 +2699,7 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         );
     };
     if native_debian_release(config, release) {
-        return render_native_preview(config, release);
+        return gate_local_provider_jobs(&render_native_preview(config, release), config);
     }
     // The build jobs run only from trusted pushes to the default branch, so
     // that — and nothing broader — is what may save the toolchain cache.
@@ -2642,6 +2725,19 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         }
     }
     let matrix_runner = release_matrix_runner(config, &release.targets);
+    let provider = release_provider(config);
+    // A local provider never has a manual rehearsal route. Hosted release
+    // builds retain the declared dispatch drill.
+    let build_gate = if provider.is_local() {
+        provider_release_runner_gate(config, provider)
+    } else if has_release_modes(release) {
+        format!(
+            "{} || (github.event_name == 'workflow_dispatch' && inputs.mode == 'rehearse')",
+            provider_release_runner_gate(config, provider)
+        )
+    } else {
+        provider_release_runner_gate(config, provider)
+    };
     let mut output = format!(
         r#"{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: true\n\npermissions:\n  contents: read\n\njobs:\n  build:\n    name: Preview / ${{{{ matrix.target }}}}\n    runs-on: {matrix_runner}\n    timeout-minutes: 75\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Build preview binary\n        env:\n          CARGO_INCREMENTAL: "0"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target "${{{{ matrix.target }}}}"\n      - name: Package preview binary\n        run: velnor-workflow release package-binary --target "${{{{ matrix.target }}}}" --version preview --package {} --binary {}\n      - name: Attest preview artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload preview artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 1\n\n  publish:\n    name: Publish rolling preview\n    needs: build\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    permissions:\n      contents: write\n    steps:\n      - name: Download preview artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Replace rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title "Rolling preview"\n          gh release edit preview --target "${{{{ github.sha }}}}" --prerelease\n          gh release upload preview dist/* --clobber\n"#,
         yaml_scalar(&config.default_branch),
@@ -2687,17 +2783,7 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         &format!("    runs-on: {matrix_runner}\n    timeout-minutes: 75"),
         &format!(
             "    runs-on: {matrix_runner}\n    if: ${{{{ {} }}}}\n    timeout-minutes: 75",
-            // The rolling lane has no verify job to resolve the drill, so a
-            // declared rehearse reads the dispatch input directly: the arm
-            // can only enable a drill build, never the push-gated publish.
-            if has_release_modes(release) {
-                format!(
-                    "{} || (github.event_name == 'workflow_dispatch' && inputs.mode == 'rehearse')",
-                    trusted_release_runner_gate(&config.default_branch)
-                )
-            } else {
-                trusted_release_runner_gate(&config.default_branch)
-            }
+            build_gate
         ),
     )
     .replace(
@@ -2729,7 +2815,8 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
     if let Some(guest) = render_guest_payload_job(config, release, false) {
         output = output.replace("jobs:\n  build:", &format!("jobs:\n{guest}\n  build:"));
     }
-    inject_tarball_preview_bindings(&output, config, release)
+    let output = inject_tarball_preview_bindings(&output, config, release);
+    gate_local_provider_jobs(&output, config)
 }
 
 /// The tarball preview bindings: trigger bindings with the source and gate
@@ -2822,90 +2909,207 @@ fn inject_tarball_preview_bindings(
     inject_archive_retention(&output, release)
 }
 
-/// The providers a versioned-tool dispatch offers: exactly the
-/// repository's providers in canonical order, plus `all` when the
-/// repository has more than one.
+/// The providers a versioned-tool dispatch offers: configured non-local
+/// providers admitted by `default_dispatch_providers`, plus `all` when the
+/// configured universe has multiple providers and at least one is admitted.
 fn versioned_tool_providers(config: &ProjectConfig) -> Vec<&'static str> {
-    let mut providers = config
-        .providers
+    let mut providers: Vec<_> = versioned_tool_dispatch_providers(config)
         .iter()
         .map(ProviderId::as_str)
         .collect::<Vec<_>>();
-    if providers.len() > 1 {
+    if config.providers.len() > 1 && !providers.is_empty() {
         providers.push("all");
     }
     providers
 }
 
-/// Render `value` as a JSON string: the runner-configs the version job emits
-/// travel through bash into `fromJSON`, so every label is escaped.
-fn json_string(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len() + 2);
-    escaped.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => escaped.push_str("\\\""),
-            '\\' => escaped.push_str("\\\\"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            other if other.is_control() => {
-                let _ = write!(escaped, "\\u{:04x}", other as u32);
-            }
-            other => escaped.push(other),
-        }
-    }
-    escaped.push('"');
-    escaped
+fn versioned_tool_dispatch_providers(config: &ProjectConfig) -> Vec<ProviderId> {
+    config
+        .default_dispatch_providers
+        .iter()
+        .copied()
+        .filter(|provider| config.providers.contains(provider) && !provider.is_local())
+        .collect()
 }
 
-/// The `runs-on` JSON value for one provider: a single label renders as
-/// a string, several as an array — the same value `runs-on` takes.
-fn versioned_tool_runner_json(config: &ProjectConfig, provider: ProviderId) -> String {
-    let labels = runs_on_for(&config.selectors, provider)
-        .map(|labels| {
-            labels
-                .iter()
-                .map(|label| json_string(label))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    match labels.as_slice() {
-        [single] => single.clone(),
-        labels => format!("[{}]", labels.join(",")),
+/// Providers `all` selects on manual runs. `all` omits local runners so a
+/// configured hosted release still runs. Explicit local selections are denied:
+/// dispatch selection config does not authorize local execution, which policy
+/// reserves for exact automatic default-branch pushes.
+fn versioned_tool_dispatch_selection(
+    config: &ProjectConfig,
+    selection: &str,
+) -> Result<Vec<ProviderId>, &'static str> {
+    if selection == "all" {
+        let selected = versioned_tool_dispatch_providers(config);
+        return if selected.is_empty() {
+            Err("no non-local provider is admitted for workflow_dispatch")
+        } else {
+            Ok(selected)
+        };
     }
-}
-
-/// The runner-configs array for one `providers` input value: one
-/// `{provider, runner}` object per provider the build matrix fans out to.
-fn versioned_tool_provider_configs(config: &ProjectConfig, providers: &str) -> String {
-    let selected: Vec<ProviderId> = if providers == "all" {
-        config.providers.iter().copied().collect()
-    } else {
-        ProviderId::parse(providers).into_iter().collect()
+    let Ok(provider) = ProviderId::parse(selection) else {
+        return Err("unknown provider");
     };
-    // Exactly one provider uploads: the first local provider when one runs,
-    // else the single provider. Every cell still builds (provider
-    // redundancy validates the compile), but only the writer attests and
-    // uploads, so two providers never publish the same tarball name twice.
-    let writer = selected
+    if !config.providers.contains(&provider) {
+        return Err("provider is outside the configured universe");
+    }
+    if !config.default_dispatch_providers.contains(&provider) {
+        return Err("provider is outside default_dispatch_providers");
+    }
+    if provider.is_local() {
+        return Err("local providers require a protected default-branch push");
+    }
+    Ok(vec![provider])
+}
+
+fn versioned_tool_automatic_selection(config: &ProjectConfig, selection: &str) -> Vec<ProviderId> {
+    if selection == "all" {
+        config.automatic_providers.iter().copied().collect()
+    } else {
+        ProviderId::parse(selection)
+            .ok()
+            .filter(|provider| {
+                config.providers.contains(provider) && config.automatic_providers.contains(provider)
+            })
+            .into_iter()
+            .collect()
+    }
+}
+
+fn versioned_tool_writer(selected: &[ProviderId]) -> Option<ProviderId> {
+    selected
         .iter()
         .find(|provider| provider.is_local())
         .or(selected.first())
-        .copied();
-    let configs = selected
+        .copied()
+}
+
+fn provider_csv(providers: &[ProviderId]) -> String {
+    providers
+        .iter()
+        .map(|provider| provider.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn versioned_tool_default_dispatch_provider(config: &ProjectConfig) -> Option<&'static str> {
+    versioned_tool_dispatch_providers(config)
+        .first()
+        .map(ProviderId::as_str)
+}
+
+fn versioned_tool_dispatch_block(config: &ProjectConfig) -> String {
+    let providers = versioned_tool_providers(config);
+    let Some(default_provider) = versioned_tool_default_dispatch_provider(config) else {
+        return String::new();
+    };
+    let options = providers
+        .iter()
+        .map(|provider| format!("          - {provider}\n"))
+        .collect::<String>();
+    format!(
+        "  workflow_dispatch:\n    inputs:\n      providers:\n        description: Build admitted non-local providers (`all` uses admitted default_dispatch_providers)\n        required: false\n        default: {default_provider}\n        type: choice\n        options:\n{options}"
+    )
+}
+
+fn versioned_tool_provider_arms(config: &ProjectConfig) -> String {
+    let mut arms = String::new();
+    for provider in &config.providers {
+        let dispatch_allowed = versioned_tool_dispatch_selection(config, provider.as_str()).is_ok();
+        let automatic_allowed = config.automatic_providers.contains(provider);
+        let _ = writeln!(
+            arms,
+            "          {provider})\n            if [ \"$EVENT_NAME\" = workflow_dispatch ] && [ \"{dispatch_allowed}\" != true ]; then\n              echo \"::error::provider '{provider}' is not admitted for workflow_dispatch\" >&2\n              exit 1\n            fi\n            if [ \"$EVENT_NAME\" = push ] && [ \"{automatic_allowed}\" != true ]; then\n              echo \"::error::provider '{provider}' is not in automatic_providers\" >&2\n              exit 1\n            fi\n            selected_providers='{}'\n            writer='{}' ;;",
+            provider,
+            provider,
+        );
+    }
+    let dispatch_all = versioned_tool_dispatch_selection(config, "all").unwrap_or_default();
+    let automatic_all = versioned_tool_automatic_selection(config, "all");
+    let _ = writeln!(
+        arms,
+        "          all)\n            if [ \"$EVENT_NAME\" = workflow_dispatch ]; then\n              selected_providers='{}'\n              writer='{}'\n            else\n              selected_providers='{}'\n              writer='{}'\n            fi\n            if [ -z \"$selected_providers\" ] || [ -z \"$writer\" ]; then\n              echo \"::error::all selected no admitted release provider\" >&2\n              exit 1\n            fi ;;",
+        provider_csv(&dispatch_all),
+        versioned_tool_writer(&dispatch_all)
+            .map(|provider| provider.as_str())
+            .unwrap_or_default(),
+        provider_csv(&automatic_all),
+        versioned_tool_writer(&automatic_all)
+            .map(|provider| provider.as_str())
+            .unwrap_or_default(),
+    );
+    arms
+}
+
+fn versioned_tool_build_providers(config: &ProjectConfig) -> Vec<ProviderId> {
+    config
+        .providers
+        .iter()
+        .copied()
+        .filter(|provider| {
+            config.automatic_providers.contains(provider)
+                || config.default_dispatch_providers.contains(provider)
+        })
+        .collect()
+}
+
+fn versioned_tool_local_gate(config: &ProjectConfig, provider: ProviderId) -> String {
+    WorkflowIr::from_config(config)
+        .provider_admission_expression(ProviderAdmission::ProviderTrusted(provider))
+}
+
+fn versioned_tool_control_gate(config: &ProjectConfig) -> Option<String> {
+    let provider = release_provider(config);
+    provider
+        .is_local()
+        .then(|| versioned_tool_local_gate(config, provider))
+}
+
+fn versioned_tool_hosted_build_gate(config: &ProjectConfig, provider: ProviderId) -> String {
+    format!(
+        "github.repository == '{}' && ((github.event_name == 'push' && github.ref == 'refs/heads/{}') || github.event_name == 'workflow_dispatch') && needs.assert-version.outputs.published != 'true' && contains(format(',{{0}},', needs.version.outputs.selected_providers), ',{},')",
+        config.repository,
+        config.default_branch,
+        provider.as_str(),
+    )
+}
+
+fn versioned_tool_hosted_publish_gate(config: &ProjectConfig) -> String {
+    format!(
+        "github.repository == '{}' && github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.assert-version.outputs.published != 'true'",
+        config.repository,
+        config.default_branch,
+    )
+}
+
+fn versioned_tool_signer_gate(config: &ProjectConfig, providers: &[ProviderId]) -> String {
+    let build_results = providers
         .iter()
         .map(|provider| {
             format!(
-                "{{\"provider\":\"{}\",\"runner\":{},\"writer\":{}}}",
-                provider.as_str(),
-                versioned_tool_runner_json(config, *provider),
-                Some(*provider) == writer,
+                "(!contains(format(',{{0}},', needs.version.outputs.selected_providers), ',{provider},') || needs.build-{}.result == 'success')",
+                provider.as_str()
             )
         })
         .collect::<Vec<_>>()
-        .join(",");
-    format!("[{configs}]")
+        .join(" && ");
+    format!(
+        "always() && {} && needs.version.result == 'success' && needs.assert-version.result == 'success' && needs.assert-version.outputs.published != 'true' && needs.version.outputs.writer != '' && ({build_results})",
+        versioned_tool_hosted_publish_gate(config),
+    )
+}
+
+fn render_versioned_tool_mise_setup_for_provider(provider: ProviderId, gate: &str) -> String {
+    let setup = render_mise_setup_for_provider(provider);
+    if setup.is_empty() {
+        setup
+    } else {
+        setup.replace(
+            "      - name: Set up Mise\n",
+            &format!("      - name: Set up Mise\n        if: {gate}\n"),
+        )
+    }
 }
 
 /// Pinned Mise provisioning for a versioned-tool job: hosted providers
@@ -2919,11 +3123,10 @@ fn render_versioned_tool_mise_setup(config: &ProjectConfig) -> String {
     render_mise_setup()
 }
 
-/// Pinned Mise provisioning for one typed release job. The job's selected
-/// runner owns this decision: GitHub-hosted Linux and macOS lanes need the
-/// setup action, while Velnor lanes use the preinstalled binary.
-fn render_mise_setup_for_runner(runner: &str) -> String {
-    if matches!(runner, "github" | "macos") {
+/// Pinned Mise provisioning for one typed release job. Hosted jobs use the
+/// setup action; local providers use their preinstalled binary.
+fn render_mise_setup_for_provider(provider: ProviderId) -> String {
+    if provider == ProviderId::GithubHosted {
         render_mise_setup()
     } else {
         String::new()
@@ -2957,19 +3160,18 @@ fn render_versioned_tool_task_steps(tasks: &[String], gate: Option<&str>) -> Str
     steps
 }
 
-/// The runner selector for one typed tasks-release job. macOS is a fixed
-/// hosted lane in schema 2; the other aliases resolve through the explicit
-/// provider selectors that config validation requires.
+/// The runner selector for one validated task-release job. Config validation
+/// admits only `github-hosted`; macOS is fixed while Linux resolves through
+/// that provider's selector.
 fn tasks_job_runs_on(config: &ProjectConfig, job: &ReleaseJobSpec) -> String {
-    match job.runner.as_str() {
-        "macos" => yaml_scalar(MACOS_HOSTED_RUNS_ON),
-        "velnor" => config
-            .selectors
-            .get(&ProviderId::Velnor)
-            .map(selector_runs_on_yaml)
-            .unwrap_or_default(),
-        _ => hosted_selector_runs_on(config),
+    if job.platform == Platform::MacosArm64 {
+        return yaml_scalar(MACOS_HOSTED_RUNS_ON);
     }
+    config
+        .selectors
+        .get(&job.provider)
+        .map(selector_runs_on_yaml)
+        .unwrap_or_default()
 }
 
 /// Dispatch drills run `validate` jobs; tag pushes run `publish` jobs. Jobs
@@ -3043,7 +3245,7 @@ fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> Str
         output,
         "    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n{}",
         ActionPin::Checkout.reference(),
-        render_mise_setup_for_runner(&job.runner),
+        render_mise_setup_for_provider(job.provider),
     );
     output.push_str(&render_versioned_tool_task_steps(&job.tasks, None));
     if !job.attest_subjects.is_empty() {
@@ -3085,25 +3287,32 @@ fn render_tasks_release(config: &ProjectConfig, release: &ReleaseSpec) -> String
 /// named task — generic code classifies nothing here, so no second
 /// classifier exists.
 fn render_version_gate_job(config: &ProjectConfig, spec: &VersionedToolSpec) -> String {
+    let provider = release_provider(config);
+    let gate = if provider.is_local() {
+        versioned_tool_local_gate(config, provider)
+    } else {
+        "github.event_name == 'pull_request'".to_owned()
+    };
     format!(
-        "  validate-version:\n    name: Validate version bump\n    if: ${{{{ github.event_name == 'pull_request' }}}}\n    runs-on: {}\n    timeout-minutes: 15\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{}{}",
+        "  validate-version:\n    name: Validate version bump\n    if: {}\n    runs-on: {}\n    timeout-minutes: 15\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{}{}",
+        github_expression(&gate),
         selected_runner(config),
         ActionPin::Checkout.reference(),
-        render_versioned_tool_mise_setup(config),
+        render_mise_setup_for_provider(provider),
         render_versioned_tool_task_steps(&spec.version_gate_tasks, None),
     )
 }
 
-/// The version job: one manifest version plus the runner-configs the build
-/// matrix fans out to, resolved from the dispatch providers input.
+/// The version job resolves one manifest version and a validated provider
+/// selection; each build job has its own statically rendered runner.
 fn render_versioned_tool_version_job(config: &ProjectConfig, spec: &VersionedToolSpec) -> String {
-    let mut provider_arms = String::new();
-    for provider in versioned_tool_providers(config) {
-        let configs = shell_quote(&versioned_tool_provider_configs(config, provider));
-        let _ = writeln!(provider_arms, "          {provider}) configs={configs} ;;");
-    }
+    let provider_arms = versioned_tool_provider_arms(config);
+    let local_gate = versioned_tool_control_gate(config)
+        .map(|gate| format!("    if: {}\n", github_expression(&gate)))
+        .unwrap_or_default();
     format!(
-        "  version:\n    name: Resolve tool version\n    runs-on: {}\n    timeout-minutes: 10\n    outputs:\n      version: ${{{{ steps.resolve.outputs.version }}}}\n      runner-configs: ${{{{ steps.resolve.outputs.runner-configs }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{}{}      - name: Resolve the tool version from the manifest\n        id: resolve\n        env:\n          PROVIDERS: ${{{{ github.event_name == 'workflow_dispatch' && inputs.providers || '{}' }}}}\n          MANIFEST: {}\n        run: |\n          set -euo pipefail\n          version=\"$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' \"$MANIFEST\" | head -n1)\"\n          case \"$version\" in\n            ''|*[!0-9.]*) echo \"::error::tool version $version is not an X.Y.Z version\" >&2; exit 1 ;;\n          esac\n          [[ \"$version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] \\\n            || {{ echo \"::error::tool version $version is not an X.Y.Z version\" >&2; exit 1; }}\n          case \"$PROVIDERS\" in\n{}            *) echo \"::error::unknown providers '$PROVIDERS'\" >&2; exit 1 ;;\n          esac\n          {{\n            echo \"version=$version\"\n            echo \"runner-configs=$configs\"\n          }} >> \"$GITHUB_OUTPUT\"\n",
+        "  version:\n    name: Resolve tool version\n{}    runs-on: {}\n    timeout-minutes: 10\n    outputs:\n      version: ${{{{ steps.resolve.outputs.version }}}}\n      selected_providers: ${{{{ steps.resolve.outputs.selected_providers }}}}\n      writer: ${{{{ steps.resolve.outputs.writer }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{}{}      - name: Resolve the tool version from the manifest\n        id: resolve\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          PROVIDERS: ${{{{ github.event_name == 'workflow_dispatch' && inputs.providers || '{}' }}}}\n          MANIFEST: {}\n        run: |\n          set -euo pipefail\n          version=\"$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' \"$MANIFEST\" | head -n1)\"\n          case \"$version\" in\n            ''|*[!0-9.]*) echo \"::error::tool version $version is not an X.Y.Z version\" >&2; exit 1 ;;\n          esac\n          [[ \"$version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] \\\n            || {{ echo \"::error::tool version $version is not an X.Y.Z version\" >&2; exit 1; }}\n          selected_providers=''\n          writer=''\n          case \"$PROVIDERS\" in\n{}            *) echo \"::error::unknown providers '$PROVIDERS'\" >&2; exit 1 ;;\n          esac\n          {{\n            echo \"version=$version\"\n            echo \"selected_providers=$selected_providers\"\n            echo \"writer=$writer\"\n          }} >> \"$GITHUB_OUTPUT\"\n",
+        local_gate,
         selected_runner(config),
         ActionPin::Checkout.reference(),
         workflow_runtime_setup_for_config(config),
@@ -3136,48 +3345,130 @@ fn render_versioned_tool_assert_job(config: &ProjectConfig, spec: &VersionedTool
             render_versioned_tool_task_steps(&spec.assert_tasks, Some(&gate)),
         );
     }
+    let local_gate = versioned_tool_control_gate(config)
+        .map(|gate| format!("    if: {}\n", github_expression(&gate)))
+        .unwrap_or_default();
     format!(
-        "  assert-version:\n    name: Assert the version is unpublished\n    needs: [version]\n    runs-on: {}\n    timeout-minutes: 10\n    outputs:\n      published: ${{{{ steps.published.outputs.published }}}}\n    steps:\n{}",
+        "  assert-version:\n    name: Assert the version is unpublished\n    needs: [version]\n{}    runs-on: {}\n    timeout-minutes: 10\n    outputs:\n      published: ${{{{ steps.published.outputs.published }}}}\n    steps:\n{}",
+        local_gate,
         selected_runner(config),
         steps,
     )
 }
 
-/// The matrix build: declared targets crossed with the version job's provider
-/// configs. The declared build tasks own the compile — cross-builders like
-/// zigbuild stay named tasks, never generic code — and generic code
-/// packages the conventional `target/<triple>/release/<binary>` output,
-/// attests it, and uploads it per provider and target.
-fn render_versioned_tool_build_job(config: &ProjectConfig, spec: &VersionedToolSpec) -> String {
+fn versioned_tool_selection_expression(provider: ProviderId) -> String {
+    format!(
+        "contains(format(',{{0}},', needs.version.outputs.selected_providers), ',{},')",
+        provider.as_str()
+    )
+}
+
+/// One typed build job per provider that can run automatically or is
+/// admitted for dispatch. Every `runs-on` value is rendered from its typed
+/// selector; target coverage stays a static matrix inside each provider job.
+fn render_versioned_tool_build_jobs(config: &ProjectConfig, spec: &VersionedToolSpec) -> String {
+    let mut output = String::new();
+    for provider in versioned_tool_build_providers(config) {
+        output.push_str(&render_versioned_tool_build_job_for_provider(
+            config, spec, provider,
+        ));
+    }
+    output
+}
+
+fn render_versioned_tool_build_job_for_provider(
+    config: &ProjectConfig,
+    spec: &VersionedToolSpec,
+    provider: ProviderId,
+) -> String {
     let mut targets = String::new();
     for target in &spec.targets {
         let _ = writeln!(targets, "          - {}", yaml_scalar(target));
     }
-    let build_steps = format!(
-        "{}{}",
-        render_versioned_tool_mise_setup(config),
-        render_versioned_tool_task_steps(&spec.build_tasks, None),
-    );
+    let job_id = format!("build-{}", provider.as_str());
+    let run_if = if provider.is_local() {
+        github_expression(&versioned_tool_local_gate(config, provider))
+    } else {
+        github_expression(&versioned_tool_hosted_build_gate(config, provider))
+    };
+    let step_gate = github_expression(&format!(
+        "github.event_name != 'pull_request' && needs.assert-version.outputs.published != 'true' && {}",
+        versioned_tool_selection_expression(provider)
+    ));
+    let writer_gate = github_expression(&format!(
+        "github.event_name != 'pull_request' && needs.assert-version.outputs.published != 'true' && {} && needs.version.outputs.writer == '{}'",
+        versioned_tool_selection_expression(provider),
+        provider.as_str(),
+    ));
+    let runner = config
+        .selectors
+        .get(&provider)
+        .map(selector_runs_on_yaml)
+        .unwrap_or_default();
+    let setup = render_versioned_tool_mise_setup_for_provider(provider, &step_gate);
     format!(
-        "  build:\n    name: Build / ${{{{ matrix.target }}}} / ${{{{ matrix.config.provider }}}}\n    needs: [version, assert-version]\n    if: ${{{{ github.event_name != 'pull_request' && needs.assert-version.outputs.published != 'true' }}}}\n    runs-on: ${{{{ matrix.config.runner }}}}\n    timeout-minutes: 90\n    strategy:\n      fail-fast: false\n      matrix:\n        target:\n{}        config: ${{{{ fromJSON(needs.version.outputs.runner-configs) }}}}\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    env:\n      VERSION: ${{{{ needs.version.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n{}{}      - name: Package tool binary\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-binary --target \"${{{{ matrix.target }}}}\" --version \"$VERSION\" --package {} --binary {}\n      - name: Attest tool artifact\n        if: ${{{{ matrix.config.writer }}}}\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload tool artifact\n        if: ${{{{ matrix.config.writer }}}}\n        uses: {}\n        with:\n          name: ${{{{ matrix.config.provider }}}}-${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 2\n",
-        targets,
+        "  {job_id}:\n    name: Build / {provider} / ${{{{ matrix.target }}}}\n    needs: [version, assert-version]\n    if: {run_if}\n    runs-on: {runner}\n    timeout-minutes: 90\n    strategy:\n      fail-fast: false\n      matrix:\n        target:\n{targets}    permissions:\n      contents: read\n    env:\n      VERSION: ${{{{ needs.version.outputs.version }}}}\n    steps:\n      - name: Checkout\n        if: {step_gate}\n        uses: {}\n        with:\n          persist-credentials: false\n{setup}{}      - name: Package tool binary\n        if: {writer_gate}\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-binary --target \"${{{{ matrix.target }}}}\" --version \"$VERSION\" --package {} --binary {}\n      - name: Upload tool artifact\n        if: {writer_gate}\n        uses: {}\n        with:\n          name: tool-${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 2\n",
         ActionPin::Checkout.reference(),
-        workflow_runtime_setup_for_config(config),
-        build_steps,
-        yaml_scalar(&spec.package),
-        yaml_scalar(&spec.binary),
-        ActionPin::Attest.reference(),
+        render_versioned_tool_task_steps(&spec.build_tasks, Some(&step_gate)),
+        shell_quote(&spec.package),
+        shell_quote(&spec.binary),
         ActionPin::UploadArtifact.reference(),
     )
 }
 
-/// The mutexed immutable publish: downloads every provider's archives,
+/// A credential-isolated signer. It downloads only the exact writer's
+/// packaged files, checks the complete target inventory and checksums, then
+/// attests those paths without checkout or candidate-code execution.
+fn render_versioned_tool_sign_job(
+    config: &ProjectConfig,
+    spec: &VersionedToolSpec,
+    providers: &[ProviderId],
+) -> String {
+    let provider = release_provider(config);
+    let needs = std::iter::once("version".to_owned())
+        .chain(std::iter::once("assert-version".to_owned()))
+        .chain(
+            providers
+                .iter()
+                .map(|provider| format!("build-{}", provider.as_str())),
+        )
+        .collect::<Vec<_>>()
+        .join(", ");
+    let gate = if provider.is_local() {
+        github_expression(&versioned_tool_local_gate(config, provider))
+    } else {
+        github_expression(&versioned_tool_signer_gate(config, providers))
+    };
+    let step_gate = github_expression("needs.assert-version.outputs.published != 'true'");
+    let targets = spec
+        .targets
+        .iter()
+        .map(|target| shell_quote(target))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let expected = spec.targets.len();
+    let binary = spec.binary.as_str();
+    format!(
+        "  sign:\n    name: Sign tool artifacts\n    needs: [{needs}]\n    if: {gate}\n    runs-on: {}\n    timeout-minutes: 15\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    env:\n      VERSION: ${{{{ needs.version.outputs.version }}}}\n    steps:\n      - name: Download tool artifacts\n        if: {step_gate}\n        uses: {}\n        with:\n          path: dist\n          pattern: tool-*\n          merge-multiple: true\n      - name: Verify exact tool artifact inventory\n        if: {step_gate}\n        run: |\n          set -euo pipefail\n          for target in {targets}; do\n            archive=\"dist/{binary}-$VERSION-$target.tar.gz\"\n            test -f \"$archive\" || {{ echo \"::error::missing expected tool archive $archive\" >&2; exit 1; }}\n            test -f \"$archive.sha256\" || {{ echo \"::error::missing checksum for $archive\" >&2; exit 1; }}\n          done\n          archives=\"$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l | tr -d ' ')\"\n          checksums=\"$(find dist -maxdepth 1 -type f -name '*.tar.gz.sha256' | wc -l | tr -d ' ')\"\n          [ \"$archives\" -eq {expected} ] || {{ echo \"::error::unexpected tool archive count $archives\" >&2; exit 1; }}\n          [ \"$checksums\" -eq {expected} ] || {{ echo \"::error::unexpected tool checksum count $checksums\" >&2; exit 1; }}\n          (cd dist && for checksum in *.tar.gz.sha256; do sha256sum --check \"$checksum\"; done)\n      - name: Attest tool artifacts\n        if: {step_gate}\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n",
+        selected_runner(config),
+        ActionPin::DownloadArtifact.reference(),
+        ActionPin::Attest.reference(),
+    )
+}
+
+/// The mutexed immutable publish: downloads the signed writer artifacts,
 /// re-verifies provenance and checksums, and creates the versioned release
 /// once — no clobber, and no tag check, because no tag triggered this flow.
 fn render_versioned_tool_publish_job(config: &ProjectConfig, spec: &VersionedToolSpec) -> String {
+    let provider = release_provider(config);
+    let job_gate = if provider.is_local() {
+        github_expression(&versioned_tool_local_gate(config, provider))
+    } else {
+        github_expression(&versioned_tool_hosted_publish_gate(config))
+    };
+    let step_gate = github_expression("needs.assert-version.outputs.published != 'true'");
     format!(
-        "  publish:\n    name: Publish immutable tool release\n    needs: [version, assert-version, build]\n    if: ${{{{ github.ref == 'refs/heads/{}' && needs.assert-version.outputs.published != 'true' }}}}\n    runs-on: {}\n    timeout-minutes: 20\n    environment: github-release\n    concurrency:\n      group: {}\n      cancel-in-progress: false\n    permissions:\n      contents: write\n    env:\n      VERSION: ${{{{ needs.version.outputs.version }}}}\n      COMMIT: ${{{{ github.sha }}}}\n    steps:\n      - name: Download tool artifacts\n        uses: {}\n        with:\n          path: dist\n          pattern: \"*-*\"\n          merge-multiple: true\n      - name: Verify artifact provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in dist/*.tar.gz; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\"; done\n      - name: Verify archive checksums\n        run: |\n          set -euo pipefail\n          cd dist\n          for checksum in *.sha256; do sha256sum --check \"$checksum\"; done\n      - name: Publish immutable tool release\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          tag=\"{}$VERSION\"\n          gh release create \"$tag\" dist/* --target \"$COMMIT\" --title \"$tag\" --generate-notes\n",
-        config.default_branch,
+        "  publish:\n    name: Publish immutable tool release\n    needs: [version, assert-version, sign]\n    if: {job_gate}\n    runs-on: {}\n    timeout-minutes: 20\n    environment: github-release\n    concurrency:\n      group: {}\n      cancel-in-progress: false\n    permissions:\n      contents: write\n    env:\n      VERSION: ${{{{ needs.version.outputs.version }}}}\n      COMMIT: ${{{{ github.sha }}}}\n    steps:\n      - name: Download tool artifacts\n        if: {step_gate}\n        uses: {}\n        with:\n          path: dist\n          pattern: tool-*\n          merge-multiple: true\n      - name: Verify artifact provenance\n        if: {step_gate}\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in dist/*.tar.gz; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\"; done\n      - name: Verify archive checksums\n        if: {step_gate}\n        run: |\n          set -euo pipefail\n          cd dist\n          for checksum in *.tar.gz.sha256; do sha256sum --check \"$checksum\"; done\n      - name: Publish immutable tool release\n        if: {step_gate}\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          tag=\"{}$VERSION\"\n          gh release create \"$tag\" dist/* --target \"$COMMIT\" --title \"$tag\" --generate-notes\n",
         selected_runner(config),
         yaml_scalar(&spec.publish_group),
         ActionPin::DownloadArtifact.reference(),
@@ -3185,17 +3476,11 @@ fn render_versioned_tool_publish_job(config: &ProjectConfig, spec: &VersionedToo
     )
 }
 
-/// The main-branch-driven versioned-tool publisher: the row's own workflow
-/// name, push-main plus pull-request triggers over declared paths, a
-/// providers dispatch, per-ref concurrency that cancels PR runs only, and
-/// the five-job version graph — gate, version, assert, matrix build, and
-/// the mutexed immutable publish. No tag checks render: no tag triggers
-/// this file, so there is nothing to verify.
+/// The main-branch-driven versioned-tool publisher: push-main and PR triggers
+/// over declared paths, a constrained providers dispatch, static provider
+/// build jobs, an isolated signer, and a mutexed immutable publisher.
 fn render_versioned_tool_release(config: &ProjectConfig, spec: &VersionedToolSpec) -> String {
-    let mut provider_options = String::new();
-    for provider in versioned_tool_providers(config) {
-        let _ = writeln!(provider_options, "          - {provider}");
-    }
+    let dispatch_block = versioned_tool_dispatch_block(config);
     let mut push_paths = String::new();
     for path in &spec.push_paths {
         let _ = writeln!(push_paths, "      - {}", yaml_scalar(path));
@@ -3204,8 +3489,8 @@ fn render_versioned_tool_release(config: &ProjectConfig, spec: &VersionedToolSpe
     for path in &spec.pull_request_paths {
         let _ = writeln!(pull_request_paths, "      - {}", yaml_scalar(path));
     }
-    format!(
-        "{GENERATED_HEADER}name: {}\nrun-name: {}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{}  pull_request:\n    paths:\n{}  workflow_dispatch:\n    inputs:\n      providers:\n        description: Build providers (all builds every provider)\n        required: false\n        default: {}\n        type: choice\n        options:\n{}concurrency:\n  group: ${{{{ github.workflow }}}}-${{{{ github.ref }}}}\n  cancel-in-progress: ${{{{ github.event_name == 'pull_request' }}}}\n\npermissions:\n  contents: read\n\njobs:\n{}{}{}{}{}",
+    let output = format!(
+        "{GENERATED_HEADER}name: {}\nrun-name: {}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{}  pull_request:\n    paths:\n{}{}concurrency:\n  group: ${{{{ github.workflow }}}}-${{{{ github.ref }}}}\n  cancel-in-progress: ${{{{ github.event_name == 'pull_request' }}}}\n\npermissions:\n  contents: read\n\njobs:\n{}{}{}{}{}{}",
         yaml_scalar(&spec.name),
         yaml_scalar(&format!(
             "{} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}",
@@ -3214,14 +3499,15 @@ fn render_versioned_tool_release(config: &ProjectConfig, spec: &VersionedToolSpe
         yaml_scalar(&config.default_branch),
         push_paths,
         pull_request_paths,
-        canonical_provider(config),
-        provider_options,
+        dispatch_block,
         render_version_gate_job(config, spec),
         render_versioned_tool_version_job(config, spec),
         render_versioned_tool_assert_job(config, spec),
-        render_versioned_tool_build_job(config, spec),
+        render_versioned_tool_build_jobs(config, spec),
+        render_versioned_tool_sign_job(config, spec, &versioned_tool_build_providers(config)),
         render_versioned_tool_publish_job(config, spec),
-    )
+    );
+    gate_local_provider_jobs(&output, config)
 }
 
 pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
@@ -3240,7 +3526,7 @@ pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> S
             "{GENERATED_HEADER}# Release omitted: producer bindings, dispatch modes, archive contracts, and credential pairings render only for the `rust-binary` and `native` publishers (`tasks` renders dispatch modes only).\n"
         );
     }
-    match release.kind.as_str() {
+    let output = match release.kind.as_str() {
         "crates" => render_crates_release(config, release),
         "rust-binary" => render_binary_release(config, release),
         "native" => render_native_release(config, release),
@@ -3252,7 +3538,8 @@ pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> S
         _ => format!(
             "{GENERATED_HEADER}# Release omitted: this publisher requires a separately verified contract.\n"
         ),
-    }
+    };
+    gate_local_provider_jobs(&output, config)
 }
 
 /// One release unit job for `(provider, unit)`; returns its job id.
@@ -3277,7 +3564,7 @@ fn render_release_unit_job(
     let job_name = yaml_scalar(&crate::s2::comparison_job_name(provider, unit));
     let verify_name = yaml_scalar(&unit.label);
     let dispatch_gate = if provider.is_local() {
-        trusted_release_runner_gate(&config.default_branch)
+        provider_release_runner_gate(config, provider)
     } else {
         String::new()
     };
@@ -3297,18 +3584,6 @@ fn render_release_unit_job(
         ActionPin::Checkout.reference()
     );
     workflow.render_workflow_runtime_setup(output, provider);
-    // The generator's own unit runs `--plain --check` with the network
-    // restricted, so its D19 guard needs the pinned policy binary before the
-    // first command. Hosted release jobs already acquire the runtime product
-    // at the pin (the guard finds it on PATH by closure); local providers
-    // run the packaged fleet runtime and provision the pinned product into
-    // the host's persistent executable store instead.
-    if provider.is_local() && super::ir::unit_runs_workflow_plain_check(unit) {
-        output.push_str(&crate::s2::workflow_pinned_policy_runtime_local(
-            &workflow.workflow_revision,
-            "${{ github.workspace }}",
-        ));
-    }
     workflow.render_tool_provisioning(output, provider, unit, false);
     let cargo_cache_restored = CacheBackend::Detected
         .provider_enables_actions_cache(provider, workflow, unit)
@@ -3480,11 +3755,10 @@ fn render_crates_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
 }
 
 /// The `build` job gate for native releases: `always()` plus explicit
-/// result checks, so a tag dispatch can declare the github-hosted
-/// bootstrap scope while tag pushes keep the full gate. Hosted lanes
-/// are ungated (they run on every event) and required on every event;
-/// local lanes are trusted-gated (they skip a tag dispatch) and
-/// required off dispatches. A dispatch additionally declares
+/// result checks. Hosted lanes are ungated (they run on every event) and
+/// required on every event. Local lane results are required only on an
+/// automatic push to this repository's default branch, where policy admits
+/// those runners. A dispatch additionally declares
 /// github-hosted-only scope (the admit job rejects anything else
 /// loudly) plus an adoptable image index, so a fresh-version dispatch
 /// fails closed at the build instead of after an hour of wasted
@@ -3520,12 +3794,26 @@ fn native_release_build_gate(
         }
     }
     let hosted = lane_results(&config.providers, unit_job_ids, false);
-    let local = lane_results(&config.providers, unit_job_ids, true);
+    let automatic_local: crate::s2::provider::ProviderSet = config
+        .providers
+        .iter()
+        .copied()
+        .filter(|provider| provider.is_local() && config.automatic_providers.contains(provider))
+        .collect();
+    let local = lane_results(&automatic_local, unit_job_ids, true);
     let has_hosted_lanes = hosted != "true";
+    let local_gate = if local == "true" {
+        "true".to_owned()
+    } else {
+        format!(
+            "github.repository != '{}' || github.event_name != 'push' || github.ref != 'refs/heads/{}' || ({local})",
+            config.repository, config.default_branch
+        )
+    };
     let mut clauses = vec![
         "needs.verify.result == 'success'".to_owned(),
         format!("({hosted})"),
-        format!("(github.event_name == 'workflow_dispatch' || ({local}))"),
+        format!("({local_gate})"),
     ];
     if has_hosted_lanes {
         let mut scope = vec![
@@ -3651,15 +3939,18 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         // Native releases carry the stricter always()-plus-results gate
         // (declared provider subsets on tag dispatch; full gate on push);
         // other publishers keep the legacy trusted gate verbatim.
-        let build_gate = if release.kind == "native" {
+        let provider = release_provider(config);
+        let build_gate = if provider.is_local() {
+            provider_release_runner_gate(config, provider)
+        } else if release.kind == "native" {
             native_release_build_gate(config, &unit_job_ids, release)
         } else if has_release_modes(release) {
             format!(
                 "{} || (github.event_name == 'workflow_dispatch' && needs.verify.outputs.mode == 'rehearse')",
-                trusted_release_runner_gate(&config.default_branch)
+                trusted_release_runner_gate(config, provider)
             )
         } else {
-            trusted_release_runner_gate(&config.default_branch)
+            trusted_release_runner_gate(config, provider)
         };
         let build = build.replace(
             &format!("    runs-on: {matrix_runner}\n    timeout-minutes: 90"),
@@ -4271,11 +4562,60 @@ fn render_homebrew_release(config: &ProjectConfig, release: &ReleaseSpec) -> Str
 }
 
 fn render_apt_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
-    render_package_feed(
-        config,
-        "apt",
-        &release.package,
-        &release.consumer_repository,
+    // Declared and config-driven contracts are validated before rendering,
+    // so resolution here only fails when a caller bypassed validation — and
+    // then no feed renders at all rather than a broken one.
+    let Ok(contract) = apt_contract(release) else {
+        return format!(
+            "{GENERATED_HEADER}# APT release omitted: its typed publication contract is incomplete or invalid.\n"
+        );
+    };
+    // The feed publishes from GitHub only, so the GitHub-lane runtime setup
+    // applies regardless of the repository's own lane mode: the jobs below
+    // run on the hosted runner even for a local-provider repository.
+    let setup = workflow_runtime_setup(
+        ProviderId::GithubHosted,
+        &config.repository,
+        &config.workflow_revision,
+    );
+    let runner = hosted_selector_runs_on(config);
+    let branch = &config.default_branch;
+    let source = shell_quote(&contract.source_repo);
+    let package = shell_quote(&contract.package);
+    // Names interpolated inside double-quoted shell strings stay raw: the
+    // typed validators forbid every metacharacter, so quoting them would
+    // corrupt the interpolation instead of protecting it.
+    let package_raw = &contract.package;
+    // The repository slug (owner/name, no metacharacters) for the
+    // attestation signer identity.
+    let source_raw = &contract.source_repo;
+    let binary = shell_quote(&contract.binary);
+    let schema = shell_quote(&contract.manifest_schema);
+    let signer = shell_quote(&contract.signer);
+    let secret = &contract.passphrase_secret;
+    let key_secret = &contract.signing_key_secret;
+    let keyring = shell_quote(&contract.keyring);
+    let identity = shell_quote(&contract.identity_dir);
+    let origin = shell_quote(&contract.origin);
+    let description = shell_quote(&contract.description);
+    let feed = shell_quote(&contract.feed_url);
+    let consumer = shell_quote(&contract.consumer_repo);
+    let letter = apt::pool_letter(&contract.package);
+    let checkout = ActionPin::Checkout.reference();
+    // The apt-incoming upload below carries verify's hidden sentinel, so
+    // its `with:` opts into `include-hidden-files`: upload-artifact drops
+    // dotfiles by default, and publish refuses without the sentinel. The
+    // apt-staging tree holds no hidden files, so its upload stays default.
+    let upload = ActionPin::UploadArtifact.reference();
+    let download = ActionPin::DownloadArtifact.reference();
+    let policy = policy_enforcement_step();
+    format!(
+        "{GENERATED_HEADER}name: Package feed\nrun-name: Package feed · apt · ${{{{ github.event_name }}}}\n\non:\n  schedule:\n    - cron: '17 4 * * *'\n  workflow_dispatch:\n    inputs:\n      providers:\n        description: Comma-separated provider subset (APT publication runs on GitHub-hosted)\n        required: false\n        default: github-hosted\n        type: string\n      channel:\n        description: Package channel\n        required: false\n        default: stable\n        type: choice\n        options:\n          - stable\n          - preview\n      version:\n        description: Target version (empty discovers the channel head)\n        required: false\n        default: ''\n        type: string\n      commit:\n        description: Target source commit (empty resolves it)\n        required: false\n        default: ''\n        type: string\n\nconcurrency:\n  group: package-feed-apt-${{{{ github.repository }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  admit-provider:\n    name: Admit feed provider\n    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject dispatches without GitHub-hosted provider\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers != '' && !contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,') }}}}\n        run: |\n          echo 'apt feed mutation publishes from GitHub only' >&2\n          exit 1\n  verify:\n    name: Verify apt feed\n    needs: [admit-provider]\n    runs-on: {runner}\n    timeout-minutes: 30\n    outputs:\n      version: ${{{{ steps.feed.outputs.version }}}}\n      commit: ${{{{ steps.feed.outputs.commit }}}}\n      channel: ${{{{ steps.feed.outputs.channel }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n{POLICY_CHECKOUT_WITH}{setup}{policy}      - name: Fetch and verify feed inputs\n        id: feed\n        env:\n          CHANNEL: ${{{{ github.event.inputs.channel || 'stable' }}}}\n          INPUT_VERSION: ${{{{ github.event.inputs.version || '' }}}}\n          INPUT_COMMIT: ${{{{ github.event.inputs.commit || '' }}}}\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          channel=\"$CHANNEL\"\n          case \"$channel\" in stable|preview) ;; *) echo \"::error::unknown channel $channel\" >&2; exit 1 ;; esac\n          version=\"$INPUT_VERSION\"\n          commit=\"$INPUT_COMMIT\"\n          if [ \"$channel\" = stable ]; then\n            if [ -z \"$version\" ]; then\n              version=\"$(gh release list --repo {source} --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')\"\n            fi\n            if [ -z \"$commit\" ]; then\n              commit=\"$(velnor-workflow release apt-resolve-commit --source-repo {source} --version \"$version\")\"\n            fi\n          else\n            rm -rf discover\n            gh release download preview --repo {source} --pattern 'release-manifest.json' --dir discover\n            manifest_version=\"$(jq -er .version discover/release-manifest.json)\"\n            if [ -z \"$version\" ]; then\n              version=\"$manifest_version\"\n            elif [ \"$version\" != \"$manifest_version\" ]; then\n              echo \"::error::requested $version disagrees with the rolling manifest $manifest_version\" >&2\n              exit 1\n            fi\n            if [ -z \"$commit\" ]; then\n              commit=\"$(gh release view preview --repo {source} --json targetCommitish --jq .targetCommitish)\"\n            fi\n          fi\n          rm -rf incoming\n          velnor-workflow release apt-fetch --suite \"$channel\" --source-repo {source} --package {package} --version \"$version\" --dir incoming\n          if [ \"$channel\" = stable ]; then\n            source_ref=\"refs/tags/$version\"\n          else\n            source_ref=\"refs/heads/{branch}\"\n          fi\n          shopt -s nullglob\n          attest_subjects=(incoming/*.deb)\n          [ \"${{#attest_subjects[@]}}\" -gt 0 ] || {{ echo \"::error::no fetched debs to attest\" >&2; exit 1; }}\n          for subject in \"${{attest_subjects[@]}}\"; do\n            gh attestation verify \"$subject\" --repo {source} --signer-workflow \"{source_raw}/.github/workflows/ci-release-package-signer.yml\" --source-ref \"$source_ref\" --source-digest \"$commit\"\n          done\n          live_fpr=\"$(gpg --show-keys --with-colons {keyring} | awk -F: '/^fpr:/{{print $10; exit}}')\"\n          if [ \"$channel\" = stable ]; then\n            velnor-workflow release apt-verify --suite \"$channel\" --source-repo {source} --package {package} --binary {binary} --identity-dir {identity} --manifest-schema {schema} --version \"$version\" --incoming incoming --commit \"$commit\" --signer \"$live_fpr\" --expect-signer {signer} --verify-oci true\n          else\n            velnor-workflow release apt-verify --suite \"$channel\" --source-repo {source} --package {package} --binary {binary} --identity-dir {identity} --manifest-schema {schema} --version \"$version\" --incoming incoming --commit \"$commit\" --signer \"$live_fpr\" --expect-signer {signer}\n          fi\n          {{\n            echo \"version=$version\"\n            echo \"commit=$commit\"\n            echo \"channel=$channel\"\n          }} >> \"$GITHUB_OUTPUT\"\n      - name: Upload verified feed inputs\n        uses: {upload}\n        with:\n          name: apt-incoming\n          path: incoming\n          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n  publish:\n    name: Publish apt feed\n    needs: [admit-provider, verify]\n    if: ${{{{ github.ref == 'refs/heads/{branch}' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.event.inputs.providers == '' || contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,')) }}}}\n    runs-on: {runner}\n    timeout-minutes: 30\n    environment: package-feed\n    permissions:\n      contents: write\n    outputs:\n      version: ${{{{ needs.verify.outputs.version }}}}\n      commit: ${{{{ needs.verify.outputs.commit }}}}\n      channel: ${{{{ needs.verify.outputs.channel }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}      - name: Download verified feed inputs\n        uses: {download}\n        with:\n          name: apt-incoming\n          path: incoming\n      - name: Recover the prior pair and derive the previous pointer\n        id: prior\n        env:\n          CHANNEL: ${{{{ needs.verify.outputs.channel }}}}\n          VERSION: ${{{{ needs.verify.outputs.version }}}}\n        run: |\n          set -euo pipefail\n          rm -rf prev\n          mkdir -p prev\n          feed={feed}\n          echo \"bootstrap=false\" >> \"$GITHUB_OUTPUT\"\n          case \"$CHANNEL\" in\n            stable)\n              prev_tag=\"$(curl --fail --show-error --silent --location \"$feed/last-publish\")\"\n              prev_version=\"${{prev_tag#v}}\"\n              case \"$prev_version\" in ''|*[!0-9.]*) echo \"::error::live last-publish is not a version: $prev_tag\" >&2; exit 1 ;; esac\n              for arch in amd64 arm64; do\n                curl --fail --show-error --silent --location --retry 3 \\\n                  -o \"prev/{package_raw}-$prev_version-$arch.deb\" \\\n                  \"$feed/pool/main/{letter}/{package_raw}/{package_raw}_${{prev_version}}_${{arch}}.deb\"\n              done\n              candidate_sha=\"$(awk '{{print $1}}' incoming/release-record.json.sha256)\"\n              curl --fail --show-error --silent --location -o published.json \"$feed/publication-record.json\"\n              velnor-workflow release apt-previous-pointer --suite stable --published published.json --prior \"$prev_tag\" --candidate \"$VERSION\" --candidate-sha \"$candidate_sha\" > previous-pointer.json\n              ;;\n            preview)\n              if curl --fail --show-error --silent --location --output /dev/null \"$feed/dists/preview/InRelease\"; then\n                curl --fail --show-error --silent --location -o live-packages \"$feed/dists/preview/main/binary-amd64/Packages\"\n                rollback=\"$(awk '$1==\"Package:\"{{p=$2}} p==\"{package_raw}\" && $1==\"Version:\"{{print $2}}' live-packages | sort -u | grep -Fxv \"$VERSION\")\"\n                [ -n \"$rollback\" ] || {{ echo \"::error::no retained rollback in the live preview index\" >&2; exit 1; }}\n                [ \"$(printf '%s\\n' \"$rollback\" | wc -l | tr -d ' ')\" = 1 ] || {{ echo \"::error::live preview index retains more than one rollback\" >&2; exit 1; }}\n                case \"$rollback\" in ''|*[!0-9A-Za-z.+:~-]*) echo \"::error::live preview rollback is not a pool version: $rollback\" >&2; exit 1 ;; esac\n                for arch in amd64 arm64; do\n                  curl --fail --show-error --silent --location --retry 3 \\\n                    -o \"prev/{package_raw}_${{rollback}}_${{arch}}.deb\" \\\n                    \"$feed/pool/preview/main/{letter}/{package_raw}/{package_raw}_${{rollback}}_${{arch}}.deb\"\n                done\n                velnor-workflow release apt-previous-pointer --suite preview > previous-pointer.json\n              else\n                velnor-workflow release apt-previous-pointer --suite preview --bootstrap true > previous-pointer.json\n                echo \"bootstrap=true\" >> \"$GITHUB_OUTPUT\"\n              fi\n              ;;\n          esac\n      - name: Publish the staged suite\n        env:\n          CHANNEL: ${{{{ needs.verify.outputs.channel }}}}\n          VERSION: ${{{{ needs.verify.outputs.version }}}}\n          COMMIT: ${{{{ needs.verify.outputs.commit }}}}\n          {secret}: ${{{{ secrets.{secret} }}}}\n          {key_secret}: ${{{{ secrets.{key_secret} }}}}\n        run: |\n          set -euo pipefail\n          args=(--suite \"$CHANNEL\" --source-repo {source} --package {package} --binary {binary} --consumer-repo {consumer} --manifest-schema {schema} --identity-dir {identity} --keyring {keyring} --origin {origin} --description {description} --feed-url {feed} --signer {signer} --passphrase-env {secret} --key-env {key_secret} --version \"$VERSION\" --incoming incoming --previous-pointer previous-pointer.json --staging public)\n          if [ \"${{{{ steps.prior.outputs.bootstrap }}}}\" = true ]; then\n            args+=(--bootstrap true)\n          else\n            args+=(--prev-dir prev)\n          fi\n          velnor-workflow release apt-publish \"${{args[@]}}\"\n          if [ \"$CHANNEL\" = stable ]; then\n            ref=\"refs/tags/$VERSION\"\n            manifest=\"incoming/manifest.json\"\n          else\n            ref=\"refs/heads/main\"\n            manifest=\"incoming/release-manifest.json\"\n          fi\n          velnor-workflow release apt-channel-update --suite \"$CHANNEL\" --source-repo {source} --source-ref \"$ref\" --commit \"$COMMIT\" --version \"$VERSION\" --package {package} --manifest \"$manifest\" --staging public\n      - name: Upload staged feed tree\n        uses: {upload}\n        with:\n          name: apt-staging\n          path: public\n          if-no-files-found: error\n          retention-days: 2\n  deploy:\n    name: Deploy apt feed\n    needs: [admit-provider, publish]\n    if: ${{{{ github.ref == 'refs/heads/{branch}' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.event.inputs.providers == '' || contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,')) }}}}\n    runs-on: {runner}\n    timeout-minutes: 20\n    environment: github-pages\n    permissions:\n      contents: read\n      pages: write\n      id-token: write\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}      - name: Download staged feed tree\n        uses: {download}\n        with:\n          name: apt-staging\n          path: public\n      - name: Guard against a rollback deploy\n        env:\n          CHANNEL: ${{{{ needs.publish.outputs.channel }}}}\n        run: |\n          set -euo pipefail\n          if [ \"$CHANNEL\" = stable ]; then last=\"last-publish\"; else last=\"last-publish-preview\"; fi\n          live=\"unknown\"\n          if curl --fail --show-error --silent --location -o live-last-publish {feed}/$last; then\n            live=\"$(cat live-last-publish)\"\n          fi\n          velnor-workflow release apt-deploy-guard --suite \"$CHANNEL\" --staged public --live-version \"$live\"\n      - name: Configure Pages\n        uses: {configure_pages}\n      - name: Upload Pages artifact\n        uses: {upload_pages}\n        with:\n          path: public\n      - name: Deploy Pages\n        uses: {deploy_pages}\n  feed-result:\n    name: Feed result\n    needs: [admit-provider, verify, publish, deploy]\n    if: ${{{{ always() }}}}\n    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Fail closed unless the feed verified and published\n        env:\n          REF: ${{{{ github.ref }}}}\n          VERIFY: ${{{{ needs.verify.result }}}}\n          PUBLISH: ${{{{ needs.publish.result }}}}\n          DEPLOY: ${{{{ needs.deploy.result }}}}\n        run: |\n          set -euo pipefail\n          [ \"$VERIFY\" = success ] || {{ echo \"::error::feed verification did not succeed: $VERIFY\" >&2; exit 1; }}\n          if [ \"$REF\" = \"refs/heads/{branch}\" ]; then\n            [ \"$PUBLISH\" = success ] || {{ echo \"::error::feed publication did not succeed: $PUBLISH\" >&2; exit 1; }}\n            [ \"$DEPLOY\" = success ] || {{ echo \"::error::feed deployment did not succeed: $DEPLOY\" >&2; exit 1; }}\n          else\n            [ \"$PUBLISH\" = skipped ] || {{ echo \"::error::unexpected publication state off the default branch: $PUBLISH\" >&2; exit 1; }}\n            [ \"$DEPLOY\" = skipped ] || {{ echo \"::error::unexpected deployment state off the default branch: $DEPLOY\" >&2; exit 1; }}\n          fi\n",
+        branch = branch,
+        policy = policy,
+        configure_pages = ActionPin::ConfigurePages.reference(),
+        upload_pages = ActionPin::UploadPages.reference(),
+        deploy_pages = ActionPin::DeployPages.reference(),
     )
 }
 
@@ -4362,10 +4702,148 @@ fn render_pages_release(config: &ProjectConfig, release: &ReleaseSpec) -> String
     output
 }
 
-fn trusted_release_runner_gate(default_branch: &str) -> String {
+fn trusted_release_runner_gate(config: &ProjectConfig, provider: ProviderId) -> String {
+    if provider.is_local() {
+        WorkflowIr::from_config(config)
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(provider))
+    } else {
+        trusted_hosted_release_runner_gate(&config.default_branch)
+    }
+}
+
+fn trusted_hosted_release_runner_gate(default_branch: &str) -> String {
     format!(
         "(github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/{default_branch}')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{default_branch}')"
     )
+}
+
+/// A local release-side job has exactly the same admission as every other
+/// local provider job. Dispatch defaults and tag/schedule triggers do not
+/// authorize self-hosted capacity.
+fn provider_release_runner_gate(config: &ProjectConfig, provider: ProviderId) -> String {
+    trusted_release_runner_gate(config, provider)
+}
+
+/// Bind every generic release/preview job that resolves to a local provider
+/// to that provider's canonical admission. Existing job-level conditions are
+/// replaced because the policy's admission contract is the whole local `if:`;
+/// dependency success remains GitHub's default status condition.
+fn gate_local_provider_jobs(workflow: &str, config: &ProjectConfig) -> String {
+    let providers: Vec<_> = config
+        .providers
+        .iter()
+        .copied()
+        .filter(|provider| provider.is_local())
+        .collect();
+    if providers.is_empty() {
+        return workflow.to_owned();
+    }
+
+    let lines: Vec<_> = workflow.split_inclusive('\n').collect();
+    let Some(jobs_header) = lines
+        .iter()
+        .position(|line| line.trim_end_matches('\n').trim_end_matches('\r') == "jobs:")
+    else {
+        return workflow.to_owned();
+    };
+    let job_starts: Vec<_> = (jobs_header + 1..lines.len())
+        .filter(|index| is_top_level_job_header(lines[*index]))
+        .collect();
+    if job_starts.is_empty() {
+        return workflow.to_owned();
+    }
+
+    let mut output = String::with_capacity(workflow.len());
+    output.push_str(&lines[..job_starts[0]].concat());
+    for (position, start) in job_starts.iter().copied().enumerate() {
+        let end = job_starts.get(position + 1).copied().unwrap_or(lines.len());
+        let block = &lines[start..end];
+        let job_id = lines[start]
+            .trim_end_matches('\n')
+            .trim_end_matches('\r')
+            .strip_prefix("  ")
+            .and_then(|header| header.strip_suffix(':'))
+            .unwrap_or_default();
+        let block_text = block.concat();
+        let matching_providers: Vec<_> = providers
+            .iter()
+            .copied()
+            .filter(|provider| local_provider_job_matches(job_id, &block_text, config, *provider))
+            .collect();
+        if let [provider] = matching_providers.as_slice() {
+            let gate = WorkflowIr::from_config(config)
+                .provider_admission_expression(ProviderAdmission::ProviderTrusted(*provider));
+            output.push_str(&set_local_job_admission(block, &gate));
+        } else {
+            output.push_str(&block_text);
+        }
+    }
+    output
+}
+
+fn is_top_level_job_header(line: &str) -> bool {
+    let line = line.trim_end_matches('\n').trim_end_matches('\r');
+    line.starts_with("  ") && !line.starts_with("   ") && line.ends_with(':')
+}
+
+fn local_provider_job_matches(
+    job_id: &str,
+    block: &str,
+    config: &ProjectConfig,
+    provider: ProviderId,
+) -> bool {
+    let provider_id = provider.as_str();
+    let explicit_provider = job_id.starts_with(&format!("release-{provider_id}-"))
+        || block
+            .lines()
+            .any(|line| line.trim() == format!("provider: {provider_id}"));
+    if explicit_provider {
+        return true;
+    }
+
+    let Some(selector) = config.selectors.get(&provider) else {
+        return false;
+    };
+    let runner = selector_runs_on_yaml(selector);
+    if runner.is_empty() {
+        return false;
+    }
+    block.lines().any(|line| {
+        let line = line.trim();
+        line == format!("runs-on: {runner}") || line == format!("runner: {runner}")
+    })
+}
+
+fn set_local_job_admission(block: &[&str], gate: &str) -> String {
+    let expected = format!("if: ${{{{ {gate} }}}}");
+    let existing = block.iter().position(|line| {
+        line.trim_end_matches('\n')
+            .trim_end_matches('\r')
+            .starts_with("    if:")
+    });
+    if let Some(index) = existing {
+        let line = block[index].trim_end_matches('\n').trim_end_matches('\r');
+        if line.trim() == expected {
+            return block.concat();
+        }
+        let mut output = String::new();
+        for (line_index, original) in block.iter().enumerate() {
+            if line_index == index {
+                output.push_str(&format!("    {expected}\n"));
+            } else {
+                output.push_str(original);
+            }
+        }
+        output
+    } else {
+        let mut output = String::new();
+        if let Some((header, rest)) = block.split_first() {
+            output.push_str(header);
+            output.push_str(&format!("    {expected}\n"));
+            output.push_str(&rest.concat());
+        }
+        output
+    }
 }
 
 /// Delete one Actions cache entry with bounded retries. A delete the API no
@@ -4398,75 +4876,100 @@ const MAINTENANCE_WORKFLOW: &str = r#"name: Maintenance
 run-name: Maintenance · ${{ github.event_name }}
 
 on:
-  pull_request:
-    types: [closed]
+  push:
+    branches:
+      - __MAINTENANCE_PUSH_BRANCH__
   schedule:
     - cron: __MAINTENANCE_SCHEDULE__
-  workflow_dispatch:
-    inputs:
-      pull_request_number:
-        description: Optional closed PR number whose merge cache should be removed
-        required: false
-        type: string
 
 permissions:
-  actions: write
   contents: read
 
 concurrency:
-  group: maintenance-${{ github.repository }}-${{ github.event.pull_request.number || inputs.pull_request_number || github.run_id }}
+  group: maintenance-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   prune-pr-cache:
-    name: Prune closed-PR cache
-    if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}
+    name: Prune merged-PR cache
+    if: ${{ __MAINTENANCE_PRUNE_GATE__ }}
     runs-on: __MAINTENANCE_PRUNE_RUNNER__
     timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: read
     steps:
-      - name: Delete merge-ref cache namespace
+      - name: Prune merged-PR merge-ref caches
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request_number }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 __MAINTENANCE_DELETE_CACHE_FN__
-          ref="refs/pull/$PR_NUMBER/merge"
-          encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
-          listing="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" --jq '.actions_caches[].id')" || {
-            echo "::error::failed to list cache entries for $ref" >&2
+          if [[ ! "$COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::push commit is not a full lowercase SHA" >&2
             exit 1
-          }
-          if [[ -z "$listing" ]]; then
-            echo "No merge-ref cache entries found for $ref"
-            exit 0
           fi
-          mapfile -t cache_ids <<<"$listing"
           deleted=0
           failed=0
-          for id in "${cache_ids[@]}"; do
-            [[ -z "$id" ]] && continue
-            if (( deleted + failed >= __MAINTENANCE_MAX_DELETES__ )); then
-              echo "::error::maintenance delete bound reached (__MAINTENANCE_MAX_DELETES__ cache deletes); rerun maintenance to continue" >&2
+          pr_listing="$(gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$COMMIT_SHA/pulls" --jq '.[].number')" || {
+            echo "::error::failed to find pull requests associated with pushed commit $COMMIT_SHA" >&2
+            exit 1
+          }
+          if [[ -z "$pr_listing" ]]; then
+            echo "No pull requests are associated with pushed commit $COMMIT_SHA"
+            exit 0
+          fi
+          mapfile -t pr_numbers < <(printf '%s\n' "$pr_listing" | sort -nu)
+          for PR_NUMBER in "${pr_numbers[@]}"; do
+            if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::GitHub returned an invalid pull request number: $PR_NUMBER" >&2
               exit 1
             fi
-            if delete_cache_id "$id"; then
-              deleted=$((deleted + 1))
-            else
-              status=$?
-              if (( status == 2 )); then
+            state="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq .state)" || {
+              echo "::error::failed to check state for pull request $PR_NUMBER" >&2
+              exit 1
+            }
+            if [[ "$state" != "CLOSED" ]]; then
+              echo "Pull request $PR_NUMBER is not closed; leaving its merge-ref caches alone"
+              continue
+            fi
+            ref="refs/pull/$PR_NUMBER/merge"
+            encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
+            listing="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" --jq '.actions_caches[].id')" || {
+              echo "::error::failed to list cache entries for $ref" >&2
+              exit 1
+            }
+            if [[ -z "$listing" ]]; then
+              echo "No merge-ref cache entries found for $ref"
+              continue
+            fi
+            mapfile -t cache_ids <<<"$listing"
+            for id in "${cache_ids[@]}"; do
+              [[ -z "$id" ]] && continue
+              if (( deleted + failed >= __MAINTENANCE_MAX_DELETES__ )); then
+                echo "::error::maintenance delete bound reached (__MAINTENANCE_MAX_DELETES__ cache deletes); rerun maintenance to continue" >&2
                 exit 1
               fi
-              failed=$((failed + 1))
-            fi
+              if delete_cache_id "$id"; then
+                deleted=$((deleted + 1))
+              else
+                status=$?
+                if (( status == 2 )); then
+                  exit 1
+                fi
+                failed=$((failed + 1))
+              fi
+            done
           done
           if (( failed > 0 )); then
-            echo "::error::$failed closed-PR cache entries could not be deleted; rerun maintenance" >&2
+            echo "::error::$failed merged-PR cache entries could not be deleted; rerun maintenance" >&2
             exit 1
           fi
   cache-budget:
     name: Cache retention
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ __MAINTENANCE_CACHE_GATE__ }}
     runs-on: __MAINTENANCE_CACHE_RUNNER__
     timeout-minutes: 10
     permissions:
@@ -4688,16 +5191,15 @@ __MAINTENANCE_DELETE_CACHE_FN__
           fi
 "#;
 
-/// Maintenance follows the configured provider universe: both prune and
-/// cache-budget stay on Velnor when `providers = ["velnor"]`, so no
-/// GitHub-hosted `runs-on` leaks into a Velnor-only surface. Hosted
-/// otherwise. `uses:` stays on the
-/// `SOURCE_REV` pin (GitHub Actions rejects expressions in `uses:` versions).
-/// `rev:` uses a context-gated `${{ github.sha }}` with a static fallback
-/// when this repository owns the setup action.
-/// Maintenance is one writer that follows the universe: hosted when the
-/// universe contains it, otherwise the canonical-first local provider, so no
-/// hosted `runs-on` leaks into a local-only surface.
+/// Privileged cleanup uses only trusted repository events: pushes to the
+/// configured default branch identify merged PRs by their pushed commit, and
+/// the scheduled sweep handles other closed PRs. It never consumes PR event
+/// fields or checks out PR code. Both jobs follow the configured provider
+/// universe; a local provider still uses its canonical same-repository,
+/// default-branch push admission. Hosted `uses:` stay on the `SOURCE_REV` pin
+/// because GitHub Actions rejects expressions in `uses:` versions. `rev:`
+/// uses a context-gated `${{ github.sha }}` with a static fallback when this
+/// repository owns the setup action.
 fn maintenance_provider(config: &ProjectConfig) -> ProviderId {
     if config.providers.contains(&ProviderId::GithubHosted) {
         ProviderId::GithubHosted
@@ -4713,17 +5215,16 @@ fn maintenance_provider(config: &ProjectConfig) -> ProviderId {
 
 fn render_maintenance(config: &ProjectConfig) -> String {
     let maintenance = maintenance_provider(config);
-    let prune_gate = format!(
-        "github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '')",
-        config.default_branch
-    );
-    let cache_gate = if maintenance == ProviderId::GithubHosted {
-        "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'".to_owned()
+    let (prune_gate, cache_gate) = if maintenance.is_local() {
+        let admission = provider_release_runner_gate(config, maintenance);
+        (admission.clone(), admission)
     } else {
-        format!(
-            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
+        let prune_gate = format!(
+            "github.event_name == 'push' && github.ref == 'refs/heads/{}'",
             config.default_branch
-        )
+        );
+        let cache_gate = "github.event_name == 'schedule'".to_owned();
+        (prune_gate, cache_gate)
     };
     let setup = if maintenance == ProviderId::GithubHosted {
         let mut setup = workflow_runtime_setup_with_install_rev(
@@ -4759,6 +5260,12 @@ fn render_maintenance(config: &ProjectConfig) -> String {
     MAINTENANCE_WORKFLOW
         .replace("VELNOR_RUNTIME_SETUP_STEPS", &setup)
         .replace(
+            "__MAINTENANCE_PUSH_BRANCH__",
+            &yaml_scalar(&config.default_branch),
+        )
+        .replace("__MAINTENANCE_PRUNE_GATE__", &prune_gate)
+        .replace("__MAINTENANCE_CACHE_GATE__", &cache_gate)
+        .replace(
             "__MAINTENANCE_SCHEDULE__",
             &yaml_scalar(&config.maintenance.schedule),
         )
@@ -4774,22 +5281,8 @@ fn render_maintenance(config: &ProjectConfig) -> String {
             "__MAINTENANCE_DELETE_CACHE_FN__",
             MAINTENANCE_DELETE_CACHE_FN.trim_end_matches('\n'),
         )
-        .replace(
-            "__MAINTENANCE_PRUNE_RUNNER__",
-            &maintenance_runs_on,
-        )
-        .replace(
-            "__MAINTENANCE_CACHE_RUNNER__",
-            &maintenance_runs_on,
-        )
-        .replace(
-            "if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}",
-            &format!("if: ${{{{ {prune_gate} }}}}"),
-        )
-        .replace(
-            "if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}",
-            &format!("if: ${{{{ {cache_gate} }}}}"),
-        )
+        .replace("__MAINTENANCE_PRUNE_RUNNER__", &maintenance_runs_on)
+        .replace("__MAINTENANCE_CACHE_RUNNER__", &maintenance_runs_on)
 }
 
 #[cfg(test)]
@@ -4799,7 +5292,7 @@ mod tests {
         reason = "tests need setup failures to name their root cause"
     )]
 
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -4882,6 +5375,77 @@ mod tests {
         )
     }
 
+    fn job_gate_expression(workflow: &str, id: &str) -> String {
+        let job = yaml_job(workflow, id);
+        let line = must_some(
+            job.lines().find(|line| line.starts_with("    if: ")),
+            &format!("{id} job-level admission"),
+        );
+        must_some(
+            line.strip_prefix("    if: ${{ ")
+                .and_then(|expression| expression.strip_suffix(" }}")),
+            &format!("{id} job-level expression: {line}"),
+        )
+        .to_owned()
+    }
+
+    fn assert_local_provider_jobs_use_gate(
+        workflow: &str,
+        config: &ProjectConfig,
+        provider: ProviderId,
+        expected: &str,
+    ) -> BTreeSet<String> {
+        let lines: Vec<_> = workflow.split_inclusive('\n').collect();
+        let jobs_header = lines
+            .iter()
+            .position(|line| line.trim_end_matches('\n').trim_end_matches('\r') == "jobs:")
+            .unwrap_or_else(|| panic!("workflow has jobs: {workflow}"));
+        let starts: Vec<_> = (jobs_header + 1..lines.len())
+            .filter(|index| is_top_level_job_header(lines[*index]))
+            .collect();
+        let mut matched = BTreeSet::new();
+        for (position, start) in starts.iter().copied().enumerate() {
+            let end = starts.get(position + 1).copied().unwrap_or(lines.len());
+            let block = lines[start..end].concat();
+            let job_id = lines[start]
+                .trim_end_matches('\n')
+                .trim_end_matches('\r')
+                .strip_prefix("  ")
+                .and_then(|header| header.strip_suffix(':'))
+                .unwrap_or_default();
+            if local_provider_job_matches(job_id, &block, config, provider) {
+                assert_eq!(
+                    job_gate_expression(&block, job_id),
+                    expected,
+                    "{job_id} has canonical {provider} admission: {block}"
+                );
+                matched.insert(job_id.to_owned());
+            }
+        }
+        assert!(
+            !matched.is_empty(),
+            "workflow contains a {provider} job: {workflow}"
+        );
+        matched
+    }
+
+    fn local_gate_allows_context(
+        gate: &str,
+        canonical: &str,
+        configured_repository: &str,
+        default_branch: &str,
+        automatic: bool,
+        repository: &str,
+        event: &str,
+        reference: &str,
+    ) -> bool {
+        gate == canonical
+            && automatic
+            && repository == configured_repository
+            && event == "push"
+            && reference == format!("refs/heads/{default_branch}")
+    }
+
     fn assert_cache_retention_has_actions_write(workflow: &str) {
         let job = yaml_job(workflow, "cache-budget");
         assert!(
@@ -4893,6 +5457,33 @@ mod tests {
                 "permissions:\n      contents: read\n      actions: write\n      pull-requests: read"
             ),
             "Cache retention must grant actions: write and pull-requests: read: {job}"
+        );
+    }
+
+    fn assert_prune_has_scoped_actions_write(workflow: &str) {
+        let job = yaml_job(workflow, "prune-pr-cache");
+        assert!(
+            job.contains(
+                "permissions:\n      contents: read\n      actions: write\n      pull-requests: read"
+            ),
+            "merge-ref pruning alone needs actions: write and pull-requests: read: {job}"
+        );
+        assert!(
+            job.contains("COMMIT_SHA: ${{ github.sha }}"),
+            "merge-ref pruning must derive its PR association from the trusted pushed commit: {job}"
+        );
+        assert!(
+            job.contains("/commits/$COMMIT_SHA/pulls"),
+            "merge-ref pruning must look up PRs associated with the pushed commit: {job}"
+        );
+        assert!(
+            !job.contains("github.event.pull_request")
+                && !job.contains("inputs.pull_request_number"),
+            "pruning must not consume attacker-controlled PR payload fields: {job}"
+        );
+        assert!(
+            !job.contains("actions/checkout") && !job.contains("git checkout"),
+            "privileged pruning must not fetch or execute candidate source: {job}"
         );
     }
 
@@ -4968,19 +5559,23 @@ mod tests {
             );
         }
         let prune_if = format!(
-            "github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '')",
+            "github.event_name == 'push' && github.ref == 'refs/heads/{}'",
             config.default_branch
         );
         assert!(
             workflow.contains(&prune_if),
-            "closed-PR prune must stay live: {workflow}"
+            "merged-PR pruning must run only on the trusted default-branch push: {workflow}"
         );
         assert!(
-            workflow.contains(
-                "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
-            ),
-            "cache retention must keep schedule and dispatch: {workflow}"
+            workflow.contains("github.event_name == 'schedule'"),
+            "cache retention must keep the scheduled sweep: {workflow}"
         );
+        assert!(
+            !workflow.contains("pull_request") && !workflow.contains("workflow_dispatch"),
+            "privileged maintenance must not run from PR or selectable-branch dispatch events: {workflow}"
+        );
+        assert_prune_has_scoped_actions_write(workflow);
+        assert_cache_retention_has_actions_write(workflow);
     }
 
     /// Every maintenance step that calls `gh api` must carry `GH_TOKEN`: an
@@ -5013,7 +5608,7 @@ mod tests {
         assert_eq!(
             authenticated.as_slice(),
             [
-                "Delete merge-ref cache namespace",
+                "Prune merged-PR merge-ref caches",
                 "Sweep closed-PR merge-ref caches",
                 "Collect Actions cache account",
                 "Apply retention evictions",
@@ -5054,30 +5649,37 @@ mod tests {
             "velnor-only maintenance must not emit runs-on: ubuntu-: {workflow}"
         );
         assert!(!workflow.contains("setup-velnor-workflow"));
-        let prune_if = format!(
-            "github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '')",
-            config.default_branch
+        let local_admission = provider_release_runner_gate(config, maintenance_provider(config));
+        assert!(
+            yaml_job(workflow, "prune-pr-cache")
+                .contains(&format!("if: ${{{{ {local_admission} }}}}")),
+            "merged-PR prune must use canonical local admission: {workflow}"
         );
         assert!(
-            workflow.contains(&prune_if),
-            "closed-PR prune must stay live: {workflow}"
-        );
-        let cache_gate = format!(
-            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
-            config.default_branch
+            yaml_job(workflow, "cache-budget")
+                .contains(&format!("if: ${{{{ {local_admission} }}}}")),
+            "Velnor cache retention must use canonical local admission: {workflow}"
         );
         assert!(
-            workflow.contains(&cache_gate),
-            "Velnor cache retention must stay on the trusted lane: {workflow}"
+            workflow.contains(&format!(
+                "\n  push:\n    branches:\n      - {}",
+                yaml_scalar(&config.default_branch)
+            )),
+            "maintenance must trigger only for pushes to the configured default branch: {workflow}"
         );
-        assert!(!workflow.contains("\n  push:"));
+        assert!(
+            !workflow.contains("pull_request") && !workflow.contains("workflow_dispatch"),
+            "Velnor maintenance must not inherit untrusted or branch-selectable triggers: {workflow}"
+        );
+        assert_prune_has_scoped_actions_write(workflow);
+        assert_cache_retention_has_actions_write(workflow);
     }
 
     /// A scanned throwaway repository: the only way to obtain a real shape.
     fn scanned_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-release-{name}-{}",
-            crate::s2::unique_suffix()
+            crate::unique_suffix()
         ));
         must(fs::create_dir_all(&root), "create release test repository");
         must(
@@ -5169,6 +5771,7 @@ mod tests {
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
             jobs: Vec::new(),
+            ..ReleaseSpec::default()
         }
     }
 
@@ -5207,6 +5810,7 @@ mod tests {
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
             jobs: Vec::new(),
+            ..ReleaseSpec::default()
         }
     }
 
@@ -5241,6 +5845,23 @@ mod tests {
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
             jobs: Vec::new(),
+            ..ReleaseSpec::default()
+        }
+    }
+
+    fn apt_spec() -> ReleaseSpec {
+        ReleaseSpec {
+            kind: "apt".to_owned(),
+            package: "example".to_owned(),
+            binary: "example".to_owned(),
+            source_repository: "example/app".to_owned(),
+            consumer_repository: "example/apt".to_owned(),
+            manifest_schema: "example.test/consumer-manifest-v1".to_owned(),
+            signer_fingerprint: "0123456789ABCDEF0123456789ABCDEF01234567".to_owned(),
+            passphrase_secret: "APT_PASSPHRASE".to_owned(),
+            signing_key_secret: "APT_SIGNING_KEY".to_owned(),
+            apt_feed_url: "https://example.test/apt".to_owned(),
+            ..ReleaseSpec::default()
         }
     }
 
@@ -5371,7 +5992,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "5d7699eb1fe59c1ff441adbd6ce225a847bf0c2ea20a3bc7cbc31c190bbcb62d",
+                "d1f23fdc0b460e0a6dc0ecc066fd5f95be2ae8e059aeeda6a9689affeb542966",
             ),
             (
                 "preview.yml",
@@ -5379,7 +6000,7 @@ mod tests {
             ),
             (
                 "maintenance.yml",
-                "3725b27e2f9fe196c7a5694f8e1255feef011f7b88ad52e214c47300809c0328",
+                "e7ed843f6be582f7956b42505aa33f8a9b8f149e5d9a3e448594876e2974e340",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -5450,9 +6071,7 @@ mod tests {
         let mut pages = binary_spec();
         pages.kind = "pages".to_owned();
         pages.artifact_path = "site".to_owned();
-        let mut apt = binary_spec();
-        apt.kind = "apt".to_owned();
-        apt.consumer_repository = "example/apt".to_owned();
+        let apt = apt_spec();
         let mut homebrew = binary_spec();
         homebrew.kind = "homebrew".to_owned();
         homebrew.source_repository = "example/app".to_owned();
@@ -5485,6 +6104,74 @@ mod tests {
         }
     }
 
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its APT contract"
+    )]
+    fn apt_release_renders_fetch_verification_publication_and_deploy_guard() {
+        let mut config = config(&["release.yml"], Some(apt_spec()));
+        config.repository = "example/apt".to_owned();
+        let Some(release) = config.release.as_ref() else {
+            panic!("APT fixture must carry a release contract")
+        };
+        assert!(super::release_contract_complete(release));
+
+        let workflow = super::render_release(&config, release);
+        let verify = yaml_job(&workflow, "verify");
+        for command in ["apt-resolve-commit", "apt-fetch", "apt-verify"] {
+            assert!(verify.contains(command), "missing {command}: {verify}");
+        }
+        assert!(verify.contains("include-hidden-files: true"), "{verify}");
+        assert!(verify.contains("--expect-signer"), "{verify}");
+        assert!(verify.contains("gh attestation verify"), "{verify}");
+
+        let publish = yaml_job(&workflow, "publish");
+        for command in ["apt-previous-pointer", "apt-publish", "apt-channel-update"] {
+            assert!(publish.contains(command), "missing {command}: {publish}");
+        }
+        assert!(publish.contains("secrets.APT_PASSPHRASE"), "{publish}");
+        assert!(publish.contains("secrets.APT_SIGNING_KEY"), "{publish}");
+        assert!(publish.contains("name: apt-staging"), "{publish}");
+
+        let deploy = yaml_job(&workflow, "deploy");
+        assert!(deploy.contains("apt-deploy-guard"), "{deploy}");
+        assert!(deploy.contains("Deploy Pages"), "{deploy}");
+        assert!(yaml_job(&workflow, "feed-result").contains("Fail closed"));
+        assert!(workflow.contains("admit-provider"), "{workflow}");
+        assert!(
+            !workflow.contains("release update-feed --kind apt"),
+            "APT must use its typed publication commands: {workflow}"
+        );
+    }
+
+    #[test]
+    fn apt_release_completeness_uses_the_full_typed_contract() {
+        let mut invalid_specs = Vec::new();
+        let mut invalid_arches = apt_spec();
+        invalid_arches.apt_arches = vec!["amd64".to_owned()];
+        invalid_specs.push(invalid_arches);
+        let mut invalid_signer = apt_spec();
+        invalid_signer.signer_fingerprint = "0123".to_owned();
+        invalid_specs.push(invalid_signer);
+        let mut invalid_secret = apt_spec();
+        invalid_secret.passphrase_secret = "lowercase-secret".to_owned();
+        invalid_specs.push(invalid_secret);
+        let mut invalid_url = apt_spec();
+        invalid_url.apt_feed_url = "http://example.test/apt".to_owned();
+        invalid_specs.push(invalid_url);
+        let mut invalid_retention = apt_spec();
+        invalid_retention.retention = 2;
+        invalid_specs.push(invalid_retention);
+
+        for release in invalid_specs {
+            assert!(
+                !super::release_contract_complete(&release),
+                "invalid APT contract unexpectedly passed: {release:?}"
+            );
+        }
+    }
+
     /// The identity release surface, pinned like the legacy one: any renderer
     /// change shows up here and has to be carried into the pin deliberately.
     #[test]
@@ -5492,15 +6179,16 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "dda4fe0ecf3711890a1daa84b48b2f9517e57b07dad6c06783cb34bfcaa08559",
+                "8dd950e9dd9da0c9b85856a01c02266734df5fe288115d3616c1528c29b86546",
             ),
             (
                 "preview.yml",
-                "4922e8b7aded3ec357e776fec51fad0ef4d408db8117801c87ec7dfeefb36368",
+                "8349e91b3ce210b10434330600e12ce13e426dc8f426a766b65921497153f394",
             ),
         ];
         let root = scanned_root("identity-pinned");
-        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let mut config = native_identity_config(&["release.yml", "preview.yml"]);
+        config.repository = "example/declared".to_owned();
         let surface = generate(&root, &config, None);
         let divergent: Vec<String> = PINNED
             .iter()
@@ -5567,6 +6255,218 @@ mod tests {
             assert!(!workflow.contains("runs-on: ubuntu-24.04"), "{workflow}");
             assert!(!workflow.contains("github-hosted"), "{workflow}");
         }
+    }
+
+    #[test]
+    fn generic_local_release_preview_and_maintenance_use_canonical_admission() {
+        let mut cfg = config(
+            &["release.yml", "preview.yml", "maintenance.yml"],
+            Some(binary_spec()),
+        );
+        cfg.repository = "example/consumer".to_owned();
+        cfg.default_branch = "trunk".to_owned();
+        cfg.providers = BTreeSet::from([ProviderId::Velnor]);
+        cfg.automatic_providers = BTreeSet::from([ProviderId::Velnor]);
+        cfg.default_dispatch_providers = BTreeSet::from([ProviderId::Velnor]);
+        let canonical = provider_release_runner_gate(&cfg, ProviderId::Velnor);
+        assert_eq!(
+            canonical,
+            "github.repository == 'example/consumer' && (github.event_name == 'push' && github.ref == 'refs/heads/trunk')"
+        );
+
+        let Some(release_spec) = cfg.release.as_ref() else {
+            panic!("local release fixture must carry its contract")
+        };
+        let release = render_release(&cfg, release_spec);
+        let release_jobs =
+            assert_local_provider_jobs_use_gate(&release, &cfg, ProviderId::Velnor, &canonical);
+        for job in ["verify", "build", "release-velnor-rust-example", "publish"] {
+            assert!(
+                release_jobs.contains(job),
+                "local release job {job} must be covered by canonical admission: {release}"
+            );
+        }
+
+        let preview = render_preview(&cfg, Some(release_spec));
+        let preview_jobs =
+            assert_local_provider_jobs_use_gate(&preview, &cfg, ProviderId::Velnor, &canonical);
+        assert!(preview_jobs.contains("build"), "{preview}");
+
+        let maintenance = render_maintenance(&cfg);
+        let maintenance_jobs =
+            assert_local_provider_jobs_use_gate(&maintenance, &cfg, ProviderId::Velnor, &canonical);
+        assert!(maintenance_jobs.contains("prune-pr-cache"), "{maintenance}");
+        assert!(maintenance_jobs.contains("cache-budget"), "{maintenance}");
+
+        let release_gate = job_gate_expression(&release, "build");
+        for (name, repository, event, reference, expected) in [
+            (
+                "default-branch push",
+                "example/consumer",
+                "push",
+                "refs/heads/trunk",
+                true,
+            ),
+            (
+                "tag push",
+                "example/consumer",
+                "push",
+                "refs/tags/v1.2.3",
+                false,
+            ),
+            (
+                "schedule",
+                "example/consumer",
+                "schedule",
+                "refs/heads/trunk",
+                false,
+            ),
+            (
+                "workflow dispatch",
+                "example/consumer",
+                "workflow_dispatch",
+                "refs/heads/trunk",
+                false,
+            ),
+            (
+                "pull request target",
+                "example/consumer",
+                "pull_request_target",
+                "refs/heads/trunk",
+                false,
+            ),
+            (
+                "fork repository",
+                "fork/consumer",
+                "push",
+                "refs/heads/trunk",
+                false,
+            ),
+            (
+                "wrong branch",
+                "example/consumer",
+                "push",
+                "refs/heads/feature",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                local_gate_allows_context(
+                    &release_gate,
+                    &canonical,
+                    &cfg.repository,
+                    &cfg.default_branch,
+                    true,
+                    repository,
+                    event,
+                    reference,
+                ),
+                expected,
+                "{name} admission"
+            );
+        }
+
+        let valid_context = ("example/consumer", "push", "refs/heads/trunk");
+        let mutations = [
+            canonical.replace(
+                "github.event_name == 'push'",
+                "github.event_name == 'schedule'",
+            ),
+            canonical.replace(
+                "github.event_name == 'push'",
+                "github.event_name == 'workflow_dispatch'",
+            ),
+            canonical.replace(
+                "github.repository == 'example/consumer'",
+                "github.repository == 'fork/consumer'",
+            ),
+            canonical.replace("refs/heads/trunk", "refs/heads/feature"),
+            canonical.replace("refs/heads/trunk", "refs/tags/v1.2.3"),
+        ];
+        for mutation in mutations {
+            assert!(
+                !local_gate_allows_context(
+                    &mutation,
+                    &canonical,
+                    &cfg.repository,
+                    &cfg.default_branch,
+                    true,
+                    valid_context.0,
+                    valid_context.1,
+                    valid_context.2,
+                ),
+                "gate mutation must fail closed: {mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_local_release_provider_is_false_even_when_dispatch_selects_it() {
+        let mut cfg = config(
+            &["release.yml", "preview.yml", "maintenance.yml"],
+            Some(binary_spec()),
+        );
+        cfg.repository = "example/consumer".to_owned();
+        cfg.default_branch = "trunk".to_owned();
+        cfg.providers = BTreeSet::from([ProviderId::Velnor]);
+        cfg.automatic_providers.clear();
+        cfg.default_dispatch_providers = BTreeSet::from([ProviderId::Velnor]);
+        let disabled = provider_release_runner_gate(&cfg, ProviderId::Velnor);
+        assert_eq!(
+            disabled,
+            "github.repository == 'example/consumer' && (false)"
+        );
+
+        let Some(release_spec) = cfg.release.as_ref() else {
+            panic!("local release fixture must carry its contract")
+        };
+        let release = render_release(&cfg, release_spec);
+        assert_local_provider_jobs_use_gate(&release, &cfg, ProviderId::Velnor, &disabled);
+        let preview = render_preview(&cfg, Some(release_spec));
+        assert_local_provider_jobs_use_gate(&preview, &cfg, ProviderId::Velnor, &disabled);
+        let maintenance = render_maintenance(&cfg);
+        assert_local_provider_jobs_use_gate(&maintenance, &cfg, ProviderId::Velnor, &disabled);
+        assert!(
+            !local_gate_allows_context(
+                &disabled,
+                &disabled,
+                &cfg.repository,
+                &cfg.default_branch,
+                false,
+                &cfg.repository,
+                "push",
+                "refs/heads/trunk",
+            ),
+            "an explicitly selected but non-automatic local provider stays disabled"
+        );
+    }
+
+    #[test]
+    fn hosted_release_preview_and_maintenance_keep_their_existing_event_gates() {
+        let mut cfg = config(
+            &["release.yml", "preview.yml", "maintenance.yml"],
+            Some(binary_spec()),
+        );
+        cfg.default_branch = "trunk".to_owned();
+        let Some(release_spec) = cfg.release.as_ref() else {
+            panic!("hosted release fixture must carry its contract")
+        };
+        let hosted_gate = trusted_release_runner_gate(&cfg, ProviderId::GithubHosted);
+        let release = render_release(&cfg, release_spec);
+        assert_eq!(job_gate_expression(&release, "build"), hosted_gate);
+        let preview = render_preview(&cfg, Some(release_spec));
+        assert_eq!(job_gate_expression(&preview, "build"), hosted_gate);
+
+        let maintenance = render_maintenance(&cfg);
+        assert!(
+            maintenance.contains("\n  push:\n    branches:\n      - trunk\n"),
+            "maintenance trigger must use the configured default branch: {maintenance}"
+        );
+        assert!(yaml_job(&maintenance, "prune-pr-cache").contains(
+            "if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/trunk' }}"
+        ));
+        assert!(yaml_job(&maintenance, "cache-budget")
+            .contains("if: ${{ github.event_name == 'schedule' }}"));
     }
 
     #[test]
@@ -5813,6 +6713,29 @@ mod tests {
     fn maintenance_passes_trusted_policy_audit() {
         let cfg = config(&["maintenance.yml"], None);
         let workflow = super::render_maintenance(&cfg);
+        assert!(
+            workflow.contains(&format!(
+                "  push:\n    branches:\n      - {}",
+                yaml_scalar(&cfg.default_branch)
+            )),
+            "maintenance push trigger must use the configured default branch: {workflow}"
+        );
+        assert!(workflow.contains("  schedule:\n"), "{workflow}");
+        assert!(
+            !workflow.contains("pull_request") && !workflow.contains("workflow_dispatch"),
+            "maintenance must not expose privileged work to PR or branch-selectable events: {workflow}"
+        );
+        assert!(
+            workflow.contains("permissions:\n  contents: read\n\nconcurrency:"),
+            "workflow-level permissions stay read-only: {workflow}"
+        );
+        assert_prune_has_scoped_actions_write(&workflow);
+        assert_cache_retention_has_actions_write(&workflow);
+        assert_eq!(
+            workflow.matches("actions: write").count(),
+            2,
+            "write scope exists only on the trusted cache-maintenance jobs: {workflow}"
+        );
         let root = scanned_root("maintenance-audit");
         let workflows = root.join(".github/workflows");
         must(fs::create_dir_all(&workflows), "create audited workflows");
@@ -5946,7 +6869,7 @@ mod tests {
         must(
             fs::write(
                 root.join(crate::s2::config::GENERATION_CONFIG_PATH),
-                "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\nmodes = [\"validate\"]\ntag_pattern = \"v[0-9]*\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"desktop-build\"]\nrunner = \"github\"\n\n[[release.job]]\nid = \"sign\"\nname = \"Sign release\"\ntasks = [\"desktop-sign\"]\nneeds = [\"build\"]\nrunner = \"macos\"\nmodes = [\"publish\"]\nenvironment = \"release-macos\"\nattest_subjects = [\"dist/app.zip\"]\n\n[release.job.permissions]\nid-token = \"write\"\n\n[[release.job]]\nid = \"attest-defaults\"\ntasks = [\"desktop-sign\"]\nrunner = \"github\"\nattest_subjects = [\"dist/*.tar.gz\"]\n",
+                "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\nmodes = [\"validate\"]\ntag_pattern = \"v[0-9]*\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"desktop-build\"]\nprovider = \"github-hosted\"\nplatform = \"linux-x64\"\n\n[[release.job]]\nid = \"sign\"\nname = \"Sign release\"\ntasks = [\"desktop-sign\"]\nneeds = [\"build\"]\nprovider = \"github-hosted\"\nplatform = \"macos-arm64\"\nmodes = [\"publish\"]\nenvironment = \"release-macos\"\nattest_subjects = [\"dist/app.zip\"]\n\n[release.job.permissions]\nid-token = \"write\"\n\n[[release.job]]\nid = \"attest-defaults\"\ntasks = [\"desktop-sign\"]\nprovider = \"github-hosted\"\nplatform = \"linux-x64\"\nattest_subjects = [\"dist/*.tar.gz\"]\n",
             ),
             "write tasks release config",
         );
@@ -5994,24 +6917,32 @@ mod tests {
     }
 
     #[test]
-    fn schema2_tasks_release_mise_setup_follows_job_runner() {
-        let mut config = config(&["release.yml"], None);
-        config.providers = [ProviderId::Velnor].into_iter().collect();
+    fn schema2_tasks_release_uses_hosted_platforms() {
+        let config = config(&["release.yml"], None);
 
-        for (runner, needs_setup) in [("github", true), ("macos", true), ("velnor", false)] {
+        for (platform, expected_runs_on) in [
+            (Platform::LinuxX64, "ubuntu-24.04"),
+            (Platform::MacosArm64, "macos-26"),
+        ] {
             let job = ReleaseJobSpec {
                 id: "job".to_owned(),
                 name: "Job".to_owned(),
                 tasks: vec!["desktop-build".to_owned()],
-                runner: runner.to_owned(),
+                needs: Vec::new(),
+                provider: ProviderId::GithubHosted,
+                platform,
+                modes: Vec::new(),
                 timeout_minutes: 10,
-                ..ReleaseJobSpec::default()
+                environment: String::new(),
+                attest_subjects: Vec::new(),
+                permissions: BTreeMap::new(),
+                env: BTreeMap::new(),
             };
             let rendered = render_tasks_release_job(&config, &job);
-            assert_eq!(
-                rendered.contains("Set up Mise"),
-                needs_setup,
-                "Mise setup for runner {runner}: {rendered}"
+            assert!(rendered.contains("Set up Mise"), "{rendered}");
+            assert!(
+                rendered.contains(&format!("runs-on: {expected_runs_on}")),
+                "hosted platform {platform}: {rendered}"
             );
         }
     }
@@ -6033,7 +6964,7 @@ mod tests {
         must(
             fs::write(
                 root.join(crate::s2::config::GENERATION_CONFIG_PATH),
-                "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\n\n[[release.job]]\nid = \"on\"\ntasks = [\"desktop-build\"]\n\n[[release.job]]\nid = \"publish\"\ntasks = [\"desktop-publish\"]\nneeds = [\"on\"]\n",
+                "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\n\n[[release.job]]\nid = \"on\"\ntasks = [\"desktop-build\"]\nprovider = \"github-hosted\"\nplatform = \"linux-x64\"\n\n[[release.job]]\nid = \"publish\"\ntasks = [\"desktop-publish\"]\nprovider = \"github-hosted\"\nplatform = \"linux-x64\"\nneeds = [\"on\"]\n",
             ),
             "write reserved-id release config",
         );
@@ -6310,7 +7241,7 @@ mod tests {
 
     /// The genericity law's deny list, parsed out of its own source so the
     /// probes stay in sync without this file spelling a consumer name. The
-    /// sibling parser in `tests/migration_contract.rs` reads the same
+    /// sibling parser in `tests/s2_contract.rs` reads the same
     /// source; the law file is the single source of truth for the tokens.
     fn deny_list_probes() -> (Vec<String>, (String, String)) {
         const LAW: &str = include_str!("../../../tests/generic_surface_literals.rs");
@@ -7123,20 +8054,56 @@ mod tests {
         clippy::panic,
         reason = "the fixture construction must fail loudly if it loses its release contract"
     )]
-    fn native_release_local_lanes_keep_the_legacy_trusted_gate() {
-        let config = native_identity_config(&["release.yml", "preview.yml"]);
+    fn native_release_local_lanes_use_the_canonical_push_gate() {
+        let mut config = native_identity_config(&["release.yml", "preview.yml"]);
+        config.repository = "example/declared".to_owned();
         let Some(release) = config.release.as_ref() else {
             panic!("identity fixture must carry a release contract")
         };
         let workflow = super::render_release(&config, release);
-        // Local lanes never read the dispatch provider subset: they run
-        // on tag pushes via the trusted gate and skip tag dispatches, so
-        // a dispatch can only ever declare the github-hosted scope. The
-        // admit job rejects anything else loudly.
+        let canonical = trusted_release_runner_gate(&config, ProviderId::Velnor);
+        assert_eq!(
+            canonical,
+            "github.repository == 'example/declared' && (github.event_name == 'push' && github.ref == 'refs/heads/main')"
+        );
+        let local_jobs =
+            assert_local_provider_jobs_use_gate(&workflow, &config, ProviderId::Velnor, &canonical);
+        assert!(
+            local_jobs.contains("release-velnor-rust-example"),
+            "{workflow}"
+        );
         let velnor = yaml_job(&workflow, "release-velnor-rust-example");
         assert!(!velnor.contains("event.inputs.providers"), "{velnor}");
-        // Tag pushes keep the trusted gate.
-        assert!(velnor.contains("(github.event_name == 'push'"), "{velnor}");
+        assert_eq!(
+            job_gate_expression(&workflow, "release-velnor-rust-example"),
+            canonical
+        );
+        for (name, event, reference, expected) in [
+            ("default-branch push", "push", "refs/heads/main", true),
+            ("tag push", "push", "refs/tags/v1.2.3", false),
+            ("schedule", "schedule", "refs/heads/main", false),
+            (
+                "workflow dispatch",
+                "workflow_dispatch",
+                "refs/heads/main",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                local_gate_allows_context(
+                    &job_gate_expression(&workflow, "release-velnor-rust-example"),
+                    &canonical,
+                    &config.repository,
+                    &config.default_branch,
+                    config.automatic_providers.contains(&ProviderId::Velnor),
+                    &config.repository,
+                    event,
+                    reference,
+                ),
+                expected,
+                "{name} admission"
+            );
+        }
         // Hosted lanes stay ungated: the build gate enforces their scope.
         let hosted = yaml_job(&workflow, "release-github-hosted-rust-example");
         let header_end = must_some(hosted.find("    steps:"), "leg steps render");
@@ -7149,7 +8116,8 @@ mod tests {
         reason = "the fixture construction must fail loudly if it loses its release contract"
     )]
     fn native_release_build_gate_declares_provider_scope_on_dispatch_and_full_scope_on_push() {
-        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let mut config = native_identity_config(&["release.yml", "preview.yml"]);
+        config.repository = "example/declared".to_owned();
         let Some(release) = config.release.as_ref() else {
             panic!("identity fixture must carry a release contract")
         };
@@ -7163,14 +8131,16 @@ mod tests {
             "{build}"
         );
         // Hosted lanes run on every event and are required on every
-        // event; local lanes skip tag dispatches and are required off
-        // dispatches.
+        // event. Local lanes are required only on their admitted
+        // default-branch push.
         assert!(
             build.contains("(needs.release-github-hosted-rust-example.result == 'success')"),
             "{build}"
         );
         assert!(
-            build.contains("(github.event_name == 'workflow_dispatch' || ("),
+            build.contains(
+                "github.repository != 'example/declared' || github.event_name != 'push' || github.ref != 'refs/heads/main' || ("
+            ),
             "{build}"
         );
         for id in [
@@ -7602,6 +8572,7 @@ mod tests {
                 registry_username_secret: String::new(),
                 registry_password_secret: String::new(),
                 jobs: Vec::new(),
+                ..ReleaseSpec::default()
             });
             let surface = must(
                 super::super::generate(&root, &shape, &scanned, None),
@@ -7780,6 +8751,7 @@ mod tests {
                 registry_username_secret: String::new(),
                 registry_password_secret: String::new(),
                 jobs: Vec::new(),
+                ..ReleaseSpec::default()
             });
             let surface = must(
                 super::super::generate(&root, &shape, &scanned, None),
@@ -7863,10 +8835,10 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_apt_feed_mutates_from_github_only() {
-        for (name, package, consumer) in [
-            ("apt-feed", "example", "example/apt"),
-            ("apt-feed-acme", "widget", "acme/apt"),
+    fn a_declared_apt_feed_renders_the_full_github_publication_pipeline() {
+        for (name, package, source, consumer) in [
+            ("apt-feed", "example", "example/app", "example/apt"),
+            ("apt-feed-acme", "widget", "acme/widget", "acme/apt"),
         ] {
             let root = scanned_root(name);
             let surface = generate(
@@ -7875,7 +8847,13 @@ mod tests {
                 Some(&format!(
                     "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
                      [declare.args]\nkind = \"apt\"\npackage = \"{package}\"\n\
-                     consumer_repository = \"{consumer}\"\n"
+                     binary = \"{package}\"\nsource_repository = \"{source}\"\n\
+                     consumer_repository = \"{consumer}\"\n\
+                     manifest_schema = \"example.test/consumer-manifest-v1\"\n\
+                     signer_fingerprint = \"0123456789ABCDEF0123456789ABCDEF01234567\"\n\
+                     passphrase_secret = \"APT_PASSPHRASE\"\n\
+                     signing_key_secret = \"APT_SIGNING_KEY\"\n\
+                     apt_feed_url = \"https://example.test/apt\"\n"
                 )),
             );
             let release = surface
@@ -7883,13 +8861,21 @@ mod tests {
                 .get(&PathBuf::from(".github/workflows/release.yml"))
                 .unwrap_or_else(|| panic!("an apt feed must render release.yml"));
             assert!(release.contains("Package feed"), "{release}");
-            assert!(release.contains("--kind apt"), "{release}");
-            assert!(
-                release.contains(&format!("--package {package}")),
-                "{release}"
-            );
+            assert!(release.contains("apt-resolve-commit"), "{release}");
+            assert!(release.contains("apt-fetch"), "{release}");
+            assert!(release.contains("apt-verify"), "{release}");
+            assert!(release.contains("apt-publish"), "{release}");
+            assert!(release.contains("apt-channel-update"), "{release}");
+            assert!(release.contains("apt-deploy-guard"), "{release}");
+            assert!(release.contains(source), "{release}");
             assert!(release.contains(consumer), "{release}");
-            assert!(release.contains("default: github"), "{release}");
+            assert!(release.contains("default: github-hosted"), "{release}");
+            assert!(release.contains("APT_PASSPHRASE"), "{release}");
+            assert!(release.contains("APT_SIGNING_KEY"), "{release}");
+            assert!(
+                !release.contains("release update-feed --kind apt"),
+                "the APT publisher must call typed commands: {release}"
+            );
             let _ = fs::remove_dir_all(root);
         }
     }
@@ -8044,6 +9030,7 @@ mod tests {
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
             jobs: Vec::new(),
+            ..ReleaseSpec::default()
         }
     }
 
@@ -8160,7 +9147,7 @@ mod tests {
         assert!(
             build.contains(&format!(
                 "    if: ${{{{ {} || (github.event_name == 'workflow_dispatch' && needs.verify.outputs.mode == 'rehearse') }}}}",
-                trusted_release_runner_gate("main")
+                trusted_release_runner_gate(&config, ProviderId::GithubHosted)
             )),
             "the build must run trusted refs in every mode and rehearse on any ref: {build}"
         );
@@ -8693,13 +9680,15 @@ mod tests {
         )
     }
 
-    /// A versioned-tool row renders its own file end to end: per-row name,
-    /// main-branch triggers over declared paths, a providers dispatch,
-    /// PR-only file concurrency, and the five-job version graph.
+    /// A versioned-tool row renders its own file end to end with a hosted-only
+    /// dispatch default, static runner selection, isolated signing, and publish.
     #[test]
-    fn versioned_tool_row_renders_the_five_job_graph() {
+    fn versioned_tool_row_renders_static_provider_release_graph() {
         let root = scanned_root("versioned-tool-graph");
-        let config = config(&[], None);
+        let mut config = config(&[], None);
+        config.repository = "example/declared".to_owned();
+        config.automatic_providers = [ProviderId::GithubHosted].into_iter().collect();
+        config.default_dispatch_providers = [ProviderId::GithubHosted].into_iter().collect();
         let surface = generate(
             &root,
             &config,
@@ -8721,10 +9710,11 @@ mod tests {
         assert!(
             workflow.contains("      providers:\n")
                 && workflow.contains("        default: github-hosted\n")
-                && workflow.contains(
-                    "          - github-hosted\n          - github-self-hosted\n          - velnor\n          - all\n"
-                ),
-            "the dispatch must offer the repository providers: {workflow}"
+                && workflow
+                    .contains("        options:\n          - github-hosted\n          - all\n")
+                && !workflow.contains("          - github-self-hosted\n")
+                && !workflow.contains("          - velnor\n"),
+            "the dispatch offers configured non-local providers only: {workflow}"
         );
         assert!(
             workflow.contains(
@@ -8741,11 +9731,13 @@ mod tests {
         );
         let version = yaml_job(&workflow, "version");
         assert!(
-            version.contains("runner-configs: ${{ steps.resolve.outputs.runner-configs }}")
+            version.contains("selected_providers: ${{ steps.resolve.outputs.selected_providers }}")
+                && version.contains("writer: ${{ steps.resolve.outputs.writer }}")
                 && version.contains("s/^version = ")
-                && version.contains("configs='[{\"provider\":\"github-hosted\"")
-                && version.contains("velnor) configs='[{\"provider\":\"velnor\""),
-            "the version job resolves the manifest version and the provider configs: {version}"
+                && version.contains("selected_providers='github-hosted'")
+                && version.contains("all)\n            if [ \"$EVENT_NAME\" = workflow_dispatch ]; then\n              selected_providers='github-hosted'")
+                && version.contains("provider 'velnor' is not admitted for workflow_dispatch"),
+            "the version job resolves its manifest and constrained provider selection: {version}"
         );
         let assert_job = yaml_job(&workflow, "assert-version");
         assert!(
@@ -8756,27 +9748,60 @@ mod tests {
                 && assert_job.contains("if: ${{ github.ref == 'refs/heads/main' }}"),
             "the assert job checks reuse and gates product tasks to main: {assert_job}"
         );
-        let build = yaml_job(&workflow, "build");
+        let build = yaml_job(&workflow, "build-github-hosted");
         assert!(
             build.contains("    needs: [version, assert-version]")
-                && build.contains("github.event_name != 'pull_request' && needs.assert-version.outputs.published != 'true'")
-                && build.contains("runs-on: ${{ matrix.config.runner }}")
-                && build.contains("config: ${{ fromJSON(needs.version.outputs.runner-configs) }}")
+                && build.contains("github.repository == 'example/declared'")
+                && build.contains("runs-on: ubuntu-24.04")
+                && build.contains("target:\n          - x86_64-unknown-linux-gnu\n          - aarch64-unknown-linux-gnu")
                 && build.contains("run: mise run build-example-tool")
-                && build.contains("package-binary --target \"${{ matrix.target }}\" --version \"$VERSION\""),
-            "the build crosses targets with provider configs and packages the task output: {build}"
+                && build.contains("package-binary --target \"${{ matrix.target }}\" --version \"$VERSION\"")
+                && !build.contains("id-token: write")
+                && !build.contains("attestations: write"),
+            "the static hosted job crosses targets with read-only build permissions: {build}"
+        );
+        assert_eq!(
+            versioned_tool_build_providers(&config),
+            vec![ProviderId::GithubHosted],
+            "the current release admissions schedule only the hosted provider"
+        );
+        for provider in [ProviderId::GithubSelfHosted, ProviderId::Velnor] {
+            assert!(
+                !workflow.contains(&format!("  build-{}:\n", provider.as_str())),
+                "a local provider outside automatic/default-dispatch admission gets no release verification job: {workflow}"
+            );
+        }
+        assert_eq!(
+            versioned_tool_dispatch_selection(&config, "all").unwrap(),
+            vec![ProviderId::GithubHosted],
+            "manual all selection retains the admitted hosted release"
+        );
+        let signer = yaml_job(&workflow, "sign");
+        assert!(
+            signer.contains("needs: [version, assert-version, build-github-hosted]")
+                && signer.contains("id-token: write")
+                && signer.contains("attestations: write")
+                && signer.contains("Verify exact tool artifact inventory")
+                && signer.contains("Attest tool artifacts")
+                && !signer.contains("Checkout")
+                && !signer.contains("mise run"),
+            "only the isolated signer receives attestation credentials: {signer}"
         );
         let publish = yaml_job(&workflow, "publish");
         assert!(
-            publish.contains("    needs: [version, assert-version, build]")
-                && publish.contains("github.ref == 'refs/heads/main' && needs.assert-version.outputs.published != 'true'")
+            publish.contains("    needs: [version, assert-version, sign]")
+                && publish.contains("github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.assert-version.outputs.published != 'true'")
                 && publish.contains("      group: example-tap-publish")
+                && publish.contains("pattern: tool-*")
                 && publish.contains("tag=\"example-tool-v$VERSION\"")
                 && publish.contains("gh release create \"$tag\" dist/* --target \"$COMMIT\" --title \"$tag\" --generate-notes"),
             "the publish mints the immutable versioned release under its mutex: {publish}"
         );
         assert!(
-            !workflow.contains("verify-tag") && !workflow.contains("clobber"),
+            !workflow.contains("verify-tag")
+                && !workflow.contains("clobber")
+                && !workflow.contains("runs-on: ${{")
+                && !workflow.contains("fromJSON(needs.version.outputs.runner-configs)"),
             "no tag check and no clobber render for a main-branch file: {workflow}"
         );
         let _ = fs::remove_dir_all(root);
@@ -9087,16 +10112,12 @@ mod tests {
         }));
     }
 
-    /// The dispatch providers and runner-configs follow the repository
-    /// providers: one provider renders one option and one config, several
-    /// render each plus `all`.
+    /// Dispatch choices include only admitted non-local providers; automatic
+    /// build jobs may still use configured local providers.
     #[test]
     fn versioned_tool_providers_follow_the_repository_providers() {
         let all = config(&[], None);
-        assert_eq!(
-            versioned_tool_providers(&all),
-            vec!["github-hosted", "github-self-hosted", "velnor", "all"]
-        );
+        assert_eq!(versioned_tool_providers(&all), vec!["github-hosted", "all"]);
         let mut hosted = all.clone();
         hosted.providers = [crate::s2::provider::ProviderId::GithubHosted]
             .into_iter()
@@ -9106,62 +10127,463 @@ mod tests {
         velnor.providers = [crate::s2::provider::ProviderId::Velnor]
             .into_iter()
             .collect();
-        assert_eq!(versioned_tool_providers(&velnor), vec!["velnor"]);
-        assert!(
-            versioned_tool_provider_configs(&all, "all").contains("\"provider\":\"github-hosted\"")
-                && versioned_tool_provider_configs(&all, "all").contains("\"provider\":\"velnor\""),
-            "all providers must fan out: {}",
-            versioned_tool_provider_configs(&all, "all")
-        );
-        assert!(
-            !versioned_tool_provider_configs(&all, "github-hosted")
-                .contains("\"provider\":\"velnor\""),
-            "one provider must not fan out: {}",
-            versioned_tool_provider_configs(&all, "github-hosted")
+        assert!(versioned_tool_providers(&velnor).is_empty());
+        assert!(versioned_tool_dispatch_block(&velnor).is_empty());
+        assert_eq!(
+            versioned_tool_build_providers(&all),
+            all.providers.iter().copied().collect::<Vec<_>>()
         );
     }
 
-    /// Exactly one provider uploads: in `all` mode the first local provider
-    /// writes and the others do not, so two providers never publish the
-    /// same per-target tarball name twice; a single provider always writes.
+    /// Dispatch `all` keeps admitted hosted work. Explicit locals are rejected
+    /// because `default_dispatch_providers` does not authorize local execution.
     #[test]
-    fn versioned_tool_writer_is_single_and_local_preferred() {
-        let all = config(&[], None);
-        let configs = versioned_tool_provider_configs(&all, "all");
-        assert_eq!(
-            configs.matches("\"writer\":true").count(),
-            1,
-            "exactly one provider must write: {configs}"
+    fn versioned_tool_dispatch_all_uses_only_admitted_providers() {
+        let mut config = config(&[], None);
+        config.repository = "example/declared".to_owned();
+        config.default_dispatch_providers = [ProviderId::GithubHosted].into_iter().collect();
+        let selected = must(
+            versioned_tool_dispatch_selection(&config, "all"),
+            "select all dispatch-admitted providers",
         );
+        assert_eq!(selected, vec![ProviderId::GithubHosted]);
         assert_eq!(
-            configs.matches("\"writer\":false").count(),
-            2,
-            "the other providers must not write: {configs}"
-        );
-        let (hosted, local) = must_some(
-            configs.split_once("\"provider\":\"github-self-hosted\""),
-            "all mode must configure the first local provider",
+            versioned_tool_writer(&selected),
+            Some(ProviderId::GithubHosted)
         );
         assert!(
-            hosted.contains("\"writer\":false") && !hosted.contains("\"writer\":true"),
-            "the hosted provider must not write: {configs}"
+            versioned_tool_dispatch_selection(&config, "velnor").is_err(),
+            "a local provider outside default_dispatch_providers must be denied"
         );
+
+        config.default_dispatch_providers = config.providers.clone();
+        assert_eq!(
+            versioned_tool_dispatch_selection(&config, "all").unwrap(),
+            vec![ProviderId::GithubHosted],
+            "all filters local providers from a manual run even when listed"
+        );
+        assert_eq!(
+            versioned_tool_dispatch_selection(&config, "velnor"),
+            Err("local providers require a protected default-branch push"),
+            "dispatch config cannot authorize a local provider"
+        );
+        assert_eq!(
+            versioned_tool_local_gate(&config, ProviderId::Velnor),
+            "github.repository == 'example/declared' && (github.event_name == 'push' && github.ref == 'refs/heads/main')",
+            "config admission does not widen the local runner's event gate"
+        );
+        assert_eq!(
+            versioned_tool_writer(&versioned_tool_automatic_selection(&config, "all")),
+            Some(ProviderId::GithubSelfHosted),
+            "automatic builds preserve the existing local-preferred writer"
+        );
+    }
+
+    #[test]
+    fn versioned_tool_provider_jobs_use_literal_runners_and_trusted_local_gates() {
+        let root = scanned_root("versioned-tool-static-runners");
+        let mut config = config(&[], None);
+        config.repository = "example/declared".to_owned();
+        let surface = generate(
+            &root,
+            &config,
+            Some(&versioned_tool_row("example-tool.yml")),
+        );
+        let workflow = rendered(&surface, "example-tool.yml");
         assert!(
-            local.contains("\"writer\":true"),
-            "the first local provider must write: {configs}"
+            !workflow.contains("runs-on: ${{")
+                && !workflow.contains("fromJSON(needs.version.outputs.runner-configs)"),
+            "release runner placement must be static: {workflow}"
         );
-        for single in ["github-hosted", "velnor"] {
-            let configs = versioned_tool_provider_configs(&all, single);
-            assert_eq!(
-                configs.matches("\"writer\":true").count(),
-                1,
-                "a single provider must write: {configs}"
+        for provider in ProviderId::ALL {
+            let job = yaml_job(&workflow, &format!("build-{}", provider.as_str()));
+            let selector = config
+                .selectors
+                .get(&provider)
+                .map(selector_runs_on_yaml)
+                .unwrap_or_default();
+            assert!(
+                job.contains(&format!("runs-on: {selector}")),
+                "{provider} must use its literal configured selector: {job}"
             );
             assert!(
-                !configs.contains("\"writer\":false"),
-                "a single provider has no non-writer: {configs}"
+                job.contains("x86_64-unknown-linux-gnu")
+                    && job.contains("aarch64-unknown-linux-gnu"),
+                "{provider} must cover both declared release targets: {job}"
+            );
+            if provider.is_local() {
+                let expected = "if: ${{ github.repository == 'example/declared' && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}";
+                assert!(
+                    job.contains(expected),
+                    "local gate must match policy: {job}"
+                );
+                assert_eq!(
+                    versioned_tool_dispatch_selection(&config, provider.as_str()),
+                    Err("local providers require a protected default-branch push"),
+                    "dispatch must reject local provider {provider}"
+                );
+                assert!(
+                    !job.contains("workflow_dispatch")
+                        && job.contains(
+                            "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+                        ),
+                    "local job gate skips dispatch and admits only protected main: {job}"
+                );
+            }
+        }
+        let triggers = workflow
+            .split_once("\nconcurrency:")
+            .map(|(triggers, _)| triggers)
+            .unwrap_or(&workflow);
+        let version = yaml_job(&workflow, "version");
+        assert!(
+            !triggers.contains("tags:") && !triggers.contains("schedule:"),
+            "the versioned-tool workflow has no tag or schedule event: {triggers}"
+        );
+        assert!(
+            triggers.contains("workflow_dispatch:")
+                && version.contains("selected_providers='github-hosted'"),
+            "manual all selects the hosted dispatch set while local jobs stay push-gated: {workflow}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn versioned_tool_local_jobs_use_canonical_push_gate_and_hide_dispatch() {
+        let mut config = config(&[], None);
+        config.repository = "example/declared".to_owned();
+        config.providers = BTreeSet::from([ProviderId::Velnor]);
+        config.automatic_providers = BTreeSet::from([ProviderId::Velnor]);
+        config.default_dispatch_providers = BTreeSet::from([ProviderId::Velnor]);
+        let canonical = WorkflowIr::from_config(&config)
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        assert_eq!(
+            canonical,
+            "github.repository == 'example/declared' && (github.event_name == 'push' && github.ref == 'refs/heads/main')"
+        );
+
+        let root = scanned_root("versioned-tool-local-only-admission");
+        let surface = generate(
+            &root,
+            &config,
+            Some(&versioned_tool_row("example-tool.yml")),
+        );
+        let workflow = rendered(&surface, "example-tool.yml");
+        let local_jobs =
+            assert_local_provider_jobs_use_gate(&workflow, &config, ProviderId::Velnor, &canonical);
+        for job in [
+            "validate-version",
+            "version",
+            "assert-version",
+            "build-velnor",
+            "sign",
+            "publish",
+        ] {
+            assert!(
+                local_jobs.contains(job),
+                "local versioned-tool job {job} must use canonical admission: {workflow}"
             );
         }
+
+        let triggers = workflow
+            .split_once("\nconcurrency:")
+            .map(|(triggers, _)| triggers)
+            .unwrap_or(&workflow);
+        assert!(
+            !triggers.contains("workflow_dispatch:")
+                && !triggers.contains("schedule:")
+                && !triggers.contains("tags:"),
+            "a local-only versioned tool has no dispatch, schedule, or tag route: {triggers}"
+        );
+        assert_eq!(
+            versioned_tool_default_dispatch_provider(&config),
+            None,
+            "a local provider is never a dispatch default"
+        );
+        assert!(
+            versioned_tool_dispatch_selection(&config, "velnor").is_err()
+                && versioned_tool_dispatch_selection(&config, "all").is_err(),
+            "dispatch rejects local provider selections"
+        );
+
+        let actual_gate = job_gate_expression(&workflow, "validate-version");
+        for (name, repository, event, reference, expected) in [
+            (
+                "default branch push",
+                "example/declared",
+                "push",
+                "refs/heads/main",
+                true,
+            ),
+            (
+                "pull request",
+                "example/declared",
+                "pull_request",
+                "refs/pull/4/merge",
+                false,
+            ),
+            (
+                "pull request target",
+                "example/declared",
+                "pull_request_target",
+                "refs/heads/main",
+                false,
+            ),
+            (
+                "tag push",
+                "example/declared",
+                "push",
+                "refs/tags/v1.2.3",
+                false,
+            ),
+            (
+                "schedule",
+                "example/declared",
+                "schedule",
+                "refs/heads/main",
+                false,
+            ),
+            (
+                "workflow dispatch",
+                "example/declared",
+                "workflow_dispatch",
+                "refs/heads/main",
+                false,
+            ),
+            (
+                "fork repository",
+                "attacker/declared",
+                "push",
+                "refs/heads/main",
+                false,
+            ),
+            (
+                "wrong branch",
+                "example/declared",
+                "push",
+                "refs/heads/release",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                local_gate_allows_context(
+                    &actual_gate,
+                    &canonical,
+                    &config.repository,
+                    &config.default_branch,
+                    true,
+                    repository,
+                    event,
+                    reference,
+                ),
+                expected,
+                "versioned-tool {name} admission"
+            );
+        }
+
+        let mutations = [
+            canonical.replace(
+                "github.event_name == 'push'",
+                "github.event_name == 'schedule'",
+            ),
+            canonical.replace(
+                "github.event_name == 'push'",
+                "github.event_name == 'workflow_dispatch'",
+            ),
+            canonical.replace(
+                "github.repository == 'example/declared'",
+                "github.repository == 'attacker/declared'",
+            ),
+            canonical.replace("refs/heads/main", "refs/heads/release"),
+            canonical.replace("refs/heads/main", "refs/tags/v1.2.3"),
+        ];
+        for mutation in mutations {
+            assert!(
+                !local_gate_allows_context(
+                    &mutation,
+                    &canonical,
+                    &config.repository,
+                    &config.default_branch,
+                    true,
+                    "example/declared",
+                    "push",
+                    "refs/heads/main",
+                ),
+                "local gate mutation must fail closed: {mutation}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disabled_versioned_tool_local_provider_has_false_gate() {
+        let mut config = config(&[], None);
+        config.repository = "example/declared".to_owned();
+        config.providers = BTreeSet::from([ProviderId::Velnor]);
+        config.automatic_providers.clear();
+        config.default_dispatch_providers = BTreeSet::from([ProviderId::Velnor]);
+        let disabled = WorkflowIr::from_config(&config)
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        assert_eq!(
+            disabled,
+            "github.repository == 'example/declared' && (false)"
+        );
+
+        let root = scanned_root("versioned-tool-disabled-local-provider");
+        let surface = generate(
+            &root,
+            &config,
+            Some(&versioned_tool_row("example-tool.yml")),
+        );
+        let workflow = rendered(&surface, "example-tool.yml");
+        let local_jobs =
+            assert_local_provider_jobs_use_gate(&workflow, &config, ProviderId::Velnor, &disabled);
+        assert!(local_jobs.contains("build-velnor"), "{workflow}");
+        assert!(
+            !workflow.contains("workflow_dispatch:")
+                && versioned_tool_default_dispatch_provider(&config).is_none(),
+            "disabled local execution cannot become a dispatch default: {workflow}"
+        );
+        assert!(
+            !local_gate_allows_context(
+                &disabled,
+                &disabled,
+                &config.repository,
+                &config.default_branch,
+                false,
+                "example/declared",
+                "push",
+                "refs/heads/main",
+            ),
+            "disabled local provider remains denied even on the default branch"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn versioned_tool_local_release_gate_fails_policy_for_untrusted_events_and_identity() {
+        let mut config = config(&[], None);
+        config.repository = "example/declared".to_owned();
+        config.providers = [ProviderId::GithubHosted, ProviderId::Velnor]
+            .into_iter()
+            .collect();
+        config.automatic_providers = config.providers.clone();
+        config.default_dispatch_providers = [ProviderId::GithubHosted].into_iter().collect();
+        let spec = VersionedToolSpec {
+            name: "example-tool".to_owned(),
+            package: "example-tool".to_owned(),
+            binary: "example-tool".to_owned(),
+            targets: vec![
+                "x86_64-unknown-linux-gnu".to_owned(),
+                "aarch64-unknown-linux-gnu".to_owned(),
+            ],
+            version_manifest: "crates/example-tool/Cargo.toml".to_owned(),
+            version_prefix: "example-tool-v".to_owned(),
+            publish_group: "example-tap-publish".to_owned(),
+            version_gate_tasks: vec!["check-example-tool-version".to_owned()],
+            assert_tasks: vec!["assert-example-tool-published".to_owned()],
+            build_tasks: vec!["build-example-tool".to_owned()],
+            push_paths: vec!["crates/example-tool/**".to_owned()],
+            pull_request_paths: vec!["crates/example-tool/**".to_owned(), "Cargo.lock".to_owned()],
+        };
+        let local_job =
+            render_versioned_tool_build_job_for_provider(&config, &spec, ProviderId::Velnor);
+        let expected_gate = github_expression(
+            "github.repository == 'example/declared' && (github.event_name == 'push' && github.ref == 'refs/heads/main')",
+        );
+        assert!(
+            local_job.contains(&format!("if: {expected_gate}")),
+            "local release job must carry the exact default-branch identity gate: {local_job}"
+        );
+        assert!(
+            versioned_tool_dispatch_selection(&config, "velnor").is_err(),
+            "the current hosted-only dispatch set must reject explicit local selection"
+        );
+
+        let root = scanned_root("versioned-tool-policy-gate");
+        let workflows = root.join(".github/workflows");
+        let generation = root.join(".github-gen");
+        must(fs::create_dir_all(&workflows), "create audited workflows");
+        must(fs::create_dir_all(&generation), "create generation config");
+        let runtime = root.join(".github/ci");
+        must(
+            fs::create_dir_all(&runtime),
+            "create audited runtime config",
+        );
+        must(
+            fs::write(
+                runtime.join("project.toml"),
+                "schema = 3\nrepository = \"example/declared\"\nprofile = \"generic\"\nverified = true\ndefault_branch = \"main\"\nproviders = [\"github-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\", \"velnor\"]\ndefault_dispatch_providers = [\"github-hosted\"]\n",
+            ),
+            "write audited runtime config",
+        );
+        let generation_config = format!(
+            "schema = 2\n\n[generator]\nrepository = \"example/declared\"\nrevision = \"{FIXTURE_REVISION}\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\", \"velnor\"]\ndefault_branch = \"main\"\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-runner\"]\n"
+        );
+        must(
+            fs::write(generation.join("velnor-workflow.toml"), generation_config),
+            "write policy generation config",
+        );
+        let wrap_job = |job: &str| {
+            format!(
+                "{GENERATED_HEADER}name: Versioned Tool Release\non:\n  push:\n    branches: [main]\n  workflow_dispatch:\njobs:\n{job}"
+            )
+        };
+        let workflow_path = workflows.join("versioned-tool.yml");
+        must(
+            fs::write(&workflow_path, wrap_job(&local_job)),
+            "write local release job",
+        );
+        let audit = must(
+            crate::s2::policy::audit_workflows(&root),
+            "audit the exact local release gate",
+        );
+        assert!(audit.runners.is_empty(), "{:?}", audit.runners);
+
+        for (label, rejected_gate) in [
+            (
+                "tag event",
+                "github.repository == 'example/declared' && (github.event_name == 'push' && github.ref == 'refs/tags/v1.2.3')",
+            ),
+            (
+                "schedule event",
+                "github.repository == 'example/declared' && (github.event_name == 'schedule' && github.ref == 'refs/heads/main')",
+            ),
+            (
+                "workflow dispatch",
+                "github.repository == 'example/declared' && (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')",
+            ),
+            (
+                "wrong repository",
+                "github.repository == 'attacker/repo' && (github.event_name == 'push' && github.ref == 'refs/heads/main')",
+            ),
+            (
+                "wrong branch",
+                "github.repository == 'example/declared' && (github.event_name == 'push' && github.ref == 'refs/heads/release')",
+            ),
+        ] {
+            let rejected = github_expression(rejected_gate);
+            let rejected_job = local_job.replacen(
+                &format!("if: {expected_gate}"),
+                &format!("if: {rejected}"),
+                1,
+            );
+            let rejected_workflow = wrap_job(&rejected_job);
+            must(
+                fs::write(&workflow_path, rejected_workflow),
+                "write rejected local release gate",
+            );
+            let audit = must(
+                crate::s2::policy::audit_workflows(&root),
+                "audit rejected local release gate",
+            );
+            assert!(
+                audit.runners.iter().any(|finding| finding.contains("build-velnor")),
+                "policy must reject the local {label}: {:?}",
+                audit.runners
+            );
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     /// A declared tag filter reaches every release trigger, whichever kind

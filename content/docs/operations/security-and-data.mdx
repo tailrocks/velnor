@@ -66,6 +66,49 @@ limit” means the reviewed implementation does not prove the stronger property.
 | Attestation and provenance | Approved `dist` subjects are streamed and SHA-256 hashed; OIDC claims are validated; bundles are uploaded to GitHub and signed through public-good or private endpoints according to repository visibility. | Bundle files are written below a unique runner-temp subdirectory and their container paths are recorded. | Attestation discloses repository, workflow, ref/SHA, run identifiers, runner environment, and subject names/digests to its configured services. `crates/velnor-runner/src/attestation.rs:53-142`, `crates/velnor-runner/src/attestation.rs:252-320`, `crates/velnor-runner/src/attestation.rs:427-566` |
 | Package configuration and installation data | Debian units load operator config and, where applicable, an operator-owned secrets file. Guardian intentionally omits secrets. | `/etc/velnor/secrets.env` is operator-owned and mode `0600`; package configuration migrates a recognized token but does not ship or overwrite the secrets file. | Several runner units run as root with bounded systemd protections and explicit writable paths. `crates/velnor-runner/debian/postinst:156-172`, `crates/velnor-runner/debian/velnor-daemon.service:20-80`, `crates/velnor-runner/debian/velnor-guardian.service:6-35` |
 
+## Required CI policy runner boundary
+
+The required S2 `Policy` workflow selects `runs-on: ubuntu-24.04`. GitHub
+routes jobs by runner labels. Self-hosted labels can be created and assigned
+at repository or organization scope, and label matching is case-insensitive.
+The repository's available-runner inventory includes self-hosted runners and
+Actions Runner Controller (ARC) scale sets. A self-hosted runner carrying
+`ubuntu-24.04` can therefore claim this job; the YAML selector does not prove
+GitHub-hosted placement. [GitHub label docs](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/apply-labels),
+[runner routing and inventory docs](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/use-in-a-workflow),
+[ARC scale set docs](https://docs.github.com/en/actions/how-tos/manage-runners/use-actions-runner-controller/deploy-runner-scale-sets)
+
+Velnor no longer assigns `ubuntu-24.04` to Target-MVP runners and rejects
+manual or environment attempts to configure that label. Existing GitHub or
+ARC registrations may retain it; admins must inspect and remove every
+accessible occurrence before relying on this boundary.
+[Target-MVP runner labels](/reference/configuration)
+
+`runner.environment` reports `github-hosted` or `self-hosted` for the runner
+executing a job, but the `runner` context is unavailable in
+`jobs.<job_id>.runs-on`. It is post-scheduling runtime evidence, not placement
+enforcement or proof of control-plane provenance; treat it as untrusted.
+[GitHub runner context](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#runner-context),
+[context availability table](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#available-contexts)
+
+Trusted admins must:
+
+- Reserve `ubuntu-24.04`, without regard to case, from every self-hosted runner
+  and ARC scale set accessible to repository workflows.
+- Restrict this repository's runner-group access to an approved set, and limit
+  each group's repository access to an explicit allowlist.
+- Prohibit repository-scoped self-hosted runners for this boundary.
+- Keep runner registration, runner-group access, and label administration
+  within the trusted admin set.
+
+The S2 candidate policy validates workflow YAML shape against ruleset contexts
+passed by `ci-policy.yml`; that workflow reads active rulesets through
+`gh api` and falls back to declared contexts when the initial rulesets-list
+request reports `HTTP 403` or `Upgrade to GitHub Team`.
+The candidate cannot independently inventory GitHub runner registrations or
+prove runtime placement or runner provenance. Loss of any admin invariant
+above invalidates the hosted-isolation claim for the required `Policy` workflow.
+
 ## Threat-control table
 
 | Threat | Current control | Residual/design-only limit | Evidence |

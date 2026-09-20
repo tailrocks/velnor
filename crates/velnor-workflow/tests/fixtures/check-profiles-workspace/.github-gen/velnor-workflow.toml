@@ -1,16 +1,25 @@
-schema = 1
+schema = 2
 
 [generator]
 repository = "example/check-profiles-fixture"
 
 [workflow]
-runners = "both"
-velnor_labels = ["self-hosted", "example-lane"]
+providers = ["github-hosted", "velnor"]
+automatic_providers = ["github-hosted", "velnor"]
+default_dispatch_providers = ["github-hosted", "velnor"]
+
+[workflow.selectors.github-hosted]
+runs_on = ["ubuntu-24.04"]
+
+[workflow.selectors.velnor]
+runs_on = ["self-hosted", "example-lane"]
 
 [[check_profile]]
 id = "smoke"
 name = "Smoke probe"
 schedule = "23 2 * * *"
+provider = "github-hosted"
+platform = "linux-x64"
 tasks = ["check-smoke"]
 timeout_minutes = 30
 
@@ -18,6 +27,8 @@ timeout_minutes = 30
 id = "load"
 name = "Load probe"
 schedule = "23 2 * * *"
+provider = "github-hosted"
+platform = "linux-x64"
 tasks = ["check-load", "check-load-report"]
 needs = ["smoke"]
 timeout_minutes = 90
@@ -29,7 +40,8 @@ env = { MAX_SECONDS = "300" }
 id = "fleet"
 name = "Fleet probe"
 schedule = "23 2 * * *"
-runner = "velnor"
+provider = "velnor"
+platform = "linux-x64"
 tasks = ["check-fleet"]
 timeout_minutes = 45
 
@@ -37,7 +49,8 @@ timeout_minutes = 45
 id = "compat"
 name = "Compat probe"
 schedule = "41 4 * * 1"
-runner = "macos"
+provider = "github-hosted"
+platform = "macos-arm64"
 tools = ["ripgrep"]
 tasks = ["check-compat"]
 timeout_minutes = 60

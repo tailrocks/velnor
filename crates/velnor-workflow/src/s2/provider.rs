@@ -124,6 +124,58 @@ pub(crate) fn require_subset(
     Ok(())
 }
 
+/// Whether a provider set came from automatic routing or an explicit
+/// selection such as `workflow_dispatch.providers`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderSelectionSource {
+    /// The configured automatic provider set for the current event.
+    Automatic,
+    /// A provider set explicitly requested by the caller.
+    Explicit,
+}
+
+/// Apply the provider admission result emitted by the workflow IR to a
+/// requested provider set. Automatic routing drops providers that are not
+/// admitted for this event; an explicit request for one fails planning. An
+/// empty admitted result is always an error so a local-only plan cannot pass
+/// `ci-required` with every expected provider skipped.
+pub(crate) fn apply_provider_admission(
+    requested: &ProviderSet,
+    admitted: &ProviderSet,
+    source: ProviderSelectionSource,
+) -> Result<ProviderSet, GeneratorError> {
+    let rejected = requested
+        .difference(admitted)
+        .copied()
+        .collect::<ProviderSet>();
+    if source == ProviderSelectionSource::Explicit && !rejected.is_empty() {
+        let providers = rejected
+            .iter()
+            .map(ProviderId::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(GeneratorError::usage(format!(
+            "explicit provider selection includes providers not admitted for this event: {providers}"
+        )));
+    }
+
+    let selected = requested
+        .intersection(admitted)
+        .copied()
+        .collect::<ProviderSet>();
+    if selected.is_empty() {
+        let providers = requested
+            .iter()
+            .map(ProviderId::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(GeneratorError::usage(format!(
+            "no selected provider is admitted for this event: {providers}"
+        )));
+    }
+    Ok(selected)
+}
+
 /// The `runs-on` routing for one provider: the only place labels live.
 /// Routing only — never authorization, never a fanout instruction.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -164,8 +216,8 @@ pub(crate) fn parse_selectors(
     Ok(selectors)
 }
 
-/// Every provider in the universe needs a selector; disjointness between the
-/// two local providers is enforced separately by [`validate_selector_disjointness`].
+/// Every provider in the universe needs a selector; cross-provider label
+/// overlap is rejected separately by [`validate_selector_disjointness`].
 pub(crate) fn require_selectors_for(
     selectors: &SelectorMap,
     universe: &ProviderSet,
@@ -180,25 +232,54 @@ pub(crate) fn require_selectors_for(
     Ok(())
 }
 
-/// The two local providers must use disjoint dedicated selectors: any shared
-/// label is a routing ambiguity and a hard error.
+/// Every provider must use a disjoint selector: labels are case-insensitive,
+/// so an overlap between hosted and local routing is a trust ambiguity too.
 pub(crate) fn validate_selector_disjointness(
     selectors: &SelectorMap,
 ) -> Result<(), GeneratorError> {
-    let mut claimed: BTreeMap<&str, ProviderId> = BTreeMap::new();
-    for provider in ProviderId::LOCAL {
-        let Some(selector) = selectors.get(&provider) else {
-            continue;
-        };
+    if let Some(hosted) = selectors.get(&ProviderId::GithubHosted) {
+        if hosted.runs_on.len() != 1
+            || !hosted
+                .runs_on
+                .iter()
+                .all(|label| is_github_hosted_image_label(label))
+        {
+            return Err(GeneratorError::usage(
+                "[workflow.selectors.github-hosted] runs_on must be one static GitHub-hosted image label",
+            ));
+        }
+    }
+
+    let mut claimed: BTreeMap<String, ProviderId> = BTreeMap::new();
+    for (provider, selector) in selectors {
+        let mut within = BTreeSet::new();
         for label in &selector.runs_on {
-            if let Some(owner) = claimed.insert(label.as_str(), provider) {
+            let normalized = label.to_ascii_lowercase();
+            if !within.insert(normalized.clone()) {
                 return Err(GeneratorError::usage(format!(
-                    "[workflow.selectors] label `{label}` is claimed by {owner} and {provider}; local providers need disjoint dedicated selectors"
+                    "[workflow.selectors.{provider}] repeats label `{label}` (runner labels are case-insensitive)"
                 )));
             }
+            if let Some(owner) = claimed.get(&normalized) {
+                return Err(GeneratorError::usage(format!(
+                    "[workflow.selectors] label `{label}` is claimed by {owner} and {provider}; provider selectors must be disjoint ignoring case"
+                )));
+            }
+            claimed.insert(normalized, *provider);
         }
     }
     Ok(())
+}
+
+fn is_github_hosted_image_label(label: &str) -> bool {
+    let label = label.to_ascii_lowercase();
+    !label.contains("${{")
+        && label.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+        })
+        && ["ubuntu-", "macos-", "windows-"]
+            .iter()
+            .any(|prefix| label.starts_with(prefix))
 }
 
 /// Pure selector lookup: the `runs-on` labels for one provider. Unknown
@@ -899,6 +980,53 @@ mod tests {
     }
 
     #[test]
+    fn provider_admission_filters_automatic_choices_and_rejects_explicit_denials() {
+        let requested = ProviderSet::from([ProviderId::GithubHosted, ProviderId::Velnor]);
+        let admitted = ProviderSet::from([ProviderId::GithubHosted]);
+        assert_eq!(
+            apply_provider_admission(&requested, &admitted, ProviderSelectionSource::Automatic)
+                .unwrap(),
+            ProviderSet::from([ProviderId::GithubHosted]),
+            "automatic routing keeps admitted hosted work and removes unadmitted Velnor"
+        );
+
+        let explicit = ProviderSet::from([ProviderId::Velnor]);
+        let error = must_fail(
+            apply_provider_admission(&explicit, &admitted, ProviderSelectionSource::Explicit),
+            "explicit unadmitted Velnor selection",
+        );
+        assert!(
+            error.contains("not admitted for this event: velnor"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn provider_admission_rejects_empty_plans_and_accepts_admitted_local_selection() {
+        let local_only = ProviderSet::from([ProviderId::Velnor]);
+        let none_admitted = ProviderSet::new();
+        let error = must_fail(
+            apply_provider_admission(
+                &local_only,
+                &none_admitted,
+                ProviderSelectionSource::Automatic,
+            ),
+            "local-only automatic selection without admission",
+        );
+        assert!(
+            error.contains("no selected provider is admitted"),
+            "{error}"
+        );
+
+        assert_eq!(
+            apply_provider_admission(&local_only, &local_only, ProviderSelectionSource::Explicit)
+                .unwrap(),
+            local_only,
+            "an explicit local selection is allowed when the event admits it"
+        );
+    }
+
+    #[test]
     fn platform_and_trust_parse_is_strict() {
         assert_eq!(Platform::parse("linux-x64").unwrap(), Platform::LinuxX64);
         assert_eq!(
@@ -927,6 +1055,79 @@ mod tests {
             "missing selector",
         );
         assert!(error.contains("[workflow.selectors.velnor]"), "{error}");
+    }
+
+    #[test]
+    fn hosted_selector_is_static_and_disjoint_from_local_labels() {
+        let selectors = SelectorMap::from([
+            (
+                ProviderId::GithubHosted,
+                ProviderSelector {
+                    runs_on: vec!["ubuntu-24.04".to_owned()],
+                },
+            ),
+            (
+                ProviderId::Velnor,
+                ProviderSelector {
+                    runs_on: vec!["UBUNTU-24.04".to_owned()],
+                },
+            ),
+        ]);
+        let error = must_fail(
+            validate_selector_disjointness(&selectors),
+            "hosted/local label alias",
+        );
+        assert!(error.contains("disjoint ignoring case"), "{error}");
+
+        let selectors = SelectorMap::from([(
+            ProviderId::GithubHosted,
+            ProviderSelector {
+                runs_on: vec!["self-hosted".to_owned()],
+            },
+        )]);
+        let error = must_fail(
+            validate_selector_disjointness(&selectors),
+            "hosted self-hosted label",
+        );
+        assert!(error.contains("one static GitHub-hosted image"), "{error}");
+
+        let selectors = SelectorMap::from([(
+            ProviderId::GithubHosted,
+            ProviderSelector {
+                runs_on: vec![
+                    "ubuntu-24.04".to_owned(),
+                    "${{ github.event.inputs.runner }}".to_owned(),
+                ],
+            },
+        )]);
+        let error = must_fail(
+            validate_selector_disjointness(&selectors),
+            "hosted dynamic runner label",
+        );
+        assert!(error.contains("one static GitHub-hosted image"), "{error}");
+    }
+
+    #[test]
+    fn selector_label_collisions_are_case_insensitive() {
+        let selectors = SelectorMap::from([
+            (
+                ProviderId::GithubHosted,
+                ProviderSelector {
+                    runs_on: vec!["ubuntu-24.04".to_owned()],
+                },
+            ),
+            (
+                ProviderId::Velnor,
+                ProviderSelector {
+                    runs_on: vec!["UBUNTU-24.04".to_owned()],
+                },
+            ),
+        ]);
+        let error = must_fail(
+            validate_selector_disjointness(&selectors),
+            "case-insensitive selector collision",
+        );
+        assert!(error.contains("disjoint ignoring case"), "{error}");
     }
 
     #[test]

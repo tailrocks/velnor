@@ -70,8 +70,21 @@ Global options:
 generated GitHub Actions jobs. It writes only its owned files and keeps the
 declarative execution contract in `.github/ci/project.toml`:
 
+Every repository-bound invocation requires the target root to contain
+`.github-gen/velnor-workflow.toml` with `schema = 2`. For a new target, create
+the marker before running generation or runtime commands:
+
 ```sh
-velnor-workflow REPOSITORY --runners both
+cd REPOSITORY
+mkdir -p .github-gen
+cat > .github-gen/velnor-workflow.toml <<'TOML'
+schema = 2
+
+[generator]
+repository = "OWNER/REPOSITORY"
+TOML
+
+velnor-workflow . --providers github-hosted,velnor
 velnor-workflow plan --config .github/ci/project.toml
 velnor-workflow run --scope affected
 velnor-workflow policy --workflow-root .
@@ -126,7 +139,11 @@ does not accept a command-line credential argument. Relevant options are:
 | `--dry-run` | Validate registration inputs without writing credentials. |
 | `--config-dir` | Store runner identity/configuration in this directory. |
 
-Labels are sorted and deduplicated. macOS labels are rejected; execution is Linux-only. The target MVP label additions are `hetzner-sentry-ci`, `ubuntu-24.04`, `ubuntu-latest`, and `velnor-target-mvp`.
+Labels are sorted and deduplicated. macOS labels are rejected; execution is
+Linux-only. `ubuntu-24.04` is reserved for GitHub-hosted runner selection and
+rejected for Velnor registration. `--target-mvp-labels` adds the x64 labels
+`hetzner-sentry-ci`, `ubuntu-latest`, and `velnor-target-mvp`;
+`--target-mvp-arm-label` adds `ubuntu-24.04-arm`.
 
 Other current setup commands are `auth status`, `auth check`, `context list/current/use/set/delete`, `config view/validate/diff/sources`, `instance init/install/apply/delete`, `adapter list/describe/check`, `workflow check`, `remove`, `status`, and `preflight`. `instance` and `workflow check` are local planning/input checks, not proof of a remote mutation or complete workflow compatibility.
 

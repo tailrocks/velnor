@@ -1,44 +1,69 @@
 //! File walk and repository-path helpers shared by every detector.
 
 use std::collections::BTreeSet;
-use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use super::{RepositoryShape, ScanContext};
-use crate::s2::{parent_path, GeneratorError};
+use crate::s2::{
+    parent_path,
+    safe_fs::{SafeEntryKind, SafeRoot},
+    GeneratorError,
+};
 
 /// Generator-owned artifacts must not feed back into the next scan pass.
-const GENERATOR_OWNED_SCAN_FILES: &[&str] = &["config/fleet/velnor-host.env"];
+const GENERATOR_OWNED_SCAN_FILES: &[&str] = &[
+    ".github/ci/.github-actions-generator-state",
+    "config/fleet/velnor-host.env",
+];
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn repository_files(
     root: &Path,
     exclude: &[String],
 ) -> Result<Vec<String>, GeneratorError> {
-    if !root.is_dir() {
-        return Err(GeneratorError::usage(format!(
-            "not a repository directory: {}",
-            root.display()
-        )));
-    }
+    repository_files_with_owned_paths(root, exclude, &BTreeSet::new())
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn repository_files_with_owned_paths(
+    root: &Path,
+    exclude: &[String],
+    owned_paths: &BTreeSet<PathBuf>,
+) -> Result<Vec<String>, GeneratorError> {
+    let safe_root = SafeRoot::open(root)?;
+    repository_files_with_safe_root(&safe_root, exclude, owned_paths)
+}
+
+pub(crate) fn repository_files_with_safe_root(
+    safe_root: &SafeRoot,
+    exclude: &[String],
+    owned_paths: &BTreeSet<PathBuf>,
+) -> Result<Vec<String>, GeneratorError> {
+    // `owned_paths` is supplied only after the schema-2 caller proves each
+    // path against the current renderer and recorded preimage. Never parse a
+    // sidecar here: doing so would let its text hide scan inputs.
     // Generation must stay a function of the committed repository, not of the
     // checkout: untracked CI runtime artifacts, scratch files, and the `.git`
     // file of a linked worktree would otherwise enter the scan and make the
     // recorded scan input depend on the environment that ran the generator.
     // Prefer the git index and keep the physical walk only for directories
     // that are not inside a git repository (synthetic test targets).
-    let mut files = if let Some(files) = tracked_files(root)? {
+    let mut files = if let Some(files) = tracked_files(&safe_root)? {
         files
     } else {
         let mut files = Vec::new();
-        collect_files(root, root, &mut files)?;
+        collect_files(&safe_root, Path::new(""), &mut files)?;
         files
     };
     let excludes = exclude_set(exclude)?;
     files.retain(|file| {
-        !excludes.is_match(file) && !GENERATOR_OWNED_SCAN_FILES.contains(&file.as_str())
+        !excludes.is_match(file)
+            && !GENERATOR_OWNED_SCAN_FILES.contains(&file.as_str())
+            && !owned_paths.contains(Path::new(file))
     });
     files.sort();
     Ok(files)
@@ -62,23 +87,24 @@ fn exclude_set(patterns: &[String]) -> Result<GlobSet, GeneratorError> {
 /// Tracked files under `root`, relative to it. `Ok(None)` means `root` is not
 /// inside a git repository (no `git` binary, not a work tree, or a work tree
 /// with no tracked files under `root`) and the physical walk should decide.
-fn inside_git_work_tree(root: &Path) -> bool {
-    Command::new("git")
-        .current_dir(root)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-        .is_ok_and(|output| {
-            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
-        })
+fn inside_git_work_tree(safe_root: &SafeRoot) -> bool {
+    crate::s2::safe_fs::pinned_command::output(
+        safe_root,
+        "git",
+        &["rev-parse", "--is-inside-work-tree"],
+    )
+    .is_ok_and(|output| {
+        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+    })
 }
 
-fn tracked_files(root: &Path) -> Result<Option<Vec<String>>, GeneratorError> {
-    let in_git = inside_git_work_tree(root);
-    let Ok(output) = Command::new("git")
-        .current_dir(root)
-        .args(["ls-files", "-z"])
-        .output()
-    else {
+fn tracked_files(safe_root: &SafeRoot) -> Result<Option<Vec<String>>, GeneratorError> {
+    safe_root.validate_root_binding()?;
+    let in_git = inside_git_work_tree(safe_root);
+    safe_root.validate_root_binding()?;
+    let output = crate::s2::safe_fs::pinned_command::output(safe_root, "git", &["ls-files", "-z"]);
+    safe_root.validate_root_binding()?;
+    let Ok(output) = output else {
         if in_git {
             return Err(GeneratorError::usage(
                 "git ls-files could not run inside a git work tree; scan will not walk the filesystem",
@@ -86,6 +112,7 @@ fn tracked_files(root: &Path) -> Result<Option<Vec<String>>, GeneratorError> {
         }
         return Ok(None);
     };
+    safe_root.validate_root_binding()?;
     if !output.status.success() {
         if in_git {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -103,27 +130,21 @@ fn tracked_files(root: &Path) -> Result<Option<Vec<String>>, GeneratorError> {
         let relative = std::str::from_utf8(raw).map_err(|error| {
             GeneratorError::usage(format!("repository path is not utf-8: {error}"))
         })?;
-        let relative = Path::new(relative);
-        let Some(Component::Normal(leading)) = relative.components().next() else {
+        let normalized = normalize_relative_path(Path::new(relative))?;
+        let Some(leading) = normalized.split('/').next() else {
             return Ok(None);
         };
-        // Generated `.github` content is output, not project input, and the
-        // remaining directories are tool or package-manager output.
-        if is_excluded_directory(&leading.to_string_lossy()) {
+        // Tool and package-manager output is not project input.
+        if is_excluded_directory(leading) {
             continue;
         }
-        let absolute = root.join(relative);
-        let Ok(metadata) = fs::symlink_metadata(&absolute) else {
-            // Staged but deleted in the work tree: the detectors cannot read
-            // it, so it cannot inform generation.
-            continue;
-        };
-        if metadata.is_dir() || metadata.file_type().is_symlink() {
-            // Submodule git links and tracked symlinks are skipped exactly
-            // like their walked counterparts.
+        // Every ancestor and the leaf are opened relative to the pinned
+        // repository handle. A symlinked ancestor cannot redirect a tracked
+        // path outside the work tree.
+        if !safe_root.has_regular_file(Path::new(relative))? {
             continue;
         }
-        files.push(normalize_relative_path(relative)?);
+        files.push(normalized);
     }
     if files.is_empty() && !in_git {
         return Ok(None);
@@ -131,13 +152,12 @@ fn tracked_files(root: &Path) -> Result<Option<Vec<String>>, GeneratorError> {
     Ok(Some(files))
 }
 
-/// Generated `.github` content is output, not project input; the remaining
-/// directories are tool or package-manager output.
+/// Tool and package-manager output is not project input. `.github` is
+/// intentionally absent: handwritten workflows/actions are real scan inputs.
 fn is_excluded_directory(name: &str) -> bool {
     matches!(
         name,
         ".git"
-            | ".github"
             | ".output"
             | "target"
             | "node_modules"
@@ -150,34 +170,21 @@ fn is_excluded_directory(name: &str) -> bool {
 }
 
 fn collect_files(
-    root: &Path,
-    directory: &Path,
+    directory: &SafeRoot,
+    relative_directory: &Path,
     files: &mut Vec<String>,
 ) -> Result<(), GeneratorError> {
-    let entries = fs::read_dir(directory)
-        .map_err(|error| GeneratorError::io("read directory", directory, &error))?;
-    for entry in entries {
-        let entry =
-            entry.map_err(|error| GeneratorError::io("read directory entry", directory, &error))?;
-        let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let kind = entry
-            .file_type()
-            .map_err(|error| GeneratorError::io("read file type", &path, &error))?;
-        if kind.is_symlink() {
-            continue;
-        }
-        if kind.is_dir() {
-            if is_excluded_directory(name.as_ref()) {
-                continue;
+    for entry in directory.entries()? {
+        let child_path = relative_directory.join(&entry.name);
+        let name = entry.name.to_string_lossy();
+        match entry.kind {
+            SafeEntryKind::Directory(child) => {
+                if !is_excluded_directory(name.as_ref()) {
+                    collect_files(&child, &child_path, files)?;
+                }
             }
-            collect_files(root, &path, files)?;
-        } else if kind.is_file() {
-            let relative = path.strip_prefix(root).map_err(|error| {
-                GeneratorError::usage(format!("make repository path relative: {error}"))
-            })?;
-            files.push(normalize_relative_path(relative)?);
+            SafeEntryKind::File => files.push(normalize_relative_path(&child_path)?),
+            SafeEntryKind::Symlink | SafeEntryKind::Other => (),
         }
     }
     Ok(())
@@ -308,8 +315,12 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
 
 #[cfg(test)]
 mod tests {
-    use super::repository_files;
+    use super::{repository_files, repository_files_with_safe_root};
+    use crate::s2::safe_fs::SafeRoot;
+    use crate::s2::{FLEET_CALLER_HEADER, GENERATED_HEADER};
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
@@ -422,6 +433,80 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn tracked_file_under_symlinked_ancestor_is_omitted() {
+        let root = scratch("symlinked-ancestor");
+        let outside = scratch("symlinked-ancestor-target");
+        git(&root, &["init", "-q"]);
+        must(
+            fs::create_dir_all(root.join("ancestor")),
+            "create tracked ancestor directory",
+        );
+        must(
+            fs::write(root.join("ancestor/file.txt"), "inside\n"),
+            "write tracked child file",
+        );
+        must(
+            fs::write(root.join("keep.txt"), "keep\n"),
+            "write normal tracked file",
+        );
+        git(&root, &["add", "ancestor/file.txt", "keep.txt"]);
+        git(&root, &["commit", "-qm", "tracked files"]);
+
+        must(
+            fs::write(outside.join("file.txt"), "outside\n"),
+            "write outside child file",
+        );
+        must(
+            fs::remove_dir_all(root.join("ancestor")),
+            "replace tracked ancestor",
+        );
+        must(
+            symlink(&outside, root.join("ancestor")),
+            "link tracked ancestor outside",
+        );
+
+        let files = must(repository_files(&root, &[]), "scan changed work tree");
+        assert_eq!(files, vec!["keep.txt".to_owned()]);
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_walk_rejects_repository_root_replacement() {
+        let root = scratch("root-replacement");
+        let outside = scratch("root-replacement-target");
+        let safe_root = must(SafeRoot::open(&root), "open pinned repository root");
+        git(&root, &["init", "-q"]);
+        must(
+            fs::write(root.join("tracked.txt"), "tracked\n"),
+            "write tracked file",
+        );
+        git(&root, &["add", "tracked.txt"]);
+        git(&root, &["commit", "-qm", "tracked file"]);
+
+        let moved = root.with_extension("original");
+        must(fs::rename(&root, &moved), "move pinned repository root");
+        must(
+            symlink(&outside, &root),
+            "replace repository root with symlink",
+        );
+        let error = must_fail(
+            repository_files_with_safe_root(&safe_root, &[], &std::collections::BTreeSet::new()),
+            "tracked walk must reject a replaced repository root",
+        );
+        assert!(
+            error.contains("reopen repository root") || error.contains("repository root changed"),
+            "{error}"
+        );
+        let _ = fs::remove_file(root);
+        let _ = fs::remove_dir_all(moved);
+        let _ = fs::remove_dir_all(outside);
+    }
+
     #[test]
     fn directories_outside_git_fall_back_to_the_physical_walk() {
         let root = scratch("untracked");
@@ -441,5 +526,189 @@ mod tests {
             files,
             vec!["nested/deep.txt".to_owned(), "present.txt".to_owned()]
         );
+    }
+
+    #[test]
+    fn github_inputs_are_kept_and_header_claims_are_not_authority() {
+        let root = scratch("github-provenance");
+        git(&root, &["init", "-q"]);
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create workflow directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/actions/handwritten")),
+            "create action directory",
+        );
+        must(
+            fs::create_dir_all(root.join("config/fleet")),
+            "create fleet directory",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/handwritten.yml"),
+                "name: handwritten\n",
+            ),
+            "write handwritten workflow",
+        );
+        must(
+            fs::write(
+                root.join(".github/actions/handwritten/action.yml"),
+                "name: handwritten\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            "write handwritten action",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/generated.yml"),
+                GENERATED_HEADER,
+            ),
+            "write generated workflow",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/fleet.yml"),
+                FLEET_CALLER_HEADER,
+            ),
+            "write fleet-generated workflow",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/static.yml"),
+                "name: owned static\n",
+            ),
+            "write static output",
+        );
+        must(
+            fs::write(
+                root.join("config/fleet/velnor-host.env"),
+                "VELNOR_CACHE=1\n",
+            ),
+            "write fleet output",
+        );
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "fixture"]);
+
+        let files = must(
+            repository_files(&root, &[]),
+            "scan GitHub provenance fixture",
+        );
+        assert!(files.contains(&".github/workflows/handwritten.yml".to_owned()));
+        assert!(files.contains(&".github/actions/handwritten/action.yml".to_owned()));
+        for output in [
+            ".github/workflows/generated.yml",
+            ".github/workflows/fleet.yml",
+            ".github/workflows/static.yml",
+        ] {
+            assert!(
+                files.contains(&output.to_owned()),
+                "header or config claim hid scan input: {output}"
+            );
+        }
+        assert!(!files.contains(&"config/fleet/velnor-host.env".to_owned()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shallow_checkout_keeps_the_same_provenance_boundary() {
+        let root = scratch("shallow-source");
+        git(&root, &["init", "-q"]);
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create shallow workflow directory",
+        );
+        must(
+            fs::write(root.join("README.md"), "# shallow\n"),
+            "write shallow README",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/handwritten.yml"),
+                "name: handwritten\n",
+            ),
+            "write shallow handwritten workflow",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/generated.yml"),
+                GENERATED_HEADER,
+            ),
+            "write shallow generated workflow",
+        );
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "shallow fixture"]);
+        must(
+            fs::write(root.join("README.md"), "# shallow head\n"),
+            "advance shallow fixture",
+        );
+        git(&root, &["add", "README.md"]);
+        git(&root, &["commit", "-qm", "shallow head"]);
+
+        let origin = scratch("shallow-origin.git");
+        must(
+            fs::remove_dir_all(&origin),
+            "remove empty bare origin target",
+        );
+        let output = must(
+            Command::new("git")
+                .args(["clone", "--bare", "--quiet"])
+                .arg(&root)
+                .arg(&origin)
+                .output(),
+            "clone local bare shallow origin",
+        );
+        assert!(
+            output.status.success(),
+            "bare clone failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+
+        let clone = scratch("shallow-clone");
+        must(fs::remove_dir_all(&clone), "remove empty clone target");
+        let output = must(
+            Command::new("git")
+                .args([
+                    "-c",
+                    "protocol.file.allow=always",
+                    "clone",
+                    "--depth=1",
+                    "--no-local",
+                    "--quiet",
+                ])
+                .env_remove("GIT_ALLOW_PROTOCOL")
+                .arg(&origin)
+                .arg(&clone)
+                .output(),
+            "clone shallow fixture",
+        );
+        assert!(
+            output.status.success(),
+            "shallow clone failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        let shallow_check = must(
+            Command::new("git")
+                .current_dir(&clone)
+                .args(["rev-parse", "--is-shallow-repository"])
+                .output(),
+            "inspect shallow clone",
+        );
+        assert!(
+            shallow_check.status.success(),
+            "inspect shallow clone failed: {}",
+            String::from_utf8_lossy(&shallow_check.stderr).trim()
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&shallow_check.stdout).trim(),
+            "true",
+            "fixture clone must be shallow"
+        );
+        let files = must(repository_files(&clone, &[]), "scan shallow clone");
+        assert!(files.contains(&".github/workflows/handwritten.yml".to_owned()));
+        assert!(files.contains(&".github/workflows/generated.yml".to_owned()));
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(origin);
+        let _ = fs::remove_dir_all(clone);
     }
 }

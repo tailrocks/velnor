@@ -28,7 +28,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest as _, Sha256};
 
-use crate::{GeneratorError, ReleaseSpec};
+use crate::s2::GeneratorError;
+
+/// Generation-time APT contract fields, kept separate from the other S2
+/// release publishers because their config surface differs substantially.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct AptReleaseSpec {
+    pub(crate) kind: String,
+    pub(crate) package: String,
+    pub(crate) binary: String,
+    pub(crate) source_repository: String,
+    pub(crate) consumer_repository: String,
+    pub(crate) manifest_schema: String,
+    pub(crate) apt_arches: Vec<String>,
+    pub(crate) signer_fingerprint: String,
+    pub(crate) passphrase_secret: String,
+    pub(crate) signing_key_secret: String,
+    pub(crate) keyring_path: String,
+    pub(crate) apt_origin: String,
+    pub(crate) apt_identity_dir: String,
+    pub(crate) apt_feed_url: String,
+    pub(crate) retention: u32,
+    pub(crate) description: String,
+}
 
 /// The release-record schema the coherence chain authenticates.
 pub(crate) const RELEASE_RECORD_SCHEMA: &str = "velnor.release-record/v1";
@@ -551,7 +573,7 @@ impl AptContract {
     /// Resolve a release spec into the typed contract. Empty `arches` selects
     /// both arches; a non-empty set must equal exactly both arches — a
     /// missing, duplicate, or foreign arch fails closed.
-    pub(crate) fn resolve(spec: &ReleaseSpec) -> Result<Self, GeneratorError> {
+    pub(crate) fn resolve(spec: &AptReleaseSpec) -> Result<Self, GeneratorError> {
         if spec.kind != "apt" {
             return Err(GeneratorError::usage(format!(
                 "apt contract needs kind `apt`, found `{}`",
@@ -634,7 +656,7 @@ impl AptContract {
 }
 
 /// The validated keyring path: explicit, or `<package>.gpg` by default.
-fn default_keyring(spec: &ReleaseSpec) -> Result<String, GeneratorError> {
+fn default_keyring(spec: &AptReleaseSpec) -> Result<String, GeneratorError> {
     let keyring = if spec.keyring_path.is_empty() {
         format!("{}.gpg", spec.package)
     } else {
@@ -649,7 +671,7 @@ fn default_keyring(spec: &ReleaseSpec) -> Result<String, GeneratorError> {
 }
 
 /// The validated origin: explicit, or the package name by default.
-fn default_origin(spec: &ReleaseSpec) -> Result<String, GeneratorError> {
+fn default_origin(spec: &AptReleaseSpec) -> Result<String, GeneratorError> {
     let origin = if spec.apt_origin.is_empty() {
         spec.package.clone()
     } else {
@@ -665,7 +687,7 @@ fn default_origin(spec: &ReleaseSpec) -> Result<String, GeneratorError> {
 
 /// The validated identity directory: explicit, or the source repository
 /// name by default.
-fn default_identity_dir(spec: &ReleaseSpec) -> Result<String, GeneratorError> {
+fn default_identity_dir(spec: &AptReleaseSpec) -> Result<String, GeneratorError> {
     let identity_dir = if spec.apt_identity_dir.is_empty() {
         spec.source_repository
             .split('/')
@@ -684,7 +706,7 @@ fn default_identity_dir(spec: &ReleaseSpec) -> Result<String, GeneratorError> {
 }
 
 /// The validated feed description: explicit, or derived from the package.
-fn default_description(spec: &ReleaseSpec) -> Result<String, GeneratorError> {
+fn default_description(spec: &AptReleaseSpec) -> Result<String, GeneratorError> {
     let description = if spec.description.is_empty() {
         format!("apt repository for {}", spec.package)
     } else {
@@ -3751,18 +3773,13 @@ mod tests {
         write_bytes(path, format!("{digest}  {}\n", path.display()).as_bytes());
     }
 
-    fn apt_spec() -> ReleaseSpec {
-        ReleaseSpec {
+    fn apt_spec() -> AptReleaseSpec {
+        AptReleaseSpec {
             kind: "apt".to_owned(),
             package: FIXTURE_PACKAGE.to_owned(),
-            packages: Vec::new(),
             binary: FIXTURE_BINARY.to_owned(),
-            targets: Vec::new(),
-            image: String::new(),
-            image_package: String::new(),
             source_repository: FIXTURE_SOURCE.to_owned(),
             consumer_repository: "example/feed".to_owned(),
-            artifact_path: String::new(),
             description: String::new(),
             manifest_schema: FIXTURE_SCHEMA.to_owned(),
             apt_arches: Vec::new(),
@@ -3774,21 +3791,6 @@ mod tests {
             apt_identity_dir: String::new(),
             apt_feed_url: "https://feed.example.test".to_owned(),
             retention: 0,
-            dockerfile: String::new(),
-            context: String::new(),
-            platforms: Vec::new(),
-            producer_workflow: String::new(),
-            producer_conclusion: String::new(),
-            modes: Vec::new(),
-            archive_members: Vec::new(),
-            archive_checksum: String::new(),
-            archive_retention_days: 0,
-            credentials: Vec::new(),
-            tag_pattern: String::new(),
-            registry: String::new(),
-            registry_username_secret: String::new(),
-            registry_password_secret: String::new(),
-            jobs: Vec::new(),
         }
     }
 
@@ -4224,7 +4226,7 @@ mod tests {
         assert_eq!(contract.signer, FIXTURE_FPR);
     }
 
-    type SpecMutation = Box<dyn Fn(&mut ReleaseSpec)>;
+    type SpecMutation = Box<dyn Fn(&mut AptReleaseSpec)>;
 
     #[test]
     fn contract_resolution_rejects_every_malformed_field() {
