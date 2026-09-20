@@ -66,6 +66,7 @@ pub struct LiveDependency {
     pub path: String,
     pub revision: String,
     pub resolved_path: Option<String>,
+    pub source_url: Option<String>,
     pub source_bytes_base64: Option<String>,
     pub source_raw_object_refs: Vec<String>,
     pub raw_object_refs: Vec<String>,
@@ -78,12 +79,48 @@ pub struct LiveSourceJob {
     pub raw_object_refs: Vec<String>,
 }
 
+/// Checkout proof is distinct from the provider's run/job `head_sha`.
+/// GitHub's API response binds the source revision, but does not attest what
+/// the runner actually checked out.  The collector therefore retains the API
+/// observation and raw refs while leaving `proof` absent until a separately
+/// captured, run/job/attempt-bound attestation is available.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveCheckoutObservation {
+    pub api_head_sha: String,
+    pub api_raw_object_refs: Vec<String>,
+    pub proof: Option<LiveCheckoutProof>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveCheckoutProof {
+    pub checkout_sha: String,
+    pub source_kind: String,
+    pub raw_object_refs: Vec<String>,
+}
+
+impl LiveCheckoutObservation {
+    fn api_head_only(api_head_sha: String, api_raw_object_refs: Vec<String>) -> Self {
+        Self {
+            api_head_sha,
+            api_raw_object_refs,
+            proof: None,
+        }
+    }
+
+    pub(crate) fn actual_checkout_sha(&self) -> Option<&str> {
+        self.proof.as_ref().map(|proof| proof.checkout_sha.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LiveWorkflow {
     pub path: String,
     pub revision: String,
     pub source_sha: String,
+    pub source_url: String,
     pub source_bytes_base64: String,
     pub source_raw_object_refs: Vec<String>,
     pub events: Vec<String>,
@@ -128,7 +165,7 @@ pub struct LiveJob {
     pub conclusion: Option<String>,
     pub event: String,
     pub source_sha: Option<String>,
-    pub actual_checkout_sha: Option<String>,
+    pub checkout: LiveCheckoutObservation,
     pub source_url: String,
     pub raw_object_refs: Vec<String>,
 }
@@ -156,7 +193,7 @@ pub struct LiveExecution {
     pub workflow_revision: String,
     pub event: String,
     pub source_sha: String,
-    pub actual_checkout_sha: Option<String>,
+    pub checkout: LiveCheckoutObservation,
     pub status: String,
     pub conclusion: Option<String>,
     pub source_url: String,
@@ -175,7 +212,7 @@ pub struct LiveCheck {
     pub job_id: Option<u64>,
     pub run_attempt: Option<u32>,
     pub source_sha: String,
-    pub actual_checkout_sha: Option<String>,
+    pub checkout: LiveCheckoutObservation,
     pub event: Option<String>,
     pub status: String,
     pub conclusion: Option<String>,
@@ -200,7 +237,7 @@ pub struct LiveWorkflowBinding {
     pub workflow_revision: String,
     pub event: String,
     pub source_sha: String,
-    pub actual_checkout_sha: Option<String>,
+    pub checkout: LiveCheckoutObservation,
     pub run_ids: Vec<u64>,
     pub raw_object_refs: Vec<String>,
 }
@@ -1089,6 +1126,7 @@ where
         )
         .await?;
         validate_workflow_content(&content, &manifest.repository, &path, source_sha)?;
+        let source_url = required_string(&content, &["url"])?;
         let revision = required_sha(&content, &["sha"])?;
         let metadata_source_text = decode_workflow_content(&content)?;
         let (source_text, source_raw_ids) = collect_raw_source(
@@ -1146,6 +1184,7 @@ where
             path,
             revision,
             source_sha: source_sha.to_owned(),
+            source_url,
             source_bytes_base64: BASE64.encode(source_text.as_bytes()),
             source_raw_object_refs: source_raw_ids,
             events,
@@ -1192,6 +1231,7 @@ where
     )
     .await?;
     validate_workflow_content(&content, &manifest.repository, path, source_sha)?;
+    let source_url = required_string(&content, &["url"])?;
     let revision = required_sha(&content, &["sha"])?;
     let metadata_source_text = decode_workflow_content(&content)?;
     let (source_text, source_raw_ids) = collect_raw_source(
@@ -1249,6 +1289,7 @@ where
         path: path.to_owned(),
         revision,
         source_sha: source_sha.to_owned(),
+        source_url,
         source_bytes_base64: BASE64.encode(source_text.as_bytes()),
         source_raw_object_refs: source_raw_ids.clone(),
         events: parse_workflow_events(&source_text)?,
@@ -1554,7 +1595,10 @@ where
                 workflow_revision: workflow.revision.clone(),
                 event,
                 source_sha: run_source_sha.clone(),
-                actual_checkout_sha: None,
+                checkout: LiveCheckoutObservation::api_head_only(
+                    run_source_sha.clone(),
+                    raw_ids.clone(),
+                ),
                 status: required_string(&attempt, &["status"])?,
                 conclusion: optional_string(&attempt, &["conclusion"]),
                 source_url,
@@ -1753,13 +1797,13 @@ fn workflow_bindings(executions: &[LiveExecution]) -> Vec<LiveWorkflowBinding> {
             workflow_revision: execution.workflow_revision.clone(),
             event: execution.event.clone(),
             source_sha: execution.source_sha.clone(),
-            actual_checkout_sha: execution.actual_checkout_sha.clone(),
+            checkout: execution.checkout.clone(),
             run_ids: Vec::new(),
             raw_object_refs: Vec::new(),
         });
         entry.run_ids.push(execution.run_id);
-        if entry.actual_checkout_sha.is_none() {
-            entry.actual_checkout_sha = execution.actual_checkout_sha.clone();
+        if entry.checkout.proof.is_none() && execution.checkout.proof.is_some() {
+            entry.checkout = execution.checkout.clone();
         }
         entry
             .raw_object_refs
@@ -1904,8 +1948,8 @@ fn parse_job(
         status: required_string(value, &["status"])?,
         conclusion: optional_string(value, &["conclusion"]),
         event: event.to_owned(),
-        source_sha: Some(job_source_sha),
-        actual_checkout_sha: None,
+        source_sha: Some(job_source_sha.clone()),
+        checkout: LiveCheckoutObservation::api_head_only(job_source_sha, raw_object_refs.clone()),
         source_url,
         raw_object_refs,
     })
@@ -2307,7 +2351,7 @@ fn parse_check(
         run_attempt: optional_u64(value, &["check_suite", "workflow_run", "run_attempt"])
             .map(|value| value as u32),
         source_sha: source_sha.to_owned(),
-        actual_checkout_sha: None,
+        checkout: LiveCheckoutObservation::api_head_only(source_sha.to_owned(), raw_ids.clone()),
         event: optional_string(value, &["check_suite", "workflow_run", "event"]),
         status: required_string(value, &["status"])?,
         conclusion: optional_string(value, &["conclusion"]),
@@ -2548,6 +2592,7 @@ where
             &resolved_path,
             &dependency.revision,
         )?;
+        let source_url = required_string(&source, &["url"])?;
         let metadata_source_text = decode_workflow_content(&source)?;
         let (source_text, source_raw_ids) = collect_raw_source(
             transport,
@@ -2578,6 +2623,7 @@ where
             );
         }
         dependency.resolved_path = Some(resolved_path);
+        dependency.source_url = Some(source_url);
         dependency.source_bytes_base64 = Some(BASE64.encode(source_text.as_bytes()));
         dependency.source_raw_object_refs = source_raw_ids;
         dependency.raw_object_refs = raw_ids;
@@ -2712,6 +2758,7 @@ fn parse_dependency(
         path,
         revision,
         resolved_path: None,
+        source_url: None,
         source_bytes_base64: None,
         source_raw_object_refs: Vec::new(),
         raw_object_refs: Vec::new(),
@@ -3063,6 +3110,7 @@ mod tests {
                     path: ".".to_owned(),
                     revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                     resolved_path: None,
+                    source_url: None,
                     source_bytes_base64: None,
                     source_raw_object_refs: Vec::new(),
                     raw_object_refs: Vec::new(),
