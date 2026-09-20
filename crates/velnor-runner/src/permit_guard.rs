@@ -105,6 +105,13 @@ pub fn apply_max_jobs(
 ) -> Result<(u32, bool), LedgerError> {
     let configured = ledger.max_jobs()?;
     match adopt_max_jobs(configured, explicit, slots) {
+        AdoptMaxJobs::Set(n) if configured.is_none() => {
+            // Two first daemons racing must not both write: the INSERT-if-unset
+            // is the atomic adopt. The loser reads the winner's N.
+            let adopted = ledger.set_max_jobs_if_unset(n)?;
+            let effective = ledger.max_jobs()?.unwrap_or(n);
+            Ok((effective, adopted))
+        }
         AdoptMaxJobs::Set(n) => {
             ledger.set_max_jobs(n)?;
             Ok((n, true))
