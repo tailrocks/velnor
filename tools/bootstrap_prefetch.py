@@ -311,7 +311,7 @@ def _validated_git_snapshot(
             relative = raw_path.decode("utf-8")
         except (ValueError, UnicodeDecodeError) as exc:
             _fail(f"malformed Git tree entry: {exc}")
-        relative = _safe_relative(relative, "Git tree path")
+        relative = _safe_relative(relative, "Git tree path", glob=True)
         if relative in entries:
             _fail(f"duplicate Git tree path: {relative}")
         entries[relative] = _TreeEntry(mode, kind, object_id)
