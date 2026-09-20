@@ -2134,7 +2134,7 @@ fn render_native_product_preview_publish_job(
           fi
           jq -e --arg tag "$tag" --arg commit "$COMMIT" --arg name "Preview $PRODUCT_VERSION" '.tag_name == $tag and .target_commitish == $commit and .name == $name and .prerelease == true' <<<"$release_json" >/dev/null || { echo '::error::provider preview release identity is not exact' >&2; exit 1; }
           tag_ref="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag")"
-          jq -e --arg commit "$COMMIT" '.object.sha == $commit' <<<"$tag_ref" >/dev/null || { echo '::error::preview release tag does not resolve to the source commit' >&2; exit 1; }
+          jq -e --arg commit "$COMMIT" '.object.type == "commit" and .object.sha == $commit' <<<"$tag_ref" >/dev/null || { echo '::error::preview release tag does not resolve to one source commit' >&2; exit 1; }
           release_id="$(jq -er '.id | numbers | tostring' <<<"$release_json")"
           [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || { echo '::error::provider release id is not a positive decimal number' >&2; exit 1; }
           upload_url="$(jq -er '.upload_url | strings' <<<"$release_json" | sed 's/{?name,label}//')"
@@ -2287,6 +2287,43 @@ fn render_native_product_preview_publish_job(
           printf '%s\n' "${expected_paths[@]}" | while IFS= read -r path; do basename "$path"; done | sort -u > expected-assets.txt
           actual_assets="$(gh api --paginate "$PROVIDER_ASSETS_URL" --jq '.[].name' | sort -u)"
           [ "$actual_assets" = "$(cat expected-assets.txt)" ] || { echo '::error::provider preview asset census differs from assembled product' >&2; exit 1; }
+      - name: Verify preview tag and assets immediately before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROVIDER_ASSETS_URL: ${{ steps.provider.outputs.assets_url }}
+          PROVIDER_DRAFT: ${{ steps.provider.outputs.draft }}
+          PROVIDER_RELEASE_ID: ${{ steps.provider.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          if [ "$PROVIDER_DRAFT" = true ]; then
+            # GitHub does not provide an atomic tag/release/asset transaction.
+            # This is the final admission read; the post-publication read below
+            # detects a provider-side race instead of claiming atomicity.
+            release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$PRODUCT_RELEASE_TAG")"
+            jq -e --arg id "$PROVIDER_RELEASE_ID" --arg tag "$PRODUCT_RELEASE_TAG" --arg commit "$COMMIT" --arg name "Preview $PRODUCT_VERSION" '
+              (.id | numbers | tostring) == $id and
+              .tag_name == $tag and .target_commitish == $commit and .name == $name and
+              .draft == true and .prerelease == true
+            ' <<<"$release_json" >/dev/null || { echo '::error::preview provider identity changed before publication' >&2; exit 1; }
+            tag_ref="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$PRODUCT_RELEASE_TAG")"
+            jq -e --arg commit "$COMMIT" '.object.type == "commit" and .object.sha == $commit' <<<"$tag_ref" >/dev/null || { echo '::error::preview tag moved before publication' >&2; exit 1; }
+            expected_paths=(SHA256SUMS release-manifest.json)
+            for subject in artifacts/*.deb; do expected_paths+=( "$subject" "${subject}.sha256" ); done
+            for subject in product-assets/*; do expected_paths+=( "$subject" ); done
+            assets_json="$(gh api --paginate "$PROVIDER_ASSETS_URL")"
+            expected_assets="$(for path in "${expected_paths[@]}"; do basename "$path"; done | sort)"
+            actual_assets="$(jq -r '.[].name' <<<"$assets_json" | sort)"
+            [ "$actual_assets" = "$expected_assets" ] || { echo '::error::preview asset census changed before publication' >&2; exit 1; }
+            for path in "${expected_paths[@]}"; do
+              name="$(basename "$path")"
+              id="$(jq -er --arg name "$name" '[.[] | select(.name == $name) | .id] | if length == 1 then .[0] else error("preview asset census is not unique") end' <<<"$assets_json")"
+              remote="$(mktemp)"
+              gh api "$PROVIDER_ASSETS_URL/$id" -H 'Accept: application/octet-stream' > "$remote"
+              [ "$(sha256sum "$path" | awk '{print $1}')" = "$(sha256sum "$remote" | awk '{print $1}')" ] || { echo "::error::preview asset bytes changed before publication: $name" >&2; exit 1; }
+              [ "$(wc -c <"$path" | tr -d '[:space:]')" = "$(wc -c <"$remote" | tr -d '[:space:]')" ] || { echo "::error::preview asset size changed before publication: $name" >&2; exit 1; }
+              rm -f -- "$remote"
+            done
+          fi
       - name: Publish immutable preview candidate
         env:
           GH_TOKEN: ${{ github.token }}
@@ -2301,24 +2338,33 @@ fn render_native_product_preview_publish_job(
         env:
           GH_TOKEN: ${{ github.token }}
           PROVIDER_ASSETS_URL: ${{ steps.provider.outputs.assets_url }}
+          PROVIDER_RELEASE_ID: ${{ steps.provider.outputs.release_id }}
         run: |
           set -euo pipefail
+          # The provider operations are not atomic. Re-read identity, tag and
+          # every remote asset after the draft flip; any mismatch is a race.
           published="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$PRODUCT_RELEASE_TAG")"
-          jq -e --arg tag "$PRODUCT_RELEASE_TAG" --arg commit "$COMMIT" --arg name "Preview $PRODUCT_VERSION" '.tag_name == $tag and .target_commitish == $commit and .name == $name and .draft == false and .prerelease == true' <<<"$published" >/dev/null
+          jq -e --arg id "$PROVIDER_RELEASE_ID" --arg tag "$PRODUCT_RELEASE_TAG" --arg commit "$COMMIT" --arg name "Preview $PRODUCT_VERSION" '
+            (.id | numbers | tostring) == $id and
+            .tag_name == $tag and .target_commitish == $commit and .name == $name and
+            .draft == false and .prerelease == true
+          ' <<<"$published" >/dev/null || { echo '::error::published preview provider identity changed' >&2; exit 1; }
+          tag_ref="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$PRODUCT_RELEASE_TAG")"
+          jq -e --arg commit "$COMMIT" '.object.type == "commit" and .object.sha == $commit' <<<"$tag_ref" >/dev/null || { echo '::error::published preview tag moved' >&2; exit 1; }
           expected_paths=(SHA256SUMS release-manifest.json)
           for subject in artifacts/*.deb; do expected_paths+=("$subject" "${subject}.sha256"); done
           for subject in product-assets/*; do expected_paths+=("$subject"); done
-          asset_id_for() {
-            local name="$1" assets_json
-            assets_json="$(gh api --paginate "$PROVIDER_ASSETS_URL")"
-            jq -r --arg name "$name" '[.[] | select(.name == $name) | .id] | if length == 1 then .[0] else error("published asset census is not unique") end' <<<"$assets_json"
-          }
+          assets_json="$(gh api --paginate "$PROVIDER_ASSETS_URL")"
+          expected_assets="$(for path in "${expected_paths[@]}"; do basename "$path"; done | sort)"
+          actual_assets="$(jq -r '.[].name' <<<"$assets_json" | sort)"
+          [ "$actual_assets" = "$expected_assets" ] || { echo '::error::published preview asset census differs' >&2; exit 1; }
           for path in "${expected_paths[@]}"; do
             name="$(basename "$path")"
-            id="$(asset_id_for "$name")"
+            id="$(jq -er --arg name "$name" '[.[] | select(.name == $name) | .id] | if length == 1 then .[0] else error("published asset census is not unique") end' <<<"$assets_json")"
             remote="$(mktemp)"
             gh api "$PROVIDER_ASSETS_URL/$id" -H 'Accept: application/octet-stream' > "$remote"
             [ "$(sha256sum "$path" | awk '{print $1}')" = "$(sha256sum "$remote" | awk '{print $1}')" ] || { echo "::error::published preview asset changed: $name" >&2; exit 1; }
+            [ "$(wc -c <"$path" | tr -d '[:space:]')" = "$(wc -c <"$remote" | tr -d '[:space:]')" ] || { echo "::error::published preview asset size changed: $name" >&2; exit 1; }
             rm -f -- "$remote"
           done
 "#
@@ -9707,6 +9753,22 @@ mod tests {
         );
         assert!(publish.contains("parent_manifest_id"), "{publish}");
         assert!(publish.contains("reconcile_asset"), "{publish}");
+        assert!(
+            publish.contains("Verify preview tag and assets immediately before publication")
+                && publish.contains("preview asset census changed before publication")
+                && publish.contains("preview asset size changed before publication"),
+            "preview publication must perform a final provider admission read: {publish}"
+        );
+        assert!(
+            publish.contains("published preview asset census differs")
+                && publish.contains("published preview asset size changed")
+                && publish.contains("published preview tag moved"),
+            "preview publication must re-read provider state after the flip: {publish}"
+        );
+        assert!(
+            publish.matches(".object.type == \"commit\"").count() >= 3,
+            "preview publication must bind initial, pre-flip, and post-flip tag reads to commits: {publish}"
+        );
         assert!(!publish.contains("gh release delete preview"), "{publish}");
         assert!(!publish.contains("gh release create preview"), "{publish}");
         let _ = fs::remove_dir_all(root);
