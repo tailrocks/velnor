@@ -1210,6 +1210,7 @@ async fn complete_recorded_in_flight_job_with_failure(
         None,
         infrastructure_failure_category,
         reason,
+        FailureRemediation::DaemonApi,
     )
     .await
     {
@@ -7945,6 +7946,7 @@ async fn handle_v2_message(
                 None,
                 Some("job_parse".to_string()),
                 &format!("{error:#}"),
+                FailureRemediation::DaemonApi,
             )
             .await?;
             return Err(error).context("parse acquired run-service job");
@@ -7964,6 +7966,7 @@ async fn handle_v2_message(
                 Some(&job),
                 Some("run_service_client".to_string()),
                 &format!("{error:#}"),
+                FailureRemediation::DaemonApi,
             )
             .await?;
             return Err(error).context("build run-service client from acquired job");
@@ -8102,6 +8105,7 @@ async fn handle_job_request(
                 Some(&job),
                 Some("execution_backend".to_string()),
                 &format!("{REASON}: {error}"),
+                FailureRemediation::DaemonApi,
             )
             .await;
             completion
@@ -8193,12 +8197,13 @@ async fn handle_job_request(
                     admission_rejection_reason(code),
                     admission_rejection_remediation(code),
                 ),
-                AdmissionPersistenceOutcome::DeadlineExceeded => {
-                    (DEADLINE_REASON.to_owned(), REJECTION_DAEMON_REMEDIATION)
-                }
+                AdmissionPersistenceOutcome::DeadlineExceeded => (
+                    DEADLINE_REASON.to_owned(),
+                    FailureRemediation::OperationalStore,
+                ),
                 _ => (
                     WORKER_FAILURE_REASON.to_owned(),
-                    REJECTION_DAEMON_REMEDIATION,
+                    FailureRemediation::OperationalStore,
                 ),
             };
             // No admission row exists on any of these failure paths. The
@@ -8208,7 +8213,7 @@ async fn handle_job_request(
             // a forensic line and never changes the run-service outcome.
             // Completion is the truthful run-service diagnostic and is
             // always attempted.
-            let completion = complete_acquired_job_failure_with_remediation(
+            let completion = complete_acquired_job_failure(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
                 Some(&job),
@@ -8224,13 +8229,13 @@ async fn handle_job_request(
         Some(telemetry_admission)
     } else {
         const REASON: &str = "operational store is unavailable; job failed closed before execution";
-        let completion = complete_acquired_job_failure_with_remediation(
+        let completion = complete_acquired_job_failure(
             &run_service_job,
             &AcquiredJobIdentity::from_job(&job),
             Some(&job),
             Some("operational_store".to_string()),
             REASON,
-            REJECTION_DAEMON_REMEDIATION,
+            FailureRemediation::OperationalStore,
         )
         .await;
         completion.context("failed to complete the job rejected for store unavailability")?;
@@ -8383,6 +8388,7 @@ async fn handle_job_request(
                 Some(&job),
                 Some("step_mapping".to_string()),
                 "cannot execute scripts because step mapping failed",
+                FailureRemediation::WorkflowPolicy,
             )
             .await?;
             clear_in_flight_job(config_dir)
@@ -8398,6 +8404,7 @@ async fn handle_job_request(
                 Some(&job),
                 Some("trust_policy".to_string()),
                 &format!("{error:#}"),
+                FailureRemediation::WorkflowPolicy,
             )
             .await?;
             clear_in_flight_job(config_dir)
@@ -8415,6 +8422,7 @@ async fn handle_job_request(
                 Some(&job),
                 Some("capability_validation".to_string()),
                 &format!("{error:#}"),
+                FailureRemediation::WorkflowPolicy,
             )
             .await?;
             clear_in_flight_job(config_dir)
@@ -8430,13 +8438,16 @@ async fn handle_job_request(
         .await
         {
             Ok(graph) => graph,
-            Err(error) => {
+            Err(failure) => {
+                let remediation = failure.remediation;
+                let error = failure.error;
                 complete_acquired_job_failure(
                     &run_service_job,
                     &AcquiredJobIdentity::from_job(&job),
                     Some(&job),
                     Some("action_admission".to_string()),
                     &format!("{error:#}"),
+                    remediation,
                 )
                 .await?;
                 clear_in_flight_job(config_dir)
@@ -8613,6 +8624,7 @@ async fn handle_job_request(
                         Some(&job),
                         payload.infrastructure_failure_category.clone(),
                         reason,
+                        FailureRemediation::DaemonApi,
                     )
                     .await;
                     renewal.abort();
@@ -8630,6 +8642,7 @@ async fn handle_job_request(
                         crate::protocol::TaskResult::Canceled,
                         Some("canceled".to_string()),
                         "job canceled while waiting for host disk capacity",
+                        FailureRemediation::DaemonApi,
                     )
                     .await;
                     renewal.abort();
@@ -8662,6 +8675,7 @@ async fn handle_job_request(
                         Some(&job),
                         payload.infrastructure_failure_category.clone(),
                         &reason,
+                        FailureRemediation::DaemonApi,
                     )
                     .await;
                     renewal.abort();
@@ -8684,6 +8698,7 @@ async fn handle_job_request(
                     Some(&job),
                     Some("storage_lease".to_string()),
                     &format!("{error:#}"),
+                    FailureRemediation::DaemonApi,
                 )
                 .await?;
                 clear_in_flight_job(config_dir)
@@ -8869,6 +8884,7 @@ async fn handle_job_request(
                     Some(&job),
                     Some("executor_panic".to_string()),
                     &format!("{join_error:#}"),
+                    FailureRemediation::DaemonApi,
                 )
                 .await;
                 renewal.abort();
@@ -8961,6 +8977,7 @@ async fn handle_job_request(
                         Some(&job),
                         infrastructure_failure_category,
                         &format!("{error:#}"),
+                        FailureRemediation::DaemonApi,
                     )
                     .await;
                     renewal.abort();
@@ -12887,6 +12904,35 @@ fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowS
     })
 }
 
+#[derive(Debug)]
+struct ActionAdmissionFailure {
+    remediation: FailureRemediation,
+    error: anyhow::Error,
+}
+
+impl ActionAdmissionFailure {
+    fn new(remediation: FailureRemediation, error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            remediation,
+            error: error.into(),
+        }
+    }
+
+    fn daemon_api(error: impl Into<anyhow::Error>) -> Self {
+        Self::new(FailureRemediation::DaemonApi, error)
+    }
+}
+
+fn action_admission_failure_remediation(
+    kind: crate::admission::AdmissionFailureKind,
+) -> FailureRemediation {
+    use crate::admission::AdmissionFailureKind as K;
+    match kind {
+        K::ApiTransport | K::ApiStatus | K::Internal => FailureRemediation::DaemonApi,
+        K::Policy | K::ManifestMissing | K::ManifestMalformed => FailureRemediation::WorkflowPolicy,
+    }
+}
+
 /// Complete the transitively-closed action admission graph before any side
 /// effect. Builds the read-only Contents-API metadata source from the job
 /// repository token and admits every root (local and remote), recursing nested
@@ -12901,7 +12947,7 @@ async fn admit_job_closure(
     context_data: &[(String, Value)],
     stored: &StoredRunnerConfig,
     telemetry_admission: Option<&crate::ops::JobAdmission>,
-) -> Result<crate::admission::AdmissionGraph> {
+) -> std::result::Result<crate::admission::AdmissionGraph, ActionAdmissionFailure> {
     let stage_started_unix_ms = unix_millis_now();
     let (permit, limiter_wait) = wait_for_action_admission_slot().await;
     let limiter_wait_ms = duration_ms(limiter_wait);
@@ -12931,14 +12977,19 @@ async fn admit_job_closure(
         stage_started_unix_ms,
     );
     match graph {
-        Ok(joined) => joined.context("action admission blocking worker failed")?,
-        Err(_elapsed) => bail!(
+        Ok(joined) => match joined {
+            Ok(result) => result,
+            Err(error) => Err(ActionAdmissionFailure::daemon_api(
+                anyhow::Error::from(error).context("action admission blocking worker failed"),
+            )),
+        },
+        Err(_elapsed) => Err(ActionAdmissionFailure::daemon_api(anyhow::anyhow!(
             "action admission read {}ms of action.yml metadata after a {limiter_wait_ms}ms local \
              wait and exhausted its {}s budget (stage=action_admission \
              wait_reason=github_contents_api)",
             duration_ms(fetches_started.elapsed()),
             ACTION_ADMISSION_TIMEOUT.as_secs()
-        ),
+        ))),
     }
 }
 
@@ -12946,19 +12997,37 @@ fn admit_job_closure_sync(
     job: &AgentJobRequestMessage,
     context_data: &[(String, Value)],
     stored: &StoredRunnerConfig,
-) -> Result<crate::admission::AdmissionGraph> {
+) -> std::result::Result<crate::admission::AdmissionGraph, ActionAdmissionFailure> {
     // The SystemVssConnection token authenticates Actions service endpoints and
     // does not carry repository Contents API scope; use only the repository
     // token and the runner-configured GitHub API scope.
-    let token = job_repository_access_token(job)
-        .context("action admission requires the job repository access token")?;
-    let scope = GitHubScope::parse(&stored.settings.github_url)
-        .context("parse configured GitHub scope for action admission")?;
-    validate_job_api_endpoint(context_data, &scope)?;
-    let source = crate::admission::ContentsApiMetadataSource::new(token, &scope)
-        .context("build read-only action metadata source")?;
-    let graph =
-        crate::admission::admit_job(job, context_data, &source).map_err(anyhow::Error::new)?;
+    let token = job_repository_access_token(job).ok_or_else(|| {
+        ActionAdmissionFailure::daemon_api(anyhow::anyhow!(
+            "action admission requires the job repository access token"
+        ))
+    })?;
+    let scope = GitHubScope::parse(&stored.settings.github_url).map_err(|error| {
+        ActionAdmissionFailure::daemon_api(
+            error.context("parse configured GitHub scope for action admission"),
+        )
+    })?;
+    validate_job_api_endpoint(context_data, &scope).map_err(ActionAdmissionFailure::daemon_api)?;
+    let source =
+        crate::admission::ContentsApiMetadataSource::new(token, &scope).map_err(|error| {
+            ActionAdmissionFailure::daemon_api(
+                error.context("build read-only action metadata source"),
+            )
+        })?;
+    let graph = crate::admission::admit_job(job, context_data, &source);
+    let graph = match graph {
+        Ok(graph) => graph,
+        Err(error) => {
+            return Err(ActionAdmissionFailure::new(
+                action_admission_failure_remediation(error.failure_kind()),
+                anyhow::Error::new(error),
+            ));
+        }
+    };
     println!(
         "Admitted action closure: {} node(s) from {} read-only metadata fetch(es).",
         graph.nodes.len(),
@@ -15097,6 +15166,7 @@ fn failed_acquired_job_completion(
     billing_owner_id: Option<String>,
     infrastructure_failure_category: Option<String>,
     reason: &str,
+    remediation: FailureRemediation,
 ) -> RunServiceCompleteJob {
     terminal_acquired_job_completion(
         identity,
@@ -15104,6 +15174,7 @@ fn failed_acquired_job_completion(
         TaskResult::Failed,
         infrastructure_failure_category,
         reason,
+        remediation,
     )
 }
 
@@ -15117,6 +15188,7 @@ fn pre_execution_registration_lost_completion(
         billing_owner_id,
         Some("runner_registration".to_string()),
         reason,
+        FailureRemediation::DaemonApi,
     )
 }
 
@@ -15132,6 +15204,7 @@ fn pre_execution_capacity_timeout_completion(
         billing_owner_id,
         Some("host_capacity".to_string()),
         &crate::capacity::host_capacity_timeout_reason(elapsed, timeout, last_error),
+        FailureRemediation::DaemonApi,
     )
 }
 
@@ -15141,24 +15214,7 @@ fn terminal_acquired_job_completion(
     conclusion: TaskResult,
     infrastructure_failure_category: Option<String>,
     reason: &str,
-) -> RunServiceCompleteJob {
-    terminal_acquired_job_completion_with_remediation(
-        identity,
-        billing_owner_id,
-        conclusion,
-        infrastructure_failure_category,
-        reason,
-        REJECTION_WORKFLOW_REMEDIATION,
-    )
-}
-
-fn terminal_acquired_job_completion_with_remediation(
-    identity: &AcquiredJobIdentity,
-    billing_owner_id: Option<String>,
-    conclusion: TaskResult,
-    infrastructure_failure_category: Option<String>,
-    reason: &str,
-    remediation: &str,
+    remediation: FailureRemediation,
 ) -> RunServiceCompleteJob {
     // GitHub renders jobs with empty step_results as zero-step failures with
     // no operator-visible reason. Always emit one synthetic failed step plus
@@ -15262,34 +15318,57 @@ fn recovered_terminal_completion(
 
 /// Remediation for a rejection the workflow controls: a rejected field, ref,
 /// or action, or a capability Velnor has not reviewed yet.
-const REJECTION_WORKFLOW_REMEDIATION: &str = "remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun";
-/// Remediation for a daemon-side rejection: the workflow was not at fault, so
-/// the fix is on the daemon, never in workflow fields.
-const REJECTION_DAEMON_REMEDIATION: &str = "remediation: daemon-side operational-store rejection; inspect the daemon forensic line (forensics.ops event=store-write-failed), check disk capacity, then restart/redeploy the daemon and rerun";
+const WORKFLOW_POLICY_REMEDIATION: &str = "remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun";
+/// Remediation for an operational-store rejection. The workflow was not at
+/// fault; the store rejected or could not persist the admission row.
+const OPERATIONAL_STORE_REMEDIATION: &str = "remediation: daemon-side operational-store rejection; inspect the daemon forensic line (forensics.ops event=store-write-failed), check disk capacity, then restart/redeploy the daemon and rerun";
+/// Remediation for runner, daemon, or GitHub/API failures. Do not ask the
+/// workflow author to change an unrelated field when a backend failed.
+const DAEMON_API_REMEDIATION: &str = "remediation: inspect the Velnor daemon and GitHub/API failure details, repair the runner configuration or service issue, then rerun";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureRemediation {
+    WorkflowPolicy,
+    OperationalStore,
+    DaemonApi,
+}
+
+impl FailureRemediation {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::WorkflowPolicy => WORKFLOW_POLICY_REMEDIATION,
+            Self::OperationalStore => OPERATIONAL_STORE_REMEDIATION,
+            Self::DaemonApi => DAEMON_API_REMEDIATION,
+        }
+    }
+}
 
 /// GitHub-facing reason for one admission check failure. The code is part of
 /// the reason so a rejected job names the check that failed it closed.
 fn admission_rejection_reason(code: &str) -> String {
-    format!(
-        "operational store rejected the sanitized admission row ({code}); job failed closed before execution"
-    )
+    let failure = if code == "store.admission.validate" {
+        "workflow job metadata failed sanitized admission validation"
+    } else {
+        "operational store rejected the sanitized admission row"
+    };
+    format!("{failure} ({code}); job failed closed before execution")
 }
 
 /// Remediation class for one admission check failure. Only
 /// `store.admission.validate` blames workflow input; every infra code — and
 /// any unknown future code — is a daemon action, never a workflow edit.
-fn admission_rejection_remediation(code: &str) -> &'static str {
+fn admission_rejection_remediation(code: &str) -> FailureRemediation {
     if code == "store.admission.validate" {
-        REJECTION_WORKFLOW_REMEDIATION
+        FailureRemediation::WorkflowPolicy
     } else {
-        REJECTION_DAEMON_REMEDIATION
+        FailureRemediation::OperationalStore
     }
 }
 
 fn rejection_log_lines_with_remediation(
     category: &str,
     reason: &str,
-    remediation: &str,
+    remediation: FailureRemediation,
 ) -> Vec<String> {
     let mut lines = vec![
         "##[error]Velnor rejected this job before workflow execution.".to_string(),
@@ -15302,7 +15381,7 @@ fn rejection_log_lines_with_remediation(
     }
     lines.extend([
         "effect: no declared workflow command was executed".to_string(),
-        remediation.to_string(),
+        remediation.message().to_string(),
     ]);
     lines
 }
@@ -15310,7 +15389,7 @@ fn rejection_log_lines_with_remediation(
 fn failed_acquired_job_step_log_with_remediation(
     category: &str,
     reason: &str,
-    remediation: &str,
+    remediation: FailureRemediation,
 ) -> StepLog {
     let now = unix_now_iso8601();
     StepLog {
@@ -15339,27 +15418,9 @@ async fn complete_acquired_job_failure(
     job: Option<&AgentJobRequestMessage>,
     infrastructure_failure_category: Option<String>,
     reason: &str,
+    remediation: FailureRemediation,
 ) -> Result<()> {
-    complete_acquired_job_failure_with_remediation(
-        run_service_job,
-        identity,
-        job,
-        infrastructure_failure_category,
-        reason,
-        REJECTION_WORKFLOW_REMEDIATION,
-    )
-    .await
-}
-
-async fn complete_acquired_job_failure_with_remediation(
-    run_service_job: &RunServiceJobContext,
-    identity: &AcquiredJobIdentity,
-    job: Option<&AgentJobRequestMessage>,
-    infrastructure_failure_category: Option<String>,
-    reason: &str,
-    remediation: &str,
-) -> Result<()> {
-    complete_acquired_job_outcome_with_remediation(
+    complete_acquired_job_outcome(
         run_service_job,
         identity,
         job,
@@ -15539,6 +15600,7 @@ async fn fail_closed_after_journal_acceptance_error(
         Some(job),
         Some("journal_acceptance".to_string()),
         &reason,
+        FailureRemediation::DaemonApi,
     )
     .await;
     if let Err(error) = &completion {
@@ -15593,6 +15655,7 @@ async fn fail_closed_after_in_flight_persist_error(
         Some(job),
         Some("in_flight_persist".to_string()),
         &reason,
+        FailureRemediation::DaemonApi,
     )
     .await;
     if let Err(error) = &completion {
@@ -15635,27 +15698,7 @@ async fn complete_acquired_job_outcome(
     conclusion: TaskResult,
     infrastructure_failure_category: Option<String>,
     reason: &str,
-) -> Result<()> {
-    complete_acquired_job_outcome_with_remediation(
-        run_service_job,
-        identity,
-        job,
-        conclusion,
-        infrastructure_failure_category,
-        reason,
-        REJECTION_WORKFLOW_REMEDIATION,
-    )
-    .await
-}
-
-async fn complete_acquired_job_outcome_with_remediation(
-    run_service_job: &RunServiceJobContext,
-    identity: &AcquiredJobIdentity,
-    job: Option<&AgentJobRequestMessage>,
-    conclusion: TaskResult,
-    infrastructure_failure_category: Option<String>,
-    reason: &str,
-    remediation: &str,
+    remediation: FailureRemediation,
 ) -> Result<()> {
     let masked_reason = job.map_or_else(
         || reason.to_string(),
@@ -15733,15 +15776,14 @@ async fn complete_acquired_job_outcome_with_remediation(
             );
         }
     }
-    let completion =
-        fail_closed_pre_execution_completion(terminal_acquired_job_completion_with_remediation(
-            identity,
-            run_service_job.billing_owner_id.clone(),
-            conclusion,
-            infrastructure_failure_category,
-            &masked_reason,
-            remediation,
-        ))?;
+    let completion = fail_closed_pre_execution_completion(terminal_acquired_job_completion(
+        identity,
+        run_service_job.billing_owner_id.clone(),
+        conclusion,
+        infrastructure_failure_category,
+        &masked_reason,
+        remediation,
+    ))?;
     establish_durable_completion_ownership(run_service_job, identity)
         .await
         .context("establish durable ownership before acquired-job completion")?;
@@ -21770,19 +21812,26 @@ jobs:
         fs::remove_dir_all(base).unwrap();
     }
 
-    fn assert_admission_rejection_renders(code: &str, expected_remediation: &str) {
+    fn assert_admission_rejection_renders(code: &str, expected_remediation: FailureRemediation) {
         assert_eq!(admission_rejection_remediation(code), expected_remediation);
         let reason = admission_rejection_reason(code);
         assert!(
             reason.contains(code),
             "the reason names the failing check: {reason}"
         );
+        if expected_remediation == FailureRemediation::WorkflowPolicy {
+            assert!(reason.contains("workflow job metadata"), "{reason}");
+        } else {
+            assert!(reason.contains("operational store"), "{reason}");
+        }
         let lines = rejection_log_lines_with_remediation(
             "operational_store",
             &reason,
             admission_rejection_remediation(code),
         );
-        assert!(lines.iter().any(|line| line == expected_remediation));
+        assert!(lines
+            .iter()
+            .any(|line| line == expected_remediation.message()));
         assert!(lines
             .iter()
             .any(|line| line.starts_with("reason:") && line.contains(code)));
@@ -21792,7 +21841,7 @@ jobs:
     fn admission_rejection_identity_renders_daemon_remediation() {
         assert_admission_rejection_renders(
             "store.admission.identity",
-            REJECTION_DAEMON_REMEDIATION,
+            FailureRemediation::OperationalStore,
         );
     }
 
@@ -21800,7 +21849,7 @@ jobs:
     fn admission_rejection_validate_renders_workflow_remediation() {
         assert_admission_rejection_renders(
             "store.admission.validate",
-            REJECTION_WORKFLOW_REMEDIATION,
+            FailureRemediation::WorkflowPolicy,
         );
     }
 
@@ -21808,7 +21857,7 @@ jobs:
     fn admission_rejection_instance_renders_daemon_remediation() {
         assert_admission_rejection_renders(
             "store.admission.instance",
-            REJECTION_DAEMON_REMEDIATION,
+            FailureRemediation::OperationalStore,
         );
     }
 
@@ -21816,34 +21865,57 @@ jobs:
     fn admission_rejection_transition_renders_daemon_remediation() {
         assert_admission_rejection_renders(
             "store.admission.transition",
-            REJECTION_DAEMON_REMEDIATION,
+            FailureRemediation::OperationalStore,
         );
     }
 
     #[test]
     fn admission_rejection_masks_renders_daemon_remediation() {
-        assert_admission_rejection_renders("store.masks", REJECTION_DAEMON_REMEDIATION);
+        assert_admission_rejection_renders("store.masks", FailureRemediation::OperationalStore);
     }
 
     #[test]
     fn admission_rejection_physical_budget_renders_daemon_remediation() {
         assert_admission_rejection_renders(
             "store.admission.physical-budget",
-            REJECTION_DAEMON_REMEDIATION,
+            FailureRemediation::OperationalStore,
         );
     }
 
     #[test]
     fn admission_rejection_persist_renders_daemon_remediation() {
-        assert_admission_rejection_renders("store.admission.persist", REJECTION_DAEMON_REMEDIATION);
+        assert_admission_rejection_renders(
+            "store.admission.persist",
+            FailureRemediation::OperationalStore,
+        );
     }
 
     #[test]
     fn admission_rejection_unknown_code_fails_closed_to_daemon_remediation() {
         assert_admission_rejection_renders(
             "store.admission.future-check",
-            REJECTION_DAEMON_REMEDIATION,
+            FailureRemediation::OperationalStore,
         );
+    }
+
+    #[test]
+    fn action_admission_maps_typed_failures_to_remediation() {
+        use crate::admission::AdmissionFailureKind as K;
+
+        for (kind, expected) in [
+            (K::ApiTransport, FailureRemediation::DaemonApi),
+            (K::ApiStatus, FailureRemediation::DaemonApi),
+            (K::ManifestMissing, FailureRemediation::WorkflowPolicy),
+            (K::ManifestMalformed, FailureRemediation::WorkflowPolicy),
+            (K::Policy, FailureRemediation::WorkflowPolicy),
+            (K::Internal, FailureRemediation::DaemonApi),
+        ] {
+            assert_eq!(
+                action_admission_failure_remediation(kind),
+                expected,
+                "failure kind {kind:?}"
+            );
+        }
     }
 
     #[test]
@@ -22538,6 +22610,7 @@ jobs:
             Some("billing-owner".into()),
             Some("executor_panic".into()),
             "join Docker job execution task: task panicked",
+            FailureRemediation::DaemonApi,
         );
 
         assert_eq!(completion.plan_id, "plan-1");
@@ -22558,7 +22631,7 @@ jobs:
         let rejection_log = failed_acquired_job_step_log_with_remediation(
             "executor_panic",
             "join Docker job execution task",
-            REJECTION_WORKFLOW_REMEDIATION,
+            FailureRemediation::DaemonApi,
         );
         assert_eq!(rejection_log.exit_code, 1);
         assert!(rejection_log
@@ -22573,6 +22646,14 @@ jobs:
             .lines
             .iter()
             .any(|line| line.starts_with("remediation:")));
+        assert!(rejection_log
+            .lines
+            .iter()
+            .any(|line| line == DAEMON_API_REMEDIATION));
+        assert!(!rejection_log
+            .lines
+            .iter()
+            .any(|line| line == WORKFLOW_POLICY_REMEDIATION));
         assert_eq!(
             completion.step_results[0].completed_log_lines,
             rejection_log.lines.len() as i64
@@ -22674,6 +22755,7 @@ jobs:
             None,
             Some("operational_store".to_owned()),
             "operational store admission worker failed; job failed closed before execution",
+            FailureRemediation::OperationalStore,
         );
         assert_eq!(completion.conclusion, TaskResult::Failed);
         assert_eq!(
@@ -22902,6 +22984,7 @@ jobs:
             None,
             Some("promotion_test".to_owned()),
             "durable promotion test",
+            FailureRemediation::DaemonApi,
         )
         .await
         .unwrap();
@@ -22988,6 +23071,7 @@ jobs:
             None,
             Some("recovery_test".to_owned()),
             "ownership proof unavailable",
+            FailureRemediation::DaemonApi,
         )
         .await
         .unwrap_err();
@@ -23447,7 +23531,7 @@ jobs:
                 timeout,
                 "capacity backpressure: free=117548818432 required=134432476364",
             ),
-            REJECTION_WORKFLOW_REMEDIATION,
+            FailureRemediation::DaemonApi,
         );
         assert_eq!(rejection_log.exit_code, 1);
         assert!(rejection_log
@@ -23467,6 +23551,7 @@ jobs:
             None,
             Some("host_capacity".into()),
             "capacity wait timed out",
+            FailureRemediation::DaemonApi,
         );
         success.conclusion = TaskResult::Succeeded;
         let success_error = fail_closed_pre_execution_completion(success)
@@ -23481,6 +23566,7 @@ jobs:
             None,
             Some("host_capacity".into()),
             "capacity wait timed out",
+            FailureRemediation::DaemonApi,
         );
         empty.step_results.clear();
         let empty_error = fail_closed_pre_execution_completion(empty)
@@ -23520,6 +23606,7 @@ jobs:
             TaskResult::Canceled,
             Some("canceled".into()),
             "job canceled while waiting for host disk capacity",
+            FailureRemediation::DaemonApi,
         ))
         .unwrap();
         assert_eq!(completion.conclusion, TaskResult::Canceled);

@@ -30,6 +30,26 @@ Runner jobs remain the longest observed component. These differing revisions,
 uncontrolled hardware/contention and small samples support no speedup or
 plateau claim. Substantive optimization iteration credit remains zero.
 
+## Current integration checkpoint
+
+Commit `7864f9d` retains unowned rolling tags and passes the independently
+replayed regression tests. Its exact-head policy run `35515212764` failed:
+candidate acquisition waited 900 seconds, and no same-head PR run existed.
+Policy, actionlint and full coverage did not execute at that head. Preserve
+this failed attempt; the preceding successful runs cannot substitute for it.
+
+Git transport reports main `386a5b63`, while the sampled PR REST response still
+reported base `9e5c0eb2` and a merge conflict. Integration includes the newer
+main history, its release-leg seed/pin-fetch fix and typed runner failures.
+The runtime pin advances to upstream `38dbf85e` only with independently checked
+product identity and provenance. This is compatibility repair, not a speedup.
+
+Current ownership: parent integrates upstream and the Parallax consumer;
+Jackin agent repairs telemetry after independent malformed-phase probes;
+Velnor agent reviews Parallax while its typed Rust/Mise patch awaits separate
+review; Parallax agent verifies the new upstream runtime product. Telemetry
+and Rust/Mise candidates remain isolated until their findings are resolved.
+
 ## Completion contract
 
 - Generator/runtime fixes, regenerated Velnor, Jackin and Parallax consumers.
