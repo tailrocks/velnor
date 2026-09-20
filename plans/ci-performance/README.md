@@ -28,14 +28,14 @@ Only parent performs shared branch/index/commit operations.
 | Work | Owner | Inputs | Output / acceptance | State |
 | --- | --- | --- | --- | --- |
 | Velnor inventory | `/root/velnor_inventory` | current source, PR diffs, historical jobs | source/runtime distinctions, measured bottlenecks, compatible fixes | bounded inventory delivered; 30-day metadata collected; obligation mapping and detailed job evidence ongoing |
-| Jackin inventory | `/root/jackin_inventory` | current source, PR diffs, desktop/Swift runs | product graph, tool boundaries, duplicate-work proof | bounded inventory delivered; desktop tool experiment queued |
+| Jackin inventory | `/root/jackin_inventory` | current source, PR diffs, desktop/Swift runs | product graph, tool boundaries, duplicate-work proof | tool-boundary patch written; independent actual-Mise validation ongoing |
 | Parallax inventory | `/root/parallax_inventory` | current source, PR diffs, failed/scheduled runs | actual language graph, prerequisites, scheduler outcomes | bounded inventory delivered; 30-day metadata collected; obligation mapping and detailed job evidence ongoing |
 | Timing collection/tooling | `/root/parallax_inventory` (reused) | raw paginated run/job/attempt data | reproducible JSONL/CSV and ranked cohorts | committed and pushed f8ac97b1; independent review, 16 timing tests, fmt and clippy pass |
 | Typed validation stages | `/root/velnor_inventory` (reused) | scan and opaque runtime command contract | exact scoped commands, visible stages, regression tests | inferred shell-classifier draft rejected and stashed; typed constructor design queued |
-| Compiler/cache/tools | `/root/velnor_inventory` (reused) | inventory, PR #967, actual quota failure | alternatives with compatibility and trust constraints | PR #967 actual runtime/transport independently reviewed; source integration and tests underway |
+| Compiler/cache/tools | `/root/velnor_inventory` (reused) | inventory, PR #967, actual quota failure | alternatives with compatibility and trust constraints | PR #967 integrated and pushed f0fb1c01; cold CI observed; warm comparison pending |
 | Swift/Docker/artifacts | next available agent | product inventory + primary sources | explicit producer/consumer contracts and experiments | queued |
 | Relevance/scheduling | next available agent | events, gates, transitive inputs | scenario matrix and fail-closed checks | queued |
-| Independent review | `/root/jackin_inventory` | hypotheses, diff, raw measurements | recorded findings before acceptance | collector PASS; consumer pin reviews delivered; Parallax source2 HOLD; gate and policy findings under investigation |
+| Independent review | `/root/jackin_inventory` | hypotheses, diff, raw measurements | recorded findings before acceptance | collector PASS; consumer pin reviews delivered; Parallax source2 HOLD; gate replay PASS with admission gap; policy identity patch under independent review |
 | Integration/final checks | parent | reviewed units | small signed commits, regular pushes, exact-SHA CI | active |
 
 Dependency order: inventories → ranked baseline → independently challenged
@@ -96,3 +96,16 @@ coverage, independent reviewer, verdict, resulting commit and next question.
 Documentation, unchanged reruns, and untested suggestions do not count.
 
 Substantive completed iteration count: **0**. Plateau counts: **0**.
+
+## Current integration checkpoint
+
+Main advanced to `89f82dd8b287f46a3cf4c0920f341f6ca6c736db` (PR #969).
+Merge `266dd76e` retains campaign gate/transport fixes and integrates per-member
+cache routing. Combined generator passed 1,782 library tests, all-target Clippy,
+actionlint and generation check. Exact pushed CI remains pending.
+
+The f0fb1c01 PR run `35484350008` failed documentation lint; its Rust and Docker
+jobs passed. Documentation repaired in `724ee71`. Separate policy run
+`35484349032` timed out after 15 minutes awaiting its candidate artifact. This
+is distinct from the earlier candidate/pin closure failure. Both remain evidence;
+neither failed run is a successful speed baseline.

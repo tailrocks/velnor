@@ -18,6 +18,11 @@ cross-repository timing collection completes.
 | Unknown-file fallback | PR #968 adds Markdown plus evidence JSON; all 17 units selected | Pure Markdown control vs unmatched JSON with recorded plan reasons | Parent diagnosis; collector evidence |
 | Scan metadata churn | `--check` says workflow bytes match but scan fingerprint differs after campaign additions | Compare unchanged-main archive and single input additions before narrowing identity | Queue; do not weaken drift checks |
 | Generic scan exclusions | `s2/scan/file_walk.rs` hardcodes `config/fleet/velnor-host.env` as owned output | Derive exclusions from actual output ownership, fixture generic roots | Queue; crate genericity rule |
+| Primitive watch regression | Parallax source-2 migration drops Bun `ui/` prefixes and adds unrelated Cargo inputs to Maple | Compare scanner-owned closure with emitted primitive watches; root/nested fixtures and negative plans | Velnor agent after gate validation; migration remains uncommitted |
+| Candidate versus pinned renderer | f8 policy downloaded candidate then rejected its closure as the declared pin | Separate verified renderer identities; reject tampering before execution | Parallax agent implementing policy tests |
+| Dirty generator identity | Local source build reports HEAD closure despite dirty generator source | Reproduce content identity and Cargo rerun behavior; preserve local development | Velnor agent queued |
+| Per-member cache selection | New Velnor PR #969 head 2445c647 fixes collapsed reusable MBX/sccache selection | Independently review actual source, execute mixed-member scenarios, integrate without duplicate mechanism | Parent inspected diff; independent review queued |
+| Parallax release obligations | PR #111 removes references to deleted preview/release/SDK workflows and replaces ten assertions with rehearsal checks | Map obligations across clean-room regeneration 8419de70 and current product declarations before accepting changed coverage | Independent review queued; do not blindly cherry-pick test removal |
 
 ## Relevance diagnostic under way
 

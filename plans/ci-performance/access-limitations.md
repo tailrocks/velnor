@@ -20,3 +20,6 @@ Velnor default branch advanced during work. SSH `ls-remote` and fetch proved
 response still showed e94. A refreshed request agreed with SSH. Refresh heads
 at integration/acceptance and record retrieval times; do not assume an earlier
 API response is a current revision. Main is now integrated without force-push.
+
+CLI authentication rechecked 2026-09-20 02:57 UTC: same invalid account token;
+`gh auth status` exited 1. No second permission question or token request sent.

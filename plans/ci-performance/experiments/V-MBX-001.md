@@ -182,3 +182,25 @@ controlled cohorts, cold runner MBX evidence, one failed runner test, and no
 candidate product handoff. Next work: independently review the bootstrap API,
 implement the pre-plan product producer, then run real PR and policy paths with
 exact artifact/run verification.
+
+## Integrated candidate, first CI observation
+
+Source f0fb1c012adc2b7e604eaab332785eb5bf780caa, run
+[35484350008](https://github.com/tailrocks/velnor/actions/runs/35484350008).
+The completed bench job
+[106008631268](https://github.com/tailrocks/velnor/actions/runs/35484350008/job/106008631268)
+ran action 867fc530 and MBX 1.12.0; raw duration 368 seconds. It explicitly
+reported no MBX cache found. Rustup, mise, mold and Cargo archives restored,
+so this is MBX-cold, not an entirely cold runner. Test compilation reported
+3m01s and Clippy 2m15s. Compiler statistics remain poor: test 3 hits / 0 misses /
+1840 not looked up / 131 bypasses; Clippy 3 / 3 / 1775 / 131. Both reported
+zero downloaded and uploaded bytes. Bypass reasons were native C/C++-related;
+these counters do not yet explain every Rust invocation.
+
+The source-owned telemetry incorrectly classified MBX as `prefix` despite the
+explicit miss. This is a measurement defect, not a warm-cache observation.
+[Timestamped excerpt](../observations/velnor-35484350008-106008631268-cache-excerpt.log)
+retains the conflict. Fix matched-key/outcome classification before trusting
+summaries. No speedup, warm reuse, or quota plateau is established by this job.
+The overall run still had active jobs and a documentation lint failure when
+this observation was recorded.

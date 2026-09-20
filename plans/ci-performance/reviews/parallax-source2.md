@@ -50,11 +50,12 @@ Dockerfile/context, `.dockerignore`, shared-script, rename/delete, provider,
 manual, and incomplete-diff cases remain unvalidated. Actionlint or a local
 render check cannot establish those selection and gate semantics.
 
-The main workflow's `ci-required` also receives `policy` in `needs` but does
-not explicitly reject a failed policy result. Unit jobs normally inherit that
-failure, but an empty manual affected plan can leave all unit jobs skipped and
-the gate green. The policy status must either be an independently required
-check by contract or be asserted by the stable gate.
+The earlier review raised a possible missing policy verdict. Reinspection of
+the actual `ci-main.yml` source shows that `ci-required` already reads
+`needs.policy.result` and exits unless it is `success`; no policy false-green
+was reproduced. The separate `ci-pr.yml` path intentionally has no policy job.
+This item is withdrawn as a defect; real manual and empty-plan runs still need
+to exercise the existing contract.
 
 ## Evidence inspected
 

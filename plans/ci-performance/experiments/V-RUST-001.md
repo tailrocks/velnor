@@ -1,6 +1,9 @@
 # V-RUST-001: typed visible validation stages
 
-Status: implementation held pending runtime bootstrap, consumer schema migration, and reviewer acceptance; fixture migration is green.
+Status: initial inferred-command implementation rejected and stashed. No stage
+implementation is committed. Constructor-driven replacement and runtime
+bootstrap remain pending; the historical fixture result below does not imply
+acceptance.
 
 Hypothesis: the active schema-2 generator serializes Rust validation as opaque `pr_commands`/`full_commands`, so generated Actions exposes one `Run unit checks` step and cannot report format, lint, and test failures independently. A typed stage contract can expose the same exact commands without dropping required coverage or changing profile/feature flags.
 
@@ -59,3 +62,28 @@ latest selection alone is insufficient.
 
 Fixture migration result: all runtime fixtures now use typed stage tables;
 `cargo test -p velnor-workflow --lib s2::runtime::` passed 60 tests.
+
+## Bootstrap architecture constraints after integration review
+
+Keep generator binary identity separate from the consumer execution receipt.
+The binary contract binds actual build source/closure, profile/features,
+platform, producer repository/workflow/run/attempt, artifact identity and digest.
+The receipt binds the consuming source/configuration/schema and required
+validation. Putting a consumer project-TOML digest into the binary cache key
+creates a circular self-pin and unnecessary recompilation on regeneration.
+A closure-equivalent binary built at an earlier source commit remains explicitly
+identified by its actual build commit; never forge its reported revision.
+
+Replace the late candidate producer with a pre-plan producer/consumer contract;
+do not leave competing legacy producer paths indefinitely. Same-run bootstrap
+consumers can depend on the successful build job. Cross-workflow consumers must
+verify the exact producer identity and required successful validation through
+GitHub, not trust a manifest that claims future workflow success. Keep privileged
+release consumption separate from untrusted CI artifacts. The current published
+runtime-products workflow only publishes from main; branch dispatch cannot be
+assumed to publish a development candidate, even after CLI auth is restored.
+
+Local dirty builds currently advertise the committed HEAD closure. That defect
+needs its own source-identity repair before local products can serve as immutable
+evidence. Clean committed f0fb1c01 was rebuilt separately and reports its exact
+revision/closure; no dirty binary was published.
