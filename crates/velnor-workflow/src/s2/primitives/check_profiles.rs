@@ -30,7 +30,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use super::{Args, Primitive, RenderCtx, Rendered};
-use crate::s2::provider::{runs_on_for, ProviderId};
+use crate::s2::provider::{provider_caps, runs_on_for, Platform, ProviderId};
 use crate::s2::{
     runs_on_labels_yaml, yaml_scalar, ActionPin, CheckProfileSpec, GeneratorError, ProjectConfig,
     GENERATED_HEADER,
@@ -468,22 +468,25 @@ fn render_profile_job(
     Ok(())
 }
 
-/// The `runs-on` for one profile: the hosted selector, the fixed
-/// GitHub-owned Apple image, or the repository's own Velnor selector.
+/// The `runs-on` for one profile: the fixed hosted macOS image or the
+/// selected provider's configured routing labels.
 fn profile_runs_on(
     config: &ProjectConfig,
     profile: &CheckProfileSpec,
 ) -> Result<String, GeneratorError> {
-    match profile.runner.as_str() {
-        "github" => runs_on_for(&config.selectors, ProviderId::GithubHosted)
-            .map(runs_on_labels_yaml),
-        "macos" => Ok(yaml_scalar(crate::s2::MACOS_HOSTED_RUNS_ON)),
-        "velnor" => runs_on_for(&config.selectors, ProviderId::Velnor).map(runs_on_labels_yaml),
-        runner => Err(GeneratorError::usage(format!(
-            "check profile `{}` runs on `{runner}`, which names no profile runner; use github, macos, or velnor",
-            profile.id
-        ))),
+    if !provider_caps(profile.provider)
+        .platforms
+        .contains(&profile.platform)
+    {
+        return Err(GeneratorError::usage(format!(
+            "check profile `{}` provider `{}` does not support platform `{}`",
+            profile.id, profile.provider, profile.platform
+        )));
     }
+    if profile.provider == ProviderId::GithubHosted && profile.platform == Platform::MacosArm64 {
+        return Ok(yaml_scalar(crate::s2::MACOS_HOSTED_RUNS_ON));
+    }
+    runs_on_for(&config.selectors, profile.provider).map(runs_on_labels_yaml)
 }
 
 fn render_checkout_step(output: &mut String) {
@@ -494,14 +497,13 @@ fn render_checkout_step(output: &mut String) {
     );
 }
 
-/// Tool provisioning per profile runner. Hosted runners install through the
-/// pinned `mise` action, which the Velnor fleet cannot admit, so Velnor
-/// installs with the preinstalled `mise` binary instead. Every profile runs
-/// named tasks, so hosted runners always set up even when no tool needs
-/// installing.
+/// Tool provisioning per profile provider. GitHub-hosted runners install
+/// through the pinned `mise` action; local providers use their preinstalled
+/// `mise` binary. Every profile runs named tasks, so hosted runners always set
+/// up even when no tool needs installing.
 fn render_tool_steps(output: &mut String, config: &ProjectConfig, profile: &CheckProfileSpec) {
     let mise = ActionPin::Mise.reference();
-    if profile.runner == "velnor" {
+    if profile.provider.is_local() {
         if !profile.tools.is_empty() {
             let _ = writeln!(
                 output,
@@ -570,7 +572,8 @@ mod tests {
             id: id.to_owned(),
             name: format!("{id} check"),
             schedule: "23 2 * * *".to_owned(),
-            runner: "github".to_owned(),
+            provider: ProviderId::GithubHosted,
+            platform: Platform::LinuxX64,
             tools: Vec::new(),
             tasks: vec![format!("check-{id}")],
             needs: Vec::new(),
@@ -773,10 +776,10 @@ mod tests {
         let mut hosted = profile("hosted");
         hosted.tools = vec!["ripgrep".to_owned(), "cargo:example-tool".to_owned()];
         let mut fleet = profile("fleet");
-        fleet.runner = "velnor".to_owned();
+        fleet.provider = ProviderId::Velnor;
         fleet.tools = vec!["ripgrep".to_owned()];
         let mut bare = profile("bare");
-        bare.runner = "velnor".to_owned();
+        bare.provider = ProviderId::Velnor;
         let config = profile_config(vec![hosted, fleet, bare]);
         let map = args_for("");
         let selected = must(
@@ -887,7 +890,7 @@ mod tests {
     #[test]
     fn velnor_profile_needs_a_selector_and_renders_it() {
         let mut fleet = profile("fleet");
-        fleet.runner = "velnor".to_owned();
+        fleet.provider = ProviderId::Velnor;
         let config = profile_config(vec![fleet.clone()]);
         let runs_on = must(
             profile_runs_on(&config, &fleet),
@@ -905,7 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_selection_covers_hosted_runners_and_refuses_unknown() {
+    fn typed_provider_platform_selection_routes_or_refuses_unsupported_pairs() {
         let config = profile_config(Vec::new());
         let hosted = profile("hosted");
         assert_eq!(
@@ -916,18 +919,37 @@ mod tests {
             "ubuntu-24.04"
         );
         let mut apple = profile("apple");
-        apple.runner = "macos".to_owned();
+        apple.platform = Platform::MacosArm64;
         assert_eq!(
             must(profile_runs_on(&config, &apple), "render the Apple runner"),
             "macos-26"
         );
-        let mut unknown = profile("unknown");
-        unknown.runner = "planetary".to_owned();
-        let error = must_fail(
-            profile_runs_on(&config, &unknown),
-            "an unknown runner must fail",
+        let mut local = profile("local");
+        local.provider = ProviderId::GithubSelfHosted;
+        let mut config_with_local = config;
+        config_with_local.selectors.insert(
+            ProviderId::GithubSelfHosted,
+            crate::s2::provider::ProviderSelector {
+                runs_on: vec!["self-hosted".to_owned(), "linux-x64".to_owned()],
+            },
         );
-        assert!(error.to_string().contains("planetary"), "{error}");
+        assert_eq!(
+            must(
+                profile_runs_on(&config_with_local, &local),
+                "render the self-hosted provider selector"
+            ),
+            "[self-hosted, linux-x64]"
+        );
+
+        let mut unsupported = profile("unsupported");
+        unsupported.provider = ProviderId::GithubSelfHosted;
+        unsupported.platform = Platform::MacosArm64;
+        let error = must_fail(
+            profile_runs_on(&config_with_local, &unsupported),
+            "an unsupported provider-platform pair must fail",
+        );
+        assert!(error.to_string().contains("github-self-hosted"), "{error}");
+        assert!(error.to_string().contains("macos-arm64"), "{error}");
     }
 
     #[test]

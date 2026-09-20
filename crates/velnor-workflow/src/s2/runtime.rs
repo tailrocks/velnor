@@ -11,8 +11,8 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::path::{Component, Path, PathBuf};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -265,8 +265,7 @@ impl Scope {
 }
 
 /// `velnor-workflow version [--json]`: the crate version and the source
-/// revision stamped at build time (the same value `--revision` prints), so a
-/// candidate binary can prove which commit it was built from.
+/// revision stamped at build time (the same value `--revision` prints).
 fn print_version(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let json = match arguments {
         [] => false,
@@ -302,27 +301,19 @@ fn print_version(arguments: &[OsString]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
-/// `velnor-workflow closure --rev SHA [--profile release|debug] [--repo PATH] [--candidate]`:
+/// `velnor-workflow closure --rev SHA [--profile release|debug] [--repo PATH]`:
 /// print the source-closure digest of `SHA` in the repository at `--repo`
 /// (the current directory by default). CI jobs use it to name the product
 /// they need; policy resolves the same digest when it verifies.
-/// `--candidate` names the unit job's own debug build (default features); it
-/// cannot combine with `--profile`.
 fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
-    let (candidate, rest): (Vec<&OsString>, Vec<&OsString>) =
-        arguments.iter().partition(|argument| {
-            argument
-                .to_str()
-                .is_some_and(|value| value == "--candidate")
-        });
-    if candidate.len() > 1 {
-        return Err(GeneratorError::usage(
-            "duplicate option: --candidate".to_owned(),
-        ));
-    }
-    let candidate = !candidate.is_empty();
-    let rest: Vec<OsString> = rest.into_iter().cloned().collect();
-    let options = parse_options(&rest, &["rev", "profile", "repo"])?;
+    print_closure_with_safe_root(arguments, None)
+}
+
+fn print_closure_with_safe_root(
+    arguments: &[OsString],
+    captured_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["rev", "profile", "repo"])?;
     let rev = options
         .get("rev")
         .ok_or_else(|| GeneratorError::usage("closure requires --rev SHA".to_owned()))?;
@@ -330,11 +321,6 @@ fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
         return Err(GeneratorError::usage(format!(
             "closure --rev must be a full 40-character commit SHA, got {rev:?}"
         )));
-    }
-    if candidate && options.contains_key("profile") {
-        return Err(GeneratorError::usage(
-            "closure --candidate cannot combine with --profile".to_owned(),
-        ));
     }
     let profile = options
         .get("profile")
@@ -347,42 +333,117 @@ fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
             "closure --profile must be release or debug, got {profile:?}"
         )));
     }
-    let repo = match options.get("repo") {
-        Some(path) => PathBuf::from(path.as_str()),
-        None => env::current_dir()
-            .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?,
-    };
-    let digest = if candidate {
-        crate::s2::closure::candidate_closure_of_tree(&repo, rev)?
+    let digest = if let Some(repo) = options.get("repo") {
+        let root = super::safe_fs::SafeRoot::open(Path::new(repo))?;
+        closure_digest_with_safe_root(&root, rev, profile)?
+    } else if let Some(root) = captured_root {
+        closure_digest_with_safe_root(root, rev, profile)?
     } else {
-        crate::s2::closure::closure_of_tree(&repo, rev, crate::s2::closure::CI_FEATURES, profile)?
+        // `.` is resolved against the process's open CWD. Avoid converting
+        // it to a pathname that could later be replaced before opening.
+        let root = super::safe_fs::SafeRoot::open(Path::new("."))?;
+        closure_digest_with_safe_root(&root, rev, profile)?
     };
     println!("{digest}");
     Ok(())
 }
 
+fn closure_digest_with_safe_root(
+    root: &super::safe_fs::SafeRoot,
+    rev: &str,
+    profile: &str,
+) -> Result<String, GeneratorError> {
+    root.validate_root_binding()?;
+    let digest = crate::s2::closure::closure_of_tree_with_safe_root(
+        root,
+        rev,
+        crate::s2::closure::CI_FEATURES,
+        profile,
+    );
+    root.validate_root_binding()?;
+    digest
+}
+
 /// Dispatch the binary-only subcommands. `false` means the arguments belong
 /// to the workflow generator CLI proper.
+pub(crate) fn run_policy_with_safe_root(
+    arguments: &[OsString],
+    safe_root: super::safe_fs::SafeRoot,
+) -> Result<(), GeneratorError> {
+    crate::s2::policy::run_cli_with_safe_root(arguments, Some(safe_root))
+}
+
+/// Run the legacy CLI's closure command through a captured repository root.
+/// The legacy parser is retained, but its Git read must not reopen `--repo`
+/// after route selection.
+pub(crate) fn run_closure_safely(arguments: &[OsString]) -> Result<(), crate::GeneratorError> {
+    print_closure_with_safe_root(arguments, None)
+        .map_err(|error| crate::GeneratorError::usage(error.to_string()))
+}
+
+/// Dispatch a schema-2 runtime command with the directory handle captured by
+/// schema probing. Keep it alive and verify its displayed binding at both
+/// sides of command processing.
+pub(crate) fn run_with_safe_root(
+    arguments: &[OsString],
+    safe_root: super::safe_fs::SafeRoot,
+) -> Result<(), GeneratorError> {
+    safe_root.validate_root_binding()?;
+    // Dispatch already parsed this root's schema to select S2. Re-check the
+    // typed config through the captured handle so a config removed between
+    // selection and command processing cannot enter the runtime.
+    crate::s2::config::require_with_safe_root(&safe_root)?;
+    let result = try_run_with_safe_root(arguments, Some(&safe_root));
+    // Check even when command processing failed: an observed root swap should
+    // not be hidden by an earlier read or subprocess error.
+    safe_root.validate_root_binding()?;
+    if !result? {
+        return Err(GeneratorError::usage(
+            "schema-2 runtime dispatch did not recognize the command",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
+    try_run_with_safe_root(arguments, None)
+}
+
+fn try_run_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<bool, GeneratorError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Ok(false);
     };
     match command {
         "plan" => {
             let options = parse_options(&arguments[1..], &["config"])?;
-            plan(&resolve_config_path(options.get("config")))?;
+            let config = resolve_config_path(options.get("config"));
+            if let Some(root) = safe_root {
+                plan_with_working_root(WorkingRoot::Safe(root), &config)?;
+            } else {
+                plan(&config)?;
+            }
             Ok(true)
         }
         "run" => {
             let options = parse_options(&arguments[1..], &["config", "scope", "unit"])?;
-            let root = env::current_dir()
+            let path_root = safe_root
+                .is_none()
+                .then(env::current_dir)
+                .transpose()
                 .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+            let root = safe_root.map_or_else(
+                || WorkingRoot::Path(path_root.as_deref().expect("path root was resolved")),
+                WorkingRoot::Safe,
+            );
             let config = resolve_config_path(options.get("config"));
             let scope = options
                 .get("scope")
                 .map_or(Ok(Scope::Full), |value| Scope::parse(value))?;
-            run_units(
-                &root,
+            run_units_with_working_root(
+                root,
                 &config,
                 scope,
                 options.get("unit").map(String::as_str),
@@ -391,9 +452,16 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
         }
         "test-crates" => {
             let options = parse_options(&arguments[1..], &["config"])?;
-            let root = env::current_dir()
+            let path_root = safe_root
+                .is_none()
+                .then(env::current_dir)
+                .transpose()
                 .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
-            test_crates(&root, &resolve_config_path(options.get("config")), None)?;
+            let root = safe_root.map_or_else(
+                || WorkingRoot::Path(path_root.as_deref().expect("path root was resolved")),
+                WorkingRoot::Safe,
+            );
+            test_crates_with_working_root(root, &resolve_config_path(options.get("config")), None)?;
             Ok(true)
         }
         "policy" => {
@@ -401,7 +469,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             Ok(true)
         }
         "release" => {
-            release(&arguments[1..])?;
+            release_with_safe_root(&arguments[1..], safe_root)?;
             Ok(true)
         }
         "version" => {
@@ -409,7 +477,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             Ok(true)
         }
         "closure" => {
-            print_closure(arguments.get(1..).unwrap_or_default())?;
+            print_closure_with_safe_root(arguments.get(1..).unwrap_or_default(), safe_root)?;
             Ok(true)
         }
         "prepared-tool-install" => {
@@ -426,26 +494,32 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             }
             if mode == "budget" {
                 if let Some(entries_path) = options.get("entries") {
-                    cache_budget_report(entries_path)?;
+                    cache_budget_report_with_safe_root(entries_path, safe_root)?;
                 } else {
-                    println!("{}", retention_policy_for_plan().total_bytes);
+                    let policy = retention_policy_for_plan_with_safe_root(safe_root)?;
+                    println!("{}", policy.total_bytes);
                 }
                 return Ok(true);
             }
-            cache_plan(
+            cache_plan_with_safe_root(
                 options.get("entries").map(String::as_str),
                 options.get("now").map(String::as_str),
+                safe_root,
             )?;
             Ok(true)
         }
-        _ => try_run_reuse(command, arguments),
+        _ => try_run_reuse_with_safe_root(command, arguments, safe_root),
     }
 }
 
 /// Dispatch the slice-C subcommands (`aggregate`, `select`, `fingerprint`,
 /// `reuse-decision`). `false` means the arguments belong to the workflow
 /// generator CLI proper.
-fn try_run_reuse(command: &str, arguments: &[OsString]) -> Result<bool, GeneratorError> {
+fn try_run_reuse_with_safe_root(
+    command: &str,
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<bool, GeneratorError> {
     match command {
         "aggregate" => {
             let options = parse_options(&arguments[1..], &["expected", "results"])?;
@@ -460,8 +534,6 @@ fn try_run_reuse(command: &str, arguments: &[OsString]) -> Result<bool, Generato
         }
         "select" => {
             let options = parse_options(&arguments[1..], &["config", "base", "head", "scope"])?;
-            let root = env::current_dir()
-                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
             let config = resolve_config_path(options.get("config"));
             let scope = options
                 .get("scope")
@@ -471,25 +543,55 @@ fn try_run_reuse(command: &str, arguments: &[OsString]) -> Result<bool, Generato
                 .get("head")
                 .cloned()
                 .unwrap_or_else(|| "HEAD".to_owned());
-            select_command(&root, &config, scope, &base, &head)?;
+            if let Some(root) = safe_root {
+                select_command_with_working_root(
+                    WorkingRoot::Safe(root),
+                    &config,
+                    scope,
+                    &base,
+                    &head,
+                )?;
+            } else {
+                let root = env::current_dir()
+                    .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+                select_command_with_working_root(
+                    WorkingRoot::Path(&root),
+                    &config,
+                    scope,
+                    &base,
+                    &head,
+                )?;
+            }
             Ok(true)
         }
         "fingerprint" => {
             let options = parse_options(&arguments[1..], &["config", "unit", "rev", "live"])?;
-            let root = env::current_dir()
-                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
             let config = resolve_config_path(options.get("config"));
             let rev = options
                 .get("rev")
                 .cloned()
                 .unwrap_or_else(|| "HEAD".to_owned());
-            fingerprint_command(
-                &root,
-                &config,
-                options.get("unit").map(String::as_str),
-                options.get("live").map(String::as_str),
-                &rev,
-            )?;
+            let only_unit = options.get("unit").map(String::as_str);
+            let live = options.get("live").map(String::as_str);
+            if let Some(root) = safe_root {
+                fingerprint_command_with_working_root(
+                    WorkingRoot::Safe(root),
+                    &config,
+                    only_unit,
+                    live,
+                    &rev,
+                )?;
+            } else {
+                let root = env::current_dir()
+                    .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+                fingerprint_command_with_working_root(
+                    WorkingRoot::Path(&root),
+                    &config,
+                    only_unit,
+                    live,
+                    &rev,
+                )?;
+            }
             Ok(true)
         }
         "reuse-decision" => {
@@ -570,13 +672,36 @@ where
     deserializer.deserialize_any(CacheIdVisitor)
 }
 
-fn read_cache_entries(entries_path: &str) -> Result<Vec<SnapshotCacheEntry>, GeneratorError> {
-    let entries_text = fs::read_to_string(entries_path).map_err(|error| {
-        GeneratorError::io(
-            "read cache account snapshot",
-            Path::new(entries_path),
-            &error,
-        )
+fn read_cache_entries_with_safe_root(
+    entries_path: &str,
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<Vec<SnapshotCacheEntry>, GeneratorError> {
+    let path = Path::new(entries_path);
+    let bytes = if let Some(root) = safe_root {
+        let relative = if path.is_absolute() {
+            path.strip_prefix(root.command_directory()).ok()
+        } else if path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+        {
+            Some(path)
+        } else {
+            None
+        };
+        match relative {
+            Some(relative) => root.read_file(relative)?,
+            None => fs::read(path)
+                .map_err(|error| GeneratorError::io("read cache account snapshot", path, &error))?,
+        }
+    } else {
+        fs::read(path)
+            .map_err(|error| GeneratorError::io("read cache account snapshot", path, &error))?
+    };
+    let entries_text = String::from_utf8(bytes).map_err(|error| {
+        GeneratorError::usage(format!(
+            "cache account snapshot {} is not UTF-8: {error}",
+            path.display()
+        ))
     })?;
     let records: Vec<CacheEntryRecord> = serde_json::from_str(&entries_text).map_err(|error| {
         GeneratorError::usage(format!(
@@ -597,15 +722,29 @@ fn read_cache_entries(entries_path: &str) -> Result<Vec<SnapshotCacheEntry>, Gen
 /// Resolve the GitHub Actions retention policy from `.github-gen/velnor-workflow.toml`
 /// when present, otherwise the generator default.
 fn retention_policy_for_plan() -> RetentionPolicy {
-    let discovered = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| crate::s2::config::discover(&cwd).ok().flatten());
+    retention_policy_for_plan_with_safe_root(None)
+        .unwrap_or_else(|_| RetentionPolicy::default_policy())
+}
+
+fn retention_policy_for_plan_with_safe_root(
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<RetentionPolicy, GeneratorError> {
+    let discovered = if let Some(root) = safe_root {
+        crate::s2::config::discover_with_safe_root(root)?
+    } else {
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| crate::s2::config::discover(&cwd).ok().flatten())
+    };
     let policy = discovered
         .as_ref()
         .map_or_else(RetentionPolicy::default_policy, |config| {
             RetentionPolicy::from_config(config.cache_github())
         });
-    retention_policy_with_declared_tools(policy, discovered.as_ref())
+    Ok(retention_policy_with_declared_tools(
+        policy,
+        discovered.as_ref(),
+    ))
 }
 
 /// Extend a retention policy with the prepared-tools class when the
@@ -910,6 +1049,11 @@ fn curl_producer_run(
             &endpoint,
         ])
         .env("GH_TOKEN", token)
+        // The process CWD is the captured runtime root identity. Keep these
+        // common workspace hints relative so curl cannot pass a stale alias
+        // to helpers if the root's old pathname now names another tree.
+        .env("PWD", ".")
+        .env("GITHUB_WORKSPACE", ".")
         .output()
         .map_err(|error| format!("run {curl}: {error}"))?;
     if !output.status.success() {
@@ -950,8 +1094,16 @@ fn append_step_output(path: &Path, text: &str) -> std::io::Result<()> {
 
 /// Emit per-class totals and headroom for the maintenance budget step.
 fn cache_budget_report(entries_path: &str) -> Result<(), GeneratorError> {
-    let entries = read_cache_entries(entries_path)?;
-    let report = budget_report(&entries, &retention_policy_for_plan());
+    cache_budget_report_with_safe_root(entries_path, None)
+}
+
+fn cache_budget_report_with_safe_root(
+    entries_path: &str,
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    let entries = read_cache_entries_with_safe_root(entries_path, safe_root)?;
+    let policy = retention_policy_for_plan_with_safe_root(safe_root)?;
+    let report = budget_report(&entries, &policy);
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     serde_json::to_writer(&mut handle, &report)
@@ -969,8 +1121,16 @@ fn cache_budget_report(entries_path: &str) -> Result<(), GeneratorError> {
 ///
 /// `--now` pins the clock for tests; a live run uses the system clock.
 fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), GeneratorError> {
+    cache_plan_with_safe_root(entries_path, now, None)
+}
+
+fn cache_plan_with_safe_root(
+    entries_path: Option<&str>,
+    now: Option<&str>,
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
     let entries = if let Some(path) = entries_path {
-        read_cache_entries(path)?
+        read_cache_entries_with_safe_root(path, safe_root)?
     } else {
         let mut text = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).map_err(|error| {
@@ -999,7 +1159,8 @@ fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), Gener
             .as_secs()
             .cast_signed(),
     };
-    let plan = plan_evictions(&entries, &retention_policy_for_plan(), now_epoch);
+    let policy = retention_policy_for_plan_with_safe_root(safe_root)?;
+    let plan = plan_evictions(&entries, &policy, now_epoch);
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     serde_json::to_writer(&mut handle, &plan)
@@ -1041,7 +1202,17 @@ fn select_command(
     base: &str,
     head: &str,
 ) -> Result<(), GeneratorError> {
-    let config = read_config(config_path)?;
+    select_command_with_working_root(WorkingRoot::Path(root), config_path, scope, base, head)
+}
+
+fn select_command_with_working_root(
+    root: WorkingRoot<'_>,
+    config_path: &Path,
+    scope: Scope,
+    base: &str,
+    head: &str,
+) -> Result<(), GeneratorError> {
+    let config = root.root_config(config_path)?;
     let watched: Vec<crate::s2::reuse::WatchedUnit> = config
         .unit
         .iter()
@@ -1068,7 +1239,7 @@ fn select_command(
             "no affected base; fell back to full",
         ));
     }
-    let Some(lines) = git_name_status(root, base, head)? else {
+    let Some(lines) = git_name_status_with_working_root(root, base, head)? else {
         return print_selection(&crate::s2::reuse::fallback_selection(
             &watched,
             "git diff unavailable; fell back to full",
@@ -1104,13 +1275,15 @@ fn git_name_status(
     base: &str,
     head: &str,
 ) -> Result<Option<Vec<String>>, GeneratorError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--name-status", "-M"])
-        .arg(format!("{base}...{head}"))
-        .output()
-        .map_err(|error| GeneratorError::usage(format!("run git diff: {error}")))?;
+    git_name_status_with_working_root(WorkingRoot::Path(root), base, head)
+}
+
+fn git_name_status_with_working_root(
+    root: WorkingRoot<'_>,
+    base: &str,
+    head: &str,
+) -> Result<Option<Vec<String>>, GeneratorError> {
+    let output = root.git_output(&["diff", "--name-status", "-M", &format!("{base}...{head}")])?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -1142,7 +1315,23 @@ fn fingerprint_command(
     live: Option<&str>,
     rev: &str,
 ) -> Result<(), GeneratorError> {
-    let config = read_config(config_path)?;
+    fingerprint_command_with_working_root(
+        WorkingRoot::Path(root),
+        config_path,
+        only_unit,
+        live,
+        rev,
+    )
+}
+
+fn fingerprint_command_with_working_root(
+    root: WorkingRoot<'_>,
+    config_path: &Path,
+    only_unit: Option<&str>,
+    live: Option<&str>,
+    rev: &str,
+) -> Result<(), GeneratorError> {
+    let config = root.root_config(config_path)?;
     let known: BTreeSet<&str> = config.unit.iter().map(|unit| unit.id.as_str()).collect();
     if let Some(id) = only_unit
         && !known.contains(id)
@@ -1150,7 +1339,7 @@ fn fingerprint_command(
         return Err(GeneratorError::usage(format!("unknown unit: {id}")));
     }
     let live_ids = resolve_live_ids(live, &known)?;
-    let tree = git_ls_tree(root, rev)?;
+    let tree = git_ls_tree_with_working_root(root, rev)?;
     let ordered = ordered_units(&config.unit, None)?;
     let check_impl = crate::s2::reuse::current_check_impl();
     let mut fingerprints: BTreeMap<String, String> = BTreeMap::new();
@@ -1256,12 +1445,14 @@ fn resolve_live_ids<'a>(
 }
 
 fn git_ls_tree(root: &Path, rev: &str) -> Result<String, GeneratorError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["ls-tree", "-r", rev])
-        .output()
-        .map_err(|error| GeneratorError::usage(format!("run git ls-tree: {error}")))?;
+    git_ls_tree_with_working_root(WorkingRoot::Path(root), rev)
+}
+
+fn git_ls_tree_with_working_root(
+    root: WorkingRoot<'_>,
+    rev: &str,
+) -> Result<String, GeneratorError> {
+    let output = root.git_output(&["ls-tree", "-r", rev])?;
     if !output.status.success() {
         return Err(GeneratorError::usage(format!(
             "revision {rev} is not available for fingerprinting"
@@ -1359,6 +1550,169 @@ fn resolve_config_path(config: Option<&String>) -> PathBuf {
     config.map_or_else(|| PathBuf::from(DEFAULT_CONFIG), PathBuf::from)
 }
 
+#[derive(Clone, Copy)]
+enum WorkingRoot<'a> {
+    Path(&'a Path),
+    Safe(&'a super::safe_fs::SafeRoot),
+}
+
+impl<'a> WorkingRoot<'a> {
+    fn path(self) -> &'a Path {
+        match self {
+            Self::Path(path) => path,
+            Self::Safe(root) => root.command_directory(),
+        }
+    }
+
+    fn read_file(self, relative: &Path, operation: &str) -> Result<Vec<u8>, GeneratorError> {
+        match self {
+            Self::Path(root) => {
+                let path = root.join(relative);
+                fs::read(&path).map_err(|error| GeneratorError::io(operation, &path, &error))
+            }
+            Self::Safe(root) => root.read_file(relative),
+        }
+    }
+
+    fn read_input_file(self, path: &Path, operation: &str) -> Result<Vec<u8>, GeneratorError> {
+        match self {
+            Self::Path(_) => {
+                fs::read(path).map_err(|error| GeneratorError::io(operation, path, &error))
+            }
+            Self::Safe(root) => {
+                let relative = if path.is_absolute() {
+                    path.strip_prefix(root.command_directory()).ok()
+                } else {
+                    Some(path)
+                };
+                match relative {
+                    Some(relative) => root.read_file(relative),
+                    None => {
+                        fs::read(path).map_err(|error| GeneratorError::io(operation, path, &error))
+                    }
+                }
+            }
+        }
+    }
+
+    fn has_regular_file(self, relative: &Path) -> Result<bool, GeneratorError> {
+        match self {
+            Self::Path(root) => Ok(root.join(relative).is_file()),
+            Self::Safe(root) => root.has_regular_file(relative),
+        }
+    }
+
+    fn has_directory(self, relative: &Path) -> Result<bool, GeneratorError> {
+        match self {
+            Self::Path(root) => Ok(root.join(relative).is_dir()),
+            Self::Safe(root) => {
+                let components = relative
+                    .components()
+                    .map(|component| match component {
+                        Component::Normal(name) => Ok(name.to_os_string()),
+                        _ => Err(GeneratorError::usage(format!(
+                            "repository directory must be relative and normalized: {}",
+                            relative.display()
+                        ))),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                safe_root_has_directory(root, &components)
+            }
+        }
+    }
+
+    fn git_output(self, arguments: &[&str]) -> Result<Output, GeneratorError> {
+        match self {
+            Self::Path(root) => Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(arguments)
+                .output()
+                .map_err(|error| {
+                    GeneratorError::usage(format!("run git {}: {error}", arguments.join(" ")))
+                }),
+            Self::Safe(root) => super::safe_fs::pinned_command::output(root, "git", arguments)
+                .map_err(|error| {
+                    GeneratorError::usage(format!("run git {}: {error}", arguments.join(" ")))
+                }),
+        }
+    }
+
+    fn spawn(self, mut command: Command) -> std::io::Result<std::process::Child> {
+        match self {
+            Self::Path(root) => {
+                command.current_dir(root);
+                command.spawn()
+            }
+            Self::Safe(root) => super::safe_fs::pinned_command::spawn(root, command),
+        }
+    }
+
+    fn output(self, mut command: Command) -> std::io::Result<Output> {
+        match self {
+            Self::Path(root) => {
+                command.current_dir(root);
+                command.output()
+            }
+            Self::Safe(root) => {
+                super::safe_fs::pinned_command::spawn(root, command)?.wait_with_output()
+            }
+        }
+    }
+
+    fn status(self, command: Command) -> std::io::Result<ExitStatus> {
+        self.spawn(command)?.wait()
+    }
+
+    fn root_config(self, path: &Path) -> Result<CiConfig, GeneratorError> {
+        match self {
+            Self::Path(_) => read_config(path),
+            Self::Safe(root) => {
+                let relative = if path.is_absolute() {
+                    path.strip_prefix(root.command_directory()).ok()
+                } else {
+                    Some(path)
+                };
+                let Some(relative) = relative else {
+                    // An absolute --config outside the workflow root is an
+                    // explicit external input, not a root-relative read.
+                    return read_config(path);
+                };
+                let bytes = root.read_file(relative)?;
+                let text = String::from_utf8(bytes).map_err(|error| {
+                    GeneratorError::usage(format!(
+                        "parse CI configuration {} as UTF-8: {error}",
+                        root.command_directory().join(relative).display()
+                    ))
+                })?;
+                parse_config_contents(&text, &root.command_directory().join(relative))
+            }
+        }
+    }
+}
+
+fn safe_root_has_directory(
+    root: &super::safe_fs::SafeRoot,
+    components: &[OsString],
+) -> Result<bool, GeneratorError> {
+    let Some((name, remaining)) = components.split_first() else {
+        return Ok(true);
+    };
+    for entry in root.entries()? {
+        if &entry.name == name {
+            let super::safe_fs::SafeEntryKind::Directory(directory) = entry.kind else {
+                return Ok(false);
+            };
+            return if remaining.is_empty() {
+                Ok(true)
+            } else {
+                safe_root_has_directory(&directory, remaining)
+            };
+        }
+    }
+    Ok(false)
+}
+
 /// Parse a generated `project.toml` through the real runtime contract.
 /// Emitter tests use it to prove the generator never ships a field the
 /// runtime rejects.
@@ -1370,7 +1724,11 @@ pub(crate) fn read_config_for_test(path: &Path) -> Result<(), GeneratorError> {
 pub(crate) fn read_config(path: &Path) -> Result<CiConfig, GeneratorError> {
     let contents = fs::read_to_string(path)
         .map_err(|error| GeneratorError::io("read CI configuration", path, &error))?;
-    let config: CiConfig = toml::from_str(&contents).map_err(|error| {
+    parse_config_contents(&contents, path)
+}
+
+fn parse_config_contents(contents: &str, path: &Path) -> Result<CiConfig, GeneratorError> {
+    let config: CiConfig = toml::from_str(contents).map_err(|error| {
         GeneratorError::usage(format!(
             "parse CI configuration {}: {error}",
             path.display()
@@ -1493,19 +1851,23 @@ struct PlannedExclusion {
     reason = "d2a shape: one complete plan command"
 )]
 fn plan(config_path: &Path) -> Result<(), GeneratorError> {
-    let config = read_config(config_path)?;
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    plan_with_working_root(WorkingRoot::Path(&root), config_path)
+}
+
+fn plan_with_working_root(root: WorkingRoot<'_>, config_path: &Path) -> Result<(), GeneratorError> {
+    let config = root.root_config(config_path)?;
     let scope = match scope_for_event()? {
         Some(value) => Scope::parse(&value)?,
         None => Scope::Full,
     };
-    let root = env::current_dir()
-        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
     let base = env::var("BASE_SHA").unwrap_or_default();
     let head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
     let universe = parse_provider_set(&config.providers, "providers")?;
     let effective = plan_providers(&universe)?;
     let event_trusted = event_is_trusted();
-    let selection = selection_for_diff(&root, &config, scope, &base, &head)?;
+    let selection = selection_for_working_root(root, &config, scope, &base, &head)?;
     let selected: BTreeSet<&str> = selection
         .units
         .iter()
@@ -2111,11 +2473,7 @@ pub(crate) fn run_units(
     scope: Scope,
     only_unit: Option<&str>,
 ) -> Result<(), GeneratorError> {
-    let selection_file = env::var_os("VELNOR_SELECTION_FILE").map_or_else(
-        || root.join(".velnor-ci-selection/velnor-ci-selection"),
-        PathBuf::from,
-    );
-    run_units_with_selection_file(root, config_path, scope, only_unit, &selection_file)
+    run_units_with_working_root(WorkingRoot::Path(root), config_path, scope, only_unit)
 }
 
 pub(crate) fn run_units_with_selection_file(
@@ -2125,14 +2483,42 @@ pub(crate) fn run_units_with_selection_file(
     only_unit: Option<&str>,
     selection_file: &Path,
 ) -> Result<(), GeneratorError> {
-    let config = read_config(config_path)?;
+    run_units_with_selection_file_and_root(
+        WorkingRoot::Path(root),
+        config_path,
+        scope,
+        only_unit,
+        selection_file,
+    )
+}
+
+fn run_units_with_working_root(
+    root: WorkingRoot<'_>,
+    config_path: &Path,
+    scope: Scope,
+    only_unit: Option<&str>,
+) -> Result<(), GeneratorError> {
+    let selection_file = env::var_os("VELNOR_SELECTION_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".velnor-ci-selection/velnor-ci-selection"));
+    run_units_with_selection_file_and_root(root, config_path, scope, only_unit, &selection_file)
+}
+
+fn run_units_with_selection_file_and_root(
+    root: WorkingRoot<'_>,
+    config_path: &Path,
+    scope: Scope,
+    only_unit: Option<&str>,
+    selection_file: &Path,
+) -> Result<(), GeneratorError> {
+    let config = root.root_config(config_path)?;
     if matches!(env::var("EVENT_NAME").as_deref(), Ok("push" | "schedule")) && scope != Scope::Full
     {
         return Err(GeneratorError::usage(
             "trusted events require full CI scope",
         ));
     }
-    let selection = read_selection_file(selection_file)?;
+    let selection = read_selection_file_with_root(root, selection_file)?;
     validate_selection_sha(&selection)?;
     if selection.scope != scope {
         return Err(GeneratorError::usage(format!(
@@ -2158,7 +2544,7 @@ pub(crate) fn run_units_with_selection_file(
     }
     let full_units = selection.full_units;
     let selected = select_units_for_job(selected, only_unit)?;
-    run_layers(root, &selected, scope, &full_units)
+    run_layers_with_working_root(root, &selected, scope, &full_units)
 }
 
 fn select_units_for_job<'a>(
@@ -2215,6 +2601,24 @@ fn write_selection_file(
 fn read_selection_file(path: &Path) -> Result<PlannedSelection, GeneratorError> {
     let contents = fs::read_to_string(path)
         .map_err(|error| GeneratorError::io("read CI selection", path, &error))?;
+    parse_selection_contents(&contents)
+}
+
+fn read_selection_file_with_root(
+    root: WorkingRoot<'_>,
+    path: &Path,
+) -> Result<PlannedSelection, GeneratorError> {
+    let bytes = root.read_input_file(path, "read CI selection")?;
+    let contents = String::from_utf8(bytes).map_err(|error| {
+        GeneratorError::usage(format!(
+            "CI selection {} is not UTF-8: {error}",
+            path.display()
+        ))
+    })?;
+    parse_selection_contents(&contents)
+}
+
+fn parse_selection_contents(contents: &str) -> Result<PlannedSelection, GeneratorError> {
     let mut fields = BTreeMap::new();
     for line in contents.lines() {
         let (key, value) = line
@@ -2329,13 +2733,23 @@ fn selection_for_diff<'a>(
     base: &str,
     head: &str,
 ) -> Result<UnitSelection<'a>, GeneratorError> {
+    selection_for_working_root(WorkingRoot::Path(root), config, scope, base, head)
+}
+
+fn selection_for_working_root<'a>(
+    root: WorkingRoot<'_>,
+    config: &'a CiConfig,
+    scope: Scope,
+    base: &str,
+    head: &str,
+) -> Result<UnitSelection<'a>, GeneratorError> {
     if scope == Scope::Full {
         return full_selection(config);
     }
     if base.is_empty() || base.chars().all(|character| character == '0') {
         return full_selection(config);
     }
-    let Some(changed) = git_changed_files(root, base, head)? else {
+    let Some(changed) = git_changed_files_with_working_root(root, base, head)? else {
         return full_selection(config);
     };
     if changed.is_empty() {
@@ -2347,7 +2761,7 @@ fn selection_for_diff<'a>(
     if changed.iter().any(|file| file.starts_with(".github/")) {
         return full_selection(config);
     }
-    if version_bump_matches(
+    if version_bump_matches_with_working_root(
         root,
         base,
         head,
@@ -2448,6 +2862,24 @@ fn version_bump_matches(
     units: &[CiUnit],
     allowlist: &[String],
 ) -> Result<bool, GeneratorError> {
+    version_bump_matches_with_working_root(
+        WorkingRoot::Path(root),
+        base,
+        head,
+        changed,
+        units,
+        allowlist,
+    )
+}
+
+fn version_bump_matches_with_working_root(
+    root: WorkingRoot<'_>,
+    base: &str,
+    head: &str,
+    changed: &[String],
+    units: &[CiUnit],
+    allowlist: &[String],
+) -> Result<bool, GeneratorError> {
     if allowlist.is_empty() || changed.is_empty() {
         return Ok(false);
     }
@@ -2477,19 +2909,14 @@ fn version_bump_matches(
         }
         diff_files.push(file.clone());
     }
-    let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--unified=0"])
-        .arg(format!("{base}...{head}"))
-        .arg("--");
+    let mut arguments = vec!["diff", "--unified=0"];
+    let revision_range = format!("{base}...{head}");
+    arguments.push(&revision_range);
+    arguments.push("--");
     for file in &diff_files {
-        command.arg(file);
+        arguments.push(file);
     }
-    let output = command
-        .output()
-        .map_err(|error| GeneratorError::usage(format!("run version diff: {error}")))?;
+    let output = root.git_output(&arguments)?;
     if !output.status.success() {
         return Ok(false);
     }
@@ -2553,13 +2980,16 @@ fn git_changed_files(
     base: &str,
     head: &str,
 ) -> Result<Option<Vec<String>>, GeneratorError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--name-only"])
-        .arg(format!("{base}...{head}"))
-        .output()
-        .map_err(|error| GeneratorError::usage(format!("run git diff: {error}")))?;
+    git_changed_files_with_working_root(WorkingRoot::Path(root), base, head)
+}
+
+fn git_changed_files_with_working_root(
+    root: WorkingRoot<'_>,
+    base: &str,
+    head: &str,
+) -> Result<Option<Vec<String>>, GeneratorError> {
+    let range = format!("{base}...{head}");
+    let output = root.git_output(&["diff", "--name-only", &range])?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -2615,6 +3045,15 @@ fn run_layers(
     run_scope: Scope,
     full_units: &BTreeSet<String>,
 ) -> Result<(), GeneratorError> {
+    run_layers_with_working_root(WorkingRoot::Path(root), units, run_scope, full_units)
+}
+
+fn run_layers_with_working_root(
+    root: WorkingRoot<'_>,
+    units: &[&CiUnit],
+    run_scope: Scope,
+    full_units: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
     let mut finished = BTreeSet::new();
     while finished.len() < units.len() {
         let ready = units
@@ -2646,7 +3085,7 @@ fn run_layers(
                     prerequisite_commands(unit, run_scope)
                 };
                 thread_scope.spawn(move || {
-                    let result = run_unit(root, unit, &commands);
+                    let result = run_unit_with_working_root(root, unit, &commands);
                     let _ = sender.send((unit.id.clone(), result));
                 });
             }
@@ -2765,13 +3204,23 @@ fn run_command_with_stall_guard(
     command: &str,
     stall_limit: Duration,
 ) -> Result<(), GeneratorError> {
-    let mut child = Command::new("bash")
+    run_command_with_stall_guard_at(WorkingRoot::Path(root), unit_id, command, stall_limit)
+}
+
+fn run_command_with_stall_guard_at(
+    root: WorkingRoot<'_>,
+    unit_id: &str,
+    command: &str,
+    stall_limit: Duration,
+) -> Result<(), GeneratorError> {
+    let mut child_command = Command::new("bash");
+    child_command
         .args(["-euo", "pipefail", "-c", command])
-        .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    let mut child = root
+        .spawn(child_command)
         .map_err(|error| GeneratorError::usage(format!("run CI command {unit_id}: {error}")))?;
     let (sender, receiver) = mpsc::channel();
     let mut expected_eof = 0;
@@ -2849,10 +3298,18 @@ fn run_command_with_stall_guard(
 }
 
 fn run_unit(root: &Path, unit: &CiUnit, commands: &[String]) -> Result<(), GeneratorError> {
+    run_unit_with_working_root(WorkingRoot::Path(root), unit, commands)
+}
+
+fn run_unit_with_working_root(
+    root: WorkingRoot<'_>,
+    unit: &CiUnit,
+    commands: &[String],
+) -> Result<(), GeneratorError> {
     let stall_limit = run_cmd_stall_limit();
     for command in commands {
         println!("::group::{}: {}", unit.id, command);
-        let outcome = run_command_with_stall_guard(root, &unit.id, command, stall_limit);
+        let outcome = run_command_with_stall_guard_at(root, &unit.id, command, stall_limit);
         println!("::endgroup::");
         outcome?;
     }
@@ -2962,29 +3419,50 @@ pub(crate) fn test_crates(
     config_path: &Path,
     cargo_program: Option<&Path>,
 ) -> Result<(), GeneratorError> {
-    let config = read_config(config_path)?;
+    test_crates_with_working_root(WorkingRoot::Path(root), config_path, cargo_program)
+}
+
+fn test_crates_with_working_root(
+    root: WorkingRoot<'_>,
+    config_path: &Path,
+    cargo_program: Option<&Path>,
+) -> Result<(), GeneratorError> {
+    let config = root.root_config(config_path)?;
     let mut manifests = Vec::new();
-    collect_manifests(root, root, &mut manifests)?;
+    match root {
+        WorkingRoot::Path(path) => collect_manifests(path, path, &mut manifests)?,
+        WorkingRoot::Safe(safe_root) => {
+            collect_manifests_with_safe_root(safe_root, Path::new(""), &mut manifests)?;
+        }
+    }
     manifests.sort();
-    let locked = root.join("Cargo.lock").is_file();
+    let locked = root.has_regular_file(Path::new("Cargo.lock"))?;
     let nextest = config
         .analysis
         .detected
         .iter()
         .any(|item| item == "cargo-nextest-policy");
     for manifest in manifests {
-        let contents = fs::read_to_string(&manifest)
-            .map_err(|error| GeneratorError::io("read Cargo manifest", &manifest, &error))?;
+        let contents = String::from_utf8(root.read_file(&manifest, "read Cargo manifest")?)
+            .map_err(|error| {
+                GeneratorError::usage(format!(
+                    "parse Cargo manifest {} as UTF-8: {error}",
+                    root.path().join(&manifest).display()
+                ))
+            })?;
         let value: toml::Value = toml::from_str(&contents).map_err(|error| {
             GeneratorError::usage(format!(
                 "parse Cargo manifest {}: {error}",
-                manifest.display()
+                root.path().join(&manifest).display()
             ))
         })?;
         if !value.get("package").is_some_and(toml::Value::is_table) {
             continue;
         }
-        println!("::group::cargo tests: {}", manifest.display());
+        println!(
+            "::group::cargo tests: {}",
+            root.path().join(&manifest).display()
+        );
         let default_cargo =
             if env::var(super::MR_BOXINGTON_ENABLED_ENV).is_ok_and(|value| value == "1") {
                 Path::new("mbx")
@@ -3001,17 +3479,52 @@ pub(crate) fn test_crates(
         if locked {
             command.arg("--locked");
         }
-        command.arg("--manifest-path").arg(&manifest);
-        let status = command
-            .current_dir(root)
-            .status()
+        command.arg("--manifest-path");
+        match root {
+            WorkingRoot::Path(_) => command.arg(root.path().join(&manifest)),
+            WorkingRoot::Safe(_) => command.arg(&manifest),
+        };
+        let status = root
+            .spawn(command)
+            .and_then(|mut child| child.wait())
             .map_err(|error| GeneratorError::usage(format!("run Cargo tests: {error}")))?;
         println!("::endgroup::");
         if !status.success() {
             return Err(GeneratorError::usage(format!(
                 "Cargo tests failed: {}",
-                manifest.display()
+                root.path().join(&manifest).display()
             )));
+        }
+    }
+    Ok(())
+}
+
+fn collect_manifests_with_safe_root(
+    directory: &super::safe_fs::SafeRoot,
+    relative_directory: &Path,
+    manifests: &mut Vec<PathBuf>,
+) -> Result<(), GeneratorError> {
+    for entry in directory.entries()? {
+        let relative = relative_directory.join(&entry.name);
+        match entry.kind {
+            super::safe_fs::SafeEntryKind::Directory(child) => {
+                if !matches!(relative.to_str(), Some(".git" | "target")) {
+                    collect_manifests_with_safe_root(&child, &relative, manifests)?;
+                }
+            }
+            super::safe_fs::SafeEntryKind::File
+                if entry.name == "Cargo.toml"
+                    && relative
+                        .to_str()
+                        .is_none_or(|path| !super::is_test_support_path(path)) =>
+            {
+                manifests.push(relative);
+            }
+            // Match the path walker: symlinks are not traversed or accepted
+            // as Cargo manifests, but unrelated repository symlinks do not
+            // prevent crate discovery.
+            super::safe_fs::SafeEntryKind::Symlink => {}
+            super::safe_fs::SafeEntryKind::File | super::safe_fs::SafeEntryKind::Other => {}
         }
     }
     Ok(())
@@ -3050,18 +3563,25 @@ fn collect_manifests(
 }
 
 fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    release_with_safe_root(arguments, None)
+}
+
+fn release_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(GeneratorError::usage(
             "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed | release verify-digests | release resolve-mode | release resolve-source | release admit-producer | release assemble-manifest",
         ));
     };
     match command {
-        "verify-tag" => verify_tag(&arguments[1..]),
-        "package-binary" => package_binary(&arguments[1..]),
-        "package-deb" => package_deb(&arguments[1..]),
-        "package-guest" => package_guest(&arguments[1..]),
-        "verify-feed" => verify_feed(&arguments[1..]),
-        "update-feed" => update_feed(&arguments[1..]),
+        "verify-tag" => verify_tag_with_safe_root(&arguments[1..], safe_root),
+        "package-binary" => package_binary_with_safe_root(&arguments[1..], safe_root),
+        "package-deb" => package_deb_with_safe_root(&arguments[1..], safe_root),
+        "package-guest" => package_guest_with_safe_root(&arguments[1..], safe_root),
+        "verify-feed" => verify_feed_with_safe_root(&arguments[1..], safe_root),
+        "update-feed" => update_feed_with_safe_root(&arguments[1..], safe_root),
         "verify-digests" => verify_digests(&arguments[1..]),
         "resolve-mode" => resolve_mode(&arguments[1..]),
         "resolve-source" => resolve_source(&arguments[1..]),
@@ -3074,6 +3594,25 @@ fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
 }
 
 fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    verify_tag_with_safe_root(arguments, None)
+}
+
+fn verify_tag_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    if let Some(root) = safe_root {
+        return verify_tag_with_working_root(arguments, WorkingRoot::Safe(root));
+    }
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    verify_tag_with_working_root(arguments, WorkingRoot::Path(&root))
+}
+
+fn verify_tag_with_working_root(
+    arguments: &[OsString],
+    root: WorkingRoot<'_>,
+) -> Result<(), GeneratorError> {
     let options = parse_options(arguments, &["branch", "package"])?;
     let reference = env::var("GITHUB_REF").unwrap_or_default();
     let tag = reference
@@ -3091,8 +3630,8 @@ fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
         return Err(GeneratorError::usage("invalid release branch"));
     }
     let branch_reference = format!("refs/remotes/origin/{branch}");
-    let tag_commit = git_revision(&reference)?;
-    let branch_commit = git_revision(&branch_reference)?;
+    let tag_commit = git_revision_with_working_root(root, &reference)?;
+    let branch_commit = git_revision_with_working_root(root, &branch_reference)?;
     if tag_commit != branch_commit {
         return Err(GeneratorError::usage(format!(
             "release tag must equal current origin/{branch} tip"
@@ -3102,9 +3641,10 @@ fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
         if !valid_package(package) {
             return Err(GeneratorError::usage("invalid release package"));
         }
-        let metadata = Command::new("cargo")
-            .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
-            .output()
+        let mut command = Command::new("cargo");
+        command.args(["metadata", "--no-deps", "--format-version", "1", "--locked"]);
+        let metadata = root
+            .output(command)
             .map_err(|error| GeneratorError::usage(format!("cargo metadata failed: {error}")))?;
         if !metadata.status.success() {
             return Err(GeneratorError::usage("cargo metadata failed"));
@@ -3127,6 +3667,25 @@ fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
 }
 
 fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    package_binary_with_safe_root(arguments, None)
+}
+
+fn package_binary_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    if let Some(root) = safe_root {
+        return package_binary_with_working_root(arguments, WorkingRoot::Safe(root));
+    }
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    package_binary_with_working_root(arguments, WorkingRoot::Path(&root))
+}
+
+fn package_binary_with_working_root(
+    arguments: &[OsString],
+    root: WorkingRoot<'_>,
+) -> Result<(), GeneratorError> {
     let options = parse_options(
         arguments,
         &[
@@ -3153,30 +3712,25 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
     }
     let members = package_archive_members(&options, binary)?;
     let deterministic = package_deterministic(&options)?;
-    let root = env::current_dir()
-        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
-    let source = root
-        .join("target")
+    let source = PathBuf::from("target")
         .join(target)
         .join("release")
         .join(binary);
-    if !source.is_file() {
+    if !root.has_regular_file(&source)? {
         return Err(GeneratorError::usage(format!(
             "built binary is missing: {}",
             source.display()
         )));
     }
-    let directory = source
-        .parent()
-        .map_or_else(|| root.clone(), Path::to_path_buf);
+    let directory = source.parent().unwrap_or_else(|| Path::new("."));
     for member in &members {
-        if !directory.join(member).is_file() {
+        if !root.has_regular_file(&directory.join(member))? {
             return Err(GeneratorError::usage(format!(
                 "declared archive member is missing: {member}"
             )));
         }
     }
-    let dist = root.join("dist");
+    let dist = PathBuf::from("dist");
     fs::create_dir_all(&dist)
         .map_err(|error| GeneratorError::io("create release directory", &dist, &error))?;
     let archive = dist.join(format!("{binary}-{version}-{target}.tar.gz"));
@@ -3187,22 +3741,24 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
     // guidance instead of shipping a silently skewed archive.
     if deterministic {
         require_gnu_tar()?;
-        write_deterministic_archive(&directory, binary, &members, &archive)?;
+        write_deterministic_archive(root, directory, binary, &members, &archive)?;
     } else {
-        let status = Command::new("tar")
+        let mut command = Command::new("tar");
+        command
             .arg("-C")
-            .arg(&directory)
+            .arg(directory)
             .arg("-czf")
             .arg(&archive)
             .arg(binary)
-            .args(&members)
-            .status()
+            .args(&members);
+        let status = root
+            .status(command)
             .map_err(|error| GeneratorError::usage(format!("package binary: {error}")))?;
         if !status.success() {
             return Err(GeneratorError::usage("tar failed while packaging binary"));
         }
     }
-    let digest = sha256_file(&archive)?;
+    let digest = sha256_file_with_working_root(root, &archive)?;
     // Append, never `with_extension`: the sidecar sits next to its subject
     // as `<subject>.sha256`, the name consumer lanes download it under.
     let checksum = archive.with_file_name(format!(
@@ -3266,6 +3822,7 @@ fn package_deterministic(options: &BTreeMap<String, String>) -> Result<bool, Gen
 /// and ownership onto stdout, and `gzip -n` strips the timestamp. The
 /// caller probes for GNU tar first.
 fn write_deterministic_archive(
+    root: WorkingRoot<'_>,
     directory: &Path,
     binary: &str,
     members: &[String],
@@ -3283,9 +3840,9 @@ fn write_deterministic_archive(
         binary,
     ]);
     command.args(members);
-    let tar = command
-        .stdout(Stdio::piped())
-        .spawn()
+    command.stdout(Stdio::piped());
+    let tar = root
+        .spawn(command)
         .map_err(|error| GeneratorError::usage(format!("package binary: {error}")))?;
     let Some(tar_stdout) = tar.stdout else {
         return Err(GeneratorError::usage("tar produced no archive stream"));
@@ -3304,6 +3861,25 @@ fn write_deterministic_archive(
 }
 
 fn package_deb(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    package_deb_with_safe_root(arguments, None)
+}
+
+fn package_deb_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    if let Some(root) = safe_root {
+        return package_deb_with_working_root(arguments, WorkingRoot::Safe(root));
+    }
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    package_deb_with_working_root(arguments, WorkingRoot::Path(&root))
+}
+
+fn package_deb_with_working_root(
+    arguments: &[OsString],
+    root: WorkingRoot<'_>,
+) -> Result<(), GeneratorError> {
     let options = parse_options(
         arguments,
         &[
@@ -3345,7 +3921,8 @@ fn package_deb(arguments: &[OsString]) -> Result<(), GeneratorError> {
                 guest.display()
             )));
         }
-        let dest = cargo_package_manifest_dir(package)?.join("release/microvm");
+        let dest =
+            cargo_package_manifest_dir_with_working_root(package, root)?.join("release/microvm");
         copy_dir_files(guest, &dest)?;
     }
     let mut command = Command::new("cargo");
@@ -3366,8 +3943,8 @@ fn package_deb(arguments: &[OsString]) -> Result<(), GeneratorError> {
         }
         command.args(["--target", target]);
     }
-    let status = command
-        .status()
+    let status = root
+        .status(command)
         .map_err(|error| GeneratorError::usage(format!("cargo deb: {error}")))?;
     if !status.success() {
         return Err(GeneratorError::usage("cargo deb failed"));
@@ -3379,29 +3956,57 @@ fn package_deb(arguments: &[OsString]) -> Result<(), GeneratorError> {
 }
 
 fn cargo_package_manifest_dir(package: &str) -> Result<PathBuf, GeneratorError> {
-    let metadata = Command::new("cargo")
-        .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
-        .output()
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    cargo_package_manifest_dir_with_working_root(package, WorkingRoot::Path(&root))
+}
+
+fn cargo_package_manifest_dir_with_working_root(
+    package: &str,
+    root: WorkingRoot<'_>,
+) -> Result<PathBuf, GeneratorError> {
+    let mut command = Command::new("cargo");
+    command.args(["metadata", "--no-deps", "--format-version", "1", "--locked"]);
+    let metadata = root
+        .output(command)
         .map_err(|error| GeneratorError::usage(format!("cargo metadata failed: {error}")))?;
     if !metadata.status.success() {
         return Err(GeneratorError::usage("cargo metadata failed"));
     }
     let document: serde_json::Value = serde_json::from_slice(&metadata.stdout)
         .map_err(|error| GeneratorError::usage(format!("parse cargo metadata: {error}")))?;
-    document["packages"]
+    let manifest = document["packages"]
         .as_array()
         .and_then(|packages| {
             packages.iter().find_map(|item| {
-                (item["name"].as_str() == Some(package)).then(|| {
-                    item["manifest_path"]
-                        .as_str()
-                        .map(PathBuf::from)
-                        .and_then(|path| path.parent().map(Path::to_path_buf))
-                })
+                (item["name"].as_str() == Some(package))
+                    .then(|| item["manifest_path"].as_str().map(PathBuf::from))
             })
         })
         .flatten()
-        .ok_or_else(|| GeneratorError::usage(format!("cargo package `{package}` was not found")))
+        .ok_or_else(|| GeneratorError::usage(format!("cargo package `{package}` was not found")))?;
+    let relative_manifest = if manifest.is_absolute() {
+        // Cargo reports absolute manifest paths. Convert that metadata back
+        // into a CWD-relative path, then use only relative file operations;
+        // reopening Cargo's display path could hit a replacement at the old
+        // root pathname.
+        let cwd = env::current_dir()
+            .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+        manifest
+            .strip_prefix(&cwd)
+            .map(PathBuf::from)
+            .map_err(|_| {
+                GeneratorError::usage(format!(
+                    "cargo package `{package}` is outside the captured workflow root"
+                ))
+            })?
+    } else {
+        manifest
+    };
+    relative_manifest
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| GeneratorError::usage(format!("cargo package `{package}` has no directory")))
 }
 
 fn copy_dir_files(src: &Path, dest: &Path) -> Result<(), GeneratorError> {
@@ -3532,6 +4137,25 @@ echo "$sha  linux.tar.xz" | sha256sum -c -
 }
 
 fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    package_guest_with_safe_root(arguments, None)
+}
+
+fn package_guest_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    if let Some(root) = safe_root {
+        return package_guest_with_working_root(arguments, WorkingRoot::Safe(root));
+    }
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    package_guest_with_working_root(arguments, WorkingRoot::Path(&root))
+}
+
+fn package_guest_with_working_root(
+    arguments: &[OsString],
+    root: WorkingRoot<'_>,
+) -> Result<(), GeneratorError> {
     let options = parse_options(arguments, &["arch", "package", "bin", "agent"])?;
     let arch = required_option(&options, "arch")?;
     if !matches!(arch, "x86_64" | "aarch64") {
@@ -3540,7 +4164,7 @@ fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
         ));
     }
     let pins = Path::new("microvm/pins.json");
-    if pins.is_file() {
+    if root.has_regular_file(pins)? {
         let package = required_option(&options, "package")?;
         let bin = required_option(&options, "bin")?;
         let agent = required_option(&options, "agent")?;
@@ -3549,10 +4173,10 @@ fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
                 "invalid guest package, bin, or agent",
             ));
         }
-        let status = Command::new("bash")
-            .arg("-c")
-            .arg(guest_kernel_download_script())
-            .status()
+        let mut command = Command::new("bash");
+        command.arg("-c").arg(guest_kernel_download_script());
+        let status = root
+            .status(command)
             .map_err(|error| GeneratorError::usage(format!("download guest kernel: {error}")))?;
         if !status.success() {
             return Err(GeneratorError::usage("guest kernel download failed"));
@@ -3560,27 +4184,28 @@ fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
         fs::create_dir_all("dist/microvm").map_err(|error| {
             GeneratorError::io("create guest output", Path::new("dist/microvm"), &error)
         })?;
-        let status = Command::new("cargo")
-            .args([
-                "run",
-                "--locked",
-                "--release",
-                "--package",
-                package,
-                "--bin",
-                bin,
-                "--",
-                "build",
-                "--arch",
-                arch,
-                "--out",
-                "dist/microvm",
-                "--tarball",
-                "linux.tar.xz",
-                "--guest-agent",
-                agent,
-            ])
-            .status()
+        let mut command = Command::new("cargo");
+        command.args([
+            "run",
+            "--locked",
+            "--release",
+            "--package",
+            package,
+            "--bin",
+            bin,
+            "--",
+            "build",
+            "--arch",
+            arch,
+            "--out",
+            "dist/microvm",
+            "--tarball",
+            "linux.tar.xz",
+            "--guest-agent",
+            agent,
+        ]);
+        let status = root
+            .status(command)
             .map_err(|error| GeneratorError::usage(format!("build guest image: {error}")))?;
         if !status.success() {
             return Err(GeneratorError::usage("guest image build failed"));
@@ -3588,14 +4213,15 @@ fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
         return Ok(());
     }
     let script = Path::new("microvm/build.sh");
-    if !script.is_file() {
+    if !root.has_regular_file(script)? {
         return Err(GeneratorError::usage(
             "guest image requires microvm/pins.json or a repository-owned microvm/build.sh",
         ));
     }
-    let status = Command::new("bash")
-        .args(["microvm/build.sh", arch])
-        .status()
+    let mut command = Command::new("bash");
+    command.args(["microvm/build.sh", arch]);
+    let status = root
+        .status(command)
         .map_err(|error| GeneratorError::usage(format!("build guest image: {error}")))?;
     if !status.success() {
         return Err(GeneratorError::usage("guest image build failed"));
@@ -3712,7 +4338,33 @@ fn valid_arch(value: &str) -> bool {
 }
 
 fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    verify_feed_with_safe_root(arguments, None)
+}
+
+fn verify_feed_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    if let Some(root) = safe_root {
+        return verify_feed_with_working_root(arguments, WorkingRoot::Safe(root));
+    }
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    verify_feed_with_working_root(arguments, WorkingRoot::Path(&root))
+}
+
+fn verify_feed_with_working_root(
+    arguments: &[OsString],
+    root: WorkingRoot<'_>,
+) -> Result<(), GeneratorError> {
     let options = parse_options(arguments, &["kind", "package", "coordinate"])?;
+    verify_feed_options(&options, root)
+}
+
+fn verify_feed_options(
+    options: &BTreeMap<String, String>,
+    root: WorkingRoot<'_>,
+) -> Result<(), GeneratorError> {
     let kind = required_option(&options, "kind")?;
     let package = required_option(&options, "package")?;
     if !valid_package(package) {
@@ -3721,7 +4373,7 @@ fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
     match kind {
         "homebrew" => {
             let formula = Path::new("Formula").join(format!("{package}.rb"));
-            if !formula.is_file() {
+            if !root.has_regular_file(&formula)? {
                 return Err(GeneratorError::usage(format!(
                     "homebrew feed requires {}",
                     formula.display()
@@ -3729,7 +4381,9 @@ fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
             }
         }
         "apt" => {
-            if !Path::new("conf/distributions").is_file() && !Path::new("debian").is_dir() {
+            if !root.has_regular_file(Path::new("conf/distributions"))?
+                && !root.has_directory(Path::new("debian"))?
+            {
                 return Err(GeneratorError::usage(
                     "apt feed requires conf/distributions or debian/",
                 ));
@@ -3745,8 +4399,27 @@ fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
 }
 
 fn update_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    update_feed_with_safe_root(arguments, None)
+}
+
+fn update_feed_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    if let Some(root) = safe_root {
+        return update_feed_with_working_root(arguments, WorkingRoot::Safe(root));
+    }
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    update_feed_with_working_root(arguments, WorkingRoot::Path(&root))
+}
+
+fn update_feed_with_working_root(
+    arguments: &[OsString],
+    root: WorkingRoot<'_>,
+) -> Result<(), GeneratorError> {
     let options = parse_options(arguments, &["kind", "package", "coordinate", "channel"])?;
-    verify_feed(arguments)?;
+    verify_feed_options(&options, root)?;
     let kind = required_option(&options, "kind")?;
     let channel = options.get("channel").map_or("stable", String::as_str);
     if !matches!(channel, "stable" | "preview") {
@@ -4114,11 +4787,17 @@ fn required_option<'a>(
 }
 
 fn git_revision(reference: &str) -> Result<String, GeneratorError> {
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    git_revision_with_working_root(WorkingRoot::Path(&root), reference)
+}
+
+fn git_revision_with_working_root(
+    root: WorkingRoot<'_>,
+    reference: &str,
+) -> Result<String, GeneratorError> {
     let revision_reference = format!("{reference}^{{commit}}");
-    let output = Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", &revision_reference])
-        .output()
-        .map_err(|error| GeneratorError::usage(format!("run git: {error}")))?;
+    let output = root.git_output(&["rev-parse", "--verify", "--quiet", &revision_reference])?;
     if !output.status.success() {
         return Err(GeneratorError::usage(format!(
             "git could not resolve release reference {reference}"
@@ -4136,13 +4815,25 @@ fn git_revision(reference: &str) -> Result<String, GeneratorError> {
 fn sha256_file(path: &Path) -> Result<String, GeneratorError> {
     let contents =
         fs::read(path).map_err(|error| GeneratorError::io("read release archive", path, &error))?;
+    Ok(sha256_contents(&contents))
+}
+
+fn sha256_file_with_working_root(
+    root: WorkingRoot<'_>,
+    path: &Path,
+) -> Result<String, GeneratorError> {
+    let contents = root.read_input_file(path, "read release archive")?;
+    Ok(sha256_contents(&contents))
+}
+
+fn sha256_contents(contents: &[u8]) -> String {
     let digest = Sha256::digest(contents);
     let mut output = String::with_capacity(digest.len() * 2);
     for byte in digest {
         output.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
         output.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
     }
-    Ok(output)
+    output
 }
 
 fn is_semver(value: &str) -> bool {
@@ -5018,11 +5709,9 @@ workspace_check = true
         changes: &[(&str, &str, &str)],
         config_text: &str,
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "velnor-workflow-current-project-selection-{name}-{}-{id}",
-            std::process::id()
+            "velnor-workflow-current-project-selection-{name}-{}",
+            crate::s2::unique_suffix()
         ));
         std::fs::create_dir_all(&root)?;
         let init = |args: &[&str]| -> Result<String, Box<dyn Error>> {

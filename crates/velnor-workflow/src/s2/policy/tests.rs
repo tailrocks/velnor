@@ -14,6 +14,7 @@ use crate::s2::{PolicyJobSpec, ProjectConfig};
 const PIN_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PIN_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const CLOSURE_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+#[cfg(target_os = "linux")]
 const CLOSURE_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
@@ -46,6 +47,7 @@ fn write(path: &Path, content: &str) {
     must(fs::write(path, content), "write file");
 }
 
+#[cfg(target_os = "linux")]
 fn fake_velnor_workflow(directory: &Path, revision: &str, closure: &str) -> PathBuf {
     let binary = directory.join("velnor-workflow");
     must(
@@ -68,28 +70,6 @@ fn fake_velnor_workflow(directory: &Path, revision: &str, closure: &str) -> Path
     binary
 }
 
-fn fake_legacy_velnor_workflow(directory: &Path, revision: &str) -> PathBuf {
-    let binary = directory.join("velnor-workflow");
-    must(
-        fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {revision}; exit 0; fi\nif [ \"$1\" = --closure ]; then echo unknown; exit 0; fi\nexit 2\n"
-            ),
-        ),
-        "write fake legacy velnor-workflow",
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        must(
-            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
-            "mark fake legacy velnor-workflow executable",
-        );
-    }
-    binary
-}
-
 fn lookup(
     pinned_binary: Option<PathBuf>,
     search_path: Option<std::ffi::OsString>,
@@ -97,28 +77,14 @@ fn lookup(
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
         pinned_binary,
+        trusted_closure: None,
         search_path,
         install_root,
         build_forbidden: true,
-        candidate_manifest: None,
     }
 }
 
-fn lookup_with_manifest(
-    pinned_binary: Option<PathBuf>,
-    search_path: Option<std::ffi::OsString>,
-    install_root: PathBuf,
-    candidate_manifest: PathBuf,
-) -> PinnedBinaryLookup {
-    PinnedBinaryLookup {
-        pinned_binary,
-        search_path,
-        install_root,
-        build_forbidden: true,
-        candidate_manifest: Some(candidate_manifest),
-    }
-}
-
+#[cfg(target_os = "linux")]
 fn checkout_source(root: &Path) -> PinSource {
     PinSource::Checkout(root.to_path_buf())
 }
@@ -127,7 +93,7 @@ fn checkout_source(root: &Path) -> PinSource {
 // Pinned binary resolution
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn pinned_binary_env_is_used_only_when_it_proves_the_pin() {
     let root = temporary_directory("pinned-env");
@@ -156,7 +122,7 @@ fn pinned_binary_env_is_used_only_when_it_proves_the_pin() {
     let _ = fs::remove_dir_all(root);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn path_binary_is_used_when_its_reported_closure_is_the_pin() {
     let root = temporary_directory("pinned-path");
@@ -183,9 +149,147 @@ fn path_binary_is_used_when_its_reported_closure_is_the_pin() {
     let _ = fs::remove_dir_all(root);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
-fn forbidden_build_fails_closed_listing_every_candidate() {
+fn safe_root_pin_probe_uses_captured_checkout_root() {
+    let root = temporary_directory("safe-root-pin-probe");
+    let checkout = root.join("checkout");
+    let binary_directory = root.join("bin");
+    must(fs::create_dir_all(&checkout), "create captured checkout");
+    must(
+        fs::create_dir_all(&binary_directory),
+        "create renderer directory",
+    );
+    let marker = format!(".probe-root-{}", crate::s2::unique_suffix());
+    write(&checkout.join(&marker), "captured checkout marker\n");
+
+    let binary = binary_directory.join("velnor-workflow");
+    must(
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --closure ]; then if [ -f {} ]; then echo {CLOSURE_A}; else echo {CLOSURE_B}; fi; exit 0; fi\nexit 2\n",
+                shell_quote(&marker)
+            ),
+        ),
+        "write root-sensitive renderer probe",
+    );
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        must(
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
+            "mark root-sensitive renderer executable",
+        );
+    }
+
+    let captured = must(
+        super::super::safe_fs::SafeRoot::open(&checkout),
+        "capture checkout root",
+    );
+    let lookup = lookup(Some(binary.clone()), None, root.join("install"));
+    let expected = [CLOSURE_A.to_owned()];
+    assert_eq!(
+        must(
+            resolve_pinned_binary_with_safe_root(
+                PIN_A,
+                Some(&expected),
+                &lookup,
+                &checkout_source(&root),
+                &captured,
+            ),
+            "prove pinned renderer from captured checkout root"
+        ),
+        must(fs::canonicalize(&binary), "canonicalize pinned renderer")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn missing_pin_closure_rejects_self_reporting_renderer_before_execution() {
+    let root = temporary_directory("missing-pin-closure");
+    let checkout = root.join("checkout");
+    let binary_directory = root.join("bin");
+    must(fs::create_dir_all(&checkout), "create captured checkout");
+    must(
+        fs::create_dir_all(&binary_directory),
+        "create renderer directory",
+    );
+    let binary = binary_directory.join("velnor-workflow");
+    let renderer_ran = root.join("renderer-ran");
+    must(
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --closure) : > {}; echo {CLOSURE_A}; exit 0 ;;\n  --revision) : > {}; echo {PIN_A}; exit 0 ;;\nesac\nexit 2\n",
+                shell_quote(renderer_ran.to_str().expect("UTF-8 fixture path")),
+                shell_quote(renderer_ran.to_str().expect("UTF-8 fixture path")),
+            ),
+        ),
+        "write self-reporting renderer",
+    );
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        must(
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
+            "mark self-reporting renderer executable",
+        );
+    }
+
+    let captured = must(
+        super::super::safe_fs::SafeRoot::open(&checkout),
+        "capture checkout root",
+    );
+    let lookup = lookup(Some(binary.clone()), None, root.join("install"));
+    let source = PinSource::Remote(crate::s2::VELNOR_WORKFLOW_INSTALL_GIT_URL.to_owned());
+    let _ = must_fail(
+        resolve_pinned_binary(PIN_A, None, &lookup, &source),
+        "consumer tree without locally provable pin closure",
+    );
+    assert!(
+        !renderer_ran.exists(),
+        "the basic resolver rejects missing pin history before running self-reported identity"
+    );
+    let _ = must_fail(
+        resolve_pinned_binary_with_safe_root(PIN_A, None, &lookup, &source, &captured),
+        "safe-root resolver without locally provable pin closure",
+    );
+    assert!(
+        !renderer_ran.exists(),
+        "the safe-root resolver also rejects missing pin history before execution"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn remote_pin_uses_only_the_trusted_setup_closure() {
+    let root = temporary_directory("remote-trusted-closure");
+    let mut lookup = lookup(None, None, root.join("install"));
+    lookup.trusted_closure = Some(CLOSURE_A.to_owned());
+    assert_eq!(
+        must(
+            expected_remote_closure(PIN_A, &lookup),
+            "trusted remote closure"
+        ),
+        CLOSURE_A
+    );
+
+    lookup.trusted_closure = None;
+    let error = must_fail(
+        expected_remote_closure(PIN_A, &lookup),
+        "remote pin without trusted setup output",
+    )
+    .to_string();
+    assert!(
+        error.contains(crate::VELNOR_WORKFLOW_PINNED_CLOSURE_ENV),
+        "{error}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forbidden_build_fails_closed_listing_every_renderer_attempt() {
     let root = temporary_directory("pinned-offline");
     let stale_dir = root.join("stale");
     must(fs::create_dir_all(&stale_dir), "stale dir");
@@ -222,44 +326,7 @@ fn forbidden_build_fails_closed_listing_every_candidate() {
     let _ = fs::remove_dir_all(root);
 }
 
-#[cfg(unix)]
-#[test]
-fn revision_fallback_requires_the_pin_and_a_closure_report() {
-    let root = temporary_directory("pinned-fallback");
-    for name in ["matching", "wrong", "legacy"] {
-        must(fs::create_dir_all(root.join(name)), "fallback dir");
-    }
-    let matching = fake_velnor_workflow(&root.join("matching"), PIN_A, CLOSURE_A);
-    let matching_lookup = lookup(Some(matching.clone()), None, root.join("install"));
-    assert_eq!(
-        must(
-            resolve_pinned_binary(PIN_A, None, &matching_lookup, &checkout_source(&root)),
-            "env binary at the pin without history"
-        ),
-        matching
-    );
-    let wrong = fake_velnor_workflow(&root.join("wrong"), PIN_B, CLOSURE_B);
-    let wrong_lookup = lookup(Some(wrong), None, root.join("install"));
-    let error = must_fail(
-        resolve_pinned_binary(PIN_A, None, &wrong_lookup, &checkout_source(&root)),
-        "env binary at another revision without history",
-    )
-    .to_string();
-    assert!(
-        error.contains(&format!("reports revision {PIN_B}")),
-        "an explicit pointer at the wrong revision is refused, not skipped: {error}"
-    );
-    let legacy = fake_legacy_velnor_workflow(&root.join("legacy"), PIN_A);
-    let legacy_lookup = lookup(Some(legacy), None, root.join("install"));
-    let error = must_fail(
-        resolve_pinned_binary(PIN_A, None, &legacy_lookup, &checkout_source(&root)),
-        "binary without a closure report",
-    )
-    .to_string();
-    assert!(error.contains("source-closure digest"), "{error}");
-    let _ = fs::remove_dir_all(root);
-}
-
+#[cfg(target_os = "linux")]
 #[test]
 fn the_running_binary_is_the_pin_when_built_at_it() {
     let root = temporary_directory("pinned-self");
@@ -275,6 +342,84 @@ fn the_running_binary_is_the_pin_when_built_at_it() {
         "the running binary at its own closure",
     );
     assert_eq!(resolved, must(env::current_exe(), "current exe"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn renderer_descriptor_execution_fails_closed_on_macos() {
+    let executable = must(env::current_exe(), "current test executable");
+    let pinned = must(
+        PinnedExecutable::open(&executable),
+        "open current executable handle",
+    );
+    let error = must_fail(
+        pinned.output(["--revision"]),
+        "macOS has no supported held-file exec path",
+    );
+    assert!(
+        error.contains("descriptor-bound renderer execution is unavailable"),
+        "unsupported platforms must refuse path-based execution: {error}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn pin_build_is_refused_before_path_or_build_resolution_on_macos() {
+    let root = temporary_directory("macos-pin-build-refused");
+    let renderer_directory = root.join("path-bin");
+    must(
+        fs::create_dir_all(&renderer_directory),
+        "create renderer search directory",
+    );
+    let renderer = renderer_directory.join("velnor-workflow");
+    let renderer_ran = root.join("renderer-ran");
+    write(
+        &renderer,
+        &format!(
+            "#!/bin/sh\ntouch {}\necho {}\n",
+            shell_quote(renderer_ran.to_str().expect("UTF-8 fixture path")),
+            CLOSURE_A
+        ),
+    );
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        must(
+            fs::set_permissions(&renderer, fs::Permissions::from_mode(0o755)),
+            "make renderer executable",
+        );
+    }
+    let install_root = root.join("install");
+    let lookup = PinnedBinaryLookup {
+        pinned_binary: None,
+        trusted_closure: None,
+        search_path: env::join_paths([&renderer_directory]).ok(),
+        install_root: install_root.clone(),
+        // This is the resolver state produced by explicit `--pin-build`.
+        build_forbidden: false,
+    };
+    let error = must_fail(
+        resolve_pinned_binary(
+            PIN_A,
+            Some(&[]),
+            &lookup,
+            &PinSource::Checkout(root.join("missing-checkout")),
+        ),
+        "macOS must reject D19 before resolving a path renderer or building",
+    )
+    .to_string();
+    assert!(
+        error.contains("descriptor-bound renderer execution is unavailable"),
+        "unsupported renderer execution is the feature-boundary error: {error}"
+    );
+    assert!(
+        !renderer_ran.exists(),
+        "no path renderer executes on the unsupported platform"
+    );
+    assert!(
+        !install_root.exists(),
+        "explicit --pin-build cannot create or build a renderer on the unsupported platform"
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -559,7 +704,7 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
     assert!(audit.trigger.is_empty(), "{:?}", audit.trigger);
     assert!(audit.privileges.is_empty(), "{:?}", audit.privileges);
     assert!(
-        entrypoint.contains("with no secret references"),
+        entrypoint.contains("references no secrets"),
         "the trust invariant states the absence honestly: {entrypoint}"
     );
     assert!(!entrypoint.contains("secrets."), "{entrypoint}");
@@ -586,12 +731,11 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
     let _ = fs::remove_dir_all(root);
 }
 
-/// The owner policy job acquires products (no `--rev <sha>` install) and its
-/// candidate step passes shell variables to `closure --rev=`: those variable
-/// references are not pin literals, so the pin rule still passes on the
-/// exported revision and still names it on drift.
+/// The owner policy job provisions the declared pin through the base-owned
+/// setup action. No PR candidate resolver or manifest input is generated, and
+/// the entrypoint pin rule still catches drift.
 #[test]
-fn owner_entrypoint_pin_ignores_variable_references() {
+fn owner_entrypoint_pin_uses_declared_runtime_without_candidate_input() {
     let job = crate::s2::policy_job(&PolicyJobSpec {
         name: "Policy",
         revision: PIN_A,
@@ -602,17 +746,25 @@ fn owner_entrypoint_pin_ignores_variable_references() {
         default_branch: "main",
         declared_ruleset_contexts: "ci-required,Policy",
     });
-    assert!(job.contains("--rev=\"$pin\""), "{job}");
     assert!(
-        !job.contains("--rev "),
-        "rendered templates never use the space form a pre-product base validator scans for: {job}"
+        job.contains("Set up Velnor workflow runtime") && job.contains(&format!("rev: {PIN_A}")),
+        "owner policy provisions the declared pin through the base setup action: {job}"
     );
-    assert!(
-        job.contains(&format!(
-            "--candidate-manifest \"${{{VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV}:-}}\""
-        )),
-        "the Enforce step binds the candidate manifest through the unset-safe fallback: {job}"
-    );
+    for forbidden in [
+        "--candidate-manifest",
+        "candidate-manifest.json",
+        "VELNOR_WORKFLOW_CANDIDATE",
+        "Acquire candidate generator product",
+        "gh run download",
+        "actions/download-artifact",
+        "velnor-workflow-candidate-",
+        "$candidate/velnor-workflow",
+    ] {
+        assert!(
+            !job.contains(forbidden),
+            "generated policy job contains forbidden candidate path {forbidden:?}: {job}"
+        );
+    }
     let root = entrypoint_tree("entrypoint-owner-pin", &job);
     let pin = entrypoint_pin(&root, PIN_A);
     assert!(pin.passed, "{:?}", pin.details);
@@ -773,7 +925,6 @@ fn ungated_trusted_velnor_job_fails_the_trusted_runners_rule() {
         base_revision: PIN_A.to_owned(),
         ruleset_contexts: Some(vec!["ci-required".to_owned(), "DCO".to_owned()]),
         build_pin: false,
-        candidate_manifest: None,
     };
     let report = must(evaluate(&options), "evaluate ungated tree");
     let runners = must_some(report.rule("trusted-runners"), "trusted-runners rule");
@@ -864,6 +1015,31 @@ fn a_second_pull_request_target_workflow_is_refused() {
 /// Job-level `env:` allows the documented contexts (`github, needs, strategy,
 /// matrix, vars, secrets, inputs`), and step-level `env:` allows `runner` and
 /// `steps`. A workflow using only those passes `workflow-structure`.
+#[test]
+fn static_workflow_output_is_still_semantically_audited() {
+    let root = temporary_directory("semantic-static-workflow");
+    write(
+        &root.join(GENERATION_CONFIG),
+        "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n\n[[static_files]]\nfile = \".github/workflows/rogue.yml\"\nsource = \"rogue.yml\"\n",
+    );
+    write(&root.join("rogue.yml"), "name: Rogue\n");
+    write(
+        &root.join(".github/workflows/rogue.yml"),
+        "name: Rogue\non:\n  pull_request_target:\njobs:\n  run:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo rogue\n",
+    );
+
+    let audit = must(audit_workflows(&root), "audit a rendered static workflow");
+    assert!(
+        audit
+            .pull_request_target
+            .iter()
+            .any(|finding| finding.contains("rogue.yml")),
+        "a rendered static workflow still receives semantic policy checks: {:?}",
+        audit.pull_request_target
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn job_level_env_with_allowed_contexts_passes() {
     let root = velnor_tree("semantic-job-env-allowed", &gated_trusted_job());
@@ -957,48 +1133,362 @@ fn cli_requires_the_base_validator_revision() {
     )
     .to_string();
     assert!(unknown.contains("--approved-policy-revision"), "{unknown}");
-    let duplicate = must_fail(
+    let candidate_manifest = must_fail(
         run_cli(&[
             std::ffi::OsString::from("--candidate-manifest"),
-            std::ffi::OsString::from("/first.json"),
-            std::ffi::OsString::from("--candidate-manifest"),
-            std::ffi::OsString::from("/second.json"),
+            std::ffi::OsString::from("/candidate.json"),
         ]),
-        "candidate manifest given twice",
+        "candidate manifest is unsupported",
     )
     .to_string();
-    assert!(duplicate.contains("--candidate-manifest"), "{duplicate}");
-    assert!(duplicate.contains("given twice"), "{duplicate}");
+    assert!(
+        candidate_manifest.contains("unsupported policy option"),
+        "{candidate_manifest}"
+    );
+    assert!(
+        candidate_manifest.contains("--candidate-manifest"),
+        "{candidate_manifest}"
+    );
     let _ = fs::remove_dir_all(root);
 }
 
 // ---------------------------------------------------------------------------
-// Candidate render exception
+// D19 pinned rendering and comparison
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
-fn fake_candidate_renderer(directory: &Path, closure: &str) -> PathBuf {
-    let binary = directory.join("candidate");
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn d19_renderer_and_comparison_stay_on_captured_root_during_path_swap() {
+    let fixture = temporary_directory("d19-root-swap");
+    let source = fixture.join("source");
+    let moved_source = fixture.join("source-moved");
+    let replacement = fixture.join("replacement");
     must(
-        fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --closure ]; then echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\n"
-            ),
+        fs::create_dir_all(source.join(".github/workflows")),
+        "create captured output tree",
+    );
+    must(
+        fs::create_dir_all(replacement.join(".github/workflows")),
+        "create replacement tree",
+    );
+    write(&source.join("source.txt"), "captured source\n");
+    write(
+        &source.join(".github/workflows/render.yml"),
+        "replacement render\n",
+    );
+    for root in [&source, &replacement] {
+        write(
+            &root.join(".github/actionlint.yaml"),
+            "actionlint fixture\n",
+        );
+        write(&root.join(".github/ci/project.toml"), "project fixture\n");
+        write(
+            &root.join("config/fleet/velnor-host.env"),
+            "fleet fixture\n",
+        );
+    }
+    write(&replacement.join("source.txt"), "replacement source\n");
+    write(
+        &replacement.join(".github/workflows/render.yml"),
+        "replacement render\n",
+    );
+    let captured =
+        super::super::safe_fs::SafeRoot::open(&source).expect("capture source and output tree");
+    let scratch = temporary_directory("d19-root-swap-scratch");
+    let scratch_root =
+        super::super::safe_fs::SafeRoot::open(&scratch).expect("capture scratch output");
+    let binary = fixture.join("fake-renderer");
+    let script = format!(
+        "#!/bin/sh\nset -eu\nroot={}\nmoved={}\nreplacement={}\nrestore() {{\n  if [ -d \"$root\" ] && [ ! -e \"$replacement\" ]; then mv \"$root\" \"$replacement\"; fi\n  if [ -d \"$moved\" ] && [ ! -e \"$root\" ]; then mv \"$moved\" \"$root\"; fi\n}}\ntrap restore EXIT\nmv \"$root\" \"$moved\"\nmv \"$replacement\" \"$root\"\nmkdir -p \"$3/.github/ci\" \"$3/config/fleet\" \"$3/.github/workflows\"\ncp .github/actionlint.yaml \"$3/.github/actionlint.yaml\"\ncp .github/ci/project.toml \"$3/.github/ci/project.toml\"\ncp config/fleet/velnor-host.env \"$3/config/fleet/velnor-host.env\"\ncat source.txt > \"$3/.github/workflows/render.yml\"\n",
+        shell_quote(source.to_str().expect("UTF-8 fixture path")),
+        shell_quote(moved_source.to_str().expect("UTF-8 fixture path")),
+        shell_quote(replacement.to_str().expect("UTF-8 fixture path")),
+    );
+    must(fs::write(&binary, script), "write fake renderer");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        must(
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
+            "make fake renderer executable",
+        );
+    }
+    let executable = must(
+        PinnedExecutable::open(&binary),
+        "open fake renderer handle before root swap",
+    );
+
+    let differences = must(
+        render_and_compare_with_safe_roots(
+            &executable,
+            &captured,
+            &captured,
+            &scratch,
+            &scratch_root,
+            "main",
         ),
-        "write fake candidate renderer",
+        "render and compare against the captured tree",
+    );
+    assert_eq!(
+        differences,
+        [".github/workflows/render.yml: differs from the pinned render"],
+        "the replacement tree matches the stale workflow, but the captured source must not pass"
+    );
+    assert_eq!(
+        fs::read_to_string(scratch.join(".github/workflows/render.yml"))
+            .expect("read generated fixture"),
+        "captured source\n",
+        "renderer cwd remains on the captured directory handle during the swap"
+    );
+    captured
+        .validate_root_binding()
+        .expect("the source path was restored to its captured identity");
+
+    let _ = fs::remove_dir_all(fixture);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn d19_empty_render_cannot_pass_with_an_unrendered_workflow() {
+    let fixture = temporary_directory("d19-empty-render");
+    let tree = fixture.join("tree");
+    let scratch = fixture.join("scratch");
+    must(
+        fs::create_dir_all(tree.join(".github/workflows")),
+        "create tree with an unrendered workflow",
+    );
+    must(fs::create_dir(&scratch), "create scratch output");
+    write(
+        &tree.join(".github/workflows/handwritten.yml"),
+        "handwritten workflow\n",
+    );
+    let root = must(
+        super::super::safe_fs::SafeRoot::open(&tree),
+        "capture source and target root",
+    );
+    let scratch_root = must(
+        super::super::safe_fs::SafeRoot::open(&scratch),
+        "capture empty scratch root",
+    );
+    let binary = fixture.join("empty-renderer");
+    must(
+        fs::write(&binary, "#!/bin/sh\nexit 0\n"),
+        "write empty renderer",
     );
     {
         use std::os::unix::fs::PermissionsExt as _;
         must(
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
-            "mark fake candidate renderer executable",
+            "make empty renderer executable",
         );
     }
-    binary
+    let executable = must(
+        PinnedExecutable::open(&binary),
+        "open empty renderer handle",
+    );
+    let error = must_fail(
+        render_and_compare_with_safe_roots(
+            &executable,
+            &root,
+            &root,
+            &scratch,
+            &scratch_root,
+            "main",
+        ),
+        "empty renderer must not prove the pin",
+    )
+    .to_string();
+    assert!(
+        error.contains("pinned renderer omitted required output .github/actionlint.yaml"),
+        "the independent minimum inventory rejects an empty render: {error}"
+    );
+    let _ = fs::remove_dir_all(fixture);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+#[test]
+fn d19_scratch_path_a_to_b_to_a_stays_bound_to_output_handle() {
+    let fixture = temporary_directory("d19-scratch-path-swap");
+    let tree = fixture.join("tree");
+    let scratch = fixture.join("scratch-a");
+    let moved_a = fixture.join("scratch-a-moved");
+    let replacement_b = fixture.join("scratch-b");
+    must(
+        fs::create_dir_all(tree.join(".github/workflows")),
+        "create target tree",
+    );
+    must(fs::create_dir(&scratch), "create captured scratch A");
+    for (relative, content) in [
+        (".github/actionlint.yaml", "actionlint expected\n"),
+        (".github/ci/project.toml", "project expected\n"),
+        (
+            "config/fleet/velnor-host.env",
+            "fleet environment expected\n",
+        ),
+        (".github/workflows/handwritten.yml", "unrendered workflow\n"),
+    ] {
+        write(&tree.join(relative), content);
+    }
+    let root = must(
+        super::super::safe_fs::SafeRoot::open(&tree),
+        "capture target tree",
+    );
+    let scratch_root = must(
+        super::super::safe_fs::SafeRoot::open(&scratch),
+        "capture scratch A handle",
+    );
+    let binary = fixture.join("swap-renderer");
+    let script = format!(
+        "#!/bin/sh\nset -eu\nroot=$3\nmoved={}\nreplacement={}\nfd_root=\"/proc/self/fd/${{{}:?}}\"\nmv \"$root\" \"$moved\"\nmkdir \"$root\"\nmkdir -p \"$root/.github\"\nprintf 'replacement poison\\n' > \"$root/.github/actionlint.yaml\"\nmkdir -p \"$fd_root/.github/ci\" \"$fd_root/config/fleet\"\nprintf 'actionlint expected\\n' > \"$fd_root/.github/actionlint.yaml\"\nprintf 'project expected\\n' > \"$fd_root/.github/ci/project.toml\"\nprintf 'fleet environment expected\\n' > \"$fd_root/config/fleet/velnor-host.env\"\nmv \"$root\" \"$replacement\"\nmv \"$moved\" \"$root\"\n",
+        shell_quote(moved_a.to_str().expect("UTF-8 moved path")),
+        shell_quote(replacement_b.to_str().expect("UTF-8 replacement path")),
+        super::super::safe_fs::pinned_command::OUTPUT_ROOT_FD_ENV,
+    );
+    must(fs::write(&binary, script), "write scratch-swap renderer");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        must(
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
+            "make scratch-swap renderer executable",
+        );
+    }
+    let executable = must(
+        PinnedExecutable::open(&binary),
+        "open scratch-swap renderer handle",
+    );
+    let differences = must(
+        render_and_compare_with_safe_roots(
+            &executable,
+            &root,
+            &root,
+            &scratch,
+            &scratch_root,
+            "main",
+        ),
+        "compare output written through the captured descriptor",
+    );
+    assert_eq!(
+        differences,
+        [".github/workflows/handwritten.yml: not present in rendered output"],
+        "the output handle keeps the render in A and refuses an unrendered workflow"
+    );
+    assert_eq!(
+        fs::read_to_string(replacement_b.join(".github/actionlint.yaml"))
+            .expect("read replacement B poison"),
+        "replacement poison\n",
+        "the display-path replacement received only its poison marker"
+    );
+    assert_eq!(
+        scratch_root
+            .read_file_if_exists(Path::new(".github/actionlint.yaml"))
+            .expect("read actionlint through captured scratch A")
+            .expect("captured A contains generated output"),
+        b"actionlint expected\n",
+        "the compared render came from captured A, not replacement B"
+    );
+    scratch_root
+        .validate_root_binding()
+        .expect("scratch A was restored at its captured name");
+    let _ = fs::remove_dir_all(fixture);
+}
+
+#[test]
+fn bound_scratch_creation_rejects_a_preexisting_name_collision() {
+    let fixture = temporary_directory("scratch-name-collision");
+    let name = std::ffi::OsString::from("scratch-collision");
+    let collision = fixture.join(&name);
+    must(fs::create_dir(&collision), "create preexisting directory");
+    write(&collision.join("keep.txt"), "replacement stays\n");
+    let parent = must(
+        super::super::safe_fs::SafeRoot::open(&fixture),
+        "capture scratch parent",
+    );
+
+    let error = must_fail(
+        BoundScratchDirectory::create_under_parent(parent, name),
+        "exclusive scratch creation must reject an existing name",
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("create pinned scratch directory"),
+        "the existing entry is a collision, not an accepted scratch root: {error}"
+    );
+    assert_eq!(
+        fs::read_to_string(collision.join("keep.txt")).expect("read collision marker"),
+        "replacement stays\n",
+        "creation failure leaves the preexisting directory untouched"
+    );
+    let _ = fs::remove_dir_all(fixture);
+}
+
+#[test]
+fn bound_scratch_cleanup_rejects_replacement_after_binding_validation() {
+    let fixture = temporary_directory("scratch-cleanup-swap");
+    let name = std::ffi::OsString::from("scratch");
+    let path = fixture.join(&name);
+    let moved_a = fixture.join("captured-a-moved");
+    let replacement_b = fixture.join("replacement-b");
+    let parent = must(
+        super::super::safe_fs::SafeRoot::open(&fixture),
+        "capture scratch parent",
+    );
+    let scratch = must(
+        BoundScratchDirectory::create_under_parent(parent, name.clone()),
+        "create bound scratch root",
+    );
+    let identity = scratch.identity.clone();
+    scratch
+        .root
+        .validate_root_binding()
+        .expect("post-render binding validation sees captured A");
+
+    must(fs::rename(&path, &moved_a), "move captured scratch A");
+    must(
+        fs::create_dir(&replacement_b),
+        "create replacement scratch B",
+    );
+    write(&replacement_b.join("keep.txt"), "replacement stays\n");
+    must(
+        fs::rename(&replacement_b, &path),
+        "put replacement B at the captured scratch name",
+    );
+    let error = must_fail(
+        scratch.cleanup(),
+        "cleanup must reject a replacement after binding validation",
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("repository root changed since it was opened"),
+        "cleanup revalidates the exact captured root: {error}"
+    );
+    assert_eq!(
+        fs::read_to_string(path.join("keep.txt")).expect("read replacement marker"),
+        "replacement stays\n",
+        "cleanup leaves replacement B untouched"
+    );
+
+    must(fs::rename(&path, &replacement_b), "move B aside");
+    must(fs::rename(&moved_a, &path), "restore captured A");
+    must(
+        super::super::safe_fs::SafeRoot::open(&fixture)
+            .and_then(|root| root.remove_named_tree_if_matches(&name, &identity)),
+        "remove restored captured A through its pinned parent",
+    );
+    assert_eq!(
+        fs::read_to_string(replacement_b.join("keep.txt")).expect("read B after cleanup"),
+        "replacement stays\n",
+        "cleanup of A leaves B untouched"
+    );
+    let _ = fs::remove_dir_all(fixture);
+}
+
+#[cfg(target_os = "linux")]
 fn closure_fixture(name: &str) -> (PathBuf, String) {
     let root = temporary_directory(name);
     git_ok(&root, &["init", "-q", "-b", "main"]);
@@ -1008,374 +1498,129 @@ fn closure_fixture(name: &str) -> (PathBuf, String) {
     );
     write(&root.join("Cargo.toml"), "[workspace]\n");
     write(&root.join("Cargo.lock"), "# lock\n");
+    write(
+        &root.join(".github/actionlint.yaml"),
+        "actionlint fixture\n",
+    );
+    write(&root.join(".github/ci/project.toml"), "project fixture\n");
+    write(
+        &root.join("config/fleet/velnor-host.env"),
+        "fleet fixture\n",
+    );
     write(&root.join(".github/workflows/ci-pr.yml"), "tree\n");
     let head = commit(&root, "fixture");
     (root, head)
 }
 
-// NOTE: `candidate_render_is_accepted_only_from_a_head_authentic_binary` was
-// deleted here. It asserted that an env-slot binary is accepted when its
-// `--closure` stdout echoes the wanted closure — but that expectation WAS
-// the vulnerability itself: a `--closure` echo is a self-report by
-// untrusted bytes, and treating it as authenticity let any binary that
-// prints the right string execute as the candidate. Acceptance now
-// requires the manifest binding (closure equality plus digest match before
-// any execution); the tests below pin each clause of that rule.
-
-/// A candidate manifest binding `binary` to `closure`: the digest is the
-/// real SHA-256 of the binary bytes, so only a byte-identical binary
-/// satisfies the binding.
-#[cfg(unix)]
-fn candidate_manifest_for(
-    directory: &Path,
-    name: &str,
-    binary: &Path,
-    closure: &str,
-    revision: &str,
-) -> PathBuf {
-    use sha2::Digest as _;
-    let bytes = must(fs::read(binary), "read fake binary bytes");
-    let mut digest = String::with_capacity(64);
-    for byte in sha2::Sha256::digest(&bytes) {
-        let _ = std::fmt::Write::write_fmt(&mut digest, format_args!("{byte:02x}"));
-    }
-    let manifest = directory.join(name);
-    must(
-        fs::write(
-            &manifest,
-            serde_json::json!({
-                "profile": "debug",
-                "platform": "Linux-X64",
-                "repository": crate::s2::workflow_setup_action_repository(),
-                "run_id": "123",
-                "revision": revision,
-                "closure": closure,
-                "binary_sha256": digest,
-            })
-            .to_string(),
-        ),
-        "write candidate manifest",
+#[cfg(target_os = "linux")]
+#[test]
+fn replacement_path_cannot_produce_pin_comparison() {
+    let (root, head) = closure_fixture("pin-path-swap");
+    let closures = must(expected_closures(&root, &head), "pin closure variants");
+    let pin_debug_closure = closures[1].clone();
+    let binary = root.join("pinned-renderer");
+    let original = root.join("pinned-renderer-original");
+    let replacement = root.join("pinned-renderer-replacement");
+    let opened_rendered = root.join("opened-rendered");
+    let replacement_rendered = root.join("replacement-rendered");
+    let first = format!(
+        "#!/bin/sh\nset -eu\nbinary={}\nreplacement={}\nif [ \"$1\" = --closure ]; then\n  rm \"$binary\"\n  ln -s \"$replacement\" \"$binary\"\n  echo {}\n  exit 0\nfi\ntouch {}\nmkdir -p \"$3/.github/ci\" \"$3/config/fleet\" \"$3/.github/workflows\"\ncp .github/actionlint.yaml \"$3/.github/actionlint.yaml\"\ncp .github/ci/project.toml \"$3/.github/ci/project.toml\"\ncp config/fleet/velnor-host.env \"$3/config/fleet/velnor-host.env\"\nprintf 'wrong render\\n' > \"$3/.github/workflows/ci-pr.yml\"\n",
+        shell_quote(binary.to_str().expect("UTF-8 fixture path")),
+        shell_quote(replacement.to_str().expect("UTF-8 fixture path")),
+        pin_debug_closure,
+        shell_quote(opened_rendered.to_str().expect("UTF-8 fixture path")),
     );
-    manifest
-}
-
-/// A fake candidate renderer that records every `--closure` probe in
-/// `sentinel`, so tests can prove the binary was never executed at all.
-#[cfg(unix)]
-fn fake_probed_candidate_renderer(directory: &Path, closure: &str, sentinel: &Path) -> PathBuf {
-    let binary = directory.join("candidate");
-    must(
-        fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --closure ]; then touch \"{}\"; echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\n",
-                sentinel.display()
-            ),
+    must(fs::write(&original, first), "write first pinned renderer");
+    let second = format!(
+        "#!/bin/sh\nset -eu\nif [ \"$1\" = --closure ]; then echo {}; exit 0; fi\ntouch {}\ncp -r \"$1/.\" \"$3/\"\n",
+        pin_debug_closure,
+        shell_quote(
+            replacement_rendered
+                .to_str()
+                .expect("UTF-8 fixture path")
         ),
-        "write fake probed candidate renderer",
+    );
+    must(
+        fs::write(&replacement, second),
+        "write replacement renderer",
     );
     {
         use std::os::unix::fs::PermissionsExt as _;
-        must(
-            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
-            "mark fake probed candidate renderer executable",
-        );
-    }
-    binary
-}
-
-#[cfg(unix)]
-#[test]
-fn bound_candidate_matching_head_tree_is_accepted() {
-    let (root, head) = closure_fixture("candidate-bound");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-bound-scratch");
-    let binary = fake_candidate_renderer(&root, &wanted);
-    let manifest =
-        candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
-    assert_eq!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-            "bound candidate reproduces the tree",
-        )
-        .as_deref(),
-        Some(wanted.as_str())
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn lying_binary_whose_digest_misses_the_manifest_is_rejected() {
-    let (root, head) = closure_fixture("candidate-lying");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-lying-scratch");
-    let sentinel = root.join("closure-probed");
-    let binary = fake_probed_candidate_renderer(&root, &wanted, &sentinel);
-    // Bind the manifest to *other* bytes, so the binary echoes the wanted
-    // closure but its digest misses.
-    let other = root.join("other-bytes");
-    must(fs::write(&other, "different bytes"), "write decoy bytes");
-    let manifest = candidate_manifest_for(&root, "candidate-manifest.json", &other, &wanted, &head);
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
-    assert!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-            "digest mismatch never errors, it simply does not prove",
-        )
-        .is_none(),
-        "a binary whose digest misses the manifest is not the candidate"
-    );
-    assert!(
-        !sentinel.exists(),
-        "the digest gate fires before any execution, not even `--closure`"
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn candidate_manifest_for_another_tree_is_rejected() {
-    let (root, head) = closure_fixture("candidate-other-tree");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-other-tree-scratch");
-    // Self-consistent but for another tree: the binary echoes CLOSURE_A and
-    // the manifest binds CLOSURE_A with a matching digest.
-    let binary = fake_candidate_renderer(&root, CLOSURE_A);
-    let manifest =
-        candidate_manifest_for(&root, "candidate-manifest.json", &binary, CLOSURE_A, &head);
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
-    let error = must_fail(
-        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-        "manifest for another tree",
-    )
-    .to_string();
-    assert!(error.contains("names closure"), "{error}");
-    assert!(error.contains(CLOSURE_A), "{error}");
-    assert!(error.contains(&wanted), "{error}");
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn unbound_env_candidate_is_rejected_without_manifest() {
-    let (root, head) = closure_fixture("candidate-unbound");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-unbound-scratch");
-    let sentinel = root.join("closure-probed");
-    let binary = fake_probed_candidate_renderer(&root, &wanted, &sentinel);
-    let lookup = lookup(Some(binary), None, root.join("install"));
-    let excludes = std::collections::BTreeSet::new();
-    assert!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-            "missing manifest never errors, it disables the env slot",
-        )
-        .is_none(),
-        "an env-slot binary without a manifest is never the candidate"
-    );
-    assert!(
-        !sentinel.exists(),
-        "an unbound env-slot binary is skipped, never executed"
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn malformed_candidate_manifest_is_rejected() {
-    let (root, head) = closure_fixture("candidate-malformed");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-malformed-scratch");
-    let binary = fake_candidate_renderer(&root, &wanted);
-    let digest = {
-        use sha2::Digest as _;
-        let bytes = must(fs::read(&binary), "read fake binary bytes");
-        let mut digest = String::with_capacity(64);
-        for byte in sha2::Sha256::digest(&bytes) {
-            let _ = std::fmt::Write::write_fmt(&mut digest, format_args!("{byte:02x}"));
+        for executable in [&original, &replacement] {
+            must(
+                fs::set_permissions(executable, fs::Permissions::from_mode(0o755)),
+                "make renderer executable",
+            );
         }
-        digest
-    };
-    let cases = [
-        ("truncated".to_owned(), "{not json".to_owned()),
-        (
-            "short-revision".to_owned(),
-            serde_json::json!({"revision": "abc", "closure": wanted, "binary_sha256": digest})
-                .to_string(),
-        ),
-        (
-            "short-closure".to_owned(),
-            serde_json::json!({"revision": head, "closure": "abc", "binary_sha256": digest})
-                .to_string(),
-        ),
-        (
-            "short-digest".to_owned(),
-            serde_json::json!({"revision": head, "closure": wanted, "binary_sha256": "abc"})
-                .to_string(),
-        ),
-    ];
-    for (name, body) in &cases {
-        let manifest = root.join(format!("candidate-manifest-{name}.json"));
-        must(fs::write(&manifest, body), "write malformed manifest");
-        let lookup =
-            lookup_with_manifest(Some(binary.clone()), None, root.join("install"), manifest);
-        let excludes = std::collections::BTreeSet::new();
-        let error = must_fail(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-            &format!("malformed manifest {name}"),
-        )
-        .to_string();
-        assert!(
-            error.contains(&format!("candidate-manifest-{name}.json")),
-            "{name}: the error names the manifest: {error}"
-        );
     }
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
+    std::os::unix::fs::symlink(&original, &binary).expect("link pinned renderer path to A");
 
-#[test]
-fn candidate_manifest_source_prefers_flag_over_env() {
-    // The flag wins over the environment, so generated CI stays auditable.
-    // (In-process: setting process env needs `unsafe`, which this crate
-    // forbids, so the flag directions — which hold in every environment —
-    // are pinned here, and the environment-fallback direction is pinned by
-    // the `policy` CLI subprocess test in `velnor_first_ci.rs`, which owns
-    // the child's environment.)
-    assert_eq!(
-        candidate_manifest_source(Some("/flag/manifest.json")),
-        Some(PathBuf::from("/flag/manifest.json"))
+    let lookup = lookup(Some(binary.clone()), None, root.join("install"));
+    let checkout_root = super::super::safe_fs::SafeRoot::open(&root)
+        .expect("capture checkout root before executable swap");
+    let comparison = must(
+        regenerate_and_compare_with_safe_roots(
+            &checkout_root,
+            &checkout_root,
+            &head,
+            "main",
+            &lookup,
+            &PinSource::Checkout(root.clone()),
+        ),
+        "regenerate through the opened pinned renderer",
     );
-    // An explicit empty flag disables the binding.
-    assert_eq!(candidate_manifest_source(Some("")), None);
-    // Without either source the env-slot candidate is disabled. Like
-    // `cli_requires_the_base_validator_revision`, this relies on the ambient
-    // test environment not exporting the variable.
-    assert_eq!(candidate_manifest_source(None), None);
-}
-
-#[test]
-fn from_env_consent_mapping_is_fail_closed() {
-    // Without `--pin-build` the pin is never built, in every environment.
-    assert!(PinnedBinaryLookup::from_env(PIN_A, false, None).build_forbidden);
+    match comparison {
+        TreeComparison::Differences(differences) => {
+            assert!(!differences.is_empty(), "fixture differs from pin render");
+        }
+        TreeComparison::Pin => panic!("replacement must not produce Pin"),
+    }
     assert!(
-        PinnedBinaryLookup::from_env(PIN_A, false, Some(PathBuf::from("/manifest.json")))
-            .build_forbidden
+        original.exists(),
+        "closure probe leaves executable A intact"
     );
-    // The explicit manifest survives; without one the environment fallback
-    // applies (unset in the ambient test environment, so `None` here).
-    assert_eq!(
-        PinnedBinaryLookup::from_env(PIN_A, false, Some(PathBuf::from("/manifest.json")))
-            .candidate_manifest,
-        Some(PathBuf::from("/manifest.json"))
+    assert!(
+        binary.exists(),
+        "replacement executable B now owns the path"
     );
     assert_eq!(
-        PinnedBinaryLookup::from_env(PIN_A, false, None).candidate_manifest,
-        None
+        fs::read_link(&binary).expect("read replacement symlink"),
+        replacement,
+        "closure probe switched the pinned path from A to B"
     );
+    assert!(
+        opened_rendered.exists(),
+        "pin render ran from A, the inode that answered --closure"
+    );
+    assert!(
+        !replacement_rendered.exists(),
+        "replacement B did not run during pin evaluation"
+    );
+    checkout_root
+        .validate_root_binding()
+        .expect("checkout root identity stays captured");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn from_env_pin_build_consent_is_fail_closed() {
+    // Without `--pin-build` the pin is never built, in every environment.
+    assert!(PinnedBinaryLookup::from_env(PIN_A, false).build_forbidden);
     // `CARGO_NET_OFFLINE=true` forbids the build even with `--pin-build`;
     // setting process env needs `unsafe`, which this crate forbids, so that
     // direction is pinned by the `--check` CLI subprocess test in
     // `velnor_first_ci.rs`, which owns the child's environment.
 }
 
-#[cfg(unix)]
 #[test]
-fn candidate_render_rejects_a_binary_claiming_another_closure() {
-    let (root, head) = closure_fixture("candidate-foreign");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-foreign-scratch");
-    // Valid binding for the audited tree (manifest closure plus the real
-    // digest of the binary bytes), but the binary echoes CLOSURE_A: the
-    // `--closure` self-report stays as the final tripwire.
-    let binary = fake_candidate_renderer(&root, CLOSURE_A);
-    let manifest =
-        candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
-    assert!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-            "foreign closure never errors, it simply does not prove",
-        )
-        .is_none(),
-        "a binary reporting another closure is not the tree's candidate"
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[test]
-fn candidate_render_is_unavailable_without_git_history() {
-    let root = temporary_directory("candidate-nogit");
-    let scratch = temporary_directory("candidate-nogit-scratch");
-    let binary = root.join("missing");
-    let lookup = lookup(Some(binary), None, root.join("install"));
-    let excludes = std::collections::BTreeSet::new();
-    assert!(must(
-        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-        "no checkout, no candidate",
-    )
-    .is_none());
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[test]
-fn generated_tree_report_distinguishes_pin_candidate_and_stale_main() {
-    let pin = generated_tree_report(PIN_A, Ok(TreeComparison::Pin), false);
+fn generated_tree_report_fails_on_pin_differences() {
+    let pin = generated_tree_report(PIN_A, Ok(TreeComparison::Pin));
     assert!(pin.passed);
     assert!(pin.reason.contains(PIN_A), "{}", pin.reason);
-    let flight = generated_tree_report(
-        PIN_A,
-        Ok(TreeComparison::Candidate(CLOSURE_A.to_owned())),
-        false,
-    );
-    assert!(flight.passed, "{:?}", flight.details);
-    assert!(flight.reason.contains("in flight"), "{}", flight.reason);
-    assert!(flight.reason.contains("after merge"), "{}", flight.reason);
-    let stale = generated_tree_report(
-        PIN_A,
-        Ok(TreeComparison::Candidate(CLOSURE_A.to_owned())),
-        true,
-    );
-    assert!(!stale.passed);
-    assert!(
-        stale.reason.contains("stale on mainline"),
-        "{}",
-        stale.reason
-    );
     let drift = generated_tree_report(
         PIN_A,
         Ok(TreeComparison::Differences(vec!["ci-pr.yml".to_owned()])),
-        false,
     );
     assert!(!drift.passed);
     assert_eq!(drift.details, vec!["ci-pr.yml".to_owned()]);
@@ -1438,5 +1683,17 @@ fn policy_sibling_setup_action_is_a_reviewed_local_path() {
     assert!(
         !is_approved_local_action("./policy-setup-action/.github/workflows/ci-pr.yml"),
         "the sibling checkout carries no reusable workflows"
+    );
+    assert!(
+        is_approved_local_action(crate::s2::VELNOR_WORKFLOW_SOURCE_SETUP_ACTION),
+        "the owner package publisher resolves setup from its exact source checkout"
+    );
+    assert!(
+        !is_approved_local_action("./source/.github/actions/anything-else"),
+        "the source checkout allowance is the exact setup composite"
+    );
+    assert!(
+        !is_approved_local_action("./other-source/.github/actions/setup-velnor-workflow"),
+        "other checkout paths are not implicitly trusted"
     );
 }

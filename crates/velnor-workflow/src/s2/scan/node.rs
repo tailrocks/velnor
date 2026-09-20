@@ -1,13 +1,14 @@
 //! Node and Bun detector: package manifests and the workspace dependency graph.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::Path;
 
 use serde_json::Value;
 
 use super::file_walk::{files_named, join_repo_path, path_prefix, roots_for_manifests};
+use super::read_repository_text;
 use super::{unit, RepositoryShape, ScanContext};
+use crate::s2::safe_fs::SafeRoot;
 use crate::s2::{
     identifier_suffix, parent_path, shell_change_dir, CachePurpose, CacheSpec, GeneratorError,
     UnitKind,
@@ -61,6 +62,7 @@ struct PackageJsonFacts {
 }
 
 fn parse_package_json(
+    safe_root: &SafeRoot,
     root: &Path,
     relative_root: &str,
     contents: &str,
@@ -125,18 +127,26 @@ fn parse_package_json(
     if package_manager_spec.is_some() && package_manager.is_none() {
         return Ok(None);
     }
-    let manager =
-        package_manager.or_else(|| package_manager_from_ancestors(root, relative_root, file_set));
+    let manager = match package_manager {
+        Some(manager) => Some(manager),
+        None => package_manager_from_ancestors(safe_root, root, relative_root, file_set)?,
+    };
     let Some(manager) = manager else {
         return Ok(None);
     };
     let manager_version = package_manager_spec
         .as_deref()
         .and_then(|value| value.split_once('@').map(|(_, version)| version.to_owned()))
-        .or_else(|| {
-            package_manager
-                .is_none()
-                .then(|| package_manager_version_from_ancestors(root, relative_root, manager))?
+        .or(if package_manager.is_none() {
+            package_manager_version_from_ancestors(
+                safe_root,
+                root,
+                relative_root,
+                manager,
+                file_set,
+            )?
+        } else {
+            None
         });
     if manager_version
         .as_deref()
@@ -159,23 +169,26 @@ fn parse_package_json(
 }
 
 fn package_manager_from_ancestors(
+    safe_root: &SafeRoot,
     root: &Path,
     relative_root: &str,
     file_set: &BTreeSet<String>,
-) -> Option<PackageManager> {
+) -> Result<Option<PackageManager>, GeneratorError> {
     let mut current = relative_root.to_owned();
     loop {
-        let manifest = root.join(join_repo_path(&current, "package.json"));
-        if let Ok(contents) = fs::read_to_string(manifest)
-            && let Ok(value) = serde_json::from_str::<Value>(&contents)
-            && let Some(spec) = value
-                .as_object()
-                .and_then(|object| object.get("packageManager"))
-                .and_then(Value::as_str)
-            && let Some((name, _)) = spec.split_once('@')
-            && let Some(manager) = PackageManager::from_name(name)
-        {
-            return Some(manager);
+        let manifest = join_repo_path(&current, "package.json");
+        if file_set.contains(&manifest) {
+            let contents = read_repository_text(safe_root, root, &manifest)?;
+            if let Ok(value) = serde_json::from_str::<Value>(&contents)
+                && let Some(spec) = value
+                    .as_object()
+                    .and_then(|object| object.get("packageManager"))
+                    .and_then(Value::as_str)
+                && let Some((name, _)) = spec.split_once('@')
+                && let Some(manager) = PackageManager::from_name(name)
+            {
+                return Ok(Some(manager));
+            }
         }
         if let Some(manager) =
             [PackageManager::Bun, PackageManager::Npm]
@@ -187,36 +200,40 @@ fn package_manager_from_ancestors(
                         .any(|lockfile| file_set.contains(&join_repo_path(&current, lockfile)))
                 })
         {
-            return Some(manager);
+            return Ok(Some(manager));
         }
         if current == "." {
-            return None;
+            return Ok(None);
         }
         current = parent_path(&current);
     }
 }
 
 fn package_manager_version_from_ancestors(
+    safe_root: &SafeRoot,
     root: &Path,
     relative_root: &str,
     manager: PackageManager,
-) -> Option<String> {
+    file_set: &BTreeSet<String>,
+) -> Result<Option<String>, GeneratorError> {
     let mut current = relative_root.to_owned();
     loop {
-        let manifest = root.join(join_repo_path(&current, "package.json"));
-        if let Ok(contents) = fs::read_to_string(manifest)
-            && let Ok(value) = serde_json::from_str::<Value>(&contents)
-            && let Some(spec) = value
-                .as_object()
-                .and_then(|object| object.get("packageManager"))
-                .and_then(Value::as_str)
-            && let Some((name, version)) = spec.split_once('@')
-            && PackageManager::from_name(name) == Some(manager)
-        {
-            return Some(version.to_owned());
+        let manifest = join_repo_path(&current, "package.json");
+        if file_set.contains(&manifest) {
+            let contents = read_repository_text(safe_root, root, &manifest)?;
+            if let Ok(value) = serde_json::from_str::<Value>(&contents)
+                && let Some(spec) = value
+                    .as_object()
+                    .and_then(|object| object.get("packageManager"))
+                    .and_then(Value::as_str)
+                && let Some((name, version)) = spec.split_once('@')
+                && PackageManager::from_name(name) == Some(manager)
+            {
+                return Ok(Some(version.to_owned()));
+            }
         }
         if current == "." {
-            return None;
+            return Ok(None);
         }
         current = parent_path(&current);
     }
@@ -275,15 +292,14 @@ pub(crate) fn detect(
     for package_root in roots_for_manifests(&package_manifests) {
         let prefix = path_prefix(&package_root);
         let manifest = join_repo_path(&package_root, "package.json");
-        let contents = fs::read_to_string(context.root.join(&manifest)).map_err(|error| {
-            GeneratorError::io(
-                "read package manifest",
-                &context.root.join(&manifest),
-                &error,
-            )
-        })?;
-        let Some(facts) =
-            parse_package_json(context.root, &package_root, &contents, context.file_set)?
+        let contents = context.read_text(&manifest)?;
+        let Some(facts) = parse_package_json(
+            context.safe_root,
+            context.root,
+            &package_root,
+            &contents,
+            context.file_set,
+        )?
         else {
             shape.limitations.push(format!(
                 "Skipped {manifest}: package manager is unsupported or unresolved; supported package managers are Bun and npm."

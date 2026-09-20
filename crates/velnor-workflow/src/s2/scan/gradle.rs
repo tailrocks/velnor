@@ -8,8 +8,6 @@
 //! that is not under a settings workspace stays a standalone root.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::path::Path;
 
 use super::file_walk::{is_test_support_path, join_repo_path, path_prefix};
 use super::{unit, RepositoryShape, ScanContext};
@@ -53,7 +51,7 @@ fn detect_workspace(
     covered: &mut BTreeSet<String>,
 ) -> Result<(), GeneratorError> {
     let settings_path = settings_file(context.file_set, settings_root);
-    let settings_source = read_repo_file(context.root, &settings_path)?;
+    let settings_source = read_repo_file(context, &settings_path)?;
     let modules = parse_include_modules(&settings_source);
     let gradle = gradle_command(context.file_set, settings_root);
     let command_prefix = shell_change_dir(settings_root);
@@ -92,7 +90,7 @@ fn detect_workspace(
         let mut dependencies = BTreeSet::new();
         let mut sources = String::new();
         for build_file in module_build_files(context.file_set, &module_root) {
-            let source = read_repo_file(context.root, &build_file)?;
+            let source = read_repo_file(context, &build_file)?;
             sources.push_str(&source);
             sources.push('\n');
             for dep in parse_project_deps(&source, &module_ids) {
@@ -229,9 +227,8 @@ fn module_build_files(file_set: &BTreeSet<String>, module_root: &str) -> Vec<Str
         .collect()
 }
 
-fn read_repo_file(root: &Path, relative: &str) -> Result<String, GeneratorError> {
-    let path = root.join(relative);
-    fs::read_to_string(&path).map_err(|error| GeneratorError::io("read Gradle file", &path, &error))
+fn read_repo_file(context: &ScanContext<'_>, relative: &str) -> Result<String, GeneratorError> {
+    context.read_text(relative)
 }
 
 fn parent_of(file: &str) -> String {

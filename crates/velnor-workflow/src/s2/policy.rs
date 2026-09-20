@@ -29,21 +29,19 @@
 //! bootstrap escape hatch, never emitted into generated CI — permits building
 //! the pin from the audited tree.
 //!
-//! The candidate exception binds the env-slot candidate binary by manifest
-//! before executing it: the manifest's closure must equal the audited tree's
-//! candidate closure (computed locally from git history) and the binary's
-//! digest must match the manifest first, because a `--closure` echo is an
-//! assertion by untrusted bytes, not proof. The manifest arrives via
-//! `--candidate-manifest` or `VELNOR_WORKFLOW_CANDIDATE_MANIFEST`; without
-//! either, env-slot binaries are skipped, never executed.
+//! Candidate artifacts are not accepted: an artifact and its self-authored
+//! digest do not prove that it was built from the audited source. Until the
+//! base Stage-0 validator can rebuild that source inside a trusted sandbox,
+//! a tree that differs from its declared pin fails closed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 use serde_yaml::{Mapping, Value};
 
@@ -63,8 +61,6 @@ const POLICY_ENTRYPOINT: &str = ".github/workflows/ci-policy.yml";
 /// The pull-request aggregate whose job display names are the ruleset's
 /// status-check contexts.
 const PULL_REQUEST_AGGREGATE: &str = ".github/workflows/ci-pr.yml";
-/// Names the manifest binding the env-slot candidate binary.
-pub use super::VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV;
 /// Names a `velnor-workflow` binary built at the pinned revision.
 pub use super::VELNOR_WORKFLOW_PINNED_BINARY_ENV;
 /// The revision of the validator the base branch runs.
@@ -101,8 +97,6 @@ pub(crate) struct PolicyOptions {
     /// from the audited tree. Only an explicit `--pin-build` (local
     /// development and bootstrap) sets this; generated CI never does.
     pub(crate) build_pin: bool,
-    /// Manifest binding the env-slot candidate binary; `None` disables it.
-    pub(crate) candidate_manifest: Option<PathBuf>,
 }
 
 /// One rule's verdict.
@@ -201,19 +195,76 @@ impl PolicyReport {
 }
 
 /// `velnor-workflow policy [--workflow-root PATH] [--head-sha SHA] [--base-sha SHA]
-/// [--base-revision SHA] [--ruleset-contexts a,b] [--pin-build]
-/// [--candidate-manifest PATH]`.
+/// [--base-revision SHA] [--ruleset-contexts a,b] [--pin-build]`.
 ///
 /// `--pin-build` is a local-development and bootstrap escape hatch: without
 /// it an unprovisioned pin fails closed instead of compiling from source.
-/// `--candidate-manifest` binds the env-slot candidate binary to a manifest
-/// (falling back to [`VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV`]); without
-/// either the candidate exception skips env-slot binaries.
-///
 /// # Errors
 /// Usage errors, unreadable inputs, and a failed evaluation (the rendered
 /// report is printed first; the error names the failing rules).
 pub(crate) fn run_cli(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    run_cli_with_safe_root(arguments, None)
+}
+
+/// Policy dispatch passes the descriptor that proved the selected root's
+/// schema. Keep it through evaluation so a later path replacement cannot
+/// redirect reads or Git subprocesses to another checkout.
+pub(crate) fn run_cli_with_safe_root(
+    arguments: &[OsString],
+    safe_root: Option<super::safe_fs::SafeRoot>,
+) -> Result<(), GeneratorError> {
+    let parsed = parse_policy_arguments(arguments)?;
+    let root = resolve_workflow_root(&parsed.values)?;
+    let base_revision = parsed
+        .values
+        .get("base-revision")
+        .cloned()
+        .or_else(|| env::var(BASE_REVISION_ENV).ok())
+        .ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "--base-revision or {BASE_REVISION_ENV} is required: the validator revision the base branch runs"
+            ))
+        })?;
+    let ruleset_contexts = parsed.values.get("ruleset-contexts").map(|value| {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|context| !context.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    });
+    let report = evaluate_with_safe_root(
+        &PolicyOptions {
+            root,
+            head_sha: parsed.values.get("head-sha").cloned(),
+            base_sha: parsed.values.get("base-sha").cloned(),
+            base_revision,
+            ruleset_contexts,
+            build_pin: parsed.build_pin,
+        },
+        safe_root,
+    )?;
+    println!("{}", report.render());
+    if report.passed() {
+        return Ok(());
+    }
+    Err(GeneratorError::usage(format!(
+        "workflow policy failed: {}",
+        report
+            .failed()
+            .iter()
+            .map(|rule| rule.name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
+}
+
+struct ParsedPolicyArguments {
+    values: BTreeMap<String, String>,
+    build_pin: bool,
+}
+
+fn parse_policy_arguments(arguments: &[OsString]) -> Result<ParsedPolicyArguments, GeneratorError> {
     let mut options = BTreeMap::new();
     let mut build_pin = false;
     let mut index = 0;
@@ -243,12 +294,7 @@ pub(crate) fn run_cli(arguments: &[OsString]) -> Result<(), GeneratorError> {
         };
         if !matches!(
             name.as_str(),
-            "workflow-root"
-                | "head-sha"
-                | "base-sha"
-                | "base-revision"
-                | "ruleset-contexts"
-                | "candidate-manifest"
+            "workflow-root" | "head-sha" | "base-sha" | "base-revision" | "ruleset-contexts"
         ) {
             return Err(GeneratorError::usage(format!(
                 "unsupported policy option: --{name}"
@@ -259,69 +305,31 @@ pub(crate) fn run_cli(arguments: &[OsString]) -> Result<(), GeneratorError> {
         }
         index += 1;
     }
-    let root = options
+    Ok(ParsedPolicyArguments {
+        values: options,
+        build_pin,
+    })
+}
+
+fn resolve_workflow_root(options: &BTreeMap<String, String>) -> Result<PathBuf, GeneratorError> {
+    Ok(options
         .get("workflow-root")
         .map(PathBuf::from)
         .or_else(|| env::var_os("WORKFLOW_ROOT").map(PathBuf::from))
         .or_else(|| env::var_os("GITHUB_WORKSPACE").map(PathBuf::from))
-        .or_else(|| env::current_dir().ok())
-        .ok_or_else(|| GeneratorError::usage("resolve workflow root"))?;
-    let base_revision = options
-        .get("base-revision")
-        .cloned()
-        .or_else(|| env::var(BASE_REVISION_ENV).ok())
-        .ok_or_else(|| {
-            GeneratorError::usage(format!(
-                "--base-revision or {BASE_REVISION_ENV} is required: the validator revision the base branch runs"
-            ))
-        })?;
-    let ruleset_contexts = options.get("ruleset-contexts").map(|value| {
-        value
-            .split(',')
-            .map(str::trim)
-            .filter(|context| !context.is_empty())
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
-    });
-    let candidate_manifest =
-        candidate_manifest_source(options.get("candidate-manifest").map(String::as_str));
-    let report = evaluate(&PolicyOptions {
-        root,
-        head_sha: options.get("head-sha").cloned(),
-        base_sha: options.get("base-sha").cloned(),
-        base_revision,
-        ruleset_contexts,
-        build_pin,
-        candidate_manifest,
-    })?;
-    println!("{}", report.render());
-    if report.passed() {
-        return Ok(());
-    }
-    Err(GeneratorError::usage(format!(
-        "workflow policy failed: {}",
-        report
-            .failed()
-            .iter()
-            .map(|rule| rule.name)
-            .collect::<Vec<_>>()
-            .join(", ")
-    )))
+        // Keep the process CWD as a descriptor-resolved root. Converting it
+        // to an absolute path here and opening that path during dispatch
+        // would allow a rename-and-replace race to select a different tree.
+        .unwrap_or_else(|| PathBuf::from(".")))
 }
 
-/// Resolve the candidate manifest the policy run binds env-slot candidates
-/// to: the `--candidate-manifest` flag wins (an empty value disables the
-/// binding), else [`VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV`], else none.
-fn candidate_manifest_source(cli: Option<&str>) -> Option<PathBuf> {
-    if let Some(flag) = cli {
-        if flag.is_empty() {
-            return None;
-        }
-        return Some(PathBuf::from(flag));
-    }
-    env::var_os(VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+/// Resolve with the policy parser and precedence so runtime schema probing
+/// cannot choose a different tree from `run_cli`.
+pub(crate) fn workflow_root_for_dispatch(
+    arguments: &[OsString],
+) -> Result<PathBuf, GeneratorError> {
+    let parsed = parse_policy_arguments(arguments)?;
+    resolve_workflow_root(&parsed.values)
 }
 
 /// Evaluate every rule against `options.root`.
@@ -330,16 +338,38 @@ fn candidate_manifest_source(cli: Option<&str>) -> Option<PathBuf> {
 /// Only when an input cannot be read or a tool cannot run; policy violations
 /// are `FAIL` rules in the returned report.
 pub(crate) fn evaluate(options: &PolicyOptions) -> Result<PolicyReport, GeneratorError> {
-    let root = options
-        .root
-        .canonicalize()
-        .map_err(|error| GeneratorError::io("canonicalize workflow root", &options.root, &error))?;
-    let declared = DeclaredTree::read(&root)?;
-    let mut report = PolicyReport::default();
-    let pin = declared_pin_rule(&declared, &mut report);
-    pin_rules(&root, &declared, pin.as_deref(), options, &mut report);
-    semantic_rules(&root, &declared, options, &mut report)?;
-    Ok(report)
+    evaluate_with_safe_root(options, None)
+}
+
+fn evaluate_with_safe_root(
+    options: &PolicyOptions,
+    captured_root: Option<super::safe_fs::SafeRoot>,
+) -> Result<PolicyReport, GeneratorError> {
+    let safe_root = match captured_root {
+        Some(root) => root,
+        None => super::safe_fs::SafeRoot::open(&options.root)?,
+    };
+    safe_root.validate_root_binding()?;
+    let result = (|| {
+        let resolved = options.root.canonicalize().map_err(|error| {
+            GeneratorError::io("canonicalize workflow root", &options.root, &error)
+        })?;
+        if resolved != safe_root.command_directory() {
+            return Err(GeneratorError::usage(format!(
+                "workflow root changed after schema dispatch: selected {}, captured {}",
+                resolved.display(),
+                safe_root.command_directory().display()
+            )));
+        }
+        let declared = DeclaredTree::read_with_safe_root(&safe_root)?;
+        let mut report = PolicyReport::default();
+        let pin = declared_pin_rule(&declared, &mut report);
+        pin_rules_with_safe_root(&safe_root, &declared, pin.as_deref(), options, &mut report);
+        semantic_rules_with_safe_root(&safe_root, &declared, options, &mut report)?;
+        Ok(report)
+    })();
+    safe_root.validate_root_binding()?;
+    result
 }
 
 /// `pin-declared`: the generator commit the tree names, from the generation
@@ -378,8 +408,8 @@ fn declared_pin_rule(declared: &DeclaredTree, report: &mut PolicyReport) -> Opti
 /// `pin-reachable`, `pin-monotonic`, `entrypoint-pin`, `generated-tree`: is
 /// the tree what the generator it names renders, and is that generator one
 /// the base branch may adopt?
-fn pin_rules(
-    root: &Path,
+fn pin_rules_with_safe_root(
+    root: &super::safe_fs::SafeRoot,
     declared: &DeclaredTree,
     pin: Option<&str>,
     options: &PolicyOptions,
@@ -398,7 +428,7 @@ fn pin_rules(
         }
         return;
     };
-    let source = declared.pin_source(root);
+    let source = declared.pin_source(root.command_directory());
     let head = resolve_head(root, options.head_sha.as_deref());
     let base = options.base_sha.clone().or_else(|| head.clone().ok());
     let foreign = |rule: &'static str| {
@@ -427,50 +457,37 @@ fn pin_rules(
             RuleReport::fail("pin-monotonic", reason.clone(), Vec::new())
         }
     });
-    report.rules.push(entrypoint_pin(root, pin));
-    let lookup =
-        PinnedBinaryLookup::from_env(pin, options.build_pin, options.candidate_manifest.clone());
-    let mainline = matches!((&head, &base), (Ok(head), Some(base)) if head == base);
-    let comparison = regenerate_and_compare(
+    report.rules.push(entrypoint_pin_with_safe_root(root, pin));
+    let lookup = PinnedBinaryLookup::from_env(pin, options.build_pin);
+    let comparison = regenerate_and_compare_with_safe_roots(
         root,
         root,
         pin,
         &declared.default_branch,
-        &declared.excludes,
         &lookup,
         &source,
     );
-    report
-        .rules
-        .push(generated_tree_report(pin, comparison, mainline));
+    if let Err(error) = root.validate_root_binding() {
+        report.rules.push(RuleReport::fail(
+            "generated-tree",
+            format!("could not regenerate the tree with velnor-workflow at {pin}"),
+            vec![error.to_string()],
+        ));
+    } else {
+        report.rules.push(generated_tree_report(pin, comparison));
+    }
 }
 
-/// Report the `generated-tree` verdict. The candidate exception passes on
-/// pull requests (a generator change in flight) but fails on mainline: once
-/// merged, the pin must advance so the tight invariant holds again.
+/// Report the `generated-tree` verdict.
 fn generated_tree_report(
     pin: &str,
     comparison: Result<TreeComparison, GeneratorError>,
-    mainline: bool,
 ) -> RuleReport {
     match comparison {
         Ok(TreeComparison::Pin) => RuleReport::pass(
             "generated-tree",
             format!(
                 "every generated file is byte-identical to the render of velnor-workflow at {pin}"
-            ),
-        ),
-        Ok(TreeComparison::Candidate(closure)) if mainline => RuleReport::fail(
-            "generated-tree",
-            format!(
-                "the pin is stale on mainline: the tree matches the candidate render ({closure}), not the render of velnor-workflow at {pin}; bump [generator] revision to HEAD and regenerate"
-            ),
-            Vec::new(),
-        ),
-        Ok(TreeComparison::Candidate(closure)) => RuleReport::pass(
-            "generated-tree",
-            format!(
-                "the tree matches the candidate render ({closure}), not the render of velnor-workflow at {pin}: a generator change in flight; bump [generator] revision after merge"
             ),
         ),
         Ok(TreeComparison::Differences(differences)) => RuleReport::fail(
@@ -487,14 +504,14 @@ fn generated_tree_report(
 }
 
 /// The validator's own rules over the tree's YAML, independent of any pin.
-fn semantic_rules(
-    root: &Path,
+fn semantic_rules_with_safe_root(
+    root: &super::safe_fs::SafeRoot,
     declared: &DeclaredTree,
     options: &PolicyOptions,
     report: &mut PolicyReport,
 ) -> Result<(), GeneratorError> {
-    let audit = audit_workflows(root)?;
-    let entrypoint = audit_policy_entrypoint(root, &declared.velnor_policy)?;
+    let audit = audit_workflows_with_safe_root(root)?;
+    let entrypoint = audit_policy_entrypoint_with_safe_root(root, &declared.velnor_policy)?;
     report.rules.push(RuleReport::from_findings(
         "pull-request-target",
         &format!(
@@ -524,7 +541,7 @@ fn semantic_rules(
         "every workflow parses as GitHub would run it",
         audit.structure,
     ));
-    report.rules.push(required_checks(
+    report.rules.push(required_checks_with_safe_root(
         root,
         declared,
         options.ruleset_contexts.as_deref(),
@@ -542,8 +559,8 @@ fn semantic_rules(
 /// When the pinned generator cannot be obtained or renders any generated file
 /// differently.
 pub(crate) fn verify_declared_pin_renders_tree(
-    output_root: &Path,
-    checkout: &Path,
+    output_root: &super::safe_fs::SafeRoot,
+    checkout: &super::safe_fs::SafeRoot,
     config: &ProjectConfig,
     build_pin: bool,
 ) -> Result<(), GeneratorError> {
@@ -553,34 +570,21 @@ pub(crate) fn verify_declared_pin_renders_tree(
             "declared workflow revision must be a full 40-character SHA, got {pin:?}"
         )));
     }
-    let generation = config::discover(checkout)?;
-    let excludes = generation
-        .as_ref()
-        .map(config::RepoGenerationConfig::effective_policy_exclude_workflows)
-        .unwrap_or_default();
-    let source = pin_source(
-        checkout,
-        generation
-            .as_ref()
-            .and_then(config::RepoGenerationConfig::repository),
-    );
-    let lookup = PinnedBinaryLookup::from_env(pin, build_pin, None);
-    match regenerate_and_compare(
+    let generation = config::require_with_safe_root(checkout)?;
+    let source = pin_source(checkout.command_directory(), generation.repository());
+    let lookup = PinnedBinaryLookup::from_env(pin, build_pin);
+    let comparison = regenerate_and_compare_with_safe_roots(
         checkout,
         output_root,
         pin,
         &config.default_branch,
-        &excludes,
         &lookup,
         &source,
-    )? {
+    )?;
+    checkout.validate_root_binding()?;
+    output_root.validate_root_binding()?;
+    match comparison {
         TreeComparison::Pin => Ok(()),
-        TreeComparison::Candidate(closure) => {
-            eprintln!(
-                "notice: the tree matches the candidate render ({closure}), not the render of the declared pin {pin}; bump `[generator] revision` in {GENERATION_CONFIG} after merge"
-            );
-            Ok(())
-        }
         TreeComparison::Differences(differences) => Err(GeneratorError::usage(format!(
             "the declared generator pin {pin} renders the tree differently; set `[generator] revision` in {GENERATION_CONFIG} to the last generator commit and regenerate:\n{}",
             differences.join("\n")
@@ -611,7 +615,6 @@ struct DeclaredTree {
     /// `[generator] repository`, the slug the tree says it belongs to.
     repository: Option<String>,
     default_branch: String,
-    excludes: BTreeSet<String>,
     velnor_policy: VelnorPolicyContract,
     /// Ruleset contexts `ci-pr.yml` must emit as job display names.
     required_checks: Vec<String>,
@@ -620,47 +623,33 @@ struct DeclaredTree {
 }
 
 impl DeclaredTree {
-    fn read(root: &Path) -> Result<Self, GeneratorError> {
-        let generation = config::discover(root)?;
+    fn read_with_safe_root(root: &super::safe_fs::SafeRoot) -> Result<Self, GeneratorError> {
+        let generation = config::require_with_safe_root(root)?;
         let pin = generation
-            .as_ref()
-            .and_then(|generation| generation.revision())
+            .revision()
             .filter(|revision| super::is_full_revision(revision))
-            .map(|revision| DeclaredPin::Config(revision.to_owned()))
-            .or_else(|| entrypoint_policy_revision(root).map(DeclaredPin::Entrypoint));
-        let excludes = generation
-            .as_ref()
-            .map(config::RepoGenerationConfig::effective_policy_exclude_workflows)
-            .unwrap_or_default();
-        let repository = generation
-            .as_ref()
-            .and_then(config::RepoGenerationConfig::repository)
-            .map(str::to_owned);
-        let velnor_policy = configured_velnor_policy(root)?;
-        let required_checks = generation
-            .as_ref()
-            .map(|generation| generation.ruleset_required_status_checks().to_vec())
-            .filter(|contexts| !contexts.is_empty())
-            .unwrap_or_else(|| {
-                if generation
-                    .as_ref()
-                    .and_then(config::RepoGenerationConfig::ci_required)
-                    .unwrap_or(true)
-                {
-                    vec!["ci-required".to_owned()]
-                } else {
-                    Vec::new()
-                }
-            });
-        let external_checks = generation
-            .as_ref()
-            .map(|generation| generation.ruleset_external_status_checks().to_vec())
-            .unwrap_or_default();
+            .map(|revision| DeclaredPin::Config(revision.to_owned()));
+        let pin = match pin {
+            Some(pin) => Some(pin),
+            None => entrypoint_policy_revision_with_safe_root(root)?.map(DeclaredPin::Entrypoint),
+        };
+        let repository = generation.repository().map(str::to_owned);
+        let velnor_policy = configured_velnor_policy_with_generation(root, &generation)?;
+        let configured_required_checks = generation.ruleset_required_status_checks();
+        let required_checks = if configured_required_checks.is_empty() {
+            if generation.ci_required().unwrap_or(true) {
+                vec!["ci-required".to_owned()]
+            } else {
+                Vec::new()
+            }
+        } else {
+            configured_required_checks.to_vec()
+        };
+        let external_checks = generation.ruleset_external_status_checks().to_vec();
         Ok(Self {
             pin,
             repository,
             default_branch: velnor_policy.default_branch.clone(),
-            excludes,
             velnor_policy,
             required_checks,
             external_checks,
@@ -691,10 +680,16 @@ fn pin_source(root: &Path, repository: Option<&str>) -> PinSource {
     }
 }
 
-/// The `VELNOR_WORKFLOW_POLICY_REVISION:` literal the entrypoint exports,
-/// when it is a full SHA.
-fn entrypoint_policy_revision(root: &Path) -> Option<String> {
-    let content = fs::read_to_string(root.join(POLICY_ENTRYPOINT)).ok()?;
+fn entrypoint_policy_revision_with_safe_root(
+    root: &super::safe_fs::SafeRoot,
+) -> Result<Option<String>, GeneratorError> {
+    Ok(
+        read_text_with_safe_root(root, Path::new(POLICY_ENTRYPOINT), "read policy entrypoint")?
+            .and_then(|content| entrypoint_policy_revision_from_content(&content)),
+    )
+}
+
+fn entrypoint_policy_revision_from_content(content: &str) -> Option<String> {
     let marker = format!("{BASE_REVISION_ENV}: ");
     content
         .lines()
@@ -708,17 +703,84 @@ fn entrypoint_policy_revision(root: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn read_text_with_safe_root(
+    root: &super::safe_fs::SafeRoot,
+    relative: &Path,
+    operation: &str,
+) -> Result<Option<String>, GeneratorError> {
+    let Some(bytes) = root.read_file_if_exists(relative)? else {
+        return Ok(None);
+    };
+    let path = root.command_directory().join(relative);
+    String::from_utf8(bytes).map(Some).map_err(|error| {
+        GeneratorError::usage(format!("{operation} {} as UTF-8: {error}", path.display()))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Git facts
 // ---------------------------------------------------------------------------
 
-fn git(root: &Path, arguments: &[&str]) -> Result<Option<String>, GeneratorError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(arguments)
-        .output()
-        .map_err(|error| {
+trait PolicyGitRoot {
+    fn git_output(&self, arguments: &[&str]) -> Result<Output, GeneratorError>;
+}
+
+impl PolicyGitRoot for Path {
+    fn git_output(&self, arguments: &[&str]) -> Result<Output, GeneratorError> {
+        let mut command = Command::new("git");
+        clear_root_handoff_environment(&mut command);
+        command
+            .arg("-C")
+            .arg(self)
+            .args(arguments)
+            .output()
+            .map_err(|error| {
+                GeneratorError::usage(format!("run git {}: {error}", arguments.join(" ")))
+            })
+    }
+}
+
+fn clear_root_handoff_environment(command: &mut Command) {
+    command
+        .env_remove(super::safe_fs::pinned_command::OUTPUT_ROOT_FD_ENV)
+        .env_remove(super::safe_fs::pinned_command::SOURCE_ROOT_FD_ENV)
+        .env_remove(super::safe_fs::pinned_command::SOURCE_ROOT_PATH_ENV);
+}
+
+impl PolicyGitRoot for PathBuf {
+    fn git_output(&self, arguments: &[&str]) -> Result<Output, GeneratorError> {
+        self.as_path().git_output(arguments)
+    }
+}
+
+impl PolicyGitRoot for super::safe_fs::SafeRoot {
+    fn git_output(&self, arguments: &[&str]) -> Result<Output, GeneratorError> {
+        super::safe_fs::pinned_command::output(self, "git", arguments).map_err(|error| {
+            GeneratorError::usage(format!("run git {}: {error}", arguments.join(" ")))
+        })
+    }
+}
+
+fn git<R: PolicyGitRoot + ?Sized>(
+    root: &R,
+    arguments: &[&str],
+) -> Result<Option<String>, GeneratorError> {
+    let output = root.git_output(arguments)?;
+    if output.status.success() {
+        Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
+fn git_with_safe_root(
+    root: &super::safe_fs::SafeRoot,
+    arguments: &[&str],
+) -> Result<Option<String>, GeneratorError> {
+    let output =
+        super::safe_fs::pinned_command::output(root, "git", arguments).map_err(|error| {
             GeneratorError::usage(format!("run git {}: {error}", arguments.join(" ")))
         })?;
     if output.status.success() {
@@ -730,7 +792,7 @@ fn git(root: &Path, arguments: &[&str]) -> Result<Option<String>, GeneratorError
     }
 }
 
-fn resolve_head(root: &Path, head: Option<&str>) -> Result<String, String> {
+fn resolve_head<R: PolicyGitRoot + ?Sized>(root: &R, head: Option<&str>) -> Result<String, String> {
     let head = match head {
         Some(head) => head.to_owned(),
         None => match git(root, &["rev-parse", "HEAD"]) {
@@ -749,26 +811,28 @@ fn resolve_head(root: &Path, head: Option<&str>) -> Result<String, String> {
     Ok(head)
 }
 
-fn commit_exists(root: &Path, revision: &str) -> bool {
+fn commit_exists<R: PolicyGitRoot + ?Sized>(root: &R, revision: &str) -> bool {
     git(root, &["cat-file", "-e", &format!("{revision}^{{commit}}")])
         .is_ok_and(|result| result.is_some())
 }
 
 /// `Some(true)` when `ancestor` is reachable from `descendant`; `None` when
 /// either commit is absent from the checkout.
-fn is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> Option<bool> {
+fn is_ancestor<R: PolicyGitRoot + ?Sized>(
+    root: &R,
+    ancestor: &str,
+    descendant: &str,
+) -> Option<bool> {
     if ancestor == descendant {
         return commit_exists(root, ancestor).then_some(true);
     }
     if !commit_exists(root, ancestor) || !commit_exists(root, descendant) {
         return None;
     }
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["merge-base", "--is-ancestor", ancestor, descendant])
-        .status()
-        .ok()?;
+    let status = root
+        .git_output(&["merge-base", "--is-ancestor", ancestor, descendant])
+        .ok()?
+        .status;
     match status.code() {
         Some(0) => Some(true),
         Some(1) => Some(false),
@@ -776,7 +840,12 @@ fn is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> Option<bool> {
     }
 }
 
-fn pin_reachable(root: &Path, pin: &str, head: &str, base: Option<&str>) -> RuleReport {
+fn pin_reachable<R: PolicyGitRoot + ?Sized>(
+    root: &R,
+    pin: &str,
+    head: &str,
+    base: Option<&str>,
+) -> RuleReport {
     match is_ancestor(root, pin, head) {
         Some(true) => {
             let provenance = match base.and_then(|base| is_ancestor(root, pin, base)) {
@@ -805,7 +874,7 @@ fn pin_reachable(root: &Path, pin: &str, head: &str, base: Option<&str>) -> Rule
 /// Whether the checkout is shallow (`git clone --depth`, `actions/checkout`
 /// with the default `fetch-depth: 1`): history stops at a grafted boundary,
 /// so an older commit is absent without having been removed.
-fn is_shallow_checkout(root: &Path) -> bool {
+fn is_shallow_checkout<R: PolicyGitRoot + ?Sized>(root: &R) -> bool {
     git(root, &["rev-parse", "--is-shallow-repository"])
         .is_ok_and(|output| output.is_some_and(|value| value.trim() == "true"))
 }
@@ -815,7 +884,7 @@ fn is_shallow_checkout(root: &Path) -> bool {
 /// history the rule walks (the job must check out with `fetch-depth: 0`)
 /// from a full checkout that genuinely lacks the commit (the pin or head is
 /// not in this repository's history).
-fn missing_commit_reason(root: &Path, pin: &str, head: &str) -> String {
+fn missing_commit_reason<R: PolicyGitRoot + ?Sized>(root: &R, pin: &str, head: &str) -> String {
     let mut missing = Vec::new();
     if !commit_exists(root, pin) {
         missing.push(format!("pin {pin}"));
@@ -841,7 +910,7 @@ fn missing_commit_reason(root: &Path, pin: &str, head: &str) -> String {
 
 /// The pin the tree at the merge base of `head` and `base` declared, when
 /// both commits are present and the merge base carries a generation config.
-fn merge_base_pin(root: &Path, head: &str, base: &str) -> Option<String> {
+fn merge_base_pin<R: PolicyGitRoot + ?Sized>(root: &R, head: &str, base: &str) -> Option<String> {
     let merge_base = git(root, &["merge-base", base, head]).ok().flatten()?;
     let content = git(
         root,
@@ -862,8 +931,8 @@ fn merge_base_pin(root: &Path, head: &str, base: &str) -> Option<String> {
 /// pin therefore must be the base validator or descend from it — unless the
 /// change left the pin exactly as the merge base declared it, in which case
 /// the merge keeps the base branch's own (newer) pin and nothing regresses.
-fn pin_monotonic(
-    root: &Path,
+fn pin_monotonic<R: PolicyGitRoot + ?Sized>(
+    root: &R,
     pin: &str,
     base_revision: &str,
     head: &str,
@@ -945,6 +1014,35 @@ fn entrypoint_pin(root: &Path, pin: &str) -> RuleReport {
             );
         }
     };
+    entrypoint_pin_content(&content, pin)
+}
+
+fn entrypoint_pin_with_safe_root(root: &super::safe_fs::SafeRoot, pin: &str) -> RuleReport {
+    let content = match read_text_with_safe_root(
+        root,
+        Path::new(POLICY_ENTRYPOINT),
+        "read policy entrypoint",
+    ) {
+        Ok(Some(content)) => content,
+        Ok(None) => {
+            return RuleReport::fail(
+                "entrypoint-pin",
+                format!("{POLICY_ENTRYPOINT}: file is missing"),
+                Vec::new(),
+            );
+        }
+        Err(error) => {
+            return RuleReport::fail(
+                "entrypoint-pin",
+                format!("{POLICY_ENTRYPOINT}: {error}"),
+                Vec::new(),
+            );
+        }
+    };
+    entrypoint_pin_content(&content, pin)
+}
+
+fn entrypoint_pin_content(content: &str, pin: &str) -> RuleReport {
     let mut literals = Vec::new();
     for line in content.lines() {
         for marker in [
@@ -1011,26 +1109,257 @@ fn policy_install_root(revision: &str) -> PathBuf {
         .join(format!("velnor-workflow-policy-{revision}"))
 }
 
-/// The revision a `velnor-workflow` binary reports for itself.
-fn binary_revision(binary: &Path) -> Result<String, String> {
-    binary_report(binary, "--revision")
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExecutableIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExecutableVersion {
+    identity: ExecutableIdentity,
+    length: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
+
+impl ExecutableVersion {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            identity: ExecutableIdentity {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            },
+            length: metadata.len(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            changed_seconds: metadata.ctime(),
+            changed_nanoseconds: metadata.ctime_nsec(),
+        }
+    }
+}
+
+/// An executable opened once and retained from content proof through render.
+/// `path` is normalized for diagnostics only; every probe and render launches
+/// through the retained descriptor.
+#[derive(Debug)]
+pub(crate) struct PinnedExecutable {
+    path: PathBuf,
+    file: fs::File,
+    version: ExecutableVersion,
+}
+
+impl PinnedExecutable {
+    fn open(path: &Path) -> Result<Self, String> {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            env::current_dir()
+                .map_err(|error| format!("cannot resolve {}: {error}", path.display()))?
+                .join(path)
+        };
+        let normalized = absolute.canonicalize().map_err(|error| {
+            format!(
+                "{}: cannot normalize executable path: {error}",
+                path.display()
+            )
+        })?;
+        let descriptor = rustix::fs::open(
+            &normalized,
+            rustix::fs::OFlags::RDONLY
+                .union(rustix::fs::OFlags::CLOEXEC)
+                .union(rustix::fs::OFlags::NOFOLLOW)
+                .union(rustix::fs::OFlags::NONBLOCK),
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|error| {
+            let error = std::io::Error::from(error);
+            format!("{}: cannot open executable: {error}", normalized.display())
+        })?;
+        Self::from_open_file(normalized, descriptor.into())
+    }
+
+    /// Open the kernel's reference to the running image where the platform
+    /// exposes it. A path from `current_exe()` alone does not prove identity.
+    fn running() -> Result<Self, String> {
+        #[cfg(target_os = "linux")]
+        {
+            let file = fs::File::open("/proc/self/exe")
+                .map_err(|error| format!("cannot open the running executable handle: {error}"))?;
+            let path = match env::current_exe() {
+                Ok(path) => path,
+                Err(_) => PathBuf::from("/proc/self/exe"),
+            };
+            Self::from_open_file(path, file)
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("the running executable's inode cannot be proved on this platform".to_owned())
+        }
+    }
+
+    fn from_open_file(path: PathBuf, file: fs::File) -> Result<Self, String> {
+        let metadata = file.metadata().map_err(|error| {
+            format!(
+                "{}: cannot inspect opened executable: {error}",
+                path.display()
+            )
+        })?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "{}: opened executable is not a regular file",
+                path.display()
+            ));
+        }
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(format!(
+                "{}: opened file has no executable permission",
+                path.display()
+            ));
+        }
+        Ok(Self {
+            path,
+            file,
+            version: ExecutableVersion::from_metadata(&metadata),
+        })
+    }
+
+    fn identity(&self) -> ExecutableIdentity {
+        self.version.identity
+    }
+
+    fn is_same_file(&self, other: &Self) -> bool {
+        self.identity() == other.identity()
+    }
+
+    fn ensure_unchanged(&self, stage: &str) -> Result<(), String> {
+        let metadata = self.file.metadata().map_err(|error| {
+            format!("{}: inspect bound executable: {error}", self.path.display())
+        })?;
+        if ExecutableVersion::from_metadata(&metadata) != self.version {
+            return Err(format!(
+                "{}: executable inode or contents changed {stage}",
+                self.path.display()
+            ));
+        }
+        Ok(())
+    }
+
+    fn output<I, A>(&self, args: I) -> Result<Output, String>
+    where
+        I: IntoIterator<Item = A>,
+        A: AsRef<std::ffi::OsStr>,
+    {
+        self.ensure_unchanged("before execution")?;
+        let output = super::safe_fs::pinned_command::output_executable(&self.file, args).map_err(
+            |error| {
+                format!(
+                    "{}: cannot execute the bound descriptor: {error}",
+                    self.path.display()
+                )
+            },
+        )?;
+        self.ensure_unchanged("during execution")?;
+        Ok(output)
+    }
+
+    fn output_in_safe_root<I, A>(
+        &self,
+        root: &super::safe_fs::SafeRoot,
+        args: I,
+    ) -> Result<Output, String>
+    where
+        I: IntoIterator<Item = A>,
+        A: AsRef<std::ffi::OsStr>,
+    {
+        self.ensure_unchanged("before execution")?;
+        let output =
+            super::safe_fs::pinned_command::output_executable_in_safe_root(root, &self.file, args)
+                .map_err(|error| {
+                    format!(
+                        "{}: cannot execute the bound descriptor from the captured root: {error}",
+                        self.path.display()
+                    )
+                })?;
+        self.ensure_unchanged("during execution")?;
+        Ok(output)
+    }
+
+    fn render_with_safe_roots<I, A>(
+        &self,
+        source_root: &super::safe_fs::SafeRoot,
+        output_root: &super::safe_fs::SafeRoot,
+        args: I,
+    ) -> Result<Output, String>
+    where
+        I: IntoIterator<Item = A>,
+        A: AsRef<std::ffi::OsStr>,
+    {
+        self.ensure_unchanged("before rendering")?;
+        let output = super::safe_fs::pinned_command::output_with_executable_and_output_root(
+            source_root,
+            &self.file,
+            output_root,
+            args,
+        )
+        .map_err(|error| {
+            format!(
+                "{}: cannot execute the bound renderer: {error}",
+                self.path.display()
+            )
+        })?;
+        self.ensure_unchanged("during rendering")?;
+        Ok(output)
+    }
+}
+
+impl PartialEq<PathBuf> for PinnedExecutable {
+    fn eq(&self, other: &PathBuf) -> bool {
+        self.path == *other
+    }
 }
 
 /// The source-closure digest a `velnor-workflow` binary reports for itself.
-fn binary_closure(binary: &Path) -> Result<String, String> {
+fn binary_closure(binary: &PinnedExecutable) -> Result<String, String> {
     binary_report(binary, "--closure")
 }
 
-fn binary_report(binary: &Path, flag: &str) -> Result<String, String> {
-    let output = Command::new(binary)
-        .arg(flag)
-        .output()
-        .map_err(|error| format!("{}: cannot run `{flag}`: {error}", binary.display()))?;
+fn binary_closure_with_safe_root(
+    binary: &PinnedExecutable,
+    root: &super::safe_fs::SafeRoot,
+) -> Result<String, String> {
+    binary_report_with_safe_root(binary, "--closure", root)
+}
+
+fn binary_report(binary: &PinnedExecutable, flag: &str) -> Result<String, String> {
+    binary_report_with_root(binary, flag, None)
+}
+
+fn binary_report_with_safe_root(
+    binary: &PinnedExecutable,
+    flag: &str,
+    root: &super::safe_fs::SafeRoot,
+) -> Result<String, String> {
+    binary_report_with_root(binary, flag, Some(root))
+}
+
+fn binary_report_with_root(
+    binary: &PinnedExecutable,
+    flag: &str,
+    root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<String, String> {
+    let output = match root {
+        Some(root) => binary.output_in_safe_root(root, [flag])?,
+        None => binary.output([flag])?,
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
             "{}: `{flag}` failed ({}): {}",
-            binary.display(),
+            binary.path.display(),
             output.status,
             stderr.trim()
         ));
@@ -1039,9 +1368,7 @@ fn binary_report(binary: &Path, flag: &str) -> Result<String, String> {
 }
 
 /// Closures a renderer for `pin` (a commit of `repo`) must report: the lean
-/// release and debug CI products, plus the default-feature debug candidate.
-/// The candidate's TUI is TTY-gated and policy always renders through pipes,
-/// so the reached code is identical in all three.
+/// release and debug CI products.
 pub(crate) fn expected_closures(repo: &Path, pin: &str) -> Result<Vec<String>, GeneratorError> {
     Ok(vec![
         closure_identity::closure_of_tree(
@@ -1056,7 +1383,43 @@ pub(crate) fn expected_closures(repo: &Path, pin: &str) -> Result<Vec<String>, G
             closure_identity::CI_FEATURES,
             closure_identity::PROFILE_DEBUG,
         )?,
-        closure_identity::candidate_closure_of_tree(repo, pin)?,
+    ])
+}
+
+fn expected_remote_closure(
+    pin: &str,
+    lookup: &PinnedBinaryLookup,
+) -> Result<String, GeneratorError> {
+    let closure = lookup
+        .trusted_closure
+        .as_deref()
+        .or_else(|| (SOURCE_REVISION == pin).then_some(SOURCE_CLOSURE));
+    let Some(closure) = closure.filter(|closure| closure_identity::is_full_closure(closure)) else {
+        return Err(GeneratorError::usage(format!(
+            "no trusted closure is available for remote pin {pin}; the trusted setup action must export {}",
+            crate::VELNOR_WORKFLOW_PINNED_CLOSURE_ENV
+        )));
+    };
+    Ok(closure.to_owned())
+}
+
+fn expected_closures_with_safe_root(
+    repo: &super::safe_fs::SafeRoot,
+    pin: &str,
+) -> Result<Vec<String>, GeneratorError> {
+    Ok(vec![
+        closure_identity::closure_of_tree_with_safe_root(
+            repo,
+            pin,
+            closure_identity::CI_FEATURES,
+            closure_identity::PROFILE_RELEASE,
+        )?,
+        closure_identity::closure_of_tree_with_safe_root(
+            repo,
+            pin,
+            closure_identity::CI_FEATURES,
+            closure_identity::PROFILE_DEBUG,
+        )?,
     ])
 }
 
@@ -1065,6 +1428,9 @@ pub(crate) fn expected_closures(repo: &Path, pin: &str) -> Result<Vec<String>, G
 pub(crate) struct PinnedBinaryLookup {
     /// [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`].
     pinned_binary: Option<PathBuf>,
+    /// Closure output from the trusted setup action that verified the pinned
+    /// release manifest. Required when the audited checkout lacks the pin.
+    trusted_closure: Option<String>,
     /// `PATH`.
     search_path: Option<OsString>,
     /// Where an earlier resolution built the pin.
@@ -1072,28 +1438,17 @@ pub(crate) struct PinnedBinaryLookup {
     /// Never build without an explicit `--pin-build`, or under
     /// `CARGO_NET_OFFLINE=true`.
     build_forbidden: bool,
-    /// Manifest binding the env-slot candidate binary. `None` disables the
-    /// env-slot candidate; the running binary stays manifest-exempt.
-    candidate_manifest: Option<PathBuf>,
 }
 
 impl PinnedBinaryLookup {
-    pub(crate) fn from_env(
-        revision: &str,
-        build_pin: bool,
-        candidate_manifest: Option<PathBuf>,
-    ) -> Self {
+    pub(crate) fn from_env(revision: &str, build_pin: bool) -> Self {
         Self {
             pinned_binary: env::var_os(VELNOR_WORKFLOW_PINNED_BINARY_ENV).map(PathBuf::from),
+            trusted_closure: env::var(crate::VELNOR_WORKFLOW_PINNED_CLOSURE_ENV).ok(),
             search_path: env::var_os("PATH"),
             install_root: policy_install_root(revision),
             build_forbidden: !build_pin
                 || env::var("CARGO_NET_OFFLINE").is_ok_and(|value| value == "true"),
-            candidate_manifest: candidate_manifest.or_else(|| {
-                env::var_os(VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV)
-                    .filter(|value| !value.is_empty())
-                    .map(PathBuf::from)
-            }),
         }
     }
 
@@ -1128,11 +1483,10 @@ impl PinnedBinaryLookup {
 ///    repository, `cargo install --git` for a consumer; only with an
 ///    explicit `--pin-build`, and refused under `CARGO_NET_OFFLINE=true`.
 ///
-/// `expected` holds the pin's closures ([`expected_closures`]) whenever the
-/// pin is a commit of the audited history. `None` (a consumer tree without
-/// generator history) falls back to the pin's revision plus a wellformed
-/// closure report — exactly today's trust level, never weaker — while CI,
-/// which always has the history, takes the strict path.
+/// `expected` holds the pin's closures ([`expected_closures`]) when the pin is
+/// in the audited history, or the closure reported by the trusted setup action
+/// when it is not. A renderer cannot establish its own trust by reporting a
+/// matching revision and a wellformed digest.
 ///
 /// Fails closed with every attempt listed when none of these yields the pin.
 pub(crate) fn resolve_pinned_binary(
@@ -1140,11 +1494,32 @@ pub(crate) fn resolve_pinned_binary(
     expected: Option<&[String]>,
     lookup: &PinnedBinaryLookup,
     source: &PinSource,
-) -> Result<PathBuf, GeneratorError> {
+) -> Result<PinnedExecutable, GeneratorError> {
+    resolve_pinned_binary_inner(revision, expected, lookup, source, None)
+}
+
+fn resolve_pinned_binary_with_safe_root(
+    revision: &str,
+    expected: Option<&[String]>,
+    lookup: &PinnedBinaryLookup,
+    source: &PinSource,
+    checkout_root: &super::safe_fs::SafeRoot,
+) -> Result<PinnedExecutable, GeneratorError> {
+    resolve_pinned_binary_inner(revision, expected, lookup, source, Some(checkout_root))
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_pinned_binary_inner(
+    revision: &str,
+    expected: Option<&[String]>,
+    lookup: &PinnedBinaryLookup,
+    source: &PinSource,
+    checkout_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<PinnedExecutable, GeneratorError> {
     match expected {
         Some(set) => {
             if set.contains(&SOURCE_CLOSURE.to_owned())
-                && let Ok(current) = env::current_exe()
+                && let Ok(current) = PinnedExecutable::running()
             {
                 return Ok(current);
             }
@@ -1152,7 +1527,7 @@ pub(crate) fn resolve_pinned_binary(
         None => {
             if SOURCE_REVISION == revision
                 && closure_identity::is_full_closure(SOURCE_CLOSURE)
-                && let Ok(current) = env::current_exe()
+                && let Ok(current) = PinnedExecutable::running()
             {
                 return Ok(current);
             }
@@ -1160,8 +1535,10 @@ pub(crate) fn resolve_pinned_binary(
     }
     let mut attempts = Vec::new();
     if let Some(binary) = lookup.pinned_binary.clone() {
-        return match prove_candidate(&binary, revision, expected) {
-            Ok(()) => Ok(binary),
+        return match PinnedExecutable::open(&binary).and_then(|opened| {
+            prove_candidate_with_root(&opened, expected, checkout_root).map(|()| opened)
+        }) {
+            Ok(opened) => Ok(opened),
             Err(detail) => Err(GeneratorError::usage(format!(
                 "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}={} is not the declared pin: {detail}",
                 binary.display()
@@ -1175,8 +1552,10 @@ pub(crate) fn resolve_pinned_binary(
         candidates.push(installed.clone());
     }
     for candidate in candidates {
-        match prove_candidate(&candidate, revision, expected) {
-            Ok(()) => return Ok(candidate),
+        match PinnedExecutable::open(&candidate).and_then(|opened| {
+            prove_candidate_with_root(&opened, expected, checkout_root).map(|()| opened)
+        }) {
+            Ok(opened) => return Ok(opened),
             Err(detail) => attempts.push(format!("{}: {detail}", candidate.display())),
         }
     }
@@ -1190,101 +1569,49 @@ pub(crate) fn resolve_pinned_binary(
             "no velnor-workflow renderer for the declared pin {revision} is provisioned and building one is forbidden here ({tried}); export {VELNOR_WORKFLOW_PINNED_BINARY_ENV}=<binary for {revision}>, put one on PATH, or rerun with --pin-build to compile the pin from source (local development only; never emitted into CI)"
         )));
     }
-    build_pinned_binary(revision, expected, source, install_root, &installed)
+    build_pinned_binary(
+        revision,
+        expected,
+        source,
+        install_root,
+        &installed,
+        checkout_root,
+    )
 }
 
-/// The candidate manifest the publisher wrote beside the candidate binary
-/// (`profile`, `platform`, `repository`, `run_id`, `revision`, `closure`,
-/// `binary_sha256`, plus `build_revision`). The consume-side binding uses
-/// only the closure and the digest: `revision` names the PR head the
-/// publisher built for, which a legit older pin may still equal on closure
-/// paths, so closure equality is the content binding.
-#[derive(serde::Deserialize)]
-struct CandidateManifest {
-    revision: String,
-    closure: String,
-    binary_sha256: String,
-}
-
-/// Read and shape-validate the manifest at `path`: valid JSON whose
-/// revision, closure, and digest fields are full hex digests of the right
-/// length. Anything else fails closed — a manifest the validator cannot
-/// parse proves nothing.
-fn load_candidate_manifest(path: &Path) -> Result<CandidateManifest, String> {
-    let bytes =
-        fs::read(path).map_err(|error| format!("{}: cannot read: {error}", path.display()))?;
-    let manifest: CandidateManifest = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("{}: not a candidate manifest: {error}", path.display()))?;
-    if !super::is_full_revision(&manifest.revision) {
-        return Err(format!(
-            "{}: revision {:?} is not a full commit SHA",
-            path.display(),
-            manifest.revision
-        ));
-    }
-    if !closure_identity::is_full_closure(&manifest.closure) {
-        return Err(format!(
-            "{}: closure {:?} is not a source-closure digest",
-            path.display(),
-            manifest.closure
-        ));
-    }
-    if manifest.binary_sha256.len() != 64
-        || !manifest
-            .binary_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(format!(
-            "{}: binary_sha256 {:?} is not a SHA-256 digest",
-            path.display(),
-            manifest.binary_sha256
-        ));
-    }
-    Ok(manifest)
-}
-
-/// The SHA-256 hex digest of the bytes at `path`, computed before any
-/// execution: `binary_closure` itself runs the binary, so the digest gate
-/// must come first.
-fn sha256_file(path: &Path) -> Result<String, String> {
-    use sha2::Digest as _;
-    let bytes =
-        fs::read(path).map_err(|error| format!("{}: cannot read: {error}", path.display()))?;
-    let mut digest = String::with_capacity(64);
-    for byte in sha2::Sha256::digest(&bytes) {
-        let _ = write!(digest, "{byte:02x}");
-    }
-    Ok(digest)
-}
-
-/// Whether `binary` is a renderer for `revision`: its reported closure is
-/// one of `expected`, or — when the pin's tree is unavailable — its reported
-/// revision is the pin and its closure report is wellformed.
-fn prove_candidate(
-    binary: &Path,
+#[cfg(not(target_os = "linux"))]
+fn resolve_pinned_binary_inner(
     revision: &str,
     expected: Option<&[String]>,
+    lookup: &PinnedBinaryLookup,
+    source: &PinSource,
+    checkout_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<PinnedExecutable, GeneratorError> {
+    let _ = (revision, expected, lookup, source, checkout_root);
+    Err(GeneratorError::usage(
+        "descriptor-bound renderer execution is unavailable on this platform; refusing pinned policy verification",
+    ))
+}
+
+fn prove_candidate_with_root(
+    binary: &PinnedExecutable,
+    expected: Option<&[String]>,
+    root: Option<&super::safe_fs::SafeRoot>,
 ) -> Result<(), String> {
-    let reported = binary_closure(binary)?;
-    if let Some(set) = expected {
-        if set.contains(&reported) {
-            return Ok(());
-        }
-        return Err(format!(
-            "reports closure {reported}, which is not the pin's closure"
-        ));
-    }
-    if !closure_identity::is_full_closure(&reported) {
-        return Err(format!(
-            "reports {reported:?} instead of a source-closure digest; install a current binary"
-        ));
-    }
-    match binary_revision(binary)? {
-        claimed if claimed == revision => Ok(()),
-        claimed => Err(format!(
-            "reports revision {claimed}, but the declared pin is {revision}"
-        )),
+    let expected = expected.ok_or_else(|| {
+        "no trusted closure is available for this pin; refusing renderer self-attestation"
+            .to_owned()
+    })?;
+    let reported = match root {
+        Some(root) => binary_closure_with_safe_root(binary, root)?,
+        None => binary_closure(binary)?,
+    };
+    if expected.contains(&reported) {
+        Ok(())
+    } else {
+        Err(format!(
+            "reports closure {reported}, which is not the trusted pin closure"
+        ))
     }
 }
 
@@ -1293,22 +1620,36 @@ fn prove_candidate(
 /// and caller flag removed, so the build never touches a shared store. The
 /// generator's own repository builds from a local clone of the audited
 /// checkout (hardlinked objects) checked out at the pin; a consumer installs
-/// from the generator's git URL. The result must prove the pin exactly like
-/// a provisioned candidate ([`prove_candidate`]).
+/// from the generator's git URL. The result must prove the pin using the same
+/// trusted source closure as a provisioned renderer.
 fn build_pinned_binary(
     revision: &str,
     expected: Option<&[String]>,
     source: &PinSource,
     install_root: &Path,
     installed: &Path,
-) -> Result<PathBuf, GeneratorError> {
-    fs::create_dir_all(install_root).map_err(|error| {
+    checkout_root: Option<&super::safe_fs::SafeRoot>,
+) -> Result<PinnedExecutable, GeneratorError> {
+    let install_root = if install_root.is_absolute() {
+        install_root.to_path_buf()
+    } else {
+        env::current_dir()
+            .map_err(|error| {
+                GeneratorError::usage(format!(
+                    "resolve pinned generator install root {}: {error}",
+                    install_root.display()
+                ))
+            })?
+            .join(install_root)
+    };
+    fs::create_dir_all(&install_root).map_err(|error| {
         GeneratorError::usage(format!(
             "prepare pinned generator root at {}: {error}",
             install_root.display()
         ))
     })?;
     let mut command = Command::new("cargo");
+    clear_root_handoff_environment(&mut command);
     command.args(["install", "--locked", "--no-default-features", "--force"]);
     match source {
         PinSource::Checkout(checkout) => {
@@ -1318,30 +1659,67 @@ fn build_pinned_binary(
                     GeneratorError::io("remove stale pinned source clone", &clone, &error)
                 })?;
             }
-            let status = Command::new("git")
-                .arg("clone")
-                .arg("--quiet")
-                .arg("--no-checkout")
-                .arg(checkout)
-                .arg(&clone)
-                .status()
+            let output = if let Some(checkout_root) = checkout_root {
+                use std::ffi::OsStr;
+
+                super::safe_fs::pinned_command::output(
+                    checkout_root,
+                    "git",
+                    [
+                        OsStr::new("clone"),
+                        OsStr::new("--quiet"),
+                        OsStr::new("--no-checkout"),
+                        OsStr::new("."),
+                        clone.as_os_str(),
+                    ],
+                )
                 .map_err(|error| {
                     GeneratorError::usage(format!("clone the audited checkout: {error}"))
-                })?;
+                })?
+            } else {
+                let mut git = Command::new("git");
+                clear_root_handoff_environment(&mut git);
+                git.arg("clone")
+                    .arg("--quiet")
+                    .arg("--no-checkout")
+                    .arg(checkout)
+                    .arg(&clone)
+                    .output()
+                    .map_err(|error| {
+                        GeneratorError::usage(format!("clone the audited checkout: {error}"))
+                    })?
+            };
+            let status = output.status;
             if !status.success() {
                 return Err(GeneratorError::usage(format!(
                     "clone the audited checkout {} for the pinned build failed",
                     checkout.display()
                 )));
             }
-            let status = Command::new("git")
-                .arg("-C")
-                .arg(&clone)
-                .args(["checkout", "--quiet", "--detach", revision])
-                .status()
+            let clone_root = checkout_root
+                .map(|_| super::safe_fs::SafeRoot::open(&clone))
+                .transpose()?;
+            let output = if let Some(clone_root) = clone_root.as_ref() {
+                super::safe_fs::pinned_command::output(
+                    clone_root,
+                    "git",
+                    ["checkout", "--quiet", "--detach", revision],
+                )
                 .map_err(|error| {
                     GeneratorError::usage(format!("check out pin {revision}: {error}"))
-                })?;
+                })?
+            } else {
+                let mut git = Command::new("git");
+                clear_root_handoff_environment(&mut git);
+                git.arg("-C")
+                    .arg(&clone)
+                    .args(["checkout", "--quiet", "--detach", revision])
+                    .output()
+                    .map_err(|error| {
+                        GeneratorError::usage(format!("check out pin {revision}: {error}"))
+                    })?
+            };
+            let status = output.status;
             if !status.success() {
                 return Err(GeneratorError::usage(format!(
                     "pin {revision} is not a commit of the audited checkout"
@@ -1357,7 +1735,7 @@ fn build_pinned_binary(
     }
     command
         .arg("--root")
-        .arg(install_root)
+        .arg(&install_root)
         .args(["--bin", "velnor-workflow"])
         .env("CARGO_TARGET_DIR", install_root.join("target"));
     for name in PIN_BUILD_ENV_REMOVED {
@@ -1368,7 +1746,19 @@ fn build_pinned_binary(
             command.env_remove(name);
         }
     }
-    let status = command.status().map_err(|error| {
+    let status = if let Some(checkout_root) = checkout_root {
+        super::safe_fs::pinned_command::spawn(checkout_root, command)
+            .and_then(|mut child| child.wait())
+    } else {
+        let current_directory = env::current_dir().map_err(|error| {
+            GeneratorError::usage(format!("resolve pinned generator build directory: {error}"))
+        })?;
+        command
+            .env("PWD", &current_directory)
+            .env("GITHUB_WORKSPACE", &current_directory)
+            .status()
+    }
+    .map_err(|error| {
         GeneratorError::usage(format!("build velnor-workflow at pin {revision}: {error}"))
     })?;
     if !status.success() {
@@ -1376,8 +1766,14 @@ fn build_pinned_binary(
             "build velnor-workflow at pin {revision} failed"
         )));
     }
-    match prove_candidate(installed, revision, expected) {
-        Ok(()) => Ok(installed.to_path_buf()),
+    let opened = PinnedExecutable::open(installed).map_err(|detail| {
+        GeneratorError::usage(format!(
+            "velnor-workflow built for pin {revision} at {} is unusable: {detail}",
+            installed.display()
+        ))
+    })?;
+    match prove_candidate_with_root(&opened, expected, checkout_root) {
+        Ok(()) => Ok(opened),
         Err(detail) => Err(GeneratorError::usage(format!(
             "velnor-workflow built for pin {revision} at {} is unusable: {detail}",
             installed.display()
@@ -1401,168 +1797,170 @@ fn scratch_directory(label: &str) -> Result<PathBuf, GeneratorError> {
     Ok(path)
 }
 
-/// Scan `checkout` with the generator built at `pin`, render into a scratch
-/// directory, and return every path under `tree` that differs, in sorted
-/// order. Every rendered file must match the tree byte for byte, and every
-/// workflow in the tree must be generator-owned unless the tree's policy
-/// excludes it. `checkout` and `tree` are the same directory except under
-/// `--check --output`, where the rendered tree lives apart from its source.
-///
-/// # Errors
-/// When the pinned generator cannot be obtained or its render fails.
-/// What `regenerate_and_compare` proved about the tree.
+struct BoundScratchDirectory {
+    parent: super::safe_fs::SafeRoot,
+    name: OsString,
+    path: PathBuf,
+    root: super::safe_fs::SafeRoot,
+    identity: super::safe_fs::SafeRootIdentity,
+}
+
+struct BoundScratchChild {
+    path: PathBuf,
+    root: super::safe_fs::SafeRoot,
+}
+
+impl BoundScratchDirectory {
+    fn create(label: &str) -> Result<Self, GeneratorError> {
+        let base = env::var_os("RUNNER_TEMP")
+            .or_else(|| env::var_os("TMPDIR"))
+            .map_or_else(env::temp_dir, PathBuf::from);
+        let parent = super::safe_fs::SafeRoot::open(&base)?;
+        let name = OsString::from(format!(
+            "velnor-workflow-{label}-{}",
+            super::unique_suffix()
+        ));
+        Self::create_under_parent(parent, name)
+    }
+
+    fn create_under_parent(
+        parent: super::safe_fs::SafeRoot,
+        name: OsString,
+    ) -> Result<Self, GeneratorError> {
+        let path = parent.command_directory().join(&name);
+        let root = parent.create_directory_child(&name)?;
+        let identity = root.identity()?;
+        Ok(Self {
+            parent,
+            name,
+            path,
+            root,
+            identity,
+        })
+    }
+
+    fn create_child(&self, name: &str, mode: u16) -> Result<BoundScratchChild, GeneratorError> {
+        let root = self
+            .root
+            .create_directory_child(std::ffi::OsStr::new(name))?;
+        root.set_mode(mode)?;
+        Ok(BoundScratchChild {
+            path: self.path.join(name),
+            root,
+        })
+    }
+
+    fn cleanup(self) -> Result<(), GeneratorError> {
+        // Do not treat a missing or rebound display name as successful
+        // cleanup. The parent operation repeats the identity check before
+        // deleting the name-relative tree.
+        self.root.validate_root_binding()?;
+        self.parent
+            .remove_named_tree_if_matches(&self.name, &self.identity)
+    }
+}
+
+/// What the regeneration comparison established about the tree.
 pub(crate) enum TreeComparison {
     /// The tree is byte-identical to the declared pin's render.
     Pin,
-    /// The tree differs from the pin's render but is byte-identical to the
-    /// render of the audited tree's own candidate: a generator change in
-    /// flight. Carries the candidate closure that proved it.
-    Candidate(String),
     /// Neither renderer reproduces the tree.
     Differences(Vec<String>),
 }
 
+/// Scan the checkout with the generator built at the declared pin, render into
+/// a scratch directory, and return every path under the tree that differs.
+/// Every rendered file must match byte for byte, and every workflow must
+/// appear in rendered output.
+///
+/// # Errors
+/// When the pinned generator cannot be obtained or its render fails.
 pub(crate) fn regenerate_and_compare(
     checkout: &Path,
     tree: &Path,
     pin: &str,
     default_branch: &str,
-    excludes: &BTreeSet<String>,
     lookup: &PinnedBinaryLookup,
     source: &PinSource,
 ) -> Result<TreeComparison, GeneratorError> {
-    // The generator's own repository audits a full history, so the pin's
-    // closures are always computable there; a consumer tree without generator
-    // history resolves through the revision fallback instead.
+    let checkout_root = super::safe_fs::SafeRoot::open(checkout)?;
+    let tree_root = super::safe_fs::SafeRoot::open(tree)?;
+    regenerate_and_compare_with_safe_roots(
+        &checkout_root,
+        &tree_root,
+        pin,
+        default_branch,
+        lookup,
+        source,
+    )
+}
+
+/// D19's CLI check and runtime policy keep the checkout and compared output
+/// rooted in handles captured before generation. Path-based
+/// `regenerate_and_compare` remains for callers that own their path boundary.
+fn regenerate_and_compare_with_safe_roots(
+    checkout: &super::safe_fs::SafeRoot,
+    tree: &super::safe_fs::SafeRoot,
+    pin: &str,
+    default_branch: &str,
+    lookup: &PinnedBinaryLookup,
+    source: &PinSource,
+) -> Result<TreeComparison, GeneratorError> {
     let expected = match source {
-        PinSource::Checkout(_) => Some(expected_closures(checkout, pin)?),
-        PinSource::Remote(_) => expected_closures(checkout, pin).ok(),
+        PinSource::Checkout(_) => Some(expected_closures_with_safe_root(checkout, pin)?),
+        PinSource::Remote(_) => Some(vec![expected_remote_closure(pin, lookup)?]),
     };
-    let binary = resolve_pinned_binary(pin, expected.as_deref(), lookup, source)?;
-    let scratch = scratch_directory("policy-render")?;
-    let verdict = render_and_compare(&binary, checkout, tree, &scratch, default_branch, excludes)
-        .and_then(|differences| {
+    let binary =
+        resolve_pinned_binary_with_safe_root(pin, expected.as_deref(), lookup, source, checkout)?;
+    let scratch = BoundScratchDirectory::create("policy-render")?;
+    let verdict = (|| {
+        let pin_scratch = scratch.create_child("pin-render", 0o700)?;
+        render_and_compare_with_safe_roots(
+            &binary,
+            checkout,
+            tree,
+            &pin_scratch.path,
+            &pin_scratch.root,
+            default_branch,
+        )
+        .map(|differences| {
             if differences.is_empty() {
-                return Ok(TreeComparison::Pin);
+                TreeComparison::Pin
+            } else {
+                TreeComparison::Differences(differences)
             }
-            match render_with_candidate(checkout, tree, &scratch, default_branch, excludes, lookup)?
-            {
-                Some(closure) => Ok(TreeComparison::Candidate(closure)),
-                None => Ok(TreeComparison::Differences(differences)),
-            }
-        });
-    let _ = fs::remove_dir_all(&scratch);
+        })
+    })();
+    scratch.cleanup()?;
     verdict
 }
 
-/// The candidate exception: when the tree differs from the declared pin's
-/// render, it may still be legitimate — a generator change in flight renders
-/// with the audited tree's own candidate, not with the pin.
-///
-/// Acceptance requires the manifest binding, not `--closure` alone: the
-/// manifest's closure must equal the audited checkout's own candidate
-/// closure (computed locally from git history), the env-slot binary's digest
-/// must match the manifest before any execution, and only then does the
-/// `--closure` self-report stay as a final tripwire. A `--closure` echo is an
-/// assertion by untrusted bytes, not proof. Returns the proving closure, or
-/// `None` when no bound candidate reproduces the tree.
-fn render_with_candidate(
-    checkout: &Path,
-    tree: &Path,
+fn render_and_compare_with_safe_roots(
+    binary: &PinnedExecutable,
+    checkout: &super::safe_fs::SafeRoot,
+    root: &super::safe_fs::SafeRoot,
     scratch: &Path,
+    scratch_root: &super::safe_fs::SafeRoot,
     default_branch: &str,
-    excludes: &BTreeSet<String>,
-    lookup: &PinnedBinaryLookup,
-) -> Result<Option<String>, GeneratorError> {
-    let Ok(Some(head)) = git(checkout, &["rev-parse", "HEAD"]) else {
-        return Ok(None);
-    };
-    if !super::is_full_revision(&head) {
-        return Ok(None);
-    }
-    let Ok(wanted) = closure_identity::candidate_closure_of_tree(checkout, &head) else {
-        return Ok(None);
-    };
-    let current_exe = env::current_exe().ok();
-    // The manifest gate fails closed loudly: a manifest path that cannot be
-    // loaded, or names another tree, is a configuration error, not a skip.
-    let manifest = match &lookup.candidate_manifest {
-        None => None,
-        Some(path) => {
-            let manifest = load_candidate_manifest(path).map_err(GeneratorError::usage)?;
-            if manifest.closure != wanted {
-                return Err(GeneratorError::usage(format!(
-                    "candidate manifest {} names closure {}, but the audited tree's candidate closure is {wanted}",
-                    path.display(),
-                    manifest.closure
-                )));
-            }
-            Some(manifest)
-        }
-    };
-    let mut binaries = Vec::new();
-    if let Some(pinned) = &lookup.pinned_binary {
-        binaries.push(pinned.clone());
-    }
-    if let Some(current) = &current_exe
-        && !binaries.contains(current)
-    {
-        binaries.push(current.clone());
-    }
-    for binary in binaries {
-        if !binary.is_file() {
-            continue;
-        }
-        // The running binary stays manifest-exempt: in CI it is the base
-        // product itself, and locally the operator trusts their own binary —
-        // which preserves the `--check`/bootstrap self-recognition path.
-        let is_self = current_exe.as_deref() == Some(binary.as_path());
-        if !is_self {
-            let Some(bound) = &manifest else {
-                continue;
-            };
-            // Digest before any exec: `binary_closure` runs the binary.
-            let Ok(digest) = sha256_file(&binary) else {
-                continue;
-            };
-            if digest != bound.binary_sha256 {
-                continue;
-            }
-        }
-        let Ok(reported) = binary_closure(&binary) else {
-            continue;
-        };
-        if reported != wanted {
-            continue;
-        }
-        let differences =
-            render_and_compare(&binary, checkout, tree, scratch, default_branch, excludes)?;
-        if differences.is_empty() {
-            return Ok(Some(reported));
-        }
-    }
-    Ok(None)
-}
-
-fn render_and_compare(
-    binary: &Path,
-    checkout: &Path,
-    root: &Path,
-    scratch: &Path,
-    default_branch: &str,
-    excludes: &BTreeSet<String>,
 ) -> Result<Vec<String>, GeneratorError> {
-    let output = Command::new(binary)
-        .arg(checkout)
-        .arg("--output")
-        .arg(scratch)
-        .args(["--plain", "--force", "--default-branch", default_branch])
-        .current_dir(checkout)
-        .output()
+    let output = binary
+        .render_with_safe_roots(
+            checkout,
+            scratch_root,
+            [
+                std::ffi::OsStr::new("."),
+                std::ffi::OsStr::new("--output"),
+                scratch.as_os_str(),
+                std::ffi::OsStr::new("--plain"),
+                std::ffi::OsStr::new("--force"),
+                std::ffi::OsStr::new("--default-branch"),
+                std::ffi::OsStr::new(default_branch),
+            ],
+        )
         .map_err(|error| {
             GeneratorError::usage(format!(
-                "run {} to regenerate the tree: {error}",
-                binary.display()
+                "run {} to regenerate the captured tree: {error}",
+                binary.path.display()
             ))
         })?;
     if !output.status.success() {
@@ -1574,52 +1972,73 @@ fn render_and_compare(
         };
         return Err(GeneratorError::usage(format!(
             "regeneration with {} failed: {}",
-            binary.display(),
+            binary.path.display(),
             detail.trim()
         )));
     }
+    scratch_root.validate_root_binding()?;
     let mut rendered = BTreeMap::new();
-    collect_files(scratch, scratch, &mut rendered)?;
+    collect_files_with_safe_root(scratch_root, Path::new(""), &mut rendered)?;
+    require_minimum_render_inventory(&rendered)?;
+    compare_rendered_tree_with_safe_root(root, &rendered)
+}
+
+/// Both generator backends always render these fixed artifacts. Requiring
+/// them independently of the target tree prevents an empty or partial scratch
+/// tree from proving the pin.
+const MINIMUM_RENDER_OUTPUTS: [&str; 3] = [
+    ".github/actionlint.yaml",
+    ".github/ci/project.toml",
+    "config/fleet/velnor-host.env",
+];
+
+fn require_minimum_render_inventory(
+    rendered: &BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<(), GeneratorError> {
+    for required in MINIMUM_RENDER_OUTPUTS {
+        if !rendered.contains_key(Path::new(required)) {
+            return Err(GeneratorError::usage(format!(
+                "pinned renderer omitted required output {required}; refusing policy verification"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn compare_rendered_tree_with_safe_root(
+    root: &super::safe_fs::SafeRoot,
+    rendered: &BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<Vec<String>, GeneratorError> {
     let mut differences = Vec::new();
-    for (relative, content) in &rendered {
-        let actual = root.join(relative);
-        match fs::read(&actual) {
-            Ok(bytes) if &bytes == content => {}
-            Ok(_) => differences.push(format!(
+    for (relative, content) in rendered {
+        match root.read_file_if_exists(relative)? {
+            Some(bytes) if &bytes == content => {}
+            Some(_) => differences.push(format!(
                 "{}: differs from the pinned render",
                 relative.display()
             )),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                differences.push(format!("{}: missing from the tree", relative.display()));
-            }
-            Err(error) => return Err(GeneratorError::io("read tree file", &actual, &error)),
+            None => differences.push(format!("{}: missing from the tree", relative.display())),
         }
     }
-    let workflows = root.join(".github/workflows");
-    if let Ok(entries) = fs::read_dir(&workflows) {
-        for entry in entries {
-            let path = entry
-                .map_err(|error| GeneratorError::usage(format!("read workflow entry: {error}")))?
-                .path();
-            if !path.is_file()
+    if let Some(workflows) = root.open_directory(Path::new(".github/workflows"))? {
+        for entry in workflows.entries()? {
+            let name = entry.name.to_str().unwrap_or_default();
+            let is_workflow_file = matches!(
+                entry.kind,
+                super::safe_fs::SafeEntryKind::File | super::safe_fs::SafeEntryKind::Symlink
+            );
+            if !is_workflow_file
                 || !matches!(
-                    path.extension().and_then(|value| value.to_str()),
+                    Path::new(name).extension().and_then(|value| value.to_str()),
                     Some("yml" | "yaml")
                 )
             {
                 continue;
             }
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            if excludes.contains(name) {
-                continue;
-            }
             let relative = PathBuf::from(".github/workflows").join(name);
             if !rendered.contains_key(&relative) {
                 differences.push(format!(
-                    "{}: not generator-owned (hand-written workflows are refused; list it under [policy] exclude_workflows only while migrating)",
+                    "{}: not present in rendered output",
                     relative.display()
                 ));
             }
@@ -1629,24 +2048,27 @@ fn render_and_compare(
     Ok(differences)
 }
 
-fn collect_files(
-    base: &Path,
-    directory: &Path,
+fn collect_files_with_safe_root(
+    directory: &super::safe_fs::SafeRoot,
+    relative_directory: &Path,
     files: &mut BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<(), GeneratorError> {
-    for entry in fs::read_dir(directory)
-        .map_err(|error| GeneratorError::io("read rendered directory", directory, &error))?
-    {
-        let path = entry
-            .map_err(|error| GeneratorError::usage(format!("read rendered entry: {error}")))?
-            .path();
-        if path.is_dir() {
-            collect_files(base, &path, files)?;
-        } else if path.is_file() {
-            let relative = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
-            let content = fs::read(&path)
-                .map_err(|error| GeneratorError::io("read rendered file", &path, &error))?;
-            files.insert(relative, content);
+    for entry in directory.entries()? {
+        let relative = relative_directory.join(&entry.name);
+        match entry.kind {
+            super::safe_fs::SafeEntryKind::Directory(child) => {
+                collect_files_with_safe_root(&child, &relative, files)?;
+            }
+            super::safe_fs::SafeEntryKind::File => {
+                let bytes = directory.read_file(Path::new(&entry.name))?;
+                files.insert(relative, bytes);
+            }
+            super::safe_fs::SafeEntryKind::Symlink | super::safe_fs::SafeEntryKind::Other => {
+                return Err(GeneratorError::usage(format!(
+                    "rendered output contains a non-regular path: {}",
+                    relative.display()
+                )));
+            }
         }
     }
     Ok(())
@@ -1656,18 +2078,25 @@ fn collect_files(
 // Required status-check contexts
 // ---------------------------------------------------------------------------
 
-fn required_checks(root: &Path, declared: &DeclaredTree, live: Option<&[String]>) -> RuleReport {
+fn required_checks_with_safe_root(
+    root: &super::safe_fs::SafeRoot,
+    declared: &DeclaredTree,
+    live: Option<&[String]>,
+) -> RuleReport {
     let mut findings = Vec::new();
-    let aggregate = root.join(PULL_REQUEST_AGGREGATE);
-    let emitted = match fs::read_to_string(&aggregate) {
-        Ok(yaml) => match super::workflow_job_display_names(&yaml) {
+    let emitted = match read_text_with_safe_root(
+        root,
+        Path::new(PULL_REQUEST_AGGREGATE),
+        "read pull request aggregate",
+    ) {
+        Ok(Some(yaml)) => match super::workflow_job_display_names(&yaml) {
             Ok(names) => Some(names),
             Err(error) => {
                 findings.push(format!("{PULL_REQUEST_AGGREGATE}: {error}"));
                 None
             }
         },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Ok(None) => None,
         Err(error) => {
             findings.push(format!("{PULL_REQUEST_AGGREGATE}: {error}"));
             None
@@ -1699,10 +2128,12 @@ fn required_checks(root: &Path, declared: &DeclaredTree, live: Option<&[String]>
         let live: BTreeSet<&str> = live.iter().map(String::as_str).collect();
         // The entrypoint's own job is the gate this validator runs behind; a
         // ruleset that does not require it makes every rule here advisory.
-        let entrypoint_contexts = fs::read_to_string(root.join(POLICY_ENTRYPOINT))
-            .ok()
-            .and_then(|yaml| super::workflow_job_display_names(&yaml).ok())
-            .unwrap_or_default();
+        let entrypoint_contexts =
+            read_text_with_safe_root(root, Path::new(POLICY_ENTRYPOINT), "read policy entrypoint")
+                .ok()
+                .flatten()
+                .and_then(|yaml| super::workflow_job_display_names(&yaml).ok())
+                .unwrap_or_default();
         for context in &entrypoint_contexts {
             if !live.contains(context.as_str()) {
                 findings.push(format!(
@@ -1753,21 +2184,23 @@ struct EntrypointAudit {
     privileges: Vec<String>,
 }
 
-fn audit_policy_entrypoint(
-    root: &Path,
+fn audit_policy_entrypoint_with_safe_root(
+    root: &super::safe_fs::SafeRoot,
     velnor_policy: &VelnorPolicyContract,
 ) -> Result<EntrypointAudit, GeneratorError> {
-    let path = root.join(POLICY_ENTRYPOINT);
     let mut audit = EntrypointAudit::default();
-    let content = match fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+    let content = match read_text_with_safe_root(
+        root,
+        Path::new(POLICY_ENTRYPOINT),
+        "read policy entrypoint",
+    )? {
+        Some(content) => content,
+        None => {
             audit.trigger.push(format!(
                 "{POLICY_ENTRYPOINT}: the base-owned policy entrypoint is missing"
             ));
             return Ok(audit);
         }
-        Err(error) => return Err(GeneratorError::io("read policy entrypoint", &path, &error)),
     };
     let parser = serde_yaml::ParserConfig::default()
         .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error);
@@ -1789,6 +2222,16 @@ fn audit_policy_entrypoint(
     audit_entrypoint_triggers(workflow, &mut audit);
     audit_entrypoint_privileges(workflow, &content, velnor_policy, &mut audit);
     Ok(audit)
+}
+
+/// Path-based test and caller wrapper. Runtime evaluation uses the captured
+/// root variant above so the entrypoint is read from the schema-probed tree.
+fn audit_policy_entrypoint(
+    root: &Path,
+    velnor_policy: &VelnorPolicyContract,
+) -> Result<EntrypointAudit, GeneratorError> {
+    let safe_root = super::safe_fs::SafeRoot::open(root)?;
+    audit_policy_entrypoint_with_safe_root(&safe_root, velnor_policy)
 }
 
 /// Trigger set: `pull_request_target` with the reviewed activity types, plus
@@ -1990,19 +2433,31 @@ impl PolicyFindings {
 
 /// Audit every workflow under `root/.github/workflows` with the validator's
 /// semantic rules. The policy entrypoint is exempt from the
-/// `pull_request_target` rule here; [`audit_policy_entrypoint`] judges it.
+/// `pull_request_target` rule here; [`audit_policy_entrypoint_with_safe_root`] judges it.
 ///
 /// # Errors
 /// When the workflow directory or a workflow file cannot be read.
 pub(crate) fn audit_workflows(root: &Path) -> Result<WorkflowAudit, GeneratorError> {
-    let workflows = root.join(".github/workflows");
-    let entries = fs::read_dir(&workflows)
-        .map_err(|error| GeneratorError::io("read workflow directory", &workflows, &error))?;
-    let policy_entrypoint = workflows.join("ci-policy.yml");
-    let policy_excludes = configured_policy_excludes(root);
-    let velnor_policy = configured_velnor_policy(root)?;
+    let safe_root = super::safe_fs::SafeRoot::open(root)?;
+    audit_workflows_with_safe_root(&safe_root)
+}
+
+fn audit_workflows_with_safe_root(
+    root: &super::safe_fs::SafeRoot,
+) -> Result<WorkflowAudit, GeneratorError> {
+    let workflow_directory = Path::new(".github/workflows");
+    let workflow_path = root.command_directory().join(workflow_directory);
+    let workflows = root.open_directory(workflow_directory)?.ok_or_else(|| {
+        GeneratorError::io(
+            "read workflow directory",
+            &workflow_path,
+            &std::io::Error::from(std::io::ErrorKind::NotFound),
+        )
+    })?;
+    let policy_entrypoint = workflow_path.join("ci-policy.yml");
+    let velnor_policy = configured_velnor_policy_with_safe_root(root)?;
     let mut findings = PolicyFindings {
-        root: root.to_path_buf(),
+        root: root.command_directory().to_path_buf(),
         ..PolicyFindings::default()
     };
     // GitHub rejects a workflow whose YAML carries duplicate keys, so the
@@ -2011,30 +2466,31 @@ pub(crate) fn audit_workflows(root: &Path) -> Result<WorkflowAudit, GeneratorErr
     let parser = serde_yaml::ParserConfig::default()
         .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error);
     let mut paths = Vec::new();
-    for entry in entries {
-        let path = entry
-            .map_err(|error| GeneratorError::usage(format!("read workflow entry: {error}")))?
-            .path();
-        if path.is_file()
-            && matches!(
-                path.extension().and_then(|value| value.to_str()),
-                Some("yml" | "yaml")
-            )
-        {
-            paths.push(path);
+    for entry in workflows.entries()? {
+        if matches!(
+            entry.kind,
+            super::safe_fs::SafeEntryKind::File | super::safe_fs::SafeEntryKind::Symlink
+        ) && matches!(
+            Path::new(&entry.name)
+                .extension()
+                .and_then(|value| value.to_str()),
+            Some("yml" | "yaml")
+        ) {
+            paths.push(entry.name);
         }
     }
     paths.sort();
-    for path in paths {
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| policy_excludes.contains(name))
-        {
-            continue;
-        }
-        let content = fs::read_to_string(&path)
-            .map_err(|error| GeneratorError::io("read workflow", &path, &error))?;
+    for name in paths {
+        let relative_path = workflow_directory.join(&name);
+        let path = root.command_directory().join(&relative_path);
+        let content =
+            read_text_with_safe_root(root, &relative_path, "read workflow")?.ok_or_else(|| {
+                GeneratorError::io(
+                    "read workflow",
+                    &path,
+                    &std::io::Error::from(std::io::ErrorKind::NotFound),
+                )
+            })?;
         let document: Value = match serde_yaml::from_str_with_config(&content, &parser) {
             Ok(document) => document,
             Err(error) => {
@@ -2139,33 +2595,6 @@ fn has_safe_runner_gate(
     is_generated_provider_gate(condition, &provider)
 }
 
-fn generation_workflow(root: &Path) -> Result<Option<toml::Value>, GeneratorError> {
-    let path = root.join(GENERATION_CONFIG);
-    let content = match fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(GeneratorError::io(
-                "read generation workflow config",
-                &path,
-                &error,
-            ));
-        }
-    };
-    let value = toml::from_str::<toml::Value>(&content).map_err(|error| {
-        GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
-    })?;
-    Ok(value.get("workflow").cloned())
-}
-
-fn configured_policy_excludes(root: &Path) -> BTreeSet<String> {
-    config::discover(root)
-        .ok()
-        .flatten()
-        .map(|config| config.effective_policy_exclude_workflows())
-        .unwrap_or_default()
-}
-
 fn toml_string_array(
     value: Option<&toml::Value>,
     field: &str,
@@ -2215,26 +2644,28 @@ impl VelnorPolicyContract {
     }
 }
 
-fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, GeneratorError> {
-    let path = root.join(RUNTIME_CONFIG);
+fn configured_velnor_policy_with_safe_root(
+    root: &super::safe_fs::SafeRoot,
+) -> Result<VelnorPolicyContract, GeneratorError> {
+    let generation = config::require_with_safe_root(root)?;
+    configured_velnor_policy_with_generation(root, &generation)
+}
+
+fn configured_velnor_policy_with_generation(
+    root: &super::safe_fs::SafeRoot,
+    generation: &config::RepoGenerationConfig,
+) -> Result<VelnorPolicyContract, GeneratorError> {
+    let relative = Path::new(RUNTIME_CONFIG);
+    let path = root.command_directory().join(relative);
     // Advisory sparse-checkout omits `.github/ci`. Do not default the
     // contract on a missing project.toml: the generation config still
     // carries providers and selectors.
-    let runtime = match fs::read_to_string(&path) {
-        Ok(content) => Some(toml::from_str::<toml::Value>(&content).map_err(|error| {
+    let runtime = match read_text_with_safe_root(root, relative, "read workflow config")? {
+        Some(content) => Some(toml::from_str::<toml::Value>(&content).map_err(|error| {
             GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
         })?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(GeneratorError::io("read workflow config", &path, &error)),
+        None => None,
     };
-    let generation = generation_workflow(root)?;
-    if runtime.is_none() && generation.is_none() {
-        return Ok(VelnorPolicyContract {
-            default_branch: "main".to_owned(),
-            ..VelnorPolicyContract::default()
-        });
-    }
-    let generation_workflow = generation.as_ref().and_then(toml::Value::as_table);
     let mut providers = runtime
         .as_ref()
         .and_then(|value| value.get("providers"))
@@ -2242,10 +2673,7 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
         .transpose()?
         .unwrap_or_default();
     if providers.is_empty() {
-        providers = toml_string_array(
-            generation_workflow.and_then(|workflow| workflow.get("providers")),
-            "[workflow] providers",
-        )?;
+        providers = generation.providers().unwrap_or_default().to_vec();
     }
     let automatic_providers = runtime
         .as_ref()
@@ -2261,29 +2689,16 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
         .into_iter()
         .map(|(provider, selector)| (provider.as_str().to_owned(), selector.runs_on))
         .collect();
-    if let Some(tables) = generation_workflow
-        .and_then(|workflow| workflow.get("selectors"))
-        .and_then(toml::Value::as_table)
-    {
-        for (provider, table) in tables {
-            let runs_on = toml_string_array(
-                table.get("runs_on"),
-                &format!("[workflow.selectors.{provider}] runs_on"),
-            )?;
-            if !runs_on.is_empty() {
-                selectors.insert(provider.clone(), runs_on);
-            }
+    for (provider, selector) in generation.selectors() {
+        if !selector.runs_on.is_empty() {
+            selectors.insert(provider.clone(), selector.runs_on.clone());
         }
     }
     let default_branch = runtime
         .as_ref()
         .and_then(|value| value.get("default_branch"))
         .and_then(toml::Value::as_str)
-        .or_else(|| {
-            generation_workflow
-                .and_then(|workflow| workflow.get("default_branch"))
-                .and_then(toml::Value::as_str)
-        })
+        .or_else(|| generation.default_branch())
         .unwrap_or("main")
         .to_owned();
     let policy = VelnorPolicyContract {
@@ -2621,9 +3036,14 @@ fn is_full_sha_reference(value: &str) -> bool {
 /// reference outside `.github/actions/` stays rejected below. The owner
 /// policy job's setup composite resolves out of its sibling checkout
 /// instead of the root (a root checkout would wipe `policy-checkout/`),
-/// so that exact reference is reviewed too — but no second sibling path.
+/// so that exact reference is reviewed too. The owner package publisher has
+/// a separate, exact `source/` checkout for repository verification tasks;
+/// arbitrary checkout-root action paths remain rejected.
 fn is_approved_local_action(value: &str) -> bool {
-    if value == super::VELNOR_WORKFLOW_POLICY_SETUP_ACTION {
+    if matches!(
+        value,
+        super::VELNOR_WORKFLOW_POLICY_SETUP_ACTION | super::VELNOR_WORKFLOW_SOURCE_SETUP_ACTION
+    ) {
         return true;
     }
     let Some(path) = value.strip_prefix("./.github/actions/") else {

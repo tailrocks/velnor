@@ -245,8 +245,7 @@ impl Scope {
 }
 
 /// `velnor-workflow version [--json]`: the crate version and the source
-/// revision stamped at build time (the same value `--revision` prints), so a
-/// candidate binary can prove which commit it was built from.
+/// revision stamped at build time (the same value `--revision` prints).
 fn print_version(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let json = match arguments {
         [] => false,
@@ -282,120 +281,12 @@ fn print_version(arguments: &[OsString]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
-/// `velnor-workflow closure --rev SHA [--profile release|debug] [--repo PATH] [--candidate]`:
+/// `velnor-workflow closure --rev SHA [--profile release|debug] [--repo PATH]`:
 /// print the source-closure digest of `SHA` in the repository at `--repo`
 /// (the current directory by default). CI jobs use it to name the product
 /// they need; policy resolves the same digest when it verifies.
-/// `--candidate` names the unit job's own debug build (default features); it
-/// cannot combine with `--profile`.
 fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
-    let (candidate, rest): (Vec<&OsString>, Vec<&OsString>) =
-        arguments.iter().partition(|argument| {
-            argument
-                .to_str()
-                .is_some_and(|value| value == "--candidate")
-        });
-    if candidate.len() > 1 {
-        return Err(GeneratorError::usage(
-            "duplicate option: --candidate".to_owned(),
-        ));
-    }
-    let candidate = !candidate.is_empty();
-    let rest: Vec<OsString> = rest.into_iter().cloned().collect();
-    let options = parse_options(&rest, &["rev", "profile", "repo"])?;
-    let rev = options
-        .get("rev")
-        .ok_or_else(|| GeneratorError::usage("closure requires --rev SHA".to_owned()))?;
-    if !crate::is_full_revision(rev) {
-        return Err(GeneratorError::usage(format!(
-            "closure --rev must be a full 40-character commit SHA, got {rev:?}"
-        )));
-    }
-    if candidate && options.contains_key("profile") {
-        return Err(GeneratorError::usage(
-            "closure --candidate cannot combine with --profile".to_owned(),
-        ));
-    }
-    let profile = options
-        .get("profile")
-        .map_or(crate::closure::PROFILE_RELEASE, String::as_str);
-    if !matches!(
-        profile,
-        crate::closure::PROFILE_RELEASE | crate::closure::PROFILE_DEBUG
-    ) {
-        return Err(GeneratorError::usage(format!(
-            "closure --profile must be release or debug, got {profile:?}"
-        )));
-    }
-    let repo = match options.get("repo") {
-        Some(path) => PathBuf::from(path.as_str()),
-        None => env::current_dir()
-            .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?,
-    };
-    let digest = if candidate {
-        crate::closure::candidate_closure_of_tree(&repo, rev)?
-    } else {
-        crate::closure::closure_of_tree(&repo, rev, crate::closure::CI_FEATURES, profile)?
-    };
-    println!("{digest}");
-    Ok(())
-}
-
-/// `velnor-workflow promote --rev SHA|HEAD [--repo PATH] [--generator-repo PATH]
-/// [--default-branch BRANCH] [--runners MODE] [--message TEXT] [--dry-run]`:
-/// stamp the D19 pin and regenerate the whole tree in one atomic commit. The
-/// running binary must render with exactly the source closure the pin names
-/// (render with X ⇒ stamp X); anything else fails closed before touching the
-/// tree. `--generator-repo` points fleet promotion at a product checkout
-/// holding the pin's history; it defaults to the promoted repository itself.
-fn promote_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
-    let (flags, rest): (Vec<&OsString>, Vec<&OsString>) = arguments
-        .iter()
-        .partition(|argument| argument.to_str().is_some_and(|value| value == "--dry-run"));
-    if flags.len() > 1 {
-        return Err(GeneratorError::usage(
-            "duplicate option: --dry-run".to_owned(),
-        ));
-    }
-    let dry_run = !flags.is_empty();
-    let rest: Vec<OsString> = rest.into_iter().cloned().collect();
-    let options = parse_options(
-        &rest,
-        &[
-            "rev",
-            "repo",
-            "generator-repo",
-            "default-branch",
-            "runners",
-            "message",
-        ],
-    )?;
-    let rev = options
-        .get("rev")
-        .ok_or_else(|| GeneratorError::usage("promote requires --rev SHA".to_owned()))?;
-    let repo = match options.get("repo") {
-        Some(path) => PathBuf::from(path.as_str()),
-        None => env::current_dir()
-            .map_err(|error| GeneratorError::usage(format!("resolve promote root: {error}")))?,
-    };
-    let runners = options
-        .get("runners")
-        .map_or(Ok(crate::RunnerMode::Both), |value| {
-            crate::parse_runner_mode(value)
-        })?;
-    let report = crate::promote::run_promote(&crate::promote::PromoteOptions {
-        rev: rev.clone(),
-        repo,
-        generator_repo: options
-            .get("generator-repo")
-            .map(|path| PathBuf::from(path.as_str())),
-        default_branch: options.get("default-branch").cloned(),
-        runners,
-        message: options.get("message").cloned(),
-        dry_run,
-    })?;
-    print!("{}", crate::promote::render_report(&report));
-    Ok(())
+    crate::s2::runtime::run_closure_safely(arguments)
 }
 
 /// Dispatch the binary-only subcommands. `false` means the arguments belong
@@ -447,10 +338,6 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
         }
         "closure" => {
             print_closure(arguments.get(1..).unwrap_or_default())?;
-            Ok(true)
-        }
-        "promote" => {
-            promote_command(arguments.get(1..).unwrap_or_default())?;
             Ok(true)
         }
         "prepared-tool-install" => {
@@ -5194,11 +5081,9 @@ workspace_check = true
         changes: &[(&str, &str, &str)],
         config_text: &str,
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "velnor-workflow-current-project-selection-{name}-{}-{id}",
-            std::process::id()
+            "velnor-workflow-current-project-selection-{name}-{}",
+            crate::s2::unique_suffix()
         ));
         std::fs::create_dir_all(&root)?;
         let init = |args: &[&str]| -> Result<String, Box<dyn Error>> {

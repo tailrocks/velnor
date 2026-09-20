@@ -12,10 +12,8 @@
 //! * `VELNOR_WORKFLOW_FEATURES`: the sorted enabled-feature list the closure
 //!   footer hashed (see `cargo_features`).
 //! * `VELNOR_WORKFLOW_PROFILE`: the Cargo profile the closure footer hashed.
-//!   Together with the feature list it lets `promote` recompute the stamped
-//!   pin's closure under exactly the running binary's own build identity, so
-//!   the render-with-X-stamp-X binding holds for release products and
-//!   development builds alike.
+//!   Together with the feature list it lets policy verification compute the
+//!   stamped source closure under exactly the running binary's build identity.
 //!
 //! The closure duplicates the canonicalization in `src/closure.rs` (a build
 //! script cannot import the crate it builds): `git ls-tree -r HEAD` over the

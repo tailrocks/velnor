@@ -1,10 +1,11 @@
 //! Repository-owned generation config: the explicit input half of generation.
 //!
 //! Generation is a pure function of the repository shape, this config, and the
-//! generator revision. The config lives in the target repository at
-//! `.github-gen/velnor-workflow.toml`, is optional (a repository without one
-//! keeps the generator's default behavior), and is fail-closed: a config that
-//! fails to parse or validate stops generation instead of being ignored.
+//! generator revision. Schema-2 dispatch requires the typed config at
+//! `.github-gen/velnor-workflow.toml`; missing, malformed, or unsupported
+//! configuration fails before scan or generation. The lower-level `discover`
+//! helper still reports absence as `None` for callers that explicitly need to
+//! inspect optional configuration.
 //!
 //! The config is where a repository states everything the generator used to
 //! know for it: its identity, its runner placement, its profile label, its
@@ -15,12 +16,16 @@
 pub(crate) mod canonical;
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::s2::provider::{parse_provider_set, parse_selectors, ProviderId, ProviderSelector};
+use super::safe_fs::SafeRoot;
+use crate::s2::provider::{
+    parse_provider_set, parse_selectors, provider_caps, Platform, ProviderId, ProviderSelector,
+};
 use crate::s2::{content_digest_bytes, GeneratorError};
 
 /// Location of the repository-owned generation config, relative to the
@@ -32,38 +37,45 @@ pub(crate) const GENERATION_CONFIG_PATH: &str = ".github-gen/velnor-workflow.tom
 /// is the provider-set contract; schema 1 lane strings are not read.
 const CONFIG_SCHEMA: i64 = 2;
 
-/// Load and parse the generation config at `path`.
+/// Discover optional config data from a repository root.
 ///
-/// # Errors
-/// Returns filesystem errors and parse errors with the affected path.
-pub(crate) fn load(path: &Path) -> Result<RepoGenerationConfig, GeneratorError> {
-    let bytes = fs::read(path)
-        .map_err(|error| GeneratorError::io("read generation config", path, &error))?;
-    parse(path, &bytes)
-}
-
-/// Discover the generation config at the repository root.
-///
-/// A missing config is a valid outcome: repositories without a config keep the
-/// generator's default behavior.
+/// Schema-2 dispatch must use [`require_with_safe_root`] instead, so absence
+/// cannot fall through to defaults during a scan, policy run, or generation.
 ///
 /// # Errors
 /// Returns filesystem errors and parse errors with the affected path.
 pub(crate) fn discover(root: &Path) -> Result<Option<RepoGenerationConfig>, GeneratorError> {
-    let path = root.join(GENERATION_CONFIG_PATH);
-    match fs::metadata(&path) {
-        Ok(metadata) if metadata.is_dir() => Err(GeneratorError::usage(format!(
-            "generation config is a directory: {}",
-            path.display()
-        ))),
-        Ok(_) => load(&path).map(Some),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(GeneratorError::io(
-            "inspect generation config",
-            &path,
-            &error,
-        )),
+    let safe_root = SafeRoot::open(root)?;
+    discover_with_safe_root(&safe_root)
+}
+
+/// Discover generation config through the repository identity captured by the
+/// scan transaction.
+pub(crate) fn discover_with_safe_root(
+    safe_root: &SafeRoot,
+) -> Result<Option<RepoGenerationConfig>, GeneratorError> {
+    let path = safe_root.command_directory().join(GENERATION_CONFIG_PATH);
+    match safe_root.read_file_if_exists(Path::new(GENERATION_CONFIG_PATH))? {
+        Some(bytes) => parse(&path, &bytes).map(Some),
+        None => Ok(None),
     }
+}
+
+/// Read the typed schema-2 config required by an S2 dispatch from its pinned
+/// repository root. Optional discovery remains available to non-dispatching
+/// config helpers; scans and policy entrypoints must use this gate.
+pub(crate) fn require_with_safe_root(
+    safe_root: &SafeRoot,
+) -> Result<RepoGenerationConfig, GeneratorError> {
+    discover_with_safe_root(safe_root)?.ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "schema-2 dispatch requires {}",
+            safe_root
+                .command_directory()
+                .join(GENERATION_CONFIG_PATH)
+                .display()
+        ))
+    })
 }
 
 pub(crate) fn parse(path: &Path, bytes: &[u8]) -> Result<RepoGenerationConfig, GeneratorError> {
@@ -310,17 +322,19 @@ impl MaintenanceSection {
 /// instead of a partially rendered workflow.
 /// One composable scheduled-check profile the repository declares for itself.
 ///
-/// A profile is a named scheduled job: its cadence, its platform, the named
-/// tasks it runs, and the status it reports. The generator renders the
-/// schedule, the lane, and the job shell; the named tasks own every product
-/// assertion and threshold, so generic code never interprets a check result.
+/// A profile is a named scheduled job: its cadence, typed provider and
+/// platform, the named tasks it runs, and the status it reports. macOS is
+/// represented as the `github-hosted` provider with `macos-arm64` platform.
+/// The generator renders the schedule, lane, and job shell; named tasks own
+/// every product assertion and threshold.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CheckProfileSection {
     id: Option<String>,
     name: Option<String>,
     schedule: Option<String>,
-    runner: Option<String>,
+    provider: Option<ProviderId>,
+    platform: Option<Platform>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -345,7 +359,8 @@ pub(crate) struct ReleaseJobSection {
     tasks: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     needs: Option<Vec<String>>,
-    runner: Option<String>,
+    provider: Option<ProviderId>,
+    platform: Option<Platform>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     modes: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -683,9 +698,6 @@ struct PolicySection {
     action_pin_admission: Option<String>,
     /// Emit `config-variables: null` in the generated actionlint config.
     actionlint_config_variables_null: Option<bool>,
-    /// Workflow basenames skipped by `velnor-workflow policy` until migrated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    exclude_workflows: Vec<String>,
 }
 
 impl RenovateSection {
@@ -891,8 +903,12 @@ impl ReleaseJobSection {
         self.needs.as_deref()
     }
 
-    pub(crate) fn runner(&self) -> Option<&str> {
-        self.runner.as_deref()
+    pub(crate) fn provider(&self) -> Option<ProviderId> {
+        self.provider
+    }
+
+    pub(crate) fn platform(&self) -> Option<Platform> {
+        self.platform
     }
 
     pub(crate) fn modes(&self) -> Option<&[String]> {
@@ -947,8 +963,12 @@ impl CheckProfileSection {
         self.schedule.as_deref()
     }
 
-    pub(crate) fn runner(&self) -> Option<&str> {
-        self.runner.as_deref()
+    pub(crate) fn provider(&self) -> Option<ProviderId> {
+        self.provider
+    }
+
+    pub(crate) fn platform(&self) -> Option<Platform> {
+        self.platform
     }
 
     pub(crate) fn tools(&self) -> Option<&[String]> {
@@ -1066,16 +1086,22 @@ impl UnitSection {
         id: &str,
         root: &Path,
     ) -> Result<Vec<crate::s2::DockerContext>, GeneratorError> {
-        let canonical_root = fs::canonicalize(root).map_err(|error| {
-            GeneratorError::io("resolve repository root for Docker context", root, &error)
-        })?;
+        let safe_root = SafeRoot::open(root)?;
+        self.named_docker_contexts_with_safe_root(id, &safe_root)
+    }
+
+    pub(crate) fn named_docker_contexts_with_safe_root(
+        &self,
+        id: &str,
+        safe_root: &SafeRoot,
+    ) -> Result<Vec<crate::s2::DockerContext>, GeneratorError> {
         let mut contexts = Vec::with_capacity(self.docker_contexts.len());
         let mut names = BTreeSet::new();
         for context in &self.docker_contexts {
             let name = context.name.as_deref().unwrap_or_default();
             let path = context.path.as_deref().unwrap_or_default();
             validate_docker_context_name(id, name, &mut names)?;
-            validate_docker_context_path(id, name, path, &canonical_root)?;
+            validate_docker_context_path(id, name, path, safe_root)?;
             contexts.push(crate::s2::DockerContext {
                 name: name.to_owned(),
                 path: path.to_owned(),
@@ -1242,7 +1268,7 @@ fn validate_docker_context_path(
     id: &str,
     name: &str,
     path: &str,
-    canonical_root: &Path,
+    safe_root: &SafeRoot,
 ) -> Result<(), GeneratorError> {
     let relative = Path::new(path);
     let lexical_safe = !path.is_empty()
@@ -1259,23 +1285,15 @@ fn validate_docker_context_path(
             "[[units.docker_contexts]] {id} context `{name}` path `{path}` must be repository-relative without traversal"
         )));
     }
-    let candidate = canonical_root.join(relative);
-    let canonical_candidate = fs::canonicalize(&candidate).map_err(|error| {
-        GeneratorError::usage(format!(
-            "[[units.docker_contexts]] {id} context `{name}` path `{path}` does not exist: {error}"
-        ))
-    })?;
-    if !canonical_candidate.starts_with(canonical_root) {
-        return Err(GeneratorError::usage(format!(
-            "[[units.docker_contexts]] {id} context `{name}` path `{path}` escapes the repository"
-        )));
+    match safe_root.open_directory(relative) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(GeneratorError::usage(format!(
+            "[[units.docker_contexts]] {id} context `{name}` path `{path}` does not exist"
+        ))),
+        Err(error) => Err(GeneratorError::usage(format!(
+            "[[units.docker_contexts]] {id} context `{name}` path `{path}` must name a directory inside the repository: {error}"
+        ))),
     }
-    if !canonical_candidate.is_dir() {
-        return Err(GeneratorError::usage(format!(
-            "[[units.docker_contexts]] {id} context `{name}` path `{path}` must name a directory"
-        )));
-    }
-    Ok(())
 }
 
 impl UnitCacheSection {
@@ -1537,33 +1555,6 @@ impl RepoGenerationConfig {
     /// report rather than workflows.
     pub(crate) fn ruleset_external_status_checks(&self) -> &[String] {
         &self.policy.ruleset_external_status_checks
-    }
-
-    /// Workflow basenames excluded from static policy validation.
-    pub(crate) fn policy_exclude_workflows(&self) -> &[String] {
-        &self.policy.exclude_workflows
-    }
-
-    /// Explicit policy excludes plus every owned static workflow file.
-    pub(crate) fn effective_policy_exclude_workflows(&self) -> BTreeSet<String> {
-        let mut excludes = self
-            .policy_exclude_workflows()
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        for row in &self.static_files {
-            let Some(file) = row.file.as_deref() else {
-                continue;
-            };
-            if !file.starts_with(".github/workflows/") {
-                continue;
-            }
-            let Some(name) = Path::new(file).file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            excludes.insert(name.to_owned());
-        }
-        excludes
     }
 
     fn schema_error(&self, path: &Path) -> Result<(), GeneratorError> {
@@ -1961,11 +1952,16 @@ pub(crate) fn parse_mise_lock_keys(lock_toml: &str) -> Result<BTreeSet<String>, 
 /// Returns an I/O error when the lock cannot be read, and a usage error when
 /// it is not valid UTF-8 TOML.
 pub(crate) fn mise_lock_actionlint_version(root: &Path) -> Result<Option<String>, GeneratorError> {
-    let path = root.join(MISE_LOCK_PATH);
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(GeneratorError::io("read mise.lock", &path, &error)),
+    let safe_root = SafeRoot::open(root)?;
+    mise_lock_actionlint_version_with_safe_root(&safe_root)
+}
+
+pub(crate) fn mise_lock_actionlint_version_with_safe_root(
+    safe_root: &SafeRoot,
+) -> Result<Option<String>, GeneratorError> {
+    let path = safe_root.command_directory().join(MISE_LOCK_PATH);
+    let Some(bytes) = safe_root.read_file_if_exists(Path::new(MISE_LOCK_PATH))? else {
+        return Ok(None);
     };
     let text = String::from_utf8(bytes).map_err(|error| {
         GeneratorError::usage(format!("parse mise.lock {}: {error}", path.display()))
@@ -2005,11 +2001,16 @@ pub(crate) fn mise_lock_actionlint_version(root: &Path) -> Result<Option<String>
 /// Returns an I/O error when the lock cannot be read, and a usage error when
 /// it is not valid UTF-8 TOML.
 pub(crate) fn mise_lock_keys_for_root(root: &Path) -> Result<BTreeSet<String>, GeneratorError> {
-    let path = root.join(MISE_LOCK_PATH);
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
-        Err(error) => return Err(GeneratorError::io("read mise.lock", &path, &error)),
+    let safe_root = SafeRoot::open(root)?;
+    mise_lock_keys_for_root_with_safe_root(&safe_root)
+}
+
+pub(crate) fn mise_lock_keys_for_root_with_safe_root(
+    safe_root: &SafeRoot,
+) -> Result<BTreeSet<String>, GeneratorError> {
+    let path = safe_root.command_directory().join(MISE_LOCK_PATH);
+    let Some(bytes) = safe_root.read_file_if_exists(Path::new(MISE_LOCK_PATH))? else {
+        return Ok(BTreeSet::new());
     };
     let text = String::from_utf8(bytes).map_err(|error| {
         GeneratorError::usage(format!("parse mise.lock {}: {error}", path.display()))
@@ -2165,18 +2166,7 @@ pub(crate) fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), Ge
                 "[[static_file]] file must be a repository-relative path inside `.github/`, found `{file}`"
             )));
         }
-        if !is_contained_repository_path(source) {
-            return Err(GeneratorError::usage(format!(
-                "[[static_file]] source must be a repository-relative path, found `{source}`"
-            )));
-        }
-        if normalize_repository_relative_path(source)
-            .is_some_and(|normalized| normalized.starts_with(".github"))
-        {
-            return Err(GeneratorError::usage(format!(
-                "[[static_file]] source must stay outside `.github/` so a static output cannot hide workflow or action inputs, found `{source}`"
-            )));
-        }
+        validate_static_file_source(source)?;
         let duplicate = rows
             .iter()
             .filter(|other| other.file.as_deref() == Some(file))
@@ -2190,10 +2180,37 @@ pub(crate) fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), Ge
     Ok(())
 }
 
-fn is_contained_github_path(path: &str) -> bool {
-    normalize_repository_relative_path(path).is_some_and(|normalized| {
-        normalized.starts_with(".github") && normalized != Path::new(".github")
+/// Validate a static file's source before any filesystem access. It must be a
+/// portable repository-relative path outside `.github/`, which owns generator
+/// inputs and outputs.
+pub(crate) fn validate_static_file_source(source: &str) -> Result<(), GeneratorError> {
+    if !is_contained_repository_path(source) {
+        return Err(GeneratorError::usage(format!(
+            "[[static_file]] source must be a repository-relative path, found `{source}`"
+        )));
+    }
+    if normalize_repository_relative_path(source)
+        .is_some_and(|normalized| first_component_is_github(&normalized))
+    {
+        return Err(GeneratorError::usage(format!(
+            "[[static_file]] source must stay outside `.github/` so a static output cannot hide workflow or action inputs, found `{source}`"
+        )));
+    }
+    Ok(())
+}
+
+fn first_component_is_github(path: &Path) -> bool {
+    path.components().next().is_some_and(|component| {
+        matches!(component, Component::Normal(name) if name.to_string_lossy().eq_ignore_ascii_case(".github"))
     })
+}
+
+fn is_contained_github_path(path: &str) -> bool {
+    path.starts_with(".github/")
+        && !path
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+        && normalize_repository_relative_path(path).is_some()
 }
 
 fn is_contained_repository_path(path: &str) -> bool {
@@ -2202,10 +2219,14 @@ fn is_contained_repository_path(path: &str) -> bool {
 
 /// Normalize repository-relative config paths before applying containment
 /// policy. Lexical normalization catches equivalent spellings such as
-/// `./.github/...` and `.//.github/...`; filesystem canonicalization is applied
-/// by the caller when a source is read so symlinks cannot escape the root.
+/// `./.github/...` and `.//.github/...`; filesystem readers must still enforce
+/// containment and reject symlink traversal when a source is opened.
 pub(crate) fn normalize_repository_relative_path(path: &str) -> Option<PathBuf> {
-    if path.is_empty() || path.starts_with('/') || path.contains('\\') {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || has_windows_drive_prefix(path)
+    {
         return None;
     }
     let mut normalized = PathBuf::new();
@@ -2214,10 +2235,21 @@ pub(crate) fn normalize_repository_relative_path(path: &str) -> Option<PathBuf> 
             "" | "." => continue,
             ".." => return None,
             segment if segment.chars().any(char::is_control) => return None,
+            segment if segment.ends_with('.') || segment.ends_with(' ') => return None,
             segment => normalized.push(segment),
         }
     }
     (!normalized.as_os_str().is_empty()).then_some(normalized)
+}
+
+/// `Path::is_absolute` only recognizes the host platform's path syntax. Reject
+/// Windows drive prefixes in every component because a later `PathBuf::push`
+/// can replace earlier components when interpreted on Windows.
+fn has_windows_drive_prefix(path: &str) -> bool {
+    path.split('/').any(|segment| {
+        let bytes = segment.as_bytes();
+        bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+    })
 }
 
 /// The publishers the renderer implements, and the contract fields each one
@@ -2513,11 +2545,7 @@ pub(crate) fn validate_maintenance_max_deletes(max_deletes: u32) -> Result<(), G
 }
 
 pub(crate) fn validate_renovate_config_path(config: &str) -> Result<(), GeneratorError> {
-    if config.is_empty()
-        || config.starts_with('/')
-        || config.contains('\\')
-        || config.contains("..")
-    {
+    if !is_contained_repository_path(config) {
         return Err(GeneratorError::usage(format!(
             "[renovate] config must be a repository-relative Renovate config path, found `{config}`"
         )));
@@ -3072,15 +3100,14 @@ fn validate_check_profile_row(
     if let Some(schedule) = row.schedule.as_deref() {
         validate_check_profile_cron(id, schedule)?;
     }
-    match row.runner.as_deref() {
-        None | Some("github" | "macos" | "velnor") => {}
-        Some(runner) => {
-            return Err(GeneratorError::usage(format!(
-                "[[check_profile]] {id} runner must be one of: github, macos, velnor; found `{runner}`"
-            )));
-        }
+    let provider = row.provider.unwrap_or(ProviderId::GithubHosted);
+    let platform = row.platform.unwrap_or(Platform::LinuxX64);
+    if !provider_caps(provider).platforms.contains(&platform) {
+        return Err(GeneratorError::usage(format!(
+            "[[check_profile]] {id} provider `{provider}` does not support platform `{platform}`"
+        )));
     }
-    if row.runner.as_deref().unwrap_or("github") == "velnor" {
+    if provider.is_local() {
         let universe = config
             .workflow
             .providers
@@ -3088,14 +3115,14 @@ fn validate_check_profile_row(
             .map(|providers| parse_provider_set(providers, "[workflow] providers"))
             .transpose()?
             .unwrap_or_else(|| crate::s2::provider::ProviderId::ALL.into_iter().collect());
-        if !universe.contains(&ProviderId::Velnor) {
+        if !universe.contains(&provider) {
             return Err(GeneratorError::usage(format!(
-                "[[check_profile]] {id} runs on velnor, but [workflow] providers has no velnor provider"
+                "[[check_profile]] {id} selects {provider}, but [workflow] providers has no {provider} provider"
             )));
         }
-        if !config.workflow.selectors.contains_key("velnor") {
+        if !config.workflow.selectors.contains_key(provider.as_str()) {
             return Err(GeneratorError::usage(format!(
-                "[[check_profile]] {id} runs on velnor, but [workflow.selectors.velnor] names no selector for the job"
+                "[[check_profile]] {id} selects {provider}, but [workflow.selectors.{provider}] names no selector for the job"
             )));
         }
     }
@@ -3471,8 +3498,9 @@ fn validate_release_bindings(release: &ReleaseSection) -> Result<(), GeneratorEr
 /// Whether `value` is a portable archive member name: a bare file name over
 /// the portable asset alphabet, never a path.
 /// Validate the typed named-task release graph. Tasks are repository-owned
-/// commands, but job identity, dependencies, runner aliases, mode gates, and
-/// execution metadata are generator-owned structure and fail closed here.
+/// commands, but job identity, dependencies, provider/platform placement,
+/// mode gates, and execution metadata are generator-owned structure and fail
+/// closed here.
 #[allow(clippy::too_many_lines)]
 fn validate_release_jobs(
     workflow: &WorkflowSection,
@@ -3514,7 +3542,7 @@ fn validate_release_jobs(
         .unwrap_or_else(|| ProviderId::ALL.into_iter().collect());
     // The repository config may override scan defaults, but omitted selectors
     // still resolve to those defaults before rendering. Validate release
-    // runner choices against the same effective map so a valid config can
+    // provider choices against the same effective map so a valid config can
     // never render `runs-on:` empty.
     let mut selectors = crate::s2::scan::default_selectors();
     selectors.extend(parse_selectors(&workflow.selectors)?);
@@ -3558,27 +3586,23 @@ fn validate_release_jobs(
                 }
             }
         }
-        let runner = row.runner.as_deref().unwrap_or("github");
-        let (provider, needs_selector) = match runner {
-            "github" => (ProviderId::GithubHosted, true),
-            // macOS is a fixed GitHub-hosted label, so it needs the hosted
-            // provider but not its Linux selector.
-            "macos" => (ProviderId::GithubHosted, false),
-            "velnor" => (ProviderId::Velnor, true),
-            _ => {
-                return Err(GeneratorError::usage(format!(
-                    "[[release.job]] {id} runner must be one of github, macos, velnor; found {runner}"
-                )));
-            }
-        };
-        if !providers.contains(&provider) {
+        let provider = row.provider.unwrap_or(ProviderId::GithubHosted);
+        let platform = row.platform.unwrap_or(Platform::LinuxX64);
+        if !provider_caps(provider).platforms.contains(&platform) {
             return Err(GeneratorError::usage(format!(
-                "[[release.job]] {id} runner `{runner}` selects {provider}, but [workflow] providers does not include that lane"
+                "[[release.job]] {id} provider `{provider}` does not support platform `{platform}`"
             )));
         }
-        if needs_selector && !selectors.contains_key(&provider) {
+        if !providers.contains(&provider) {
             return Err(GeneratorError::usage(format!(
-                "[[release.job]] {id} runner `{runner}` selects {provider}, but no selector supplies its runs-on labels"
+                "[[release.job]] {id} provider `{provider}` is outside [workflow] providers"
+            )));
+        }
+        // The GitHub-hosted macOS image has a fixed GitHub-owned label;
+        // provider selectors route the remaining provider/platform pairs.
+        if platform != Platform::MacosArm64 && !selectors.contains_key(&provider) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} provider `{provider}` has no selector supplying its runs-on labels"
             )));
         }
         if let Some(modes) = row.modes.as_deref() {
@@ -3613,12 +3637,12 @@ fn validate_release_jobs(
                     )));
                 }
             }
-            if runner == "velnor"
+            if provider == ProviderId::Velnor
                 && (subjects.len() != 1
                     || !VELNOR_ATTESTATION_SUBJECTS.contains(&subjects[0].as_str()))
             {
                 return Err(GeneratorError::usage(format!(
-                    "[[release.job]] {id} runner `velnor` supports exactly one attest_subjects value from {}; found [{}]",
+                    "[[release.job]] {id} provider `velnor` supports exactly one attest_subjects value from {}; found [{}]",
                     VELNOR_ATTESTATION_SUBJECTS.join(", "),
                     subjects.join(", "),
                 )));
@@ -3799,11 +3823,15 @@ mod tests {
     #[test]
     fn docker_context_names_are_typed_unique_and_reserved_names_fail() {
         let root = scanned_root("docker-context-names");
+        must(
+            fs::create_dir(root.join("context")),
+            "create context directory",
+        );
         let duplicate = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
-             [[units.docker_contexts]]\nname = \"checkout\"\npath = \".\"\n\n\
-             [[units.docker_contexts]]\nname = \"checkout\"\npath = \".\"\n",
+             [[units.docker_contexts]]\nname = \"checkout\"\npath = \"context\"\n\n\
+             [[units.docker_contexts]]\nname = \"checkout\"\npath = \"context\"\n",
         );
         let error = must_fail(
             duplicate.units()[0].named_docker_contexts("docker", &root),
@@ -3814,7 +3842,7 @@ mod tests {
         let reserved = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
-             [[units.docker_contexts]]\nname = \"velnor-cache-seed\"\npath = \".\"\n",
+             [[units.docker_contexts]]\nname = \"velnor-cache-seed\"\npath = \"context\"\n",
         );
         let error = must_fail(
             reserved.units()[0].named_docker_contexts("docker", &root),
@@ -3824,7 +3852,7 @@ mod tests {
         let invalid = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
-             [[units.docker_contexts]]\nname = \"Checkout\"\npath = \".\"\n",
+             [[units.docker_contexts]]\nname = \"Checkout\"\npath = \"context\"\n",
         );
         let error = must_fail(
             invalid.units()[0].named_docker_contexts("docker", &root),
@@ -3858,7 +3886,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn docker_context_path_rejects_escape_but_allows_in_repo_symlink() {
+    fn docker_context_path_requires_real_directories_without_symlink_hops() {
         use std::os::unix::fs::symlink;
 
         let root = scanned_root("docker-context-paths");
@@ -3878,12 +3906,23 @@ mod tests {
         let valid = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
-             [[units.docker_contexts]]\nname = \"checkout\"\npath = \"inside-link\"\n",
+             [[units.docker_contexts]]\nname = \"checkout\"\npath = \"inside\"\n",
         );
         must(
             valid.units()[0].named_docker_contexts("docker", &root),
-            "in-repository symlink must remain usable",
+            "a direct in-repository directory must remain usable",
         );
+
+        let internal_link = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
+             [[units.docker_contexts]]\nname = \"checkout\"\npath = \"inside-link\"\n",
+        );
+        let error = must_fail(
+            internal_link.units()[0].named_docker_contexts("docker", &root),
+            "symlinked context paths must be rejected",
+        );
+        assert!(error.to_string().contains("symlink"), "{error}");
 
         let escaping = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
@@ -3894,10 +3933,7 @@ mod tests {
             escaping.units()[0].named_docker_contexts("docker", &root),
             "escaping symlink must fail",
         );
-        assert!(
-            error.to_string().contains("escapes the repository"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("symlink"), "{error}");
 
         let traversal = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
@@ -3979,24 +4015,73 @@ mod tests {
     fn release_job_rejects_velnor_attestation_subject_outside_capability() {
         let error = tasks_release_validation_error(
             "[workflow]\nproviders = [\"velnor\"]\n",
-            "[[release.job]]\nid = \"sign\"\ntasks = [\"sign\"]\nrunner = \"velnor\"\nattest_subjects = [\"dist/app.zip\"]\n",
+            "[[release.job]]\nid = \"sign\"\ntasks = [\"sign\"]\nprovider = \"velnor\"\nattest_subjects = [\"dist/app.zip\"]\n",
         );
-        assert!(error.contains("runner `velnor`"), "{error}");
+        assert!(error.contains("provider `velnor`"), "{error}");
         assert!(error.contains("dist/*.tar.gz"), "{error}");
         assert!(error.contains("dist/l2-subject.json"), "{error}");
     }
 
     #[test]
-    fn release_job_rejects_runner_outside_provider_universe() {
+    fn release_job_rejects_provider_outside_provider_universe() {
         let error = tasks_release_validation_error(
             "[workflow]\nproviders = [\"velnor\"]\n",
-            "[[release.job]]\nid = \"build\"\ntasks = [\"build\"]\nrunner = \"github\"\n",
+            "[[release.job]]\nid = \"build\"\ntasks = [\"build\"]\nprovider = \"github-hosted\"\n",
         );
         assert!(
-            error.contains("runner `github` selects github-hosted"),
+            error.contains("provider `github-hosted` is outside [workflow] providers"),
             "{error}"
         );
-        assert!(error.contains("does not include that lane"), "{error}");
+    }
+
+    #[test]
+    fn release_job_uses_canonical_provider_and_platform_ids() {
+        let config = tasks_release_config(
+            "",
+            "[[release.job]]\nid = \"sign\"\ntasks = [\"sign\"]\nprovider = \"github-hosted\"\nplatform = \"macos-arm64\"\n",
+        );
+        let job = &config.release().jobs()[0];
+        assert_eq!(job.provider(), Some(ProviderId::GithubHosted));
+        assert_eq!(job.platform(), Some(Platform::MacosArm64));
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "hosted macOS release placement validates",
+        );
+
+        let legacy_runner = format!(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"tasks\"\n\n[[release.job]]\nid = \"sign\"\ntasks = [\"sign\"]\nrunner = \"macos\"\n"
+        );
+        let error = must_fail(
+            toml::from_str::<RepoGenerationConfig>(&legacy_runner),
+            "release-job runner aliases must be rejected",
+        )
+        .to_string();
+        assert!(error.contains("unknown field"), "{error}");
+
+        let alias_provider = format!(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"tasks\"\n\n[[release.job]]\nid = \"sign\"\ntasks = [\"sign\"]\nprovider = \"github\"\n"
+        );
+        let error = must_fail(
+            toml::from_str::<RepoGenerationConfig>(&alias_provider),
+            "provider aliases must be rejected",
+        )
+        .to_string();
+        assert!(error.contains("unknown variant"), "{error}");
+
+        let unsupported = tasks_release_config(
+            "",
+            "[[release.job]]\nid = \"sign\"\ntasks = [\"sign\"]\nprovider = \"github-self-hosted\"\nplatform = \"macos-arm64\"\n",
+        );
+        let error = must_fail(
+            unsupported.validate(&[], &[], &BTreeSet::new()),
+            "a release job cannot select a platform its provider does not support",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("does not support platform `macos-arm64`"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -4612,7 +4697,7 @@ mod tests {
             ),
             "write future schema",
         );
-        let error = must_some_error(load(&path).err(), "future schema must fail");
+        let error = must_some_error(discover(&root).err(), "future schema must fail");
         assert!(
             error.contains("schema 3"),
             "error must name the schema: {error}"
@@ -4624,7 +4709,7 @@ mod tests {
             ),
             "write previous schema",
         );
-        let error = must_some_error(load(&path).err(), "previous schema must fail");
+        let error = must_some_error(discover(&root).err(), "previous schema must fail");
         assert!(
             error.contains("has schema 1; this generator reads schema 2 only"),
             "error must name the schema: {error}"
@@ -4633,7 +4718,7 @@ mod tests {
             fs::write(&path, "[generator]\nrepository = \"example/fixture\"\n"),
             "write config without schema",
         );
-        let missing = must_some_error(load(&path).err(), "missing schema must fail");
+        let missing = must_some_error(discover(&root).err(), "missing schema must fail");
         assert!(
             missing.contains("missing `schema = 2`"),
             "error must name the missing schema: {missing}"
@@ -4859,6 +4944,40 @@ mod tests {
             "error names the lock file: {error}"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mise_lock_readers_reject_symlinked_lockfiles() {
+        use std::os::unix::fs::symlink;
+
+        let root = scanned_root("mise-lock-symlink");
+        let outside = scanned_root("mise-lock-symlink-target");
+        must(
+            fs::write(
+                outside.join(MISE_LOCK_PATH),
+                "[[tools.actionlint]]\nversion = \"1.7.7\"\n",
+            ),
+            "write external lock",
+        );
+        must(
+            symlink(outside.join(MISE_LOCK_PATH), root.join(MISE_LOCK_PATH)),
+            "link external lock",
+        );
+
+        let error = must_fail(
+            mise_lock_keys_for_root(&root),
+            "tool-key reader must reject a symlinked lock",
+        );
+        assert!(error.to_string().contains("symlink"), "{error}");
+        let error = must_fail(
+            mise_lock_actionlint_version(&root),
+            "actionlint reader must reject a symlinked lock",
+        );
+        assert!(error.to_string().contains("symlink"), "{error}");
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
     }
 
     #[test]
@@ -5092,6 +5211,52 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn discovery_rejects_symlinked_config_and_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let source = scanned_root("discovery-symlink-source");
+        let source_path = source.join(GENERATION_CONFIG_PATH);
+        must(
+            fs::create_dir_all(source_path.parent().unwrap_or(&source)),
+            "create source config directory",
+        );
+        must(
+            fs::write(
+                &source_path,
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n",
+            ),
+            "write source config",
+        );
+
+        for (suffix, link, target) in [
+            ("leaf", PathBuf::from(GENERATION_CONFIG_PATH), source_path),
+            (
+                "ancestor",
+                PathBuf::from(".github-gen"),
+                source.join(".github-gen"),
+            ),
+        ] {
+            let root = scanned_root(&format!("discovery-symlink-{suffix}"));
+            if link != Path::new(".github-gen") {
+                must(
+                    fs::create_dir_all(root.join(".github-gen")),
+                    "create config link parent",
+                );
+            }
+            must(symlink(target, root.join(&link)), "create config symlink");
+
+            let error = must_fail(
+                discover(&root),
+                "config symlinks must be rejected without opening their target",
+            );
+            assert!(error.to_string().contains("symlink"), "{error}");
+            let _ = fs::remove_dir_all(root);
+        }
+        let _ = fs::remove_dir_all(source);
+    }
+
     #[expect(
         clippy::panic,
         reason = "tests need setup failures to name their root cause"
@@ -5100,6 +5265,93 @@ mod tests {
         match value {
             Some(value) => value.to_string(),
             None => panic!("{context}"),
+        }
+    }
+
+    #[test]
+    fn repository_relative_paths_reject_nonportable_escape_forms() {
+        for path in [
+            "C:/outside.json",
+            "C:outside.json",
+            "c:/outside.json",
+            "z:outside.json",
+            "./C:outside.json",
+            "C:\\outside.json",
+            "\\\\server\\share\\outside.json",
+            ".github/C:outside.json",
+            ".github./workflows/ci.yml",
+            "nested/.. /.. /outside.json",
+            "/outside.json",
+            "../outside.json",
+            "nested/../../outside.json",
+        ] {
+            assert!(
+                normalize_repository_relative_path(path).is_none(),
+                "must reject {path:?}"
+            );
+            assert!(
+                !is_contained_repository_path(path),
+                "must not classify {path:?} as repository-relative"
+            );
+            assert!(
+                validate_renovate_config_path(path).is_err(),
+                "Renovate path must reject {path:?}"
+            );
+            assert!(
+                validate_static_file_source(path).is_err(),
+                "static source must reject {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn repository_relative_paths_allow_dot_aliases_for_input_paths() {
+        let normalized = normalize_repository_relative_path("./renovate.json");
+        assert_eq!(
+            normalized.as_deref(),
+            Some(std::path::Path::new("renovate.json"))
+        );
+        assert!(is_contained_repository_path("./renovate.json"));
+        must(
+            validate_renovate_config_path("./renovate.json"),
+            "Renovate dot-prefixed repository-relative path",
+        );
+        must(
+            validate_static_file_source("./project.json"),
+            "static source dot-prefixed repository-relative path",
+        );
+        assert!(validate_static_file_source("./.github/workflows/ci.yml").is_err());
+        assert!(validate_static_file_source(".GITHUB/workflows/ci.yml").is_err());
+        assert!(validate_static_file_source(".githubish/project.json").is_ok());
+        assert!(
+            validate_renovate_config_path("renovate..json").is_ok(),
+            "two dots inside a filename are not a traversal segment"
+        );
+    }
+
+    #[test]
+    fn static_output_paths_require_canonical_spelling_inside_github() {
+        for (file, valid) in [
+            (".github/workflows/ci.yml", true),
+            ("./.github/workflows/ci.yml", false),
+            (".github//workflows/ci.yml", false),
+            (".github/workflows/ci.yml/", false),
+            (".github/./workflows/ci.yml", false),
+            (".github/workflows/./ci.yml", false),
+            (".github/workflows/../ci.yml", false),
+            (".github", false),
+            (".githubish/workflows/ci.yml", false),
+            ("config/ci.yml", false),
+        ] {
+            let rows = [StaticFileSection {
+                file: Some(file.to_owned()),
+                source: Some("README.md".to_owned()),
+            }];
+            assert_eq!(
+                validate_static_files(&rows).is_ok(),
+                valid,
+                "static output {file:?} validity"
+            );
         }
     }
 
@@ -5148,8 +5400,53 @@ mod tests {
         assert!(error.contains("unknown field"), "{error}");
     }
 
+    #[test]
+    fn policy_cannot_exclude_workflows_from_validation() {
+        let text = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[policy]\nexclude_workflows = [\"legacy.yml\"]\n";
+        let error = must_fail(
+            toml::from_str::<RepoGenerationConfig>(text),
+            "policy workflow exclusions must be rejected",
+        )
+        .to_string();
+        assert!(error.contains("unknown field"), "{error}");
+    }
+
     fn check_profile_config(body: &str) -> String {
         format!("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n{body}")
+    }
+
+    #[test]
+    fn check_profile_uses_canonical_provider_and_platform_ids() {
+        let config = config_for(&check_profile_config(
+            "[[check_profile]]\nid = \"apple\"\nschedule = \"23 2 * * *\"\nprovider = \"github-hosted\"\nplatform = \"macos-arm64\"\ntasks = [\"check-apple\"]\n",
+        ));
+        let profile = &config.check_profiles()[0];
+        assert_eq!(profile.provider(), Some(ProviderId::GithubHosted));
+        assert_eq!(profile.platform(), Some(Platform::MacosArm64));
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "hosted macOS placement validates",
+        );
+
+        let legacy_runner = check_profile_config(
+            "[[check_profile]]\nid = \"apple\"\nschedule = \"23 2 * * *\"\nrunner = \"macos\"\ntasks = [\"check-apple\"]\n",
+        );
+        let error = must_fail(
+            toml::from_str::<RepoGenerationConfig>(&legacy_runner),
+            "check-profile runner aliases must be rejected",
+        )
+        .to_string();
+        assert!(error.contains("unknown field"), "{error}");
+
+        let alias_provider = check_profile_config(
+            "[[check_profile]]\nid = \"apple\"\nschedule = \"23 2 * * *\"\nprovider = \"macos\"\ntasks = [\"check-apple\"]\n",
+        );
+        let error = must_fail(
+            toml::from_str::<RepoGenerationConfig>(&alias_provider),
+            "macos is a platform, not a provider alias",
+        )
+        .to_string();
+        assert!(error.contains("unknown variant"), "{error}");
     }
 
     #[test]
@@ -5165,7 +5462,7 @@ mod tests {
         let config = config_for(&check_profile_config(
             "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-smoke\"]\n\n\
              [[check_profile]]\nid = \"load\"\nname = \"Load probe\"\nschedule = \"23 2 * * *\"\n\
-             runner = \"velnor\"\ntasks = [\"check-load\"]\nneeds = [\"smoke\"]\n\
+             provider = \"velnor\"\ntasks = [\"check-load\"]\nneeds = [\"smoke\"]\n\
              timeout_minutes = 90\nartifacts = [\"load-results/\"]\nstatus = \"advisory\"\n\
              env = { MAX_SECONDS = \"300\" }\n\n\
              [workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n\
@@ -5200,8 +5497,8 @@ mod tests {
                 "5-field cron",
             ),
             (
-                "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\nrunner = \"planetary\"\ntasks = [\"check-smoke\"]\n",
-                "runner must be",
+                "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\nprovider = \"github-self-hosted\"\nplatform = \"macos-arm64\"\ntasks = [\"check-smoke\"]\n",
+                "does not support platform",
             ),
             (
                 "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\n",
@@ -5258,9 +5555,9 @@ mod tests {
     }
 
     #[test]
-    fn check_profile_velnor_runner_needs_a_provider_and_selector() {
+    fn check_profile_local_providers_need_a_provider_and_selector() {
         let github_only = config_for(&check_profile_config(
-            "[[check_profile]]\nid = \"fleet\"\nschedule = \"23 2 * * *\"\nrunner = \"velnor\"\ntasks = [\"check-fleet\"]\n\n\
+            "[[check_profile]]\nid = \"fleet\"\nschedule = \"23 2 * * *\"\nprovider = \"velnor\"\ntasks = [\"check-fleet\"]\n\n\
              [workflow]\nproviders = [\"github-hosted\"]\n\n\
              [workflow.selectors.velnor]\nruns_on = [\"self-hosted\"]\n",
         ));
@@ -5274,7 +5571,7 @@ mod tests {
         );
 
         let unrouted = config_for(&check_profile_config(
-            "[[check_profile]]\nid = \"fleet\"\nschedule = \"23 2 * * *\"\nrunner = \"velnor\"\ntasks = [\"check-fleet\"]\n",
+            "[[check_profile]]\nid = \"fleet\"\nschedule = \"23 2 * * *\"\nprovider = \"velnor\"\ntasks = [\"check-fleet\"]\n",
         ));
         let error = must_fail(
             unrouted.validate(&[], &[], &BTreeSet::new()),
@@ -5283,6 +5580,46 @@ mod tests {
         assert!(
             error.to_string().contains("[workflow.selectors.velnor]"),
             "{error}"
+        );
+
+        let self_hosted_without_provider = config_for(&check_profile_config(
+            "[[check_profile]]\nid = \"self-hosted\"\nschedule = \"23 2 * * *\"\nprovider = \"github-self-hosted\"\ntasks = [\"check-self-hosted\"]\n\n\
+             [workflow]\nproviders = [\"github-hosted\"]\n",
+        ));
+        let error = must_fail(
+            self_hosted_without_provider.validate(&[], &[], &BTreeSet::new()),
+            "a self-hosted profile outside the provider universe must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("has no github-self-hosted provider"),
+            "{error}"
+        );
+
+        let self_hosted_without_selector = config_for(&check_profile_config(
+            "[[check_profile]]\nid = \"self-hosted\"\nschedule = \"23 2 * * *\"\nprovider = \"github-self-hosted\"\ntasks = [\"check-self-hosted\"]\n\n\
+             [workflow]\nproviders = [\"github-self-hosted\"]\n",
+        ));
+        let error = must_fail(
+            self_hosted_without_selector.validate(&[], &[], &BTreeSet::new()),
+            "a self-hosted profile without a declared selector must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[workflow.selectors.github-self-hosted]"),
+            "{error}"
+        );
+
+        let self_hosted = config_for(&check_profile_config(
+            "[[check_profile]]\nid = \"self-hosted\"\nschedule = \"23 2 * * *\"\nprovider = \"github-self-hosted\"\ntasks = [\"check-self-hosted\"]\n\n\
+             [workflow]\nproviders = [\"github-self-hosted\"]\n\n\
+             [workflow.selectors.github-self-hosted]\nruns_on = [\"gh-self-hosted\"]\n",
+        ));
+        must(
+            self_hosted.validate(&[], &[], &BTreeSet::new()),
+            "a declared self-hosted profile provider and selector validate",
         );
     }
 

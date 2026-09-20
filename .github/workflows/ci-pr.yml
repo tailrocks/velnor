@@ -1110,7 +1110,6 @@ jobs:
         rust-toolchain
       cargo_root: "crates/velnor-workflow"
       cargo_net_offline: true
-      candidate_publish: true
       unit_platform: linux-x64
       unit_trust: untrusted-ok
       unit_dependencies: rust-velnor-runner

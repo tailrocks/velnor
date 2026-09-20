@@ -7,8 +7,10 @@
 //! branch inside this primitive.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use super::{Args, Primitive, RenderCtx, Rendered, WATCH_GRAPH};
+use crate::s2::safe_fs::SafeRoot;
 use crate::s2::scan::file_walk::{has_extension, is_test_support_path};
 use crate::s2::{GeneratorError, Unit, UnitKind};
 
@@ -33,8 +35,8 @@ impl Primitive for WatchGraph {
     fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
         let additions = args.unit_strings(ctx, "watch")?.unwrap_or_default();
         let closure = args.strings("docker_closure")?.unwrap_or_default();
-        let docker_watch = docker_watch_paths(
-            ctx.root,
+        let docker_watch = docker_watch_paths_with_safe_root(
+            ctx.safe_root,
             ctx.shape.files(),
             &ctx.config.units,
             &closure.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -167,6 +169,18 @@ pub(crate) fn docker_watch_paths(
     units: &[Unit],
     closure_seeds: &[&str],
 ) -> Result<Vec<String>, GeneratorError> {
+    let safe_root = SafeRoot::open(root)?;
+    docker_watch_paths_with_safe_root(&safe_root, files, units, closure_seeds)
+}
+
+/// Read Docker build inputs through the scan transaction's pinned root.
+pub(crate) fn docker_watch_paths_with_safe_root(
+    safe_root: &SafeRoot,
+    files: &[String],
+    units: &[Unit],
+    closure_seeds: &[&str],
+) -> Result<Vec<String>, GeneratorError> {
+    let root = safe_root.command_directory();
     let mut watch = BTreeSet::from([
         ".dockerignore".to_owned(),
         "Cargo.lock".to_owned(),
@@ -187,9 +201,13 @@ pub(crate) fn docker_watch_paths(
                 .next()
                 .is_some_and(|name| name.starts_with("Dockerfile"))
     }) {
-        let contents = std::fs::read_to_string(root.join(dockerfile)).map_err(|error| {
-            GeneratorError::io("read Dockerfile", &root.join(dockerfile), &error)
-        })?;
+        let contents =
+            String::from_utf8(safe_root.read_file(Path::new(dockerfile))?).map_err(|error| {
+                GeneratorError::usage(format!(
+                    "Dockerfile is not valid UTF-8 at {}: {error}",
+                    root.join(dockerfile).display()
+                ))
+            })?;
         validate_canonical_release_products(dockerfile, &contents)?;
         for line in contents.lines() {
             let tokens = line
@@ -306,7 +324,9 @@ pub(crate) fn validate_canonical_release_products(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_broad_per_crate_source_watch, opentofu_watch_paths};
+    use std::fs;
+
+    use super::{docker_watch_paths, is_broad_per_crate_source_watch, opentofu_watch_paths};
 
     #[test]
     fn workspace_topology_gate_ignores_whole_crate_trees() {
@@ -337,5 +357,33 @@ mod tests {
                 "infra/.terraform.lock.hcl".to_owned(),
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docker_watch_rejects_symlinked_dockerfile_source() {
+        let root =
+            std::env::temp_dir().join(format!("velnor-watch-symlink-root-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!(
+            "velnor-watch-symlink-outside-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&root).expect("create watch test root");
+        fs::create_dir_all(&outside).expect("create outside test root");
+        fs::write(outside.join("Dockerfile"), "FROM scratch\nCOPY app /app\n")
+            .expect("write outside Dockerfile");
+        std::os::unix::fs::symlink(outside.join("Dockerfile"), root.join("Dockerfile"))
+            .expect("link outside Dockerfile");
+        let root = root.canonicalize().expect("canonicalize watch test root");
+        let files = vec!["Dockerfile".to_owned(), "app".to_owned()];
+
+        let error = docker_watch_paths(&root, &files, &[], &[])
+            .expect_err("symlinked Dockerfile source must be rejected");
+        assert!(error.to_string().contains("symlink"), "{error}");
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
     }
 }

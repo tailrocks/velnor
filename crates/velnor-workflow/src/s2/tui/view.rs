@@ -55,14 +55,14 @@ fn render_title(frame: &mut Frame<'_>, app: &App, system: &DesignSystem, area: R
                 system.style(Role::Text).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ", system.style(Role::TextMuted)),
-            Span::styled(app.target.as_str(), system.style(Role::TextMuted)),
+            Span::styled(app.cli.target.as_str(), system.style(Role::TextMuted)),
         ])),
         area,
     );
 }
 
 fn render_scanning(frame: &mut Frame<'_>, app: &App, system: &DesignSystem, area: Rect) {
-    let target = format!("Reading checked-in metadata from {}", app.target);
+    let target = format!("Reading checked-in metadata from {}", app.cli.target);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -145,7 +145,7 @@ fn render_configure(frame: &mut Frame<'_>, app: &mut App, system: &DesignSystem,
 }
 
 fn render_empty(frame: &mut Frame<'_>, app: &App, system: &DesignSystem, area: Rect) {
-    let context = format!("Inspected {}", app.target);
+    let context = format!("Inspected {}", app.cli.target);
     frame.render_widget(
         EmptyState::new("No supported project found", system)
             .explanation("No supported manifests or lockfiles found")
@@ -788,7 +788,15 @@ mod tests {
         }
         app.config = Some(config);
         app.selector = Some(selector);
-        app.output_root = Some(PathBuf::from("/tmp/generated-output"));
+        let output_root = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonicalize temporary directory")
+            .join(format!(
+                "velnor-tui-view-output-{}",
+                crate::s2::unique_suffix()
+            ));
+        app.output_binding = super::super::OutputPathBinding::capture(&output_root).ok();
+        app.output_root = Some(output_root);
         app.files = Some(BTreeMap::from([(
             PathBuf::from(".github/workflows/ci-pr.yml"),
             "name: CI".to_owned(),
@@ -928,6 +936,7 @@ mod tests {
             changed: Vec::new(),
             stale: vec![PathBuf::from(".github/workflows/old.yml")],
             conflicts: Vec::new(),
+            output_binding: None,
             ownership_present: true,
             ownership_needs_refresh: true,
             recorded_inputs: None,
@@ -1037,7 +1046,12 @@ mod tests {
         assert_eq!(app.phase, super::super::Phase::Configure);
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.phase, super::super::Phase::Review);
+        assert_eq!(
+            app.phase,
+            super::super::Phase::Review,
+            "review preparation failed: {:?}",
+            app.error
+        );
     }
 
     #[test]

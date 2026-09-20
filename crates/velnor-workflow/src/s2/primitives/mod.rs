@@ -32,6 +32,7 @@ use std::path::PathBuf;
 
 use crate::s2::config::RepoGenerationConfig;
 use crate::s2::provider::ProviderId;
+use crate::s2::safe_fs::SafeRoot;
 use crate::s2::scan::RepositoryShape;
 use crate::s2::{
     nested_unit_workflow_file, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, Unit,
@@ -428,9 +429,9 @@ impl GraphNode {
 
 /// Read-only render input for one primitive invocation.
 pub(crate) struct RenderCtx<'a> {
-    /// The scanned repository root. A primitive may read repository files the
-    /// walk observed, and must never execute project code.
-    pub(crate) root: &'a std::path::Path,
+    /// The root descriptor captured at scan entry. Every primitive file read
+    /// uses this handle so rendering cannot switch repositories mid-pass.
+    pub(crate) safe_root: &'a SafeRoot,
     /// What the scan proved about the repository.
     pub(crate) shape: &'a RepositoryShape,
     /// The generated project contract the surface is rendered for.
@@ -697,6 +698,21 @@ pub(crate) fn generate(
     config: &ProjectConfig,
     generation: Option<&RepoGenerationConfig>,
 ) -> Result<Surface, GeneratorError> {
+    let safe_root = SafeRoot::open(root)?;
+    generate_with_safe_root(&safe_root, shape, config, generation)
+}
+
+/// Render through the repository identity captured by the scan transaction.
+#[expect(
+    clippy::too_many_lines,
+    reason = "generation stages contract resolution, rendering, and ownership in one transaction"
+)]
+pub(crate) fn generate_with_safe_root(
+    safe_root: &SafeRoot,
+    shape: &RepositoryShape,
+    config: &ProjectConfig,
+    generation: Option<&RepoGenerationConfig>,
+) -> Result<Surface, GeneratorError> {
     let declared = match generation {
         Some(generation) => generation
             .declare()
@@ -730,7 +746,7 @@ pub(crate) fn generate(
         };
         let rendered = primitive.render(
             &ctx(
-                root,
+                safe_root,
                 shape,
                 config,
                 None,
@@ -763,7 +779,7 @@ pub(crate) fn generate(
         let primitive = lookup(&row.primitive)?;
         let rendered = primitive.render(
             &ctx(
-                root,
+                safe_root,
                 shape,
                 &resolved,
                 unit,
@@ -866,7 +882,7 @@ fn reject_owned_file(
 
 #[allow(clippy::too_many_arguments)]
 fn ctx<'a>(
-    root: &'a std::path::Path,
+    safe_root: &'a SafeRoot,
     shape: &'a RepositoryShape,
     config: &'a ProjectConfig,
     unit: Option<&'a Unit>,
@@ -880,7 +896,7 @@ fn ctx<'a>(
     contracts: &'a BTreeMap<String, UnitContract>,
 ) -> RenderCtx<'a> {
     RenderCtx {
-        root,
+        safe_root,
         shape,
         config,
         unit,

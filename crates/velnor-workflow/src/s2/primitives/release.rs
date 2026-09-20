@@ -17,7 +17,7 @@ use super::{
     WorkflowIr, D19_PIN_FETCH_COMMANDS, MAINTENANCE, PACKAGE_RELEASE, PREVIEW, RELEASE,
     RELEASE_SIGNER, STATIC_WORKFLOW,
 };
-use crate::s2::provider::{runs_on_for, ProviderId};
+use crate::s2::provider::{runs_on_for, Platform, ProviderId};
 use crate::s2::{
     github_expression, provider_supports_unit, rendered_cache_values, selector_runs_on_yaml,
     shell_quote, unit_display_label, workflow_runtime_setup,
@@ -2920,11 +2920,10 @@ fn render_versioned_tool_mise_setup(config: &ProjectConfig) -> String {
     render_mise_setup()
 }
 
-/// Pinned Mise provisioning for one typed release job. The job's selected
-/// runner owns this decision: GitHub-hosted Linux and macOS lanes need the
-/// setup action, while Velnor lanes use the preinstalled binary.
-fn render_mise_setup_for_runner(runner: &str) -> String {
-    if matches!(runner, "github" | "macos") {
+/// Pinned Mise provisioning for one typed release job. GitHub-hosted jobs use
+/// the pinned setup action; local providers use their preinstalled binary.
+fn render_mise_setup_for_provider(provider: ProviderId) -> String {
+    if provider == ProviderId::GithubHosted {
         render_mise_setup()
     } else {
         String::new()
@@ -2958,19 +2957,18 @@ fn render_versioned_tool_task_steps(tasks: &[String], gate: Option<&str>) -> Str
     steps
 }
 
-/// The runner selector for one typed tasks-release job. macOS is a fixed
-/// hosted lane in schema 2; the other aliases resolve through the explicit
-/// provider selectors that config validation requires.
+/// The runner selector for one typed tasks-release job. Hosted macOS uses the
+/// fixed GitHub image; all other provider/platform pairs resolve through the
+/// provider selector that config validation requires.
 fn tasks_job_runs_on(config: &ProjectConfig, job: &ReleaseJobSpec) -> String {
-    match job.runner.as_str() {
-        "macos" => yaml_scalar(MACOS_HOSTED_RUNS_ON),
-        "velnor" => config
-            .selectors
-            .get(&ProviderId::Velnor)
-            .map(selector_runs_on_yaml)
-            .unwrap_or_default(),
-        _ => hosted_selector_runs_on(config),
+    if job.provider == ProviderId::GithubHosted && job.platform == Platform::MacosArm64 {
+        return yaml_scalar(MACOS_HOSTED_RUNS_ON);
     }
+    config
+        .selectors
+        .get(&job.provider)
+        .map(selector_runs_on_yaml)
+        .unwrap_or_default()
 }
 
 /// Dispatch drills run `validate` jobs; tag pushes run `publish` jobs. Jobs
@@ -3044,7 +3042,7 @@ fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> Str
         output,
         "    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n{}",
         ActionPin::Checkout.reference(),
-        render_mise_setup_for_runner(&job.runner),
+        render_mise_setup_for_provider(job.provider),
     );
     output.push_str(&render_versioned_tool_task_steps(&job.tasks, None));
     if !job.attest_subjects.is_empty() {
@@ -5965,6 +5963,17 @@ mod tests {
         let workflows = root.join(".github/workflows");
         must(fs::create_dir_all(&workflows), "create audited workflows");
         must(
+            fs::create_dir_all(root.join(".github-gen")),
+            "create generation config directory",
+        );
+        must(
+            fs::write(
+                root.join(".github-gen/velnor-workflow.toml"),
+                "schema = 2\n",
+            ),
+            "write required schema-2 config",
+        );
+        must(
             fs::write(workflows.join("maintenance.yml"), &workflow),
             "write audited maintenance.yml",
         );
@@ -6094,7 +6103,7 @@ mod tests {
         must(
             fs::write(
                 root.join(crate::s2::config::GENERATION_CONFIG_PATH),
-                "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\nmodes = [\"validate\"]\ntag_pattern = \"v[0-9]*\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"desktop-build\"]\nrunner = \"github\"\n\n[[release.job]]\nid = \"sign\"\nname = \"Sign release\"\ntasks = [\"desktop-sign\"]\nneeds = [\"build\"]\nrunner = \"macos\"\nmodes = [\"publish\"]\nenvironment = \"release-macos\"\nattest_subjects = [\"dist/app.zip\"]\n\n[release.job.permissions]\nid-token = \"write\"\n\n[[release.job]]\nid = \"attest-defaults\"\ntasks = [\"desktop-sign\"]\nrunner = \"github\"\nattest_subjects = [\"dist/*.tar.gz\"]\n",
+            "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\nmodes = [\"validate\"]\ntag_pattern = \"v[0-9]*\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"desktop-build\"]\nprovider = \"github-hosted\"\nplatform = \"linux-x64\"\n\n[[release.job]]\nid = \"sign\"\nname = \"Sign release\"\ntasks = [\"desktop-sign\"]\nneeds = [\"build\"]\nprovider = \"github-hosted\"\nplatform = \"macos-arm64\"\nmodes = [\"publish\"]\nenvironment = \"release-macos\"\nattest_subjects = [\"dist/app.zip\"]\n\n[release.job.permissions]\nid-token = \"write\"\n\n[[release.job]]\nid = \"attest-defaults\"\ntasks = [\"desktop-sign\"]\nprovider = \"github-hosted\"\nplatform = \"linux-x64\"\nattest_subjects = [\"dist/*.tar.gz\"]\n",
             ),
             "write tasks release config",
         );
@@ -6142,16 +6151,42 @@ mod tests {
     }
 
     #[test]
-    fn schema2_tasks_release_mise_setup_follows_job_runner() {
+    fn schema2_tasks_release_mise_setup_follows_typed_provider() {
         let mut config = config(&["release.yml"], None);
         config.providers = [ProviderId::Velnor].into_iter().collect();
 
-        for (runner, needs_setup) in [("github", true), ("macos", true), ("velnor", false)] {
+        for (provider, platform, needs_setup, runs_on) in [
+            (
+                ProviderId::GithubHosted,
+                Platform::LinuxX64,
+                true,
+                "ubuntu-24.04",
+            ),
+            (
+                ProviderId::GithubHosted,
+                Platform::MacosArm64,
+                true,
+                "macos-26",
+            ),
+            (
+                ProviderId::Velnor,
+                Platform::LinuxX64,
+                false,
+                "[self-hosted, example-runner]",
+            ),
+            (
+                ProviderId::GithubSelfHosted,
+                Platform::LinuxX64,
+                false,
+                "bastion-scale-set",
+            ),
+        ] {
             let job = ReleaseJobSpec {
                 id: "job".to_owned(),
                 name: "Job".to_owned(),
                 tasks: vec!["desktop-build".to_owned()],
-                runner: runner.to_owned(),
+                provider,
+                platform,
                 timeout_minutes: 10,
                 ..ReleaseJobSpec::default()
             };
@@ -6159,7 +6194,11 @@ mod tests {
             assert_eq!(
                 rendered.contains("Set up Mise"),
                 needs_setup,
-                "Mise setup for runner {runner}: {rendered}"
+                "Mise setup for provider {provider}: {rendered}"
+            );
+            assert!(
+                rendered.contains(&format!("runs-on: {runs_on}")),
+                "runs-on for {provider}/{platform}: {rendered}"
             );
         }
     }
