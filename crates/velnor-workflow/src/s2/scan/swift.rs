@@ -18,18 +18,30 @@ use crate::s2::{
 /// One `.binaryTarget` stanza: a local `path` artifact or a remote `url`
 /// artifact. `None` means the stanza had no literal value for that key — a
 /// variable or computed expression the static scan cannot resolve.
-struct BinaryTarget {
-    name: Option<String>,
-    path: Option<String>,
-    url: Option<String>,
+pub(crate) struct BinaryTarget {
+    pub(crate) name: Option<String>,
+    pub(crate) path: Option<String>,
+    pub(crate) url: Option<String>,
 }
 
 /// Static `Package.swift` facts. The manifest is executable Swift; the scan
 /// only reads its text, never evaluates it.
-struct PackageFacts {
-    tools_version: Option<String>,
-    has_tests: bool,
-    binary_targets: Vec<BinaryTarget>,
+pub(crate) struct PackageFacts {
+    pub(crate) tools_version: Option<String>,
+    pub(crate) has_tests: bool,
+    pub(crate) binary_targets: Vec<BinaryTarget>,
+}
+
+/// One local-path binary target awaiting the native-producer join: the
+/// detector records it, and `super::join_native_producers` matches it
+/// against `BoltFFI` producers after every detector has run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SwiftBinaryConsumer {
+    pub(crate) manifest: String,
+    pub(crate) package_root: String,
+    pub(crate) unit: String,
+    pub(crate) name: Option<String>,
+    pub(crate) path: String,
 }
 
 impl Default for PackageFacts {
@@ -978,18 +990,13 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
                 (Some(path), _) => {
                     unit.platform = crate::s2::provider::Platform::MacosArm64;
                     unit.capabilities.native_macos_arm64 = true;
-                    let tracked = resolve_repo_path(&package_root, path).is_some_and(|resolved| {
-                        context.file_set.contains(&resolved)
-                            || context
-                                .file_set
-                                .iter()
-                                .any(|file| file.starts_with(&format!("{resolved}/")))
+                    shape.swift_consumers.push(SwiftBinaryConsumer {
+                        manifest: manifest.clone(),
+                        package_root: package_root.clone(),
+                        unit: unit.id.clone(),
+                        name: target.name.clone(),
+                        path: path.clone(),
                     });
-                    if !tracked {
-                        shape.limitations.push(format!(
-                            "Swift package {manifest} references binary target `{name}` at `{path}`, which no tracked file provides; the producing step must materialize it before `swift build` consumes the package."
-                        ));
-                    }
                 }
                 (None, Some(_)) => {
                     shape.limitations.push(format!(
@@ -1088,6 +1095,17 @@ mod tests {
         match option {
             Some(value) => value,
             None => panic!("{context}"),
+        }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_ok<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error}"),
         }
     }
 
@@ -1444,5 +1462,246 @@ mod tests {
             must_some(unit, "unit").tool_version.as_deref(),
             Some("2.46.0")
         );
+    }
+
+    const NATIVE_CARGO: &str = "[package]\nname = \"bridge-core-ffi\"\nversion = \"0.1.0\"\n";
+    const NATIVE_TOOLCHAIN: &str = "[toolchain]\nchannel = \"1.90.0\"\n";
+    const NATIVE_BOLTFFI: &str = "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
+         [targets.apple.xcframework]\nname = \"BridgeCore\"\noutput = \"../../target/xcframework\"\n";
+
+    fn native_package(binary_target: &str) -> String {
+        format!(
+            "// swift-tools-version: 6.0\nimport PackageDescription\n\nlet package = Package(\n    name: \"Desktop\",\n    targets: [\n        {binary_target},\n        .target(name: \"Bridge\"),\n        .testTarget(name: \"BridgeTests\", dependencies: [\"Bridge\"]),\n    ]\n)\n"
+        )
+    }
+
+    fn native_fixture(entries: &[(&str, &str)]) -> std::path::PathBuf {
+        use std::fs;
+        let root =
+            std::env::temp_dir().join(format!("velnor-swift-native-{}", crate::unique_suffix()));
+        for (path, contents) in entries {
+            let target = root.join(path);
+            if let Some(parent) = target.parent() {
+                must_some(fs::create_dir_all(parent).ok(), "create fixture directory");
+            }
+            must_some(fs::write(&target, contents).ok(), "write fixture file");
+        }
+        root
+    }
+
+    fn scan_native(root: &std::path::Path) -> super::super::RepositoryShape {
+        must_ok(
+            super::super::scan_shape(
+                root,
+                &std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
+                "main",
+                &[],
+            ),
+            "scan fixture",
+        )
+    }
+
+    #[test]
+    fn native_join_wires_product_edge_on_renamed_fixture() {
+        let root = native_fixture(&[
+            ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
+            ("libs/bridge-ffi/Cargo.toml", NATIVE_CARGO),
+            ("rust-toolchain.toml", NATIVE_TOOLCHAIN),
+            (
+                "clients/desktop/Package.swift",
+                &native_package(
+                    ".binaryTarget(name: \"BridgeCoreFFI\", path: \"../../target/xcframework/BridgeCore.xcframework\")",
+                ),
+            ),
+        ]);
+        let shape = scan_native(&root);
+        let producer = must_some(
+            shape.units.iter().find(|unit| {
+                unit.kind == crate::s2::UnitKind::Rust && unit.root == "libs/bridge-ffi"
+            }),
+            "rust producer unit",
+        );
+        assert_eq!(producer.products.len(), 1);
+        assert_eq!(producer.products[0].name, "xcframework-bridgecore");
+        assert_eq!(producer.products[0].task, None);
+        assert!(producer.products[0].env.is_empty());
+        assert_eq!(
+            producer.products[0].outputs,
+            vec!["target/xcframework/BridgeCore.xcframework".to_owned()]
+        );
+        let consumer = must_some(
+            shape
+                .units
+                .iter()
+                .find(|unit| unit.id == "swift-package-clients-desktop"),
+            "swift consumer unit",
+        );
+        assert_eq!(consumer.prerequisites.len(), 1);
+        assert_eq!(consumer.prerequisites[0].producer, producer.id);
+        assert_eq!(consumer.prerequisites[0].product, "xcframework-bridgecore");
+        assert_eq!(consumer.prerequisites[0].task, None);
+        assert!(
+            shape
+                .detected
+                .iter()
+                .any(|entry| entry == "boltffi-producer:libs/bridge-ffi"),
+            "{:?}",
+            shape.detected
+        );
+        assert!(
+            shape.limitations.iter().any(|limitation| limitation.contains(
+                "consumes binary target `BridgeCoreFFI` from BoltFFI manifest libs/bridge-ffi/boltffi.toml"
+            )),
+            "{:?}",
+            shape.limitations
+        );
+        assert!(
+            !shape
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("no tracked file provides")),
+            "{:?}",
+            shape.limitations
+        );
+        assert!(shape.swift_consumers.is_empty());
+        let canonical = must_ok(shape.canonical_json(), "canonicalize shape");
+        assert!(!canonical.contains("boltffi_producers"));
+        assert!(!canonical.contains("swift_consumers"));
+        let mut config = crate::s2::ProjectConfig::from(shape);
+        must_ok(
+            crate::s2::platform::resolve(&mut config),
+            "product graph accepts the joined edge",
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_join_rejects_module_mismatch() {
+        let root = native_fixture(&[
+            ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
+            ("libs/bridge-ffi/Cargo.toml", NATIVE_CARGO),
+            ("rust-toolchain.toml", NATIVE_TOOLCHAIN),
+            (
+                "clients/desktop/Package.swift",
+                &native_package(
+                    ".binaryTarget(name: \"WrongName\", path: \"../../target/xcframework/BridgeCore.xcframework\")",
+                ),
+            ),
+        ]);
+        let shape = scan_native(&root);
+        assert!(
+            shape.limitations.iter().any(|limitation| limitation
+                .contains("produces FFI module `BridgeCoreFFI`; the module disagrees")),
+            "{:?}",
+            shape.limitations
+        );
+        assert!(
+            shape.units.iter().all(|unit| unit.products.is_empty()),
+            "mismatched producer must not offer a product"
+        );
+        assert!(
+            shape.units.iter().all(|unit| unit.prerequisites.is_empty()),
+            "mismatched consumer must not require a product"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_join_keeps_untracked_limitation_without_producer() {
+        let root = native_fixture(&[(
+            "clients/desktop/Package.swift",
+            &native_package(
+                ".binaryTarget(name: \"BridgeCoreFFI\", path: \"../../target/xcframework/BridgeCore.xcframework\")",
+            ),
+        )]);
+        let shape = scan_native(&root);
+        assert!(
+            shape
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains(
+                    "which no tracked file provides; the producing step must materialize it"
+                )),
+            "{:?}",
+            shape.limitations
+        );
+        assert!(shape.units.iter().all(|unit| unit.prerequisites.is_empty()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_join_accepts_tracked_prebuilt_silently() {
+        let root = native_fixture(&[
+            (
+                "clients/desktop/Package.swift",
+                &native_package(
+                    ".binaryTarget(name: \"BridgeCoreFFI\", path: \"Frameworks/BridgeCore.xcframework\")",
+                ),
+            ),
+            (
+                "clients/desktop/Frameworks/BridgeCore.xcframework/Info.plist",
+                "<plist/>\n",
+            ),
+        ]);
+        let shape = scan_native(&root);
+        assert!(
+            !shape
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("BridgeCoreFFI")),
+            "{:?}",
+            shape.limitations
+        );
+        assert!(shape.units.iter().all(|unit| unit.prerequisites.is_empty()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_join_rejects_escaping_consumer_path() {
+        let root = native_fixture(&[(
+            "clients/desktop/Package.swift",
+            &native_package(
+                ".binaryTarget(name: \"BridgeCoreFFI\", path: \"../../../../escape.xcframework\")",
+            ),
+        )]);
+        let shape = scan_native(&root);
+        assert!(
+            shape.limitations.iter().any(|limitation| limitation
+                .contains("absolute or escapes the repository; no producer can be joined")),
+            "{:?}",
+            shape.limitations
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_join_accepts_unnamed_target_on_path_match() {
+        let root = native_fixture(&[
+            ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
+            ("libs/bridge-ffi/Cargo.toml", NATIVE_CARGO),
+            ("rust-toolchain.toml", NATIVE_TOOLCHAIN),
+            (
+                "clients/desktop/Package.swift",
+                &native_package(
+                    ".binaryTarget(path: \"../../target/xcframework/BridgeCore.xcframework\")",
+                ),
+            ),
+        ]);
+        let shape = scan_native(&root);
+        let consumer = must_some(
+            shape
+                .units
+                .iter()
+                .find(|unit| unit.id == "swift-package-clients-desktop"),
+            "swift consumer unit",
+        );
+        assert_eq!(consumer.prerequisites.len(), 1);
+        assert!(
+            shape.limitations.iter().any(|limitation| limitation
+                .contains("consumes binary target `<unnamed>` from BoltFFI manifest")),
+            "{:?}",
+            shape.limitations
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -15,7 +15,7 @@ mod node;
 mod opentofu;
 pub(crate) mod rust;
 mod signals;
-mod swift;
+pub(crate) mod swift;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -50,6 +50,8 @@ pub(crate) fn scan_shape(
     let mut shape = RepositoryShape {
         files: Vec::new(),
         units: Vec::new(),
+        boltffi_producers: Vec::new(),
+        swift_consumers: Vec::new(),
         detected: Vec::new(),
         // Standing boundaries of static inspection. Every scan reports them,
         // whatever the detectors find.
@@ -72,9 +74,170 @@ pub(crate) fn scan_shape(
     docker::detect(&context, &mut shape);
     homebrew::detect(&context, &mut shape);
     docs::detect(&context, &mut shape);
+    join_native_producers(&mut shape, &file_set);
     shape.finalize();
     shape.files = files;
     Ok(shape)
+}
+
+/// Join Swift local-path binary targets against `BoltFFI` Apple producers.
+///
+/// A consumer joins its producer only when the normalized consumer path
+/// equals the producer's normalized `{parent}/{framework}.xcframework`
+/// output and, when the stanza names the target, the name equals the
+/// producer's `{framework}FFI` module. A unique match becomes a taskless
+/// product edge — `NamedProduct` on the Rust unit, `Prerequisite` on the
+/// Swift unit — which later compiles into a selection dependency; the
+/// execution adapter that materializes the framework lands separately, so
+/// the matched limitation keeps naming the materialization obligation.
+/// Ambiguous producers, module mismatches, and unresolvable paths stay
+/// diagnostics with no edge: the join never guesses.
+fn join_native_producers(shape: &mut RepositoryShape, file_set: &BTreeSet<String>) {
+    let consumers = std::mem::take(&mut shape.swift_consumers);
+    for consumer in &consumers {
+        let name = consumer.name.as_deref().unwrap_or("<unnamed>");
+        let Some(resolved) = file_walk::resolve_repo_path(&consumer.package_root, &consumer.path)
+        else {
+            shape.limitations.push(format!(
+                "Swift package {} declares binary target `{name}` at `{}`, which is absolute or escapes the repository; no producer can be joined statically.",
+                consumer.manifest, consumer.path,
+            ));
+            continue;
+        };
+        // Cloned, not borrowed: the wiring below needs `shape` mutably.
+        let matches: Vec<rust::BoltffiProducer> = shape
+            .boltffi_producers
+            .iter()
+            .filter(|producer| producer.output == resolved)
+            .cloned()
+            .collect();
+        if matches.is_empty() {
+            let tracked = file_set.contains(&resolved)
+                || file_set
+                    .iter()
+                    .any(|file| file.starts_with(&format!("{resolved}/")));
+            if !tracked {
+                shape.limitations.push(format!(
+                    "Swift package {} references binary target `{name}` at `{}`, which no tracked file provides; the producing step must materialize it before `swift build` consumes the package.",
+                    consumer.manifest, consumer.path,
+                ));
+            }
+            continue;
+        }
+        // At most one producer claims an output: the Rust detector drops
+        // conflicting claimants with their own diagnostic, so a match here
+        // is unique and ambiguity needs no second branch.
+        let Some(producer) = matches.first() else {
+            continue;
+        };
+        if consumer
+            .name
+            .as_deref()
+            .is_some_and(|name| name != producer.ffi_module)
+        {
+            shape.limitations.push(format!(
+                "Swift package {} binary target `{name}` at `{}` matches the XCFramework output of {}, which produces FFI module `{}`; the module disagrees, so no product edge was constructed.",
+                consumer.manifest, consumer.path, producer.manifest, producer.ffi_module,
+            ));
+            continue;
+        }
+        wire_native_edge(shape, consumer, producer, name);
+    }
+}
+
+/// Wire one agreed producer/consumer pair: ensure the product on the Rust
+/// unit, add the prerequisite on the Swift unit, and record the
+/// materialization obligation. Every failure stays a diagnostic with no
+/// partial edge.
+fn wire_native_edge(
+    shape: &mut RepositoryShape,
+    consumer: &swift::SwiftBinaryConsumer,
+    producer: &rust::BoltffiProducer,
+    name: &str,
+) {
+    let Some(producer_unit) = producer.unit.clone() else {
+        shape.limitations.push(format!(
+            "Swift package {} binary target `{name}` matches BoltFFI producer {}, but no Rust unit owns `{}`; no product edge was constructed.",
+            consumer.manifest, producer.manifest, producer.root,
+        ));
+        return;
+    };
+    let product_name = native_product_name(&producer.framework);
+    let producer_index = shape.units.iter().position(|unit| unit.id == producer_unit);
+    let consumer_index = shape.units.iter().position(|unit| unit.id == consumer.unit);
+    let (Some(producer_index), Some(consumer_index)) = (producer_index, consumer_index) else {
+        shape.limitations.push(format!(
+            "Swift package {} binary target `{name}` matches BoltFFI producer {}, but the owning unit is missing; no product edge was constructed.",
+            consumer.manifest, producer.manifest,
+        ));
+        return;
+    };
+    if shape.units[producer_index].products.iter().any(|product| {
+        product.name == product_name
+            && (product.outputs.len() != 1
+                || product
+                    .outputs
+                    .first()
+                    .is_some_and(|output| output != producer.output.as_str()))
+    }) {
+        shape.limitations.push(format!(
+            "BoltFFI manifest {} framework `{}` collides with product `{product_name}` on unit `{producer_unit}`; no product edge was constructed.",
+            producer.manifest, producer.framework,
+        ));
+        return;
+    }
+    if !shape.units[producer_index]
+        .products
+        .iter()
+        .any(|product| product.name == product_name)
+    {
+        shape.units[producer_index]
+            .products
+            .push(crate::s2::platform::NamedProduct {
+                name: product_name.clone(),
+                task: None,
+                env: std::collections::BTreeMap::new(),
+                outputs: vec![producer.output.clone()],
+            });
+    }
+    shape.units[consumer_index]
+        .prerequisites
+        .push(crate::s2::platform::Prerequisite {
+            producer: producer_unit,
+            product: product_name,
+            task: None,
+            env: std::collections::BTreeMap::new(),
+        });
+    shape.limitations.push(format!(
+        "Swift package {} consumes binary target `{name}` from BoltFFI manifest {} (crate `{}`); the producer step must materialize `{}` before `swift build` consumes the package.",
+        consumer.manifest, producer.manifest, producer.crate_name, producer.output,
+    ));
+}
+
+/// The product name for a framework: lowercase, shell-safe, within the
+/// product-name length cap. Collisions with a same-named different-output
+/// product fail closed at the join.
+fn native_product_name(framework: &str) -> String {
+    let mut sanitized: String = framework
+        .chars()
+        .map(|character| {
+            if character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '.' | '_' | '-')
+            {
+                character
+            } else if character.is_ascii_uppercase() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // `platform::valid_product_name` caps names at 100 bytes.
+    while sanitized.len() + "xcframework-".len() > 100 {
+        sanitized.pop();
+    }
+    format!("xcframework-{sanitized}")
 }
 
 impl RepositoryShape {
@@ -130,6 +293,16 @@ pub(crate) struct RepositoryShape {
     files: Vec<String>,
     /// Verification units derived from manifests and directory layout.
     units: Vec<Unit>,
+    /// `BoltFFI` Apple producers awaiting the native join. Skipped from
+    /// canonical serialization: the join compiles them into product edges,
+    /// so they must not perturb the scan digest on their own.
+    #[serde(skip_serializing)]
+    pub(crate) boltffi_producers: Vec<rust::BoltffiProducer>,
+    /// Swift local-path binary targets awaiting the native join. Skipped
+    /// from canonical serialization for the same reason; consumed by the
+    /// join before `finalize`.
+    #[serde(skip_serializing)]
+    pub(crate) swift_consumers: Vec<swift::SwiftBinaryConsumer>,
     /// Detected capabilities, sorted and deduplicated.
     detected: Vec<String>,
     /// What static inspection could not prove, sorted and deduplicated.
@@ -322,5 +495,36 @@ impl From<RepositoryShape> for ProjectConfig {
             velnor_host_cache: crate::s2::config::CacheVelnorSection::default(),
             check_profiles: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::native_product_name;
+
+    #[test]
+    fn native_product_name_sanitizes_frameworks() {
+        assert_eq!(native_product_name("BridgeCore"), "xcframework-bridgecore");
+        assert_eq!(
+            native_product_name("My Framework!"),
+            "xcframework-my-framework-"
+        );
+        assert_eq!(native_product_name("a.b_c-d"), "xcframework-a.b_c-d");
+        assert_eq!(native_product_name("Ünïcode"), "xcframework--n-code");
+        for name in [
+            native_product_name("BridgeCore"),
+            native_product_name("My Framework!"),
+            native_product_name("Ünïcode"),
+        ] {
+            assert!(crate::s2::platform::valid_product_name(&name), "{name}");
+        }
+    }
+
+    #[test]
+    fn native_product_name_truncates_to_the_length_cap() {
+        let name = native_product_name(&"F".repeat(200));
+        assert!(name.len() <= 100, "{name}");
+        assert!(crate::s2::platform::valid_product_name(&name), "{name}");
+        assert!(name.starts_with("xcframework-ffff"));
     }
 }

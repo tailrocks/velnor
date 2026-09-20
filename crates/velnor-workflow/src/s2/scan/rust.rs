@@ -1201,12 +1201,229 @@ fn toml_inline_string(value: &str, wanted_key: &str) -> Option<String> {
     })
 }
 
+/// One `boltffi.toml` Apple producer: a Rust crate whose `pack apple` run
+/// emits `{framework}.xcframework` under a manifest-relative output
+/// directory. Field semantics mirror `boltffi_cli` 0.30.1
+/// (`Config::xcframework_name`, `apple_xcframework_output`,
+/// `AppleNames::ffi_module_name`): the framework name falls back from
+/// `targets.apple.xcframework.name` through
+/// `targets.apple.swift.module_name` to `PascalCase`(`package.name`), the
+/// output parent falls back from `targets.apple.xcframework.output` through
+/// `targets.apple.output` to `dist/apple`, and the FFI module is always
+/// `{framework}FFI`. Paths resolve against the manifest directory, the
+/// working directory `BoltFFI` itself assumes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BoltffiProducer {
+    pub(crate) manifest: String,
+    pub(crate) root: String,
+    pub(crate) package: String,
+    pub(crate) crate_name: String,
+    pub(crate) framework: String,
+    pub(crate) ffi_module: String,
+    /// Normalized repo-relative `{parent}/{framework}.xcframework`.
+    pub(crate) output: String,
+    /// The Rust unit owning the producing crate, resolved at detect time.
+    pub(crate) unit: Option<String>,
+}
+
+/// The `boltffi.toml` fields the producer join reads. Everything else in the
+/// file (architectures, SPM layout, debug symbols) belongs to the execution
+/// adapter, not to static matching.
+#[derive(Default)]
+struct BoltffiManifest {
+    enabled: bool,
+    package_name: Option<String>,
+    package_crate: Option<String>,
+    apple_output: Option<String>,
+    xcframework_name: Option<String>,
+    xcframework_output: Option<String>,
+    swift_module_name: Option<String>,
+}
+
+fn parse_boltffi_manifest(contents: &str) -> BoltffiManifest {
+    let mut manifest = BoltffiManifest {
+        enabled: true,
+        ..BoltffiManifest::default()
+    };
+    let mut section = String::new();
+    for line in contents.lines() {
+        let trimmed = strip_toml_comment(line).trim().to_owned();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(header) = trimmed.strip_prefix('[') {
+            if let Some(header) = header.strip_suffix(']') {
+                header.trim().clone_into(&mut section);
+            }
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        match (section.as_str(), key) {
+            ("package", "name") => manifest.package_name = toml_string_value(value),
+            ("package", "crate") => manifest.package_crate = toml_string_value(value),
+            ("targets.apple", "enabled") => {
+                if value == "true" {
+                    manifest.enabled = true;
+                } else if value == "false" {
+                    manifest.enabled = false;
+                }
+            }
+            ("targets.apple", "output") => manifest.apple_output = toml_string_value(value),
+            ("targets.apple.xcframework", "name") => {
+                manifest.xcframework_name = toml_string_value(value);
+            }
+            ("targets.apple.xcframework", "output") => {
+                manifest.xcframework_output = toml_string_value(value);
+            }
+            ("targets.apple.swift", "module_name") => {
+                manifest.swift_module_name = toml_string_value(value);
+            }
+            _ => {}
+        }
+    }
+    manifest
+}
+
+/// `BoltFFI`'s `to_pascal_case`: split on `_` and `-`, uppercase each word's
+/// first character, concatenate the rest unchanged.
+fn boltffi_pascal_case(name: &str) -> String {
+    name.split(['_', '-'])
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+            }
+        })
+        .collect()
+}
+
+/// Whether `segment` can name the framework directory inside a normalized
+/// product output: no separators, control characters, or blank/path
+/// navigation segments.
+fn valid_framework_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && !segment.bytes().any(|byte| byte == b'/' || byte == b'\\')
+        && !segment.chars().any(char::is_control)
+        && segment != "."
+        && segment != ".."
+}
+
+/// Discover every usable `BoltFFI` Apple producer plus one diagnostic per
+/// manifest that cannot join a consumer. Semantic failures stay diagnostics:
+/// a malformed binding manifest must not fail the whole scan when `BoltFFI`
+/// itself will report the error at build time.
+pub(crate) fn boltffi_producers(
+    context: &ScanContext<'_>,
+) -> Result<(Vec<BoltffiProducer>, Vec<String>), GeneratorError> {
+    let mut manifests = files_named(context.files, "boltffi.toml");
+    manifests.sort();
+    let mut producers = Vec::new();
+    let mut diagnostics = Vec::new();
+    for manifest_path in &manifests {
+        let root = parent_path(manifest_path);
+        let path = context.root.join(manifest_path);
+        let contents = fs::read_to_string(&path)
+            .map_err(|error| GeneratorError::io("read BoltFFI manifest", &path, &error))?;
+        let parsed = parse_boltffi_manifest(&contents);
+        if !parsed.enabled {
+            continue;
+        }
+        let Some(package) = parsed.package_name else {
+            diagnostics.push(format!(
+                "BoltFFI manifest {manifest_path} declares no [package] name; the framework name cannot be derived."
+            ));
+            continue;
+        };
+        let framework = parsed
+            .xcframework_name
+            .or(parsed.swift_module_name)
+            .unwrap_or_else(|| boltffi_pascal_case(&package));
+        if !valid_framework_segment(&framework) {
+            diagnostics.push(format!(
+                "BoltFFI manifest {manifest_path} resolves framework name `{framework}`, which is not a valid path segment; no producer edge was constructed."
+            ));
+            continue;
+        }
+        let parent = parsed
+            .xcframework_output
+            .as_deref()
+            .or(parsed.apple_output.as_deref())
+            .unwrap_or("dist/apple");
+        let Some(parent) = resolve_repo_path(&root, parent) else {
+            diagnostics.push(format!(
+                "BoltFFI manifest {manifest_path} declares output `{}`, which is absolute or escapes the repository; no producer edge was constructed.",
+                parsed
+                    .xcframework_output
+                    .as_deref()
+                    .or(parsed.apple_output.as_deref())
+                    .unwrap_or("dist/apple"),
+            ));
+            continue;
+        };
+        let cargo_manifest = join_repo_path(&root, "Cargo.toml");
+        if !context.file_set.contains(&cargo_manifest) {
+            diagnostics.push(format!(
+                "BoltFFI manifest {manifest_path} has no sibling Cargo.toml; the producing crate cannot be identified."
+            ));
+            continue;
+        }
+        let cargo_path = context.root.join(&cargo_manifest);
+        let cargo_contents = fs::read_to_string(&cargo_path)
+            .map_err(|error| GeneratorError::io("read Cargo manifest", &cargo_path, &error))?;
+        let cargo = parse_cargo_manifest(&root, &cargo_contents);
+        let crate_name = parsed.package_crate.unwrap_or_else(|| package.clone());
+        if cargo.package_name.as_deref() != Some(crate_name.as_str()) {
+            diagnostics.push(format!(
+                "BoltFFI manifest {manifest_path} names crate `{crate_name}`, but the sibling Cargo.toml declares package `{}`; no producer edge was constructed.",
+                cargo.package_name.as_deref().unwrap_or("<unnamed>"),
+            ));
+            continue;
+        }
+        producers.push(BoltffiProducer {
+            manifest: manifest_path.clone(),
+            root,
+            package,
+            crate_name,
+            ffi_module: format!("{framework}FFI"),
+            output: join_repo_path(&parent, &format!("{framework}.xcframework")),
+            framework,
+            unit: None,
+        });
+    }
+    let mut by_output: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for producer in &producers {
+        by_output
+            .entry(producer.output.as_str())
+            .or_default()
+            .push(producer.manifest.as_str());
+    }
+    let mut conflicted: BTreeSet<String> = BTreeSet::new();
+    for (output, claimants) in &by_output {
+        if claimants.len() > 1 {
+            diagnostics.push(format!(
+                "BoltFFI manifests {} claim the same XCFramework output `{output}`; none of them is joined to a consumer.",
+                claimants.join(", "),
+            ));
+            conflicted.insert((*output).to_owned());
+        }
+    }
+    producers.retain(|producer| !conflicted.contains(&producer.output));
+    Ok((producers, diagnostics))
+}
+
 pub(crate) fn detect(
     context: &ScanContext<'_>,
     shape: &mut RepositoryShape,
 ) -> Result<(), GeneratorError> {
+    let (mut producers, diagnostics) = boltffi_producers(context)?;
     let cargo_manifests = files_named(context.files, "Cargo.toml");
     if cargo_manifests.is_empty() {
+        shape.limitations.extend(diagnostics);
         return Ok(());
     }
     let rust = analyze_rust_manifests(
@@ -1215,8 +1432,24 @@ pub(crate) fn detect(
         context.file_set,
         &cargo_manifests,
     )?;
+    for producer in &mut producers {
+        producer.unit = rust
+            .units
+            .iter()
+            .find(|unit| {
+                unit.kind == UnitKind::Rust
+                    && unit.root == producer.root
+                    && unit.id != POLICY_UNIT_ID
+            })
+            .map(|unit| unit.id.clone());
+        shape
+            .detected
+            .push(format!("boltffi-producer:{}", producer.root));
+    }
+    shape.boltffi_producers.extend(producers);
     shape.units.extend(rust.units);
     shape.detected.extend(rust.detected);
+    shape.limitations.extend(diagnostics);
     shape.limitations.extend(rust.limitations);
     Ok(())
 }
@@ -1494,5 +1727,251 @@ mod tests {
             .contains("include_str! target does not exist"));
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn boltffi_manifest_parses_apple_fields() {
+        use super::parse_boltffi_manifest;
+        let parsed = parse_boltffi_manifest(
+            "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
+             [targets.apple]\noutput = \"shared\"\n\n\
+             [targets.apple.xcframework]\nname = \"BridgeCore\"\noutput = \"../../target/xcframework\"\n\n\
+             [targets.apple.swift]\nmodule_name = \"BridgeSwift\"\n",
+        );
+        assert!(parsed.enabled);
+        assert_eq!(parsed.package_name.as_deref(), Some("bridge-core"));
+        assert_eq!(parsed.package_crate.as_deref(), Some("bridge-core-ffi"));
+        assert_eq!(parsed.apple_output.as_deref(), Some("shared"));
+        assert_eq!(parsed.xcframework_name.as_deref(), Some("BridgeCore"));
+        assert_eq!(
+            parsed.xcframework_output.as_deref(),
+            Some("../../target/xcframework")
+        );
+        assert_eq!(parsed.swift_module_name.as_deref(), Some("BridgeSwift"));
+        let disabled =
+            parse_boltffi_manifest("[package]\nname = \"x\"\n\n[targets.apple]\nenabled = false\n");
+        assert!(!disabled.enabled);
+    }
+
+    #[test]
+    fn boltffi_pascal_case_matches_upstream() {
+        use super::boltffi_pascal_case;
+        assert_eq!(boltffi_pascal_case("bridge-core"), "BridgeCore");
+        assert_eq!(boltffi_pascal_case("foo_bar"), "FooBar");
+        assert_eq!(boltffi_pascal_case("Already"), "Already");
+        assert_eq!(boltffi_pascal_case("a--b"), "AB");
+        assert_eq!(boltffi_pascal_case("x"), "X");
+    }
+
+    fn boltffi_fixture(entries: &[(&str, &str)]) -> (PathBuf, Vec<String>, BTreeSet<String>) {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-boltffi-scan-{}",
+            crate::unique_suffix()
+        ));
+        must(fs::create_dir_all(&root), "create scratch directory");
+        let mut files = Vec::new();
+        for (path, contents) in entries {
+            let target = root.join(path);
+            if let Some(parent) = target.parent() {
+                must(fs::create_dir_all(parent), "create fixture directory");
+            }
+            must(fs::write(&target, contents), "write fixture file");
+            files.push((*path).to_owned());
+        }
+        files.sort();
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        (root, files, file_set)
+    }
+
+    fn boltffi_minimal_crate(package: &str) -> String {
+        format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\n")
+    }
+
+    #[test]
+    fn boltffi_producers_resolves_happy_path() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "libs/bridge-ffi/boltffi.toml",
+                "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
+                 [targets.apple.xcframework]\nname = \"BridgeCore\"\noutput = \"../../target/xcframework\"\n",
+            ),
+            (
+                "libs/bridge-ffi/Cargo.toml",
+                &boltffi_minimal_crate("bridge-core-ffi"),
+            ),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(producers.len(), 1);
+        let producer = &producers[0];
+        assert_eq!(producer.manifest, "libs/bridge-ffi/boltffi.toml");
+        assert_eq!(producer.root, "libs/bridge-ffi");
+        assert_eq!(producer.package, "bridge-core");
+        assert_eq!(producer.crate_name, "bridge-core-ffi");
+        assert_eq!(producer.framework, "BridgeCore");
+        assert_eq!(producer.ffi_module, "BridgeCoreFFI");
+        assert_eq!(producer.output, "target/xcframework/BridgeCore.xcframework");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producers_applies_name_and_output_defaults() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "crates/plain/boltffi.toml",
+                "[package]\nname = \"plain-core\"\n",
+            ),
+            (
+                "crates/plain/Cargo.toml",
+                &boltffi_minimal_crate("plain-core"),
+            ),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(producers.len(), 1);
+        assert_eq!(producers[0].framework, "PlainCore");
+        assert_eq!(producers[0].ffi_module, "PlainCoreFFI");
+        assert_eq!(
+            producers[0].output,
+            "crates/plain/dist/apple/PlainCore.xcframework"
+        );
+        assert_eq!(producers[0].crate_name, "plain-core");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producers_prefers_module_name_over_pascal_case() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "crates/modular/boltffi.toml",
+                "[package]\nname = \"modular-core\"\n\n\
+                 [targets.apple.swift]\nmodule_name = \"CustomModule\"\n",
+            ),
+            (
+                "crates/modular/Cargo.toml",
+                &boltffi_minimal_crate("modular-core"),
+            ),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(producers.len(), 1);
+        assert_eq!(producers[0].framework, "CustomModule");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producers_skips_disabled_apple() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "crates/off/boltffi.toml",
+                "[package]\nname = \"off\"\n\n[targets.apple]\nenabled = false\n",
+            ),
+            ("crates/off/Cargo.toml", &boltffi_minimal_crate("off")),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(producers.is_empty());
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producers_reports_unusable_manifests() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            ("crates/nameless/boltffi.toml", "[targets.apple]\n"),
+            (
+                "crates/nameless/Cargo.toml",
+                &boltffi_minimal_crate("nameless"),
+            ),
+            (
+                "crates/orphan/boltffi.toml",
+                "[package]\nname = \"orphan\"\n",
+            ),
+            (
+                "crates/mismatched/boltffi.toml",
+                "[package]\nname = \"mismatched\"\ncrate = \"other-crate\"\n",
+            ),
+            (
+                "crates/mismatched/Cargo.toml",
+                &boltffi_minimal_crate("mismatched"),
+            ),
+            (
+                "crates/escaping/boltffi.toml",
+                "[package]\nname = \"escaping\"\n\n\
+                 [targets.apple.xcframework]\nname = \"Escaping\"\noutput = \"../../../../tmp\"\n",
+            ),
+            (
+                "crates/escaping/Cargo.toml",
+                &boltffi_minimal_crate("escaping"),
+            ),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(producers.is_empty());
+        assert_eq!(diagnostics.len(), 4);
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic
+            .contains("crates/nameless/boltffi.toml declares no [package] name")));
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic
+            .contains("crates/orphan/boltffi.toml has no sibling Cargo.toml")));
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic
+            .contains("names crate `other-crate`")
+            && diagnostic.contains("declares package `mismatched`")));
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic
+            .contains("crates/escaping/boltffi.toml")
+            && diagnostic.contains("escapes the repository")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producers_rejects_conflicting_outputs() {
+        use super::{boltffi_producers, ScanContext};
+        let manifest = "[package]\nname = \"shared-core\"\ncrate = \"shared-core\"\n\n\
+             [targets.apple.xcframework]\nname = \"Shared\"\noutput = \"../../target/xcframework\"\n";
+        let (root, files, file_set) = boltffi_fixture(&[
+            ("libs/one/boltffi.toml", manifest),
+            ("libs/one/Cargo.toml", &boltffi_minimal_crate("shared-core")),
+            ("libs/two/boltffi.toml", manifest),
+            ("libs/two/Cargo.toml", &boltffi_minimal_crate("shared-core")),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(producers.is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("claim the same XCFramework output"));
+        assert!(diagnostics[0].contains("libs/one/boltffi.toml"));
+        assert!(diagnostics[0].contains("libs/two/boltffi.toml"));
+        let _ = fs::remove_dir_all(root);
     }
 }
