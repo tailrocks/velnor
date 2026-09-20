@@ -1311,6 +1311,10 @@ where
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the collector keeps transport, storage, auth, repository, workflow, identity, and ledger boundaries explicit"
+)]
 async fn collect_pr_execution_facts<T, S>(
     transport: &T,
     store: &mut S,
@@ -1977,6 +1981,10 @@ fn ruleset_is_complete(value: &Value) -> bool {
         && value.get("rules").and_then(Value::as_array).is_some()
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "job parsing keeps repository, run, attempt, source, and raw provenance explicit"
+)]
 fn parse_job(
     value: &Value,
     event: &str,
