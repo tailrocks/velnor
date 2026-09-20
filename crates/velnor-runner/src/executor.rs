@@ -5159,13 +5159,22 @@ where
             tier,
             container.repository.as_deref(),
         );
-        let run_root = crate::buildkit::claims_run_root()
-            .ok_or_else(|| anyhow::anyhow!("setup-buildx requires configured Velnor storage"))?;
-        let temp = state
-            .temp_host
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("setup-buildx requires a runner temp directory"))?;
-        crate::buildkit::record_job_builder(temp, &name)?;
+        // Builder claims live in the storage-backed claim store: without a
+        // runner temp dir or without configured Velnor storage (unit tests
+        // run hermetically, without VELNOR_STORAGE_ROOT) there is nothing to
+        // claim in, so setup proceeds unclaimed and the builder stays
+        // unmanaged — the same degraded path every other storage-gated
+        // caller takes. The inspect/create below always runs.
+        let lifecycle: Option<(&Path, PathBuf)> = match (
+            state.temp_host.as_deref(),
+            crate::buildkit::claims_run_root(),
+        ) {
+            (Some(temp), Some(run_root)) => {
+                crate::buildkit::record_job_builder(temp, &name)?;
+                Some((temp, run_root))
+            }
+            _ => None,
+        };
         let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         let buildkitd_config_inline =
             native_input(action, &action_state, "buildkitd-config-inline")?;
@@ -5186,15 +5195,23 @@ where
             // Setup claims and creates/reuses under the same filesystem-wide
             // lifecycle gate the reaper takes exclusively. A job may be
             // admitted while cleanup runs, but cannot claim or use a builder
-            // until its current-generation name is registered again.
-            let _coordinator = crate::capacity::FilesystemCoordinator::lock_shared(&run_root)
-                .context("lock BuildKit lifecycle for setup")?;
-            crate::buildkit::claim_builder(
-                &run_root,
-                &name,
-                &job_scope_from_temp(Some(temp)),
-                &container.name,
-            )?;
+            // until its current-generation name is registered again. Without
+            // a claim store there is no gate to take and nothing to claim,
+            // so setup proceeds straight to inspect/create.
+            let _coordinator = match lifecycle.as_ref() {
+                Some((temp, run_root)) => {
+                    let coordinator = crate::capacity::FilesystemCoordinator::lock_shared(run_root)
+                        .context("lock BuildKit lifecycle for setup")?;
+                    crate::buildkit::claim_builder(
+                        run_root,
+                        &name,
+                        &job_scope_from_temp(Some(*temp)),
+                        &container.name,
+                    )?;
+                    Some(coordinator)
+                }
+                None => None,
+            };
             let inspect_args = vec!["buildx".to_string(), "inspect".to_string(), name.clone()];
             let inspect_result =
                 self.container_docker(container, &action_state, &inspect_args, None, timeout)?;
@@ -5222,8 +5239,9 @@ where
                 self.container_docker(container, &action_state, &args, None, timeout)?
             }
         };
-        if let Some(report) =
-            crate::buildkit::maybe_reap_idle_builders(&run_root, std::time::SystemTime::now())
+        if let Some(run_root) = lifecycle.as_ref().map(|(_, run_root)| run_root)
+            && let Some(report) =
+                crate::buildkit::maybe_reap_idle_builders(run_root, std::time::SystemTime::now())
         {
             for failure in &report.failures {
                 eprintln!("buildx setup: horizon reap: {failure}");
