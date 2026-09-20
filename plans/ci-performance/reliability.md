@@ -297,3 +297,19 @@ The ordinary local invocation encountered an unrelated unconfigured
 ShellCheck mise shim; no lint check was disabled. The regenerated full generator suite passed all 1,967 tests with no
 skips in 57.941 seconds (`cargo nextest run --locked -p velnor-workflow`).
 Hosted execution remains a separate verification obligation.
+
+## User-requested final delivery and stop
+
+The user explicitly requested all work on `refactor/holla-parity`, followed
+by a complete stop. Completed source and generated activation were pushed as
+`e972ddd`; its normal commit hook passed staged formatting and strict workspace
+Clippy. Final agent patches, baselines, hashes, verification logs, and the
+latest inventory are preserved under `observations/stopped-20260920`.
+Unfinished source remains a recoverable patch rather than an accepted runtime
+change. No merge or main verification is claimed.
+
+Concurrent remote changes at `9bbf4a4e` remain on the original
+`fix/ci-validation-contract` branch. They are not overwritten. Reconciliation
+of the independent Rust policy designs was unfinished when the user stopped
+work. All remaining acceptance requirements are documented in the final
+checkpoint. The goal is stopped at the user's request, not completed.

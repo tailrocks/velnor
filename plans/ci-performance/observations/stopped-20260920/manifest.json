@@ -1,0 +1,22 @@
+{
+  "typed-stages-final.tar.gz": {
+    "sha256": "6114b40200e15c1612eb4cd03bad23726cc4f59644f8ddd986743ec4a899f61e",
+    "bytes": 701615,
+    "members": 19
+  },
+  "mergequeue-wip.tar.gz": {
+    "sha256": "dccc69272bb21f21a969ae824f451a7623a8090bcc768f0bdbcdfef7e46e90d8",
+    "bytes": 51224,
+    "members": 5
+  },
+  "renderer-activation-proof.tar.gz": {
+    "sha256": "8abcd7785863f7eceda39a68dc27b2e6996acc92d4e122051faacc2436e9c274",
+    "bytes": 51641,
+    "members": 5
+  },
+  "preflight-and-inventory-final.tar.gz": {
+    "sha256": "9b116a637ca2cca38043a553327e7a892bc633b0f09c3aa8226389b94feaaafc",
+    "bytes": 5877193,
+    "members": 12
+  }
+}
