@@ -312,7 +312,12 @@ pub(crate) fn candidate_bounded_git_archive_script() -> String {
             mv -- "$partial" "$destination"
           }
 "#
+    .replace(
+        "__MAX_UNCOMPRESSED__",
+        &CANDIDATE_TRANSPORT_MAX_UNCOMPRESSED_BYTES.to_string(),
+    )
 }
+
 pub(crate) const CANDIDATE_MANIFEST_SCHEMA: &str = "velnor.bootstrap-producer-manifest.v1";
 /// The producer manifest schema is embedded in the base-owned policy
 /// renderer.  The policy job writes this exact text before it accepts a
@@ -4832,8 +4837,8 @@ fn audited_pin_script() -> &'static str {
 const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
           base_workflow_archive="$RUNNER_TEMP/base-github.tar"
           head_workflow_archive="$RUNNER_TEMP/head-github.tar"
-          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$BASE_SHA" -- > "$base_workflow_archive"
-          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$HEAD_SHA" -- > "$head_workflow_archive"
+__BOUNDED_GIT_ARCHIVE__          bounded_git_archive "$BASE_SHA" "$base_workflow_archive"
+          bounded_git_archive "$HEAD_SHA" "$head_workflow_archive"
           python3 - "$base_workflow_archive" "$head_workflow_archive" "$BASE_SHA" "$HEAD_SHA" "$base_tree_sha" "$head_tree_sha" "$base_tree_api_digest" "$head_tree_api_digest" <<'PY' > "$RUNNER_TEMP/candidate-workflow-contract.txt"
           import hashlib
           import re
@@ -4868,6 +4873,8 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
           archive_members = {}
           workflow_lines = {}
           pinned_action_pattern = re.compile(r"^[^./][^ ]+@[0-9a-f]{40}$")
+          max_members = __MAX_MEMBERS__
+          max_uncompressed = __MAX_UNCOMPRESSED__
 
           def uses_value(line):
               text = line.strip()
@@ -4893,8 +4900,23 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
               archive_external_reusable_workflows = []
               archive_untrusted_action_references = []
               archive_source_members = {}
+              seen_source_members = set()
+              total_declared_bytes = 0
+              total_read_bytes = 0
               with tarfile.open(archive_name, "r:") as archive:
                   for member in archive.getmembers():
+                      if len(seen_source_members) >= max_members:
+                          raise SystemExit("workflow archive has too many members")
+                      member_path = member.name[:-1] if member.isdir() and member.name.endswith("/") else member.name
+                      parts = member_path.split("/")
+                      if not member_path or member_path.startswith("/") or "\\" in member_path or any(part in ("", ".", "..") for part in parts):
+                          raise SystemExit(f"unsafe workflow archive member: {member.name}")
+                      if member_path in seen_source_members:
+                          raise SystemExit(f"duplicate workflow archive member: {member_path}")
+                      seen_source_members.add(member_path)
+                      if member.size < 0 or total_declared_bytes + member.size > max_uncompressed:
+                          raise SystemExit("workflow archive declared bytes exceed bound")
+                      total_declared_bytes += member.size
                       if member.isdir():
                           continue
                       if not member.isfile():
@@ -4902,13 +4924,26 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                       stream = archive.extractfile(member)
                       if stream is None:
                           raise SystemExit("workflow archive member is unreadable")
-                      contents = stream.read()
-                      archive_source_members[member.name] = (member.mode, contents)
-                      if not member.name.endswith((".yml", ".yaml")):
+                      chunks = []
+                      member_read_bytes = 0
+                      while True:
+                          chunk = stream.read(min(1024 * 1024, max_uncompressed - total_read_bytes + 1))
+                          if not chunk:
+                              break
+                          member_read_bytes += len(chunk)
+                          total_read_bytes += len(chunk)
+                          if member_read_bytes > member.size or total_read_bytes > max_uncompressed:
+                              raise SystemExit("workflow archive bytes exceed bound")
+                          chunks.append(chunk)
+                      if member_read_bytes != member.size:
+                          raise SystemExit("workflow archive member is truncated")
+                      contents = b"".join(chunks)
+                      archive_source_members[member_path] = (member.mode, contents)
+                      if not member_path.endswith((".yml", ".yaml")):
                           continue
                       lines = contents.decode("utf-8").splitlines()
-                      archive_workflows[member.name] = lines
-                      archive_edges[member.name] = [
+                      archive_workflows[member_path] = lines
+                      archive_edges[member_path] = [
                           reference
                           for line in lines
                           for value in [uses_value(line)]
@@ -4916,7 +4951,7 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                           for reference in [local_reference(value)]
                           if reference is not None and reference.startswith(local_workflow_prefix)
                       ]
-                      archive_action_edges[member.name] = [
+                      archive_action_edges[member_path] = [
                           reference
                           for line in lines
                           for value in [uses_value(line)]
@@ -4927,9 +4962,9 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                       for line in lines:
                           value = uses_value(line)
                           if value is not None and external_workflow_pattern.match(value):
-                              archive_external_reusable_workflows.append((member.name, value))
+                              archive_external_reusable_workflows.append((member_path, value))
                           elif value is not None and not value.startswith("./") and not pinned_action_pattern.fullmatch(value):
-                              archive_untrusted_action_references.append((member.name, value))
+                              archive_untrusted_action_references.append((member_path, value))
                       job = None
                       for index, line in enumerate(lines):
                           matched_job = job_pattern.fullmatch(line)
@@ -4959,10 +4994,10 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                           names = [item[len(name_prefix):].strip() for item in block if item.startswith(name_prefix)]
                           ids = [item[len(id_prefix):].strip() for item in block if item.startswith(id_prefix)]
                           if len(upload_uses) != 1 or len(names) != 1:
-                              raise SystemExit(f"{member.name}: upload step has no unique action or with.name")
-                          name = names[0].split(" #", 1)[0].strip().strip("\\\"'")
+                              raise SystemExit(f"{member_path}: upload step has no unique action or with.name")
+                          upload_name = names[0].split(" #", 1)[0].strip().strip("\\\"'")
                           step_id = ids[0] if len(ids) == 1 else ""
-                          uploads.append((archive_name, member.name, job, step_id, name))
+                          uploads.append((archive_name, member_path, job, step_id, upload_name))
               local_workflow_edges[archive_name] = archive_edges
               local_action_edges[archive_name] = archive_action_edges
               workflow_lines[archive_name] = archive_workflows
@@ -5065,6 +5100,17 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                       for line in block
                       if line.startswith("        working-directory:")
                   ]
+                  step_names = [
+                      line[len("      - name:"):].strip()
+                      for line in block
+                      if line.startswith("      - name:")
+                  ]
+                  if step_names in (["Prepare bounded transport scratch"], ["Remove candidate build workspace"], ["Remove bounded transport scratch"]):
+                      if working_directories:
+                          raise SystemExit(
+                              f"{archive_name}: producer transport step must run from the mounted workspace root"
+                          )
+                      continue
                   if working_directories != ["candidate-control"]:
                       raise SystemExit(
                           f"{archive_name}: candidate_producer run step is not bound to candidate-control"
@@ -5213,6 +5259,18 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
 
 fn candidate_namespace_scan_script() -> String {
     CANDIDATE_NAMESPACE_SCAN_SCRIPT
+        .replace(
+            "__BOUNDED_GIT_ARCHIVE__",
+            &crate::s2::candidate_bounded_git_archive_script(),
+        )
+        .replace(
+            "__MAX_MEMBERS__",
+            &crate::s2::CANDIDATE_TRANSPORT_MAX_MEMBERS.to_string(),
+        )
+        .replace(
+            "__MAX_UNCOMPRESSED__",
+            &crate::s2::CANDIDATE_TRANSPORT_MAX_UNCOMPRESSED_BYTES.to_string(),
+        )
         .replace("__CANDIDATE_ARTIFACT__", crate::s2::CANDIDATE_ARTIFACT_NAME)
         .replace(
             "__CANDIDATE_HANDOFF__",
@@ -5318,6 +5376,8 @@ macro_rules! policy_candidate_step_template {
               --header "Authorization: Bearer $GH_TOKEN" \
               --header "X-GitHub-Api-Version: 2022-11-28" \
               "$GITHUB_API_URL/repos/$repository/tarball/$revision" --output "$archive"
+            archive_size="$(stat -c '%s' "$archive")"
+            test "$archive_size" -le {max_compressed}
             test "$(sha256sum "$archive" | awk '{{print $1}}')" = "$expected"
           }}
           verify_action_archive actions/checkout "{checkout_action_revision}" "{checkout_action_archive_sha256}" checkout
@@ -5375,7 +5435,7 @@ macro_rules! policy_candidate_step_template {
           test "$(grep -Fxc "          path: candidate-source" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "          fetch-depth: 1" <<<"$candidate_block")" = 2
           test "$(grep -Fxc "          persist-credentials: false" <<<"$candidate_block")" = 2
-          test "$(grep -Fxc "        working-directory: candidate-control" <<<"$candidate_block")" = 4
+          test "$(grep -Fxc "        working-directory: candidate-control" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "        uses: {upload}" <<<"$candidate_block")" = 1
           test "$(grep -Ec "^[[:space:]]+uses: " <<<"$candidate_block")" = 3
           test "$(grep -Ec "^[[:space:]]+uses: \.\/" <<<"$candidate_block")" = 0
@@ -5401,7 +5461,7 @@ macro_rules! policy_candidate_step_template {
           test "$(grep -Fxc "      upload_step_id: {upload_step_id}" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "      artifact_binding_method: {artifact_binding_method}" <<<"$candidate_block")" = 1
           test "$(grep -Ec '^[[:space:]]+uses: .*upload-artifact@' <<<"$candidate_block")" = 1
-          test "$(grep -Fxc "          path: ${{{{ runner.temp }}}}/velnor-bootstrap-scratch/velnor-workflow-candidate-upload" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "          path: ${{{{ runner.temp }}}}/velnor-workflow-candidate-upload" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "          name: {artifact}" "$contract")" = 1
 {namespace_scan}
           read -r candidate_workflow_contract_sha256 candidate_workflow_binding_sha256 < "$RUNNER_TEMP/candidate-workflow-contract.txt"
@@ -5526,7 +5586,7 @@ macro_rules! policy_candidate_step_template {
           mkdir -p "$handoff"
           install -m 0555 "$binary" "$handoff/velnor-workflow"
           install -m 0444 "$manifest" "$handoff/candidate-manifest.json"
-          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$HEAD_SHA" > "$handoff/source.tar"
+{bounded_git_archive}          bounded_git_archive "$HEAD_SHA" "$handoff/source.tar"
           source_archive_sha256="$(sha256sum "$handoff/source.tar" | awk '{{print $1}}')"
           source_size="$(stat -c '%s' "$handoff/source.tar")"
           test "$source_size" -le {max_uncompressed}
@@ -5596,7 +5656,7 @@ macro_rules! policy_candidate_step_template {
         uses: {upload}
         with:
           name: {handoff}
-          path: ${{{{ runner.temp }}}}/velnor-bootstrap-scratch/candidate-handoff
+          path: ${{{{ runner.temp }}}}/candidate-handoff
           if-no-files-found: error
           retention-days: 1
 "#,
@@ -5620,6 +5680,7 @@ macro_rules! policy_candidate_step_template {
         upload_step_id = crate::s2::CANDIDATE_UPLOAD_STEP_ID,
         artifact_binding_method = crate::s2::CANDIDATE_ARTIFACT_BINDING_METHOD,
         object_format = crate::s2::CANDIDATE_TRANSPORT_OBJECT_FORMAT,
+        bounded_git_archive = crate::s2::candidate_bounded_git_archive_script(),
         upload = ActionPin::UploadArtifact.reference(),
         )
     };
@@ -5658,14 +5719,15 @@ macro_rules! policy_candidate_role_jobs_template {
       handoff_id: ${{{{ steps.handoff_upload.outputs.artifact-id }}}}
       handoff_digest: ${{{{ steps.handoff_upload.outputs.artifact-digest }}}}
     steps:
+{scratch_setup_step}
       - name: Checkout base history
         uses: {checkout}
         with:
           path: policy-checkout
           fetch-depth: 0
           persist-credentials: false
-{scratch_setup_step}
 {acquire}
+{scratch_cleanup_step}
   candidate_execute:
     name: candidate_execute
     needs: [policy_acquire]
@@ -5682,11 +5744,11 @@ macro_rules! policy_candidate_role_jobs_template {
         uses: {download}
         with:
           artifact-ids: ${{{{ needs.policy_acquire.outputs.handoff_id }}}}
-          path: ${{{{ runner.temp }}}}/velnor-bootstrap-scratch/candidate-handoff
+          path: ${{{{ runner.temp }}}}/candidate-handoff
       - name: Execute candidate in pinned sandbox
         id: candidate_execute
         env:
-          HANDOFF: ${{{{ runner.temp }}}}/velnor-bootstrap-scratch/candidate-handoff/{handoff}
+          HANDOFF: ${{{{ runner.temp }}}}/candidate-handoff/{handoff}
           SANDBOX_IMAGE_REPOSITORY: {image_repository}
           SANDBOX_IMAGE_DIGEST: "{image_digest}"
           DEFAULT_BRANCH: {default_branch}
@@ -5970,7 +6032,7 @@ macro_rules! policy_candidate_role_jobs_template {
         uses: {upload}
         with:
           name: {result}
-          path: ${{{{ runner.temp }}}}/velnor-bootstrap-scratch/candidate-result
+          path: ${{{{ runner.temp }}}}/candidate-result
           if-no-files-found: error
           retention-days: 1
 {scratch_cleanup_step}
@@ -6082,6 +6144,8 @@ macro_rules! policy_candidate_result_verification_template {
               --header "Authorization: Bearer $GH_TOKEN" \
               --header "X-GitHub-Api-Version: 2022-11-28" \
               "$GITHUB_API_URL/repos/$repository/tarball/$revision" --output "$archive"
+            archive_size="$(stat -c '%s' "$archive")"
+            test "$archive_size" -le {max_compressed}
             test "$(sha256sum "$archive" | awk '{{print $1}}')" = "$expected"
           }}
           verify_action_archive actions/checkout "{checkout_action_revision}" "{checkout_action_archive_sha256}" checkout
@@ -6384,7 +6448,7 @@ macro_rules! policy_candidate_result_verification_template {
           verifier_manifest_schema_sha256="$(sha256sum "$verifier_manifest_schema" | awk '{{print $1}}')"
           test "$verifier_manifest_schema_sha256" = "$(jq -er .manifest_schema_sha256 "$handoff_json")"
           verifier_source_archive="$RUNNER_TEMP/verifier-source.tar"
-          GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" archive --format=tar "$HEAD_SHA" > "$verifier_source_archive"
+{bounded_git_archive}          bounded_git_archive "$HEAD_SHA" "$verifier_source_archive"
           verifier_source_archive_size="$(stat -c '%s' "$verifier_source_archive")"
           test "$verifier_source_archive_size" -le {max_uncompressed}
           test "$(sha256sum "$verifier_source_archive" | awk '{{print $1}}')" = "$(jq -er .source_archive_sha256 "$handoff_json")"
@@ -6453,6 +6517,7 @@ macro_rules! policy_candidate_result_verification_template {
         max_members = crate::s2::CANDIDATE_TRANSPORT_MAX_MEMBERS,
         max_uncompressed = crate::s2::CANDIDATE_TRANSPORT_MAX_UNCOMPRESSED_BYTES,
         result_max_uncompressed = crate::s2::CANDIDATE_RESULT_MAX_UNCOMPRESSED_BYTES,
+        bounded_git_archive = crate::s2::candidate_bounded_git_archive_script(),
         upload_action_archive_sha256 = crate::s2::CANDIDATE_UPLOAD_ACTION_ARCHIVE_SHA256,
         upload_action_revision = crate::s2::CANDIDATE_UPLOAD_ACTION_REVISION,
         )
@@ -6499,12 +6564,27 @@ fn render_policy_job(
         candidate_command_arguments,
         actionlint_setup,
     } = *parts;
+    let candidate_transport_setup = if candidate_graph {
+        format!(
+            "      - name: Prepare bounded transport scratch\n        id: transport_scratch\n        run: |\n{}",
+            candidate_transport_scratch_setup_script()
+        )
+    } else {
+        String::new()
+    };
     let mut policy = format!
         (
         "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: this job is the fresh verifier. It executes only the\n    # base-pinned validator and compares the isolated candidate's rendered\n    # bytes against a clean checkout; candidate code never runs in this job.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{setup_checkout}{validator}{renderer}{ruleset_step}      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\"{candidate_command_arguments}\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
         ActionPin::Checkout.reference(),
             actionlint_setup = actionlint_setup,
     );
+    if candidate_graph {
+        policy = policy.replacen(
+            "    steps:\n",
+            &format!("    steps:\n{candidate_transport_setup}"),
+            1,
+        );
+    }
     policy = policy.replacen(
         "    permissions:\n",
         "    # Candidate execution runs with no secret references or persisted credentials.\n    permissions:\n",
@@ -6684,11 +6764,7 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
 }
 
 fn candidate_policy_transport_verification_steps() -> String {
-    format!(
-        "      - name: Prepare bounded transport scratch\n        id: transport_scratch\n        run: |\n{}{}",
-        candidate_transport_scratch_setup_script(),
-        policy_candidate_result_verification_step()
-    )
+    policy_candidate_result_verification_step()
 }
 
 /// The step that provisions the pinned actionlint for the policy job. The
