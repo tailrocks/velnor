@@ -888,9 +888,7 @@ mod tests {
         );
         assert!(producer.contains("mkfs.ext4 -F"), "{producer}");
         assert!(
-            producer.contains(
-                "path: ${{ runner.temp }}/velnor-bootstrap-scratch/velnor-workflow-candidate-upload"
-            ),
+            producer.contains("path: ${{ runner.temp }}/velnor-workflow-candidate-upload"),
             "{producer}"
         );
         assert!(
@@ -3039,6 +3037,10 @@ macro_rules! render_candidate_producer_template {
       upload_step_id: candidate_upload
       artifact_binding_method: static-single-uploader-v1
     steps:
+      - name: Prepare bounded transport scratch
+        id: transport_scratch
+        run: |
+{scratch_setup}
       - name: Check out base-owned producer control source
         uses: {checkout}
         with:
@@ -3055,11 +3057,6 @@ macro_rules! render_candidate_producer_template {
           path: candidate-source
           fetch-depth: 1
           persist-credentials: false
-      - name: Prepare bounded transport scratch
-        id: transport_scratch
-        working-directory: candidate-control
-        run: |
-{scratch_setup}
       - name: Build candidate generator
         id: candidate_build
         working-directory: candidate-control
@@ -3184,16 +3181,14 @@ macro_rules! render_candidate_producer_template {
         uses: {upload}
         with:
           name: {artifact}
-          path: ${{{{ runner.temp }}}}/velnor-bootstrap-scratch/velnor-workflow-candidate-upload
+          path: ${{{{ runner.temp }}}}/velnor-workflow-candidate-upload
           if-no-files-found: error
           retention-days: 1
       - name: Remove candidate build workspace
         if: always()
-        working-directory: candidate-control
-        run: rm -rf -- "${{{{ runner.temp }}}}/velnor-bootstrap-scratch/velnor-workflow-candidate-upload"
+        run: rm -rf -- "${{{{ runner.temp }}}}/velnor-workflow-candidate-upload"
       - name: Remove bounded transport scratch
         if: always()
-        working-directory: candidate-control
         run: |
 {scratch_cleanup}
 "#,

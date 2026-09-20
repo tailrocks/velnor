@@ -146,51 +146,171 @@ pub(crate) const CANDIDATE_UPLOAD_STEP_ID: &str = "candidate_upload";
 pub(crate) const CANDIDATE_ARTIFACT_BINDING_METHOD: &str = "static-single-uploader-v1";
 pub(crate) const CANDIDATE_TRANSPORT_OBJECT_FORMAT: &str = "zip";
 
-/// Establish a real, fixed-size host filesystem before any artifact transport
-/// touches runner storage.  A plain directory plus `df` is not a quota: the
-/// loopback ext4 mount makes the bound explicit, and every capability failure
-/// is fatal.  The setup step exports the mount root for later shell steps.
+/// Establish a real, fixed-size host filesystem before any checkout, action, or
+/// artifact transport touches runner storage.  A plain directory plus `df` is
+/// not a quota: the loopback ext4 mount makes the bound explicit, and binding
+/// the workspace into it puts checkout/action workspace writes in that quota.
+/// Docker daemon storage remains trusted host infrastructure; untrusted bytes
+/// receive no daemon socket or host-store mount and only get the explicit
+/// read-only source plus bounded tmpfs mounts below.
 pub(crate) fn candidate_transport_scratch_setup_script() -> String {
     r#"          set -euo pipefail
           test "${RUNNER_OS:-}" = Linux
-          host_runner_temp="$RUNNER_TEMP"
-          scratch_root="$host_runner_temp/velnor-bootstrap-scratch"
-          scratch_image="$host_runner_temp/velnor-bootstrap-scratch.ext4"
-          if findmnt -rn -T "$scratch_root" >/dev/null 2>&1; then sudo umount "$scratch_root"; fi
-          rm -rf "$scratch_root" "$scratch_image"
+          host_runner_temp="${RUNNER_TEMP:?runner temp is unavailable}"
+          workspace_root="${GITHUB_WORKSPACE:?workspace is unavailable}"
+          test -d "$workspace_root"
+          test "$workspace_root" != "/"
+          host_runner_parent="${host_runner_temp%/*}"
+          test "$host_runner_parent" != "$host_runner_temp"
+          test "$host_runner_parent" != "/"
+          scratch_root="$host_runner_temp"
+          scratch_image="$host_runner_parent/velnor-bootstrap-scratch.ext4"
+          scratch_stage="$host_runner_temp/.velnor-bootstrap-stage"
+          scratch_path_marker="$host_runner_parent/velnor-bootstrap-scratch.path"
+          scratch_image_marker="$host_runner_parent/velnor-bootstrap-scratch.image"
+          scratch_workspace_marker="$host_runner_parent/velnor-bootstrap-scratch.workspace"
+          if [[ -e "$scratch_path_marker" || -e "$scratch_image_marker" || -e "$scratch_workspace_marker" ]]; then
+            test -f "$scratch_path_marker" && test -f "$scratch_image_marker" && test -f "$scratch_workspace_marker"
+            old_scratch_root="$(cat "$scratch_path_marker")"
+            old_scratch_image="$(cat "$scratch_image_marker")"
+            old_workspace_root="$(cat "$scratch_workspace_marker")"
+            test "$old_scratch_root" = "$scratch_root"
+            test "$old_scratch_image" = "$scratch_image"
+            test "$old_workspace_root" = "$workspace_root"
+            if findmnt -rn -T "$old_workspace_root" -o TARGET | grep -Fqx "$old_workspace_root"; then sudo umount "$old_workspace_root"; fi
+            if findmnt -rn -T "$old_scratch_root" -o TARGET | grep -Fqx "$old_scratch_root"; then sudo umount "$old_scratch_root"; fi
+            rm -f -- "$scratch_path_marker" "$scratch_image_marker" "$scratch_workspace_marker"
+            rm -f -- "$old_scratch_image"
+          elif findmnt -rn -T "$scratch_root" -o TARGET | grep -Fqx "$scratch_root"; then
+            echo "::error::runner temp is already mounted without the bootstrap ownership markers" >&2
+            exit 1
+          fi
           command -v fallocate >/dev/null
           command -v mkfs.ext4 >/dev/null
           command -v findmnt >/dev/null
           command -v mount >/dev/null
           command -v sudo >/dev/null
-          mkdir -m 0700 "$scratch_root"
+          command_dir="$(dirname "$GITHUB_ENV")"
+          case "$command_dir" in "$host_runner_temp"/*) ;; *) exit 1 ;; esac
+          command_relative="${command_dir#"$host_runner_temp"/}"
+          scratch_mounted=0
+          stage_mounted=0
+          workspace_mounted=0
+          rollback() {
+            status=$?
+            cleanup_complete=1
+            trap - EXIT
+            if [[ "$workspace_mounted" == 1 ]]; then
+              if ! sudo umount "$workspace_root"; then status=1; cleanup_complete=0; fi
+            fi
+            if [[ "$scratch_mounted" == 1 ]]; then
+              if ! sudo umount "$scratch_root"; then status=1; cleanup_complete=0; fi
+            fi
+            if [[ "$stage_mounted" == 1 ]]; then
+              if ! sudo umount "$scratch_stage"; then status=1; cleanup_complete=0; fi
+            fi
+            if [[ "$cleanup_complete" == 1 ]]; then
+              rm -f -- "$scratch_path_marker" "$scratch_image_marker" "$scratch_workspace_marker"
+              rmdir "$scratch_stage" 2>/dev/null || true
+              rm -f -- "$scratch_image"
+            fi
+            exit "$status"
+          }
+          trap rollback EXIT
+          mkdir -m 0700 "$scratch_stage"
           fallocate -l {scratch_bytes} "$scratch_image"
           mkfs.ext4 -F "$scratch_image" >/dev/null
+          test -f "$scratch_image"
+          sudo mount -o loop,nodev,nosuid,noexec "$scratch_image" "$scratch_stage"
+          stage_mounted=1
+          test "$(findmnt -rn -T "$scratch_stage" -o FSTYPE)" = ext4
+          mkdir -p "$scratch_stage/$command_relative"
+          if [[ -d "$command_dir" ]]; then cp -a -- "$command_dir/." "$scratch_stage/$command_relative/"; fi
+          sudo umount "$scratch_stage"
+          stage_mounted=0
+          rmdir "$scratch_stage"
           sudo mount -o loop,nodev,nosuid,noexec "$scratch_image" "$scratch_root"
+          scratch_mounted=1
           test "$(findmnt -rn -T "$scratch_root" -o FSTYPE)" = ext4
           scratch_capacity="$(df -P -B1 "$scratch_root" | awk 'NR == 2 {print $2}')"
           case "$scratch_capacity" in ''|*[!0-9]*) exit 1 ;; esac
           test "$scratch_capacity" -ge {scratch_bytes}
-          printf '%s\n' "$scratch_root" > "$host_runner_temp/velnor-bootstrap-scratch.path"
-          printf '%s\n' "$scratch_image" > "$host_runner_temp/velnor-bootstrap-scratch.image"
+          sudo mount --bind "$scratch_root" "$workspace_root"
+          workspace_mounted=1
+          test "$(findmnt -rn -T "$workspace_root" -o TARGET)" = "$workspace_root"
+          test "$(findmnt -rn -T "$workspace_root" -o FSTYPE)" = ext4
+          printf '%s\n' "$scratch_root" > "$scratch_path_marker"
+          printf '%s\n' "$scratch_image" > "$scratch_image_marker"
+          printf '%s\n' "$workspace_root" > "$scratch_workspace_marker"
           echo "VELNOR_TRANSPORT_SCRATCH=$scratch_root" >> "$GITHUB_ENV"
+          echo "VELNOR_HOST_RUNNER_TEMP=$host_runner_temp" >> "$GITHUB_ENV"
+          trap - EXIT
 "#
     .replace("{scratch_bytes}", &CANDIDATE_HOST_SCRATCH_BYTES.to_string())
 }
 
-/// Unmount the fixed host filesystem after the last artifact action.  Missing
-/// mount state is an error unless both marker files are already gone, so a
-/// failed setup cannot silently degrade into an unbounded runner directory.
+/// Unmount the fixed host filesystem after the last artifact action.  The
+/// workspace bind is removed first, then the ext4 mount and image.  A job that
+/// never completed setup is a no-op; partial marker state is an error rather
+/// than a silent fallback to an unbounded runner directory.
 pub(crate) fn candidate_transport_scratch_cleanup_script() -> &'static str {
     r#"          set -euo pipefail
-          host_runner_temp="$RUNNER_TEMP"
-          scratch_root="$(cat "$host_runner_temp/velnor-bootstrap-scratch.path")"
-          scratch_image="$(cat "$host_runner_temp/velnor-bootstrap-scratch.image")"
-          test "$scratch_root" = "$host_runner_temp/velnor-bootstrap-scratch"
-          test "$scratch_image" = "$host_runner_temp/velnor-bootstrap-scratch.ext4"
+          host_runner_temp="${VELNOR_HOST_RUNNER_TEMP:-${RUNNER_TEMP:?runner temp is unavailable}}"
+          host_runner_parent="${host_runner_temp%/*}"
+          test "$host_runner_parent" != "$host_runner_temp"
+          scratch_path_marker="$host_runner_parent/velnor-bootstrap-scratch.path"
+          scratch_image_marker="$host_runner_parent/velnor-bootstrap-scratch.image"
+          scratch_workspace_marker="$host_runner_parent/velnor-bootstrap-scratch.workspace"
+          if [[ ! -e "$scratch_path_marker" && ! -e "$scratch_image_marker" && ! -e "$scratch_workspace_marker" ]]; then exit 0; fi
+          test -f "$scratch_path_marker" && test -f "$scratch_image_marker" && test -f "$scratch_workspace_marker"
+          scratch_root="$(cat "$scratch_path_marker")"
+          scratch_image="$(cat "$scratch_image_marker")"
+          workspace_root="$(cat "$scratch_workspace_marker")"
+          test "$scratch_root" = "$host_runner_temp"
+          test "$scratch_image" = "$host_runner_parent/velnor-bootstrap-scratch.ext4"
+          test "$workspace_root" != "/"
+          test "$(findmnt -rn -T "$workspace_root" -o TARGET)" = "$workspace_root"
+          test "$(findmnt -rn -T "$workspace_root" -o FSTYPE)" = ext4
+          sudo umount "$workspace_root"
+          test "$(findmnt -rn -T "$scratch_root" -o TARGET)" = "$scratch_root"
           test "$(findmnt -rn -T "$scratch_root" -o FSTYPE)" = ext4
           sudo umount "$scratch_root"
-          rm -rf "$scratch_root" "$scratch_image" "$host_runner_temp/velnor-bootstrap-scratch.path" "$host_runner_temp/velnor-bootstrap-scratch.image"
+          rm -f -- "$scratch_path_marker" "$scratch_image_marker" "$scratch_workspace_marker"
+          rm -f -- "$scratch_image"
+"#
+}
+
+/// Stream a Git archive into a private partial file and rename only after the
+/// byte bound is satisfied. Shell redirection is deliberately not used for
+/// trusted source archives: it would let an oversized tree consume the
+/// transport filesystem before a later `stat` check could reject it.
+pub(crate) fn candidate_bounded_git_archive_script() -> String {
+    r#"          bounded_git_archive() {
+            local revision="$1"
+            local destination="$2"
+            local partial="${destination}.partial"
+            rm -f -- "$partial" "$destination"
+            if ! GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$revision" -- |
+            python3 -c '
+          import sys
+          destination = sys.argv[1]
+          limit = int(sys.argv[2])
+          total = 0
+          with open(destination, "wb") as output:
+              while True:
+                  chunk = sys.stdin.buffer.read(1024 * 1024)
+                  if not chunk:
+                      break
+                  total += len(chunk)
+                  if total > limit:
+                      raise SystemExit("archive exceeds bounded transport size")
+                  output.write(chunk)
+          ' "$partial" "__MAX_UNCOMPRESSED__"; then
+              rm -f -- "$partial" "$destination"
+              return 1
+            fi
+            mv -- "$partial" "$destination"
+          }
 "#
 }
 pub(crate) const CANDIDATE_MANIFEST_SCHEMA: &str = "velnor.bootstrap-producer-manifest.v1";

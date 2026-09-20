@@ -41,12 +41,52 @@ static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
 struct Generated {
     producer: String,
+    scratch_setup: String,
     acquire: String,
     execute: String,
     artifact_name: String,
     build_image_repository: String,
     build_image_digest: String,
     sandbox_image_repository: String,
+}
+
+impl Generated {
+    fn from_workflows(pr: &str, policy: &str) -> Self {
+        let producer = step_run(pr, "Build candidate generator");
+        let scratch_setup = step_run(pr, "Prepare bounded transport scratch");
+        let acquire = step_run(policy, "Acquire candidate generator product");
+        let execute = step_run(policy, "Execute candidate in pinned sandbox");
+        let artifact_name = step_with(pr, "Upload candidate generator product", "name");
+        let build_image_repository = step_env(
+            pr,
+            "Build candidate generator",
+            "CANDIDATE_BUILD_IMAGE_REPOSITORY",
+        )
+        .unwrap_or_else(|| "ghcr.io/tailrocks/velnor-bootstrap-builder".to_owned());
+        let build_image_digest = step_env(
+            pr,
+            "Build candidate generator",
+            "CANDIDATE_BUILD_IMAGE_DIGEST",
+        )
+        .unwrap_or_default();
+        let sandbox_image_repository = step_env(
+            policy,
+            "Execute candidate in pinned sandbox",
+            "SANDBOX_IMAGE_REPOSITORY",
+        )
+        .unwrap_or_else(|| "ghcr.io/tailrocks/velnor-bootstrap-sandbox".to_owned());
+
+        Self {
+            producer,
+            scratch_setup,
+            acquire,
+            execute,
+            artifact_name,
+            build_image_repository,
+            build_image_digest,
+            sandbox_image_repository,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +108,10 @@ enum FailureCase {
     HeadWorkflowSubstitution,
     ExtraUploader,
     DynamicUploader,
+    OversizedWorkflowArchive,
+    DuplicateWorkflowArchive,
+    TraversalWorkflowArchive,
+    LinkWorkflowArchive,
 }
 
 struct TransportFixture {
@@ -131,28 +175,7 @@ impl TransportFixture {
 
         let pr = read_workflow(&output, "ci-pr.yml");
         let policy = read_workflow(&output, "ci-policy.yml");
-        let producer = step_run(&pr, "Build candidate generator");
-        let acquire = step_run(&policy, "Acquire candidate generator product");
-        let execute = step_run(&policy, "Execute candidate in pinned sandbox");
-        let artifact_name = step_with(&pr, "Upload candidate generator product", "name");
-        let build_image_repository = step_env(
-            &pr,
-            "Build candidate generator",
-            "CANDIDATE_BUILD_IMAGE_REPOSITORY",
-        )
-        .unwrap_or_else(|| "ghcr.io/tailrocks/velnor-bootstrap-builder".to_owned());
-        let build_image_digest = step_env(
-            &pr,
-            "Build candidate generator",
-            "CANDIDATE_BUILD_IMAGE_DIGEST",
-        )
-        .unwrap_or_default();
-        let sandbox_image_repository = step_env(
-            &policy,
-            "Execute candidate in pinned sandbox",
-            "SANDBOX_IMAGE_REPOSITORY",
-        )
-        .unwrap_or_else(|| "ghcr.io/tailrocks/velnor-bootstrap-sandbox".to_owned());
+        let generated = Generated::from_workflows(&pr, &policy);
 
         let bin_dir = root.join("fake-bin");
         fs::create_dir_all(&bin_dir).expect("fake bin");
@@ -171,15 +194,7 @@ impl TransportFixture {
 
         Self {
             root,
-            generated: Generated {
-                producer,
-                acquire,
-                execute,
-                artifact_name,
-                build_image_repository,
-                build_image_digest,
-                sandbox_image_repository,
-            },
+            generated,
             bin_dir,
             archive,
             source_archive,
@@ -301,6 +316,18 @@ impl TransportFixture {
                 | FailureCase::DynamicUploader,
             )
             | None => {}
+            Some(FailureCase::OversizedWorkflowArchive) => {
+                scenario["workflow_archive_fault"] = json!("oversized");
+            }
+            Some(FailureCase::DuplicateWorkflowArchive) => {
+                scenario["workflow_archive_fault"] = json!("duplicate");
+            }
+            Some(FailureCase::TraversalWorkflowArchive) => {
+                scenario["workflow_archive_fault"] = json!("traversal");
+            }
+            Some(FailureCase::LinkWorkflowArchive) => {
+                scenario["workflow_archive_fault"] = json!("link");
+            }
         }
         fs::write(
             &self.scenario,
@@ -548,6 +575,10 @@ fn generated_acquire_rejects_transport_and_identity_faults() {
         FailureCase::HeadWorkflowSubstitution,
         FailureCase::ExtraUploader,
         FailureCase::DynamicUploader,
+        FailureCase::OversizedWorkflowArchive,
+        FailureCase::DuplicateWorkflowArchive,
+        FailureCase::TraversalWorkflowArchive,
+        FailureCase::LinkWorkflowArchive,
     ];
     for case in cases {
         let fixture = TransportFixture::new();
@@ -565,6 +596,27 @@ fn generated_acquire_rejects_transport_and_identity_faults() {
 fn generated_producer_keeps_upload_surface_after_build() {
     let fixture = TransportFixture::new();
     fixture.valid_artifact();
+    assert!(fixture
+        .generated
+        .scratch_setup
+        .contains("sudo mount --bind \"$scratch_root\" \"$workspace_root\""));
+    assert!(fixture
+        .generated
+        .scratch_setup
+        .contains("trap rollback EXIT"));
+    assert!(fixture
+        .generated
+        .scratch_setup
+        .contains("cleanup_complete=1"));
+    assert!(fixture
+        .generated
+        .scratch_setup
+        .contains("VELNOR_HOST_RUNNER_TEMP=$host_runner_temp"));
+    assert!(fixture
+        .generated
+        .producer
+        .contains("DOCKER_CONFIG=\"$RUNNER_TEMP/docker-config\""));
+    assert!(!fixture.generated.producer.contains("/var/run/docker.sock"));
     let output = fixture.run_producer_build();
     assert!(
         output.status.success(),
@@ -972,6 +1024,35 @@ elif command == "show":
         print(scenario["object_base_tree"] if sha == os.environ["BASE_SHA"] else scenario["object_head_tree"])
 elif command == "archive":
     if "--" in rest:
+        workflow_archive_fault = scenario.get("workflow_archive_fault")
+        if workflow_archive_fault:
+            with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as archive:
+                if workflow_archive_fault == "oversized":
+                    member = tarfile.TarInfo(".github/workflows/oversized")
+                    member.type = tarfile.DIRTYPE
+                    member.mode = 0o755
+                    member.size = 536870913
+                    archive.addfile(member)
+                elif workflow_archive_fault == "duplicate":
+                    for _ in range(2):
+                        member = tarfile.TarInfo(".github/workflows/ci-pr.yml")
+                        payload = b"fixture workflow\n"
+                        member.mode = 0o644
+                        member.size = len(payload)
+                        archive.addfile(member, io.BytesIO(payload))
+                elif workflow_archive_fault == "traversal":
+                    member = tarfile.TarInfo("../escape")
+                    payload = b"fixture workflow\n"
+                    member.mode = 0o644
+                    member.size = len(payload)
+                    archive.addfile(member, io.BytesIO(payload))
+                elif workflow_archive_fault == "link":
+                    member = tarfile.TarInfo(".github/workflows/ci-pr.yml")
+                    member.type = tarfile.SYMTYPE
+                    member.linkname = "../../escape"
+                    member.mode = 0o777
+                    archive.addfile(member)
+            raise SystemExit(0)
         contract = os.environ["FIXTURE_HEAD_CONTRACT"] if os.environ["HEAD_SHA"] in rest else os.environ["FIXTURE_CONTRACT"]
         payload = open(contract, "rb").read()
         with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as archive:
