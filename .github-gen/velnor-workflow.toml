@@ -39,7 +39,7 @@ concurrency_group = "velnor-${{ github.repository }}-${{ github.event.pull_reque
 version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust-velnorctl"]
 
 [workflow.selectors.github-hosted]
-runs_on = ["ubuntu-24.04"]
+runs_on = ["ubuntu-26.04"]
 
 # Recovery: repository-scoped macOS/Linux hosts claim Velnor-lane jobs with
 # these labels without joining an org pool.

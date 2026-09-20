@@ -885,7 +885,7 @@ mod tests {
             selectors: std::collections::BTreeMap::from([(
                 crate::s2::provider::ProviderId::GithubHosted,
                 crate::s2::provider::ProviderSelector {
-                    runs_on: vec!["ubuntu-24.04".to_owned()],
+                    runs_on: vec![crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER.to_owned()],
                 },
             )]),
             release_enabled: false,
@@ -1368,7 +1368,10 @@ mod tests {
         for line in runs_on {
             assert_eq!(
                 line.trim(),
-                "runs-on: ubuntu-24.04",
+                format!(
+                    "runs-on: {}",
+                    crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER
+                ),
                 "every job stays on the static runner: {workflow}"
             );
         }

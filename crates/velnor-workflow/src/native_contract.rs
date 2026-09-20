@@ -486,7 +486,8 @@ const MACOS_27_SDKS: &[(AppleSdkFamily, AppleVersion)] = &[
 /// The latest verified GitHub-hosted Apple label. This is intentionally an
 /// exact label, not `macos-latest`: the alias is provider policy, not an
 /// attestation of the image major or architecture.
-pub(crate) const LATEST_HOSTED_APPLE_RUNNER: &str = "xcode-27";
+pub(crate) const LATEST_HOSTED_APPLE_RUNNER: &str =
+    crate::hosted_contract::LATEST_HOSTED_MACOS_ARM64_RUNNER;
 
 /// Historical hosted offers used to prove architecture mismatch behavior in
 /// unit fixtures. They are not part of production label selection: generation

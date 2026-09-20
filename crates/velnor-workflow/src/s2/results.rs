@@ -165,7 +165,7 @@ mod tests {
             (
                 ProviderId::GithubHosted,
                 ProviderSelector {
-                    runs_on: vec!["ubuntu-24.04".to_owned()],
+                    runs_on: vec![crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER.to_owned()],
                 },
             ),
             (
@@ -505,7 +505,7 @@ mod tests {
                 provider: ProviderId::GithubHosted,
                 job_id: "github-hosted-rust-a".to_owned(),
                 display_name: "Rust".to_owned(),
-                runs_on: vec!["ubuntu-24.04".to_owned()],
+                runs_on: vec![crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER.to_owned()],
                 platform: Platform::LinuxX64,
                 trust: TrustReq::UntrustedOk,
                 command_digest: "digest-of-rust-a".to_owned(),

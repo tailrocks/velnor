@@ -189,7 +189,7 @@ mod tests {
     fn owner_test_ir(repository: &str, units: Vec<Unit>) -> WorkflowIr {
         WorkflowIr {
             default_branch: "main".to_owned(),
-            github_runner: "ubuntu-24.04".to_owned(),
+            github_runner: crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER.to_owned(),
             macos_runner: "macos-15".to_owned(),
             velnor_labels: vec!["self-hosted".to_owned()],
             ci_required: true,
@@ -526,7 +526,10 @@ mod tests {
             "{swift_workflow}"
         );
         assert!(
-            !swift_workflow.contains("runs-on: ubuntu-24.04"),
+            !swift_workflow.contains(&format!(
+                "runs-on: {}",
+                crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER
+            )),
             "{swift_workflow}"
         );
         let rust_rendered = must_ok(
@@ -535,7 +538,10 @@ mod tests {
         );
         let rust_workflow = must_some(rust_rendered, "rust kind has members").1;
         assert!(
-            rust_workflow.contains("runs-on: ubuntu-24.04"),
+            rust_workflow.contains(&format!(
+                "runs-on: {}",
+                crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER
+            )),
             "{rust_workflow}"
         );
         assert!(

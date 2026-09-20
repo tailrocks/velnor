@@ -496,10 +496,10 @@ fn release_runner(config: &ProjectConfig) -> (ProviderId, String) {
             .copied()
             .unwrap_or(ProviderId::GithubHosted)
     };
-    let runner = config
-        .selectors
-        .get(&provider)
-        .map_or_else(|| "ubuntu-24.04".to_owned(), selector_runs_on_yaml);
+    let runner = config.selectors.get(&provider).map_or_else(
+        || crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER.to_owned(),
+        selector_runs_on_yaml,
+    );
     (provider, runner)
 }
 
@@ -2768,7 +2768,7 @@ default_dispatch_providers = ["github-hosted"]
 default_branch = "main"
 
 [workflow.selectors.github-hosted]
-runs_on = ["ubuntu-24.04"]
+runs_on = ["ubuntu-26.04"]
 
 [[declare]]
 primitive = "package-release"
@@ -2953,7 +2953,7 @@ concurrency_group = "package-release-preview"
             selectors: BTreeMap::from([(
                 ProviderId::GithubHosted,
                 crate::s2::provider::ProviderSelector {
-                    runs_on: vec!["ubuntu-24.04".to_owned()],
+                    runs_on: vec![crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER.to_owned()],
                 },
             )]),
             release_enabled: false,

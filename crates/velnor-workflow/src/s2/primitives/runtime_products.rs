@@ -69,8 +69,8 @@ pub(crate) fn canonical_runtime_products_side_file(primitive: &str) -> Option<&'
 /// mints a new product tag instead of reusing the stale tag's binaries. Owner
 /// selector labels move freely without affecting the builders, and can never
 /// silently reselect them.
-const LINUX_X64_RUNNER: &str = "ubuntu-24.04";
-const LINUX_ARM64_RUNNER: &str = "ubuntu-24.04-arm";
+const LINUX_X64_RUNNER: &str = crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER;
+const LINUX_ARM64_RUNNER: &str = crate::hosted_contract::LATEST_HOSTED_LINUX_ARM64_RUNNER;
 
 /// The manifest acceptance filter, exactly as the setup action evaluates it:
 /// full closure, a well-formed source revision, release profile, empty
@@ -1290,12 +1290,18 @@ mod tests {
             fs::read_to_string(&mapping_file),
             "read the producer renderer",
         );
-        for runner in [LINUX_X64_RUNNER, LINUX_ARM64_RUNNER] {
-            assert!(
-                mapping_source.contains(&format!("\"{runner}\"")),
-                "the fixed mapping lives in the producer renderer: {runner}"
-            );
-        }
+        assert!(
+            mapping_source.contains(
+                "const LINUX_X64_RUNNER: &str = crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER"
+            ),
+            "the fixed x64 mapping lives in the producer renderer: {mapping_source}"
+        );
+        assert!(
+            mapping_source.contains(
+                "const LINUX_ARM64_RUNNER: &str = crate::hosted_contract::LATEST_HOSTED_LINUX_ARM64_RUNNER"
+            ),
+            "the fixed arm64 mapping lives in the producer renderer: {mapping_source}"
+        );
         assert!(
             mapping_source.contains("runner: MACOS_HOSTED_RUNS_ON"),
             "the macOS builder reuses the hosted Apple runner contract: {mapping_source}"
@@ -1793,8 +1799,16 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "b3fdd2b0433c55249f4664ad67f037587d850235c0a4df8f43d948ca68efe471";
+        const PINNED: &str = "26eedf6068848d716878eecee689623f55a1916f7bedfc7e440aa68383b18ff8";
         let content = owner_content(&["maintenance.yml"]);
+        let latest_arm_matrix = format!(
+            "          - os: Linux\n            arch: ARM64\n            runner: {}",
+            crate::hosted_contract::LATEST_HOSTED_LINUX_ARM64_RUNNER
+        );
+        assert!(
+            content.contains(&latest_arm_matrix),
+            "the pinned producer bytes use the central latest Linux arm64 runner policy: {content}"
+        );
         let latest_apple_matrix = format!(
             "          - os: macOS\n            arch: ARM64\n            runner: {}",
             crate::native_contract::LATEST_HOSTED_APPLE_RUNNER

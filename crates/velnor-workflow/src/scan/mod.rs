@@ -218,7 +218,7 @@ impl From<RepositoryShape> for ProjectConfig {
             default_branch: shape.default_branch,
             runners: shape.runners,
             automatic: crate::inferred_automatic(shape.runners),
-            github_runner: "ubuntu-24.04".to_owned(),
+            github_runner: crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER.to_owned(),
             macos_runner: crate::native_contract::LATEST_HOSTED_APPLE_RUNNER.to_owned(),
             velnor_labels: Vec::new(),
             release_enabled: false,

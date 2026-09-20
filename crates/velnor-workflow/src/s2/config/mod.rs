@@ -3912,8 +3912,12 @@ mod tests {
     }
 
     fn config_for(text: &str) -> RepoGenerationConfig {
+        let text = text.replace(
+            "ubuntu-24.04",
+            crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER,
+        );
         must(
-            toml::from_str::<RepoGenerationConfig>(text),
+            toml::from_str::<RepoGenerationConfig>(&text),
             "parse config under test",
         )
     }
@@ -4037,7 +4041,7 @@ mod tests {
              default_branch = \"trunk\"\n\
              \n\
              [workflow.selectors.github-hosted]\n\
-             runs_on = [\"ubuntu-24.04\"]\n\
+             runs_on = [\"ubuntu-26.04\"]\n\
              \n\
              [workflow.selectors.velnor]\n\
              runs_on = [\"self-hosted\", \"example-runner-label\"]\n\
@@ -5151,7 +5155,7 @@ mod tests {
              timeout_minutes = 90\nartifacts = [\"load-results/\"]\nstatus = \"advisory\"\n\
              env = { MAX_SECONDS = \"300\" }\n\n\
              [workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n\
-             [workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n\
+             [workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-26.04\"]\n\n\
              [workflow.selectors.velnor]\nruns_on = [\"self-hosted\"]\n",
         ));
         assert_eq!(config.check_profiles().len(), 2);

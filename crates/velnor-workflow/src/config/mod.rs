@@ -2009,6 +2009,10 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
             "[workflow] github_runner must not be empty",
         ));
     }
+    if let Some(runner) = workflow.github_runner.as_deref() {
+        crate::hosted_contract::reject_stale_or_alias(runner)
+            .map_err(|error| GeneratorError::usage(format!("[workflow] github_runner: {error}")))?;
+    }
     if workflow.macos_runner.as_deref().is_some_and(str::is_empty) {
         return Err(GeneratorError::usage(
             "[workflow] macos_runner must not be empty",
@@ -4134,7 +4138,7 @@ mod tests {
              repository = \"example/fixture\"\n\
              \n\
              [workflow]\n\
-             github_runner = \"ubuntu-24.04\"\n\
+             github_runner = \"ubuntu-26.04\"\n\
              velnor_labels = [\"self-hosted\", \"example-runner-label\"]\n\
              velnor_runner_group = \"example-runner-group\"\n\
              default_branch = \"trunk\"\n\

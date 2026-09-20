@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use crate::s2::provider::{
-    check_capabilities, eligibility, runs_on_for, Capabilities, ExclusionReason, Platform,
+    check_capabilities, eligibility, runs_on_for_platform, Capabilities, ExclusionReason, Platform,
     ProviderId, ProviderSet, SelectorMap, TrustReq,
 };
 use crate::s2::GeneratorError;
@@ -67,7 +67,7 @@ pub(crate) fn route_unit(
             continue;
         }
         check_capabilities(&requirements.unit_id, requirements.capabilities, *provider)?;
-        let runs_on = runs_on_for(selectors, *provider)?.to_vec();
+        let runs_on = runs_on_for_platform(selectors, *provider, requirements.platform)?;
         decisions.insert(*provider, RouteDecision::Route { runs_on });
     }
     Ok(decisions)
@@ -125,7 +125,7 @@ mod tests {
             (
                 ProviderId::GithubHosted,
                 ProviderSelector {
-                    runs_on: vec!["ubuntu-24.04".to_owned()],
+                    runs_on: vec![crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER.to_owned()],
                 },
             ),
             (
@@ -185,6 +185,27 @@ mod tests {
     }
 
     #[test]
+    fn hosted_linux_arm64_routes_to_the_typed_arm_label() {
+        let unit = UnitRequirements {
+            platform: Platform::LinuxArm64,
+            ..plain_unit()
+        };
+        let decisions = route_unit(&unit, &universe(), &selectors(), true).unwrap();
+        assert_eq!(
+            decisions.get(&ProviderId::GithubHosted),
+            Some(&RouteDecision::Route {
+                runs_on: vec![crate::hosted_contract::LATEST_HOSTED_LINUX_ARM64_RUNNER.to_owned()]
+            })
+        );
+        assert!(matches!(
+            decisions.get(&ProviderId::GithubSelfHosted),
+            Some(RouteDecision::Exclude {
+                reason: ExclusionReason::Platform
+            })
+        ));
+    }
+
+    #[test]
     fn missing_selector_fails_explicitly_and_never_falls_back_to_hosted() {
         let mut partial = selectors();
         partial.remove(&ProviderId::Velnor);
@@ -205,7 +226,7 @@ mod tests {
         let tables = BTreeMap::from([(
             "github".to_owned(),
             ProviderSelector {
-                runs_on: vec!["ubuntu-24.04".to_owned()],
+                runs_on: vec![crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER.to_owned()],
             },
         )]);
         let error = must_fail(

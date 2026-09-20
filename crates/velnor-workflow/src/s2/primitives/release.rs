@@ -1157,11 +1157,11 @@ fn guest_arch_matrix(config: &ProjectConfig) -> String {
         ("aarch64", "aarch64-unknown-linux-gnu"),
     ] {
         // aarch64 guest-agent + aws-lc/openssl need native headers. Crossing
-        // on ubuntu-24.04 with only gcc-aarch64-linux-gnu fails closed
+        // on the x64 hosted image with only gcc-aarch64-linux-gnu fails closed
         // (bits/libc-header-start.h / sys/types.h). The image lane already
         // names GitHub's hosted arm64 label for the same reason.
         let runner = match arch {
-            "aarch64" => "ubuntu-24.04-arm".to_owned(),
+            "aarch64" => crate::hosted_contract::LATEST_HOSTED_LINUX_ARM64_RUNNER.to_owned(),
             _ => hosted_selector_runs_on(config),
         };
         let _ = writeln!(
@@ -1697,7 +1697,7 @@ fn image_platform_matrix(config: &ProjectConfig, targets: &[String]) -> Option<S
             "amd64" => hosted_selector_runs_on(config),
             // GitHub's hosted arm64 label; the release contract names it and
             // no second hosted label exists to configure.
-            _ => "ubuntu-24.04-arm".to_owned(),
+            _ => crate::hosted_contract::LATEST_HOSTED_LINUX_ARM64_RUNNER.to_owned(),
         };
         let _ = writeln!(
             matrix,
@@ -3962,7 +3962,7 @@ fn docker_platform_matrix(config: &ProjectConfig, release: &ReleaseSpec) -> Stri
             "amd64" => hosted_selector_runs_on(config),
             // GitHub's hosted arm64 label; the release contract names it and
             // no second hosted label exists to configure.
-            _ => "ubuntu-24.04-arm".to_owned(),
+            _ => crate::hosted_contract::LATEST_HOSTED_LINUX_ARM64_RUNNER.to_owned(),
         };
         let _ = writeln!(
             matrix,
@@ -5370,15 +5370,15 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "9bac3040c77b0dc9fb9acf31cabb426f20a8da419f86f976d34819b0c1bc5e75",
+                "d02b026471da1d821f89d67a19db7677c9285b93510c39ea6098a105dc49b79c",
             ),
             (
                 "preview.yml",
-                "4c47335678cafe07eeb3dfd7f2aacdc8e57535f80fec2a1a9f8fcea7a1336afc",
+                "70b9e266d4448c63716f48a7646bc4409158f0721f5479cbfca74f98298e43ae",
             ),
             (
                 "maintenance.yml",
-                "3725b27e2f9fe196c7a5694f8e1255feef011f7b88ad52e214c47300809c0328",
+                "4b86313c3da44d82c414dba4ee072bf5f4c96b20f89743cd37db364777342479",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -5491,11 +5491,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "be72b8ec1252d670495df4d184c26b50c08ae0e2847d1191688851d3e5eb9c2c",
+                "08163eab2f40ca642286857f45fa9ef671ef264918eb078349a1c9434457aed4",
             ),
             (
                 "preview.yml",
-                "4922e8b7aded3ec357e776fec51fad0ef4d408db8117801c87ec7dfeefb36368",
+                "6ca4f87ab8878bbc63d5882def00828cb4f34c01cf094238ccabd5d33c7337df",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -5531,7 +5531,10 @@ mod tests {
         let preview = super::render_preview(&config, Some(release));
         let identity = yaml_job(&preview, "identity");
         assert!(
-            identity.contains("runs-on: ubuntu-24.04"),
+            identity.contains(&format!(
+                "runs-on: {}",
+                crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER
+            )),
             "the identity job stays hosted whatever the lane: {identity}"
         );
         let setup = must_some(
@@ -5638,7 +5641,10 @@ mod tests {
                 "hosted-only release-side matrices must use a literal runner: {workflow}"
             );
             assert!(
-                workflow.contains("runs-on: ubuntu-24.04"),
+                workflow.contains(&format!(
+                    "runs-on: {}",
+                    crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER
+                )),
                 "hosted release-side runner must remain configured: {workflow}"
             );
         }
@@ -5964,7 +5970,13 @@ mod tests {
             "{release}"
         );
         let build = yaml_job(release, "build");
-        assert!(build.contains("runs-on: ubuntu-24.04"), "{build}");
+        assert!(
+            build.contains(&format!(
+                "runs-on: {}",
+                crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER
+            )),
+            "{build}"
+        );
         assert!(build.contains("run: mise run desktop-build"), "{build}");
         let sign = yaml_job(release, "sign");
         assert!(sign.contains("needs: [build]"), "{sign}");
@@ -6383,7 +6395,13 @@ mod tests {
         assert!(platform.contains("platform: linux/amd64"), "{platform}");
         assert!(platform.contains("- arch: arm64"), "{platform}");
         assert!(platform.contains("platform: linux/arm64"), "{platform}");
-        assert!(platform.contains("runner: ubuntu-24.04-arm"), "{platform}");
+        assert!(
+            platform.contains(&format!(
+                "runner: {}",
+                crate::hosted_contract::LATEST_HOSTED_LINUX_ARM64_RUNNER
+            )),
+            "{platform}"
+        );
         assert!(
             platform.contains("runs-on: ${{ matrix.runner }}"),
             "{platform}"
@@ -6602,7 +6620,13 @@ mod tests {
         assert!(platform.contains("platform: linux/amd64"), "{platform}");
         assert!(platform.contains("- arch: arm64"), "{platform}");
         assert!(platform.contains("platform: linux/arm64"), "{platform}");
-        assert!(platform.contains("runner: ubuntu-24.04-arm"), "{platform}");
+        assert!(
+            platform.contains(&format!(
+                "runner: {}",
+                crate::hosted_contract::LATEST_HOSTED_LINUX_ARM64_RUNNER
+            )),
+            "{platform}"
+        );
         assert!(
             platform.contains("runs-on: ${{ matrix.runner }}"),
             "{platform}"
@@ -7623,7 +7647,10 @@ mod tests {
                 "guest payload must honor the per-arch runner: {preview}"
             );
             assert!(
-                preview.contains("runner: ubuntu-24.04-arm"),
+                preview.contains(&format!(
+                    "runner: {}",
+                    crate::hosted_contract::LATEST_HOSTED_LINUX_ARM64_RUNNER
+                )),
                 "aarch64 guest payload must build on hosted arm64: {preview}"
             );
             assert!(

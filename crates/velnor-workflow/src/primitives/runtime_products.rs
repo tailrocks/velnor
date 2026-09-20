@@ -74,8 +74,10 @@ pub(crate) fn canonical_runtime_products_side_file(primitive: &str) -> Option<&'
 /// mints a new product tag instead of reusing the stale tag's binaries. Owner
 /// lane labels (`github_runner`, `macos_runner`) move freely without
 /// affecting the builders, and can never silently reselect them.
-const LINUX_X64_RUNNER: &str = "ubuntu-24.04";
-const LINUX_ARM64_RUNNER: &str = "ubuntu-24.04-arm";
+const LINUX_X64_RUNNER: &str =
+    crate::hosted_contract::linux_runner(crate::hosted_contract::HostedLinuxPlatform::X64);
+const LINUX_ARM64_RUNNER: &str =
+    crate::hosted_contract::linux_runner(crate::hosted_contract::HostedLinuxPlatform::Arm64);
 const MACOS_ARM64_RUNNER: &str = crate::s2::MACOS_HOSTED_RUNS_ON;
 
 /// The manifest acceptance filter, exactly as the setup action evaluates it:
@@ -795,7 +797,7 @@ mod tests {
             default_branch: "main".to_owned(),
             runners: RunnerMode::Both,
             automatic: RunnerMode::Both,
-            github_runner: "ubuntu-24.04".to_owned(),
+            github_runner: crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER.to_owned(),
             macos_runner: "xcode-27".to_owned(),
             velnor_labels: vec!["self-hosted".to_owned(), "example-runner".to_owned()],
             release_enabled: false,
@@ -1377,12 +1379,18 @@ mod tests {
             fs::read_to_string(&mapping_file),
             "read the producer renderer",
         );
-        for runner in [LINUX_X64_RUNNER, LINUX_ARM64_RUNNER] {
-            assert!(
-                mapping_source.contains(&format!("\"{runner}\"")),
-                "the fixed mapping lives in the producer renderer: {runner}"
-            );
-        }
+        assert!(
+            mapping_source
+                .contains("const LINUX_X64_RUNNER: &str = crate::hosted_contract::linux_runner")
+                && mapping_source.contains("HostedLinuxPlatform::X64"),
+            "the fixed x64 mapping lives in the producer renderer: {mapping_source}"
+        );
+        assert!(
+            mapping_source
+                .contains("const LINUX_ARM64_RUNNER: &str = crate::hosted_contract::linux_runner")
+                && mapping_source.contains("HostedLinuxPlatform::Arm64"),
+            "the fixed arm64 mapping lives in the producer renderer: {mapping_source}"
+        );
         assert!(
             mapping_source
                 .contains("const MACOS_ARM64_RUNNER: &str = crate::s2::MACOS_HOSTED_RUNS_ON;"),
@@ -2420,7 +2428,7 @@ exit 1
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "aa4b0af1250e0c3c993c088659e6999de64401c7b65e61ad8b003820fcb78bdb";
+        const PINNED: &str = "ebc22580d7512f0406f9475cc406a2450db3402e14567ba46bae6ba7bb93591f";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");

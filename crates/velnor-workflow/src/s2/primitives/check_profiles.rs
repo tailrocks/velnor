@@ -612,7 +612,9 @@ mod tests {
                 (
                     crate::s2::provider::ProviderId::GithubHosted,
                     crate::s2::provider::ProviderSelector {
-                        runs_on: vec!["ubuntu-24.04".to_owned()],
+                        runs_on: vec![
+                            crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER.to_owned()
+                        ],
                     },
                 ),
                 (
@@ -913,7 +915,7 @@ mod tests {
                 profile_runs_on(&config, &hosted),
                 "render the hosted runner"
             ),
-            "ubuntu-24.04"
+            crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER
         );
         let mut apple = profile("apple");
         apple.runner = "macos".to_owned();
@@ -1280,7 +1282,10 @@ branches = ["main"]"#,
             );
         }
         assert!(
-            workflow.contains("    runs-on: ubuntu-24.04"),
+            workflow.contains(&format!(
+                "    runs-on: {}",
+                crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER
+            )),
             "the job stays on its static runner: {workflow}"
         );
     }

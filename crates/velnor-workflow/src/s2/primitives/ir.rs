@@ -18,7 +18,7 @@ use super::{
     CacheBackend, GraphNode, Pins, ProviderJob, UnitContract, DEFAULT_UNIT_TIMEOUT_MINUTES,
     MUTABLE_MOUNT_HOST_DIR,
 };
-use crate::s2::provider::{ProviderId, ProviderSet, SelectorMap, CONTROL_PLANE_PROVIDER};
+use crate::s2::provider::{self, ProviderId, ProviderSet, SelectorMap, CONTROL_PLANE_PROVIDER};
 use crate::s2::reuse::REQUIRED_CHECK;
 use crate::s2::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
@@ -569,7 +569,10 @@ mod tests {
             "{swift_workflow}"
         );
         assert!(
-            !swift_workflow.contains("runs-on: ubuntu-24.04"),
+            !swift_workflow.contains(&format!(
+                "runs-on: {}",
+                crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER
+            )),
             "{swift_workflow}"
         );
         let rust_rendered = must_ok(
@@ -578,7 +581,10 @@ mod tests {
         );
         let rust_workflow = must_some(rust_rendered, "rust kind has members").1;
         assert!(
-            rust_workflow.contains("runs-on: ubuntu-24.04"),
+            rust_workflow.contains(&format!(
+                "runs-on: {}",
+                crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER
+            )),
             "{rust_workflow}"
         );
         assert!(
@@ -4355,24 +4361,26 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             let provider = *provider;
             if provider == ProviderId::GithubHosted {
                 let hosted = self.collapsed_provider_members(members, contracts, provider, None);
-                let (native, portable): (Vec<_>, Vec<_>) = hosted
-                    .into_iter()
-                    .partition(|unit| unit.apple_native.is_some());
-                if !portable.is_empty() {
-                    jobs.push((
-                        provider,
-                        portable,
-                        "verify-github-hosted".to_owned(),
-                        "GitHub · hosted".to_owned(),
-                    ));
+                let mut by_platform: BTreeMap<provider::Platform, Vec<&Unit>> = BTreeMap::new();
+                for unit in hosted {
+                    by_platform.entry(unit.platform).or_default().push(unit);
                 }
-                if !native.is_empty() {
-                    jobs.push((
-                        provider,
-                        native,
-                        "verify-github-hosted-apple".to_owned(),
-                        "GitHub · hosted · Apple".to_owned(),
-                    ));
+                for (platform, units) in by_platform {
+                    let (job_id, display) = match platform {
+                        provider::Platform::LinuxX64 => (
+                            "verify-github-hosted".to_owned(),
+                            "GitHub · hosted".to_owned(),
+                        ),
+                        provider::Platform::LinuxArm64 => (
+                            "verify-github-hosted-linux-arm64".to_owned(),
+                            "GitHub · hosted · linux-arm64".to_owned(),
+                        ),
+                        provider::Platform::MacosArm64 | provider::Platform::MacosX64 => (
+                            "verify-github-hosted-apple".to_owned(),
+                            "GitHub · hosted · Apple".to_owned(),
+                        ),
+                    };
+                    jobs.push((provider, units, job_id, display));
                 }
                 continue;
             }
@@ -4396,12 +4404,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
         }
         for (provider, split, job_id, display) in &jobs {
-            // macOS-platform members only exist on hosted, and need the
-            // GitHub-owned macOS image instead of the Linux selector.
-            let macos = *provider == ProviderId::GithubHosted
-                && split.iter().any(|unit| unit.platform.is_macos());
-            let runs_on = if macos {
-                yaml_scalar(crate::s2::MACOS_HOSTED_RUNS_ON)
+            let runs_on = if *provider == ProviderId::GithubHosted {
+                let platform = split[0].platform;
+                let labels = crate::s2::provider::runs_on_for_platform(
+                    &self.selectors,
+                    *provider,
+                    platform,
+                )?;
+                crate::s2::runs_on_labels_yaml(&labels)
             } else {
                 self.runs_on_yaml(*provider)
             };

@@ -158,6 +158,11 @@ pub(crate) fn parse_selectors(
                     "[workflow.selectors.{key}] runs_on labels must be non-empty and contain no control characters"
                 )));
             }
+            if provider == ProviderId::GithubHosted {
+                crate::hosted_contract::reject_stale_or_alias(label).map_err(|error| {
+                    GeneratorError::usage(format!("[workflow.selectors.{key}] {error}"))
+                })?;
+            }
         }
         selectors.insert(provider, selector.clone());
     }
@@ -216,6 +221,42 @@ pub(crate) fn runs_on_for(
                 "no [workflow.selectors.{provider}] routing for a selected provider"
             ))
         })
+}
+
+/// Resolve a typed unit platform to hosted routing. Linux arm64 is selected by
+/// its platform contract, never by selector ordering; Apple uses the verified
+/// native contract. Custom hosted x64 labels remain supported for repositories
+/// that provide their own runner label, while stale and alias labels fail at
+/// the config boundary above and again here for programmatic callers.
+pub(crate) fn runs_on_for_platform(
+    selectors: &SelectorMap,
+    provider: ProviderId,
+    platform: Platform,
+) -> Result<Vec<String>, GeneratorError> {
+    let labels = runs_on_for(selectors, provider)?;
+    if provider != ProviderId::GithubHosted {
+        return Ok(labels.to_vec());
+    }
+    for label in labels {
+        crate::hosted_contract::reject_stale_or_alias(label).map_err(|error| {
+            GeneratorError::usage(format!(
+                "[workflow.selectors.{}] {error}",
+                provider.as_str()
+            ))
+        })?;
+    }
+    match platform {
+        Platform::LinuxX64 => Ok(labels.to_vec()),
+        Platform::LinuxArm64 => Ok(vec![
+            crate::hosted_contract::LATEST_HOSTED_LINUX_ARM64_RUNNER.to_owned(),
+        ]),
+        Platform::MacosArm64 => Ok(vec![
+            crate::hosted_contract::LATEST_HOSTED_MACOS_ARM64_RUNNER.to_owned(),
+        ]),
+        Platform::MacosX64 => Err(GeneratorError::usage(
+            "github-hosted has no verified latest x86_64 macOS platform; generation must stop instead of selecting an older image or alias",
+        )),
+    }
 }
 
 /// Execution platform, typed. Platforms are never label strings.
@@ -364,7 +405,11 @@ pub(crate) struct ProviderCaps {
 pub(crate) fn provider_caps(provider: ProviderId) -> ProviderCaps {
     match provider {
         ProviderId::GithubHosted => ProviderCaps {
-            platforms: BTreeSet::from([Platform::LinuxX64, Platform::MacosArm64]),
+            platforms: BTreeSet::from([
+                Platform::LinuxX64,
+                Platform::LinuxArm64,
+                Platform::MacosArm64,
+            ]),
             trusted: true,
             caps: Capabilities {
                 docker: true,
@@ -935,6 +980,30 @@ mod tests {
             "missing selector",
         );
         assert!(error.contains("[workflow.selectors.velnor]"), "{error}");
+    }
+
+    #[test]
+    fn hosted_selector_rejects_stale_and_alias_labels() {
+        for label in ["ubuntu-latest", "ubuntu-24.04", "ubuntu-24.04-arm"] {
+            let tables = BTreeMap::from([(
+                "github-hosted".to_owned(),
+                ProviderSelector {
+                    runs_on: vec![label.to_owned()],
+                },
+            )]);
+            let error = must_fail(parse_selectors(&tables), "stale hosted selector");
+            assert!(error.contains("stale or an alias"), "{error}");
+        }
+    }
+
+    #[test]
+    fn hosted_capabilities_include_typed_linux_arm64() {
+        assert!(provider_caps(ProviderId::GithubHosted)
+            .platforms
+            .contains(&Platform::LinuxArm64));
+        assert!(!provider_caps(ProviderId::GithubSelfHosted)
+            .platforms
+            .contains(&Platform::LinuxArm64));
     }
 
     #[test]

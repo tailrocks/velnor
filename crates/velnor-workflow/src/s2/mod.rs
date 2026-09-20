@@ -4975,7 +4975,10 @@ fn control_plane_runner(config: &ProjectConfig) -> String {
     config
         .selectors
         .get(&provider::ProviderId::GithubHosted)
-        .map_or_else(|| yaml_scalar("ubuntu-24.04"), selector_runs_on_yaml)
+        .map_or_else(
+            || yaml_scalar(crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER),
+            selector_runs_on_yaml,
+        )
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -7992,6 +7995,7 @@ impl Drop for Checkout {
 mod tests {
     /// The revision fixtures render with: the scan default, i.e. this build.
     const FIXTURE_REVISION: &str = SOURCE_REVISION;
+    const HOSTED_LINUX_X64: &str = crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER;
     /// The per-crate fanout command the runtime's `test-crates` subcommand
     /// implements; tests use it as the canonical non-cargo-prefixed command.
     const PER_CRATE_TEST_COMMAND: &str =
@@ -8571,7 +8575,7 @@ mod tests {
         let workflow = generated_ci_main(&WorkflowIr::from_config(&config));
         let plan = yaml_job(&workflow, "plan");
         assert!(
-            plan.contains("runs-on: ubuntu-24.04"),
+            plan.contains(&format!("runs-on: {HOSTED_LINUX_X64}")),
             "Planning is control plane, always hosted: {plan}"
         );
         assert!(
@@ -9632,11 +9636,11 @@ mod tests {
         );
         let report = report_unit_runners(&config, &swift);
         assert!(
-            report.contains("github-hosted: ubuntu-24.04"),
+            report.contains(&format!("github-hosted: {HOSTED_LINUX_X64}")),
             "the report names the provider selector: {report}"
         );
         let actionlint = render_actionlint_config(&config);
-        assert!(actionlint.contains("ubuntu-24.04"), "{actionlint}");
+        assert!(actionlint.contains(HOSTED_LINUX_X64), "{actionlint}");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -10039,7 +10043,7 @@ mod tests {
             fs::write(
                 directory.join("velnor-workflow.toml"),
                 format!(
-                    "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-runner\"]\n\n[[units]]\nid = \"{id}\"\ntrust = \"trusted-only\"\n"
+                    "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"{HOSTED_LINUX_X64}\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-runner\"]\n\n[[units]]\nid = \"{id}\"\ntrust = \"trusted-only\"\n"
                 ),
             ),
             "write generation config",
@@ -10073,7 +10077,7 @@ mod tests {
             "gated unit renders the trusted collapsed job: {kind}"
         );
         assert!(
-            kind.contains("runs-on: ubuntu-24.04"),
+            kind.contains(&format!("runs-on: {HOSTED_LINUX_X64}")),
             "hosted job keeps its selector: {kind}"
         );
         assert!(
@@ -10614,7 +10618,7 @@ mod tests {
             fs::write(
                 directory.join("velnor-workflow.toml"),
                 format!(
-                    "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-runner\"]\n\n[[units]]\nid = \"{id}\"\ntrust = \"trusted-only\"\n"
+                    "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"{HOSTED_LINUX_X64}\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-runner\"]\n\n[[units]]\nid = \"{id}\"\ntrust = \"trusted-only\"\n"
                 ),
             ),
             "write generation config",
@@ -12248,7 +12252,7 @@ lockfile = true
         )
         .1;
         assert!(
-            rust_kind.contains("runs-on: ubuntu-24.04"),
+            rust_kind.contains(&format!("runs-on: {HOSTED_LINUX_X64}")),
             "Linux jobs keep the hosted selector: {rust_kind}"
         );
         let _ = fs::remove_dir_all(root);
@@ -12990,7 +12994,7 @@ lockfile = true
             Some(
                 "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [workflow]\nproviders = [\"github-hosted\"]\n\n\
-                 [workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n\
+                 [workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-26.04\"]\n\n\
                  [release]\nenabled = true\nkind = \"rust-binary\"\npackage = \"example\"\n\
                  binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n",
             ),
@@ -13603,7 +13607,7 @@ lockfile = true
                 "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\
                  files = [\"ci-pr.yml\", \"release.yml\", \"ci-release-package-signer.yml\"]\n\n\
-                 [workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n\
+                 [workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-26.04\"]\n\n\
                  [workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-lane\"]\n\n\
                  [release]\nenabled = true\nkind = \"native\"\npackage = \"example\"\n\
                  binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n\
@@ -13701,9 +13705,10 @@ lockfile = true
             "x86_64 guest payload must stay on the configured hosted runner: {guest}"
         );
         assert!(
-            guest.contains(
-                "          - arch: aarch64\n            target: aarch64-unknown-linux-gnu\n            runner: ubuntu-24.04-arm\n"
-            ),
+            guest.contains(&format!(
+                "          - arch: aarch64\n            target: aarch64-unknown-linux-gnu\n            runner: {}\n",
+                crate::hosted_contract::LATEST_HOSTED_LINUX_ARM64_RUNNER
+            )),
             "aarch64 guest payload must use GitHub's hosted arm64 runner: {guest}"
         );
         assert!(
@@ -14776,8 +14781,8 @@ lockfile = true
             assert_maintenance_setup_uses_literal_source_rev(workflow);
             let cache_budget = yaml_job(workflow, "cache-budget");
             assert!(
-                cache_budget.contains("runs-on: ubuntu-24.04"),
-                "Cache retention stays GitHub-hosted ubuntu-24.04: {cache_budget}"
+                cache_budget.contains(&format!("runs-on: {HOSTED_LINUX_X64}")),
+                "Cache retention stays GitHub-hosted {HOSTED_LINUX_X64}: {cache_budget}"
             );
             assert!(workflow.contains(
                 "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
@@ -14890,7 +14895,7 @@ lockfile = true
             .collect();
         assert_eq!(
             plan_runs_on.as_slice(),
-            ["runs-on: ubuntu-24.04"],
+            [format!("runs-on: {HOSTED_LINUX_X64}")],
             "Planning is control plane, always hosted: {plan}"
         );
         assert!(
@@ -14908,7 +14913,8 @@ lockfile = true
             .collect();
         for runs_on in &all_runs_on {
             assert_eq!(
-                *runs_on, "runs-on: ubuntu-24.04",
+                *runs_on,
+                format!("runs-on: {HOSTED_LINUX_X64}"),
                 "only control-plane jobs render runs-on, always hosted: {workflow}"
             );
         }
@@ -14939,7 +14945,7 @@ lockfile = true
         assert!(actionlint.starts_with(GENERATED_HEADER));
         assert!(actionlint.contains("self-hosted-runner:\n  labels:\n"));
         assert!(actionlint.contains("    - self-hosted\n"));
-        assert!(actionlint.contains("    - ubuntu-24.04\n"));
+        assert!(actionlint.contains(&format!("    - {HOSTED_LINUX_X64}\n")));
         assert!(actionlint.contains("    - example-runner-label\n"));
     }
 
@@ -14954,7 +14960,10 @@ lockfile = true
             files.get(&PathBuf::from(".github/actionlint.yaml")),
             "generated actionlint configuration",
         );
-        assert!(actionlint.contains("    - ubuntu-24.04\n"), "{actionlint}");
+        assert!(
+            actionlint.contains(&format!("    - {HOSTED_LINUX_X64}\n")),
+            "{actionlint}"
+        );
         assert!(actionlint.contains("    - self-hosted\n"), "{actionlint}");
         assert!(
             !actionlint.contains("bastion-scale-set"),
@@ -15207,7 +15216,7 @@ lockfile = true
         assert!(root.contains("provider: github-hosted"));
         assert!(root.contains("provider: velnor"));
         assert!(crate_workflow.contains("provider:\n        required: true"));
-        assert!(crate_workflow.contains("runs-on: ubuntu-24.04"));
+        assert!(crate_workflow.contains(&format!("runs-on: {HOSTED_LINUX_X64}")));
         assert!(crate_workflow.contains(&fixture_lane_selector()));
         assert!(crate_workflow.contains("CI_SCOPE: ${{ inputs.scope }}"));
         assert!(crate_workflow.contains("CI_UNIT_ID: ${{ inputs.unit }}"));
@@ -16326,7 +16335,7 @@ lockfile = true
     #[test]
     fn both_runner_policy_entrypoint_stays_on_hosted_runner() {
         let policy = generated_ci_policy(&scanned_fixture(all_providers()));
-        assert!(policy.contains("runs-on: ubuntu-24.04"));
+        assert!(policy.contains(&format!("runs-on: {HOSTED_LINUX_X64}")));
         assert!(policy.contains("fetch-depth: 0"));
         assert!(policy.contains("--ruleset-contexts"));
         assert!(
@@ -16538,7 +16547,7 @@ lockfile = true
         )));
         assert!(github.contains("  github-hosted-"));
         assert!(!github.contains("\n  velnor-"));
-        assert!(github.contains("runs-on: ubuntu-24.04"));
+        assert!(github.contains(&format!("runs-on: {HOSTED_LINUX_X64}")));
         assert!(!github.contains(&fixture_lane_selector()));
 
         let velnor = generated_ci_main(&WorkflowIr::from_config(&scanned_fixture(provider_set([
@@ -16583,7 +16592,7 @@ lockfile = true
         assert!(both.contains("  github-hosted-"));
         assert!(both.contains("  github-self-hosted-"));
         assert!(both.contains("  velnor-"));
-        assert!(both.contains("runs-on: ubuntu-24.04"));
+        assert!(both.contains(&format!("runs-on: {HOSTED_LINUX_X64}")));
         // The cache machinery the aggregate selects lives in the kind
         // reusable, not in the caller jobs.
         let both_rust = must_some(
@@ -16759,8 +16768,8 @@ lockfile = true
         assert!(rendered.contains("  mutate-github-hosted:"));
         let static_selector = format!("    runs-on: [{}]", FIXTURE_LABELS.join(", "));
         assert!(rendered.contains(&static_selector), "{rendered}");
-        assert!(rendered.contains("    runs-on: ubuntu-24.04"));
-        assert!(!rendered.contains("    runs-on: ubuntu-26.04"));
+        assert!(rendered.contains(&format!("    runs-on: {HOSTED_LINUX_X64}")));
+        assert!(!rendered.contains("    runs-on: ubuntu-24.04"));
         assert!(rendered.contains("github.ref == 'refs/heads/main'"));
         assert!(!rendered.contains("runs-on: ${{ inputs.lane"));
         assert!(!rendered.contains("needs.verify."));
@@ -16770,7 +16779,7 @@ lockfile = true
         apt.selectors.insert(
             ProviderId::GithubHosted,
             provider::ProviderSelector {
-                runs_on: vec!["ubuntu-22.04".to_owned()],
+                runs_on: vec!["ubuntu-custom".to_owned()],
             },
         );
         let custom_files = must(generated_files(&apt), "generate");
@@ -16778,8 +16787,8 @@ lockfile = true
             custom_files.get(&PathBuf::from(".github/workflows/package-updater.yml")),
             "generated APT package updater with configured GitHub runner",
         );
-        assert!(custom_runner.contains("    runs-on: ubuntu-22.04"));
-        assert!(!custom_runner.contains("    runs-on: ubuntu-26.04"));
+        assert!(custom_runner.contains("    runs-on: ubuntu-custom"));
+        assert!(!custom_runner.contains(&format!("    runs-on: {HOSTED_LINUX_X64}")));
 
         let static_template = strip_workflow_generator_header(rendered).to_owned();
         apt.workflow_templates
@@ -16789,8 +16798,8 @@ lockfile = true
             normalized_files.get(&PathBuf::from(".github/workflows/package-updater.yml")),
             "normalized static APT package updater",
         );
-        assert!(normalized_runner.contains("    runs-on: ubuntu-22.04"));
-        assert!(!normalized_runner.contains("    runs-on: ubuntu-24.04"));
+        assert!(normalized_runner.contains("    runs-on: ubuntu-custom"));
+        assert!(!normalized_runner.contains(&format!("    runs-on: {HOSTED_LINUX_X64}")));
     }
 
     #[test]
@@ -16812,7 +16821,7 @@ lockfile = true
             generated.get(&PathBuf::from(".github/workflows/package-update.yml")),
             "generated hosted APT package update barrier",
         );
-        assert!(rendered.contains("runs-on: ubuntu-24.04"));
+        assert!(rendered.contains(&format!("runs-on: {HOSTED_LINUX_X64}")));
         assert!(!rendered.contains("runs-on: ${{"));
         assert!(!rendered.contains("example-runner-group"));
         assert_eq!(
@@ -16879,7 +16888,7 @@ lockfile = true
             let workflow = generated_ci_pr(&WorkflowIr::from_config(&scanned_fixture(providers)));
             match selection {
                 "github-hosted" => {
-                    assert!(workflow.contains("runs-on: ubuntu-24.04"));
+                    assert!(workflow.contains(&format!("runs-on: {HOSTED_LINUX_X64}")));
                     assert!(!workflow.contains("self-hosted"));
                     assert!(!workflow.contains("\n  velnor-"));
                     assert!(workflow.contains("  github-hosted-"));
@@ -16894,7 +16903,7 @@ lockfile = true
                     );
                 }
                 "all" => {
-                    assert!(workflow.contains("runs-on: ubuntu-24.04"));
+                    assert!(workflow.contains(&format!("runs-on: {HOSTED_LINUX_X64}")));
                     assert!(workflow.contains("  github-hosted-"));
                     assert!(workflow.contains("  velnor-"));
                 }
@@ -17237,7 +17246,7 @@ lockfile = true
             fs::write(
                 root.join(".github-gen/velnor-workflow.toml"),
                 "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-                 [workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"fixture-runner\"]\n\n\
+                 [workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-26.04\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"fixture-runner\"]\n\n\
                  [cache.github]\nbudget_bytes = 8589934592\n\
                  [cache.velnor]\nbudget_bytes = 53687091200\n",
             ),
@@ -20102,7 +20111,7 @@ lockfile = true
 
         assert!(pr.contains("pull_request:"));
         assert!(!pr.contains("merge_group:"));
-        assert!(pr.contains("runs-on: ubuntu-24.04"));
+        assert!(pr.contains(&format!("runs-on: {HOSTED_LINUX_X64}")));
         assert!(pr.contains("  github-"));
         assert!(pr.contains("  velnor-"));
         assert!(main.contains("push:"));
@@ -20386,6 +20395,10 @@ lockfile = true
         if let Some(config) = config {
             let directory = root.join(".github-gen");
             must(fs::create_dir_all(&directory), "create config directory");
+            let config = config.replace(
+                "ubuntu-24.04",
+                crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER,
+            );
             must(
                 fs::write(directory.join("velnor-workflow.toml"), config),
                 "write generation config",

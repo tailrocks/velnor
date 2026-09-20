@@ -243,7 +243,7 @@ pub(crate) fn default_selectors() -> crate::s2::provider::SelectorMap {
         (
             ProviderId::GithubHosted,
             ProviderSelector {
-                runs_on: vec!["ubuntu-24.04".to_owned()],
+                runs_on: vec![crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER.to_owned()],
             },
         ),
         (

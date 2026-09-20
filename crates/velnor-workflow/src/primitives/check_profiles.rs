@@ -685,8 +685,8 @@ mod tests {
             default_branch: "main".to_owned(),
             runners: crate::RunnerMode::Both,
             automatic: crate::RunnerMode::Both,
-            github_runner: "ubuntu-24.04".to_owned(),
-            macos_runner: "macos-15".to_owned(),
+            github_runner: crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER.to_owned(),
+            macos_runner: crate::native_contract::LATEST_HOSTED_APPLE_RUNNER.to_owned(),
             velnor_labels: vec!["self-hosted".to_owned(), "example-lane".to_owned()],
             release_enabled: false,
             release_reason: String::new(),
@@ -982,13 +982,13 @@ mod tests {
         let hosted = profile("hosted");
         assert_eq!(
             must(profile_runs_on(&config, &hosted), "render the hosted lane"),
-            "ubuntu-24.04"
+            crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER
         );
         let mut apple = profile("apple");
         apple.runner = "macos".to_owned();
         assert_eq!(
             must(profile_runs_on(&config, &apple), "render the Apple lane"),
-            "macos-15"
+            crate::native_contract::LATEST_HOSTED_APPLE_RUNNER
         );
         let mut unknown = profile("unknown");
         unknown.runner = "planetary".to_owned();
@@ -1468,7 +1468,10 @@ branches = ["main"]"#,
             );
         }
         assert!(
-            workflow.contains("    runs-on: ubuntu-24.04"),
+            workflow.contains(&format!(
+                "    runs-on: {}",
+                crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER
+            )),
             "the job stays on its static lane: {workflow}"
         );
     }
@@ -1560,7 +1563,10 @@ branches = ["main"]"#,
             "the dispatchable lane sets the default: {workflow}"
         );
         assert!(
-            workflow.contains("    runs-on: macos-15"),
+            workflow.contains(&format!(
+                "    runs-on: {}",
+                crate::native_contract::LATEST_HOSTED_APPLE_RUNNER
+            )),
             "the macos job keeps its static label: {workflow}"
         );
         assert_eq!(

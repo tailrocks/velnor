@@ -43,6 +43,17 @@ fn write(path: &Path, content: &str) {
     if let Some(parent) = path.parent() {
         must(fs::create_dir_all(parent), "create parent directory");
     }
+    let content = if path
+        .file_name()
+        .is_some_and(|name| name == "velnor-workflow.toml")
+    {
+        content.replace(
+            "ubuntu-24.04",
+            crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER,
+        )
+    } else {
+        content.to_owned()
+    };
     must(fs::write(path, content), "write file");
 }
 

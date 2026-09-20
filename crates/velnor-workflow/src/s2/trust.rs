@@ -220,7 +220,7 @@ mod tests {
             (
                 ProviderId::GithubHosted,
                 ProviderSelector {
-                    runs_on: vec!["ubuntu-24.04".to_owned()],
+                    runs_on: vec![crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER.to_owned()],
                 },
             ),
             (
@@ -414,8 +414,14 @@ mod tests {
             "{error}"
         );
         // The hosted label still routes within the verdict.
-        let routed =
-            check_label_spoof(&[String::from("ubuntu-24.04")], &selectors(), &fork).unwrap();
+        let routed = check_label_spoof(
+            &[String::from(
+                crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER,
+            )],
+            &selectors(),
+            &fork,
+        )
+        .unwrap();
         assert_eq!(routed, hosted_only());
     }
 
@@ -438,8 +444,14 @@ mod tests {
             },
             true,
         );
-        let routed =
-            check_label_spoof(&[String::from("ubuntu-24.04")], &selectors(), &fork).unwrap();
+        let routed = check_label_spoof(
+            &[String::from(
+                crate::hosted_contract::LATEST_HOSTED_LINUX_X64_RUNNER,
+            )],
+            &selectors(),
+            &fork,
+        )
+        .unwrap();
         assert!(routed
             .iter()
             .all(|provider| fork.providers.contains(provider)));
