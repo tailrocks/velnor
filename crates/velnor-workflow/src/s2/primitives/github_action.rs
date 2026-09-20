@@ -80,16 +80,7 @@ impl Primitive for GithubActionFixtures {
                         "read github-action-fixtures consumer workflow `{fixture}`: {error}"
                     ))
                 })?;
-                if !consumer_uses_marker(&source) {
-                    return Err(GeneratorError::usage(format!(
-                        "github-action-fixtures consumer workflow `{fixture}` must contain `uses: {ACTION_PATH_MARKER}`"
-                    )));
-                }
-                if !consumer_uses_marker_named(&source, CHECKOUT_ACTION_MARKER) {
-                    return Err(GeneratorError::usage(format!(
-                        "github-action-fixtures consumer workflow `{fixture}` must contain a pinned checkout marker `{CHECKOUT_ACTION_MARKER}`"
-                    )));
-                }
+                validate_consumer_workflow_source(&source, &fixture)?;
                 let action_path = if unit.root == "." {
                     "./".to_owned()
                 } else {
@@ -113,7 +104,12 @@ impl Primitive for GithubActionFixtures {
                         "parse github-action-fixtures consumer workflow `{fixture}`: {error}"
                     ))
                 })?;
-                validate_consumer_workflow_graph(&rendered, ctx.pins.checkout, &fixture)?;
+                validate_consumer_workflow_graph(
+                    &rendered,
+                    ctx.pins.checkout,
+                    &action_path,
+                    &fixture,
+                )?;
                 let output = consumer_workflow_path(&unit.id, &fixture);
                 if files.insert(output.clone(), rendered).is_some() {
                     return Err(GeneratorError::usage(format!(
@@ -131,45 +127,176 @@ impl Primitive for GithubActionFixtures {
     }
 }
 
-fn consumer_uses_marker(source: &str) -> bool {
-    consumer_uses_marker_named(source, ACTION_PATH_MARKER)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConsumerMarkerScope {
+    Root,
+    Jobs,
+    Job,
+    Steps,
+    Step,
+    Uses,
+    Other,
 }
 
-fn consumer_uses_marker_named(source: &str, marker: &str) -> bool {
-    let Ok(document) = serde_yaml::from_str::<serde_yaml::Value>(source) else {
-        return false;
-    };
-    let mut found = false;
-    visit_consumer_marker(&document, marker, false, &mut found) && found
+#[derive(Default)]
+struct ConsumerMarkerCounts {
+    action: usize,
+    checkout: usize,
 }
 
-fn visit_consumer_marker(
-    value: &serde_yaml::Value,
-    marker: &str,
-    is_uses_value: bool,
-    found: &mut bool,
-) -> bool {
-    match value {
-        serde_yaml::Value::Mapping(mapping) => mapping.iter().all(|(key, value)| {
-            visit_consumer_marker(value, marker, key.as_str() == "uses", found)
-        }),
-        serde_yaml::Value::Sequence(sequence) => sequence
-            .iter()
-            .all(|value| visit_consumer_marker(value, marker, false, found)),
-        serde_yaml::Value::String(value) if value.contains(marker) => {
-            if !is_uses_value || value != marker {
-                return false;
+fn validate_consumer_workflow_source(source: &str, fixture: &str) -> Result<(), GeneratorError> {
+    let document = serde_yaml::from_str::<serde_yaml::Value>(source).map_err(|error| {
+        GeneratorError::usage(format!(
+            "parse github-action-fixtures consumer workflow `{fixture}`: {error}"
+        ))
+    })?;
+    let jobs = document
+        .get("jobs")
+        .and_then(serde_yaml::Value::as_mapping)
+        .ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "github-action-fixtures consumer workflow `{fixture}` must declare jobs"
+            ))
+        })?;
+    let mut markers = ConsumerMarkerCounts::default();
+    visit_consumer_markers(&document, ConsumerMarkerScope::Root, &mut markers, fixture)?;
+
+    let mut action_jobs = 0;
+    for (job_name, job) in jobs {
+        let steps = job
+            .get("steps")
+            .and_then(serde_yaml::Value::as_sequence)
+            .ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "github-action-fixtures consumer workflow `{fixture}` job `{job_name:?}` must declare steps"
+                ))
+            })?;
+        let mut action_step = None;
+        let mut checkout_step = None;
+        for (index, step) in steps.iter().enumerate() {
+            let Some(uses) = step.get("uses").and_then(serde_yaml::Value::as_str) else {
+                continue;
+            };
+            if uses == ACTION_PATH_MARKER {
+                if action_step.replace(index).is_some() {
+                    return Err(GeneratorError::usage(format!(
+                        "github-action-fixtures consumer workflow `{fixture}` job `{job_name:?}` must contain one action marker step"
+                    )));
+                }
+                if checkout_step.is_none() {
+                    return Err(GeneratorError::usage(format!(
+                        "github-action-fixtures consumer workflow `{fixture}` job `{job_name:?}` action marker must follow its checkout marker"
+                    )));
+                }
+            } else if uses == CHECKOUT_ACTION_MARKER {
+                if checkout_step.replace(index).is_some() {
+                    return Err(GeneratorError::usage(format!(
+                        "github-action-fixtures consumer workflow `{fixture}` job `{job_name:?}` must contain one checkout marker step"
+                    )));
+                }
+            } else if uses.starts_with("./") {
+                return Err(GeneratorError::usage(format!(
+                    "github-action-fixtures consumer workflow `{fixture}` job `{job_name:?}` local action at step {index} must use the action marker"
+                )));
             }
-            *found = true;
-            true
         }
-        _ => true,
+        match (action_step, checkout_step) {
+            (Some(_), Some(_)) => action_jobs += 1,
+            (Some(_), None) => {
+                return Err(GeneratorError::usage(format!(
+                    "github-action-fixtures consumer workflow `{fixture}` job `{job_name:?}` action marker must have a checkout marker"
+                )));
+            }
+            (None, Some(_)) => {
+                return Err(GeneratorError::usage(format!(
+                    "github-action-fixtures consumer workflow `{fixture}` job `{job_name:?}` checkout marker must bind to an action marker"
+                )));
+            }
+            (None, None) => {}
+        }
     }
+    if markers.action == 0 || action_jobs == 0 {
+        return Err(GeneratorError::usage(format!(
+            "github-action-fixtures consumer workflow `{fixture}` must contain an action marker in `jobs.*.steps[*].uses`"
+        )));
+    }
+    if markers.checkout == 0 {
+        return Err(GeneratorError::usage(format!(
+            "github-action-fixtures consumer workflow `{fixture}` must contain a pinned checkout marker in `jobs.*.steps[*].uses`"
+        )));
+    }
+    if markers.action != action_jobs || markers.checkout != action_jobs {
+        return Err(GeneratorError::usage(format!(
+            "github-action-fixtures consumer workflow `{fixture}` must bind each action marker to one checkout marker in the same job"
+        )));
+    }
+    Ok(())
+}
+
+fn visit_consumer_markers(
+    value: &serde_yaml::Value,
+    scope: ConsumerMarkerScope,
+    counts: &mut ConsumerMarkerCounts,
+    fixture: &str,
+) -> Result<(), GeneratorError> {
+    match value {
+        serde_yaml::Value::Mapping(mapping) => {
+            for (key, value) in mapping {
+                if key.as_str().contains(ACTION_PATH_MARKER)
+                    || key.as_str().contains(CHECKOUT_ACTION_MARKER)
+                {
+                    return Err(GeneratorError::usage(format!(
+                        "github-action-fixtures consumer workflow `{fixture}` markers must be exact `uses` scalars under `jobs.*.steps`"
+                    )));
+                }
+                let child_scope = match (scope, key.as_str()) {
+                    (ConsumerMarkerScope::Root, "jobs") => ConsumerMarkerScope::Jobs,
+                    (ConsumerMarkerScope::Jobs, _) => ConsumerMarkerScope::Job,
+                    (ConsumerMarkerScope::Job, "steps") => ConsumerMarkerScope::Steps,
+                    (ConsumerMarkerScope::Step, "uses") => ConsumerMarkerScope::Uses,
+                    _ => ConsumerMarkerScope::Other,
+                };
+                visit_consumer_markers(value, child_scope, counts, fixture)?;
+            }
+        }
+        serde_yaml::Value::Sequence(sequence) => {
+            let child_scope = match scope {
+                ConsumerMarkerScope::Jobs => ConsumerMarkerScope::Job,
+                ConsumerMarkerScope::Steps => ConsumerMarkerScope::Step,
+                _ => ConsumerMarkerScope::Other,
+            };
+            for value in sequence {
+                visit_consumer_markers(value, child_scope, counts, fixture)?;
+            }
+        }
+        serde_yaml::Value::String(value) => {
+            let has_action_marker = value.contains(ACTION_PATH_MARKER);
+            let has_checkout_marker = value.contains(CHECKOUT_ACTION_MARKER);
+            if !has_action_marker && !has_checkout_marker {
+                return Ok(());
+            }
+            if scope != ConsumerMarkerScope::Uses
+                || (value != ACTION_PATH_MARKER && value != CHECKOUT_ACTION_MARKER)
+            {
+                return Err(GeneratorError::usage(format!(
+                    "github-action-fixtures consumer workflow `{fixture}` markers must be exact `uses` scalars under `jobs.*.steps`"
+                )));
+            }
+            if value == ACTION_PATH_MARKER {
+                counts.action += 1;
+            } else {
+                counts.checkout += 1;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn validate_consumer_workflow_graph(
     source: &str,
     checkout_reference: &str,
+    action_path: &str,
     fixture: &str,
 ) -> Result<(), GeneratorError> {
     let document = serde_yaml::from_str::<serde_yaml::Value>(source).map_err(|error| {
@@ -221,6 +348,11 @@ fn validate_consumer_workflow_graph(
                 if !checkout_seen {
                     return Err(GeneratorError::usage(format!(
                         "github-action-fixtures consumer workflow `{fixture}` job `{job_name:?}` local action at step {index} must follow pinned checkout `{checkout_reference}`"
+                    )));
+                }
+                if uses != action_path {
+                    return Err(GeneratorError::usage(format!(
+                        "github-action-fixtures consumer workflow `{fixture}` job `{job_name:?}` local action at step {index} must invoke the scanned action `{action_path}`"
                     )));
                 }
                 local_action_seen = true;
@@ -410,21 +542,35 @@ mod tests {
 
     #[test]
     fn generated_consumer_graph_requires_automatic_triggers_and_checkout_order() {
-        let embedded_action_marker = "on:\n  pull_request:\n  push:\njobs:\n  consume:\n    steps:\n      - uses: octo/__VELNOR_ACTION_PATH__\n";
+        let embedded_action_marker = "jobs:\n  consume:\n    steps:\n      - uses: __VELNOR_CHECKOUT_ACTION__\n      - uses: octo/__VELNOR_ACTION_PATH__\n";
         assert!(
-            !super::consumer_uses_marker(embedded_action_marker),
+            super::validate_consumer_workflow_source(embedded_action_marker, "fixture.yml")
+                .is_err(),
             "an embedded action marker is not a local consumer uses scalar"
         );
-        let exact_action_marker = "on:\n  pull_request:\n  push:\njobs:\n  consume:\n    steps:\n      - uses: __VELNOR_ACTION_PATH__\n";
+        let exact_action_marker = "jobs:\n  consume:\n    steps:\n      - uses: __VELNOR_CHECKOUT_ACTION__\n      - uses: __VELNOR_ACTION_PATH__\n";
         assert!(
-            super::consumer_uses_marker(exact_action_marker),
+            super::validate_consumer_workflow_source(exact_action_marker, "fixture.yml").is_ok(),
             "the exact action marker is accepted in a uses scalar"
+        );
+        let duplicate_action_marker = "jobs:\n  consume:\n    steps:\n      - uses: __VELNOR_CHECKOUT_ACTION__\n      - uses: __VELNOR_ACTION_PATH__\n      - uses: __VELNOR_ACTION_PATH__\n";
+        assert!(
+            super::validate_consumer_workflow_source(duplicate_action_marker, "fixture.yml")
+                .is_err(),
+            "a job cannot bind multiple action marker steps"
+        );
+        let unrelated_source_action = "jobs:\n  consume:\n    steps:\n      - uses: __VELNOR_CHECKOUT_ACTION__\n      - uses: __VELNOR_ACTION_PATH__\n      - uses: ./unrelated\n";
+        assert!(
+            super::validate_consumer_workflow_source(unrelated_source_action, "fixture.yml")
+                .is_err(),
+            "a job cannot contain an unrelated local action"
         );
 
         let missing_trigger = "on: workflow_dispatch\njobs:\n  consume:\n    steps:\n      - uses: actions/checkout@deadbeef\n      - uses: ./\n";
         let error = super::validate_consumer_workflow_graph(
             missing_trigger,
             "actions/checkout@deadbeef",
+            "./",
             "fixture.yml",
         )
         .err()
@@ -435,6 +581,7 @@ mod tests {
         let error = super::validate_consumer_workflow_graph(
             checkout_after_local,
             "actions/checkout@deadbeef",
+            "./",
             "fixture.yml",
         )
         .err()
@@ -448,12 +595,27 @@ mod tests {
         let error = super::validate_consumer_workflow_graph(
             checkout_only,
             "actions/checkout@deadbeef",
+            "./",
             "fixture.yml",
         )
         .err()
         .unwrap_or_else(|| panic!("consumer graphs must invoke a local action"));
         assert!(
             error.to_string().contains("invoke a local action"),
+            "{error}"
+        );
+
+        let unrelated_after_checkout = "on:\n  pull_request:\n  push:\njobs:\n  consume:\n    steps:\n      - uses: actions/checkout@deadbeef\n      - uses: ./unrelated\n";
+        let error = super::validate_consumer_workflow_graph(
+            unrelated_after_checkout,
+            "actions/checkout@deadbeef",
+            "./",
+            "fixture.yml",
+        )
+        .err()
+        .unwrap_or_else(|| panic!("unrelated local actions must be rejected"));
+        assert!(
+            error.to_string().contains("invoke the scanned action"),
             "{error}"
         );
     }
@@ -583,8 +745,29 @@ mod tests {
             "embedded action markers must not generate a consumer workflow"
         );
         must(
-            fs::write(&workflow_path, valid_workflow),
+            fs::write(&workflow_path, &valid_workflow),
             "restore valid action marker fixture",
+        );
+        let misplaced_marker_workflow = valid_workflow
+            .replacen("uses: __VELNOR_ACTION_PATH__", "uses: ./unrelated", 1)
+            .replacen(
+                "name: generic action consumer\n",
+                "name: generic action consumer\nuses: __VELNOR_ACTION_PATH__\n",
+                1,
+            );
+        assert_ne!(misplaced_marker_workflow, valid_workflow);
+        must(
+            fs::write(&workflow_path, misplaced_marker_workflow),
+            "write misplaced action marker fixture",
+        );
+        let misplaced_render = super::GithubActionFixtures.render(&ctx, &args);
+        assert!(
+            misplaced_render.is_err(),
+            "markers outside job steps and unrelated local actions must not generate a consumer workflow"
+        );
+        must(
+            fs::write(&workflow_path, &valid_workflow),
+            "restore valid action marker fixture after misplaced-marker test",
         );
         let rendered = must(
             super::GithubActionFixtures.render(&ctx, &args),
