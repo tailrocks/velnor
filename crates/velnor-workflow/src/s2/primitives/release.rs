@@ -7813,6 +7813,10 @@ mod tests {
             ),
             "stable product assembly must carry the admitted provider release id: {publish}"
         );
+        assert!(
+            !publish.contains("gh api -i \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\""),
+            "stable product publisher must not resolve or create a competing provider release: {publish}"
+        );
         assert!(publish.contains("release-attestation.json"), "{publish}");
         assert!(
             publish.contains(
@@ -10940,6 +10944,8 @@ JSON
                 && publish.contains("velnor.github-release-attestation/v1")
                 && publish.contains("Verify native signer records and attestations")
                 && !publish.contains("steps.provider")
+                && !publish.contains("Create or inspect immutable preview provider release")
+                && !publish.contains("gh api -i")
                 && !publish.contains("Attest canonical native product subjects"),
             "preview must consume the typed signer records without a competing provider/self-attestation path: {publish}"
         );
