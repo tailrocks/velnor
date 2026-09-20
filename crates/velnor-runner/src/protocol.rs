@@ -11381,6 +11381,10 @@ mod tests {
             "canceled ",
         ] {
             assert_eq!(TaskResult::parse_wire(raw), None, "{raw}");
+            assert!(
+                serde_json::from_value::<TaskResult>(serde_json::json!(raw)).is_err(),
+                "serde must reject what parse_wire rejects: {raw}"
+            );
         }
     }
 
