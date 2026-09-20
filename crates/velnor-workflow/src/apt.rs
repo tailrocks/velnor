@@ -8184,6 +8184,32 @@ mod tests {
         "/tests/fixtures/native-product/product-manifest.json.sha256"
     ));
 
+    /// Fixture producers must source the repository identity from an
+    /// independently captured provider response, never from the candidate
+    /// manifest or release attestation. Production discovery performs the
+    /// equivalent fresh API read in `acquire_provider_release`.
+    fn captured_provider_repository_id() -> u64 {
+        let repository = must(
+            serde_json::from_slice::<serde_json::Value>(CAPTURED_REPOSITORY),
+            "parse captured repository response for selection identity",
+        );
+        assert_eq!(
+            must(
+                field(&repository, "full_name"),
+                "read captured repository name"
+            ),
+            FIXTURE_SOURCE,
+            "captured provider response must describe the fixture source"
+        );
+        must(
+            repository
+                .get("id")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| GeneratorError::usage("captured repository ID is not numeric")),
+            "read captured repository ID",
+        )
+    }
+
     #[expect(
         clippy::panic,
         reason = "tests need setup failures to name their root cause"
@@ -8649,7 +8675,7 @@ mod tests {
             "manifest_sha256": manifest_sha,
             "package": package,
             "product_id": "velnor",
-            "provider_repository_id": 1255367013,
+            "provider_repository_id": captured_provider_repository_id(),
             "provider_release_id": 123,
             "published_at": "2026-09-20T00:00:00Z",
             "release_assets": release_assets,
@@ -8919,7 +8945,7 @@ mod tests {
             "manifest_sha256": manifest_sha256,
             "package": FIXTURE_PACKAGE,
             "product_id": "velnor",
-            "provider_repository_id": 1255367013,
+            "provider_repository_id": captured_provider_repository_id(),
             "provider_release_id": 123,
             "published_at": "2026-09-20T00:00:00Z",
             "release_assets": release_assets,
@@ -9511,7 +9537,7 @@ mod tests {
             "manifest_sha256": manifest_sha256,
             "package": "velnor-runner",
             "product_id": product_id,
-            "provider_repository_id": 1255367013,
+            "provider_repository_id": captured_provider_repository_id(),
             "provider_release_id": 12345,
             "published_at": "2026-09-20T00:00:00Z",
             "release_assets": release_assets,
