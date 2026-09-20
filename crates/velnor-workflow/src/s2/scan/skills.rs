@@ -45,7 +45,7 @@ impl SkillsCheck {
     fn command(self, bun: &str) -> String {
         match self {
             Self::GeneratedDocs => format!(
-                "set -o pipefail && test \"$(bun --version)\" = \"{bun}\" && tmp=$(mktemp -d) && trap 'rm -rf \"$tmp\"' EXIT && repo=$(basename \"$PWD\") && mkdir \"$tmp/$repo\" && git archive --format=tar HEAD | tar -x -C \"$tmp/$repo\" && cp -R \"$tmp/$repo/docs\" \"$tmp/docs.expected\" && bun \"$tmp/$repo/scripts/generate-docs.ts\" && diff -ru \"$tmp/docs.expected\" \"$tmp/$repo/docs\""
+                "set -o pipefail && test \"$(bun --version)\" = \"{bun}\" && tmp=$(mktemp -d) && trap 'rm -rf \"$tmp\"' EXIT && repo=$(basename \"$PWD\") && mkdir \"$tmp/$repo\" && git archive --format=tar HEAD | tar -x -C \"$tmp/$repo\" && cp -R \"$tmp/$repo/docs\" \"$tmp/docs.expected\" && cd \"$tmp/$repo\" && bun scripts/generate-docs.ts && diff -ru \"$tmp/docs.expected\" \"$tmp/$repo/docs\""
             ),
             Self::HelperSyntax => format!(
                 "set -o pipefail && test \"$(bun --version)\" = \"{bun}\" && tmp=$(mktemp -d) && trap 'rm -rf \"$tmp\"' EXIT && find scripts -type f -iname '*.ts' -not -path '{HELPER_TEMPLATE_GLOB}' -print0 | xargs -0 bun build --target=bun --no-bundle --outdir \"$tmp\""
@@ -240,7 +240,6 @@ fn has_generated_docs_surface(context: &ScanContext<'_>) -> bool {
     context.file_set.contains(DOCS_INDEX)
         || context.file_set.contains(DOCS_README)
         || context.file_set.contains("scripts/generate-docs.ts")
-        || context.files.iter().any(|file| file.starts_with("docs/"))
 }
 
 fn has_helper_sources(context: &ScanContext<'_>, template_files: &BTreeSet<String>) -> bool {
@@ -1810,6 +1809,8 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
         fixture
             .files
             .retain(|file| !file.starts_with("docs/") && file != "scripts/generate-docs.ts");
+        fixture.files.push("docs/contributing.md".to_owned());
+        fixture.write("docs/contributing.md", "# Contributing\n");
         let (_, shape) = fixture
             .run_detect()
             .unwrap_or_else(|error| panic!("docs-free plugin must detect: {error}"));
@@ -1908,6 +1909,9 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
                 && command.contains("test \"$(bun --version)\" = \"1.2.3\"")
                 && command.contains("-iname '*.ts'")
                 && command.contains("-not -path '*/templates/*'")
+        }));
+        assert!(shape.units[0].pr_commands.iter().any(|command| {
+            command.contains("cd \"$tmp/$repo\" && bun scripts/generate-docs.ts")
         }));
     }
 
