@@ -1,0 +1,1288 @@
+diff --git a/crates/velnor-workflow/src/lib.rs b/crates/velnor-workflow/src/lib.rs
+index 5a341523..5560fa55 100644
+--- a/crates/velnor-workflow/src/lib.rs
++++ b/crates/velnor-workflow/src/lib.rs
+@@ -35,6 +35,7 @@ mod runners;
+ pub(crate) mod runtime;
+ pub(crate) mod s2;
+ mod scan;
++mod step_block;
+ mod template_memory;
+ #[cfg(feature = "tui")]
+ mod tui;
+diff --git a/crates/velnor-workflow/src/primitives/ir.rs b/crates/velnor-workflow/src/primitives/ir.rs
+index 4d52605c..01eff85f 100644
+--- a/crates/velnor-workflow/src/primitives/ir.rs
++++ b/crates/velnor-workflow/src/primitives/ir.rs
+@@ -18,6 +18,7 @@ use super::{
+     MUTABLE_MOUNT_HOST_DIR,
+ };
+ use crate::reuse::REQUIRED_CHECK;
++use crate::step_block::prefix_step_block_with_if;
+ use crate::{
+     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
+     hosted_cargo_bin_toolchain_save, hosted_cargo_bin_toolchain_verify, hosted_mold_setup,
+@@ -31,6 +32,12 @@ use crate::{
+     VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
+ };
+ 
++fn compose_step_block(block: &str, guard: Option<&str>) -> Result<String, GeneratorError> {
++    prefix_step_block_with_if(block, guard).map_err(|error| {
++        GeneratorError::usage(format!("invalid generated workflow step block: {error}"))
++    })
++}
++
+ /// GitHub rejects reusable workflow files above this size.
+ pub(crate) const GITHUB_WORKFLOW_BYTE_LIMIT: usize = 500_000;
+ 
+@@ -74,9 +81,9 @@ mod tests {
+ 
+     use super::{
+         automatic_event_selects_lane, dispatch_choice_selects_lane, dispatch_lane_expression,
+-        lane_input, unit_owns_workflow_crate, AutomaticEvent, DispatchChoice::*, GraphNode,
+-        LaneAdmission, Pins, RunnerMode, Unit, UnitKind, VelnorPullRequest, VelnorRustNeeds,
+-        WorkflowIr, WorkflowKind,
++        lane_input, unit_owns_workflow_crate, AutomaticEvent, CachePurpose, CacheSpec,
++        DispatchChoice::*, GraphNode, LaneAdmission, Pins, RunnerMode, Unit, UnitKind,
++        VelnorPullRequest, VelnorRustNeeds, WorkflowIr, WorkflowKind,
+     };
+     use crate::{
+         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
+@@ -676,6 +683,48 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn collapsed_swift_partial_cache_composes_one_save_condition() {
++        let mut cached = rust_unit("swift-cached", "native/cached");
++        cached.kind = UnitKind::Swift;
++        cached.label = "Swift package (cached)".to_owned();
++        cached.platform = crate::platform::PlatformRequirement::apple_xcode();
++        cached.cache = Some(CacheSpec {
++            key_files: vec!["native/cached/Package.swift".to_owned()],
++            paths: vec!["~/.swiftpm".to_owned()],
++            purpose: CachePurpose::Generic,
++            mbx_output_cache_justification: None,
++            mutable_mount_seed: false,
++        });
++        let mut uncached = rust_unit("swift-uncached", "native/uncached");
++        uncached.kind = UnitKind::Swift;
++        uncached.label = "Swift package (uncached)".to_owned();
++        uncached.platform = crate::platform::PlatformRequirement::apple_xcode();
++        let ir = owner_test_ir("example/fixture", vec![cached, uncached]);
++        let workflow = must_some(
++            must_ok(
++                ir.render_kind_unit_workflow(UnitKind::Swift, None),
++                "swift partial-cache reusable renders",
++            ),
++            "swift partial-cache reusable exists",
++        )
++        .1;
++        let save = must_some(
++            workflow.find("      - name: Save unit cache"),
++            "swift save step renders",
++        );
++        let save = &workflow[save..];
++        let end = save[1..]
++            .find("      - name: ")
++            .map_or(save.len(), |offset| offset + 1);
++        let save = &save[..end];
++        assert_eq!(save.matches("        if:").count(), 1, "{save}");
++        assert!(
++            save.contains("(inputs.cache_key_files != '') && (always() &&"),
++            "{save}"
++        );
++    }
++
+     #[test]
+     fn candidate_publish_flags_only_the_hosted_owner_of_the_generator_crate() {
+         let owner = workflow_setup_action_repository().to_owned();
+@@ -2026,15 +2075,16 @@ fn render_collapsed_sccache_env_step(
+     output: &mut String,
+     sccache: FeatureCoverage,
+     mbx_input: &str,
+-) {
++) -> Result<(), GeneratorError> {
+     if !sccache.any {
+-        return;
++        return Ok(());
+     }
+     let block = "      - name: Configure sccache environment\n        run: |\n          {\n            echo 'CARGO_INCREMENTAL=0'\n            echo 'RUSTC_WRAPPER=sccache'\n            echo 'SCCACHE_GHA_ENABLED=true'\n          } >> \"$GITHUB_ENV\"\n";
+-    output.push_str(&prefix_step_block_with_if(
++    output.push_str(&compose_step_block(
+         block,
+         sccache.absent_gate(mbx_input).as_deref(),
+-    ));
++    )?);
++    Ok(())
+ }
+ 
+ fn cargo_offline_run_prelude(members: &[&Unit]) -> String {
+@@ -2625,55 +2675,6 @@ fn append_unique_needs(needs: &mut Vec<String>, additional: impl IntoIterator<It
+     }
+ }
+ 
+-fn prefix_step_block_with_if(block: &str, guard: Option<&str>) -> String {
+-    let Some(guard) = guard else {
+-        return block.to_owned();
+-    };
+-    let mut out = String::new();
+-    let mut pending_name: Option<String> = None;
+-    let mut pending_if: Option<String> = None;
+-
+-    let flush_step = |out: &mut String, name: &str, if_expr: Option<&str>| {
+-        out.push_str(name);
+-        out.push('\n');
+-        let combined = if let Some(existing) = if_expr {
+-            format!("        if: ${{{{ {guard} && ({existing}) }}}}\n")
+-        } else {
+-            format!("        if: ${{{{ {guard} }}}}\n")
+-        };
+-        out.push_str(&combined);
+-    };
+-
+-    for line in block.lines() {
+-        if line.starts_with("      - name:") {
+-            if let Some(name) = pending_name.take() {
+-                flush_step(&mut out, &name, pending_if.as_deref());
+-                pending_if = None;
+-            }
+-            pending_name = Some(line.to_owned());
+-        } else if pending_name.is_some() && line.trim().starts_with("if:") {
+-            let expr = line.trim().strip_prefix("if:").unwrap_or("").trim();
+-            pending_if = Some(
+-                expr.strip_prefix("${{ ")
+-                    .and_then(|value| value.strip_suffix(" }}"))
+-                    .unwrap_or(expr)
+-                    .to_owned(),
+-            );
+-        } else {
+-            if let Some(name) = pending_name.take() {
+-                flush_step(&mut out, &name, pending_if.as_deref());
+-                pending_if = None;
+-            }
+-            out.push_str(line);
+-            out.push('\n');
+-        }
+-    }
+-    if let Some(name) = pending_name.take() {
+-        flush_step(&mut out, &name, pending_if.as_deref());
+-    }
+-    out
+-}
+-
+ fn cargo_fetch_roots(members: &[&Unit]) -> Vec<String> {
+     let mut roots = BTreeSet::new();
+     for member in members {
+@@ -5009,13 +5010,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+         output: &mut String,
+         members: &[&Unit],
+         facts: &[LaneStepFacts],
+-    ) {
++    ) -> Result<(), GeneratorError> {
+         let member_records: Vec<BTreeSet<String>> = facts
+             .iter()
+             .map(|facts| facts.prepared_tools.iter().cloned().collect())
+             .collect();
+         if member_records.iter().all(BTreeSet::is_empty) {
+-            return;
++            return Ok(());
+         }
+         let mut union: BTreeMap<String, &Unit> = BTreeMap::new();
+         for (unit, records) in members.iter().zip(&member_records) {
+@@ -5042,8 +5043,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 self.pins.cache_restore,
+                 std::slice::from_ref(need),
+             );
+-            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
++            output.push_str(&compose_step_block(&block, gate.as_deref())?);
+         }
++        Ok(())
+     }
+ 
+     /// The single step block of a collapsed lane job. Every unit-specific
+@@ -5134,8 +5136,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+             }
+             per_member.into_iter().next().unwrap_or_default()
+         };
+-        let gated = |block: String, coverage: FeatureCoverage, input: &str| -> String {
+-            prefix_step_block_with_if(&block, coverage.gate(input).as_deref())
++        let gated = |block: String, coverage: FeatureCoverage, input: &str| {
++            compose_step_block(&block, coverage.gate(input).as_deref())
+         };
+ 
+         // The pinned policy runtime for units that run the generator's own
+@@ -5147,7 +5149,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 crate::workflow_pinned_policy_runtime_velnor("${{ github.workspace }}"),
+                 policy_runtime,
+                 lane_input::POLICY_RUNTIME,
+-            ));
++            )?);
+         }
+ 
+         // Tool provisioning, in the literal lane job's order.
+@@ -5155,7 +5157,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+         if !github_lane && mise_tools.any {
+             let mut block = String::new();
+             render_velnor_mise_install_from_input(&mut block);
+-            output.push_str(&gated(block, mise_tools, lane_input::MISE_TOOLS));
++            output.push_str(&gated(block, mise_tools, lane_input::MISE_TOOLS)?);
+         }
+         if !velnor_skips_pinned_rust_toolchain(lane)
+             && let Some(toolchain) = &toolchain
+@@ -5171,7 +5173,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 self.pins.mise,
+                 lane_input::expression(lane_input::MISE_TOOLS)
+             );
+-            output.push_str(&gated(block, mise_tools, lane_input::MISE_TOOLS));
++            output.push_str(&gated(block, mise_tools, lane_input::MISE_TOOLS)?);
+         }
+         let mise_runner = FeatureCoverage::over(&facts, |facts| facts.mise_runner);
+         if github_lane && mise_runner.any {
+@@ -5181,7 +5183,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 "      - name: Set up Mise\n        uses: {}\n        with:\n          install: false",
+                 self.pins.mise
+             );
+-            output.push_str(&gated(block, mise_runner, lane_input::MISE_RUNNER));
++            output.push_str(&gated(block, mise_runner, lane_input::MISE_RUNNER)?);
+         }
+         let mbx = FeatureCoverage::over(&facts, |facts| facts.mbx_enabled);
+         if mbx.any {
+@@ -5197,7 +5199,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+             } else {
+                 self.render_mbx_local_step(&mut block);
+             }
+-            output.push_str(&gated(block, mbx, lane_input::MBX_ENABLED));
++            output.push_str(&gated(block, mbx, lane_input::MBX_ENABLED)?);
+         }
+         let sccache =
+             FeatureCoverage::over(&facts, |facts| kind == UnitKind::Rust && !facts.mbx_enabled);
+@@ -5205,11 +5207,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+             let mut block = String::new();
+             let sccache_tools = BTreeSet::from([ToolRequirement::Sccache]);
+             self.render_kind_level_tool_steps(&mut block, lane, &sccache_tools, cache_save);
+-            output.push_str(&prefix_step_block_with_if(
++            output.push_str(&compose_step_block(
+                 &block,
+                 sccache.absent_gate(lane_input::MBX_ENABLED).as_deref(),
+-            ));
+-            render_collapsed_sccache_env_step(output, sccache, lane_input::MBX_ENABLED);
++            )?);
++            render_collapsed_sccache_env_step(output, sccache, lane_input::MBX_ENABLED)?;
+         }
+         if github_lane && kind_tools.contains(&ToolRequirement::Bun) {
+             let versioned = FeatureCoverage::over(&facts, |facts| facts.tool_version.is_some());
+@@ -5221,7 +5223,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                     self.pins.bun,
+                     lane_input::expression(lane_input::TOOL_VERSION)
+                 );
+-                output.push_str(&gated(block, versioned, lane_input::TOOL_VERSION));
++                output.push_str(&gated(block, versioned, lane_input::TOOL_VERSION)?);
+             }
+             if !versioned.all {
+                 let gate = versioned
+@@ -5231,7 +5233,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                     "      - name: Set up Bun\n        uses: {}\n",
+                     self.pins.bun
+                 );
+-                output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
++                output.push_str(&compose_step_block(&block, gate.as_deref())?);
+             }
+         }
+         if github_lane && kind_tools.contains(&ToolRequirement::Node) {
+@@ -5249,7 +5251,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                     block,
+                     cached,
+                     lane_input::NODE_CACHE_DEPENDENCY_PATH,
+-                ));
++                )?);
+             }
+             if !cached.all {
+                 let gate = cached
+@@ -5257,7 +5259,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                     .then(|| format!("inputs.{} == ''", lane_input::NODE_CACHE_DEPENDENCY_PATH));
+                 let mut block = String::new();
+                 self.render_node_step(&mut block, None);
+-                output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
++                output.push_str(&compose_step_block(&block, gate.as_deref())?);
+             }
+         }
+         let cargo_bin = FeatureCoverage::over(&facts, |facts| !facts.cargo_bin_tools.is_empty());
+@@ -5268,9 +5270,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 &lane_input::expression(lane_input::CARGO_BIN_TOOLS),
+                 cache_save,
+             );
+-            output.push_str(&gated(block, cargo_bin, lane_input::CARGO_BIN_TOOLS));
++            output.push_str(&gated(block, cargo_bin, lane_input::CARGO_BIN_TOOLS)?);
+         }
+-        self.render_collapsed_prepared_tool_steps(output, members, &facts);
++        self.render_collapsed_prepared_tool_steps(output, members, &facts)?;
+         self.render_kind_level_tool_steps(output, lane, &kind_tools, cache_save);
+         render_ci_tool_bootstrap_end_marker(output);
+ 
+@@ -5282,7 +5284,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+         if seed.any {
+             let mut block = String::new();
+             render_mutable_mount_seed_restore_from_input(&mut block, self, &checks_env);
+-            output.push_str(&gated(block, seed, lane_input::SEED_COMPAT));
++            output.push_str(&gated(block, seed, lane_input::SEED_COMPAT)?);
+         }
+         if bundle.any {
+             for unit in members {
+@@ -5301,7 +5303,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 self.pins.cache_restore,
+                 lane_input::expression(lane_input::CACHE_PATHS),
+             );
+-            output.push_str(&gated(block, bundle, lane_input::CACHE_KEY_FILES));
++            output.push_str(&gated(block, bundle, lane_input::CACHE_KEY_FILES)?);
+         }
+         render_ci_cache_prep_end_marker(output);
+ 
+@@ -5371,7 +5373,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 "Mark candidate phase end",
+                 candidate_event_complete_gate,
+             );
+-            output.push_str(&gated(block, candidate, lane_input::CANDIDATE_PUBLISH));
++            output.push_str(&gated(block, candidate, lane_input::CANDIDATE_PUBLISH)?);
+         }
+ 
+         // Cache collection.
+@@ -5384,7 +5386,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 &checks_env,
+                 cache_save,
+             );
+-            output.push_str(&gated(block, seed, lane_input::SEED_COMPAT));
++            output.push_str(&gated(block, seed, lane_input::SEED_COMPAT)?);
+         }
+         if cache_save_bundle {
+             let (cache_key, _) = format_cargo_bundle_cache_key(
+@@ -5401,7 +5403,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 lane_input::expression(lane_input::CACHE_PATHS),
+             );
+             render_cache_save_end_marker(&mut block, "BUNDLE", &save_gate, "unit_cache_save");
+-            output.push_str(&gated(block, bundle, lane_input::CACHE_KEY_FILES));
++            output.push_str(&gated(block, bundle, lane_input::CACHE_KEY_FILES)?);
+         }
+         let report = members
+             .iter()
+diff --git a/crates/velnor-workflow/src/s2/primitives/ir.rs b/crates/velnor-workflow/src/s2/primitives/ir.rs
+index 0171b16d..03386c9e 100644
+--- a/crates/velnor-workflow/src/s2/primitives/ir.rs
++++ b/crates/velnor-workflow/src/s2/primitives/ir.rs
+@@ -32,6 +32,13 @@ use crate::s2::{
+     SelectionFieldSources, Unit, UnitKind, GENERATED_HEADER, MR_BOXINGTON_VERSION,
+     OPEN_TOFU_VERSION,
+ };
++use crate::step_block::prefix_step_block_with_if;
++
++fn compose_step_block(block: &str, guard: Option<&str>) -> Result<String, GeneratorError> {
++    prefix_step_block_with_if(block, guard).map_err(|error| {
++        GeneratorError::usage(format!("invalid generated workflow step block: {error}"))
++    })
++}
+ 
+ /// GitHub rejects reusable workflow files above this size.
+ pub(crate) const GITHUB_WORKFLOW_BYTE_LIMIT: usize = 500_000;
+@@ -75,9 +82,9 @@ mod tests {
+     use std::process::Command;
+ 
+     use super::{
+-        provider_input, unit_owns_workflow_crate, GraphNode, Pins, ProviderAdmission, ProviderId,
+-        ProviderSet, RequiredCaller, RustNeeds, Unit, UnitKind, WorkflowIr, WorkflowKind,
+-        REQUIRED_CHECK,
++        provider_input, unit_owns_workflow_crate, CachePurpose, CacheSpec, GraphNode, Pins,
++        ProviderAdmission, ProviderId, ProviderSet, RequiredCaller, RustNeeds, Unit, UnitKind,
++        WorkflowIr, WorkflowKind, REQUIRED_CHECK,
+     };
+     use crate::s2::{
+         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
+@@ -799,6 +806,48 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn collapsed_swift_partial_cache_composes_one_save_condition() {
++        let mut cached = rust_unit("swift-cached", "native/cached");
++        cached.kind = UnitKind::Swift;
++        cached.label = "Swift package (cached)".to_owned();
++        cached.platform = crate::s2::provider::Platform::MacosArm64;
++        cached.cache = Some(CacheSpec {
++            key_files: vec!["native/cached/Package.swift".to_owned()],
++            paths: vec!["~/.swiftpm".to_owned()],
++            purpose: CachePurpose::Generic,
++            mbx_output_cache_justification: None,
++            mutable_mount_seed: false,
++        });
++        let mut uncached = rust_unit("swift-uncached", "native/uncached");
++        uncached.kind = UnitKind::Swift;
++        uncached.label = "Swift package (uncached)".to_owned();
++        uncached.platform = crate::s2::provider::Platform::MacosArm64;
++        let ir = owner_test_ir("example/fixture", vec![cached, uncached]);
++        let workflow = must_some(
++            must_ok(
++                ir.render_kind_unit_workflow(UnitKind::Swift, None),
++                "swift partial-cache reusable renders",
++            ),
++            "swift partial-cache reusable exists",
++        )
++        .1;
++        let save = must_some(
++            workflow.find("      - name: Save unit cache"),
++            "swift save step renders",
++        );
++        let save = &workflow[save..];
++        let end = save[1..]
++            .find("      - name: ")
++            .map_or(save.len(), |offset| offset + 1);
++        let save = &save[..end];
++        assert_eq!(save.matches("        if:").count(), 1, "{save}");
++        assert!(
++            save.contains("(inputs.cache_key_files != '') && (always() &&"),
++            "{save}"
++        );
++    }
++
+     #[test]
+     fn candidate_publish_flags_only_the_hosted_owner_of_the_generator_crate() {
+         let owner = workflow_setup_action_repository().to_owned();
+@@ -2275,15 +2324,16 @@ fn render_collapsed_sccache_env_step(
+     output: &mut String,
+     sccache: FeatureCoverage,
+     mbx_input: &str,
+-) {
++) -> Result<(), GeneratorError> {
+     if !sccache.any {
+-        return;
++        return Ok(());
+     }
+     let block = "      - name: Configure sccache environment\n        run: |\n          {\n            echo 'CARGO_INCREMENTAL=0'\n            echo 'RUSTC_WRAPPER=sccache'\n            echo 'SCCACHE_GHA_ENABLED=true'\n          } >> \"$GITHUB_ENV\"\n";
+-    output.push_str(&prefix_step_block_with_if(
++    output.push_str(&compose_step_block(
+         block,
+         sccache.absent_gate(mbx_input).as_deref(),
+-    ));
++    )?);
++    Ok(())
+ }
+ 
+ /// Every command the unit runs, on either provider: the scan-derived base
+@@ -2857,55 +2907,6 @@ fn append_unique_needs(needs: &mut Vec<String>, additional: impl IntoIterator<It
+     }
+ }
+ 
+-fn prefix_step_block_with_if(block: &str, guard: Option<&str>) -> String {
+-    let Some(guard) = guard else {
+-        return block.to_owned();
+-    };
+-    let mut out = String::new();
+-    let mut pending_name: Option<String> = None;
+-    let mut pending_if: Option<String> = None;
+-
+-    let flush_step = |out: &mut String, name: &str, if_expr: Option<&str>| {
+-        out.push_str(name);
+-        out.push('\n');
+-        let combined = if let Some(existing) = if_expr {
+-            format!("        if: ${{{{ {guard} && ({existing}) }}}}\n")
+-        } else {
+-            format!("        if: ${{{{ {guard} }}}}\n")
+-        };
+-        out.push_str(&combined);
+-    };
+-
+-    for line in block.lines() {
+-        if line.starts_with("      - name:") {
+-            if let Some(name) = pending_name.take() {
+-                flush_step(&mut out, &name, pending_if.as_deref());
+-                pending_if = None;
+-            }
+-            pending_name = Some(line.to_owned());
+-        } else if pending_name.is_some() && line.trim().starts_with("if:") {
+-            let expr = line.trim().strip_prefix("if:").unwrap_or("").trim();
+-            pending_if = Some(
+-                expr.strip_prefix("${{ ")
+-                    .and_then(|value| value.strip_suffix(" }}"))
+-                    .unwrap_or(expr)
+-                    .to_owned(),
+-            );
+-        } else {
+-            if let Some(name) = pending_name.take() {
+-                flush_step(&mut out, &name, pending_if.as_deref());
+-                pending_if = None;
+-            }
+-            out.push_str(line);
+-            out.push('\n');
+-        }
+-    }
+-    if let Some(name) = pending_name.take() {
+-        flush_step(&mut out, &name, pending_if.as_deref());
+-    }
+-    out
+-}
+-
+ fn cargo_fetch_roots(members: &[&Unit]) -> Vec<String> {
+     let mut roots = BTreeSet::new();
+     for member in members {
+@@ -5007,13 +5008,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+         output: &mut String,
+         members: &[&Unit],
+         facts: &[ProviderStepFacts],
+-    ) {
++    ) -> Result<(), GeneratorError> {
+         let member_records: Vec<BTreeSet<String>> = facts
+             .iter()
+             .map(|facts| facts.prepared_tools.iter().cloned().collect())
+             .collect();
+         if member_records.iter().all(BTreeSet::is_empty) {
+-            return;
++            return Ok(());
+         }
+         let mut union: BTreeMap<String, &Unit> = BTreeMap::new();
+         for (unit, records) in members.iter().zip(&member_records) {
+@@ -5040,8 +5041,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 self.pins.cache_restore,
+                 std::slice::from_ref(need),
+             );
+-            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
++            output.push_str(&compose_step_block(&block, gate.as_deref())?);
+         }
++        Ok(())
+     }
+ 
+     /// The single step block of a collapsed provider job. Every unit-specific
+@@ -5132,8 +5134,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+             }
+             per_member.into_iter().next().unwrap_or_default()
+         };
+-        let gated = |block: String, coverage: FeatureCoverage, input: &str| -> String {
+-            prefix_step_block_with_if(&block, coverage.gate(input).as_deref())
++        let gated = |block: String, coverage: FeatureCoverage, input: &str| {
++            compose_step_block(&block, coverage.gate(input).as_deref())
+         };
+ 
+         // The pinned policy runtime for units that run the generator's own
+@@ -5148,7 +5150,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 ),
+                 policy_runtime,
+                 provider_input::POLICY_RUNTIME,
+-            ));
++            )?);
+         }
+ 
+         // Tool provisioning, in the literal provider job's order.
+@@ -5156,7 +5158,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+         if !hosted && mise_tools.any {
+             let mut block = String::new();
+             render_velnor_mise_install_from_input(&mut block);
+-            output.push_str(&gated(block, mise_tools, provider_input::MISE_TOOLS));
++            output.push_str(&gated(block, mise_tools, provider_input::MISE_TOOLS)?);
+         }
+         if !local_skips_pinned_rust_toolchain(provider)
+             && let Some(toolchain) = &toolchain
+@@ -5172,7 +5174,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 self.pins.mise,
+                 provider_input::expression(provider_input::MISE_TOOLS)
+             );
+-            output.push_str(&gated(block, mise_tools, provider_input::MISE_TOOLS));
++            output.push_str(&gated(block, mise_tools, provider_input::MISE_TOOLS)?);
+         }
+         let mise_runner = FeatureCoverage::over(&facts, |facts| facts.mise_runner);
+         if hosted && mise_runner.any {
+@@ -5182,7 +5184,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 "      - name: Set up Mise\n        uses: {}\n        with:\n          install: false",
+                 self.pins.mise
+             );
+-            output.push_str(&gated(block, mise_runner, provider_input::MISE_RUNNER));
++            output.push_str(&gated(block, mise_runner, provider_input::MISE_RUNNER)?);
+         }
+         let mbx = FeatureCoverage::over(&facts, |facts| facts.mbx_enabled);
+         if mbx.any {
+@@ -5198,7 +5200,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+             } else {
+                 self.render_mbx_local_step(&mut block);
+             }
+-            output.push_str(&gated(block, mbx, provider_input::MBX_ENABLED));
++            output.push_str(&gated(block, mbx, provider_input::MBX_ENABLED)?);
+         }
+         let sccache =
+             FeatureCoverage::over(&facts, |facts| kind == UnitKind::Rust && !facts.mbx_enabled);
+@@ -5206,11 +5208,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+             let mut block = String::new();
+             let sccache_tools = BTreeSet::from([ToolRequirement::Sccache]);
+             self.render_kind_level_tool_steps(&mut block, provider, &sccache_tools, cache_save);
+-            output.push_str(&prefix_step_block_with_if(
++            output.push_str(&compose_step_block(
+                 &block,
+                 sccache.absent_gate(provider_input::MBX_ENABLED).as_deref(),
+-            ));
+-            render_collapsed_sccache_env_step(output, sccache, provider_input::MBX_ENABLED);
++            )?);
++            render_collapsed_sccache_env_step(output, sccache, provider_input::MBX_ENABLED)?;
+         }
+         if hosted && kind_tools.contains(&ToolRequirement::Bun) {
+             let versioned = FeatureCoverage::over(&facts, |facts| facts.tool_version.is_some());
+@@ -5222,7 +5224,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                     self.pins.bun,
+                     provider_input::expression(provider_input::TOOL_VERSION)
+                 );
+-                output.push_str(&gated(block, versioned, provider_input::TOOL_VERSION));
++                output.push_str(&gated(block, versioned, provider_input::TOOL_VERSION)?);
+             }
+             if !versioned.all {
+                 let gate = versioned
+@@ -5232,7 +5234,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                     "      - name: Set up Bun\n        uses: {}\n",
+                     self.pins.bun
+                 );
+-                output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
++                output.push_str(&compose_step_block(&block, gate.as_deref())?);
+             }
+         }
+         if hosted && kind_tools.contains(&ToolRequirement::Node) {
+@@ -5250,7 +5252,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                     block,
+                     cached,
+                     provider_input::NODE_CACHE_DEPENDENCY_PATH,
+-                ));
++                )?);
+             }
+             if !cached.all {
+                 let gate = cached.any.then(|| {
+@@ -5261,7 +5263,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 });
+                 let mut block = String::new();
+                 self.render_node_step(&mut block, None);
+-                output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
++                output.push_str(&compose_step_block(&block, gate.as_deref())?);
+             }
+         }
+         let cargo_bin = FeatureCoverage::over(&facts, |facts| !facts.cargo_bin_tools.is_empty());
+@@ -5272,9 +5274,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 &provider_input::expression(provider_input::CARGO_BIN_TOOLS),
+                 cache_save,
+             );
+-            output.push_str(&gated(block, cargo_bin, provider_input::CARGO_BIN_TOOLS));
++            output.push_str(&gated(block, cargo_bin, provider_input::CARGO_BIN_TOOLS)?);
+         }
+-        self.render_collapsed_prepared_tool_steps(output, members, &facts);
++        self.render_collapsed_prepared_tool_steps(output, members, &facts)?;
+         self.render_kind_level_tool_steps(output, provider, &kind_tools, cache_save);
+         render_ci_tool_bootstrap_end_marker(output);
+ 
+@@ -5286,7 +5288,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+         if seed.any {
+             let mut block = String::new();
+             render_mutable_mount_seed_restore_from_input(&mut block, self, &checks_env);
+-            output.push_str(&gated(block, seed, provider_input::SEED_COMPAT));
++            output.push_str(&gated(block, seed, provider_input::SEED_COMPAT)?);
+         }
+         if bundle.any {
+             for unit in members {
+@@ -5308,7 +5310,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 self.pins.cache_restore,
+                 provider_input::expression(provider_input::CACHE_PATHS),
+             );
+-            output.push_str(&gated(block, bundle, provider_input::CACHE_KEY_FILES));
++            output.push_str(&gated(block, bundle, provider_input::CACHE_KEY_FILES)?);
+         }
+         render_ci_cache_prep_end_marker(output);
+ 
+@@ -5409,7 +5411,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 "Mark candidate phase end",
+                 candidate_event_complete_gate,
+             );
+-            output.push_str(&gated(block, candidate, provider_input::CANDIDATE_PUBLISH));
++            output.push_str(&gated(block, candidate, provider_input::CANDIDATE_PUBLISH)?);
+         }
+ 
+         // Cache collection.
+@@ -5422,7 +5424,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 &checks_env,
+                 cache_save,
+             );
+-            output.push_str(&gated(block, seed, provider_input::SEED_COMPAT));
++            output.push_str(&gated(block, seed, provider_input::SEED_COMPAT)?);
+         }
+         if cache_save_bundle {
+             let (cache_key, _) = format_cargo_bundle_cache_key(
+@@ -5442,7 +5444,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+                 provider_input::expression(provider_input::CACHE_PATHS),
+             );
+             render_cache_save_end_marker(&mut block, "BUNDLE", &save_gate, "unit_cache_save");
+-            output.push_str(&gated(block, bundle, provider_input::CACHE_KEY_FILES));
++            output.push_str(&gated(block, bundle, provider_input::CACHE_KEY_FILES)?);
+         }
+         let report = members
+             .iter()
+diff --git a/crates/velnor-workflow/src/step_block.rs b/crates/velnor-workflow/src/step_block.rs
+new file mode 100644
+index 00000000..e1854a89
+--- /dev/null
++++ b/crates/velnor-workflow/src/step_block.rs
+@@ -0,0 +1,567 @@
++//! Typed condition composition for generated workflow step blocks.
++//!
++//! Renderers build small YAML step blocks before a collapsed reusable job adds
++//! a membership gate.  Conditions are step metadata, not shell text: this
++//! module keeps the complete step body intact while composing one `if` field
++//! for each top-level step.
++
++use std::fmt;
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct StepBlockError {
++    message: String,
++}
++
++impl StepBlockError {
++    fn new(message: impl Into<String>) -> Self {
++        Self {
++            message: message.into(),
++        }
++    }
++}
++
++impl fmt::Display for StepBlockError {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str(&self.message)
++    }
++}
++
++/// Add `guard` to every top-level step in `block`.
++///
++/// The parser only recognizes workflow-step metadata at its exact YAML
++/// indentation.  Therefore `if:` text in a `run: |` body, `env:`, `with:`, or
++/// another nested mapping remains byte-for-byte unchanged.  Existing step
++/// metadata is retained in its original order and only its condition line is
++/// replaced.  A step with no condition receives one immediately after its
++/// list-item line.
++pub(crate) fn prefix_step_block_with_if(
++    block: &str,
++    guard: Option<&str>,
++) -> Result<String, StepBlockError> {
++    if guard.is_some_and(|guard| guard.trim().is_empty()) {
++        return Err(StepBlockError::new("step guard must not be empty"));
++    }
++
++    let starts = step_starts(block);
++    if starts.is_empty() {
++        return Ok(block.to_owned());
++    }
++
++    let mut output = String::with_capacity(block.len() + starts.len() * 32);
++    output.push_str(&block[..starts[0]]);
++    for (index, start) in starts.iter().copied().enumerate() {
++        let end = starts.get(index + 1).copied().unwrap_or(block.len());
++        output.push_str(&render_step(&block[start..end], guard)?);
++    }
++    Ok(output)
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct ConditionLocation {
++    line_start: usize,
++    line_end: usize,
++    value_start: usize,
++    value_end: usize,
++}
++
++fn render_step(step: &str, guard: Option<&str>) -> Result<String, StepBlockError> {
++    let mut first_line_end = None;
++    let mut condition = None;
++    let mut line_start = 0;
++    let mut line_number = 0;
++
++    while line_start < step.len() {
++        let line_end = next_line_end(step, line_start);
++        let line = &step[line_start..line_end];
++        if first_line_end.is_none() {
++            first_line_end = Some(line_end);
++        }
++        if let Some(location) = condition_location(line_start, line_end, line, line_number == 0) {
++            if condition.is_some() {
++                return Err(StepBlockError::new(
++                    "step block contains more than one top-level if condition",
++                ));
++            }
++            condition = Some(location);
++        }
++        line_start = line_end;
++        line_number += 1;
++    }
++
++    // A one-line step without a trailing newline still has a first line.
++    let first_line_end = first_line_end.unwrap_or(step.len());
++    let parsed_condition = condition
++        .as_ref()
++        .map(|location| parse_condition(&step[location.value_start..location.value_end]))
++        .transpose()?;
++    let Some(guard) = guard else {
++        return Ok(step.to_owned());
++    };
++
++    let Some(condition) = condition else {
++        let newline = line_ending(&step[..first_line_end]);
++        let insertion_line_ending = if newline.is_empty() { "\n" } else { newline };
++        let mut output = String::with_capacity(step.len() + guard.len() + 24);
++        output.push_str(&step[..first_line_end]);
++        if newline.is_empty() {
++            output.push('\n');
++        }
++        output.push_str("        if: ");
++        output.push_str(&wrapped_guard(guard));
++        output.push_str(insertion_line_ending);
++        output.push_str(&step[first_line_end..]);
++        return Ok(output);
++    };
++
++    let line = &step[condition.line_start..condition.line_end];
++    let Some((expression, suffix)) = parsed_condition else {
++        return Err(StepBlockError::new(
++            "top-level if condition could not be parsed",
++        ));
++    };
++    let key_prefix = &line[..condition.value_start - condition.line_start];
++    let composed = format!(
++        "{}{}{}{}{}",
++        key_prefix,
++        " ",
++        wrapped_composed_guard(guard, &expression),
++        suffix,
++        &line[condition.value_end - condition.line_start..],
++    );
++
++    let mut output = String::with_capacity(step.len() + composed.len());
++    output.push_str(&step[..condition.line_start]);
++    output.push_str(&composed);
++    output.push_str(&step[condition.line_end..]);
++    Ok(output)
++}
++
++fn step_starts(block: &str) -> Vec<usize> {
++    let mut starts = Vec::new();
++    let mut line_start = 0;
++    while line_start < block.len() {
++        let line_end = next_line_end(block, line_start);
++        if is_step_start(&block[line_start..line_end]) {
++            starts.push(line_start);
++        }
++        line_start = line_end;
++    }
++    starts
++}
++
++fn is_step_start(line: &str) -> bool {
++    let content = without_line_ending(line);
++    content == "      -" || content.starts_with("      - ")
++}
++
++fn condition_location(
++    line_start: usize,
++    line_end: usize,
++    line: &str,
++    first_line: bool,
++) -> Option<ConditionLocation> {
++    let content_end = line_end - line_ending(line).len();
++    let content = &line[..content_end - line_start];
++    let rest = if first_line && content.starts_with("      - ") {
++        &content[8..]
++    } else {
++        content.strip_prefix("        ")?
++    };
++    if !rest.starts_with("if:") {
++        return None;
++    }
++    let after_key = &rest[3..];
++    if after_key
++        .chars()
++        .next()
++        .is_some_and(|character| !character.is_whitespace())
++    {
++        return None;
++    }
++    Some(ConditionLocation {
++        line_start,
++        line_end,
++        value_start: line_start + 8 + 3,
++        value_end: line_start + content_end - line_start,
++    })
++}
++
++fn parse_condition(raw: &str) -> Result<(String, String), StepBlockError> {
++    // The renderer accepts only one-line scalar metadata.  Parsing happens even
++    // when no new guard is requested: a malformed generated step must never be
++    // allowed through merely because this composition pass is disabled.
++    if raw.contains('\n') || raw.contains('\r') {
++        return Err(StepBlockError::new(
++            "top-level if condition must be a single-line scalar",
++        ));
++    }
++
++    let value = raw.trim();
++    if value.is_empty() {
++        return Err(StepBlockError::new(
++            "top-level if condition must not be empty",
++        ));
++    }
++
++    let (scalar, suffix) = split_inline_comment(value)?;
++    let scalar = decode_scalar(scalar.trim())?;
++    let value = scalar.trim();
++    if value.is_empty() {
++        return Err(StepBlockError::new(
++            "top-level if expression must not be empty",
++        ));
++    }
++
++    if let Some(inner) = value.strip_prefix("${{") {
++        let Some(close) = find_expression_close(inner)? else {
++            return Err(StepBlockError::new(
++                "top-level if expression has no closing `}}`",
++            ));
++        };
++        let expression = inner[..close].trim();
++        if expression.is_empty() {
++            return Err(StepBlockError::new(
++                "top-level if expression must not be empty",
++            ));
++        }
++        if !inner[close + 2..].trim().is_empty() {
++            return Err(StepBlockError::new(
++                "top-level if expression has unsupported trailing text",
++            ));
++        }
++        return Ok((expression.to_owned(), suffix.to_owned()));
++    }
++
++    if is_unsupported_scalar_form(value) {
++        return Err(StepBlockError::new(
++            "top-level if condition uses an unsupported YAML scalar form",
++        ));
++    }
++    if value.trim().is_empty() {
++        return Err(StepBlockError::new(
++            "top-level if expression must not be empty",
++        ));
++    }
++    Ok((value.to_owned(), suffix.to_owned()))
++}
++
++fn split_inline_comment(value: &str) -> Result<(&str, &str), StepBlockError> {
++    let bytes = value.as_bytes();
++    let mut quote = None;
++    let mut index = 0;
++    while index < bytes.len() {
++        match quote {
++            Some(b'\'') => {
++                if bytes[index] == b'\'' {
++                    if bytes.get(index + 1) == Some(&b'\'') {
++                        index += 2;
++                    } else {
++                        quote = None;
++                        index += 1;
++                    }
++                } else {
++                    index += 1;
++                }
++            }
++            Some(b'"') => {
++                if bytes[index] == b'\\' {
++                    index = (index + 2).min(bytes.len());
++                } else if bytes[index] == b'"' {
++                    quote = None;
++                    index += 1;
++                } else {
++                    index += 1;
++                }
++            }
++            Some(_) => index += 1,
++            None => {
++                if bytes[index] == b'\'' || bytes[index] == b'"' {
++                    quote = Some(bytes[index]);
++                    index += 1;
++                } else if bytes[index] == b'#'
++                    && (index == 0 || bytes[index - 1].is_ascii_whitespace())
++                {
++                    let mut comment_start = index;
++                    while comment_start > 0 && bytes[comment_start - 1].is_ascii_whitespace() {
++                        comment_start -= 1;
++                    }
++                    return Ok((&value[..comment_start], &value[comment_start..]));
++                } else {
++                    index += 1;
++                }
++            }
++        }
++    }
++    if quote.is_some() {
++        return Err(StepBlockError::new(
++            "top-level if condition has an unterminated quote",
++        ));
++    }
++    Ok((value, ""))
++}
++
++fn decode_scalar(value: &str) -> Result<String, StepBlockError> {
++    if value.is_empty() {
++        return Ok(String::new());
++    }
++    if value
++        .as_bytes()
++        .first()
++        .is_some_and(|character| matches!(character, b'|' | b'>'))
++    {
++        return Err(StepBlockError::new(
++            "top-level if condition does not support block scalars",
++        ));
++    }
++    if value
++        .as_bytes()
++        .first()
++        .is_some_and(|character| matches!(character, b'[' | b'{' | b'&' | b'*'))
++    {
++        return Err(StepBlockError::new(
++            "top-level if condition does not support collections or aliases",
++        ));
++    }
++    if value.starts_with('\'') || value.starts_with('"') {
++        let decoded = serde_yaml::from_str::<String>(value).map_err(|error| {
++            StepBlockError::new(format!(
++                "top-level if condition has invalid quoted scalar: {error}"
++            ))
++        })?;
++        if decoded.contains('\n') || decoded.contains('\r') {
++            return Err(StepBlockError::new(
++                "top-level if condition must be a single-line scalar",
++            ));
++        }
++        return Ok(decoded);
++    }
++    Ok(value.to_owned())
++}
++
++fn is_unsupported_scalar_form(value: &str) -> bool {
++    let bytes = value.as_bytes();
++    let Some(first) = bytes.first() else {
++        return false;
++    };
++    if matches!(
++        first,
++        b'[' | b'{' | b'|' | b'>' | b'&' | b'*' | b'!' | b'%' | b'@' | b'`'
++    ) {
++        return true;
++    }
++    matches!(first, b'-' | b'?' | b':') && bytes.get(1).is_some_and(u8::is_ascii_whitespace)
++}
++
++fn find_expression_close(inner: &str) -> Result<Option<usize>, StepBlockError> {
++    let bytes = inner.as_bytes();
++    let mut quote = None;
++    let mut index = 0;
++    while index < bytes.len() {
++        match quote {
++            Some(b'\'') => {
++                if bytes[index] == b'\'' {
++                    if bytes.get(index + 1) == Some(&b'\'') {
++                        index += 2;
++                    } else {
++                        quote = None;
++                        index += 1;
++                    }
++                } else {
++                    index += 1;
++                }
++            }
++            Some(b'"') => {
++                if bytes[index] == b'\\' {
++                    index = (index + 2).min(bytes.len());
++                } else if bytes[index] == b'"' {
++                    quote = None;
++                    index += 1;
++                } else {
++                    index += 1;
++                }
++            }
++            Some(_) => index += 1,
++            None => {
++                if bytes[index] == b'\'' || bytes[index] == b'"' {
++                    quote = Some(bytes[index]);
++                    index += 1;
++                } else if bytes[index] == b'}' && bytes.get(index + 1) == Some(&b'}') {
++                    return Ok(Some(index));
++                } else {
++                    index += 1;
++                }
++            }
++        }
++    }
++    if quote.is_some() {
++        return Err(StepBlockError::new(
++            "top-level if expression has an unterminated quote",
++        ));
++    }
++    Ok(None)
++}
++
++fn wrapped_guard(guard: &str) -> String {
++    format!("${{{{ ({guard}) }}}}")
++}
++
++fn wrapped_composed_guard(guard: &str, existing: &str) -> String {
++    format!("${{{{ ({guard}) && ({existing}) }}}}")
++}
++
++fn next_line_end(text: &str, start: usize) -> usize {
++    text[start..]
++        .find('\n')
++        .map_or(text.len(), |offset| start + offset + 1)
++}
++
++fn without_line_ending(line: &str) -> &str {
++    line.strip_suffix('\n')
++        .unwrap_or(line)
++        .strip_suffix('\r')
++        .unwrap_or_else(|| line.strip_suffix('\n').unwrap_or(line))
++}
++
++fn line_ending(line: &str) -> &str {
++    if line.ends_with("\r\n") {
++        "\r\n"
++    } else if line.ends_with('\n') {
++        "\n"
++    } else {
++        ""
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::prefix_step_block_with_if;
++
++    #[expect(clippy::panic, reason = "fixture setup failure must name its cause")]
++    fn must_render(result: Result<String, super::StepBlockError>, context: &str) -> String {
++        match result {
++            Ok(rendered) => rendered,
++            Err(error) => panic!("{context}: {error}"),
++        }
++    }
++
++    #[test]
++    fn composes_metadata_in_any_order_and_preserves_nested_if_text() {
++        let block = "      - name: first\n        id: first\n        run: |\n          echo 'if: body'\n          if: body\n        if: ${{ foo || bar }} # keep\n      - uses: example/action@v1\n        with:\n          script: if: nested\n";
++        let rendered = must_render(
++            prefix_step_block_with_if(block, Some("inputs.member != ''")),
++            "condition composition",
++        );
++        assert!(
++            rendered.contains("        if: ${{ (inputs.member != '') && (foo || bar) }} # keep\n")
++        );
++        assert!(rendered.contains("          echo 'if: body'\n          if: body\n"));
++        assert!(rendered.contains(
++            "      - uses: example/action@v1\n        if: ${{ (inputs.member != '') }}\n"
++        ));
++    }
++
++    #[test]
++    fn rejects_duplicate_top_level_conditions_but_ignores_nested_text() {
++        let duplicate =
++            "      - name: duplicate\n        if: foo\n        id: step\n        if: bar\n";
++        assert!(prefix_step_block_with_if(duplicate, Some("guard")).is_err());
++
++        let nested = "      - name: nested\n        run: |\n          if: one\n          if: two\n";
++        assert!(prefix_step_block_with_if(nested, Some("guard")).is_ok());
++    }
++
++    #[test]
++    fn empty_and_no_guard_are_safe() {
++        let block = "# preamble\n\n      - name: one\n        run: echo ok\n";
++        assert_eq!(
++            must_render(prefix_step_block_with_if(block, None), "no guard"),
++            block
++        );
++        assert_eq!(
++            must_render(
++                prefix_step_block_with_if("# only comments\n", Some("guard")),
++                "comment-only block",
++            ),
++            "# only comments\n"
++        );
++        assert!(prefix_step_block_with_if(block, Some(" ")).is_err());
++
++        let no_trailing_newline = must_render(
++            prefix_step_block_with_if("      - name: one", Some("guard")),
++            "single-line step",
++        );
++        assert_eq!(
++            no_trailing_newline,
++            "      - name: one\n        if: ${{ (guard) }}\n"
++        );
++    }
++
++    #[test]
++    fn preserves_crlf_and_condition_comments() {
++        let block = "      - name: one\r\n        if: ready # comment\r\n        run: echo ok\r\n";
++        let rendered = must_render(
++            prefix_step_block_with_if(block, Some("guard")),
++            "CRLF condition",
++        );
++        assert!(rendered.contains("if: ${{ (guard) && (ready) }} # comment\r\n"));
++        assert!(rendered.ends_with("run: echo ok\r\n"));
++    }
++
++    #[test]
++    fn quoted_hash_is_not_an_inline_yaml_comment() {
++        let hash = "      - name: quoted hash\n        if: contains(inputs.value, ' # marker')\n        run: true\n";
++        let rendered = must_render(
++            prefix_step_block_with_if(hash, Some("guard")),
++            "quoted hash",
++        );
++        assert!(rendered.contains("(contains(inputs.value, ' # marker'))"));
++    }
++
++    #[test]
++    fn quoted_expression_braces_are_not_expression_terminators() {
++        let braces = "      - name: quoted braces\n        if: ${{ contains(inputs.value, '}}') }}\n        run: true\n";
++        let rendered = must_render(
++            prefix_step_block_with_if(braces, Some("guard")),
++            "quoted braces",
++        );
++        assert!(rendered.contains("(contains(inputs.value, '}}'))"));
++    }
++
++    #[test]
++    fn supports_quoted_yaml_scalars_and_rejects_unsupported_forms() {
++        let double_quoted = "      - name: double quoted\n        if: \"contains(inputs.value, ' # marker')\"\n        run: true\n";
++        let rendered = must_render(
++            prefix_step_block_with_if(double_quoted, Some("guard")),
++            "double quoted scalar",
++        );
++        assert!(rendered.contains("(contains(inputs.value, ' # marker'))"));
++
++        let single_quoted = "      - name: single quoted\n        if: '${{ contains(inputs.value, ''marker'') }}'\n        run: true\n";
++        let rendered = must_render(
++            prefix_step_block_with_if(single_quoted, Some("guard")),
++            "single quoted scalar",
++        );
++        assert!(rendered.contains("(contains(inputs.value, 'marker'))"));
++
++        for scalar in ["|", ">", "[ready]", "{ready: true}", "!tag"] {
++            let block =
++                format!("      - name: unsupported\n        if: {scalar}\n        run: true\n");
++            assert!(
++                prefix_step_block_with_if(&block, Some("guard")).is_err(),
++                "scalar form should be rejected: {scalar}"
++            );
++        }
++    }
++
++    #[test]
++    fn malformed_condition_is_rejected_without_a_new_guard() {
++        let malformed = "      - name: invalid\n        if: ${{\n        run: true\n";
++        assert!(prefix_step_block_with_if(malformed, None).is_err());
++    }
++
++    #[test]
++    fn unterminated_quoted_condition_is_rejected_without_a_new_guard() {
++        let unterminated = "      - name: invalid\n        if: \"ready\n        run: true\n";
++        assert!(prefix_step_block_with_if(unterminated, None).is_err());
++    }
++}

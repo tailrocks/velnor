@@ -1,0 +1,158 @@
+{
+  "audit_date": "2026-09-21",
+  "scope": "Completed, independently reviewed diagnostic/correctness work in plans/ci-performance; no source or canonical ledger mutation.",
+  "credit_rule": "A credit requires a distinct hypothesis, a measured intervention or diagnostic, and an independently checked conclusion. Documentation, unchanged reruns, opinions, and artificial splitting do not count.",
+  "canonical_state": {
+    "readme_substantive_iteration_credit": 0,
+    "performance_acceptance_credit": 0,
+    "plateau_credit": 0,
+    "speedup_claim": false,
+    "canonical_ledger_changed": false
+  },
+  "recommended_diagnostic_credits": 5,
+  "candidates": [
+    {
+      "id": "V-MBX-001.transport",
+      "recommendation": "eligible_diagnostic",
+      "recommended_credit": 1,
+      "performance_credit": 0,
+      "hypothesis": "The pinned Mr. Boxington directory transport can export/import a cache directory without the prior quota failure.",
+      "measurement": "Successful manual-dispatch run 35481387575 exercised MBX 1.12.0/action 1.4 directory transport; failed run 35480920648 retained as a negative control.",
+      "independent_check": "plans/ci-performance/reviews/mbx-integration.md; verdict is transport conditional PASS.",
+      "scope_boundary": "Count transport only. Bootstrap/policy compatibility remains HOLD; compiler reuse and performance remain unproven.",
+      "evidence": [
+        "plans/ci-performance/experiments/V-MBX-001.md",
+        "plans/ci-performance/reviews/mbx-integration.md",
+        "https://github.com/tailrocks/velnor/actions/runs/35481387575",
+        "https://github.com/tailrocks/velnor/actions/runs/35480920648"
+      ]
+    },
+    {
+      "id": "V-BUN-001",
+      "recommendation": "eligible_diagnostic",
+      "recommended_credit": 1,
+      "performance_credit": 0,
+      "hypothesis": "The scanner watch set must retain Bun/TypeScript inputs required by the UI producer; the old watch omission is a correctness defect.",
+      "measurement": "Focused fixture: the old branch fails on a changed TypeScript input while the candidate preserves the input and passes. Exact PR CI run 35488747612 passed its executed/required gates.",
+      "independent_check": "Independent renderer-level review by /root/jackin_inventory; experiment record documents the regression and command preservation.",
+      "scope_boundary": "Correctness/coverage diagnostic only. No elapsed-time or cache-hit improvement accepted.",
+      "evidence": [
+        "plans/ci-performance/experiments/V-BUN-001.md",
+        "https://github.com/tailrocks/velnor/actions/runs/35488747612"
+      ]
+    },
+    {
+      "id": "V-MISE-LOCK-001",
+      "recommendation": "eligible_diagnostic",
+      "recommended_credit": 1,
+      "performance_credit": 0,
+      "hypothesis": "Declared Mise tools must have lock membership and generated installs must use --locked; missing lock data must fail before CI execution.",
+      "measurement": "Actual Mise 2026.9.11 macOS ARM probes showed missing lock membership fails and plain install attempts an offline installation; focused generation/runtime fixtures cover both providers.",
+      "independent_check": "Independent contract review by /root/parallax_inventory; focused tests, Clippy, fmt, and generated checks passed. The canceled exact CI run is retained as a negative validation path, not a success claim.",
+      "scope_boundary": "Count the lock/provisioning unit once. Mise bootstrap and scheduled-child fixture repairs are supporting work, not extra credits.",
+      "evidence": [
+        "plans/ci-performance/experiments/V-MISE-LOCK-001.md",
+        "plans/ci-performance/reviews/mise-bootstrap-review.md",
+        "plans/ci-performance/observations/velnor-35490258957-*",
+        "https://github.com/tailrocks/velnor/actions/runs/35490258957"
+      ]
+    },
+    {
+      "id": "V-RUST-ORDER-001.failfast",
+      "recommendation": "eligible_diagnostic",
+      "recommended_credit": 1,
+      "performance_credit": 0,
+      "hypothesis": "Running fmt, then Clippy, then the existing test command gives earlier actionable failure feedback while preserving the command multiset and coverage.",
+      "measurement": "Five deliberate failure/ordering samples measured the candidate and opposite orders; the failure-feedback mechanism reproduced, while shared-host load confounded timing.",
+      "independent_check": "plans/ci-performance/reviews/rust-order-review.md independently replayed the fixture and marked the mechanism valid but held any Velnor performance claim.",
+      "scope_boundary": "Diagnostic feedback-order credit only. No speedup, target-baseline, or plateau credit.",
+      "evidence": [
+        "plans/ci-performance/experiments/V-RUST-ORDER-001.md",
+        "plans/ci-performance/reviews/rust-order-review.md",
+        "https://github.com/tailrocks/velnor/actions/runs/35492230871",
+        "https://github.com/tailrocks/velnor/actions/runs/35491248265"
+      ]
+    },
+    {
+      "id": "V-ROLLBACK-SIGNAL-001",
+      "recommendation": "eligible_diagnostic",
+      "recommended_credit": 1,
+      "performance_credit": 0,
+      "hypothesis": "The rolling publication failure boundary must preserve the lock, terminate the verifier process group, and perform rollback exactly once across supported Bash versions.",
+      "measurement": "Bash 3.2 and 5.x false, explicit-exit, pipeline, function, success, TERM/KILL, and cleanup fixtures exercised the boundary; exact CI run 35508236735 passed the generated test/gate set.",
+      "independent_check": "plans/ci-performance/reviews/upstream-9e5-integration-review.md independently checked the final foreground verifier, process cleanup, lock retention, and rollback assertions.",
+      "scope_boundary": "Correctness diagnostic only. Real scheduler cancellation replay remains separate and unvalidated; do not claim a scheduling or runtime reduction.",
+      "evidence": [
+        "plans/ci-performance/experiments/V-ROLLBACK-SIGNAL-001.md",
+        "plans/ci-performance/reviews/upstream-9e5-integration-review.md",
+        "plans/ci-performance/observations/velnor-35508236735-*",
+        "https://github.com/tailrocks/velnor/actions/runs/35508236735"
+      ]
+    },
+    {
+      "id": "PARALLAX-EMBED-UI-GUARD-001",
+      "recommendation": "provisional_unledgered",
+      "recommended_credit": 0,
+      "conditional_credit_after_canonicalization": 1,
+      "performance_credit": 0,
+      "hypothesis": "The Rust embed-ui build script must reject missing, empty, stub, symlink, and special-file products instead of fabricating _shell.html.",
+      "measurement": "Final guard fixtures reject invalid products and accept a real product; the baseline accepts invalid cases. Final review also checked the generated selection/runtime provenance.",
+      "independent_check": "/private/tmp/parallax-ui-final-review-e28a88ec.md and /private/tmp/parallax-embed-guard-validation.txt.",
+      "scope_boundary": "Not in the canonical Velnor experiment index. Canonicalize as one UI correctness unit before counting; do not split guard and watch-selection evidence.",
+      "evidence": [
+        "/private/tmp/parallax-embed-guard-validation.txt",
+        "/private/tmp/parallax-ui-final-review-e28a88ec.md",
+        "/private/tmp/parallax-ui-selection-048-comparison.json"
+      ]
+    },
+    {
+      "id": "V-MBX-TELEMETRY-001",
+      "recommendation": "inconclusive_no_credit",
+      "recommended_credit": 0,
+      "reason": "The initial truth-table repair was independently reviewed, but generated/live schema4 parity and complete phase attribution were still pending; later writer phases also exposed aggregate/chronology gaps.",
+      "evidence": [
+        "plans/ci-performance/experiments/V-MBX-TELEMETRY-001.md",
+        "plans/ci-performance/reviews/mbx-telemetry-review.md"
+      ]
+    },
+    {
+      "id": "V-RERUN-MEASUREMENT-001",
+      "recommendation": "rejected_no_credit",
+      "recommended_credit": 0,
+      "reason": "The record is an unchanged bounded rerun. Collector correctness fixes are valuable evidence integrity work, but must not be counted as a second performance iteration or split from the rerun.",
+      "evidence": [
+        "plans/ci-performance/experiments/V-RERUN-MEASUREMENT-001.md",
+        "plans/ci-performance/reviews/rerun-freshness-review.md"
+      ]
+    },
+    {
+      "id": "V-ROLLING-LOOKUP-001",
+      "recommendation": "inconclusive_no_credit",
+      "recommended_credit": 0,
+      "reason": "The initial red/green lookup result was superseded by the later ownership race: SHA equality does not prove tag creation ownership. The replacement fix needs its own exact CI proof; do not count both stages.",
+      "evidence": [
+        "plans/ci-performance/experiments/V-ROLLING-LOOKUP-001.md",
+        "plans/ci-performance/reviews/rolling-ownership-review.md",
+        "/private/tmp/velnor-tag-race-before.log"
+      ]
+    },
+    {
+      "id": "V-PIN-0DC-001",
+      "recommendation": "rejected_no_credit",
+      "recommended_credit": 0,
+      "reason": "The isolated pin propagation test passed, but independent review found the global downgrade unsafe: it loses current runtime behavior and fails the current policy fixture.",
+      "evidence": [
+        "plans/ci-performance/experiments/V-PIN-0DC-001.md",
+        "plans/ci-performance/reviews/pin-review.md"
+      ]
+    }
+  ],
+  "excluded_nested_or_pending": [
+    "V-SCHEDULED-CHECK-001: supporting fixture for locked provisioning; do not count separately.",
+    "V-MISE-CLOSURE-001, V-POLICY-001, V-IDENTITY-001, V-WATCH-001, V-GATE-001, V-METADATA-STAGING-001, V-CANCELLATION-001: pending, held, or missing required independent/real-CI proof.",
+    "V-MBX-REUSE-001: diagnosis/design remains pending controlled observations.",
+    "V-CONSUMER-RUNTIME-001: candidate rollout and independent realtime proof pending.",
+    "JACKIN-DESKTOP-001: diagnosis only; no intervention with accepted measured conclusion."
+  ],
+  "audit_conclusion": "Five diagnostic/correctness credits are defensible if section 13 permits non-performance iterations. Performance acceptance remains zero, plateau remains zero, and no timing improvement is claimed. The Parallax UI unit is a sixth candidate only after canonical experiment indexing; all other listed work stays zero or pending."
+}

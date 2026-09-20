@@ -1,0 +1,147 @@
+{
+  "repository": "tailrocks/velnor",
+  "run": 35526876220,
+  "attempt": 1,
+  "source_sha": "07bc3e231b8955880974bb8142f3425e3011f616",
+  "event": "pull_request",
+  "conclusion": "success",
+  "effective_merge_sha": "5337b90b2e8f8c4e452b39fdb24725e2a0f41c64",
+  "effective_merge_parents": [
+    "97bac4c4582bbe18ee607a1dd7a41b4854345c7e",
+    "07bc3e231b8955880974bb8142f3425e3011f616"
+  ],
+  "source_and_merge_tree": "7a9152183389afac188108d07304c229731115c0",
+  "required_seconds": 546,
+  "aggregate_execution_seconds": 1509,
+  "executed_jobs": 20,
+  "reports": {
+    "runner": {
+      "schema_version": 4,
+      "job": "rust-velnor-runner",
+      "log_present": true,
+      "queue_seconds": null,
+      "queue_source": null,
+      "total_source": "job_markers",
+      "runner_setup_seconds": 3,
+      "selection_transport_seconds": 0,
+      "tool_bootstrap_seconds": 14,
+      "cache_prep_seconds": 4,
+      "cargo_fetch_seconds": 0,
+      "checks_wall_seconds": 496,
+      "checks_seconds": 496,
+      "candidate_seconds": null,
+      "candidate_preparation_seconds": null,
+      "candidate_publication_seconds": null,
+      "cache_seed_save_seconds": null,
+      "cache_bundle_save_seconds": null,
+      "cache_save_seconds": null,
+      "cache_save_observation": null,
+      "cache_post_job_observation": "mbx_post_job_unobserved",
+      "candidate_observation": null,
+      "cache_save_observed_phases": [],
+      "cache_save_unobserved_phases": [
+        "rustup",
+        "mold",
+        "cargo_bin",
+        "mbx_post_job"
+      ],
+      "cleanup_seconds": null,
+      "cleanup_observation": "unobserved_no_renderer_boundary",
+      "total_seconds": 518,
+      "cache_outcomes": {
+        "lane": "github",
+        "rustup": "exact",
+        "mold": "exact",
+        "cargo": "prefix",
+        "mbx": "unknown",
+        "docker_seed": null
+      },
+      "cache_declarations": {
+        "host_warm_layers": []
+      },
+      "origin_downloads": {
+        "updating_crates_io_index": 0,
+        "updating_git": 0,
+        "downloading_crates": 0,
+        "downloaded_lines": []
+      },
+      "compiler": {
+        "mbx_outcomes": [
+          "mbx[cache]: object cache: 3 hits, 0 misses, 1879 not looked up, 131 bypassed; 0 B downloaded, 0 B uploaded, 703.1 MiB stored locally",
+          "mbx[cache]: object cache: 3 hits, 3 misses, 1807 not looked up, 131 bypassed; 0 B downloaded, 0 B uploaded, 6.7 GiB stored locally"
+        ],
+        "finished_segments": [
+          "    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 58s",
+          "    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 06s"
+        ],
+        "compiling_lines": 370
+      }
+    },
+    "generator": {
+      "schema_version": 4,
+      "job": "rust-velnor-workflow",
+      "log_present": true,
+      "queue_seconds": null,
+      "queue_source": null,
+      "total_source": "job_markers",
+      "runner_setup_seconds": 5,
+      "selection_transport_seconds": 0,
+      "tool_bootstrap_seconds": 45,
+      "cache_prep_seconds": 6,
+      "cargo_fetch_seconds": 0,
+      "checks_wall_seconds": 154,
+      "checks_seconds": 154,
+      "candidate_seconds": 9,
+      "candidate_preparation_seconds": 3,
+      "candidate_publication_seconds": 6,
+      "cache_seed_save_seconds": null,
+      "cache_bundle_save_seconds": null,
+      "cache_save_seconds": null,
+      "cache_save_observation": null,
+      "cache_post_job_observation": "mbx_post_job_unobserved",
+      "candidate_observation": "candidate_phase_complete",
+      "cache_save_observed_phases": [],
+      "cache_save_unobserved_phases": [
+        "rustup",
+        "mold",
+        "cargo_bin",
+        "mbx_post_job"
+      ],
+      "cleanup_seconds": null,
+      "cleanup_observation": "unobserved_no_renderer_boundary",
+      "total_seconds": 222,
+      "cache_outcomes": {
+        "lane": "github",
+        "rustup": "exact",
+        "mold": "exact",
+        "cargo": "prefix",
+        "mbx": "unknown",
+        "docker_seed": null
+      },
+      "cache_declarations": {
+        "host_warm_layers": []
+      },
+      "origin_downloads": {
+        "updating_crates_io_index": 0,
+        "updating_git": 0,
+        "downloading_crates": 0,
+        "downloaded_lines": []
+      },
+      "compiler": {
+        "mbx_outcomes": [
+          "mbx[cache]: object cache: 1 hits, 2 misses, 1 bypassed; 0 B downloaded, 0 B uploaded, 381.0 MiB stored locally",
+          "mbx[cache]: object cache: 3 hits, 3 misses, 21 not looked up, 1 bypassed; 0 B downloaded, 0 B uploaded, 29.4 MiB stored locally",
+          "mbx[cache]: object cache: 2 hits, 4 misses, 21 not looked up, 1 bypassed; 0 B downloaded, 0 B uploaded, 1.5 GiB stored locally"
+        ],
+        "finished_segments": [
+          "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 19.67s",
+          "    Finished `test` profile [unoptimized + debuginfo] target(s) in 33.15s",
+          "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 09s"
+        ],
+        "compiling_lines": 7
+      }
+    }
+  },
+  "measurement_status": "uncontrolled observation; no speedup acceptance; restored older MBX prefix archive does not establish warm compiler reuse",
+  "url": "https://github.com/tailrocks/velnor/actions/runs/35526876220"
+}

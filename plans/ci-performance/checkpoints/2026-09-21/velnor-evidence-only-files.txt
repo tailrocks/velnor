@@ -1,0 +1,10 @@
+M	.github/ci/.github-actions-generator-state
+M	plans/ci-performance/README.md
+A	plans/ci-performance/observations/parallax-35525629941-cli.log.gz
+A	plans/ci-performance/observations/parallax-35525629941-jobs.csv
+A	plans/ci-performance/observations/parallax-35525629941-jobs.json
+A	plans/ci-performance/observations/parallax-35525629941-jobs.jsonl
+A	plans/ci-performance/observations/parallax-35525629941-observation.json
+A	plans/ci-performance/observations/parallax-35525629941-run.json
+A	plans/ci-performance/observations/parallax-35525629941-server.log.gz
+A	plans/ci-performance/observations/parallax-35525629941-summary.md

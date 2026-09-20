@@ -1,0 +1,74 @@
+--- a/crates/velnor-workflow/tests/platform_prerequisites.rs
++++ b/crates/velnor-workflow/tests/platform_prerequisites.rs
+@@ -30,6 +30,26 @@
+ 
+     fn project(&self) -> String {
+         fs::read_to_string(self.output.join(".github/ci/project.toml")).unwrap()
++    }
++
++    fn workflow_kind(&self, kind: &str) -> String {
++        let directory = self.output.join(".github/workflows");
++        let prefix = format!("ci-unit-{kind}");
++        let mut matches = fs::read_dir(&directory)
++            .unwrap()
++            .filter_map(Result::ok)
++            .filter_map(|entry| {
++                let name = entry.file_name().into_string().ok()?;
++                (name.starts_with(&prefix) && name.ends_with(".yml")).then_some(name)
++            })
++            .collect::<Vec<_>>();
++        matches.sort();
++        assert_eq!(
++            matches.len(),
++            1,
++            "fixture must expose exactly one {kind} partition; found {matches:?}"
++        );
++        self.workflow(&matches[0])
+     }
+ }
+ 
+@@ -211,7 +231,7 @@
+         "[workflow]\nrunners = \"github\"\ngithub_runner = \"ubuntu-24.04\"\n",
+     );
+     let generated = generate(&root);
+-    let swift = generated.workflow("ci-unit-swift.yml");
++    let swift = generated.workflow_kind("swift");
+     let (default, apple) = swift
+         .split_once("verify-github-apple:")
+         .expect("the split kind renders both partitions");
+@@ -288,7 +308,7 @@
+         swift.contains("TARGETS='ios' mise run build-xcframework"),
+         "the consumer prepares the product with its task inputs: {swift}"
+     );
+-    let kind = generated.workflow("ci-unit-swift.yml");
++    let kind = generated.workflow_kind("swift");
+     assert!(
+         kind.contains("runs-on: macos-15"),
+         "the xcframework capability resolves to macOS: {kind}"
+@@ -348,7 +368,7 @@
+          [units.env]\nRUSTFLAGS = \"-C link-arg=-fuse-ld=mold -D warnings\"\nCUSTOM_FLAG = \"yes\"\n",
+     );
+     let generated = generate(&root);
+-    let kind = generated.workflow("ci-unit-rust.yml");
++    let kind = generated.workflow_kind("rust");
+     assert!(
+         kind.contains("RUSTFLAGS: \"-C link-arg=-fuse-ld=mold -D warnings\""),
+         "declared flags render into the kind env: {kind}"
+@@ -375,7 +395,7 @@
+         unit.contains("cargo test") && !unit.contains("mbx test"),
+         "an opted-out unit keeps plain Cargo: {unit}"
+     );
+-    let kind = generated.workflow("ci-unit-rust.yml");
++    let kind = generated.workflow_kind("rust");
+     assert!(
+         !kind.contains("Set up Mr. Boxington"),
+         "an opted-out unit provisions no object transport: {kind}"
+@@ -408,7 +428,7 @@
+          [[units]]\nid = \"rust-svc\"\ncapabilities = [\"xcframework\"]\n",
+     );
+     let generated = generate(&root);
+-    let kind = generated.workflow("ci-unit-rust.yml");
++    let kind = generated.workflow_kind("rust");
+     assert!(
+         kind.contains("runs-on: macos-15"),
+         "an Apple capability resolves to the macOS executor: {kind}"

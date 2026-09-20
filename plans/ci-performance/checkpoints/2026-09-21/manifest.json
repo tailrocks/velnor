@@ -1,0 +1,27 @@
+{
+  "purpose": "User-requested immediate commit and push of all work; archives preserve interrupted agent source without accepting or installing it.",
+  "source_base": "47ce2e881f9fd6ca6d7a20293805a1407f93d056",
+  "drafts": [
+    {
+      "name": "environment",
+      "source": "/tmp/velnor-env-signature-impl",
+      "archive": "environment-draft.tar.gz",
+      "sha256": "c342d2dec7e74f49875bba1b9ca3e0238938dd7f1f7151058decd8b6e0d62c12",
+      "status": "unvalidated frozen draft; independent review findings pending"
+    },
+    {
+      "name": "conditions",
+      "source": "/tmp/velnor-step-condition",
+      "archive": "conditions-draft.tar.gz",
+      "sha256": "3ee0384e888c09b567b528a17b049429561a74914482e7151a1aa4853210d820",
+      "status": "unvalidated frozen draft; independent review findings pending"
+    },
+    {
+      "name": "cache-writer",
+      "source": "/tmp/velnor-mbx-writer-repair",
+      "archive": "cache-writer-draft.tar.gz",
+      "sha256": "738fc1fe12e945b0d6760536a906ca9a79203dedfa45a37e509b9b92a27e7d66",
+      "status": "unvalidated frozen draft; independent review findings pending"
+    }
+  ]
+}
