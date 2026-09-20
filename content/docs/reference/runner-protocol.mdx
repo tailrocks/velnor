@@ -4,9 +4,9 @@ title: "GitHub Actions Runner V2 protocol"
 
 # GitHub Actions Runner V2 protocol
 
-This reference describes the runner protocol Velnor currently implements. It
-is for engineers investigating registration, work delivery, job execution,
-progress, completion, and interruption behavior.
+This reference describes the Native runner protocol Velnor currently
+implements. It is for engineers investigating registration, work delivery, job
+execution, progress, completion, and interruption behavior.
 
 Velnor follows the protocol shapes and sequencing established by the upstream
 [`actions/runner`](https://github.com/actions/runner). That project remains the
@@ -15,9 +15,15 @@ intentional limits; it is not a promise of complete upstream equivalence.
 
 ## Protocol scope
 
-The active path is one JIT V2 session per ephemeral runner slot. A daemon may
+The Native path is one JIT V2 session per ephemeral runner slot. A daemon may
 operate several slots, but each slot has its own runner identity, broker
 session, lease, and job ownership.
+
+The Scale Set adapter classifies incoming offers from event and
+owner/repository fields, then delegates acquired jobs to the official Actions
+runner. It does not use the Native action-closure admission path. See
+[Scale Set job flow](/concepts/architecture#scale-set-job-flow) for the
+classifier limits.
 
 The protocol has four remote service roles:
 
@@ -87,9 +93,9 @@ The sequence is:
 6. Velnor claims the local `(plan, job)` identity before execution. Duplicate
    delivery is fenced by the local in-flight claim and host-wide plan/job lock.
 
-The acquired payload supplies the workflow/job identity, steps, actions,
-variables, masks, services, outputs, permissions, runtime URLs, and job
-credentials needed to build the execution plan.
+On the native lane, the acquired payload supplies the workflow/job identity,
+steps, actions, variables, masks, services, outputs, permissions, runtime
+URLs, and job credentials needed to build the execution plan.
 
 ## Lease and status behavior
 
@@ -106,11 +112,11 @@ An exact typed Run Service `404` during a terminal operation may be recorded as
 the remote already observing the job as terminal. This is distinct from treating
 an arbitrary failed request as success.
 
-## Admission before side effects
+## Native admission before side effects
 
-Velnor parses and validates the complete action closure before it performs
-checkout, downloads, credential injection, cache mutation, service startup,
-or executor work. Admission checks include:
+The Native runner parses and validates the complete action closure before it
+performs checkout, downloads, credential injection, cache mutation, service
+startup, or executor work. Admission checks include:
 
 - repository and trust policy;
 - action references, metadata, inputs, and supported action forms;
@@ -203,7 +209,7 @@ after service recreation.
 | Job acquisition transient failure | Retry while retaining the session where allowed. | The runner saw work; it may not yet have acquired the payload. |
 | Job acquisition permanent failure | Stop that acquisition/session path according to the typed response. | Inspect GitHub job state and the classified response. |
 | Lease renewal failure | Retry transient errors; registration loss cancels the job. | A locally running process is not proof GitHub still considers the job owned. |
-| Drain or service stop | Idle slots exit at a poll boundary; active jobs drain, then escalation may terminate them. | GitHub may see cancellation or infrastructure failure if the deadline expires. |
+| Drain or service stop | Native idle slots exit at a poll boundary; native active jobs drain, then service-stop escalation may terminate them. | GitHub may see cancellation or infrastructure failure if the native stop deadline expires. |
 | Job cancellation | Active broker cancellation is matched to the job; Velnor cancels execution and reports terminal state. | Cancellation is not equivalent to a normal successful completion. |
 | Progress upload failure | Continue execution when safe; retain bounded local evidence. | GitHub's live log/timeline can lag or be incomplete even while local execution continues. |
 | Completion request failure | Retry transient failures under a bounded budget; preserve the outbox until acknowledgement, terminal remote observation, or budget exhaustion. | Inspect outbox age and remote job state before retrying manually. |
@@ -218,17 +224,18 @@ timeout.
 
 Velnor models the same split: one cancellation token per job with `Requested`
 and `Forced` levels, and a `SIGINT → SIGTERM → SIGKILL` ladder per target. The
-current step's own work — its host process tree, its Docker-action sidecar, its
-BuildKit builder — dies at `Requested`; the job and service containers survive
-to `Forced` so `always()` and `cancelled()` post steps still have a container.
-Cancellation signals; removal belongs to teardown.
+current step's own work — its host process tree and Docker-action sidecar —
+dies at `Requested`; the job and service containers survive to `Forced` so
+`always()` and `cancelled()` post steps still have a container. Cancellation
+signals; removal belongs to teardown.
 
-It is not fully equivalent yet. Only host process groups register as
-termination targets on the live path, so containers are killed by name rather
-than through the ladder, and the Firecracker path sends no vsock cancel to the
-guest. Velnor still drains publishers, collects available state, and attempts
-terminal completion, but operators must not assume identical graceful step
-cancellation or cleanup timing.
+The live native path registers host process groups, job and service
+containers, and Docker-action sidecars. For Firecracker, an active cancellation
+token registers the jailer process group as the termination fallback; a guest
+`Cancel` hook is registered when a vsock cancel handle is also available.
+Containers and process groups use the signal ladder; the guest hook attempts
+graceful cancellation and teardown owns resource removal. Velnor still drains
+publishers, collects available state, and attempts terminal completion.
 
 This is the principal intentional adapter difference. Broker session creation,
 long polling, job acquisition, lease renewal, completion, status mapping, and

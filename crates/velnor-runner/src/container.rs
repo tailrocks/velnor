@@ -77,13 +77,14 @@ fn is_docker_control_env(name: &str) -> bool {
 /// (`--pids-limit`, oomd, `MemoryHigh`) were considered and rejected:
 /// the spec forbids ceilings, and the installer fails closed on any
 /// surviving one (postinst + preflight assert infinity).
-const QUOTA_FLAGS: [&str; 11] = [
+const QUOTA_FLAGS: [&str; 12] = [
     "--cpus",
     "--cpu-period",
     "--cpu-quota",
     "--cpu-shares",
     "--cpuset-cpus",
     "--cpuset-mems",
+    "-m",
     "--memory",
     "--memory-reservation",
     "--memory-swap",
@@ -2188,6 +2189,9 @@ mod tests {
             "--cpus".into(),
             "2".into(),
             "--memory=1g".into(),
+            "-m".into(),
+            "1g".into(),
+            "-m=2g".into(),
             "--cpu-quota".into(),
             "50000".into(),
             "--cpuset-cpus".into(),
@@ -2221,7 +2225,12 @@ mod tests {
             );
         }
         // The stripped values vanish with their flags; neighbors survive.
-        assert!(!args.iter().any(|arg| arg == "0-1" || arg == "512"));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "0-1" | "512" | "1g" | "2g")),
+            "quota values must be stripped with their flags: {args:?}"
+        );
         assert!(
             args.windows(2)
                 .any(|pair| pair[0] == "--label" && pair[1] == "workflow"),
@@ -2241,13 +2250,14 @@ mod tests {
     /// behavior. (Accepted risk, audit F4: no ceilings by spec §4.3.)
     #[test]
     fn quota_strip_list_covers_every_ceiling_flag() {
-        const CEILINGS: [&str; 11] = [
+        const CEILINGS: [&str; 12] = [
             "--cpus",
             "--cpu-period",
             "--cpu-quota",
             "--cpu-shares",
             "--cpuset-cpus",
             "--cpuset-mems",
+            "-m",
             "--memory",
             "--memory-reservation",
             "--memory-swap",

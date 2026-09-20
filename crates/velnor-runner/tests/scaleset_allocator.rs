@@ -133,18 +133,20 @@ fn occupancy_never_exceeds_n_under_churn() {
                             violations.fetch_add(1, Ordering::SeqCst);
                         }
                         guard.transition_running();
-                        drop(guard);
+                        guard.release();
                     }
                 } else {
                     let holder = native_permit_holder(&format!("churn-{lane}-{round}"));
-                    if let Some(guard) =
+                    if let Some(mut guard) =
                         NativePermitGuard::acquire(&ledger_path, holder, "scope-test").unwrap()
                     {
                         if allocator.occupied().unwrap() > 4 {
                             violations.fetch_add(1, Ordering::SeqCst);
                         }
                         guard.transition_running();
-                        drop(guard);
+                        // Terminal release: Drop after running retains uncertain
+                        // occupancy and would leak counted rows across rounds.
+                        guard.release();
                     }
                 }
             }
@@ -172,8 +174,10 @@ fn native_occupancy_denies_scaleset_and_vice_versa() {
         .expect("native grant b across scopes");
     assert!(allocator.acquire(&permit_holder(7, 1)).unwrap().is_none());
 
-    // One native release frees exactly one scale-set grant.
-    drop(native_a);
+    // Terminal native cleanup (not Drop): Drop would return native/a to
+    // Eligible with its original age, and global demand order would grant
+    // that older native demand again instead of the scale-set offer.
+    native_a.release();
     let guard = allocator
         .acquire(&permit_holder(7, 1))
         .unwrap()
@@ -188,8 +192,8 @@ fn native_occupancy_denies_scaleset_and_vice_versa() {
     let native_c = NativePermitGuard::acquire(&path, native_permit_holder("c"), "scope-a")
         .unwrap()
         .expect("native grant c after scale-set release");
-    drop(native_b);
-    drop(native_c);
+    native_b.release();
+    native_c.release();
     assert_eq!(allocator.occupied().unwrap(), 0);
 }
 
