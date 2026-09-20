@@ -155,6 +155,42 @@ local-export versus durable-save reporting, mode coupling and bounded timing
 repairs. Its [independent review](reviews/mbx-pr-writer-review.md) records all
 findings; no unreviewed writer has been integrated.
 
+## Identical-input repetition and API interruption
+
+Run [35524310993](https://github.com/tailrocks/velnor/actions/runs/35524310993)
+passed twice at head `ce75f7c3`. Both generator checkout logs prove effective
+merge `8955c765dd607b54a9f0f8fdfe440ca4b95b5a88`; Git transport independently
+verified its parents and tree, which matches the source head.
+
+| Attempt | Required result from attempt start | Aggregate execution | Runner | Generator |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 542s | 1,558s | 517s | 226s |
+| 2 | 559s | 1,622s | 532s | 220s |
+
+Attempt 2 reports `created_at` one second after `run_started_at`; the table
+uses the latter and retains both raw values without interpreting that skew as queue time.
+
+These are identical-input observations, not proof of a fully warm compiler
+cache. Both restored the same older MBX prefix archive and reported the same
+high unconsulted/bypass counts. Rustup and mold were exact hits; Cargo used a
+prefix restore; no origin downloads were reported. The sample size of two
+does not establish a stable noise distribution, tail estimate or speedup.
+The rerun counts as a repetition within the same experiment, not an iteration.
+
+Parallax #118 merged upstream as `3a657a54` with the validated `60cf651b` tree.
+Reviewed directory-transport runtime candidate `1aeb47e` was integrated with
+that history as `8e1262d7`, preserving the identical candidate tree, and pushed
+in [PR #119](https://github.com/tailrocks/parallax/pull/119). Its policy run
+`35525629889` passed; full CI `35525629941` was still running at last observation.
+
+At 17:26:50 UTC, GitHub rejected that run poll with HTTP 403 for exhausted core
+API quota. One bounded retry confirmed remaining 0 of 5,000 and reset
+17:39:16 UTC. The generic rate endpoint contradicted the actual response, so
+the failed resource's headers govern retries. API observation is temporarily
+unavailable; local implementation, tests and Git transport continue. Exact
+operations and limitations are retained in `observations/ci-campaign-api-blocker.json`.
+No unseen CI result or campaign completion is claimed.
+
 ## Completion contract
 
 - Generator/runtime fixes, regenerated Velnor, Jackin and Parallax consumers.
