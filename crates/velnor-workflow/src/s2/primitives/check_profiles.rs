@@ -919,7 +919,7 @@ mod tests {
         apple.runner = "macos".to_owned();
         assert_eq!(
             must(profile_runs_on(&config, &apple), "render the Apple runner"),
-            "macos-15"
+            "macos-26"
         );
         let mut unknown = profile("unknown");
         unknown.runner = "planetary".to_owned();

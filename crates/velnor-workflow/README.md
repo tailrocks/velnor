@@ -53,6 +53,31 @@ config, and the generator revision (`GENERATOR_REVISION`); all three are
 recorded in the ownership sidecar (`schema = 2`) and `--check` fails when they
 no longer match the current run, even if every generated file is unchanged.
 
+## Typed package-release verification hooks
+
+Schema-2 `package-release` declarations may name repository-owned mise tasks in
+`verify_tasks`. Velnor validates each name against the scanned `mise.toml` and
+renders the task after producer creation, after the downloaded handoff is
+re-verified, and after the immutable release is downloaded. The task runs from
+the exact source checkout with `VELNOR_VERIFIED_PACKAGE_DIR` pointing at the
+bytes under verification; Velnor does not interpret the task's package
+semantics.
+
+```toml
+[[declare]]
+primitive = "package-release"
+file = "preview.yml"
+
+[declare.args]
+build_tasks = ["build-package"]
+verify_tasks = ["verify-package"]
+```
+
+`verify_tasks` is a list of plain mise task names, not shell commands or an
+arbitrary command array. Omit it when a package has no repository-owned
+semantic verification beyond Velnor's generic manifest, checksum, and
+provenance checks.
+
 ## `[renovate]` — self-hosted dependency updates
 
 Scan evidence alone (`renovate.json`, `renovate.json5`, or `.github/renovate.json*`)

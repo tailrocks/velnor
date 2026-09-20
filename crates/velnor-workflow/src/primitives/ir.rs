@@ -331,6 +331,123 @@ mod tests {
         );
     }
 
+    #[test]
+    fn collapsed_rust_members_gate_mbx_per_member() {
+        let mbx_unit = rust_unit("rust-mbx", "crates/mbx");
+        let mut disabled_unit = rust_unit("rust-disabled", "crates/disabled");
+        disabled_unit.mbx = Some(false);
+        let mut ir = owner_test_ir("example/mbx-gating", vec![mbx_unit, disabled_unit]);
+        ir.mr_boxington = true;
+
+        let kind = must_render_kind(&ir);
+        assert_eq!(
+            kind.matches("Set up Mr. Boxington").count(),
+            2,
+            "each lane keeps the MBX setup block"
+        );
+        assert!(
+            kind.contains("if: ${{ inputs.mbx_enabled }}"),
+            "mixed members gate MBX on the selected member"
+        );
+        assert!(
+            kind.contains("if: ${{ inputs.mbx_enabled == false }}"),
+            "mixed members gate the sccache alternative on the selected member"
+        );
+        assert!(
+            kind.contains(
+                "- name: Configure sccache environment\n        if: ${{ inputs.mbx_enabled == false }}"
+            ),
+            "mixed members gate the sccache environment on the selected member"
+        );
+        for assignment in [
+            "CARGO_INCREMENTAL=0",
+            "RUSTC_WRAPPER=sccache",
+            "SCCACHE_GHA_ENABLED=true",
+        ] {
+            assert!(
+                kind.contains(&format!("echo '{assignment}' >> \"$GITHUB_ENV\"")),
+                "mixed sccache members export {assignment}: {kind}"
+            );
+        }
+        assert!(
+            kind.contains("hashFiles(inputs.mbx_dependency_files)"),
+            "MBX members keep their per-member snapshot key inputs"
+        );
+
+        for (unit, enabled) in [(&ir.units[0], true), (&ir.units[1], false)] {
+            for lane in [RunnerMode::Github, RunnerMode::Velnor] {
+                let facts = ir.unit_lane_facts(unit, &ir.default_unit_contract(unit, true), lane);
+                assert_eq!(facts.mbx_enabled, enabled, "{lane:?} / {}", unit.id);
+                let values = facts.input_values();
+                assert_eq!(
+                    values.iter().any(|(name, value)| {
+                        *name == lane_input::MBX_ENABLED && value == "true"
+                    }),
+                    enabled,
+                    "typed MBX input for {lane:?} / {}",
+                    unit.id
+                );
+                assert_eq!(
+                    facts.mbx.is_some(),
+                    lane == RunnerMode::Github && enabled,
+                    "hosted snapshot facts for {lane:?} / {}",
+                    unit.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn collapsed_rust_all_mbx_keeps_ungated_mbx_setup() {
+        let mut ir = owner_test_ir(
+            "example/mbx-all",
+            vec![
+                rust_unit("rust-a", "crates/a"),
+                rust_unit("rust-b", "crates/b"),
+            ],
+        );
+        ir.mr_boxington = true;
+
+        let kind = must_render_kind(&ir);
+        assert_eq!(kind.matches("Set up Mr. Boxington").count(), 2);
+        assert!(!kind.contains("if: ${{ inputs.mbx_enabled }}"));
+        assert!(!kind.contains("if: ${{ inputs.mbx_enabled == false }}"));
+        assert!(!kind.contains("Set up sccache"));
+    }
+
+    #[test]
+    fn collapsed_rust_all_disabled_omits_mbx_and_keeps_sccache() {
+        let mut disabled = rust_unit("rust-disabled", "crates/disabled");
+        disabled.mbx = Some(false);
+        let mut ir = owner_test_ir("example/mbx-none", vec![disabled]);
+        ir.mr_boxington = true;
+
+        let kind = must_render_kind(&ir);
+        assert!(!kind.contains("Set up Mr. Boxington"));
+        assert_eq!(kind.matches("Set up sccache").count(), 1);
+        assert_eq!(
+            kind.matches("Configure sccache environment").count(),
+            1,
+            "the all-disabled job configures sccache once"
+        );
+        assert!(!kind.contains("if: ${{ inputs.mbx_enabled }}"));
+        assert!(!kind.contains("if: ${{ inputs.mbx_enabled == false }}"));
+        let facts = ir.unit_lane_facts(
+            &ir.units[0],
+            &ir.default_unit_contract(&ir.units[0], true),
+            RunnerMode::Github,
+        );
+        assert!(!facts.mbx_enabled);
+        assert!(facts.mbx.is_none());
+        assert!(
+            facts
+                .input_values()
+                .iter()
+                .all(|(name, _)| *name != lane_input::MBX_ENABLED),
+            "disabled members pass no MBX input"
+        );
+    }
+
     fn candidate_flagged_callers(ir: &WorkflowIr) -> Vec<String> {
         let mut flagged = Vec::new();
         for unit in &ir.units {
@@ -1698,6 +1815,26 @@ fn collapsed_checks_env(offline: FeatureCoverage) -> String {
     env
 }
 
+/// Export the sccache defaults after setup for the selected member. Collapsed
+/// jobs cannot use [`render_job_env`] because one job serves members with
+/// mutually exclusive MBX and sccache transports; `GITHUB_ENV` carries the
+/// selected member's values to every later command without assigning empty
+/// wrapper variables to MBX members.
+fn render_collapsed_sccache_env_step(
+    output: &mut String,
+    sccache: FeatureCoverage,
+    mbx_input: &str,
+) {
+    if !sccache.any {
+        return;
+    }
+    let block = "      - name: Configure sccache environment\n        run: |\n          echo 'CARGO_INCREMENTAL=0' >> \"$GITHUB_ENV\"\n          echo 'RUSTC_WRAPPER=sccache' >> \"$GITHUB_ENV\"\n          echo 'SCCACHE_GHA_ENABLED=true' >> \"$GITHUB_ENV\"\n";
+    output.push_str(&prefix_step_block_with_if(
+        block,
+        sccache.absent_gate(mbx_input).as_deref(),
+    ));
+}
+
 fn cargo_offline_run_prelude(members: &[&Unit]) -> String {
     let restricted = members
         .iter()
@@ -2958,6 +3095,8 @@ pub(crate) mod lane_input {
     pub(crate) const MISE_RUNNER: &str = "mise_runner";
     /// The Mr. Boxington snapshot compatibility digest.
     pub(crate) const MBX_COMPAT: &str = "mbx_compat";
+    /// `true` when the selected unit uses Mr. Boxington instead of sccache.
+    pub(crate) const MBX_ENABLED: &str = "mbx_enabled";
     /// Newline-separated `hashFiles` patterns of the snapshot dependency segment.
     pub(crate) const MBX_DEPENDENCY_FILES: &str = "mbx_dependency_files";
     /// Newline-separated `hashFiles` patterns of the snapshot freshness segment.
@@ -3012,6 +3151,7 @@ pub(crate) mod lane_input {
     pub(crate) const ALL: &[&str] = &[
         MISE_TOOLS,
         MISE_RUNNER,
+        MBX_ENABLED,
         MBX_COMPAT,
         MBX_DEPENDENCY_FILES,
         MBX_FRESHNESS_FILES,
@@ -3043,6 +3183,7 @@ pub(crate) mod lane_input {
         matches!(
             name,
             MISE_RUNNER
+                | MBX_ENABLED
                 | CARGO_FETCH_SKIP_WHEN_WARM
                 | CARGO_NET_OFFLINE
                 | POLICY_RUNTIME
@@ -3111,6 +3252,7 @@ pub(crate) struct SnapshotFacts {
 pub(crate) struct LaneStepFacts {
     pub(crate) mise_tools: Vec<String>,
     pub(crate) mise_runner: bool,
+    pub(crate) mbx_enabled: bool,
     pub(crate) mbx: Option<SnapshotFacts>,
     pub(crate) cargo_bin_tools: Vec<String>,
     pub(crate) tool_version: Option<String>,
@@ -3141,6 +3283,9 @@ impl LaneStepFacts {
         }
         if self.mise_runner {
             values.push((lane_input::MISE_RUNNER, "true".to_owned()));
+        }
+        if self.mbx_enabled {
+            values.push((lane_input::MBX_ENABLED, "true".to_owned()));
         }
         if let Some(mbx) = &self.mbx {
             values.push((lane_input::MBX_COMPAT, mbx.compatibility.clone()));
@@ -3238,6 +3383,12 @@ impl FeatureCoverage {
     /// carries it.
     fn gate(self, input: &str) -> Option<String> {
         (self.any && !self.all).then(|| lane_input::present_gate(input))
+    }
+
+    /// The gate for a boolean feature's complement when only some members
+    /// carry it. This keeps the alternative transport member-scoped too.
+    fn absent_gate(self, input: &str) -> Option<String> {
+        (self.any && !self.all).then(|| format!("inputs.{input} == false"))
     }
 }
 
@@ -4472,6 +4623,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             && tools.contains(&ToolRequirement::Mise)
             && mise_tools.is_empty()
             && commands_invoke_mise(unit);
+        let mbx_enabled = tools.contains(&ToolRequirement::MrBoxington);
         let mbx = (github_lane && tools.contains(&ToolRequirement::MrBoxington))
             .then(|| unit_snapshot_facts(self, unit));
         let cargo_bin_tools = if github_lane {
@@ -4525,6 +4677,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         LaneStepFacts {
             mise_tools,
             mise_runner,
+            mbx_enabled,
             mbx,
             cargo_bin_tools,
             tool_version,
@@ -4687,6 +4840,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                                     | ToolRequirement::Nextest
                                     | ToolRequirement::CargoDeny
                                     | ToolRequirement::CargoAudit
+                                    // MBX and sccache are mutually exclusive
+                                    // per-member transports, not kind-level
+                                    // tools. Their setup is gated below from
+                                    // the selected member's typed input.
+                                    | ToolRequirement::MrBoxington
+                                    | ToolRequirement::Sccache
                             )
                         })
                         .collect::<BTreeSet<_>>()
@@ -4746,7 +4905,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             );
             output.push_str(&gated(block, mise_runner, lane_input::MISE_RUNNER));
         }
-        if kind_tools.contains(&ToolRequirement::MrBoxington) {
+        let mbx = FeatureCoverage::over(&facts, |facts| facts.mbx_enabled);
+        if mbx.any {
+            let mut block = String::new();
             if github_lane {
                 let (cache_key, restore_keys) = input_snapshot(
                     UNIT_SNAPSHOT_NAMESPACE,
@@ -4754,10 +4915,23 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     lane_input::MBX_DEPENDENCY_FILES,
                     lane_input::MBX_FRESHNESS_FILES,
                 );
-                self.render_mbx_github_step(output, &cache_key, &restore_keys);
+                self.render_mbx_github_step(&mut block, &cache_key, &restore_keys);
             } else {
-                self.render_mbx_local_step(output);
+                self.render_mbx_local_step(&mut block);
             }
+            output.push_str(&gated(block, mbx, lane_input::MBX_ENABLED));
+        }
+        let sccache =
+            FeatureCoverage::over(&facts, |facts| kind == UnitKind::Rust && !facts.mbx_enabled);
+        if github_lane && sccache.any {
+            let mut block = String::new();
+            let sccache_tools = BTreeSet::from([ToolRequirement::Sccache]);
+            self.render_kind_level_tool_steps(&mut block, lane, &sccache_tools, cache_save);
+            output.push_str(&prefix_step_block_with_if(
+                &block,
+                sccache.absent_gate(lane_input::MBX_ENABLED).as_deref(),
+            ));
+            render_collapsed_sccache_env_step(output, sccache, lane_input::MBX_ENABLED);
         }
         if github_lane && kind_tools.contains(&ToolRequirement::Bun) {
             let versioned = FeatureCoverage::over(&facts, |facts| facts.tool_version.is_some());

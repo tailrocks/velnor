@@ -1927,7 +1927,7 @@ mod tests {
 
     #[test]
     fn remote_javascript_action_is_admitted_as_a_leaf() {
-        let action_ref = "7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777";
+        let action_ref = "a20e1ffcd962370fb2b6045c13b7b349f7b03386";
         let repository = "jdx/mr-boxington-action";
         let job = job(serde_json::json!([repo_step(
             repository,

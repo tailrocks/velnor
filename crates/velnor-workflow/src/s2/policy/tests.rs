@@ -1439,4 +1439,16 @@ fn policy_sibling_setup_action_is_a_reviewed_local_path() {
         !is_approved_local_action("./policy-setup-action/.github/workflows/ci-pr.yml"),
         "the sibling checkout carries no reusable workflows"
     );
+    assert!(
+        is_approved_local_action(crate::s2::VELNOR_WORKFLOW_SOURCE_SETUP_ACTION),
+        "the owner package publisher resolves setup from its exact source checkout"
+    );
+    assert!(
+        !is_approved_local_action("./source/.github/actions/anything-else"),
+        "the source checkout allowance is the exact setup composite"
+    );
+    assert!(
+        !is_approved_local_action("./other-source/.github/actions/setup-velnor-workflow"),
+        "other checkout paths are not implicitly trusted"
+    );
 }

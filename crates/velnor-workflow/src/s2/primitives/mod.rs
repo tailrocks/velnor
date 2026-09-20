@@ -15,6 +15,7 @@ mod cache;
 pub(crate) mod check_profiles;
 pub(crate) mod docs_site;
 mod ir;
+mod package_release;
 mod pipeline;
 mod plan;
 pub(crate) mod prepared_tools;
@@ -75,6 +76,8 @@ pub(crate) const DOCS_SITE: &str = "docs-site";
 pub(crate) const RELEASE: &str = "release";
 /// The `preview.yml` rolling artifact lane.
 pub(crate) const PREVIEW: &str = "preview";
+/// The typed six-payload rolling package release and consumer handoff.
+pub(crate) const PACKAGE_RELEASE: &str = "package-release";
 /// The `maintenance.yml` cache-hygiene workflow.
 pub(crate) const MAINTENANCE: &str = "maintenance";
 /// The release artifact provenance signer.
@@ -606,6 +609,7 @@ pub(crate) fn registry() -> Vec<Box<dyn Primitive>> {
         Box::new(pipeline::DocsLint),
         Box::new(release::Release),
         Box::new(release::Preview),
+        Box::new(package_release::PackageRelease),
         Box::new(release::Maintenance),
         Box::new(release::ReleaseSigner),
         Box::new(release::StaticWorkflow),
@@ -1307,8 +1311,9 @@ fn validate(
             .or_else(|| renovate::canonical_renovate_side_file(&row.primitive))
             .or_else(|| docs_site::canonical_docs_site_side_file(&row.primitive))
             .or_else(|| runtime_products::canonical_runtime_products_side_file(&row.primitive));
-        // Only a main-branch-driven release row renders outside `release.yml`;
-        // tag-triggered kinds stay pinned to the canonical file.
+        // Main-branch-driven release rows and package publishers own their
+        // declared file; other tag-driven families stay pinned to a canonical
+        // file.
         let main_branch_driven = row.primitive == RELEASE
             && Args(&row.args)
                 .string("kind")
@@ -1434,6 +1439,7 @@ mod tests {
             REGEN_GATE,
             RELEASE,
             PREVIEW,
+            PACKAGE_RELEASE,
             MAINTENANCE,
             RELEASE_SIGNER,
             STATIC_WORKFLOW,
