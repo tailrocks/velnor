@@ -45,9 +45,10 @@ The fixture deliberately probes nine hostile surfaces:
   approval or provenance.
 * `trusted-harness-negative-tests.sh` exercises schema duplicate/float/extra-key
   rejection, exact producer archive extra/missing/duplicate-member rejection,
-  forged-manifest identity rejection, unreadable output-subtree rejection,
-  unexpected regular-file rejection, and the non-Linux host gate. It never
-  invokes Docker or the probe.
+  CRC corruption, forged-manifest identity rejection, and the producer ZIP-only
+  assertion against an otherwise safe TAR. It also covers unreadable
+  output-subtree rejection, unexpected regular-file rejection, and the non-Linux
+  host gate. It never invokes Docker or the probe.
 
 The approved sandbox base identity is recorded as the raw digest-pinned
 `ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b`.
@@ -148,7 +149,9 @@ cap. Any image, quota, timeout, copy, result, or cleanup failure is red; no
 host-shell fallback exists.
 
 Before candidate execution, the wrapper requires the producer archive member
-census to equal the two base-owned member names. Extra files, missing files,
+census to equal the two base-owned member names and requires the producer
+transport format to be ZIP. (The generic checker may retain TAR support for the
+clean source archive; the producer wrapper does not.) Extra files, missing files,
 duplicate names, unsafe paths, links, special entries, and malformed member
 bytes fail closed. It hashes both members, extracts only the manifest into a
 disposable file, validates the strict manifest schema, and compares

@@ -46,8 +46,10 @@ done
 # are disposable test data; no candidate binary, Docker daemon, or network is
 # involved.
 python3 - "$tmp" <<'PY'
+import io
 import json
 import sys
+import tarfile
 import warnings
 import zipfile
 from pathlib import Path
@@ -67,6 +69,11 @@ files = [
 write_archive("exact.zip", files)
 write_archive("extra.zip", files + [("unexpected", b"no")])
 write_archive("missing.zip", files[:1])
+with tarfile.open(root / "exact.tar", "w") as archive:
+    for member, data in files:
+        info = tarfile.TarInfo(member)
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
 with zipfile.ZipFile(root / "crc.zip", "w", compression=zipfile.ZIP_STORED) as archive:
     archive.writestr("velnor-workflow", b"first")
     archive.writestr("candidate-manifest.json", b"{}")
@@ -99,6 +106,15 @@ python3 -B "$checker" --exact-member velnor-workflow \
   --exact-member candidate-manifest.json "$tmp/exact.zip" >"$tmp/exact.json"
 jq -e '.schema == "velnor.bootstrap-archive-exact.v1" and .status == "valid" and .files == 2' \
   "$tmp/exact.json" >/dev/null
+python3 -B "$checker" --exact-member velnor-workflow \
+  --exact-member candidate-manifest.json "$tmp/exact.tar" >"$tmp/exact-tar.json"
+jq -e '.schema == "velnor.bootstrap-archive-exact.v1" and .status == "valid" and .format == "tar"' \
+  "$tmp/exact-tar.json" >/dev/null
+set +e
+jq -e '.format == "zip"' "$tmp/exact-tar.json" >/dev/null
+tar_transport_rc=$?
+set -e
+test "$tar_transport_rc" -ne 0
 for archive in extra missing duplicate crc; do
   set +e
   python3 -B "$checker" --exact-member velnor-workflow \

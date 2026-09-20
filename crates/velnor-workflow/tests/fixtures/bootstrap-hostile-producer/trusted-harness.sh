@@ -260,6 +260,7 @@ jq -e \
     ([.required_isolation[]] | index("network-none") != null) and
     ([.required_isolation[]] | index("bounded-output-tmp") != null) and
     ([.required_isolation[]] | index("numeric-non-root") != null) and
+    .producer_archive_contract.transport == "zip" and
     (.producer_archive_contract.base_owned_exact_files ==
       ["binary-member-from-handoff", "manifest-member-from-handoff"]) and
     .producer_archive_contract.parent_directories_only == true and
@@ -305,7 +306,7 @@ python3 -B "$G1_ARCHIVE_CHECK_PATH" \
   || die "producer archive member census failed"
 jq -e '
   .schema == "velnor.bootstrap-archive-exact.v1" and
-  .status == "valid" and .files == 2
+  .status == "valid" and .format == "zip" and .files == 2
 ' "$evidence/producer-archive-summary.json" >/dev/null || die "producer archive census record invalid"
 python3 -B "$G1_ARCHIVE_CHECK_PATH" --member-sha256 "$G1_PRODUCER_BINARY_MEMBER" \
   "$G1_PRODUCER_ARCHIVE_PATH" >"$evidence/producer-member-summary.json" || die "producer member validation failed"

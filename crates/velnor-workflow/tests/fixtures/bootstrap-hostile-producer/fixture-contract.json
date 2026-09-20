@@ -18,6 +18,7 @@
   ],
   "binary_source": "probe.rs",
   "producer_archive_contract": {
+    "transport": "zip",
     "base_owned_exact_files": ["binary-member-from-handoff", "manifest-member-from-handoff"],
     "parent_directories_only": true,
     "extra_files": false,
