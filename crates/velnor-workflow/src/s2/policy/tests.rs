@@ -630,10 +630,11 @@ fn candidate_transport_rejects_malformed_manifest_and_open_publishers() {
     });
     for marker in [
         "step_pattern = re.compile",
+        "unsafe local action/workflow path",
         "external_workflow_pattern",
         "external reusable workflow is outside the closed artifact publisher contract",
+        "trusted workflow source closure differs from the base-owned contract",
         "upload step has no unique action or with.name",
-        "shell step can POST to the Actions artifact service",
     ] {
         assert!(
             job.contains(marker),
