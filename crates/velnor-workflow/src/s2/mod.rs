@@ -6166,6 +6166,11 @@ fn recover_transaction_cli(cli: &Cli) -> Result<(), GeneratorError> {
             let checkout = path.canonicalize().map_err(|error| {
                 GeneratorError::io("canonicalize local recovery target", &path, &error)
             })?;
+            if !dispatch::dir_is_schema2(&checkout) {
+                return Err(GeneratorError::usage(
+                    "transaction recovery requires a local schema-2 target with `schema = 2` in .github-gen/velnor-workflow.toml",
+                ));
+            }
             match cli.output.as_deref() {
                 Some(path) => resolve_output_path(path)?,
                 None => checkout,

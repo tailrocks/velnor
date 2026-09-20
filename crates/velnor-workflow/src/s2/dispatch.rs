@@ -47,6 +47,9 @@ pub(crate) fn run_if_s2() -> Option<Result<(), crate::GeneratorError>> {
 }
 
 fn wants_s2(arguments: &[OsString]) -> bool {
+    if has_recover_transaction_flag(arguments) {
+        return true;
+    }
     if has_providers_flag(arguments) {
         return true;
     }
@@ -56,6 +59,12 @@ fn wants_s2(arguments: &[OsString]) -> bool {
         return wants_s2_runtime(command, arguments);
     }
     wants_s2_generator(arguments)
+}
+
+fn has_recover_transaction_flag(arguments: &[OsString]) -> bool {
+    arguments
+        .iter()
+        .any(|argument| argument == "--recover-transaction")
 }
 
 fn has_providers_flag(arguments: &[OsString]) -> bool {
