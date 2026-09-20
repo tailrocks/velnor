@@ -3539,6 +3539,13 @@ gh() {
   fi
   return 0
 }
+old_assets="$TEST_TMPDIR/missing-old-assets"
+set +e
+asset_was_in_old_set candidate.tar.gz
+asset_status="$?"
+set -e
+test "$asset_status" -eq 2
+old_assets="$TEST_TMPDIR/old-assets"
 set +e
 (rollback 1)
 rollback_status=$?
