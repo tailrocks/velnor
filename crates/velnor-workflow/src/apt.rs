@@ -3105,10 +3105,15 @@ fn acquire_provider_release(
             ));
         }
     };
-    let expected_owner_api_url = format!("https://api.github.com/{owner_api_prefix}/{owner_login}");
+    // The repository response embeds a user-shaped owner object. GitHub uses
+    // its `/users/` URL even when the owner type is Organization; the typed
+    // owner endpoint below is a separate REST resource.
+    let expected_embedded_owner_api_url = format!("https://api.github.com/users/{owner_login}");
+    let expected_owner_detail_api_url =
+        format!("https://api.github.com/{owner_api_prefix}/{owner_login}");
     let expected_owner_html_url = format!("https://github.com/{owner_login}");
     if repository_owner_login != owner_login
-        || field(owner, "url")? != expected_owner_api_url
+        || field(owner, "url")? != expected_embedded_owner_api_url
         || field(owner, "html_url")? != expected_owner_html_url
     {
         return Err(GeneratorError::usage(
@@ -3120,7 +3125,7 @@ fn acquire_provider_release(
     if positive_field(&owner_document, "id")? != owner_id
         || field(&owner_document, "login")? != owner_login
         || field(&owner_document, "type")? != owner_type
-        || field(&owner_document, "url")? != expected_owner_api_url
+        || field(&owner_document, "url")? != expected_owner_detail_api_url
         || field(&owner_document, "html_url")? != expected_owner_html_url
     {
         return Err(GeneratorError::usage(
@@ -8093,13 +8098,24 @@ mod tests {
 
     static FIXTURE_SEQ: AtomicU64 = AtomicU64::new(0);
 
-    const FIXTURE_SOURCE: &str = "example/app";
+    const FIXTURE_SOURCE: &str = "tailrocks/velnor";
     const FIXTURE_PACKAGE: &str = "example";
     const FIXTURE_BINARY: &str = "example";
-    const FIXTURE_IDENTITY: &str = "app";
+    const FIXTURE_IDENTITY: &str = "velnor";
     const FIXTURE_SCHEMA: &str = "example.test/apt-manifest-v1";
     const FIXTURE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
     const FIXTURE_FPR: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
+    // Raw owner objects extracted from the captured tailrocks/velnor REST
+    // response and its separately probed organization endpoint. Keep the
+    // two URL forms distinct: GitHub's embedded repository owner is a
+    // user-shaped object, while the typed organization route is /orgs/.
+    const CAPTURED_REPOSITORY_OWNER: &[u8] = br#"{"login":"tailrocks","id":78806509,"url":"https://api.github.com/users/tailrocks","html_url":"https://github.com/tailrocks","type":"Organization"}"#;
+    const CAPTURED_ORGANIZATION_OWNER: &[u8] = br#"{"login":"tailrocks","id":78806509,"url":"https://api.github.com/orgs/tailrocks","html_url":"https://github.com/tailrocks","type":"Organization"}"#;
+    // User-owned repositories use the same embedded `/users/` shape. This is
+    // a raw-byte shape fixture, not live authority; the provider identity
+    // checks below still require equal ID/login/type across both responses.
+    const USER_REPOSITORY_OWNER: &[u8] = br#"{"login":"tailrocks","id":78806509,"url":"https://api.github.com/users/tailrocks","html_url":"https://github.com/tailrocks","type":"User"}"#;
+    const USER_OWNER_DETAIL: &[u8] = br#"{"login":"tailrocks","id":78806509,"url":"https://api.github.com/users/tailrocks","html_url":"https://github.com/tailrocks","type":"User"}"#;
     const NATIVE_ASSEMBLED_PRODUCT_MANIFEST: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/native-product/product-manifest.json"
@@ -8921,24 +8937,19 @@ mod tests {
             "prerelease": false,
             "assets": release_assets
         });
+        let repository_owner = must(
+            serde_json::from_slice::<serde_json::Value>(CAPTURED_REPOSITORY_OWNER),
+            "parse captured repository owner",
+        );
+        let owner = must(
+            serde_json::from_slice::<serde_json::Value>(CAPTURED_ORGANIZATION_OWNER),
+            "parse captured organization owner",
+        );
         let repository = serde_json::json!({
-            "id": 456,
+            "id": 1255367013,
             "full_name": FIXTURE_SOURCE,
             "html_url": format!("https://github.com/{FIXTURE_SOURCE}"),
-            "owner": {
-                "id": 789,
-                "login": "example",
-                "type": "Organization",
-                "url": "https://api.github.com/orgs/example",
-                "html_url": "https://github.com/example"
-            }
-        });
-        let owner = serde_json::json!({
-            "id": 789,
-            "login": "example",
-            "type": "Organization",
-            "url": "https://api.github.com/orgs/example",
-            "html_url": "https://github.com/example"
+            "owner": repository_owner
         });
         let tag_ref = serde_json::json!({
             "ref": "refs/tags/v1.2.3",
@@ -8976,7 +8987,7 @@ mod tests {
         .expect("append provider repository case");
         writeln!(
             &mut script,
-            "  users/example|orgs/example) cat \"{}/owner.json\" ;;",
+            "  users/tailrocks|orgs/tailrocks) cat \"{}/owner.json\" ;;",
             fixture.root.display()
         )
         .expect("append provider owner case");
@@ -9063,6 +9074,34 @@ mod tests {
                 Box::new(|root| {
                     rewrite_fixture_json(&root.join("owner.json"), |owner| {
                         owner["id"] = serde_json::json!(999);
+                    });
+                }),
+            ),
+            (
+                "wrong-repository-owner-id",
+                "owner endpoint",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("repository.json"), |repository| {
+                        repository["owner"]["id"] = serde_json::json!(999);
+                    });
+                }),
+            ),
+            (
+                "wrong-repository-owner-url",
+                "owner identity",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("repository.json"), |repository| {
+                        repository["owner"]["url"] =
+                            serde_json::json!("https://api.github.com/orgs/tailrocks");
+                    });
+                }),
+            ),
+            (
+                "wrong-owner-detail-url",
+                "owner endpoint",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("owner.json"), |owner| {
+                        owner["url"] = serde_json::json!("https://api.github.com/users/tailrocks");
                     });
                 }),
             ),
@@ -9227,13 +9266,19 @@ mod tests {
     fn provider_owner_user_shape_is_supported() {
         let fixture = discovery_fixture("provider-owner-user");
         let bin = discovery_gh_stub(&fixture);
+        let user_repository_owner = must(
+            serde_json::from_slice::<serde_json::Value>(USER_REPOSITORY_OWNER),
+            "parse raw User repository owner fixture",
+        );
+        let user_owner_detail = must(
+            serde_json::from_slice::<serde_json::Value>(USER_OWNER_DETAIL),
+            "parse raw User owner detail fixture",
+        );
         rewrite_fixture_json(&fixture.root.join("repository.json"), |repository| {
-            repository["owner"]["type"] = serde_json::json!("User");
-            repository["owner"]["url"] = serde_json::json!("https://api.github.com/users/example");
+            repository["owner"] = user_repository_owner;
         });
         rewrite_fixture_json(&fixture.root.join("owner.json"), |owner| {
-            owner["type"] = serde_json::json!("User");
-            owner["url"] = serde_json::json!("https://api.github.com/users/example");
+            *owner = user_owner_detail;
         });
         let fetched = fixture.root.join("fetched");
         must(
