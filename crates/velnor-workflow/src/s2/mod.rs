@@ -6850,7 +6850,8 @@ fn sync_transaction_file(path: &Path) -> Result<(), GeneratorError> {
 fn sync_transaction_directory(path: &Path) -> Result<(), GeneratorError> {
     // Callers sync after each journal create/rename/remove boundary. This
     // orders directory metadata for normal recovery; it is not a power-loss
-    // attestation for every filesystem or storage stack.
+    // attestation for every filesystem or storage stack. Tests cover journal
+    // tampering and ordering paths, not crash-recovery semantics.
     fs::File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| GeneratorError::io("sync transaction journal directory", path, &error))
