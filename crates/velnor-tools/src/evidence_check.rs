@@ -7951,6 +7951,55 @@ fn sort_findings(findings: &mut [Finding]) {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::{Cursor, Read};
+
+    fn real_api_fixture_entry(path: &str) -> Vec<u8> {
+        let encoded =
+            include_str!("testdata/g0/real-api-fixture-corpus-20260920-080318/corpus.zip.base64")
+                .trim();
+        let archive_bytes = BASE64.decode(encoded).expect("real fixture archive base64");
+        let mut archive = zip::ZipArchive::new(Cursor::new(archive_bytes))
+            .expect("real fixture archive is a zip");
+        let mut entry = archive.by_name(path).expect("real fixture entry exists");
+        let mut bytes = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .expect("read real fixture entry");
+        bytes
+    }
+
+    fn captured_page_request(endpoint: &str, query: &str, items: u32) -> G0RequestRecord {
+        G0RequestRecord {
+            request_id: format!("fixture:{endpoint}"),
+            api: G0ApiKind::Rest,
+            method: "GET".to_owned(),
+            endpoint_or_operation: endpoint.to_owned(),
+            query_base64: BASE64.encode(query.as_bytes()),
+            variables_base64: BASE64.encode(b"{}"),
+            query_sha256: digest_bytes(query.as_bytes()),
+            variables_sha256: digest_bytes(b"{}"),
+            auth_identity_ref: "collector.auth".to_owned(),
+            started_at_utc: "2026-09-20T07:53:35Z".to_owned(),
+            completed_at_utc: "2026-09-20T07:53:36Z".to_owned(),
+            http_status: 200,
+            api_request_id: "fixture-api-request".to_owned(),
+            rate_limit_ref: "collector.rate_limit".to_owned(),
+            page: G0Page {
+                number: 1,
+                per_page: 100,
+                link_next: None,
+                cursor_in: None,
+                cursor_out: None,
+                has_next_page: false,
+                items_returned: items,
+            },
+            response_raw_ref: "fixture-raw".to_owned(),
+            error_raw_ref: None,
+            state: G0RequestState::Complete,
+            complete: true,
+            truncation_reason: None,
+        }
+    }
 
     fn sha(seed: char) -> String {
         std::iter::repeat_n(seed, SHA_LENGTH).collect()
@@ -10468,6 +10517,169 @@ mod tests {
         assert_eq!(
             g0_json_string(&selected_job, &["check_run_url"]),
             Some("https://api.github.com/repos/tailrocks/holla-apt/check-runs/104741135689")
+        );
+    }
+
+    #[test]
+    fn frozen_real_api_corpus_preserves_run_graph_and_provider_relationships() {
+        let run_bytes = real_api_fixture_entry("raw/velnor/run-35493166478/run.body");
+        let attempt_bytes =
+            real_api_fixture_entry("raw/velnor/run-35493166478/attempt-1/attempt.body");
+        let jobs_bytes =
+            real_api_fixture_entry("raw/velnor/run-35493166478/attempt-1/jobs/page-0001.body");
+        let artifacts_bytes =
+            real_api_fixture_entry("raw/velnor/run-35493166478/artifacts/page-0001.body");
+        let checks_bytes = real_api_fixture_entry(
+            "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs/page-0001.body",
+        );
+        let sonar_bytes = real_api_fixture_entry(
+            "raw/homebrew-tap/commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-runs/page-0001.body",
+        );
+        assert_eq!(
+            digest_bytes(&run_bytes),
+            "sha256:40bf9508b2a024d6813c498b225caf255f02390d27d00dcf390bbee19294aa10"
+        );
+        assert_eq!(
+            digest_bytes(&attempt_bytes),
+            "sha256:9837c6d5b687cfb1979b7bd9f547e1eec69536bdfb08bcf435dcd6444f820405"
+        );
+        assert_eq!(
+            digest_bytes(&jobs_bytes),
+            "sha256:b9937bad52729f233fed821f81ed5d2e8526eefdc049f462dea5d20aefcfdec9"
+        );
+        assert_eq!(
+            digest_bytes(&artifacts_bytes),
+            "sha256:7abeb5ab6ba79e4d085d70bacb67bd1357adb7fb0ab9811933bdf2a6f0a5c171"
+        );
+        assert_eq!(
+            digest_bytes(&checks_bytes),
+            "sha256:2f30395551e7bfad2f0271dfeaa09bd4768da3905dfa1a42785aa12d6388bf57"
+        );
+        assert_eq!(
+            digest_bytes(&sonar_bytes),
+            "sha256:c241e54220d3a3c04d5761e100be507b9c2dfec15772414b898a90957b7551b5"
+        );
+
+        let run: Value = serde_json::from_slice(&run_bytes).expect("run body JSON");
+        let attempt: Value = serde_json::from_slice(&attempt_bytes).expect("attempt body JSON");
+        assert_eq!(g0_json_u64(&run, &["id"]), Some(35_493_166_478));
+        assert_eq!(g0_json_u64(&run, &["run_attempt"]), Some(1));
+        assert_eq!(
+            g0_json_string(&run, &["head_sha"]),
+            Some("df9fb272c025f76cc8711560209afcdfd6cc4e00")
+        );
+        assert_eq!(g0_json_string(&run, &["event"]), Some("pull_request"));
+        assert_eq!(g0_json_u64(&attempt, &["id"]), Some(35_493_166_478));
+        assert_eq!(g0_json_u64(&attempt, &["run_attempt"]), Some(1));
+        assert_eq!(
+            g0_json_string(&attempt, &["head_sha"]),
+            Some("df9fb272c025f76cc8711560209afcdfd6cc4e00")
+        );
+
+        let jobs: Value = serde_json::from_slice(&jobs_bytes).expect("jobs page JSON");
+        let jobs_array = jobs["jobs"].as_array().expect("jobs envelope");
+        assert_eq!(jobs["total_count"].as_u64(), Some(68));
+        assert_eq!(jobs_array.len(), 68);
+        let job_ids = jobs_array
+            .iter()
+            .map(|job| g0_json_u64(job, &["id"]).expect("job id"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(job_ids.len(), 68);
+        assert!(jobs_array.iter().all(|job| {
+            g0_json_u64(job, &["run_id"]) == Some(35_493_166_478)
+                && g0_json_u64(job, &["run_attempt"]) == Some(1)
+                && g0_json_string(job, &["html_url"]).is_some_and(|url| {
+                    url.starts_with(
+                        "https://github.com/tailrocks/velnor/actions/runs/35493166478/job/",
+                    )
+                })
+        }));
+        let job_request = captured_page_request(
+            "/repos/tailrocks/velnor/actions/runs/35493166478/attempts/1/jobs",
+            "per_page=100&page=1",
+            68,
+        );
+        let selected_job = g0_select_raw_member(
+            jobs,
+            "job",
+            job_ids.iter().next().copied().expect("first job id"),
+            &job_request,
+        )
+        .expect("first job must be selected from the complete page");
+        assert_eq!(
+            g0_json_u64(&selected_job, &["run_id"]),
+            Some(35_493_166_478)
+        );
+
+        let artifacts: Value =
+            serde_json::from_slice(&artifacts_bytes).expect("artifacts page JSON");
+        let artifacts_array = artifacts["artifacts"]
+            .as_array()
+            .expect("artifacts envelope");
+        assert_eq!(artifacts["total_count"].as_u64(), Some(2));
+        assert_eq!(artifacts_array.len(), 2);
+        assert!(artifacts_array.iter().all(|artifact| {
+            g0_json_u64(artifact, &["workflow_run", "id"]) == Some(35_493_166_478)
+                && artifact
+                    .get("workflow_run")
+                    .and_then(|run| run.get("run_attempt"))
+                    .is_none()
+                && artifact.get("workflow_run_id").is_none()
+        }));
+
+        let checks: Value = serde_json::from_slice(&checks_bytes).expect("checks page JSON");
+        let checks_array = checks["check_runs"].as_array().expect("checks envelope");
+        assert_eq!(checks["total_count"].as_u64(), Some(70));
+        assert_eq!(checks_array.len(), 70);
+        let check_ids = checks_array
+            .iter()
+            .map(|check| g0_json_u64(check, &["id"]).expect("check id"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(check_ids.len(), 70);
+        let dco = checks_array
+            .iter()
+            .find(|check| g0_json_u64(check, &["app", "id"]) == Some(974_774))
+            .expect("captured DCO check");
+        assert_eq!(g0_json_u64(dco, &["id"]), Some(106_031_458_188));
+        assert_eq!(g0_json_string(dco, &["name"]), Some("DCO"));
+        assert_eq!(
+            g0_json_u64(dco, &["check_suite", "id"]),
+            Some(96_108_219_979)
+        );
+        assert_eq!(g0_json_string(dco, &["app", "slug"]), Some("dco-2"));
+        assert_eq!(
+            g0_json_string(dco, &["head_sha"]),
+            Some("df9fb272c025f76cc8711560209afcdfd6cc4e00")
+        );
+        let checks_request = captured_page_request(
+            "/repos/tailrocks/velnor/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs",
+            "per_page=100&filter=all&page=1",
+            70,
+        );
+        let selected_dco =
+            g0_select_raw_member(checks, "check_run", 106_031_458_188, &checks_request)
+                .expect("DCO must be selected from the complete checks page");
+        assert_eq!(g0_json_u64(&selected_dco, &["app", "id"]), Some(974_774));
+
+        let sonar: Value = serde_json::from_slice(&sonar_bytes).expect("Sonar checks page JSON");
+        let sonar_check = sonar["check_runs"]
+            .as_array()
+            .expect("Sonar checks envelope")
+            .iter()
+            .find(|check| g0_json_u64(check, &["app", "id"]) == Some(12_526))
+            .expect("captured Sonar check");
+        assert_eq!(g0_json_u64(sonar_check, &["id"]), Some(105_978_471_119));
+        assert_eq!(
+            g0_json_string(sonar_check, &["conclusion"]),
+            Some("failure")
+        );
+        assert_eq!(
+            g0_json_string(sonar_check, &["app", "slug"]),
+            Some("sonarqubecloud")
+        );
+        assert_eq!(
+            g0_json_string(sonar_check, &["head_sha"]),
+            Some("c501e90d014c207234ed94ea41f7a1c9b6ea0c7c")
         );
     }
 
