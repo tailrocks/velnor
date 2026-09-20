@@ -737,9 +737,7 @@ fn owner_entrypoint_renders_the_isolated_candidate_transport() {
         "the hosted verifier consumes result bytes, not the legacy manifest path: {job}"
     );
     let template = hosted_entrypoint(PIN_A);
-    let (prefix, _) = template
-        .split_once("jobs:\n")
-        .expect("hosted workflow jobs");
+    let (prefix, _) = must_some(template.split_once("jobs:\n"), "hosted workflow jobs");
     let root = entrypoint_tree("entrypoint-owner-pin", &format!("{prefix}jobs:\n{job}"));
     let audit = must(
         audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),

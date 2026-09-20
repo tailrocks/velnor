@@ -407,16 +407,16 @@ fn pin_rules(
     report.rules.push(entrypoint_pin(root, pin));
     let lookup = PinnedBinaryLookup::from_env(pin, options.build_pin);
     let mainline = matches!((&head, &base), (Ok(head), Some(base)) if head == base);
-    let comparison = regenerate_and_compare(
-        root,
-        root,
+    let comparison = regenerate_and_compare(&RegenerateRequest {
+        checkout: root,
+        tree: root,
         pin,
-        &declared.default_branch,
-        &declared.excludes,
-        &lookup,
-        &source,
-        options.candidate_render.as_deref(),
-    );
+        default_branch: &declared.default_branch,
+        excludes: &declared.excludes,
+        lookup: &lookup,
+        source: &source,
+        candidate_render: options.candidate_render.as_deref(),
+    });
     report
         .rules
         .push(generated_tree_report(pin, comparison, mainline));
@@ -542,16 +542,16 @@ pub(crate) fn verify_declared_pin_renders_tree(
             .and_then(config::RepoGenerationConfig::repository),
     );
     let lookup = PinnedBinaryLookup::from_env(pin, build_pin);
-    match regenerate_and_compare(
+    match regenerate_and_compare(&RegenerateRequest {
         checkout,
-        output_root,
+        tree: output_root,
         pin,
-        &config.default_branch,
-        &excludes,
-        &lookup,
-        &source,
-        None,
-    )? {
+        default_branch: &config.default_branch,
+        excludes: &excludes,
+        lookup: &lookup,
+        source: &source,
+        candidate_render: None,
+    })? {
         TreeComparison::Pin => Ok(()),
         TreeComparison::Candidate(closure) => {
             eprintln!(
@@ -1323,39 +1323,55 @@ pub(crate) enum TreeComparison {
     Differences(Vec<String>),
 }
 
-pub(crate) fn regenerate_and_compare(
-    checkout: &Path,
-    tree: &Path,
-    pin: &str,
-    default_branch: &str,
-    excludes: &BTreeSet<String>,
-    lookup: &PinnedBinaryLookup,
-    source: &PinSource,
-    candidate_render: Option<&Path>,
+struct RegenerateRequest<'a> {
+    checkout: &'a Path,
+    tree: &'a Path,
+    pin: &'a str,
+    default_branch: &'a str,
+    excludes: &'a BTreeSet<String>,
+    lookup: &'a PinnedBinaryLookup,
+    source: &'a PinSource,
+    candidate_render: Option<&'a Path>,
+}
+
+fn regenerate_and_compare(
+    request: &RegenerateRequest<'_>,
 ) -> Result<TreeComparison, GeneratorError> {
     // The generator's own repository audits a full history, so the pin's
     // closures are always computable there; a consumer tree without generator
     // history resolves through the revision fallback instead.
-    let expected = match source {
-        PinSource::Checkout(_) => Some(expected_closures(checkout, pin)?),
-        PinSource::Remote(_) => expected_closures(checkout, pin).ok(),
+    let expected = match request.source {
+        PinSource::Checkout(_) => Some(expected_closures(request.checkout, request.pin)?),
+        PinSource::Remote(_) => expected_closures(request.checkout, request.pin).ok(),
     };
-    let binary = resolve_pinned_binary(pin, expected.as_deref(), lookup, source)?;
+    let binary = resolve_pinned_binary(
+        request.pin,
+        expected.as_deref(),
+        request.lookup,
+        request.source,
+    )?;
     let scratch = scratch_directory("policy-render")?;
-    let verdict = render_and_compare(&binary, checkout, tree, &scratch, default_branch, excludes)
-        .and_then(|differences| {
-            if differences.is_empty() {
-                return Ok(TreeComparison::Pin);
+    let verdict = render_and_compare(
+        &binary,
+        request.checkout,
+        request.tree,
+        &scratch,
+        request.default_branch,
+        request.excludes,
+    )
+    .and_then(|differences| {
+        if differences.is_empty() {
+            return Ok(TreeComparison::Pin);
+        }
+        if let Some(render) = request.candidate_render {
+            let head = resolve_head(request.checkout, None).map_err(GeneratorError::usage)?;
+            let closure = closure_identity::candidate_closure_of_tree(request.checkout, &head)?;
+            if compare_rendered_tree(render, request.tree, request.excludes)?.is_empty() {
+                return Ok(TreeComparison::Candidate(closure));
             }
-            if let Some(render) = candidate_render {
-                let head = resolve_head(checkout, None).map_err(GeneratorError::usage)?;
-                let closure = closure_identity::candidate_closure_of_tree(checkout, &head)?;
-                if compare_rendered_tree(render, tree, excludes)?.is_empty() {
-                    return Ok(TreeComparison::Candidate(closure));
-                }
-            }
-            Ok(TreeComparison::Differences(differences))
-        });
+        }
+        Ok(TreeComparison::Differences(differences))
+    });
     let _ = fs::remove_dir_all(&scratch);
     verdict
 }

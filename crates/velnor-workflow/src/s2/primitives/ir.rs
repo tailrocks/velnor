@@ -816,8 +816,14 @@ mod tests {
             rendered.contains("github.event.pull_request.head.repo.id == github.repository_id"),
             "{rendered}"
         );
-        let producer_start = rendered.find("  candidate_producer:\n").unwrap();
-        let producer_end = rendered[producer_start..].find("\n  ci-required:").unwrap();
+        let producer_start = must_some(
+            rendered.find("  candidate_producer:\n"),
+            "candidate producer job",
+        );
+        let producer_end = must_some(
+            rendered[producer_start..].find("\n  ci-required:"),
+            "candidate producer boundary",
+        );
         let producer = &rendered[producer_start..producer_start + producer_end];
         assert!(!producer.contains("needs:"), "{producer}");
         assert!(
