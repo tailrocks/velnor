@@ -876,8 +876,6 @@ where
         let mut page_query = query.clone();
         if paginated {
             page_query.insert("page".to_owned(), page_number.to_string());
-        } else if page_number == 1 {
-            page_query.insert("per_page".to_owned(), request.per_page.to_string());
         }
         let page_key = canonical_page_key(&endpoint, &page_query)?;
         if !seen_pages.insert(page_key) {

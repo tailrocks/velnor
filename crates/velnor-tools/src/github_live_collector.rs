@@ -3658,7 +3658,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dependency_fetch_error_fails_closed_without_cache_or_edges() {
+    async fn dependency_fetch_error_fails_closed_but_retains_failure_request() {
         let transport = FixtureTransport::with_responses(vec![Err(TransportFailure::Timeout)]);
         let mut store = FixtureStore::default();
         let auth = AuthIdentity::new(
@@ -3703,7 +3703,8 @@ mod tests {
         assert!(result.is_err());
         assert!(ledger.dependency_trees.is_empty());
         assert!(ledger.dependency_sources.is_empty());
-        assert!(ledger.requests.is_empty());
+        assert_eq!(ledger.requests.len(), 1);
+        assert_eq!(ledger.requests[0].state, AcquisitionState::TransportError);
         assert!(ledger.raw_objects.is_empty());
     }
 

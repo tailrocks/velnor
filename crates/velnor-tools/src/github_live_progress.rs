@@ -204,6 +204,9 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn request() -> RequestRecord {
         RequestRecord {
@@ -245,7 +248,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!(
             "velnor-live-progress-{}-{}",
             std::process::id(),
-            utc_now().replace([':', '.'], "-")
+            TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path)?;
         Ok(path)
