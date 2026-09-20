@@ -364,6 +364,7 @@ pub struct Cli {
     local_no_baseline: bool,
     plain: bool,
     pin_build: bool,
+    recover_transaction: bool,
 }
 
 /// Clap-owned command-line syntax. Conversion into [`Cli`] preserves the
@@ -439,6 +440,12 @@ struct RawCli {
     #[arg(long)]
     pin_build: bool,
 
+    /// Explicitly recover a pending transaction after reviewing that every
+    /// changed output still matches its journaled after-image. Local targets
+    /// only; refuses mismatches and never guesses a replacement.
+    #[arg(long)]
+    recover_transaction: bool,
+
     /// Print the source commit this binary was built from and exit.
     #[arg(long, exclusive = true)]
     revision: bool,
@@ -511,6 +518,7 @@ impl TryFrom<RawCli> for Cli {
             local_no_baseline: raw.local_no_baseline,
             plain: raw.plain,
             pin_build: raw.pin_build,
+            recover_transaction: raw.recover_transaction,
         })
     }
 }
@@ -6064,6 +6072,9 @@ fn render_tree_with_baseline(
 }
 
 fn run(cli: &Cli) -> Result<(), GeneratorError> {
+    if cli.recover_transaction {
+        return recover_transaction_cli(cli);
+    }
     if cli.baseline_revision.is_none() && !cli.local_no_baseline {
         return Err(GeneratorError::usage(
             "baseline unavailable: supply --baseline-revision <full-sha> or explicitly select --local-no-baseline",
@@ -6134,6 +6145,40 @@ fn run(cli: &Cli) -> Result<(), GeneratorError> {
         baseline.as_ref(),
         cli.local_no_baseline,
     );
+    Ok(())
+}
+
+fn recover_transaction_cli(cli: &Cli) -> Result<(), GeneratorError> {
+    if cli.check
+        || cli.dry_run
+        || cli.force
+        || cli.baseline_revision.is_some()
+        || cli.local_no_baseline
+        || cli.pin_build
+    {
+        return Err(GeneratorError::usage(
+            "--recover-transaction cannot be combined with generation, baseline, or pin-build flags",
+        ));
+    }
+    let source = RepositorySource::parse(&cli.target)?;
+    let output_root = match source {
+        RepositorySource::Local(path) => {
+            let checkout = path.canonicalize().map_err(|error| {
+                GeneratorError::io("canonicalize local recovery target", &path, &error)
+            })?;
+            match cli.output.as_deref() {
+                Some(path) => resolve_output_path(path)?,
+                None => checkout,
+            }
+        }
+        RepositorySource::GitHub { .. } => {
+            return Err(GeneratorError::usage(
+                "--recover-transaction requires a local repository target",
+            ));
+        }
+    };
+    recover_pending_transaction_with_operator_attestation(&output_root)?;
+    println!("Recovered pending transaction in {}", output_root.display());
     Ok(())
 }
 
@@ -7016,7 +7061,7 @@ fn recover_transaction_record(
     let after_bytes = transaction_snapshot_bytes(journal, "after", record, &record.after)?;
     let Some(expected_identity) = progress.get(&record.index) else {
         return Err(GeneratorError::usage(format!(
-            "transaction recovery cannot prove mutation identity for {}",
+            "transaction recovery cannot prove mutation identity for {}; inspect the journaled after-image, then run `velnor-workflow --recover-transaction <local-target>`",
             record.relative.display()
         )));
     };
@@ -7084,11 +7129,17 @@ fn cleanup_transaction_journal(root: &Path) -> Result<(), GeneratorError> {
     }
 }
 
-fn recover_pending_transaction(root: &Path) -> Result<(), GeneratorError> {
+struct PendingTransaction {
+    path: PathBuf,
+    records: Vec<TransactionRecord>,
+    progress: BTreeMap<usize, TransactionProgress>,
+}
+
+fn inspect_pending_transaction(root: &Path) -> Result<Option<PendingTransaction>, GeneratorError> {
     let path = transaction_path(root);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(GeneratorError::io(
                 "inspect transaction journal",
@@ -7127,6 +7178,74 @@ fn recover_pending_transaction(root: &Path) -> Result<(), GeneratorError> {
             "transaction journal progress references an unknown entry: {}",
             path.display()
         )));
+    }
+    Ok(Some(PendingTransaction {
+        path,
+        records,
+        progress,
+    }))
+}
+
+fn recover_pending_transaction(root: &Path) -> Result<(), GeneratorError> {
+    let Some(PendingTransaction {
+        path,
+        records,
+        progress,
+    }) = inspect_pending_transaction(root)?
+    else {
+        return Ok(());
+    };
+    for record in records.iter().rev() {
+        recover_transaction_record(root, &path, record, &progress)?;
+    }
+    cleanup_transaction_journal(root)
+}
+
+/// Explicit operator recovery for a mutation whose post-write identity was
+/// not recorded. The operator command proves each unrecorded target still
+/// matches its journaled after-image before creating progress; it never
+/// guesses a path, bytes, or identity. Normal generation remains fail-closed.
+fn recover_pending_transaction_with_operator_attestation(
+    root: &Path,
+) -> Result<(), GeneratorError> {
+    let _generation_lock = GenerationLock::acquire(root, std::iter::empty::<&PathBuf>())?;
+    let Some(PendingTransaction {
+        path,
+        records,
+        mut progress,
+    }) = inspect_pending_transaction(root)?
+    else {
+        return Err(GeneratorError::usage(format!(
+            "no pending transaction journal in {}; nothing to recover",
+            root.display()
+        )));
+    };
+    let mut newly_proven = BTreeMap::new();
+    for record in &records {
+        if progress.contains_key(&record.index) {
+            continue;
+        }
+        let current = capture_file_preimage(&root.join(&record.relative), &record.relative)?;
+        let before_bytes = transaction_snapshot_bytes(&path, "before", record, &record.before)?;
+        if snapshot_matches(&current, &record.before, before_bytes.as_deref()) {
+            continue;
+        }
+        let after_bytes = transaction_snapshot_bytes(&path, "after", record, &record.after)?;
+        if !snapshot_matches(&current, &record.after, after_bytes.as_deref()) {
+            return Err(GeneratorError::usage(format!(
+                "operator recovery refused {}; current output does not match its journaled after-image; journal preserved",
+                record.relative.display()
+            )));
+        }
+        let observed = match current {
+            FilePreimage::Missing => TransactionProgress::Missing,
+            FilePreimage::Regular { identity, .. } => TransactionProgress::Regular(identity),
+        };
+        newly_proven.insert(record.index, observed);
+    }
+    if !newly_proven.is_empty() {
+        progress.extend(newly_proven);
+        write_transaction_progress(&path, &progress)?;
     }
     for record in records.iter().rev() {
         recover_transaction_record(root, &path, record, &progress)?;
@@ -7763,10 +7882,6 @@ pub(crate) fn is_full_revision(value: &str) -> bool {
     value.len() == 40 && value.chars().all(|character| character.is_ascii_hexdigit())
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the bounded transaction keeps preflight, mutation, and rollback in one reviewable path"
-)]
 fn apply_generated_write_plan(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
@@ -7776,6 +7891,39 @@ fn apply_generated_write_plan(
     force: bool,
     plan: &GeneratedWritePlan,
 ) -> Result<WriteOutcome, GeneratorError> {
+    apply_generated_write_plan_with_capture(
+        root,
+        files,
+        inputs,
+        dry_run,
+        check,
+        force,
+        plan,
+        capture_post_write_preimage,
+    )
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the bounded transaction keeps preflight, mutation, and rollback in one reviewable path"
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the capture callback is a narrow test seam around the existing write-plan contract"
+)]
+fn apply_generated_write_plan_with_capture<C>(
+    root: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    inputs: &GenerationInputs,
+    dry_run: bool,
+    check: bool,
+    force: bool,
+    plan: &GeneratedWritePlan,
+    capture_post_write: C,
+) -> Result<WriteOutcome, GeneratorError>
+where
+    C: Fn(&Path, &Path, Option<&[u8]>) -> Result<FilePreimage, GeneratorError>,
+{
     validate_plan_preimages(root, plan)?;
     // A state file written by another schema is never parsed, so its recorded
     // provenance cannot support a check verdict: refuse to conclude instead of
@@ -7879,11 +8027,16 @@ fn apply_generated_write_plan(
                 GeneratorError::usage("generated plan has no file preimage"),
             );
         };
-        let after =
-            match write_reviewed_file(&root.join(relative), relative, content, &planned.preimage) {
-                Ok(after) => after,
-                Err(error) => return rollback_after_error(root, &mutated, error),
-            };
+        let after = match write_reviewed_file_with_capture(
+            &root.join(relative),
+            relative,
+            content,
+            &planned.preimage,
+            &capture_post_write,
+        ) {
+            Ok(after) => after,
+            Err(error) => return rollback_after_error(root, &mutated, error),
+        };
         mutated.push(AppliedMutation {
             relative: relative.clone(),
             before: planned.preimage.clone(),
@@ -7931,11 +8084,12 @@ fn apply_generated_write_plan(
             GeneratorError::usage("generated plan has no ownership preimage"),
         );
     };
-    let after = match write_reviewed_file(
+    let after = match write_reviewed_file_with_capture(
         &root.join(&ownership_path),
         &ownership_path,
         &ownership_state_content(files, inputs),
         &ownership_file.preimage,
+        &capture_post_write,
     ) {
         Ok(after) => after,
         Err(error) => return rollback_after_error(root, &mutated, error),
@@ -8650,13 +8804,32 @@ fn write_reviewed_file(
     content: &str,
     expected: &FilePreimage,
 ) -> Result<FilePreimage, GeneratorError> {
+    write_reviewed_file_with_capture(
+        path,
+        relative,
+        content,
+        expected,
+        capture_post_write_preimage,
+    )
+}
+
+fn write_reviewed_file_with_capture<C>(
+    path: &Path,
+    relative: &Path,
+    content: &str,
+    expected: &FilePreimage,
+    capture_post_write: C,
+) -> Result<FilePreimage, GeneratorError>
+where
+    C: Fn(&Path, &Path, Option<&[u8]>) -> Result<FilePreimage, GeneratorError>,
+{
     write_reviewed_file_observed_with_capture(
         path,
         relative,
         content,
         expected,
         |_| Ok(()),
-        capture_post_write_preimage,
+        capture_post_write,
     )
 }
 
@@ -10091,6 +10264,17 @@ mod tests {
                 plain: true,
                 ..
             }) if target == "."
+        ));
+        let recover = Cli::parse_args([
+            OsString::from("--recover-transaction"),
+            OsString::from("--plain"),
+        ]);
+        assert!(matches!(
+            recover,
+            Ok(Cli {
+                recover_transaction: true,
+                ..
+            })
         ));
         let local = Cli::parse_args([OsString::from("generate"), OsString::from(".")]);
         assert!(matches!(
@@ -21095,6 +21279,10 @@ lockfile = true
         let _ = fs::remove_dir_all(root);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test covers the complete real post-capture recovery lifecycle"
+    )]
     #[test]
     fn post_capture_failure_after_commit_preserves_recovery_journal() {
         let root = temporary_repository("post-capture-failure-recovery");
@@ -21122,7 +21310,7 @@ lockfile = true
             ),
             "plan post-capture failure write",
         );
-        let mut journal = must(
+        let _journal = must(
             create_transaction_journal(&root, &wanted, &GenerationInputs::parts(0, 0), &plan),
             "create post-capture failure journal",
         );
@@ -21138,10 +21326,9 @@ lockfile = true
                 &wanted[&relative],
                 &planned.preimage,
                 |_| Ok(()),
-                |_, _, _| {
-                    Err(GeneratorError::partial_apply_recovery_required(
-                        "injected post-write preimage capture failure",
-                    ))
+                |path, relative, expected| {
+                    atomic_write(path, "tampered after commit\n")?;
+                    capture_post_write_preimage(path, relative, expected)
                 },
             )
             .err(),
@@ -21151,11 +21338,12 @@ lockfile = true
             rollback_after_error(&root, &[], write_error).err(),
             "partial recovery must preserve the journal",
         );
-        assert!(error.requires_partial_recovery());
+        assert!(error.requires_partial_recovery(), "{error}");
         assert_eq!(
             must(fs::read_to_string(&path), "read committed replacement"),
-            wanted[&relative]
+            "tampered after commit\n"
         );
+        assert!(error.to_string().contains("post-write bytes changed"));
         assert!(transaction_path(&root).is_dir());
         let backup_count = fs::read_dir(must_some(path.parent(), "workflow parent"))
             .into_iter()
@@ -21181,17 +21369,172 @@ lockfile = true
             .contains("cannot prove mutation identity"));
         assert!(transaction_path(&root).is_dir());
 
+        let refused = must_some(
+            recover_pending_transaction_with_operator_attestation(&root).err(),
+            "operator recovery must refuse mismatched after-image",
+        );
+        assert!(refused.to_string().contains("operator recovery refused"));
+        assert!(transaction_path(&root).is_dir());
+
         must(
-            journal.record(&root, &relative),
-            "record observed post-write identity for recovery",
+            atomic_write(&path, &wanted[&relative]),
+            "restore expected after-image for explicit recovery",
         );
         must(
-            recover_pending_transaction(&root),
-            "recover journal after identity is observed",
+            recover_transaction_cli(&Cli {
+                target: root.to_string_lossy().into_owned(),
+                default_branch: None,
+                output: None,
+                providers: None,
+                dry_run: false,
+                check: false,
+                force: false,
+                baseline_revision: None,
+                local_no_baseline: false,
+                plain: true,
+                pin_build: false,
+                recover_transaction: true,
+            }),
+            "recover journal through explicit command",
         );
         assert_eq!(
             must(fs::read_to_string(&path), "read recovered preimage"),
             initial[&relative]
+        );
+        assert!(!transaction_path(&root).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test covers prior progress plus a later multi-output failure"
+    )]
+    #[test]
+    fn later_post_capture_failure_preserves_prior_journal_progress() {
+        let root = temporary_repository("later-post-capture-failure");
+        let first = PathBuf::from(".github/workflows/a.yml");
+        let second = PathBuf::from(".github/workflows/b.yml");
+        let initial = BTreeMap::from([
+            (
+                first.clone(),
+                format!("{GENERATED_HEADER}name: first-initial\n"),
+            ),
+            (
+                second.clone(),
+                format!("{GENERATED_HEADER}name: second-initial\n"),
+            ),
+        ]);
+        must(
+            write_generated(&root, &initial, false, false, false),
+            "write initial multi-output layout",
+        );
+        let baseline = committed_test_baseline(&root);
+        let wanted = BTreeMap::from([
+            (
+                first.clone(),
+                format!("{GENERATED_HEADER}name: first-wanted\n"),
+            ),
+            (
+                second.clone(),
+                format!("{GENERATED_HEADER}name: second-wanted\n"),
+            ),
+        ]);
+        let plan = must(
+            plan_generated_write_with_baseline(
+                &root,
+                &wanted,
+                &GenerationInputs::parts(0, 0),
+                false,
+                Some(&baseline),
+            ),
+            "plan multi-output post-capture failure",
+        );
+        let second_path = root.join(&second);
+        let error = must_some(
+            apply_generated_write_plan_with_capture(
+                &root,
+                &wanted,
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                true,
+                &plan,
+                |path, relative, expected| {
+                    if path == second_path {
+                        atomic_write(path, "tampered later output\n")?;
+                    }
+                    capture_post_write_preimage(path, relative, expected)
+                },
+            )
+            .err(),
+            "later post-capture failure must be reported",
+        );
+        assert!(error.requires_partial_recovery(), "{error}");
+        assert!(error.to_string().contains("post-write bytes changed"));
+        assert_eq!(
+            must(
+                fs::read_to_string(root.join(&first)),
+                "read prior committed output"
+            ),
+            wanted[&first]
+        );
+        assert_eq!(
+            must(
+                fs::read_to_string(&second_path),
+                "read tampered later output"
+            ),
+            "tampered later output\n"
+        );
+        assert!(transaction_path(&root).is_dir());
+
+        let unproven = must_some(
+            recover_pending_transaction(&root).err(),
+            "normal recovery must stop at unproven later output",
+        );
+        assert!(unproven
+            .to_string()
+            .contains("cannot prove mutation identity"));
+        let refused = must_some(
+            recover_pending_transaction_with_operator_attestation(&root).err(),
+            "operator recovery must refuse tampered later output",
+        );
+        assert!(refused.to_string().contains("operator recovery refused"));
+        assert!(transaction_path(&root).is_dir());
+
+        must(
+            atomic_write(&second_path, &wanted[&second]),
+            "restore expected later after-image",
+        );
+        must(
+            recover_transaction_cli(&Cli {
+                target: root.to_string_lossy().into_owned(),
+                default_branch: None,
+                output: None,
+                providers: None,
+                dry_run: false,
+                check: false,
+                force: false,
+                baseline_revision: None,
+                local_no_baseline: false,
+                plain: true,
+                pin_build: false,
+                recover_transaction: true,
+            }),
+            "recover multi-output journal through explicit command",
+        );
+        assert_eq!(
+            must(
+                fs::read_to_string(root.join(&first)),
+                "read recovered first preimage"
+            ),
+            initial[&first]
+        );
+        assert_eq!(
+            must(
+                fs::read_to_string(&second_path),
+                "read recovered second preimage"
+            ),
+            initial[&second]
         );
         assert!(!transaction_path(&root).exists());
         let _ = fs::remove_dir_all(root);
@@ -21824,6 +22167,7 @@ lockfile = true
             local_no_baseline: true,
             plain: true,
             pin_build: false,
+            recover_transaction: false,
         };
 
         must(run(&cli), "generate into explicit output path");

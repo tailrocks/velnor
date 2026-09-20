@@ -1064,6 +1064,7 @@ mod tests {
                 local_no_baseline: false,
                 plain: false,
                 pin_build: false,
+                recover_transaction: false,
             },
             receiver,
         );
