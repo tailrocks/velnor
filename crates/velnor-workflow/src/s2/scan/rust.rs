@@ -467,16 +467,16 @@ fn analyze_rust_manifests(
         let clippy_command = format!(
             "{command_prefix}cargo clippy {cargo_lock_flag} --profile test --no-deps --all-targets --all-features {package_selector} -- -D warnings"
         );
-        // Nextest before clippy: rustc test-profile artifacts are reused by
-        // clippy, avoiding a separate dev-profile compile plus a clippy-driver
-        // rebuild that nextest would not share anyway.
+        // Clippy before tests: report lint failures before compiling and
+        // running the test targets. Keep every command and its exact flags;
+        // the test command still covers test-less crates through `--no-tests`.
         let commands = vec![
             format!(
                 "{command_prefix}cargo fmt --manifest-path {} -- --check",
                 shell_quote("Cargo.toml")
             ),
-            test_command,
             clippy_command,
+            test_command,
         ];
         let mut watch = vec![
             manifest_path.clone(),
@@ -1366,6 +1366,92 @@ mod tests {
             analysis.detected
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn validation_commands_put_clippy_first_without_changing_the_command_set() {
+        for use_nextest in [true, false] {
+            let root = scratch(if use_nextest {
+                "validation-order-nextest"
+            } else {
+                "validation-order-cargo-test"
+            });
+            must(
+                fs::write(
+                    root.join("Cargo.toml"),
+                    "[package]\nname = \"widget\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+                ),
+                "write validation manifest",
+            );
+            must(
+                fs::write(root.join("Cargo.lock"), ""),
+                "write validation lockfile",
+            );
+            must(
+                fs::create_dir_all(root.join("tests")),
+                "create validation test directory",
+            );
+            must(
+                fs::write(
+                    root.join("tests/integration.rs"),
+                    "#[test]\nfn smoke() {}\n",
+                ),
+                "write validation test",
+            );
+            must(
+                fs::write(
+                    root.join("rust-toolchain.toml"),
+                    "[toolchain]\nchannel = \"1.91.1\"\n",
+                ),
+                "write validation toolchain",
+            );
+            let mut files = vec![
+                "Cargo.lock".to_owned(),
+                "Cargo.toml".to_owned(),
+                "rust-toolchain.toml".to_owned(),
+                "tests/integration.rs".to_owned(),
+            ];
+            if use_nextest {
+                must(
+                    fs::create_dir_all(root.join(".config")),
+                    "create nextest configuration directory",
+                );
+                must(
+                    fs::write(root.join(".config/nextest.toml"), ""),
+                    "write nextest configuration",
+                );
+                files.push(".config/nextest.toml".to_owned());
+            }
+            let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+            let analysis = must(
+                super::analyze_rust_manifests(&root, &files, &file_set, &["Cargo.toml".to_owned()]),
+                "analyze validation manifest",
+            );
+            let commands = &analysis.units[0].pr_commands;
+            let format = "cargo fmt --manifest-path 'Cargo.toml' -- --check".to_owned();
+            let test = if use_nextest {
+                "cargo nextest run --locked --all-features --package 'widget' --no-tests pass"
+                    .to_owned()
+            } else {
+                "cargo test --locked --all-features --package 'widget'".to_owned()
+            };
+            let clippy = "cargo clippy --locked --profile test --no-deps --all-targets --all-features --package 'widget' -- -D warnings".to_owned();
+            let expected_order = vec![format, clippy, test];
+            let mut expected_multiset = expected_order.clone();
+            expected_multiset.sort();
+            let mut observed_multiset = commands.clone();
+            observed_multiset.sort();
+            assert_eq!(
+                observed_multiset, expected_multiset,
+                "validation command flags or selector changed"
+            );
+            assert_eq!(
+                commands, &expected_order,
+                "validation command order changed"
+            );
+            assert_eq!(analysis.units[0].full_commands, expected_order);
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[expect(
