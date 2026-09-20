@@ -181,8 +181,25 @@ pub(crate) struct G0RepositoryInventory {
     pub default_branch_sha: String,
     pub rulesets: Vec<G0RulesetInventory>,
     pub workflows: Vec<G0WorkflowInventory>,
+    /// Complete artifact census for the source-bound runs retained by the
+    /// collector.  Artifact rows are not inferred from result records.
+    pub artifacts: Vec<G0ArtifactObservation>,
     pub open_prs: Vec<G0PullRequestInventory>,
     pub main_checks: Vec<G0CheckProducer>,
+    pub raw_object_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct G0ArtifactObservation {
+    pub artifact_id: u64,
+    pub run_id: u64,
+    pub run_attempt: u32,
+    pub run_head_sha: String,
+    pub name: String,
+    pub digest: String,
+    pub expired: bool,
+    pub source_url: String,
     pub raw_object_refs: Vec<String>,
 }
 
@@ -211,10 +228,25 @@ pub(crate) struct G0RequiredCheckPolicy {
 pub(crate) struct G0WorkflowInventory {
     pub source: G0WorkflowSource,
     pub events: Vec<String>,
+    /// Exact jobs derived from the immutable workflow source.  This is a
+    /// source fact, not a projection of observed run/job rows.
+    pub source_jobs: Vec<G0SourceJob>,
     pub reusable_workflows: Vec<G0WorkflowDependency>,
     pub actions: Vec<G0WorkflowDependency>,
     pub scanners: Vec<G0WorkflowDependency>,
     pub generated_state: G0ArtifactReference,
+    pub raw_object_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct G0SourceJob {
+    pub job_id: String,
+    pub workload_id: String,
+    pub provider: String,
+    pub platform: String,
+    pub architecture: String,
+    pub required: bool,
     pub raw_object_refs: Vec<String>,
 }
 

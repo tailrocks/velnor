@@ -1987,6 +1987,35 @@ fn check_g0_external_storage(
                 );
             }
         }
+        for artifact in &repository.artifacts {
+            let Some(raw) = artifact.raw_object_refs.iter().find_map(|raw_id| {
+                inventory
+                    .collector_snapshot
+                    .raw_objects
+                    .iter()
+                    .find(|raw| raw.raw_id == *raw_id && raw.sha256 == artifact.digest)
+            }) else {
+                continue;
+            };
+            let Ok(expected) = BASE64.decode(&raw.bytes_base64) else {
+                finding(
+                    findings,
+                    "g0-storage-bytes",
+                    &repository.repository,
+                    "evidence.g0_inventory.collector_snapshot.artifacts.raw_object_refs",
+                    "artifact raw object bytes must decode before external CAS verification",
+                );
+                continue;
+            };
+            check_g0_external_object(
+                "evidence.g0_inventory.collector_snapshot.artifacts.storage_ref",
+                &store,
+                &raw.storage_ref,
+                &artifact.digest,
+                &expected,
+                findings,
+            );
+        }
     }
 }
 
@@ -3296,6 +3325,18 @@ fn check_g0_repositories(
                 );
             }
         }
+        check_g0_artifact_observations(
+            &repo.repository,
+            &repo.artifacts,
+            G0ArtifactContext {
+                default_branch_sha: &repo.default_branch_sha,
+                open_prs: &repo.open_prs,
+                main_checks: &repo.main_checks,
+                raw_ids,
+                raw_objects: &collector.raw_objects,
+            },
+            findings,
+        );
         if repo.workflows.is_empty() {
             finding(
                 findings,
@@ -3410,6 +3451,14 @@ fn check_g0_repositories(
                 && let Some(plan) = source_plan.as_ref()
             {
                 check_g0_derived_plan(&repo.repository, manifest_repo, workflow, plan, findings);
+                check_g0_source_jobs(
+                    &repo.repository,
+                    manifest_repo,
+                    workflow,
+                    plan,
+                    raw_ids,
+                    findings,
+                );
             }
         }
         if let Some(manifest_repo) = manifest
@@ -3505,6 +3554,233 @@ fn check_g0_repositories(
             );
         }
     }
+}
+
+struct G0ArtifactContext<'a> {
+    default_branch_sha: &'a str,
+    open_prs: &'a [G0PullRequestInventory],
+    main_checks: &'a [G0CheckProducer],
+    raw_ids: &'a BTreeSet<String>,
+    raw_objects: &'a [G0RawObjectRef],
+}
+
+fn check_g0_artifact_observations(
+    repository: &str,
+    artifacts: &[G0ArtifactObservation],
+    context: G0ArtifactContext<'_>,
+    findings: &mut Vec<Finding>,
+) {
+    if artifacts.is_empty() {
+        finding(
+            findings,
+            "g0-artifact-inventory",
+            repository,
+            "repositories.artifacts",
+            "complete source-bound artifact inventory is required",
+        );
+        return;
+    }
+
+    let mut artifact_ids = BTreeSet::new();
+    let mut artifact_names = BTreeSet::new();
+    let mut known_runs = context
+        .main_checks
+        .iter()
+        .map(|check| check.workflow_run_id)
+        .collect::<BTreeSet<_>>();
+    let mut known_source_shas = BTreeSet::from([context.default_branch_sha.to_owned()]);
+    for pr in context.open_prs {
+        known_source_shas.insert(pr.head_sha.clone());
+        known_source_shas.insert(pr.base_sha.clone());
+        known_source_shas.insert(pr.tested_merge_sha.clone());
+        if let Some(merge_group_sha) = &pr.merge_group_sha {
+            known_source_shas.insert(merge_group_sha.clone());
+        }
+        for check in &pr.required_check_producers {
+            known_runs.insert(check.workflow_run_id);
+        }
+    }
+
+    for artifact in artifacts {
+        if artifact.artifact_id == 0
+            || !artifact_ids.insert(artifact.artifact_id)
+            || artifact.name.trim().is_empty()
+            || !artifact_names.insert(artifact.name.clone())
+            || artifact.run_id == 0
+            || artifact.run_attempt == 0
+            || !valid_sha(&artifact.run_head_sha)
+            || !known_source_shas.contains(&artifact.run_head_sha)
+            || !known_runs.contains(&artifact.run_id)
+            || !valid_digest(&artifact.digest)
+            || artifact.expired
+            || !g0_artifact_source_url(repository, artifact.artifact_id, &artifact.source_url)
+        {
+            finding(
+                findings,
+                "g0-artifact-identity",
+                repository,
+                "repositories.artifacts",
+                "artifact rows require unique ID/name, source-bound run identity, unexpired digest, and canonical API URL",
+            );
+        }
+        check_g0_raw_refs(
+            "evidence.g0_inventory.collector_snapshot.artifact.raw_object_refs",
+            &artifact.raw_object_refs,
+            context.raw_ids,
+            findings,
+        );
+        let Some(raw) = artifact.raw_object_refs.iter().find_map(|raw_id| {
+            context
+                .raw_objects
+                .iter()
+                .find(|raw| raw.raw_id == *raw_id && raw.sha256 == artifact.digest)
+        }) else {
+            finding(
+                findings,
+                "g0-artifact-digest",
+                repository,
+                "repositories.artifacts",
+                "artifact digest must bind to one referenced raw API object",
+            );
+            continue;
+        };
+        if raw.object_kind != "workflow_artifacts" {
+            finding(
+                findings,
+                "g0-artifact-raw-kind",
+                repository,
+                "repositories.artifacts.raw_object_refs",
+                "artifact provenance must reference a workflow_artifacts API object",
+            );
+        }
+    }
+}
+
+fn check_g0_source_jobs(
+    repository: &str,
+    manifest: &ManifestRepository,
+    workflow: &G0WorkflowInventory,
+    plan: &DerivedWorkflowPlan,
+    raw_ids: &BTreeSet<String>,
+    findings: &mut Vec<Finding>,
+) {
+    if workflow.source_jobs.is_empty() {
+        finding(
+            findings,
+            "g0-source-job-inventory",
+            repository,
+            "repositories.workflows.source_jobs",
+            "immutable workflow source must emit a non-empty typed job inventory",
+        );
+        return;
+    }
+
+    let mut seen = BTreeSet::new();
+    let source_jobs = workflow
+        .source_jobs
+        .iter()
+        .map(|job| {
+            if !seen.insert(job.job_id.clone())
+                || job.job_id.trim().is_empty()
+                || job.workload_id.trim().is_empty()
+                || job.provider.trim().is_empty()
+                || job.platform.trim().is_empty()
+                || job.architecture.trim().is_empty()
+            {
+                finding(
+                    findings,
+                    "g0-source-job-identity",
+                    repository,
+                    "repositories.workflows.source_jobs",
+                    "source jobs require unique non-empty logical and target identities",
+                );
+            }
+            check_g0_raw_refs(
+                "evidence.g0_inventory.collector_snapshot.workflow.source_jobs.raw_object_refs",
+                &job.raw_object_refs,
+                raw_ids,
+                findings,
+            );
+            (
+                job.job_id.clone(),
+                job.workload_id.clone(),
+                job.provider.clone(),
+                job.platform.clone(),
+                job.architecture.clone(),
+                job.required,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let expected_jobs = manifest
+        .expected_jobs
+        .iter()
+        .map(|job| {
+            (
+                job.job_id.clone(),
+                job.workload_id.clone(),
+                job.provider.clone(),
+                job.platform.clone(),
+                job.architecture.clone(),
+                job.required,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if source_jobs != expected_jobs {
+        finding(
+            findings,
+            "g0-source-job-plan",
+            repository,
+            "repositories.workflows.source_jobs",
+            "source-derived job inventory must exactly match the reviewed expected job plan",
+        );
+    }
+
+    let derived_jobs = plan
+        .jobs
+        .iter()
+        .map(|job| {
+            (
+                job.job_id.clone(),
+                manifest
+                    .expected_jobs
+                    .iter()
+                    .find(|expected| expected.job_id == job.job_id)
+                    .map(|expected| expected.workload_id.clone())
+                    .unwrap_or_default(),
+                job.provider.clone(),
+                job.platform.clone(),
+                job.architecture.clone(),
+                manifest
+                    .expected_jobs
+                    .iter()
+                    .find(|expected| expected.job_id == job.job_id)
+                    .is_some_and(|expected| expected.required),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if derived_jobs != source_jobs {
+        finding(
+            findings,
+            "g0-source-job-derivation",
+            repository,
+            "repositories.workflows.source_jobs",
+            "typed source jobs must equal the jobs derived from immutable workflow bytes",
+        );
+    }
+}
+
+fn g0_artifact_source_url(repository: &str, artifact_id: u64, value: &str) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str() == Some("api.github.com")
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path() == format!("/repos/{repository}/actions/artifacts/{artifact_id}/zip")
 }
 
 struct G0CheckExpectation<'a> {
@@ -7473,8 +7749,11 @@ mod tests {
             let pr_check_suite_id = 60_000 + repository_id;
             let pr_check_run_id = 70_000 + repository_id;
             let pr_job_id = 80_000 + repository_id;
+            let artifact_id = 90_000 + repository_id;
             let raw_id = format!("raw-repository-{repository_id}");
             let request_id = format!("request-repository-{repository_id}");
+            let artifact_raw_id = format!("raw-artifact-{repository_id}");
+            let artifact_request_id = format!("request-artifact-{repository_id}");
             let raw_bytes =
                 format!("{{\"repository\":\"{repository}\",\"id\":{repository_id}}}").into_bytes();
             let raw_digest = digest_bytes(&raw_bytes);
@@ -7490,6 +7769,25 @@ mod tests {
                 storage_ref: format!(
                     "sha256://{}",
                     raw_digest
+                        .strip_prefix("sha256:")
+                        .expect("digest has prefix")
+                ),
+            });
+            let artifact_bytes =
+                format!("{{\"artifact_id\":{artifact_id},\"run_id\":{main_run_id}}}").into_bytes();
+            let artifact_digest = digest_bytes(&artifact_bytes);
+            raw_objects.push(G0RawObjectRef {
+                raw_id: artifact_raw_id.clone(),
+                request_id: artifact_request_id.clone(),
+                object_kind: "workflow_artifacts".to_owned(),
+                canonicalization: "raw-json".to_owned(),
+                sha256: artifact_digest.clone(),
+                byte_length: artifact_bytes.len() as u64,
+                bytes_base64: BASE64.encode(&artifact_bytes),
+                media_type: "application/json".to_owned(),
+                storage_ref: format!(
+                    "sha256://{}",
+                    artifact_digest
                         .strip_prefix("sha256:")
                         .expect("digest has prefix")
                 ),
@@ -7537,6 +7835,38 @@ mod tests {
                     items_returned: 1,
                 },
                 response_raw_ref: raw_id.clone(),
+                error_raw_ref: None,
+                state: G0RequestState::Complete,
+                complete: true,
+                truncation_reason: None,
+            });
+            requests.push(G0RequestRecord {
+                request_id: artifact_request_id,
+                api: G0ApiKind::Rest,
+                method: "GET".to_owned(),
+                endpoint_or_operation: format!(
+                    "/repos/{repository}/actions/runs/{main_run_id}/artifacts"
+                ),
+                query_base64: BASE64.encode(b"page=1"),
+                variables_base64: BASE64.encode(b"{}"),
+                query_sha256: digest_bytes(b"page=1"),
+                variables_sha256: digest_bytes(b"{}"),
+                auth_identity_ref: "collector.auth".to_owned(),
+                started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+                completed_at_utc: "2026-09-20T00:00:01Z".to_owned(),
+                http_status: 200,
+                api_request_id: format!("api-artifact-request-{repository_id}"),
+                rate_limit_ref: "collector.rate_limit".to_owned(),
+                page: G0Page {
+                    number: 1,
+                    per_page: 100,
+                    link_next: None,
+                    cursor_in: None,
+                    cursor_out: None,
+                    has_next_page: false,
+                    items_returned: 1,
+                },
+                response_raw_ref: artifact_raw_id.clone(),
                 error_raw_ref: None,
                 state: G0RequestState::Complete,
                 complete: true,
@@ -7813,11 +8143,33 @@ mod tests {
                 workflows: vec![G0WorkflowInventory {
                     source: workflow_source,
                     events: vec!["push".to_owned(), "pull_request".to_owned()],
+                    source_jobs: vec![G0SourceJob {
+                        job_id: "scan".to_owned(),
+                        workload_id: "scan".to_owned(),
+                        provider: "github".to_owned(),
+                        platform: "linux".to_owned(),
+                        architecture: "amd64".to_owned(),
+                        required: true,
+                        raw_object_refs: vec![raw_id.clone()],
+                    }],
                     reusable_workflows: Vec::new(),
                     actions: Vec::new(),
                     scanners: Vec::new(),
                     generated_state,
                     raw_object_refs: vec![raw_id.clone()],
+                }],
+                artifacts: vec![G0ArtifactObservation {
+                    artifact_id,
+                    run_id: main_run_id,
+                    run_attempt: 1,
+                    run_head_sha: source_sha.clone(),
+                    name: format!("scan-artifact-{repository_id}"),
+                    digest: artifact_digest,
+                    expired: false,
+                    source_url: format!(
+                        "https://api.github.com/repos/{repository}/actions/artifacts/{artifact_id}/zip"
+                    ),
+                    raw_object_refs: vec![artifact_raw_id],
                 }],
                 open_prs: vec![G0PullRequestInventory {
                     number: 1,
@@ -8061,6 +8413,51 @@ mod tests {
         let mut findings = Vec::new();
         check_g0_inventory(&manifest, &snapshot, Some(&inventory), &mut findings);
         assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+
+        let mut missing_artifacts = inventory.clone();
+        missing_artifacts.collector_snapshot.repositories[0]
+            .artifacts
+            .clear();
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&missing_artifacts),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-artifact-inventory"));
+
+        let mut wrong_artifact = inventory.clone();
+        wrong_artifact.collector_snapshot.repositories[0].artifacts[0].source_url =
+            "https://api.github.com/repos/other/repository/actions/artifacts/90001/zip".to_owned();
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&wrong_artifact), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-artifact-identity"));
+
+        let mut missing_source_job = inventory.clone();
+        missing_source_job.collector_snapshot.repositories[0].workflows[0]
+            .source_jobs
+            .clear();
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&missing_source_job),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-source-job-inventory"));
+
+        let mut mismatched_source_job = inventory.clone();
+        mismatched_source_job.collector_snapshot.repositories[0].workflows[0].source_jobs[0]
+            .platform = "windows".to_owned();
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&mismatched_source_job),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-source-job-plan"));
 
         let mut raw_tampered = inventory.clone();
         raw_tampered.collector_snapshot.raw_objects[0].bytes_base64 = BASE64.encode(b"tampered");

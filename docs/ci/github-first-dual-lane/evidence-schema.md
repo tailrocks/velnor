@@ -122,7 +122,12 @@ G7.
 Every repository row records the GitHub numeric repository ID, actual default
 branch and SHA, complete ruleset status-check/app-ID inventory, workflow path
 and immutable revision inventory, all current open PRs (including drafts/bots),
-and separate execution arrays for the current main tip and each PR.
+an explicit artifact census, and separate execution arrays for the current main
+tip and each PR. Each artifact row binds `{artifact_id, run_id, run_attempt,
+run_head_sha, name, digest, expired, source_url, raw_object_refs}`. The checker
+requires unique IDs and names, a non-expired artifact, a known source/run
+identity, the canonical GitHub API artifact URL, and a raw object whose digest
+and object kind are `workflow_artifacts`.
 
 Ruleset checks are `{context, app_id}` with a source URL and complete-page
 marker. A PR row is `{number, state: "open", head_sha, base_sha, merge_sha,
@@ -261,6 +266,13 @@ repository/workflow/source identity. Runtime child rows must bind their
 child run; matching a SHA alone is not a parent association. Jobs, child runs,
 or expected checks observed only in result records cannot create an
 expectation.
+
+The `source_jobs` array is mandatory for every workflow. Each row binds
+`{job_id, workload_id, provider, platform, architecture, required,
+raw_object_refs}` and must exactly equal both the reviewed expected-job plan
+and the jobs derived from the immutable source bytes. An empty, duplicated,
+target-mismatched, or unbound source-job row fails G0; observed run jobs cannot
+fill a missing source obligation.
 
 The dependency graph is also typed source evidence, not a summary digest.
 Every node and edge has an immutable source SHA/ref, raw-object references,
