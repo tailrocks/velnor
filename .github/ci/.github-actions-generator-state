@@ -2,8 +2,8 @@
 schema = 2
 [inputs]
 config	ba6993bd6203b42d
-scan	e79f77c1d41233e1
-generator	64
+scan	3c967bed2ccdf6d6
+generator	65
 [outputs]
 .github/actionlint.yaml	5f03ee5134752603
 .github/actions/report-velnor-ci-outcomes/action.yml	aec8ab938e281785
@@ -22,6 +22,6 @@ generator	64
 .github/workflows/ci-unit-rust.yml	f1f2eccb80335188
 .github/workflows/maintenance.yml	9c29c9e6e15db8ff
 .github/workflows/nightly.yml	c333ad481145b60e
-.github/workflows/preview.yml	486d99e467850508
-.github/workflows/release.yml	ffdf72f3e0024e0c
+.github/workflows/preview.yml	660671c79323d827
+.github/workflows/release.yml	3d3dfb5ca34d6b5b
 config/fleet/velnor-host.env	d14b419216449423

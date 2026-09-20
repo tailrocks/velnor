@@ -43,7 +43,28 @@ hypothesis → implementation → focused checks → controlled CI → independe
 results review → commit/push → rerank. Independent research runs concurrently;
 timing experiments must account for shared runner contention.
 
-Current bounded queue (2026-09-20, after `56017bac`):
+Current ownership checkpoint (2026-09-20, after `6544ad3a`):
+
+- Parent: integrate release input staging, preserve exact-source CI evidence,
+  and publish small verified units. Metadata has independent complete-script
+  probes; committed regression fixtures and safe real packaging remain pending.
+- Velnor agent: finish metadata regression fixtures, then split candidate work
+  and cache save from telemetry cleanup. Mise closure review remains bounded;
+  the unrelated cancellation suite is not full-suite proof for Mise.
+- Parallax agent: repair candidate identity/receipt contracts in isolation, then
+  repair clean Parallax runtime convergence before the larger bootstrap graph. The
+  first large DAG draft is rejected for concrete identity, artifact, permission
+  and graph defects; it has not been integrated.
+- Jackin agent: independently review and adapt PR #973 rolling-tag fixes without
+  replacing the accepted foreground verifier or typed process ownership.
+- Dependency chain: typed candidate contract → producer/consumer graph →
+  usable candidate runtime → consumer regeneration → controlled CI cohorts.
+  Metadata and telemetry repairs remain independent source units.
+- Existing source identity, typed stages, Mise exact tool selection, relevance,
+  scheduled child outcomes, ARM production and Swift/product reuse remain
+  queued requirements. No plateau or performance acceptance is recorded.
+
+Prior checkpoint (2026-09-20, after `56017bac`):
 
 - Telemetry schema 2 and its assertion-preserving test helpers are published
   (`112e6acc`, `ebc05ab0`). Exact committed generation check passed. Compiler
@@ -181,7 +202,7 @@ Documentation, unchanged reruns, and untested suggestions do not count.
 
 Substantive completed iteration count: **0**. Plateau counts: **0**.
 
-## Current integration checkpoint
+## Historical integration checkpoint (266dd76e)
 
 Main advanced to `89f82dd8b287f46a3cf4c0920f341f6ca6c736db` (PR #969).
 Merge `266dd76e` retains campaign gate/transport fixes and integrates per-member
