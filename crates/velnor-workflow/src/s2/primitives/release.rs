@@ -2757,6 +2757,16 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
         r#"error(\"component identity differs across targets\")"#,
         r#"error("component identity differs across targets")"#,
     );
+    output = output.replace("\n+            --arg", "\n            --arg");
+    output = output.replace("\n+            '{{schema:", "\n            '{{schema:");
+    output = output.replace(
+        "\n+            > product-assets/release-attestation.json",
+        "\n            > product-assets/release-attestation.json",
+    );
+    output = output.replace(
+        "            > product-assets/release-attestation.json\n",
+        "            > product-assets/release-attestation.json\n          jq -S -n --arg schema \"velnor.release-admission/v1\" --arg source_repository \"$GITHUB_REPOSITORY\" --arg source_ref \"$source_ref\" --arg source_commit \"$source_commit\" --arg release_tag \"$release_tag\" --arg release_id \"$PRODUCT_RELEASE_ID\" --arg provider_repository_id \"$PRODUCT_PROVIDER_REPOSITORY_ID\" --arg parent_manifest_sha256 \"$manifest_sha256\" '{schema:$schema,source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit,release_tag:$release_tag,release_id:$release_id,provider_repository_id:$provider_repository_id,parent_manifest_sha256:$parent_manifest_sha256,manifest_asset:\"product-manifest.json\"}' > product-assets/release-admission.json\n          sha256sum product-assets/release-admission.json > product-assets/release-admission.json.sha256\n",
+    );
     output
 }
 
@@ -2777,7 +2787,7 @@ fn render_native_publish_job(
     let (assets, published, arch_targets) = native_publish_asset_lists(release, version);
     let published = if product_enabled {
         format!(
-            "{published} \\\n                        \"product-manifest.json\" \\\n                        \"product-manifest.json.sha256\" \\\n                        \"release-attestation.json\""
+            "{published} \\\n                        \"product-manifest.json\" \\\n                        \"product-manifest.json.sha256\" \\\n                        \"release-attestation.json\" \\\n                        \"release-admission.json\" \\\n                        \"release-admission.json.sha256\""
         )
     } else {
         published
@@ -2925,6 +2935,8 @@ fn render_native_publish_job(
               product-assets/product-manifest.json
               product-assets/product-manifest.json.sha256
               product-assets/release-attestation.json
+              product-assets/release-admission.json
+              product-assets/release-admission.json.sha256
             )
             while IFS= read -r name; do
               case "$name" in
@@ -2938,6 +2950,21 @@ fn render_native_publish_job(
             gh attestation verify "$tmp/product-manifest.json" --repo "$GITHUB_REPOSITORY"
             gh attestation verify "$tmp/product-manifest.json.sha256" --repo "$GITHUB_REPOSITORY"
             gh attestation verify "$tmp/release-attestation.json" --repo "$GITHUB_REPOSITORY"
+            gh release download "$tag" --pattern "release-admission.json" --dir "$tmp" --clobber >/dev/null 2>&1 \
+              || { echo '::error::published product is missing release-admission.json' >&2; exit 1; }
+            gh release download "$tag" --pattern "release-admission.json.sha256" --dir "$tmp" --clobber >/dev/null 2>&1 \
+              || { echo '::error::published product is missing release-admission.json.sha256' >&2; exit 1; }
+            gh attestation verify "$tmp/release-admission.json" --repo "$GITHUB_REPOSITORY"
+            gh attestation verify "$tmp/release-admission.json.sha256" --repo "$GITHUB_REPOSITORY"
+            [ "$(awk 'NF {print $1; exit}' "$tmp/release-admission.json.sha256")" = "$(sha256sum "$tmp/release-admission.json" | awk '{print $1}')" ] \
+              || { echo '::error::published release-admission.json fails its sidecar checksum' >&2; exit 1; }
+            jq -e --arg schema "velnor.release-admission/v1" --arg repository "$GITHUB_REPOSITORY" --arg ref "refs/tags/$tag" --arg commit "$COMMIT" --arg tag "$tag" --arg id "$provider_release_id" --arg provider_id "$PRODUCT_PROVIDER_REPOSITORY_ID" --arg manifest_sha "$(sha256sum "$tmp/product-manifest.json" | awk '{print $1}')" '
+              ((keys | sort) == ["manifest_asset","parent_manifest_sha256","provider_repository_id","release_id","release_tag","schema","source_commit","source_ref","source_repository"]) and
+              .schema == $schema and .source_repository == $repository and .source_ref == $ref and
+              .source_commit == $commit and .release_tag == $tag and .release_id == $id and
+              .provider_repository_id == $provider_id and .parent_manifest_sha256 == $manifest_sha and
+              .manifest_asset == "product-manifest.json"
+            ' "$tmp/release-admission.json" >/dev/null
             jq -e --arg schema "velnor.github-release-attestation/v1" \
               --arg repository "$GITHUB_REPOSITORY" --arg source_ref "refs/tags/$tag" \
               --arg source_commit "$COMMIT" --arg release_tag "$tag" \
@@ -3080,7 +3107,7 @@ fn render_native_publish_job(
             )
             .replace(
                 "      SOURCE_COMMIT: ${{ github.sha }}\n      COMMIT: ${{ github.sha }}\n",
-                "      SOURCE_COMMIT: ${{ needs.admit-product-release.outputs.source_commit }}\n      COMMIT: ${{ needs.admit-product-release.outputs.source_commit }}\n      PRODUCT_RELEASE_ID: ${{ needs.admit-product-release.outputs.release_id }}\n      PRODUCT_RELEASE_TAG: ${{ needs.admit-product-release.outputs.release_tag }}\n",
+                "      SOURCE_COMMIT: ${{ needs.admit-product-release.outputs.source_commit }}\n      COMMIT: ${{ needs.admit-product-release.outputs.source_commit }}\n      PRODUCT_RELEASE_ID: ${{ needs.admit-product-release.outputs.release_id }}\n      PRODUCT_PROVIDER_REPOSITORY_ID: ${{ needs.admit-product-release.outputs.provider_repository_id }}\n      PRODUCT_RELEASE_TAG: ${{ needs.admit-product-release.outputs.release_tag }}\n",
             );
     }
     output = output.replace(
@@ -7426,6 +7453,16 @@ mod tests {
         );
         assert!(publish.contains("release-manifest.json"), "{publish}");
         assert!(publish.contains("product-manifest.json"), "{publish}");
+        assert!(publish.contains("release-admission.json"), "{publish}");
+        assert!(publish.contains("velnor.release-admission/v1"), "{publish}");
+        assert!(
+            publish.contains("PRODUCT_PROVIDER_REPOSITORY_ID: ${{ needs.admit-product-release.outputs.provider_repository_id }}"),
+            "APT handoff must consume the admitted provider repository id: {publish}"
+        );
+        assert!(
+            !publish.contains("\n+            --arg"),
+            "generated attestation jq must not contain patch-marker lines: {publish}"
+        );
         assert!(
             !publish.contains("steps.product-release.outputs"),
             "stable product assembly must consume admitted release outputs, not a local provider fallback: {publish}"
