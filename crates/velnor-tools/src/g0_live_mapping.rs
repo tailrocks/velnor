@@ -438,39 +438,41 @@ fn canonical_storage_ref(digest: &str) -> String {
 
 fn canonical_json_bytes<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
     let value = serde_json::to_value(value).context("convert G0 snapshot to JSON")?;
-    Ok(canonical_json(&value).into_bytes())
+    Ok(canonical_json(&value)?.into_bytes())
 }
 
-fn canonical_json(value: &serde_json::Value) -> String {
+fn canonical_json(value: &serde_json::Value) -> Result<String> {
     match value {
-        serde_json::Value::Null => "null".to_owned(),
-        serde_json::Value::Bool(value) => value.to_string(),
-        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::Null => Ok("null".to_owned()),
+        serde_json::Value::Bool(value) => Ok(value.to_string()),
+        serde_json::Value::Number(value) => Ok(value.to_string()),
         serde_json::Value::String(value) => {
-            serde_json::to_string(value).expect("JSON string serialization cannot fail")
+            serde_json::to_string(value).context("serialize canonical JSON string")
         }
-        serde_json::Value::Array(values) => format!(
-            "[{}]",
-            values
+        serde_json::Value::Array(values) => {
+            let members = values
                 .iter()
                 .map(canonical_json)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
+                .collect::<Result<Vec<_>>>()?;
+            Ok(format!("[{}]", members.join(",")))
+        }
         serde_json::Value::Object(values) => {
             let mut keys = values.keys().collect::<Vec<_>>();
             keys.sort();
             let members = keys
                 .into_iter()
-                .map(|key| {
-                    format!(
+                .map(|key| -> Result<String> {
+                    let value = values
+                        .get(key)
+                        .context("canonical JSON key disappeared during traversal")?;
+                    Ok(format!(
                         "{}:{}",
-                        serde_json::to_string(key).expect("JSON key serialization cannot fail"),
-                        canonical_json(values.get(key).expect("key collected from object"))
-                    )
+                        serde_json::to_string(key).context("serialize canonical JSON key")?,
+                        canonical_json(value)?
+                    ))
                 })
-                .collect::<Vec<_>>();
-            format!("{{{}}}", members.join(","))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(format!("{{{}}}", members.join(",")))
         }
     }
 }
