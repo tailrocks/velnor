@@ -4682,9 +4682,7 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
           local_workflow_pattern = re.compile(r"^\./(.github/workflows/[^ #]+)")
           local_action_pattern = re.compile(r"^\./(.github/actions/[^ #]+)")
           external_workflow_pattern = re.compile(r"^[^./][^ ]*/[^ ]+/.github/workflows/[^ #]+@")
-          post_pattern = re.compile(r"(?:--method|--request|-X)\s+POST|\bPOST\b", re.IGNORECASE)
           uploads = []
-          direct_uploads = {}
           external_reusable_workflows = {}
           local_workflow_edges = {}
           local_action_edges = {}
@@ -4700,25 +4698,10 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                   return None
               return text[len("uses:"):].split(" #", 1)[0].strip().strip("\\\"'")
 
-          def direct_upload_reason(block):
-              text = "\n".join(block)
-              lower = text.lower()
-              if any(
-                  "ACTIONS_RUNTIME_URL" in line and any(command in line.lower() for command in ("curl", "wget", "http://", "https://"))
-                  for line in block
-              ):
-                  return "runner artifact service URL is used by a shell step"
-              if "actions/artifacts" in lower and post_pattern.search(text) is not None:
-                  return "shell step can POST to the Actions artifact service"
-              if "upload-artifact" in lower and post_pattern.search(text) is not None and any(command in lower for command in ("curl", "wget", "gh api")):
-                  return "shell step names an artifact uploader"
-              return None
-
           for archive_name in sys.argv[1:3]:
               archive_edges = {}
               archive_action_edges = {}
               archive_workflows = {}
-              archive_direct_uploads = []
               archive_external_reusable_workflows = []
               archive_source_members = {}
               with tarfile.open(archive_name, "r:") as archive:
@@ -4782,9 +4765,6 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                               value for value in values
                               if value is not None and value.startswith("actions/upload-artifact@")
                           ]
-                          reason = direct_upload_reason(block)
-                          if reason is not None:
-                              archive_direct_uploads.append((member.name, reason))
                           if not upload_uses:
                               continue
                           name_prefix = " " * (indent + 4) + "name:"
@@ -4799,7 +4779,6 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
               local_workflow_edges[archive_name] = archive_edges
               local_action_edges[archive_name] = archive_action_edges
               workflow_lines[archive_name] = archive_workflows
-              direct_uploads[archive_name] = archive_direct_uploads
               external_reusable_workflows[archive_name] = archive_external_reusable_workflows
               archive_members[archive_name] = archive_source_members
 
@@ -4935,17 +4914,17 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
               # under a different workflow/run identity. Acquisition binds the
               # numeric ci-pr workflow, run, attempt, job, and artifact IDs, so
               # those outputs cannot be selected as this producer's handoff.
-              # A reusable workflow or direct publisher reachable from ci-pr,
-              # however, shares the producer run and is outside this closed
-              # contract; reject it before any upload can mint the namespace.
+              # A reusable workflow reachable from ci-pr, however, shares the
+              # producer run and is outside this closed contract; reject it
+              # before any upload can mint the namespace. The full normalized
+              # base contract and exact action source closure cover shell and
+              # local-action behavior without pretending a keyword scan proves
+              # arbitrary code safe.
               for path, value in external_reusable_workflows[archive_name]:
                   if path in reachable:
                       raise SystemExit(
                           f"{path}: reachable external reusable workflow is outside the closed artifact publisher contract: {value}"
                       )
-              for path, reason in direct_uploads[archive_name]:
-                  if path in reachable:
-                      raise SystemExit(f"{path}: {reason}; use one fixed upload-artifact action contract")
               found = [
                   row
                   for row in uploads
