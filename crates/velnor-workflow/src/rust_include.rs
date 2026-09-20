@@ -204,6 +204,17 @@ fn parse_static_string_expression(
 
 fn evaluate_static_expression(expression: &Expr, macro_name: &str) -> Result<StaticString, String> {
     match expression {
+        Expr::Lit(literal) => match &literal.lit {
+            Lit::Str(value) => Ok(StaticString::literal(value.value())),
+            _ => Err(format!("{macro_name} must use a static string expression")),
+        },
+        Expr::Macro(expression) => evaluate_static_macro(expression, macro_name),
+        _ => Err(format!("{macro_name} must use a static string expression")),
+    }
+}
+
+fn evaluate_concat_argument(expression: &Expr, macro_name: &str) -> Result<StaticString, String> {
+    match expression {
         Expr::Lit(literal) => evaluate_static_literal(&literal.lit, macro_name),
         Expr::Unary(unary) if matches!(unary.op, UnOp::Neg(_)) => {
             let Expr::Lit(literal) = unary.expr.as_ref() else {
@@ -260,7 +271,7 @@ fn evaluate_static_macro(
         "concat" => {
             let mut combined = StaticString::default();
             for argument in arguments {
-                combined.append(evaluate_static_expression(&argument, include_macro)?);
+                combined.append(evaluate_concat_argument(&argument, include_macro)?);
             }
             Ok(combined)
         }
@@ -552,6 +563,11 @@ mod tests {
                 "asset-42truex-71.5".to_owned()
             )])
         );
+    }
+
+    #[test]
+    fn rejects_non_string_literal_direct_include_arguments() {
+        assert!(parse_include_paths("include_str!(42);").is_err());
     }
 
     #[test]
