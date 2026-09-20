@@ -6,8 +6,13 @@ on:
   push:
     branches: [main]
     paths:
+      - "**/*.js"
+      - "**/*.json"
+      - "**/*.jsx"
       - "**/*.tf"
       - "**/*.tofu"
+      - "**/*.ts"
+      - "**/*.tsx"
       - "**/.terraform.lock.hcl"
       - "*.md"
       - ".cargo/**"
