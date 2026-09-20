@@ -12,8 +12,9 @@ use std::fmt::Write as _;
 
 use super::{
     checks_env, docker_build_token_env_for_members, render_cargo_source_preparation,
-    render_pinned_toolchain_steps, render_retained_output_cache_note, Args, CacheBackend,
-    Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, PACKAGE_RELEASE, PREVIEW, RELEASE,
+    render_mutable_mount_seed_restore_for_unit, render_pinned_toolchain_steps,
+    render_retained_output_cache_note, Args, CacheBackend, Primitive, RenderCtx, Rendered,
+    WorkflowIr, D19_PIN_FETCH_COMMANDS, MAINTENANCE, PACKAGE_RELEASE, PREVIEW, RELEASE,
     RELEASE_SIGNER, STATIC_WORKFLOW,
 };
 use crate::s2::provider::{runs_on_for, ProviderId};
@@ -3310,9 +3311,29 @@ fn render_release_unit_job(
         ));
     }
     workflow.render_tool_provisioning(output, provider, unit, false);
+    let cargo_offline = checks_env(unit);
     let cargo_cache_restored = CacheBackend::Detected
         .provider_enables_actions_cache(provider, workflow, unit)
         && unit.cache.is_some();
+    // A Docker mutable-mount seed swapped its generic `ci-` restore for the
+    // seed lifecycle (the suppression inside `provider_enables_actions_cache`),
+    // but release legs never emitted that lifecycle: the seed-consuming full
+    // commands failed on the missing `.velnor-docker-cache/seed` build
+    // context. Restore the seed and prepare its context on every provider,
+    // like the unit provider job.
+    if unit
+        .cache
+        .as_ref()
+        .is_some_and(|cache| cache.mutable_mount_seed)
+    {
+        render_mutable_mount_seed_restore_for_unit(
+            output,
+            workflow,
+            provider,
+            unit,
+            &cargo_offline,
+        );
+    }
     if cargo_cache_restored && let Some(cache) = &unit.cache {
         render_retained_output_cache_note(output, workflow, unit, cache);
         let (paths, key) = rendered_cache_values(cache);
@@ -3340,7 +3361,6 @@ fn render_release_unit_job(
         cargo_cache_restored,
         skip_when_offline_ready,
     );
-    let cargo_offline = checks_env(unit);
     let token_env = docker_build_token_env_for_members(&[unit]);
     // `run` requires the planned-selection file CI Planning materializes
     // for reusable legs; release legs have no Planning job, so each lane
@@ -3351,6 +3371,10 @@ fn render_release_unit_job(
         output,
         "      - name: Plan full release selection\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          mkdir -p .velnor-ci-selection\n          velnor-workflow plan --config .github/ci/project.toml\n"
     );
+    // The generator's self-check resolves the D19 pin's closure from local
+    // history, but release checkouts are shallow: the hosted leg fetches the
+    // pin before the checks, like the unit provider job.
+    render_release_pin_fetch(output, provider, unit);
     let _ = writeln!(
         output,
         "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}{token_env}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
@@ -3358,6 +3382,20 @@ fn render_release_unit_job(
         yaml_scalar(&unit.id)
     );
     id
+}
+
+/// The D19 pin-fetch step for a hosted release leg whose unit runs the
+/// generator's `--plain --check`: without the pin commit the guard fails
+/// `closure_of_tree(pin)` before any command runs. Local legs provision the
+/// pin through the pinned-renderer step instead and render nothing here.
+fn render_release_pin_fetch(output: &mut String, provider: ProviderId, unit: &Unit) {
+    if provider.is_local() || !super::ir::unit_runs_workflow_plain_check(unit) {
+        return;
+    }
+    let _ = writeln!(
+        output,
+        "      - name: Fetch D19 pin history\n        run: |\n          set -euo pipefail\n{D19_PIN_FETCH_COMMANDS}\n"
+    );
 }
 
 /// The `runs-on:` for one release verification job: the provider's
@@ -7116,6 +7154,116 @@ mod tests {
                 "{leg}"
             );
         }
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn native_release_seed_legs_restore_the_docker_seed_on_both_providers() {
+        let mut config = native_identity_config(&["release.yml", "preview.yml"]);
+        let mut docker = unit("docker");
+        docker.kind = crate::s2::UnitKind::Docker;
+        docker.label = "Docker".to_owned();
+        docker.pr_commands = vec![
+            "docker buildx build --target ci --build-context velnor-cache-seed='.velnor-docker-cache/seed' '.'"
+                .to_owned(),
+        ];
+        docker.full_commands = vec![
+            "docker buildx build --build-context velnor-cache-seed='.velnor-docker-cache/seed' '.'"
+                .to_owned(),
+        ];
+        docker.cache = Some(crate::s2::CacheSpec {
+            key_files: vec!["Cargo.lock".to_owned(), "Dockerfile".to_owned()],
+            paths: vec![".velnor-docker-cache".to_owned()],
+            purpose: crate::s2::CachePurpose::Generic,
+            mbx_output_cache_justification: None,
+            mutable_mount_seed: true,
+        });
+        config.units.push(docker);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        // The seed swapped the generic `ci-` restore for its own lifecycle,
+        // but release legs never emitted that lifecycle: the seed-consuming
+        // full commands failed on the missing `.velnor-docker-cache/seed`
+        // build context. Both providers' legs restore the seed and prepare
+        // its context before the checks run.
+        for (provider, id) in [
+            ("github-hosted", "release-github-hosted-docker"),
+            ("velnor", "release-velnor-docker"),
+        ] {
+            let leg = yaml_job(&workflow, id);
+            assert!(
+                !leg.contains("key: ci-release-"),
+                "the generic restore stays suppressed for seed units: {leg}"
+            );
+            let restore_at = must_some(
+                leg.find("name: Restore Docker build seed"),
+                "seed restore renders",
+            );
+            let prepare_at = must_some(
+                leg.find("name: Prepare Docker build seed context"),
+                "seed context preparation renders",
+            );
+            let run_at = must_some(leg.find("velnor-workflow run --config"), "run renders");
+            assert!(
+                restore_at < prepare_at && prepare_at < run_at,
+                "the seed lifecycle precedes the seed-consuming checks: {leg}"
+            );
+            assert!(leg.contains("mkdir -p .velnor-docker-cache/seed"), "{leg}");
+            assert!(
+                leg.contains(&format!(
+                    "-{provider}-linux-x64-untrusted-ok-docker-${{{{ hashFiles("
+                )),
+                "the seed key carries the concrete provider segments: {leg}"
+            );
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn native_release_hosted_check_leg_fetches_the_d19_pin_before_running() {
+        let mut config = native_identity_config(&["release.yml", "preview.yml"]);
+        let mut checks = unit("rust-example-checks");
+        checks.full_commands = vec![
+            "mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../..".to_owned(),
+        ];
+        config.units.push(checks);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        // The generator's self-check resolves the D19 pin's closure from
+        // local history, but release checkouts are shallow: without the pin
+        // commit the guard fails `closure_of_tree(pin)` before any command
+        // runs. The hosted leg fetches the pin before the checks.
+        let hosted = yaml_job(&workflow, "release-github-hosted-rust-example-checks");
+        let fetch_at = must_some(
+            hosted.find("name: Fetch D19 pin history"),
+            "pin fetch renders",
+        );
+        let run_at = must_some(hosted.find("velnor-workflow run --config"), "run renders");
+        assert!(fetch_at < run_at, "{hosted}");
+        assert!(
+            hosted.contains(
+                "git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$pin\""
+            ),
+            "{hosted}"
+        );
+        // Local legs provision the pin through the pinned-renderer step
+        // instead, so they carry no separate fetch.
+        let velnor = yaml_job(&workflow, "release-velnor-rust-example-checks");
+        assert!(!velnor.contains("name: Fetch D19 pin history"), "{velnor}");
+        assert!(
+            velnor.contains("name: Provision pinned Velnor workflow policy runtime"),
+            "{velnor}"
+        );
     }
 
     #[test]
