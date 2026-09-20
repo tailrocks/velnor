@@ -32,6 +32,7 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &mut App, system: &DesignSystem
     match app.phase {
         Phase::Scanning => render_scanning(frame, app, system, rows[1]),
         Phase::Empty => render_empty(frame, app, system, rows[1]),
+        Phase::PluginOnly => render_plugin_only(frame, app, system, rows[1]),
         Phase::Configure => render_configure(frame, app, system, rows[1]),
         Phase::Review => render_review(frame, app, system, rows[1]),
         Phase::Generating => render_generating(frame, app, system, rows[1]),
@@ -149,6 +150,16 @@ fn render_empty(frame: &mut Frame<'_>, app: &App, system: &DesignSystem, area: R
     frame.render_widget(
         EmptyState::new("No supported project found", system)
             .explanation("No supported manifests or lockfiles found")
+            .context(&context),
+        area,
+    );
+}
+
+fn render_plugin_only(frame: &mut Frame<'_>, app: &App, system: &DesignSystem, area: Rect) {
+    let context = format!("Inspected {}", app.target);
+    frame.render_widget(
+        EmptyState::new("Plugin metadata validated", system)
+            .explanation("No workflow checks to configure")
             .context(&context),
         area,
     );
@@ -564,7 +575,7 @@ fn help_entries(app: &App) -> Vec<HelpEntry> {
     let mut entries = match app.phase {
         Phase::Generating => Vec::new(),
         Phase::Scanning => vec![HelpEntry::new("quit", "Global", "q", "quit").priority(1)],
-        Phase::Empty => {
+        Phase::Empty | Phase::PluginOnly => {
             vec![HelpEntry::new("retry", "Action", "Enter", "retry").priority(1)]
         }
         Phase::Configure => vec![
@@ -902,6 +913,18 @@ mod tests {
         assert!(empty.contains("No supported manifests or lockfiles found"));
         assert_eq!(empty.matches("retry").count(), 1);
         assert_eq!(empty.matches("q quit").count(), 1);
+
+        if let Some(config) = app.config.as_mut() {
+            config.units.clear();
+            config.analysis.detected.push("skills-plugin".to_owned());
+        }
+        app.phase = super::super::Phase::PluginOnly;
+        let plugin_only = render_text(&mut app, 80, 24);
+        assert!(plugin_only.contains("Plugin metadata validated"));
+        assert!(plugin_only.contains("No workflow checks to configure"));
+        assert!(!plugin_only.contains("No supported manifests or lockfiles found"));
+        assert_eq!(plugin_only.matches("retry").count(), 1);
+        assert_eq!(plugin_only.matches("q quit").count(), 1);
     }
 
     #[test]

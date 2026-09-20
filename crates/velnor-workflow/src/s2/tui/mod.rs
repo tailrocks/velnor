@@ -57,6 +57,7 @@ struct PreparedProject {
 enum Phase {
     Scanning,
     Empty,
+    PluginOnly,
     Configure,
     Review,
     Generating,
@@ -212,15 +213,20 @@ impl App {
         self.config = Some(prepared.config);
         self.inputs = Some(prepared.inputs);
         self.selector = Some(selector);
-        self.phase = if self
-            .config
-            .as_ref()
-            .is_some_and(|config| config.units.is_empty())
-        {
-            Phase::Empty
-        } else {
-            Phase::Configure
-        };
+        self.phase = self.config.as_ref().map_or(Phase::Empty, |config| {
+            if !config.units.is_empty() {
+                Phase::Configure
+            } else if config
+                .analysis
+                .detected
+                .iter()
+                .any(|detection| detection == "skills-plugin")
+            {
+                Phase::PluginOnly
+            } else {
+                Phase::Empty
+            }
+        });
     }
 
     fn fail(&mut self, operation: FailedOperation, error: String) {
@@ -350,7 +356,7 @@ impl App {
             }
             return;
         }
-        if self.phase == Phase::Empty {
+        if matches!(self.phase, Phase::Empty | Phase::PluginOnly) {
             if matches!(key.code, KeyCode::Enter | KeyCode::Char('r')) {
                 self.retry_scan();
             } else if key.code == KeyCode::Esc {
@@ -931,7 +937,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     /// Synthetic generation inputs for tests that exercise the file plan
     /// directly instead of a scanned repository.
@@ -944,8 +950,8 @@ mod tests {
     };
 
     use super::{
-        dependent_ids, required_dependencies, selection_status, App, FailedOperation, Overlay,
-        Phase,
+        dependent_ids, required_dependencies, selection_status, App, Checkout, FailedOperation,
+        Overlay, Phase, PreparedProject,
     };
 
     fn unit(id: &str, dependencies: &[&str]) -> crate::s2::Unit {
@@ -1082,6 +1088,70 @@ mod tests {
         app.output_root = Some(PathBuf::from("."));
         app.phase = Phase::Configure;
         app
+    }
+
+    #[test]
+    fn finish_scan_distinguishes_plugin_only_from_unrecognized_repository() {
+        let mut app = configured_app();
+        let mut plugin_config = config();
+        plugin_config.units.clear();
+        plugin_config
+            .analysis
+            .detected
+            .push("skills-plugin".to_owned());
+        app.finish_scan(PreparedProject {
+            checkout: Checkout::Local(PathBuf::from(".")),
+            config: plugin_config,
+            inputs: test_inputs(),
+            output_root: PathBuf::from("."),
+        });
+        assert_eq!(app.phase, Phase::PluginOnly);
+
+        let mut app = configured_app();
+        let mut empty_config = config();
+        empty_config.units.clear();
+        app.finish_scan(PreparedProject {
+            checkout: Checkout::Local(PathBuf::from(".")),
+            config: empty_config,
+            inputs: test_inputs(),
+            output_root: PathBuf::from("."),
+        });
+        assert_eq!(app.phase, Phase::Empty);
+    }
+
+    #[test]
+    fn plugin_only_keys_retry_scan_or_quit_like_empty_state() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let root = std::env::temp_dir().join(format!(
+            "velnor-tui-plugin-retry-{}-{nonce}",
+            std::process::id()
+        ));
+        assert!(fs::create_dir(&root).is_ok());
+
+        for code in [KeyCode::Enter, KeyCode::Char('r')] {
+            let mut app = configured_app();
+            app.target.clone_from(&root.display().to_string());
+            app.phase = Phase::PluginOnly;
+            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+
+            assert_eq!(app.phase, Phase::Scanning);
+            assert!(!app.exit);
+            assert!(app.generation_receiver.is_none());
+            assert!(app.receiver.recv_timeout(Duration::from_secs(5)).is_ok());
+        }
+
+        assert!(fs::remove_dir_all(&root).is_ok());
+
+        for phase in [Phase::Empty, Phase::PluginOnly] {
+            let mut app = configured_app();
+            app.phase = phase;
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+            assert_eq!(app.phase, phase);
+            assert!(app.exit);
+        }
     }
 
     #[test]
