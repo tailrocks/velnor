@@ -10235,6 +10235,106 @@ mod tests {
     }
 
     #[test]
+    fn actual_captured_check_runs_page_exposes_envelope_parser_gap() {
+        let body_base64 = include_str!(
+            "testdata/g0/raw-capture-20260920-065449/checks/jackin-project_jackin-agent-smith/pr-head-206-b9db5b149cc46baba9c49549432307c29e3972b0/check-runs/page-0001.body.base64"
+        )
+        .trim();
+        let bytes = BASE64.decode(body_base64).expect("captured body base64");
+        assert_eq!(bytes.len(), 29_175);
+        assert_eq!(
+            digest_bytes(&bytes),
+            "sha256:bcc6670efbb51a1457eda1da19e473921b8b0ef51feba016e761b3ccf3d67210"
+        );
+        let raw_id = "captured-check-runs-page-0001".to_owned();
+        let request_id = "checks-fresh-jackin-project_jackin-agent-smith-check-runs-pr-head-206-b9db5b149cc46baba9c49549432307c29e3972b0-1".to_owned();
+        let raw = G0RawObjectRef {
+            raw_id: raw_id.clone(),
+            request_id: request_id.clone(),
+            object_kind: "check_run".to_owned(),
+            canonicalization: "raw-json".to_owned(),
+            sha256: "sha256:bcc6670efbb51a1457eda1da19e473921b8b0ef51feba016e761b3ccf3d67210"
+                .to_owned(),
+            byte_length: bytes.len() as u64,
+            bytes_base64: body_base64.to_owned(),
+            media_type: "application/json".to_owned(),
+            storage_ref:
+                "sha256://bcc6670efbb51a1457eda1da19e473921b8b0ef51feba016e761b3ccf3d67210"
+                    .to_owned(),
+            original_sha256:
+                "sha256:bcc6670efbb51a1457eda1da19e473921b8b0ef51feba016e761b3ccf3d67210".to_owned(),
+            original_byte_length: bytes.len() as u64,
+            original_storage_ref:
+                "sha256://bcc6670efbb51a1457eda1da19e473921b8b0ef51feba016e761b3ccf3d67210"
+                    .to_owned(),
+        };
+        let request = G0RequestRecord {
+            request_id,
+            api: G0ApiKind::Rest,
+            method: "GET".to_owned(),
+            endpoint_or_operation: "/repos/jackin-project/jackin-agent-smith/commits/b9db5b149cc46baba9c49549432307c29e3972b0/check-runs".to_owned(),
+            query_base64: BASE64.encode(b"per_page=100&filter=all&page=1"),
+            variables_base64: BASE64.encode(b"{}"),
+            query_sha256: digest_bytes(b"per_page=100&filter=all&page=1"),
+            variables_sha256: digest_bytes(b"{}"),
+            auth_identity_ref: "collector.auth".to_owned(),
+            started_at_utc: "2026-09-20T07:02:33Z".to_owned(),
+            completed_at_utc: "2026-09-20T07:02:34Z".to_owned(),
+            http_status: 200,
+            api_request_id: "api-request-check-runs-page-0001".to_owned(),
+            rate_limit_ref: "collector.rate_limit".to_owned(),
+            page: G0Page {
+                number: 1,
+                per_page: 100,
+                link_next: None,
+                cursor_in: None,
+                cursor_out: None,
+                has_next_page: false,
+                items_returned: 7,
+            },
+            response_raw_ref: raw_id,
+            error_raw_ref: None,
+            state: G0RequestState::Complete,
+            complete: true,
+            truncation_reason: None,
+        };
+        let check = G0CheckProducer {
+            context: "DCO".to_owned(),
+            app_id: "974774".to_owned(),
+            app_slug: "dco-2".to_owned(),
+            provider: G0CheckProvider::ExternalApp,
+            api: G0ApiKind::Rest,
+            check_suite_id: 95096323548,
+            check_run_id: 104858522157,
+            source_sha: "b9db5b149cc46baba9c49549432307c29e3972b0".to_owned(),
+            event: "pull_request".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: "success".to_owned(),
+            html_url: "https://github.com/jackin-project/jackin-agent-smith/runs/104858522157"
+                .to_owned(),
+            raw_object_refs: vec!["captured-check-runs-page-0001".to_owned()],
+        };
+        assert!(g0_capture_raw_json(
+            &check.raw_object_refs,
+            "check_run",
+            &["/repos/jackin-project/jackin-agent-smith/commits/b9db5b149cc46baba9c49549432307c29e3972b0/check-runs".to_owned()],
+            &[request.clone()],
+            &[raw.clone()],
+        )
+        .is_some());
+
+        // This is intentionally red in the first capture checkpoint: the
+        // current selector expects a singular object and cannot yet select
+        // the DCO member from GitHub's complete `check_runs` page envelope.
+        assert!(g0_check_raw_evidence_valid(
+            "jackin-project/jackin-agent-smith",
+            &check,
+            &[request],
+            &[raw]
+        ));
+    }
+
+    #[test]
     fn captured_app_and_actions_objects_bind_raw_provider_fields() {
         // Values below are the captured provider subset from
         // G0/fleet/check-contexts-full.json (SHA-256
