@@ -104,6 +104,16 @@ class _GitSnapshot:
                 f"{field} must be a 100644 regular Git blob, "
                 f"got mode={entry.mode} type={entry.kind}"
             )
+        path = self.root / relative
+        # Validate worktree shape, but never consume its bytes.  The source
+        # content below comes only from the content-addressed Git blob.
+        _lstat_regular(
+            path,
+            field,
+            limit,
+            single_link=True,
+            exact_mode=0o644,
+        )
         expected = _git_bytes(self.root, ["cat-file", "blob", f"{self.commit}:{relative}"])
         if len(expected) > limit:
             _fail(f"{field} exceeds {limit} bytes")
@@ -1349,6 +1359,7 @@ def validate_bundle(
     reviewed_git: Sequence[tuple[str, str]] | None = None,
     limits: Limits = Limits(),
     cargo_home: Path | None = None,
+    verify_git_cache: bool = True,
 ) -> dict[str, Any]:
     """Validate against base-owned source, closure, and recipe identities."""
 
@@ -1660,7 +1671,7 @@ def validate_bundle(
             "offline Cargo closure differs from the trusted contract: "
             f"actual={actual_closure} expected={closure_contract}"
         )
-    if reviewed_git_set:
+    if reviewed_git_set and verify_git_cache:
         git_census(cargo_home, reviewed_git_set)
     return manifest
 

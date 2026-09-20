@@ -253,6 +253,7 @@ class BootstrapPrefetchTests(unittest.TestCase):
                 ),
                 reviewed_git=GIT_SOURCE,
                 cargo_home=Path.home() / ".cargo",
+                verify_git_cache=False,
             )
             self.assertEqual(manifest["workspace_manifest_count"], 10)
             self.assertEqual(manifest["lock_package_count"], 438)
