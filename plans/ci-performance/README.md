@@ -7,6 +7,32 @@ Historical work remains in [the September 16 cache plan](../2026-09-16-ci-workfl
 and [the September 17 behavior ledger](../2026-09-17-pr994-behavior-ledger.md).
 Their claims require revalidation against current revisions.
 
+## Current measured checkpoint (8e1262d7 / 07bc3e23)
+
+Parallax PR #119 at `8e1262d75cdf8b091f479ef4639b139041e47eff`
+passed full CI `35525629941` and policy `35525629889`. All 24 jobs executed.
+Required-result latency was 756s; final control completion was 762s;
+aggregate job execution was 3,666s. Server took 723s, CLI 562s.
+Actual checkout `1ba04c383691f97b8cb49bb72af6c74949a1e686` has the same
+Git tree as the pushed head, with current main and that head as parents.
+
+This is one cold-MBX observation, with exact Rustup, Cargo and mold restores.
+The action explicitly logged `No mbx cache found` for server and CLI;
+the older schema-1 reporter incorrectly labeled both as prefix restores.
+Neither job obtained a compiler cache hit. Directory import was not exercised.
+Post-MBX steps took 48s and 46s respectively; their internal work is not
+observable from the logs and is excluded from the older phase report.
+Raw timestamps, logs, normalized rows and this correction are retained under
+`observations/parallax-35525629941-*`. No speedup is accepted from this sample.
+
+Velnor evidence commits through `07bc3e23` are pushed. Exact-head PR
+`35526876220` and policy `35526874804` passed. Environment partitioning,
+Swift condition composition and same-repository PR cache writing remain
+unaccepted local candidates with independent review findings under repair.
+Parent integrates serially; Velnor agent owns environment partitioning,
+Jackin agent reviews that work and repairs condition composition, and Parallax
+agent owns the cache-writer repair. Older ownership notes below are historical.
+
 ## Latest measured checkpoint
 
 Release metadata staging (`57e7cafc`) and rolling-release recovery
