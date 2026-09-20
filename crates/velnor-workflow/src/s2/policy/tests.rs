@@ -693,7 +693,7 @@ fn candidate_transport_rejects_malformed_manifest_and_open_publishers() {
 fn candidate_namespace_script_body() -> String {
     let script = crate::s2::candidate_namespace_scan_script();
     let marker =
-        "          python3 - \"$base_workflow_archive\" \"$head_workflow_archive\" <<'PY'\n";
+        "          python3 - \"$base_workflow_archive\" \"$head_workflow_archive\" \"$BASE_SHA\" \"$HEAD_SHA\" \"$base_tree_sha\" \"$head_tree_sha\" \"$base_tree_api_digest\" \"$head_tree_api_digest\" <<'PY' > \"$RUNNER_TEMP/candidate-workflow-contract.txt\"\n";
     let start = must_some(script.find(marker), "namespace scanner start") + marker.len();
     let end = must_some(
         script[start..].find("\n          PY\n"),
@@ -709,6 +709,10 @@ fn candidate_namespace_script_body() -> String {
 fn namespace_workflow_archive(root: &Path, name: &str, workflow: &str) -> PathBuf {
     let tree = root.join(format!("{name}-tree"));
     write(&tree.join(".github/workflows/ci-pr.yml"), workflow);
+    write(
+        &tree.join(".github/actions/setup/action.yml"),
+        "name: setup\nruns:\n  using: composite\n  steps: []\n",
+    );
     let archive = root.join(format!("{name}.tar"));
     let output = must(
         Command::new("tar")
@@ -718,7 +722,7 @@ fn namespace_workflow_archive(root: &Path, name: &str, workflow: &str) -> PathBu
                 "-C",
             ])
             .arg(must_some(tree.to_str(), "namespace tree path"))
-            .arg(".github/workflows")
+            .arg(".github")
             .env("COPYFILE_DISABLE", "1")
             .output(),
         "create namespace archive",
@@ -735,7 +739,9 @@ fn run_namespace_scanner(root: &Path, base_workflow: &str, head_workflow: &str) 
             .arg("-")
             .arg(base)
             .arg(head)
+            .args([PIN_A, PIN_B, PIN_A, PIN_B, CLOSURE_A, CLOSURE_B])
             .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn(),
         "spawn namespace scanner",
@@ -766,6 +772,30 @@ fn candidate_namespace_scan_rejects_unnamed_external_and_shell_publishers() {
         accepted.status.success(),
         "fixed publisher at {}: {accepted:?}",
         root.display()
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&accepted.stdout)
+            .split_whitespace()
+            .count(),
+        2,
+        "accepted scanner must emit contract and trusted base binding digests"
+    );
+
+    let local_action = fixed.replace(
+        "      - uses: actions/upload-artifact@",
+        "      - uses: ./.github/actions/setup\n      - uses: actions/upload-artifact@",
+    );
+    let accepted = run_namespace_scanner(&root, &local_action, &local_action);
+    assert!(
+        accepted.status.success(),
+        "recursive local action contract escaped: {accepted:?}"
+    );
+
+    let changed_top_level = fixed.replace("jobs:\n", "env:\n  CANDIDATE_FEATURE: changed\njobs:\n");
+    let rejected = run_namespace_scanner(&root, fixed, &changed_top_level);
+    assert!(
+        !rejected.status.success(),
+        "top-level workflow controls escaped semantic contract comparison: {rejected:?}"
     );
 
     let unnamed = fixed.replace(

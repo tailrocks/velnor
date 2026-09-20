@@ -4647,16 +4647,30 @@ fn audited_pin_script() -> &'static str {
 /// head.  The base contract check below protects the producer job's complete
 /// bytes; this census closes the other hole where a second workflow (or a
 /// dynamically named upload step) could publish the same namespace through a
-/// reusable workflow or an alias.
+/// reusable workflow or an alias.  The emitted binding is narrower: it binds
+/// the normalized contract to API-verified commit/tree identities.  It is not
+/// a claim that arbitrary base source is safe.
 const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
-          base_workflow_archive="$RUNNER_TEMP/base-workflows.tar"
-          head_workflow_archive="$RUNNER_TEMP/head-workflows.tar"
-          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$BASE_SHA" .github/workflows > "$base_workflow_archive"
-          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$HEAD_SHA" .github/workflows > "$head_workflow_archive"
-          python3 - "$base_workflow_archive" "$head_workflow_archive" <<'PY'
+          base_workflow_archive="$RUNNER_TEMP/base-github.tar"
+          head_workflow_archive="$RUNNER_TEMP/head-github.tar"
+          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$BASE_SHA" .github > "$base_workflow_archive"
+          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$HEAD_SHA" .github > "$head_workflow_archive"
+          python3 - "$base_workflow_archive" "$head_workflow_archive" "$BASE_SHA" "$HEAD_SHA" "$base_tree_sha" "$head_tree_sha" "$base_tree_api_digest" "$head_tree_api_digest" <<'PY' > "$RUNNER_TEMP/candidate-workflow-contract.txt"
+          import hashlib
           import re
           import sys
           import tarfile
+
+          if len(sys.argv) != 9:
+              raise SystemExit("candidate workflow scan requires both source identities")
+          base_archive, head_archive = sys.argv[1:3]
+          base_sha, head_sha, base_tree_sha, head_tree_sha, base_tree_api_digest, head_tree_api_digest = sys.argv[3:]
+          sha40 = re.compile(r"^[0-9a-f]{40}$")
+          sha64 = re.compile(r"^[0-9a-f]{64}$")
+          if not all(sha40.fullmatch(value) for value in (base_sha, head_sha, base_tree_sha, head_tree_sha)):
+              raise SystemExit("candidate workflow scan source commit/tree identity is malformed")
+          if not all(sha64.fullmatch(value) for value in (base_tree_api_digest, head_tree_api_digest)):
+              raise SystemExit("candidate workflow scan source API identity is malformed")
 
           candidate = "__CANDIDATE_ARTIFACT__"
           handoff = "__CANDIDATE_HANDOFF__"
@@ -4666,12 +4680,14 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
           job_pattern = re.compile(r"  ([A-Za-z0-9_-]+):\s*$")
           step_pattern = re.compile(r"^( +)-\s+(?:name|uses|run|id|if|env|shell|working-directory|timeout-minutes|continue-on-error):")
           local_workflow_pattern = re.compile(r"^\./(.github/workflows/[^ #]+)")
+          local_action_pattern = re.compile(r"^\./(.github/actions/[^ #]+)")
           external_workflow_pattern = re.compile(r"^[^./][^ ]*/[^ ]+/.github/workflows/[^ #]+@")
           post_pattern = re.compile(r"(?:--method|--request|-X)\s+POST|\bPOST\b", re.IGNORECASE)
           uploads = []
-          direct_uploads = []
-          external_reusable_workflows = []
+          direct_uploads = {}
+          external_reusable_workflows = {}
           local_workflow_edges = {}
+          local_action_edges = {}
           workflow_lines = {}
           pinned_action_pattern = re.compile(r"^[^./][^ ]+@[0-9a-f]{40}$")
 
@@ -4697,12 +4713,15 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                   return "shell step names an artifact uploader"
               return None
 
-          for archive_name in sys.argv[1:]:
+          for archive_name in sys.argv[1:3]:
               archive_edges = {}
+              archive_action_edges = {}
               archive_workflows = {}
+              archive_direct_uploads = []
+              archive_external_reusable_workflows = []
               with tarfile.open(archive_name, "r:") as archive:
                   for member in archive.getmembers():
-                      if not member.isfile() or not member.name.endswith((".yml", ".yaml")):
+                      if not member.isfile() or not member.name.startswith(".github/") or not member.name.endswith((".yml", ".yaml")):
                           continue
                       stream = archive.extractfile(member)
                       if stream is None:
@@ -4717,12 +4736,20 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                           for match in [local_workflow_pattern.match(value)]
                           if match is not None
                       ]
+                      archive_action_edges[member.name] = [
+                          match.group(1)
+                          for line in lines
+                          for value in [uses_value(line)]
+                          if value is not None
+                          for match in [local_action_pattern.match(value)]
+                          if match is not None
+                      ]
                       for line in lines:
                           value = uses_value(line)
-                          if value is not None and not value.startswith("./") and not pinned_action_pattern.fullmatch(value):
-                              raise SystemExit(f"{member.name}: action reference is not a pinned base-owned action: {value}")
                           if value is not None and external_workflow_pattern.match(value):
-                              external_reusable_workflows.append((member.name, value))
+                              archive_external_reusable_workflows.append((member.name, value))
+                          elif value is not None and not value.startswith("./") and not pinned_action_pattern.fullmatch(value):
+                              raise SystemExit(f"{member.name}: action reference is not a pinned base-owned action: {value}")
                       job = None
                       for index, line in enumerate(lines):
                           matched_job = job_pattern.fullmatch(line)
@@ -4747,7 +4774,7 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                           ]
                           reason = direct_upload_reason(block)
                           if reason is not None:
-                              direct_uploads.append((member.name, reason))
+                              archive_direct_uploads.append((member.name, reason))
                           if not upload_uses:
                               continue
                           name_prefix = " " * (indent + 4) + "name:"
@@ -4760,19 +4787,39 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                           step_id = ids[0] if len(ids) == 1 else ""
                           uploads.append((archive_name, member.name, job, step_id, name))
               local_workflow_edges[archive_name] = archive_edges
+              local_action_edges[archive_name] = archive_action_edges
               workflow_lines[archive_name] = archive_workflows
+              direct_uploads[archive_name] = archive_direct_uploads
+              external_reusable_workflows[archive_name] = archive_external_reusable_workflows
 
-          for path, value in external_reusable_workflows:
-              raise SystemExit(f"{path}: external reusable workflow is outside the closed artifact publisher contract: {value}")
-          for path, reason in direct_uploads:
-              raise SystemExit(f"{path}: {reason}; use one fixed upload-artifact action contract")
+          def resolve_action_manifest(reference, files):
+              root = reference.rstrip("/")
+              candidates = [root] if root.endswith((".yml", ".yaml")) else [root + "/action.yml", root + "/action.yaml"]
+              matches = [path for path in candidates if path in files]
+              if len(matches) > 1:
+                  raise SystemExit(f"{reference}: local action has multiple manifests")
+              if not matches:
+                  raise SystemExit(f"{reference}: local action implementation is not in the trusted source archive")
+              return matches[0]
 
-          def reachable_workflows(edges):
+          resolved_action_edges = {}
+          for archive_name in sys.argv[1:3]:
+              files = workflow_lines[archive_name]
+              resolved = {}
+              for owner, references in local_action_edges[archive_name].items():
+                  resolved[owner] = [resolve_action_manifest(reference, files) for reference in references]
+              resolved_action_edges[archive_name] = resolved
+
+          def reachable_nodes(workflow_edges, action_edges):
               reachable = {".github/workflows/ci-pr.yml"}
               pending = list(reachable)
               while pending:
-                  workflow = pending.pop()
-                  for dependency in edges.get(workflow, []):
+                  node = pending.pop()
+                  for dependency in workflow_edges.get(node, []):
+                      if dependency not in reachable:
+                          reachable.add(dependency)
+                          pending.append(dependency)
+                  for dependency in action_edges.get(node, []):
                       if dependency not in reachable:
                           reachable.add(dependency)
                           pending.append(dependency)
@@ -4780,12 +4827,7 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
 
           def normalized_capability_contract(lines):
               contract = []
-              in_jobs = False
               for line in lines:
-                  if line.strip() == "jobs:":
-                      in_jobs = True
-                  if not in_jobs:
-                      continue
                   stripped = line.strip()
                   if not stripped or stripped.startswith('#'):
                       continue
@@ -4793,9 +4835,18 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                   contract.append((indent, " ".join(stripped.split())))
               return contract
 
-          base_archive, head_archive = sys.argv[1:3]
-          base_reachable = reachable_workflows(local_workflow_edges[base_archive])
-          head_reachable = reachable_workflows(local_workflow_edges[head_archive])
+          def normalized_contract_material(nodes, files):
+              material = []
+              for path in sorted(nodes):
+                  lines = files.get(path)
+                  if lines is None:
+                      continue
+                  material.append(path)
+                  material.extend(f"{indent}:{line}" for indent, line in normalized_capability_contract(lines))
+              return "\n".join(material).encode("utf-8")
+
+          base_reachable = reachable_nodes(local_workflow_edges[base_archive], resolved_action_edges[base_archive])
+          head_reachable = reachable_nodes(local_workflow_edges[head_archive], resolved_action_edges[head_archive])
           root_workflow = ".github/workflows/ci-pr.yml"
           if root_workflow not in workflow_lines[base_archive] or root_workflow not in workflow_lines[head_archive]:
               raise SystemExit("candidate workflow graph has no base-owned ci-pr entrypoint")
@@ -4806,8 +4857,6 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
           for path in sorted(base_reachable):
               base_lines = workflow_lines[base_archive].get(path)
               head_lines = workflow_lines[head_archive].get(path)
-              if base_lines is None and head_lines is None:
-                  continue
               if base_lines is None or head_lines is None:
                   raise SystemExit(
                       f"{path}: reachable workflow is missing from the base-owned closed producer contract"
@@ -4817,16 +4866,43 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                       f"{path}: reachable workflow capability contract differs from the base-owned closed producer contract"
                   )
 
-          for archive_name in sys.argv[1:]:
-              reachable = {".github/workflows/ci-pr.yml"}
-              pending = list(reachable)
-              while pending:
-                  workflow = pending.pop()
-                  for dependency in local_workflow_edges[archive_name].get(workflow, []):
-                      if dependency not in reachable:
-                          reachable.add(dependency)
-                          pending.append(dependency)
-              found = [row for row in uploads if row[0] == archive_name and row[4] == candidate]
+          base_contract_sha256 = hashlib.sha256(
+              normalized_contract_material(base_reachable, workflow_lines[base_archive])
+          ).hexdigest()
+          base_binding_material = "\n".join(
+              (
+                  "candidate-workflow-contract-v2",
+                  f"base-sha:{base_sha}",
+                  f"base-tree-sha:{base_tree_sha}",
+                  f"base-tree-api-digest:{base_tree_api_digest}",
+                  f"contract-sha256:{base_contract_sha256}",
+              )
+          ).encode("utf-8")
+          base_binding_sha256 = hashlib.sha256(base_binding_material).hexdigest()
+          print(f"{base_contract_sha256} {base_binding_sha256}")
+
+          for archive_name in (base_archive, head_archive):
+              reachable = reachable_nodes(local_workflow_edges[archive_name], resolved_action_edges[archive_name])
+              # A top-level workflow that is not reachable from ci-pr executes
+              # under a different workflow/run identity. Acquisition binds the
+              # numeric ci-pr workflow, run, attempt, job, and artifact IDs, so
+              # those outputs cannot be selected as this producer's handoff.
+              # A reusable workflow or direct publisher reachable from ci-pr,
+              # however, shares the producer run and is outside this closed
+              # contract; reject it before any upload can mint the namespace.
+              for path, value in external_reusable_workflows[archive_name]:
+                  if path in reachable:
+                      raise SystemExit(
+                          f"{path}: reachable external reusable workflow is outside the closed artifact publisher contract: {value}"
+                      )
+              for path, reason in direct_uploads[archive_name]:
+                  if path in reachable:
+                      raise SystemExit(f"{path}: {reason}; use one fixed upload-artifact action contract")
+              found = [
+                  row
+                  for row in uploads
+                  if row[0] == archive_name and row[1] in reachable and row[4] == candidate
+              ]
               if len(found) != 1:
                   raise SystemExit(f"{archive_name}: candidate namespace uploader count is {len(found)}, expected 1")
               row = found[0]
@@ -5017,6 +5093,8 @@ macro_rules! policy_candidate_step_template {
           test "$(grep -Fxc "          path: ${{{{ runner.temp }}}}/velnor-workflow-candidate" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "          name: {artifact}" "$contract")" = 1
 {namespace_scan}
+          read -r candidate_workflow_contract_sha256 candidate_workflow_binding_sha256 < "$RUNNER_TEMP/candidate-workflow-contract.txt"
+          [[ "$candidate_workflow_contract_sha256" =~ ^[0-9a-f]{{64}}$ && "$candidate_workflow_binding_sha256" =~ ^[0-9a-f]{{64}}$ ]]
           contract_sha256="$(sha256sum "$contract" | awk '{{print $1}}')"
 
           workflow="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml")"
@@ -5180,8 +5258,10 @@ macro_rules! policy_candidate_step_template {
             --arg manifest_schema_sha256 "$manifest_schema_sha256" \
             --arg source_archive_sha256 "$source_archive_sha256" \
             --arg candidate_closure "$candidate_closure" \
+            --arg candidate_workflow_contract_sha256 "$candidate_workflow_contract_sha256" \
+            --arg candidate_workflow_binding_sha256 "$candidate_workflow_binding_sha256" \
             --arg contract_sha256 "$contract_sha256" \
-            '{{role: $role, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, producer_run_created_at: $producer_run_created_at, job_id: $job_id, job_name: $job_name, job_started_at: $job_started_at, job_completed_at: $job_completed_at, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, checkout_action_archive_sha256: $checkout_action_archive_sha256, download_action_archive_sha256: $download_action_archive_sha256, upload_action_archive_sha256: $upload_action_archive_sha256, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_created_at: $artifact_created_at, artifact_updated_at: $artifact_updated_at, artifact_expires_at: $artifact_expires_at, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, contract_sha256: $contract_sha256}}' > "$handoff/handoff.json"
+            '{{role: $role, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, producer_run_created_at: $producer_run_created_at, job_id: $job_id, job_name: $job_name, job_started_at: $job_started_at, job_completed_at: $job_completed_at, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, checkout_action_archive_sha256: $checkout_action_archive_sha256, download_action_archive_sha256: $download_action_archive_sha256, upload_action_archive_sha256: $upload_action_archive_sha256, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_created_at: $artifact_created_at, artifact_updated_at: $artifact_updated_at, artifact_expires_at: $artifact_expires_at, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, candidate_workflow_contract_sha256: $candidate_workflow_contract_sha256, candidate_workflow_binding_sha256: $candidate_workflow_binding_sha256, contract_sha256: $contract_sha256}}' > "$handoff/handoff.json"
       - name: Upload candidate handoff
         id: handoff_upload
         uses: {upload}
@@ -5321,8 +5401,21 @@ macro_rules! policy_candidate_role_jobs_template {
             (.artifact_expires_at | strings) and
             (.source_archive_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
             (.candidate_closure | strings | test("^[0-9a-f]{{64}}$")) and
+            (.candidate_workflow_contract_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
+            (.candidate_workflow_binding_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
             (.contract_sha256 | strings | test("^[0-9a-f]{{64}}$"))
           ' "$HANDOFF/handoff.json" >/dev/null
+          candidate_workflow_contract_sha256="$(jq -er .candidate_workflow_contract_sha256 "$HANDOFF/handoff.json")"
+          candidate_workflow_binding_sha256="$(jq -er .candidate_workflow_binding_sha256 "$HANDOFF/handoff.json")"
+          base_sha="$(jq -er .base_sha "$HANDOFF/handoff.json")"
+          base_tree_sha="$(jq -er .base_tree_sha "$HANDOFF/handoff.json")"
+          base_tree_api_digest="$(jq -er .base_tree_api_digest "$HANDOFF/handoff.json")"
+          base_binding_material="candidate-workflow-contract-v2
+          base-sha:$base_sha
+          base-tree-sha:$base_tree_sha
+          base-tree-api-digest:$base_tree_api_digest
+          contract-sha256:$candidate_workflow_contract_sha256"
+          test "$(printf '%s' "$base_binding_material" | sha256sum | awk '{{print $1}}')" = "$candidate_workflow_binding_sha256"
           jq -e --slurpfile handoff "$HANDOFF/handoff.json" \
             'type == "object" and (keys | sort == ["binary_sha256", "closure", "features", "platform", "profile", "repository", "revision", "run_id", "schema"]) and .schema == "{manifest_schema}" and .profile == $handoff[0].profile and .features == $handoff[0].features and .platform == $handoff[0].platform and .repository == $handoff[0].head_repository and .run_id == $handoff[0].run_id and .revision == $handoff[0].head_sha and .closure == $handoff[0].candidate_closure and (.binary_sha256 | strings | test("^[0-9a-f]{{64}}$"))' \
             "$HANDOFF/candidate-manifest.json" >/dev/null
@@ -5495,6 +5588,8 @@ macro_rules! policy_candidate_role_jobs_template {
             --arg manifest_schema_sha256 "$(jq -er .manifest_schema_sha256 "$handoff_json")" \
             --arg source_archive_sha256 "$(jq -er .source_archive_sha256 "$handoff_json")" \
             --arg candidate_closure "$(jq -er .candidate_closure "$handoff_json")" \
+            --arg candidate_workflow_contract_sha256 "$(jq -er .candidate_workflow_contract_sha256 "$handoff_json")" \
+            --arg candidate_workflow_binding_sha256 "$(jq -er .candidate_workflow_binding_sha256 "$handoff_json")" \
             --arg artifact_name "$(jq -er .artifact_name "$handoff_json")" \
             --argjson artifact_id "$(jq -er .artifact_id "$handoff_json")" \
             --argjson artifact_size "$(jq -er .artifact_size "$handoff_json")" \
@@ -5509,7 +5604,7 @@ macro_rules! policy_candidate_role_jobs_template {
             --arg sandbox_index_digest "$SANDBOX_IMAGE_DIGEST" \
             --arg sandbox_platform_digest "$platform_digest" \
             --arg sandbox_config_digest "$config_digest" \
-            '{{role: $role, render_sha256: $render_sha256, handoff_id: $handoff_id, handoff_digest: $handoff_digest, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, producer_run_created_at: $producer_run_created_at, job_id: $job_id, job_name: $job_name, job_started_at: $job_started_at, job_completed_at: $job_completed_at, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, checkout_action_archive_sha256: $checkout_action_archive_sha256, download_action_archive_sha256: $download_action_archive_sha256, upload_action_archive_sha256: $upload_action_archive_sha256, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_created_at: $artifact_created_at, artifact_updated_at: $artifact_updated_at, artifact_expires_at: $artifact_expires_at, execution_run_id: $execution_run_id, execution_run_attempt: $execution_run_attempt, execution_job: $execution_job, sandbox_index_digest: $sandbox_index_digest, sandbox_platform_digest: $sandbox_platform_digest, sandbox_config_digest: $sandbox_config_digest}}' > "$result/result.json"
+            '{{role: $role, render_sha256: $render_sha256, handoff_id: $handoff_id, handoff_digest: $handoff_digest, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, producer_run_created_at: $producer_run_created_at, job_id: $job_id, job_name: $job_name, job_started_at: $job_started_at, job_completed_at: $job_completed_at, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, checkout_action_archive_sha256: $checkout_action_archive_sha256, download_action_archive_sha256: $download_action_archive_sha256, upload_action_archive_sha256: $upload_action_archive_sha256, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, candidate_workflow_contract_sha256: $candidate_workflow_contract_sha256, candidate_workflow_binding_sha256: $candidate_workflow_binding_sha256, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_created_at: $artifact_created_at, artifact_updated_at: $artifact_updated_at, artifact_expires_at: $artifact_expires_at, execution_run_id: $execution_run_id, execution_run_attempt: $execution_run_attempt, execution_job: $execution_job, sandbox_index_digest: $sandbox_index_digest, sandbox_platform_digest: $sandbox_platform_digest, sandbox_config_digest: $sandbox_config_digest}}' > "$result/result.json"
       - name: Upload candidate verification result
         id: result_upload
         uses: {upload}
@@ -5707,6 +5802,8 @@ macro_rules! policy_candidate_result_verification_template {
             (.manifest_schema_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
             (.source_archive_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
             (.candidate_closure | strings | test("^[0-9a-f]{{64}}$")) and
+            (.candidate_workflow_contract_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
+            (.candidate_workflow_binding_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
             (.artifact_name == "{artifact}") and (.artifact_id | numbers) and (.artifact_size | numbers | . <= 268435456) and
             (.artifact_service_digest | strings | test("^sha256:[0-9a-f]{{64}}$")) and
             (.artifact_raw_zip_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
@@ -5781,6 +5878,8 @@ macro_rules! policy_candidate_result_verification_template {
             $h.manifest_member == $r.manifest_member and $h.manifest_sha256 == $r.manifest_sha256 and
             $h.manifest_schema_sha256 == $r.manifest_schema_sha256 and
             $h.source_archive_sha256 == $r.source_archive_sha256 and $h.candidate_closure == $r.candidate_closure and
+            $h.candidate_workflow_contract_sha256 == $r.candidate_workflow_contract_sha256 and
+            $h.candidate_workflow_binding_sha256 == $r.candidate_workflow_binding_sha256 and
             $h.artifact_name == $r.artifact_name and $h.artifact_id == $r.artifact_id and $h.artifact_size == $r.artifact_size and
             $h.artifact_service_digest == $r.artifact_service_digest and $h.artifact_raw_zip_sha256 == $r.artifact_raw_zip_sha256 and
             $h.artifact_created_at == $r.artifact_created_at and $h.artifact_updated_at == $r.artifact_updated_at and
@@ -5873,6 +5972,14 @@ macro_rules! policy_candidate_result_verification_template {
           done
           test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" show -s --format=%T "$HEAD_SHA")" = "$head_tree_sha"
           test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" show -s --format=%T "$BASE_SHA")" = "$base_tree_sha"
+          source_repo="$verifier_source_repo"
+          source_home="$verifier_source_home"
+          base_workflow_archive="$RUNNER_TEMP/base-github.tar"
+          head_workflow_archive="$RUNNER_TEMP/head-github.tar"
+{namespace_scan}
+          read -r verifier_candidate_workflow_contract_sha256 verifier_candidate_workflow_binding_sha256 < "$RUNNER_TEMP/candidate-workflow-contract.txt"
+          test "$verifier_candidate_workflow_contract_sha256" = "$(jq -er .candidate_workflow_contract_sha256 "$handoff_json")"
+          test "$verifier_candidate_workflow_binding_sha256" = "$(jq -er .candidate_workflow_binding_sha256 "$handoff_json")"
           verifier_manifest_schema="$RUNNER_TEMP/verifier-producer-manifest.schema.json"
           cat > "$verifier_manifest_schema" <<'JSON'
 {manifest_schema_json}          JSON
@@ -5937,6 +6044,7 @@ macro_rules! policy_candidate_result_verification_template {
         manifest_schema = crate::s2::CANDIDATE_MANIFEST_SCHEMA,
         manifest_schema_json = candidate_manifest_schema_script(),
         manifest_validation = $manifest_validation,
+        namespace_scan = candidate_namespace_scan_script(),
         result = crate::s2::CANDIDATE_RESULT_ARTIFACT_NAME,
         upload_action_archive_sha256 = crate::s2::CANDIDATE_UPLOAD_ACTION_ARCHIVE_SHA256,
         upload_action_revision = crate::s2::CANDIDATE_UPLOAD_ACTION_REVISION,

@@ -394,6 +394,14 @@ impl TransportFixture {
         let handoff_dir = self.run_temp.join("candidate-handoff");
         fs::create_dir_all(&handoff_dir).expect("handoff dir");
         let source_sha = file_sha256(&self.source_archive);
+        let candidate_workflow_contract_sha256 = "c".repeat(64);
+        let candidate_workflow_binding_sha256 = hex_sha256(
+            format!(
+                "candidate-workflow-contract-v2\nbase-sha:{BASE_SHA}\nbase-tree-sha:{BASE_TREE_SHA}\nbase-tree-api-digest:{}\ncontract-sha256:{candidate_workflow_contract_sha256}",
+                "b".repeat(64)
+            )
+            .as_bytes(),
+        );
         let handoff = json!({
             "role": "handoff", "workflow_path": ".github/workflows/ci-pr.yml",
             "workflow_id": WORKFLOW_ID, "run_id": RUN_ID, "run_attempt": RUN_ATTEMPT,
@@ -420,7 +428,8 @@ impl TransportFixture {
             "artifact_created_at": "2026-09-20T00:02:00Z",
             "artifact_updated_at": "2026-09-20T00:03:00Z",
             "artifact_expires_at": "2099-01-01T00:00:00Z", "source_archive_sha256": source_sha,
-            "candidate_closure": fixture_closure(), "contract_sha256": "f".repeat(64),
+            "candidate_closure": fixture_closure(), "candidate_workflow_contract_sha256": candidate_workflow_contract_sha256,
+            "candidate_workflow_binding_sha256": candidate_workflow_binding_sha256, "contract_sha256": "f".repeat(64),
             "manifest_sha256": "1".repeat(64)
         });
         let manifest = json!({
@@ -925,14 +934,29 @@ elif command == "show":
         sha = target
         print(scenario["object_base_tree"] if sha == os.environ["BASE_SHA"] else scenario["object_head_tree"])
 elif command == "archive":
-    if ".github/workflows" in rest:
+    if ".github" in rest:
         contract = os.environ["FIXTURE_HEAD_CONTRACT"] if os.environ["HEAD_SHA"] in rest else os.environ["FIXTURE_CONTRACT"]
         payload = open(contract, "rb").read()
         with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as archive:
-            member = tarfile.TarInfo(".github/workflows/ci-pr.yml")
-            member.size = len(payload)
-            member.mode = 0o644
-            archive.addfile(member, io.BytesIO(payload))
+            members = [
+                (".github/workflows/ci-pr.yml", payload),
+                (".github/actions/setup-velnor-workflow/action.yml", b"name: setup\\nruns:\\n  using: composite\\n  steps: []\\n"),
+            ]
+            members.extend(
+                (name, b"name: fixture\\non: workflow_call\\njobs: {}\\n")
+                for name in (
+                    ".github/workflows/ci-unit-bun.yml",
+                    ".github/workflows/ci-unit-docker.yml",
+                    ".github/workflows/ci-unit-docs.yml",
+                    ".github/workflows/ci-unit-opentofu.yml",
+                    ".github/workflows/ci-unit-rust.yml",
+                )
+            )
+            for name, contents in members:
+                member = tarfile.TarInfo(name)
+                member.size = len(contents)
+                member.mode = 0o644
+                archive.addfile(member, io.BytesIO(contents))
     else:
         sys.stdout.buffer.write(open(os.environ["FIXTURE_SOURCE_ARCHIVE"], "rb").read())
 elif command == "ls-tree":
