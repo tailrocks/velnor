@@ -100,7 +100,6 @@ pub async fn run(args: G0LiveCollectArgs) -> Result<()> {
         &collection.observed_at_utc,
     )
     .context("capture producer-owned model/workload bindings")?;
-    collection.raw_objects.extend(bindings.raw_objects);
     write_json_new(
         &args.evidence_dir.join("binding-capture.json"),
         &bindings.report,
@@ -118,10 +117,11 @@ pub async fn run(args: G0LiveCollectArgs) -> Result<()> {
     write_json_new(&args.evidence_dir.join("live-collection.json"), &collection)?;
     write_json_new(&args.evidence_dir.join("capture-metadata.json"), &metadata)?;
     println!(
-        "captured {} repositories, {} requests, {} raw objects into {}",
+        "captured {} repositories, {} requests, {} API raw objects and {} local binding raw objects into {}",
         collection.repositories.len(),
         collection.requests.len(),
         collection.raw_objects.len(),
+        bindings.raw_objects.len(),
         args.evidence_dir.display()
     );
     Ok(())
