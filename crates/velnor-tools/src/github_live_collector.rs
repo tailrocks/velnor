@@ -3567,6 +3567,7 @@ jobs:
             "app": {"id": 123},
             "status": "completed",
             "conclusion": "success",
+            "url": "https://api.github.com/repos/tailrocks/example/check-runs/17",
             "html_url": "https://github.com/tailrocks/example/runs/17"
         });
         let check = parse_check(
@@ -3609,13 +3610,16 @@ jobs:
             "name": "build",
             "status": "completed",
             "conclusion": "success",
-            "html_url": "https://github.com/tailrocks/example/actions/runs/7/job/8",
+            "url": "https://api.github.com/repos/tailrocks/example/actions/jobs/8",
+            "run_url": "https://api.github.com/repos/tailrocks/example/actions/runs/7",
+            "html_url": "https://github.com/tailrocks/example/runs/7/jobs/8",
             "check_run_url": "https://api.github.com/repos/tailrocks/example/check-runs/17"
         });
         let job = parse_job(
             &value,
             "pull_request",
             "tailrocks/example",
+            1,
             7,
             2,
             source_sha,
@@ -3632,6 +3636,7 @@ jobs:
             &hostile,
             "pull_request",
             "tailrocks/example",
+            1,
             7,
             2,
             source_sha,
