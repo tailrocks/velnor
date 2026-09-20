@@ -283,9 +283,120 @@ impl fmt::Display for Ancestry {
     }
 }
 
-/// A redacted admission rejection carrying the complete ancestry. It never
-/// stores the received value — only the field, accepted alternatives, a static
-/// reason, and the manifest version.
+/// Classification carried with admission failures through the runner boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionFailureKind {
+    /// A workflow or selected action violates a reviewed admission policy.
+    Policy,
+    /// GitHub Contents transport failed before an HTTP response was read.
+    ApiTransport,
+    /// GitHub Contents returned a non-success status other than not found.
+    ApiStatus,
+    /// Neither supported action manifest filename exists at the selected ref.
+    ManifestMissing,
+    /// An action manifest exists but cannot be parsed or validated structurally.
+    ManifestMalformed,
+    /// An internal validator invariant failed unexpectedly.
+    Internal,
+}
+
+impl AdmissionFailureKind {
+    const fn description(self) -> &'static str {
+        match self {
+            Self::Policy => "rejected",
+            Self::ApiTransport => "could not fetch action metadata",
+            Self::ApiStatus => "received an error from the GitHub Contents API",
+            Self::ManifestMissing => "could not find an action manifest",
+            Self::ManifestMalformed => "could not read a valid action manifest",
+            Self::Internal => "failed internally",
+        }
+    }
+}
+
+/// Typed failures from the read-only metadata source. The distinction is
+/// retained when `admit_job` adds ancestry so callers can choose remediation
+/// without parsing display text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionMetadataSourceError {
+    ApiTransport(String),
+    ApiStatus(u16),
+    ManifestMissing {
+        repository: String,
+        git_ref: String,
+        subpath: Option<String>,
+    },
+    ManifestMalformed {
+        repository: String,
+        git_ref: String,
+        detail: String,
+    },
+    Internal(String),
+}
+
+#[derive(Debug)]
+enum MetadataValidationFailure {
+    Policy(String),
+    Malformed(String),
+}
+
+impl MetadataValidationFailure {
+    fn policy(message: impl Into<String>) -> Self {
+        Self::Policy(message.into())
+    }
+
+    fn malformed(message: impl Into<String>) -> Self {
+        Self::Malformed(message.into())
+    }
+}
+
+impl fmt::Display for ActionMetadataSourceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApiTransport(detail) => {
+                write!(formatter, "GitHub Contents transport failed: {detail}")
+            }
+            Self::ApiStatus(status) => {
+                write!(
+                    formatter,
+                    "GitHub Contents request failed with status {status}"
+                )
+            }
+            Self::ManifestMissing {
+                repository,
+                git_ref,
+                subpath,
+            } => {
+                let path = subpath
+                    .as_deref()
+                    .map(|path| format!(" in {path}"))
+                    .unwrap_or_default();
+                write!(
+                    formatter,
+                    "action metadata not found for {repository}@{git_ref}{path} (last status 404)"
+                )
+            }
+            Self::ManifestMalformed {
+                repository,
+                git_ref,
+                detail,
+            } => write!(
+                formatter,
+                "parse action metadata for {repository}@{git_ref}: {detail}"
+            ),
+            Self::Internal(detail) => {
+                write!(
+                    formatter,
+                    "action metadata source failed internally: {detail}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ActionMetadataSourceError {}
+
+/// A redacted admission failure carrying the complete ancestry. It retains a
+/// typed cause class while never storing workflow input values.
 #[derive(Debug, Clone)]
 pub struct AdmissionError {
     pub ancestry: Ancestry,
@@ -293,6 +404,7 @@ pub struct AdmissionError {
     pub accepted: Vec<String>,
     pub reason: String,
     pub manifest_version: u32,
+    kind: AdmissionFailureKind,
 }
 
 impl AdmissionError {
@@ -302,13 +414,77 @@ impl AdmissionError {
         reason: impl Into<String>,
         accepted: Vec<String>,
     ) -> Self {
+        Self::with_kind(
+            ancestry,
+            field,
+            reason,
+            accepted,
+            AdmissionFailureKind::Policy,
+        )
+    }
+
+    fn with_kind(
+        ancestry: &Ancestry,
+        field: impl Into<String>,
+        reason: impl Into<String>,
+        accepted: Vec<String>,
+        kind: AdmissionFailureKind,
+    ) -> Self {
         Self {
             ancestry: ancestry.clone(),
             field: field.into(),
             accepted,
             reason: reason.into(),
             manifest_version: manifest::MANIFEST_VERSION,
+            kind,
         }
+    }
+
+    pub fn failure_kind(&self) -> AdmissionFailureKind {
+        self.kind
+    }
+
+    fn from_metadata_source(ancestry: &Ancestry, error: ActionMetadataSourceError) -> Self {
+        let (kind, field) = match &error {
+            ActionMetadataSourceError::ApiTransport(_) => {
+                (AdmissionFailureKind::ApiTransport, "metadata")
+            }
+            ActionMetadataSourceError::ApiStatus(_) => {
+                (AdmissionFailureKind::ApiStatus, "metadata")
+            }
+            ActionMetadataSourceError::ManifestMissing { .. } => {
+                (AdmissionFailureKind::ManifestMissing, "action.yml")
+            }
+            ActionMetadataSourceError::ManifestMalformed { .. } => {
+                (AdmissionFailureKind::ManifestMalformed, "action.yml")
+            }
+            ActionMetadataSourceError::Internal(_) => (AdmissionFailureKind::Internal, "metadata"),
+        };
+        Self::with_kind(ancestry, field, error.to_string(), Vec::new(), kind)
+    }
+
+    fn malformed_manifest(
+        ancestry: &Ancestry,
+        field: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self::with_kind(
+            ancestry,
+            field,
+            reason,
+            Vec::new(),
+            AdmissionFailureKind::ManifestMalformed,
+        )
+    }
+
+    fn internal(ancestry: &Ancestry, field: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::with_kind(
+            ancestry,
+            field,
+            reason,
+            Vec::new(),
+            AdmissionFailureKind::Internal,
+        )
     }
 
     /// Convert a manifest capability error into a redacted admission error,
@@ -321,10 +497,16 @@ impl AdmissionError {
                 accepted: violation.accepted.clone(),
                 reason: "unsupported capability".to_string(),
                 manifest_version: violation.manifest_version,
+                kind: AdmissionFailureKind::Policy,
             }
         } else {
-            // Structural errors (metadata fetch/parse) carry no job input value.
-            Self::new(ancestry, "uses", error.to_string(), Vec::new())
+            Self::with_kind(
+                ancestry,
+                "uses",
+                "internal capability validator failure",
+                Vec::new(),
+                AdmissionFailureKind::Internal,
+            )
         }
     }
 }
@@ -333,7 +515,8 @@ impl fmt::Display for AdmissionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "action admission rejected at {}: field '{}' ({}); accepted: {}; manifest version {}",
+            "action admission {} at {}: field '{}' ({}); accepted: {}; manifest version {}",
+            self.kind.description(),
             self.ancestry,
             self.field,
             self.reason,
@@ -357,7 +540,7 @@ pub trait ActionMetadataSource {
         repository: &str,
         git_ref: &str,
         subpath: Option<&str>,
-    ) -> Result<ActionMetadata>;
+    ) -> std::result::Result<ActionMetadata, ActionMetadataSourceError>;
 }
 
 /// Production metadata source backed by the GitHub Contents API. Uses the job
@@ -417,22 +600,26 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
         repository: &str,
         git_ref: &str,
         subpath: Option<&str>,
-    ) -> Result<ActionMetadata> {
+    ) -> std::result::Result<ActionMetadata, ActionMetadataSourceError> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         let directory = normalize_subpath(subpath);
-        let mut last_status = None;
         for file in ["action.yml", "action.yaml"] {
             let metadata_path = if directory.is_empty() {
                 file.to_string()
             } else {
                 format!("{directory}/{file}")
             };
-            let mut url = url::Url::parse(&self.api_url)
-                .map_err(|error| anyhow::anyhow!("parse configured GitHub API URL: {error}"))?;
+            let mut url = url::Url::parse(&self.api_url).map_err(|error| {
+                ActionMetadataSourceError::Internal(format!(
+                    "parse configured GitHub API URL: {error}"
+                ))
+            })?;
             {
-                let mut segments = url
-                    .path_segments_mut()
-                    .map_err(|_| anyhow::anyhow!("cannot build GitHub contents URL"))?;
+                let mut segments = url.path_segments_mut().map_err(|_| {
+                    ActionMetadataSourceError::Internal(
+                        "cannot build GitHub Contents URL".to_string(),
+                    )
+                })?;
                 segments.push("repos");
                 for segment in repository.split('/') {
                     if !segment.is_empty() {
@@ -452,30 +639,82 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
                 url.as_str(),
                 &self.token,
                 MAX_ACTION_METADATA_BYTES,
-            )?;
-            last_status = Some(response.status);
+            )
+            .map_err(|error| match error {
+                crate::protocol::GithubContentsRequestError::Transport(detail) => {
+                    ActionMetadataSourceError::ApiTransport(detail)
+                }
+                crate::protocol::GithubContentsRequestError::BodyTooLarge {
+                    max_body_bytes,
+                    status,
+                } => metadata_body_error_from_contents(
+                    repository,
+                    git_ref,
+                    status,
+                    format!("GitHub Contents response body exceeds {max_body_bytes} bytes"),
+                ),
+                crate::protocol::GithubContentsRequestError::BodyInvalidUtf8 { status } => {
+                    metadata_body_error_from_contents(
+                        repository,
+                        git_ref,
+                        status,
+                        "GitHub Contents response body is not valid UTF-8".to_string(),
+                    )
+                }
+                crate::protocol::GithubContentsRequestError::Internal(detail) => {
+                    ActionMetadataSourceError::Internal(detail)
+                }
+            })?;
             if (200..300).contains(&response.status) {
                 let contents = response.body;
-                return crate::action::parse_action_metadata(&contents)
-                    .map_err(|error| anyhow::anyhow!("parse {repository}@{git_ref}: {error:#}"));
+                return crate::action::parse_action_metadata(&contents).map_err(|error| {
+                    ActionMetadataSourceError::ManifestMalformed {
+                        repository: repository.to_string(),
+                        git_ref: git_ref.to_string(),
+                        detail: format!("{error:#}"),
+                    }
+                });
             }
             if response.status != reqwest::StatusCode::NOT_FOUND.as_u16() {
-                anyhow::bail!(
-                    "GitHub Contents request failed with status {}",
-                    response.status
-                );
+                return Err(ActionMetadataSourceError::ApiStatus(response.status));
             }
         }
-        anyhow::bail!(
-            "action metadata not found for {repository}@{git_ref} (last status {})",
-            last_status.map_or_else(|| "none".to_string(), |status| status.to_string())
-        )
+        Err(ActionMetadataSourceError::ManifestMissing {
+            repository: repository.to_string(),
+            git_ref: git_ref.to_string(),
+            subpath: (!directory.is_empty()).then_some(directory),
+        })
+    }
+}
+
+/// Body-limit and UTF-8 failures are manifest problems only after a successful
+/// Contents status. A 403/429/5xx with a huge or non-UTF-8 body still has to
+/// surface as [`ActionMetadataSourceError::ApiStatus`] so remediation stays
+/// on the HTTP class, not workflow policy.
+fn metadata_body_error_from_contents(
+    repository: &str,
+    git_ref: &str,
+    status: Option<u16>,
+    detail: String,
+) -> ActionMetadataSourceError {
+    if let Some(status) = status
+        && !(200..300).contains(&status)
+    {
+        return ActionMetadataSourceError::ApiStatus(status);
+    }
+    ActionMetadataSourceError::ManifestMalformed {
+        repository: repository.to_string(),
+        git_ref: git_ref.to_string(),
+        detail,
     }
 }
 
 #[cfg(test)]
-fn read_bounded_metadata_body<R: Read>(reader: R, content_length: Option<u64>) -> Result<String> {
-    crate::protocol::read_bounded_http_body(reader, content_length, MAX_ACTION_METADATA_BYTES)
+fn read_bounded_metadata_body<R: Read>(
+    reader: R,
+    content_length: Option<u64>,
+) -> std::result::Result<String, crate::protocol::GithubContentsRequestError> {
+    crate::protocol::read_bounded_http_body(reader, content_length, MAX_ACTION_METADATA_BYTES, 200)
 }
 
 /// Recursion state shared across the closure walk.
@@ -491,9 +730,9 @@ struct Walk<'a> {
 }
 
 /// Admit a job's complete action closure. On success returns the typed graph;
-/// on the first rejection returns a redacted [`AdmissionError`] with the full
-/// ancestry. This is read-only: it performs no container, checkout, cache,
-/// credential, service, or download side effect.
+/// on the first failure returns a redacted [`AdmissionError`] with the typed
+/// cause and full ancestry. This is read-only: it performs no container,
+/// checkout, cache, credential, service, or download side effect.
 pub fn admit_job(
     job: &AgentJobRequestMessage,
     context_data: &[(String, Value)],
@@ -744,11 +983,10 @@ fn admit_remote(
     let adapter = manifest::find(repository)
         .map(|capability| capability.adapter)
         .ok_or_else(|| {
-            AdmissionError::new(
+            AdmissionError::internal(
                 ancestry,
                 "uses",
                 "action capability disappeared during admission",
-                Vec::new(),
             )
         })?;
 
@@ -762,11 +1000,10 @@ fn admit_remote(
     // A native adapter is authoritative: no metadata fetch, no recursion.
     if let ActionAdapter::Native(expected) = adapter {
         if native_action_adapter(repository) != Some(expected) {
-            return Err(AdmissionError::new(
+            return Err(AdmissionError::internal(
                 ancestry,
                 "adapter",
                 "manifest native adapter does not match the native adapter table",
-                vec![format!("{expected:?}")],
             ));
         }
         let index = walk
@@ -783,9 +1020,9 @@ fn admit_remote(
     walk.graph.link(parent, index, ancestry)?;
 
     let metadata = cached_metadata(walk, &action_key, repository, action_ref, subpath, ancestry)?;
-    let runtime = metadata
-        .runtime()
-        .map_err(|error| AdmissionError::new(ancestry, "runtime", error.to_string(), Vec::new()))?;
+    let runtime = metadata.runtime().map_err(|error| {
+        AdmissionError::malformed_manifest(ancestry, "runtime", error.to_string())
+    })?;
     manifest::validate_action_runtime(step_label, repository, action_ref, &runtime)
         .map_err(|error| AdmissionError::from_capability(ancestry, error))?;
     if !matches!(adapter, ActionAdapter::Composite) {
@@ -890,11 +1127,10 @@ fn cached_metadata(
     ancestry: &Ancestry,
 ) -> Result<Arc<ActionMetadata>, AdmissionError> {
     if Instant::now() >= walk.deadline {
-        return Err(AdmissionError::new(
+        return Err(AdmissionError::internal(
             ancestry,
             "deadline",
             "action admission exceeded its read-only deadline",
-            Vec::new(),
         ));
     }
     if let Some(metadata) = walk.metadata_cache.get(key) {
@@ -903,9 +1139,14 @@ fn cached_metadata(
     let metadata = walk
         .source
         .fetch_action_metadata(repository, action_ref, subpath)
-        .map_err(|error| AdmissionError::from_capability(ancestry, error))?;
-    validate_metadata_bounds(&metadata).map_err(|error| {
-        AdmissionError::new(ancestry, "metadata", error.to_string(), Vec::new())
+        .map_err(|error| AdmissionError::from_metadata_source(ancestry, error))?;
+    validate_metadata_bounds(&metadata).map_err(|error| match error {
+        MetadataValidationFailure::Policy(reason) => {
+            AdmissionError::new(ancestry, "metadata", reason, Vec::new())
+        }
+        MetadataValidationFailure::Malformed(reason) => {
+            AdmissionError::malformed_manifest(ancestry, "metadata", reason)
+        }
     })?;
     let retained_bytes = metadata_retained_bytes(&metadata);
     if walk.metadata_bytes.saturating_add(retained_bytes) > MAX_ADMISSION_METADATA_BYTES {
@@ -1008,7 +1249,7 @@ fn recurse_composite(
             .unwrap_or_else(|| format!("nested-step-{child_index}"));
         let child_ancestry = ancestry.child(format!("nested '{label}'"));
         let child_inputs = render_inputs(&step.with, &inputs_context).map_err(|error| {
-            AdmissionError::new(&child_ancestry, "inputs", error.to_string(), Vec::new())
+            AdmissionError::malformed_manifest(&child_ancestry, "inputs", error.to_string())
         })?;
 
         if uses.starts_with("docker://") {
@@ -1038,20 +1279,18 @@ fn recurse_composite(
         }
 
         let Some((target, target_ref)) = uses.rsplit_once('@') else {
-            return Err(AdmissionError::new(
+            return Err(AdmissionError::malformed_manifest(
                 &ancestry.child(format!("nested '{label}' ({uses})")),
                 "uses",
                 "nested action reference is missing an @ref",
-                Vec::new(),
             ));
         };
         let mut segments = target.split('/');
         let (Some(owner), Some(repo)) = (segments.next(), segments.next()) else {
-            return Err(AdmissionError::new(
+            return Err(AdmissionError::malformed_manifest(
                 &ancestry.child(format!("nested '{label}' ({uses})")),
                 "uses",
                 "nested action reference is malformed",
-                Vec::new(),
             ));
         };
         let target_repository = format!("{owner}/{repo}");
@@ -1320,7 +1559,9 @@ fn canonicalize_admission_inputs(
     Ok(canonical)
 }
 
-fn validate_metadata_bounds(metadata: &ActionMetadata) -> Result<()> {
+fn validate_metadata_bounds(
+    metadata: &ActionMetadata,
+) -> std::result::Result<(), MetadataValidationFailure> {
     let mut total_string_bytes = 0usize;
     validate_metadata_text(metadata.name.as_deref(), "name", &mut total_string_bytes)?;
     validate_metadata_text(
@@ -1329,13 +1570,17 @@ fn validate_metadata_bounds(metadata: &ActionMetadata) -> Result<()> {
         &mut total_string_bytes,
     )?;
     if metadata.inputs.len() > MAX_METADATA_MAP_ENTRIES {
-        anyhow::bail!("metadata input count exceeds {MAX_METADATA_MAP_ENTRIES}");
+        return Err(MetadataValidationFailure::policy(format!(
+            "metadata input count exceeds {MAX_METADATA_MAP_ENTRIES}"
+        )));
     }
     let mut input_names = BTreeSet::new();
     for (name, input) in &metadata.inputs {
         validate_metadata_text(Some(name), "inputs.name", &mut total_string_bytes)?;
         if !input_names.insert(name.to_ascii_lowercase()) {
-            anyhow::bail!("metadata input names differ only by ASCII case");
+            return Err(MetadataValidationFailure::malformed(
+                "metadata input names differ only by ASCII case",
+            ));
         }
         validate_metadata_text(
             input.description.as_deref(),
@@ -1349,7 +1594,9 @@ fn validate_metadata_bounds(metadata: &ActionMetadata) -> Result<()> {
         )?;
     }
     if metadata.outputs.len() > MAX_METADATA_MAP_ENTRIES {
-        anyhow::bail!("metadata output count exceeds {MAX_METADATA_MAP_ENTRIES}");
+        return Err(MetadataValidationFailure::policy(format!(
+            "metadata output count exceeds {MAX_METADATA_MAP_ENTRIES}"
+        )));
     }
     for (name, output) in &metadata.outputs {
         validate_metadata_text(Some(name), "outputs.name", &mut total_string_bytes)?;
@@ -1381,13 +1628,17 @@ fn validate_metadata_bounds(metadata: &ActionMetadata) -> Result<()> {
         validate_metadata_text(value, field, &mut total_string_bytes)?;
     }
     if metadata.runs.args.len() > MAX_METADATA_MAP_ENTRIES {
-        anyhow::bail!("metadata argument count exceeds {MAX_METADATA_MAP_ENTRIES}");
+        return Err(MetadataValidationFailure::policy(format!(
+            "metadata argument count exceeds {MAX_METADATA_MAP_ENTRIES}"
+        )));
     }
     for value in &metadata.runs.args {
         validate_metadata_text(Some(value), "runs.args", &mut total_string_bytes)?;
     }
     if metadata.runs.steps.len() > MAX_COMPOSITE_STEPS {
-        anyhow::bail!("metadata step count exceeds {MAX_COMPOSITE_STEPS}");
+        return Err(MetadataValidationFailure::policy(format!(
+            "metadata step count exceeds {MAX_COMPOSITE_STEPS}"
+        )));
     }
     for step in &metadata.runs.steps {
         for (field, value) in [
@@ -1412,16 +1663,20 @@ fn validate_metadata_text(
     value: Option<&str>,
     field: &str,
     total_string_bytes: &mut usize,
-) -> Result<()> {
+) -> std::result::Result<(), MetadataValidationFailure> {
     let Some(value) = value else {
         return Ok(());
     };
     if value.len() > MAX_METADATA_STRING_BYTES {
-        anyhow::bail!("metadata {field} exceeds {MAX_METADATA_STRING_BYTES} bytes");
+        return Err(MetadataValidationFailure::policy(format!(
+            "metadata {field} exceeds {MAX_METADATA_STRING_BYTES} bytes"
+        )));
     }
     *total_string_bytes = total_string_bytes.saturating_add(value.len());
     if *total_string_bytes > MAX_METADATA_TOTAL_STRING_BYTES {
-        anyhow::bail!("metadata strings exceed {MAX_METADATA_TOTAL_STRING_BYTES} bytes in total");
+        return Err(MetadataValidationFailure::policy(format!(
+            "metadata strings exceed {MAX_METADATA_TOTAL_STRING_BYTES} bytes in total"
+        )));
     }
     Ok(())
 }
@@ -1430,9 +1685,11 @@ fn validate_metadata_string_map(
     values: &BTreeMap<String, String>,
     field: &str,
     total_string_bytes: &mut usize,
-) -> Result<()> {
+) -> std::result::Result<(), MetadataValidationFailure> {
     if values.len() > MAX_METADATA_MAP_ENTRIES {
-        anyhow::bail!("metadata {field} count exceeds {MAX_METADATA_MAP_ENTRIES}");
+        return Err(MetadataValidationFailure::policy(format!(
+            "metadata {field} count exceeds {MAX_METADATA_MAP_ENTRIES}"
+        )));
     }
     for (name, value) in values {
         validate_metadata_text(Some(name), field, total_string_bytes)?;
@@ -1591,17 +1848,40 @@ mod tests {
             repository: &str,
             git_ref: &str,
             subpath: Option<&str>,
-        ) -> Result<ActionMetadata> {
+        ) -> std::result::Result<ActionMetadata, ActionMetadataSourceError> {
             self.reads.fetch_add(1, Ordering::Relaxed);
-            let key = match normalize_subpath(subpath) {
-                subpath if subpath.is_empty() => format!("{repository}@{git_ref}"),
+            let normalized_subpath = normalize_subpath(subpath);
+            let key = match normalized_subpath.as_str() {
+                "" => format!("{repository}@{git_ref}"),
                 subpath => format!("{repository}/{subpath}@{git_ref}"),
             };
-            let yaml = self
-                .entries
-                .get(&key)
-                .ok_or_else(|| anyhow::anyhow!("no fixture metadata for {key}"))?;
-            crate::action::parse_action_metadata(yaml)
+            let yaml = self.entries.get(&key).ok_or_else(|| {
+                ActionMetadataSourceError::ManifestMissing {
+                    repository: repository.to_string(),
+                    git_ref: git_ref.to_string(),
+                    subpath: (!normalized_subpath.is_empty()).then_some(normalized_subpath),
+                }
+            })?;
+            crate::action::parse_action_metadata(yaml).map_err(|error| {
+                ActionMetadataSourceError::ManifestMalformed {
+                    repository: repository.to_string(),
+                    git_ref: git_ref.to_string(),
+                    detail: format!("{error:#}"),
+                }
+            })
+        }
+    }
+
+    struct FixedMetadataFailure(ActionMetadataSourceError);
+
+    impl ActionMetadataSource for FixedMetadataFailure {
+        fn fetch_action_metadata(
+            &self,
+            _repository: &str,
+            _git_ref: &str,
+            _subpath: Option<&str>,
+        ) -> std::result::Result<ActionMetadata, ActionMetadataSourceError> {
+            Err(self.0.clone())
         }
     }
 
@@ -1647,6 +1927,95 @@ mod tests {
 
     const CACHE_SHA: &str = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
     const REUSE_SHA: &str = "676e2d560c9a403aa252096d99fcab3e1132b0f5";
+
+    fn approved_composite_job() -> AgentJobRequestMessage {
+        job(serde_json::json!([repo_step(
+            "jackin-project/jackin-role-action",
+            "041f17a6d32f8fd2a8ef03c2a63be58346993136",
+            None,
+            serde_json::json!({})
+        )]))
+    }
+
+    #[test]
+    fn metadata_source_failure_kind_survives_admission() {
+        let job = approved_composite_job();
+        let context = workflow_context();
+        let cases = [
+            (
+                ActionMetadataSourceError::ApiTransport("connection refused".to_string()),
+                AdmissionFailureKind::ApiTransport,
+                "metadata",
+            ),
+            (
+                ActionMetadataSourceError::ApiStatus(503),
+                AdmissionFailureKind::ApiStatus,
+                "metadata",
+            ),
+            (
+                ActionMetadataSourceError::ManifestMissing {
+                    repository: "jackin-project/jackin-role-action".to_string(),
+                    git_ref: "041f17a6d32f8fd2a8ef03c2a63be58346993136".to_string(),
+                    subpath: None,
+                },
+                AdmissionFailureKind::ManifestMissing,
+                "action.yml",
+            ),
+            (
+                ActionMetadataSourceError::ManifestMalformed {
+                    repository: "jackin-project/jackin-role-action".to_string(),
+                    git_ref: "041f17a6d32f8fd2a8ef03c2a63be58346993136".to_string(),
+                    detail: "invalid YAML".to_string(),
+                },
+                AdmissionFailureKind::ManifestMalformed,
+                "action.yml",
+            ),
+            (
+                ActionMetadataSourceError::Internal("invalid API configuration".to_string()),
+                AdmissionFailureKind::Internal,
+                "metadata",
+            ),
+        ];
+
+        for (failure, expected_kind, expected_field) in cases {
+            let source = FixedMetadataFailure(failure);
+            let error = admit_job(&job, &context, &source).unwrap_err();
+            assert_eq!(error.failure_kind(), expected_kind);
+            assert_eq!(error.field, expected_field);
+        }
+    }
+
+    #[test]
+    fn policy_rejection_stays_distinct_and_precedes_metadata_fetch() {
+        let job = job(serde_json::json!([repo_step(
+            "jackin-project/jackin-role-action",
+            "refs/heads/main",
+            None,
+            serde_json::json!({})
+        )]));
+        let source = FakeMetadataSource::new(&[]);
+
+        let error = admit_job(&job, &workflow_context(), &source).unwrap_err();
+
+        assert_eq!(error.failure_kind(), AdmissionFailureKind::Policy);
+        assert_eq!(error.field, "ref");
+        assert_eq!(source.reads(), 0);
+    }
+
+    #[test]
+    fn metadata_resource_limit_is_a_policy_failure() {
+        let metadata_name = "x".repeat(MAX_METADATA_STRING_BYTES + 1);
+        let yaml = format!("name: '{metadata_name}'\nruns:\n  using: composite\n  steps: []\n");
+        let source = FakeMetadataSource::new(&[(
+            "jackin-project/jackin-role-action@041f17a6d32f8fd2a8ef03c2a63be58346993136",
+            &yaml,
+        )]);
+
+        let error = admit_job(&approved_composite_job(), &workflow_context(), &source).unwrap_err();
+
+        assert_eq!(error.failure_kind(), AdmissionFailureKind::Policy);
+        assert_eq!(error.field, "metadata");
+    }
 
     #[test]
     fn case_distinct_local_subpaths_are_not_aliases() {
@@ -1703,6 +2072,168 @@ mod tests {
             read_bounded_metadata_body([].as_slice(), Some(MAX_ACTION_METADATA_BYTES as u64 + 1))
                 .unwrap_err();
         assert!(error.to_string().contains("exceeds"));
+    }
+
+    #[cfg(feature = "test-support")]
+    fn contents_error_for_responses(responses: Vec<(u16, String)>) -> ActionMetadataSourceError {
+        contents_error_for_bytes(
+            responses
+                .into_iter()
+                .map(|(status, body)| (status, body.into_bytes()))
+                .collect(),
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    fn contents_error_for_bytes(responses: Vec<(u16, Vec<u8>)>) -> ActionMetadataSourceError {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            for (status, body) in responses {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(accepted) => break accepted,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("fake Contents server accept failed: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                let reason = match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    503 => "Service Unavailable",
+                    _ => "Test Response",
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                let _ = stream.write_all(&body);
+            }
+        });
+        let source = ContentsApiMetadataSource::new_for_test("test-token", api).unwrap();
+        let error = source
+            .fetch_action_metadata(
+                "jackin-project/jackin-role-action",
+                "041f17a6d32f8fd2a8ef03c2a63be58346993136",
+                None,
+            )
+            .unwrap_err();
+        server.join().unwrap();
+        error
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn contents_api_distinguishes_transport_status_and_manifest_failures() {
+        use std::net::TcpListener;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let transport_guard = runtime.block_on(crate::test_support::github_http_transport_env());
+        transport_guard.set_native();
+
+        let closed_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}", closed_listener.local_addr().unwrap());
+        drop(closed_listener);
+        let transport_source = ContentsApiMetadataSource::new_for_test("test-token", api).unwrap();
+        let transport_error = transport_source
+            .fetch_action_metadata(
+                "jackin-project/jackin-role-action",
+                "041f17a6d32f8fd2a8ef03c2a63be58346993136",
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            transport_error,
+            ActionMetadataSourceError::ApiTransport(_)
+        ));
+
+        let status_error = contents_error_for_responses(vec![(503, String::new())]);
+        assert_eq!(status_error, ActionMetadataSourceError::ApiStatus(503));
+
+        let missing_error =
+            contents_error_for_responses(vec![(404, String::new()), (404, String::new())]);
+        assert!(matches!(
+            missing_error,
+            ActionMetadataSourceError::ManifestMissing { .. }
+        ));
+
+        let malformed_error = contents_error_for_responses(vec![(200, "runs: [\n".to_string())]);
+        assert!(matches!(
+            &malformed_error,
+            ActionMetadataSourceError::ManifestMalformed { .. }
+        ));
+
+        let oversized_error =
+            contents_error_for_bytes(vec![(200, vec![b'x'; MAX_ACTION_METADATA_BYTES + 1])]);
+        assert!(matches!(
+            &oversized_error,
+            ActionMetadataSourceError::ManifestMalformed { .. }
+        ));
+        let oversized_error_status =
+            contents_error_for_bytes(vec![(503, vec![b'x'; MAX_ACTION_METADATA_BYTES + 1])]);
+        assert_eq!(
+            oversized_error_status,
+            ActionMetadataSourceError::ApiStatus(503)
+        );
+        let invalid_utf8_status = contents_error_for_bytes(vec![(429, vec![0xff])]);
+        assert_eq!(
+            invalid_utf8_status,
+            ActionMetadataSourceError::ApiStatus(429)
+        );
+        assert_eq!(
+            AdmissionError::from_metadata_source(&Ancestry::default(), oversized_error)
+                .failure_kind(),
+            AdmissionFailureKind::ManifestMalformed
+        );
+
+        let invalid_utf8_error = contents_error_for_bytes(vec![(200, vec![0xff])]);
+        assert!(matches!(
+            &invalid_utf8_error,
+            ActionMetadataSourceError::ManifestMalformed { .. }
+        ));
+        assert_eq!(
+            AdmissionError::from_metadata_source(&Ancestry::default(), invalid_utf8_error)
+                .failure_kind(),
+            AdmissionFailureKind::ManifestMalformed
+        );
+
+        // The test holds the process-wide transport environment lock.
+        unsafe { std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "unsupported") };
+        let internal_source =
+            ContentsApiMetadataSource::new_for_test("test-token", "http://127.0.0.1:1".to_string())
+                .unwrap();
+        let internal_error = internal_source
+            .fetch_action_metadata(
+                "jackin-project/jackin-role-action",
+                "041f17a6d32f8fd2a8ef03c2a63be58346993136",
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            internal_error,
+            ActionMetadataSourceError::Internal(_)
+        ));
     }
 
     #[test]
