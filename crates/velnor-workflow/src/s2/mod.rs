@@ -4829,6 +4829,62 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                   contract.append((indent, " ".join(stripped.split())))
               return contract
 
+          def validate_candidate_producer_execution(archive_name, lines):
+              """Keep trusted producer commands on the immutable base checkout.
+
+              The producer is the only workflow allowed to mint the candidate
+              namespace.  Its source-dependent build is the explicit Docker
+              sandbox; host-side run steps must therefore execute from the
+              base-owned checkout, and repository-local actions are rejected
+              because their implementation would resolve from the PR
+              workspace.  This is a workspace/role contract, not a shell
+              keyword scan: a command is either bound to candidate-control or
+              it is not admitted.
+              """
+              start = next(
+                  (index for index, line in enumerate(lines) if line == "  candidate_producer:"),
+                  None,
+              )
+              if start is None:
+                  raise SystemExit(f"{archive_name}: missing candidate_producer job")
+              end = len(lines)
+              for index in range(start + 1, len(lines)):
+                  if re.fullmatch(r"  [A-Za-z0-9_-]+:\s*", lines[index]):
+                      end = index
+                      break
+              job_lines = lines[start:end]
+              step_starts = [
+                  index
+                  for index, line in enumerate(job_lines)
+                  if re.match(r"^      -\s+", line)
+              ]
+              if not step_starts:
+                  raise SystemExit(f"{archive_name}: candidate_producer has no steps")
+              for offset, step_start in enumerate(step_starts):
+                  step_end = step_starts[offset + 1] if offset + 1 < len(step_starts) else len(job_lines)
+                  block = job_lines[step_start:step_end]
+                  uses = [uses_value(line) for line in block]
+                  for value in uses:
+                      if value is not None and value.startswith("./"):
+                          raise SystemExit(
+                              f"{archive_name}: candidate_producer cannot resolve a repository-local action from the PR workspace: {value}"
+                          )
+                  has_run = any(
+                      line.lstrip().startswith("run:") or line.lstrip().startswith("- run:")
+                      for line in block
+                  )
+                  if not has_run:
+                      continue
+                  working_directories = [
+                      line.split(":", 1)[1].strip()
+                      for line in block
+                      if line.startswith("        working-directory:")
+                  ]
+                  if working_directories != ["candidate-control"]:
+                      raise SystemExit(
+                          f"{archive_name}: candidate_producer run step is not bound to candidate-control"
+                      )
+
           def normalized_contract_material(nodes, files):
               material = []
               for path in sorted(nodes):
@@ -4869,6 +4925,12 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
           root_workflow = ".github/workflows/ci-pr.yml"
           if root_workflow not in workflow_lines[base_archive] or root_workflow not in workflow_lines[head_archive]:
               raise SystemExit("candidate workflow graph has no base-owned ci-pr entrypoint")
+          validate_candidate_producer_execution(
+              base_archive, workflow_lines[base_archive][root_workflow]
+          )
+          validate_candidate_producer_execution(
+              head_archive, workflow_lines[head_archive][root_workflow]
+          )
           if base_reachable != head_reachable:
               raise SystemExit(
                   "candidate workflow graph differs from the base-owned closed producer contract"
@@ -5116,7 +5178,20 @@ macro_rules! policy_candidate_step_template {
           grep -Fqx "  candidate_producer:" <<<"$candidate_block"
           grep -Fqx "    name: candidate_producer" <<<"$candidate_block"
           grep -Fqx "    permissions: {{}}" <<<"$candidate_block"
-          test "$(grep -Fxc "        uses: {checkout}" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "        uses: {checkout}" <<<"$candidate_block")" = 2
+          test "$(grep -Fxc "      - name: Check out base-owned producer control source" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "      - name: Check out pull-request head source" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "          repository: \${{{{ github.repository }}}}" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "          ref: \${{{{ github.event.pull_request.base.sha }}}}" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "          path: candidate-control" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "          repository: \${{{{ github.event.pull_request.head.repo.full_name }}}}" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "          ref: \${{{{ github.event.pull_request.head.sha }}}}" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "          path: candidate-source" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "          fetch-depth: 1" <<<"$candidate_block")" = 2
+          test "$(grep -Fxc "          persist-credentials: false" <<<"$candidate_block")" = 2
+          test "$(grep -Fxc "        working-directory: candidate-control" <<<"$candidate_block")" = 2
+          test "$(grep -Fxc "        uses: {upload}" <<<"$candidate_block")" = 1
+          test "$(grep -Ec "^[[:space:]]+uses: \.\/" <<<"$candidate_block")" = 0
           grep -Fq "github.event.pull_request.head.repo.id == github.repository_id" <<<"$candidate_block"
           grep -Fq "github.event.pull_request.base.repo.id == github.repository_id" <<<"$candidate_block"
           grep -Fq "test -z \"\${{GITHUB_TOKEN:-}}\"" <<<"$candidate_block"

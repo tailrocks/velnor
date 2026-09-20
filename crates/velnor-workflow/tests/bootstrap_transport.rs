@@ -364,7 +364,7 @@ impl TransportFixture {
         };
         Command::new("bash")
             .args(["-euo", "pipefail", "-c", &script])
-            .current_dir(&self.root)
+            .current_dir(self.root.join("candidate-control"))
             .env("PATH", prepend_path(&self.bin_dir))
             .env("RUNNER_TEMP", &self.run_temp)
             .env("GITHUB_WORKSPACE", &self.root)

@@ -714,6 +714,24 @@ fn namespace_workflow_archive_with_action_and_dependency(
     action_script: &str,
     dependency_script: &str,
 ) -> PathBuf {
+    namespace_workflow_archive_with_action_dependency_and_root(
+        root,
+        name,
+        workflow,
+        action_script,
+        dependency_script,
+        dependency_script,
+    )
+}
+
+fn namespace_workflow_archive_with_action_dependency_and_root(
+    root: &Path,
+    name: &str,
+    workflow: &str,
+    action_script: &str,
+    dependency_script: &str,
+    root_script: &str,
+) -> PathBuf {
     let tree = root.join(format!("{name}-tree"));
     write(&tree.join(".github/workflows/ci-pr.yml"), workflow);
     write(
@@ -727,6 +745,7 @@ fn namespace_workflow_archive_with_action_and_dependency(
         "name: setup\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: .github/scripts/publish.sh\n",
     );
     write(&tree.join("actions/setup/script.sh"), action_script);
+    write(&tree.join("scripts/publish.sh"), root_script);
     let archive = root.join(format!("{name}.tar"));
     let output = must(
         Command::new("tar")
@@ -736,7 +755,7 @@ fn namespace_workflow_archive_with_action_and_dependency(
                 "-C",
             ])
             .arg(must_some(tree.to_str(), "namespace tree path"))
-            .args([".github", "actions"])
+            .args([".github", "actions", "scripts"])
             .env("COPYFILE_DISABLE", "1")
             .output(),
         "create namespace archive",
@@ -817,6 +836,51 @@ fn run_namespace_scanner_with_action_and_dependency(
     must(child.wait_with_output(), "wait namespace scanner")
 }
 
+fn run_namespace_scanner_with_root_dependency(
+    root: &Path,
+    workflow: &str,
+    base_dependency_script: &str,
+    head_dependency_script: &str,
+    base_root_script: &str,
+    head_root_script: &str,
+) -> Output {
+    let base = namespace_workflow_archive_with_action_dependency_and_root(
+        root,
+        "base-root",
+        workflow,
+        "#!/bin/sh\necho stable action\n",
+        base_dependency_script,
+        base_root_script,
+    );
+    let head = namespace_workflow_archive_with_action_dependency_and_root(
+        root,
+        "head-root",
+        workflow,
+        "#!/bin/sh\necho stable action\n",
+        head_dependency_script,
+        head_root_script,
+    );
+    let mut child = must(
+        Command::new("python3")
+            .arg("-")
+            .arg(base)
+            .arg(head)
+            .args([PIN_A, PIN_B, PIN_A, PIN_B, CLOSURE_A, CLOSURE_B])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn(),
+        "spawn namespace scanner with root dependency",
+    );
+    let mut stdin = must_some(child.stdin.take(), "root namespace scanner stdin");
+    must(
+        stdin.write_all(candidate_namespace_script_body().as_bytes()),
+        "write root namespace scanner",
+    );
+    drop(stdin);
+    must(child.wait_with_output(), "wait root namespace scanner")
+}
+
 #[test]
 fn candidate_namespace_scan_rejects_unnamed_external_and_shell_publishers() {
     let root = temporary_directory("namespace-scanner");
@@ -849,8 +913,8 @@ fn candidate_namespace_scan_rejects_unnamed_external_and_shell_publishers() {
     );
     let accepted = run_namespace_scanner(&root, &local_action, &local_action);
     assert!(
-        accepted.status.success(),
-        "recursive local action contract escaped: {accepted:?}"
+        !accepted.status.success(),
+        "repository-local action escaped the base-control execution boundary: {accepted:?}"
     );
     let rejected = run_namespace_scanner_with_action(
         &root,
@@ -940,8 +1004,8 @@ fn candidate_namespace_scan_covers_generic_actions_and_composite_dependencies() 
     );
     let accepted = run_namespace_scanner(&root, &generic_local_action, &generic_local_action);
     assert!(
-        accepted.status.success(),
-        "repository-root local action resolution escaped: {accepted:?}"
+        !accepted.status.success(),
+        "repository-root local action escaped the base-control execution boundary: {accepted:?}"
     );
 
     let local_action = fixed.replace(
@@ -960,6 +1024,64 @@ fn candidate_namespace_scan_covers_generic_actions_and_composite_dependencies() 
     assert!(
         !rejected.status.success(),
         "composite action dependency drift escaped trusted .github source closure: {rejected:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn candidate_namespace_scan_binds_repository_scripts_to_base_control() {
+    let root = temporary_directory("namespace-runtime-closure");
+    let fixed = r"jobs:
+  candidate_producer:
+    steps:
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: candidate_upload
+        with:
+          name: velnor-workflow-candidate-linux-x64
+          path: candidate
+";
+    let root_script = fixed.replace(
+        "      - uses: actions/upload-artifact@",
+        "      - run: bash scripts/publish.sh\n      - uses: actions/upload-artifact@",
+    );
+    let rejected = run_namespace_scanner_with_root_dependency(
+        &root,
+        &root_script,
+        "#!/bin/sh\necho stable dependency\n",
+        "#!/bin/sh\necho stable dependency\n",
+        "#!/bin/sh\necho base publisher\n",
+        "#!/bin/sh\necho PR publisher\n",
+    );
+    assert!(
+        !rejected.status.success(),
+        "repository-relative publisher script without base-control cwd escaped: {rejected:?}"
+    );
+
+    let base_control_script = root_script.replace(
+        "      - uses: actions/upload-artifact@",
+        "        working-directory: candidate-control\n      - uses: actions/upload-artifact@",
+    );
+    let accepted = run_namespace_scanner_with_root_dependency(
+        &root,
+        &base_control_script,
+        "#!/bin/sh\necho stable dependency\n",
+        "#!/bin/sh\necho stable dependency\n",
+        "#!/bin/sh\necho base publisher\n",
+        "#!/bin/sh\necho PR publisher\n",
+    );
+    assert!(
+        accepted.status.success(),
+        "base-control cwd must bind repository-relative scripts to the immutable control checkout: {accepted:?}"
+    );
+
+    let pr_source_script = root_script.replace(
+        "      - uses: actions/upload-artifact@",
+        "        working-directory: candidate-source\n      - uses: actions/upload-artifact@",
+    );
+    let rejected = run_namespace_scanner(&root, &pr_source_script, &pr_source_script);
+    assert!(
+        !rejected.status.success(),
+        "candidate-source cwd must not host trusted publisher scripts: {rejected:?}"
     );
     let _ = fs::remove_dir_all(root);
 }

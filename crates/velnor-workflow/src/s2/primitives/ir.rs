@@ -832,6 +832,10 @@ mod tests {
         );
         assert!(producer.contains("path: candidate-control"), "{producer}");
         assert!(producer.contains("path: candidate-source"), "{producer}");
+        assert!(
+            producer.contains("working-directory: candidate-control"),
+            "{producer}"
+        );
         assert!(producer.contains("CANDIDATE_BASE_SHA"), "{producer}");
         assert!(
             producer.contains("trusted_source=\"$GITHUB_WORKSPACE/candidate-control\""),
@@ -3012,6 +3016,7 @@ macro_rules! render_candidate_producer_template {
           persist-credentials: false
       - name: Build candidate generator
         id: candidate_build
+        working-directory: candidate-control
         env:
           CANDIDATE_ARTIFACT_NAME: {artifact}
           CANDIDATE_BASE_SHA: ${{{{ github.event.pull_request.base.sha }}}}
@@ -3132,6 +3137,7 @@ macro_rules! render_candidate_producer_template {
           retention-days: 1
       - name: Remove candidate build workspace
         if: always()
+        working-directory: candidate-control
         run: rm -rf -- "${{{{ runner.temp }}}}/velnor-workflow-candidate"
 "#,
             job = CANDIDATE_PRODUCER_JOB,
