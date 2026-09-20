@@ -2270,48 +2270,10 @@ fn render_native_product_preview_publish_job(
           jq -S -n --arg schema "__MANIFEST_SCHEMA__" --arg source_repository "$GITHUB_REPOSITORY" --arg source_ref "$PRODUCT_SOURCE_REF" --arg source_commit "$COMMIT" --arg version "$VERSION" --slurpfile assets assets.jsonl '{schema:$schema,source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit,version:$version,assets:$assets}' > release-manifest.json
           test -s release-manifest.json
           test -n "$(jq -er '.schema' release-manifest.json)" || { echo '::error::release manifest schema is empty' >&2; exit 1; }
-      - name: Create or inspect immutable preview provider release
-        id: provider
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag="$PRODUCT_RELEASE_TAG"
-          response="$(mktemp)"
-          error_file="$response.error"
-          status=0
-          gh api -i "repos/$GITHUB_REPOSITORY/releases/tags/$tag" >"$response" 2>"$error_file" || status=$?
-          http="$(awk 'toupper($1) ~ /^HTTP\\// {code=$2} END {gsub(/\\r/, "", code); print code}' "$response")"
-          if [ "$status" -eq 0 ]; then
-            release_json="$(awk 'body {print; next} /^\\r?$/ {body=1}' "$response")"
-          elif [ "$http" = 404 ]; then
-            release_json=""
-          else
-            cat "$error_file" >&2
-            echo "::error::provider release lookup failed (HTTP ${http:-unknown})" >&2
-            exit 1
-          fi
-          if [ -z "$release_json" ]; then
-            release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases" -f tag_name="$tag" -f target_commitish="$COMMIT" -f name="Preview $PRODUCT_VERSION" -F draft=true -F prerelease=true)"
-          fi
-          jq -e --arg tag "$tag" --arg commit "$COMMIT" --arg name "Preview $PRODUCT_VERSION" '.tag_name == $tag and .target_commitish == $commit and .name == $name and .prerelease == true' <<<"$release_json" >/dev/null || { echo '::error::provider preview release identity is not exact' >&2; exit 1; }
-          tag_ref="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag")"
-          jq -e --arg commit "$COMMIT" '.object.type == "commit" and .object.sha == $commit' <<<"$tag_ref" >/dev/null || { echo '::error::preview release tag does not resolve to one source commit' >&2; exit 1; }
-          release_id="$(jq -er '.id | numbers | tostring' <<<"$release_json")"
-          [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || { echo '::error::provider release id is not a positive decimal number' >&2; exit 1; }
-          upload_url="$(jq -er '.upload_url | strings' <<<"$release_json" | sed 's/{?name,label}//')"
-          assets_url="$(jq -er '.assets_url | strings' <<<"$release_json")"
-          draft="$(jq -er '.draft | tostring' <<<"$release_json")"
-          {
-            printf 'release_id=%s\n' "$release_id"
-            printf 'upload_url=%s\n' "$upload_url"
-            printf 'assets_url=%s\n' "$assets_url"
-            printf 'draft=%s\n' "$draft"
-          } >> "$GITHUB_OUTPUT"
       - name: Assemble canonical preview product manifest and archives
         env:
           GH_TOKEN: ${{ github.token }}
-          PRODUCT_RELEASE_ID: ${{ steps.provider.outputs.release_id }}
+          PRODUCT_RELEASE_ID: ${{ needs.admit-product-release.outputs.release_id }}
         run: |
           set -euo pipefail
           source_contract=.github/ci/native-product-preview-contract.json
@@ -2394,26 +2356,18 @@ fn render_native_product_preview_publish_job(
           while IFS= read -r component; do verify_args+=(--component "$component"); done < <(jq -r '.components[].name' product-component-contract.json)
           chmod 0755 preview-metadata/__BINARY__-release-tool
           preview-metadata/__BINARY__-release-tool "${verify_args[@]}"
-      - name: Attest canonical native product subjects
-        uses: __ATTEST__
-        with:
-          subject-path: product-assets/*
-      - name: Verify canonical native product attestations
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          for subject in product-assets/*; do
-            gh attestation verify "$subject" --owner "$GITHUB_REPOSITORY_OWNER" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/__NATIVE_WORKFLOW__" --source-ref "$PRODUCT_SOURCE_REF" --source-digest "$COMMIT"
-          done
       - name: Reconcile immutable preview release assets
         env:
           GH_TOKEN: ${{ github.token }}
-          PROVIDER_UPLOAD_URL: ${{ steps.provider.outputs.upload_url }}
-          PROVIDER_ASSETS_URL: ${{ steps.provider.outputs.assets_url }}
-          PROVIDER_DRAFT: ${{ steps.provider.outputs.draft }}
+          PROVIDER_ASSETS_URL: ${{ needs.admit-product-release.outputs.assets_url }}
+          PROVIDER_DRAFT: ${{ needs.admit-product-release.outputs.phase == 'draft' }}
+          PRODUCT_RELEASE_ID: ${{ needs.admit-product-release.outputs.release_id }}
         run: |
           set -euo pipefail
+          provider_release="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$PRODUCT_RELEASE_TAG")"
+          provider_release_id="$(jq -er '.id | numbers | tostring' <<<"$provider_release")"
+          [ "$provider_release_id" = "$PRODUCT_RELEASE_ID" ] || { echo '::error::admitted preview provider release changed before asset reconciliation' >&2; exit 1; }
+          PROVIDER_UPLOAD_URL="$(jq -er '.upload_url | strings' <<<"$provider_release" | sed 's/{?name,label}//')"
           expected_paths=(SHA256SUMS release-manifest.json)
           for subject in artifacts/*.deb; do expected_paths+=("$subject" "${subject}.sha256"); done
           for subject in product-assets/*; do expected_paths+=("$subject"); done
@@ -2452,9 +2406,9 @@ fn render_native_product_preview_publish_job(
       - name: Verify preview tag and assets immediately before publication
         env:
           GH_TOKEN: ${{ github.token }}
-          PROVIDER_ASSETS_URL: ${{ steps.provider.outputs.assets_url }}
-          PROVIDER_DRAFT: ${{ steps.provider.outputs.draft }}
-          PROVIDER_RELEASE_ID: ${{ steps.provider.outputs.release_id }}
+          PROVIDER_ASSETS_URL: ${{ needs.admit-product-release.outputs.assets_url }}
+          PROVIDER_DRAFT: ${{ needs.admit-product-release.outputs.phase == 'draft' }}
+          PROVIDER_RELEASE_ID: ${{ needs.admit-product-release.outputs.release_id }}
         run: |
           set -euo pipefail
           if [ "$PROVIDER_DRAFT" = true ]; then
@@ -2489,8 +2443,8 @@ fn render_native_product_preview_publish_job(
       - name: Publish immutable preview candidate
         env:
           GH_TOKEN: ${{ github.token }}
-          PROVIDER_RELEASE_ID: ${{ steps.provider.outputs.release_id }}
-          PROVIDER_DRAFT: ${{ steps.provider.outputs.draft }}
+          PROVIDER_RELEASE_ID: ${{ needs.admit-product-release.outputs.release_id }}
+          PROVIDER_DRAFT: ${{ needs.admit-product-release.outputs.phase == 'draft' }}
         run: |
           set -euo pipefail
           if [ "$PROVIDER_DRAFT" = true ]; then
@@ -2499,8 +2453,8 @@ fn render_native_product_preview_publish_job(
       - name: Verify published immutable preview candidate
         env:
           GH_TOKEN: ${{ github.token }}
-          PROVIDER_ASSETS_URL: ${{ steps.provider.outputs.assets_url }}
-          PROVIDER_RELEASE_ID: ${{ steps.provider.outputs.release_id }}
+          PROVIDER_ASSETS_URL: ${{ needs.admit-product-release.outputs.assets_url }}
+          PROVIDER_RELEASE_ID: ${{ needs.admit-product-release.outputs.release_id }}
         run: |
           set -euo pipefail
           # The provider operations are not atomic. Re-read identity, tag and
@@ -2539,56 +2493,11 @@ fn render_native_product_preview_publish_job(
     .replace("__DEB_PAIRS__", &deb_pairs)
     .replace("__PACKAGE__", &package)
     .replace("__BINARY__", &binary)
-    .replace("__MANIFEST_SCHEMA__", &manifest_schema)
-    .replace("__NATIVE_WORKFLOW__", "preview.yml");
+    .replace("__MANIFEST_SCHEMA__", &manifest_schema);
 
     let signer_steps = native_product_signer_record_steps(download);
-    if let Some(start) =
-        output.find("      - name: Create or inspect immutable preview provider release\n")
-        && let Some(end) =
-            output.find("      - name: Assemble canonical preview product manifest and archives\n")
-    {
-        output.replace_range(start..end, &signer_steps);
-    }
-
-    if let Some(start) = output.find("      - name: Attest canonical native product subjects\n")
-        && let Some(end) = output.find("      - name: Reconcile immutable preview release assets\n")
-    {
-        output.replace_range(start..end, "");
-    }
-
-    output = output
-        .replace(
-            "${{ steps.provider.outputs.release_id }}",
-            "${{ needs.admit-product-release.outputs.release_id }}",
-        )
-        .replace(
-            "${{ steps.provider.outputs.assets_url }}",
-            "${{ needs.admit-product-release.outputs.assets_url }}",
-        )
-        .replace(
-            "${{ steps.provider.outputs.draft }}",
-            "${{ needs.admit-product-release.outputs.phase == 'draft' }}",
-        );
-
-    if let Some(start) = output.find("      - name: Reconcile immutable preview release assets\n") {
-        let end = output[start..]
-            .find("\n      - name: Verify preview tag and assets immediately before publication\n")
-            .map_or(output.len(), |offset| start + offset);
-        let mut step = output[start..end].to_owned();
-        step = step.replace(
-            "          PROVIDER_UPLOAD_URL: ${{ steps.provider.outputs.upload_url }}\n",
-            "",
-        );
-        step = step.replace(
-            "          PROVIDER_DRAFT: ${{ needs.admit-product-release.outputs.phase == 'draft' }}\n",
-            "          PROVIDER_DRAFT: ${{ needs.admit-product-release.outputs.phase == 'draft' }}\n          PRODUCT_RELEASE_ID: ${{ needs.admit-product-release.outputs.release_id }}\n",
-        );
-        step = step.replace(
-            "          set -euo pipefail\n          expected_paths=(SHA256SUMS release-manifest.json)\n",
-            "          set -euo pipefail\n          provider_release=\"$(gh api \"repos/$GITHUB_REPOSITORY/releases/tags/$PRODUCT_RELEASE_TAG\")\"\n          provider_release_id=\"$(jq -er '.id | numbers | tostring' <<<\"$provider_release\")\"\n          [ \"$provider_release_id\" = \"$PRODUCT_RELEASE_ID\" ] || { echo '::error::admitted preview provider release changed before asset reconciliation' >&2; exit 1; }\n          PROVIDER_UPLOAD_URL=\"$(jq -er '.upload_url | strings' <<<\"$provider_release\" | sed 's/{?name,label}//')\"\n          expected_paths=(SHA256SUMS release-manifest.json)\n",
-        );
-        output.replace_range(start..end, &step);
+    if let Some(start) = output.find("      - name: Assemble canonical preview product manifest and archives\n") {
+        output.insert_str(start, &signer_steps);
     }
 
     output
@@ -2700,6 +2609,10 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
     // replacing the three action/package placeholders. jq object braces stay
     // single in the source and therefore remain unchanged.
     output = output.replace("{{", "{").replace("}}", "}");
+    output = output.replace(
+        ".schema == $source[0].manifest_schema",
+        ".schema == $source[0].schema",
+    );
     output = output.replace(
         "      - name: Attest canonical native product assets\n        uses: {attest}\n        with:\n          subject-path: product-assets/*\n",
         "",
@@ -3432,6 +3345,14 @@ fn render_native_publish_job(
     output = output.replace(
         "          jq -S -n --arg schema \"$manifest_schema\" --arg product_id",
         "          jq -n --arg schema \"$manifest_schema\" --arg product_id",
+    );
+    output = output.replace(
+        ".schema == $source[0].manifest_schema",
+        ".schema == $source[0].schema",
+    );
+    output = output.replace(
+        "manifest_schema=\"$(jq -er '.schema' \"$contract\")\"",
+        "manifest_schema=\"$(jq -er '.manifest_schema' \"$contract\")\"",
     );
     output
 }
@@ -8010,7 +7931,7 @@ mod tests {
         };
         let workflow = super::render_release(&config, release);
         let publish = yaml_job(&workflow, "publish");
-        let marker = "      - name: Verify native product census and resolve provider release id\n";
+        let marker = "      - name: Verify native product census against admitted release\n";
         let start = publish
             .find(marker)
             .expect("rendered publisher must carry the native census step");
@@ -8042,7 +7963,7 @@ mod tests {
         )
         .expect("parse native product contract source");
         contract["blocked_targets"] = json!([]);
-        contract["schema"] = contract["manifest_schema"].clone();
+        contract["schema"] = json!("velnor.native-product-contract/v1");
         contract["version"] = json!("1.2.3");
         contract["source_repository"] = json!("tailrocks/velnor");
         contract["source_ref"] = json!("refs/tags/v1.2.3");
@@ -8123,7 +8044,6 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&cargo, permissions).expect("make fake cargo command executable");
 
-        let github_output = root.join("github-output");
         let path = format!(
             "{}:{}",
             fake_bin.display(),
@@ -8138,7 +8058,8 @@ mod tests {
             .env("GITHUB_REPOSITORY", "tailrocks/velnor")
             .env("GITHUB_REF", "refs/tags/v1.2.3")
             .env("GITHUB_REF_NAME", "v1.2.3")
-            .env("GITHUB_OUTPUT", &github_output)
+            .env("SOURCE_REF", "refs/tags/v1.2.3")
+            .env("SOURCE_COMMIT", FIXTURE_REVISION)
             .env("GH_TOKEN", "fixture-token")
             .output()
             .expect("run rendered native census shell");
@@ -8147,15 +8068,6 @@ mod tests {
             "rendered census must pass with source_ref bound under nounset; stdout={} stderr={}",
             String::from_utf8_lossy(&result.stdout),
             String::from_utf8_lossy(&result.stderr)
-        );
-        let outputs = fs::read_to_string(&github_output).expect("read rendered census outputs");
-        assert!(
-            outputs.contains("release_id=12345"),
-            "provider release id output: {outputs}"
-        );
-        assert!(
-            outputs.contains("contract=native-product/product-contract-"),
-            "provider contract output: {outputs}"
         );
         fs::remove_dir_all(root).expect("remove native census fixture");
     }
@@ -8417,7 +8329,7 @@ mod tests {
 
         let mut contract: Value =
             serde_json::from_str(&source_contract).expect("parse source component contract");
-        contract["schema"] = json!("velnor.product-manifest/v1");
+        contract["schema"] = json!("velnor.native-product-contract/v1");
         contract["source_repository"] = json!("tailrocks/velnor");
         contract["source_ref"] = json!("refs/tags/v1.2.3");
         contract["source_commit"] = json!("0123456789abcdef0123456789abcdef01234567");
@@ -8604,6 +8516,7 @@ JSON
             .env("VERSION", "1.2.3")
             .env("GITHUB_REPOSITORY", "tailrocks/velnor")
             .env("GITHUB_REF", "refs/tags/v1.2.3")
+            .env("PRODUCT_PROVIDER_REPOSITORY_ID", "123")
             .output()
             .expect("run rendered canonical assembly");
         assert!(
