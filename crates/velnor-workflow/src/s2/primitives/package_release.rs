@@ -1897,6 +1897,10 @@ verify_asset_bytes() {
 "#
 }
 
+// Keep the immutable publication transaction in one ordered script so its
+// preflight, upload, and post-publication checks cannot be reordered by
+// splitting the shell state across unrelated renderers.
+#[allow(clippy::too_many_lines)]
 fn render_immutable_publish_script(spec: &PackageReleaseSpec) -> String {
     let mut script = String::from(immutable_publish_script_prelude());
     for name in release_asset_names(spec) {
