@@ -106,10 +106,12 @@ enabled, the adapter runs beside native slots and uses the same host-wide
 ledger setting; all daemon scopes must resolve the same `VELNOR_PERMIT_LEDGER`
 path and use the same explicit `VELNOR_MAX_JOBS` value if set.
 
-If Scale Set registration, adoption, or session startup fails, the supervised
-daemon loop retries the pass in-process with backoff. systemd restarts only
-after the daemon process exits. Velnor does not silently start native-only when
-an opted-in lane fails.
+Fatal Scale Set startup errors in registration reconciliation, adoption-state
+setup, or session creation reach the supervised daemon loop, which retries the
+pass in-process with backoff. A per-worker adoption tick error is logged while
+the worker stays tracked; the Scale Set message path retries that tick.
+systemd restarts only after the daemon process exits. Velnor does not silently
+start native-only when an opted-in lane fails.
 
 The TOML selects a GitHub scope, owner, runner group, and Scale Set. It can
 adopt a set by ID or get-or-create it by name; exactly one of `set_id` and
@@ -135,21 +137,43 @@ App, provide `client_id`, `installation_id`, and exactly one of
 `private_key_file` or `private_key_env`. For a PAT, provide exactly one of
 `token_file` or `token_env`. These fields name a file path or environment
 variable; they do not contain the credential. Put referenced environment
-variables in the service's mode-`0600` secrets file. Secret files must be
-private (`0600` or stricter). `GITHUB_TOKEN` is not automatically used for the
-Scale Set lane; reference it explicitly with `token_env` if that is intended.
-Inline secrets and unknown TOML fields are rejected.
+variables in the service's mode-`0600` secrets file: use
+`/etc/velnor/secrets.env` for the default service and
+`/etc/velnor/NAME.secrets.env` for a named service instance. Secret files must
+be private (`0600` or stricter). `GITHUB_TOKEN` is not automatically used for
+the Scale Set lane; reference it explicitly with `token_env` if that is
+intended. Inline secrets and unknown TOML fields are rejected.
 
 The lane inherits the daemon's shared permit ledger. It cannot configure a
 second ledger path, so native and Scale Set jobs remain under the same host
 capacity limit. For a single daemon, the slot count initializes an unset `N`;
 later daemon starts adopt that stored value. A positive `VELNOR_MAX_JOBS`
-explicitly resizes the shared limit.
+explicitly resizes the shared limit. The poll header is clamped to its signed
+32-bit range: `X-ScaleSetMaxCapacity = min(i32::MAX, max(0, N - occupied))`,
+where `N` is parsed as `u32` and occupancy comes from shared permits. If the
+final free-capacity lookup returns no value or an error, Velnor sends `0`.
+Failure to open the shared ledger aborts Scale Set startup; supervised daemon
+runs retry that startup with backoff, while one-shot runs return the error.
+Generation-read or reconciliation errors abort the listener iteration before
+its message poll, then the listener backs off and retries. These earlier
+failures do not send a zero-capacity poll. Velnor does not read a
+GitHub-configured Velnor runner cap. GitHub's assigned-demand statistics
+(`totalAssignedJobs`) determine how many workers Velnor should acquire;
+upstream calls the poll value a client-reported maximum.
 
-`VELNOR_SLOTS` controls native slots. Scale Set capacity comes from its
-registration and shared permits. Either lane's capacity may be lower than the
-host-wide `N` ceiling. Labels for native runners are sorted and
-deduplicated. Empty native labels become `self-hosted,velnor`.
+If the Scale Set TOML sets a custom `state_db`, provision that file before
+startup and list its path in `/etc/velnor/permit-ledger.sources` as both
+`state-db /absolute/path` and `demand-db /absolute/path`. Startup requires the
+complete roster to include the `permit-ledger` entry, all daemon state
+databases, all Scale Set demand databases, and every native-slot marker root.
+The roster must be root-owned, readable, and regular, with no group/world
+write permission; the configured database must exist as a file.
+
+`VELNOR_SLOTS` controls native slots. Scale Set polling reports free shared
+permit headroom, while GitHub assigned-demand statistics drive its worker
+target. Either lane's capacity may be lower than the host-wide `N` ceiling.
+Labels for native runners are sorted and deduplicated. Empty native labels
+become `self-hosted,velnor`.
 Native target-MVP labels add `hetzner-sentry-ci`, `ubuntu-24.04`,
 `ubuntu-latest`, and `velnor-target-mvp`; the ARM option adds
 `ubuntu-24.04-arm`. macOS labels are rejected; local execution is Linux-only.
