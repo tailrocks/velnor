@@ -10,7 +10,7 @@ Their claims require revalidation against current revisions.
 ## Latest measured checkpoint
 
 Release metadata staging (`57e7cafc`) and rolling-release recovery
-(`27bfb54b`) passed exact-head PR and policy CI. Three latest full PR
+(`27bfb54b`) passed exact-head PR and policy CI. Four latest full PR
 observations are retained below; they are not matched performance treatments.
 
 | Source | PR run | Trigger to required result | Aggregate job execution | Runner | Generator |
@@ -18,6 +18,7 @@ observations are retained below; they are not matched performance treatments.
 | `57e7cafc` | 35510807365 | 443s | 1,266s | 413s | 182s |
 | `413458df` | 35511219049 | 541s | 1,290s | 466s | 175s |
 | `27bfb54b` | 35511815559 | 559s | 1,359s | 525s | 184s |
+| `32733948` | 35513481769 | 546s | 1,324s | 518s | 170s |
 
 Each observation includes 68 job records: 20 executed and 48 skipped.
 Generator coverage increased from 1,947 to 1,952 passing tests; runner coverage

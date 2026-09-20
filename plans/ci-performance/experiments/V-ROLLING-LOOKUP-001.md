@@ -75,3 +75,41 @@ complete draft lookup transition. Trigger to required result: 559s; aggregate
 execution: 1,359s. This is one observation of changed source and coverage, not a
 controlled speedup or packaging/release-promotion measurement. Raw observations
 are retained under `observations/velnor-35511815559-*`.
+
+## New upstream ownership race
+
+PR #973 advanced to `04da35e41e8ce806ff7d7f59ebba7b204b15cb95` after the
+previous review. Parent inspected the actual one-commit delta from `5d3ec73f`:
+one source file, 91 additions and 11 deletions. The current rollback assumes
+that a tag absent at preflight and subsequently matching the expected commit
+was created by this publisher. Another writer can create that same tag and SHA
+in between. SHA equality proves content, not creation ownership.
+
+The inherited upstream fixture initially failed because our rollback also
+calls `clear_publication_lock_retain`. Parent supplied that existing helper's
+fixture implementation, then repeated the baseline before applying production
+changes. The corrected test fails explicitly with
+`rollback deleted the external writer tag` (exit 101; one failed test).
+Missing fixture setup is not counted as proof of the production defect.
+
+Alternatives under review:
+
+1. Retain any newly observed tag whose ownership is unproven, retain the
+   publication lock, and require explicit recovery. This is the upstream fix.
+2. Record successful explicit reference creation before publishing. Creation
+   evidence alone still does not detect an external delete/recreate at the same
+   SHA, and cannot justify an unconditional later deletion.
+3. Use unique per-run publication references and a separately controlled
+   promotion operation. This changes the rolling-release transaction and
+   needs a complete product/ownership migration before adoption.
+
+The [GitHub reference deletion API](https://docs.github.com/en/rest/git/refs#delete-a-reference)
+documents owner, repository and ref parameters, with no expected-old-SHA
+parameter. Inference: a pre-delete SHA read cannot itself make that delete
+conditional. No live release or reference was mutated in this diagnostic.
+Independent challenge passed (`/root/parallax_inventory`). Parent applied the
+upstream production delta and repeated the exact fixture: one passed, zero
+failed. Parent strict all-target/all-feature Clippy, formatting, actionlint and all
+1,953 generator tests pass (zero skipped). Exact committed generation check
+and exact-head CI remain pending for this new delta.
+No performance acceptance or iteration credit.

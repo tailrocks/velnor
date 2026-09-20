@@ -2,8 +2,8 @@
 schema = 2
 [inputs]
 config	ba6993bd6203b42d
-scan	da2ab684f92e8b99
-generator	66
+scan	464321b3d002df7b
+generator	67
 [outputs]
 .github/actionlint.yaml	5f03ee5134752603
 .github/actions/report-velnor-ci-outcomes/action.yml	aec8ab938e281785
