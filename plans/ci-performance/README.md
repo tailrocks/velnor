@@ -20,6 +20,8 @@ observations are retained below; they are not matched performance treatments.
 | `27bfb54b` | 35511815559 | 559s | 1,359s | 525s | 184s |
 | `32733948` | 35513481769 | 546s | 1,324s | 518s | 170s |
 | `2da37b63` | 35517547611 | 539s | 1,320s | 475s | 186s |
+| `17318e52` | 35519321056 / 1 | 568s | 1,263s | 520s | 178s |
+| `17318e52` | 35519321056 / 2 | 543s | 1,338s | 514s | 169s |
 
 Each observation includes 68 job records: 20 executed and 48 skipped.
 Generator coverage increased from 1,947 to 1,955 passing tests; runner coverage
@@ -30,6 +32,15 @@ Raw timestamps, compressed logs, collector JSONL/CSV and summaries are in
 Runner jobs remain the longest observed component. These differing revisions,
 uncontrolled hardware/contention and small samples support no speedup or
 plateau claim. Substantive optimization iteration credit remains zero.
+
+The unchanged `17318e52` full rerun passed with 20 executed and 48 skipped jobs.
+Attempt 2 has separate raw attempt metadata, job timestamps, logs and normalized
+outputs; attempt 1 is retained. These two observations are not a noise estimate
+sufficient for a speedup claim. The PR was merged between attempts, cache
+contents may differ, and new telemetry correctness CI overlapped the latter part
+of attempt 2. Runner reports still show 1,879/1,807 operations not looked up and
+131 bypasses; there were no recorded crate downloads. Schema 2 phase categories
+remain historical evidence and must not be treated as schema 4 measurements.
 
 ## Current integration checkpoint
 
@@ -52,11 +63,26 @@ the final control job completed at 545s. Policy executed for 258s separately.
 The runner remains longest, with 1,879/1,807 MBX operations not looked up and
 131 bypasses in each check/test report. Successful CI does not prove reuse.
 
-Current ownership: parent integrates Parallax and preserves exact-head CI;
-Jackin agent repairs telemetry partial-order validation; Velnor agent repairs
-typed Rust component identity, then Parallax product file-type validation;
-Parallax agent resolves MBX cache authority and namespace design. Candidates
-remain isolated until independent findings and deterministic checks pass.
+PR #968 was merged as `845d4740`; its remote campaign branch was deleted.
+The merge tree is byte-identical to `17318e52`. Further work uses one successor
+branch, `codex/ci-performance-next`, based on that merge.
+
+Current ownership: parent integrates reviewed code and retains exact-head CI;
+Jackin agent implements the same-repository PR cache writer; Velnor agent
+prepares Parallax's directory-transport runtime upgrade; Parallax agent reviews
+complete package input selection. Typed Rust ownership and the portable
+telemetry clock have passed independent review.
+
+Parallax UI guard/input selection is published as `43d18415` in PR #118, based
+on current main `e28a88ec`. It retains runtime `048a7bda`, GitHub-only execution,
+scan exclusions and declared UI prerequisites. Policy run `35521049485` passed.
+PR run `35521049612` failed its CLI job before checks: MBX 1.11.1 exceeded quota
+while importing a 1,347,231,023-byte compressed cache. This attempt is retained;
+local validation does not replace successful full CI. Isolated Rust consumers
+still build their own UI products, so no build-once or speedup claim is made.
+Upstream #117 cache safeguards were integrated and pushed as `60cf651b`,
+retaining the UI guard, whole-package watch and both sets of contract assertions.
+The structural runtime transport upgrade remains a separate candidate.
 
 ## Completion contract
 
