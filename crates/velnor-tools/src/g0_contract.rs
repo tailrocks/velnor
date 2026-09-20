@@ -86,7 +86,10 @@ pub(crate) struct G0RequestRecord {
     pub method: String,
     pub endpoint_or_operation: String,
     /// Canonical read-only query text (REST query or GraphQL document),
-    /// encoded so its digest can be recomputed without storing secrets.
+    /// encoded so its digest can be recomputed without storing secrets. REST
+    /// payloads use the acquisition wire form `key\0value\0` in sorted key
+    /// order; URL query strings embedded in `endpoint_or_operation` remain
+    /// ordinary `key=value&...` URLs and are validated separately.
     pub query_base64: String,
     /// Canonical, redacted query variables; credentials are forbidden.
     pub variables_base64: String,

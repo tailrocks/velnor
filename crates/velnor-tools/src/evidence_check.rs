@@ -2103,7 +2103,11 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
                 && request.page.cursor_out.is_none())
             || (request.page.has_next_page
                 && request.page.link_next.as_ref().is_some_and(|link| {
-                    !g0_api_url(link).is_some_and(|url| url.path() == request.endpoint_or_operation)
+                    !g0_endpoint_path_query(&request.endpoint_or_operation)
+                        .ok()
+                        .is_some_and(|(path, _)| {
+                            g0_api_url(link).is_some_and(|url| url.path() == path)
+                        })
                 }))
             || (!request.page.has_next_page
                 && (request.page.link_next.is_some() || request.page.cursor_out.is_some()))
@@ -2627,7 +2631,10 @@ fn g0_response_query_contract(
     query: &[u8],
     contract: G0EndpointContract,
 ) -> bool {
-    let Some(ordered) = g0_rest_query_pairs_ordered(query) else {
+    let Some(payload_pairs) = g0_request_query_pairs_ordered(query) else {
+        return false;
+    };
+    let Some(ordered) = g0_effective_request_query(request, &payload_pairs) else {
         return false;
     };
     let response_schema = contract.response_schema;
@@ -2636,10 +2643,10 @@ fn g0_response_query_contract(
         response_schema,
         G0RawResponseSchema::Singular | G0RawResponseSchema::Binary
     ) {
-        let singular_page = ordered.is_empty()
-            || (ordered.len() == 1
-                && ordered[0].0 == "per_page"
-                && ordered[0].1 == request.page.per_page.to_string());
+        let singular_page = payload_pairs.is_empty()
+            || (payload_pairs.len() == 1
+                && payload_pairs[0].0 == "per_page"
+                && payload_pairs[0].1 == request.page.per_page.to_string());
         return endpoint_query_valid
             && singular_page
             && request.page.number == 1
@@ -2650,34 +2657,7 @@ fn g0_response_query_contract(
         .iter()
         .map(|(key, _)| key.as_str())
         .collect::<Vec<_>>();
-    let expected_keys = match contract.kind {
-        G0EndpointKind::PullRequestsPage => vec!["per_page", "state", "page"],
-        G0EndpointKind::RulesetsPage => vec!["includes_parents", "per_page", "page"],
-        G0EndpointKind::WorkflowsPage | G0EndpointKind::WorkflowRunsPage => {
-            vec!["per_page", "page"]
-        }
-        G0EndpointKind::CheckRunsPage => vec!["per_page", "filter", "page"],
-        G0EndpointKind::CheckSuitesPage => vec!["per_page", "page"],
-        G0EndpointKind::CheckSuiteRunsPage => vec!["per_page", "filter", "page"],
-        G0EndpointKind::WorkflowJobsPage => vec!["filter", "per_page", "page"],
-        G0EndpointKind::WorkflowAttemptJobsPage | G0EndpointKind::ArtifactsPage => {
-            vec!["per_page", "page"]
-        }
-        G0EndpointKind::Repository
-        | G0EndpointKind::Viewer
-        | G0EndpointKind::DefaultBranchCommit
-        | G0EndpointKind::PullRequest
-        | G0EndpointKind::Ruleset
-        | G0EndpointKind::WorkflowSource
-        | G0EndpointKind::WorkflowDependency
-        | G0EndpointKind::WorkflowDependencySource
-        | G0EndpointKind::WorkflowAttempt
-        | G0EndpointKind::CheckRun
-        | G0EndpointKind::CheckSuite
-        | G0EndpointKind::WorkflowRun
-        | G0EndpointKind::ArtifactArchive
-        | G0EndpointKind::App => Vec::new(),
-    };
+    let expected_keys = g0_paginated_query_keys(contract.kind);
     if keys != expected_keys {
         return false;
     }
@@ -2711,6 +2691,26 @@ fn g0_endpoint_inline_query_contract(
         .is_some_and(|(_, query)| g0_endpoint_inline_query_shape_from_query(query, contract.kind))
 }
 
+fn g0_effective_request_query(
+    request: &G0RequestRecord,
+    payload_pairs: &[(String, String)],
+) -> Option<Vec<(String, String)>> {
+    let (_, endpoint_pairs) = g0_endpoint_path_query(&request.endpoint_or_operation).ok()?;
+    let mut seen = BTreeSet::new();
+    let mut effective = Vec::with_capacity(endpoint_pairs.len() + payload_pairs.len());
+    for (key, value) in endpoint_pairs
+        .into_iter()
+        .chain(payload_pairs.iter().cloned())
+    {
+        if !seen.insert(key.clone()) {
+            return None;
+        }
+        effective.push((key, value));
+    }
+    effective.sort();
+    Some(effective)
+}
+
 fn g0_endpoint_inline_query_shape(endpoint: &str, kind: G0EndpointKind) -> bool {
     g0_endpoint_path_query(endpoint)
         .ok()
@@ -2728,7 +2728,59 @@ fn g0_endpoint_inline_query_shape_from_query(
         G0EndpointKind::WorkflowDependency => {
             query.as_slice() == [("recursive".to_owned(), "1".to_owned())]
         }
+        kind if !g0_paginated_query_keys(kind).is_empty() => {
+            if query.is_empty() {
+                return true;
+            }
+            let expected_keys = g0_paginated_query_keys(kind);
+            let mut ordered = query;
+            ordered.sort();
+            let keys = ordered
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>();
+            if keys != expected_keys {
+                return false;
+            }
+            ordered.iter().all(|(key, value)| match key.as_str() {
+                "page" => value.parse::<u32>().is_ok_and(|page| page > 0),
+                "per_page" => value
+                    .parse::<u32>()
+                    .is_ok_and(|per_page| (1..=100).contains(&per_page)),
+                "filter" => value == "all",
+                _ => !value.is_empty(),
+            })
+        }
         _ => query.is_empty(),
+    }
+}
+
+fn g0_paginated_query_keys(kind: G0EndpointKind) -> &'static [&'static str] {
+    match kind {
+        G0EndpointKind::PullRequestsPage => &["page", "per_page", "state"],
+        G0EndpointKind::RulesetsPage => &["includes_parents", "page", "per_page"],
+        G0EndpointKind::WorkflowsPage | G0EndpointKind::WorkflowRunsPage => &["page", "per_page"],
+        G0EndpointKind::CheckRunsPage => &["filter", "page", "per_page"],
+        G0EndpointKind::CheckSuitesPage => &["page", "per_page"],
+        G0EndpointKind::CheckSuiteRunsPage => &["filter", "page", "per_page"],
+        G0EndpointKind::WorkflowJobsPage => &["filter", "page", "per_page"],
+        G0EndpointKind::WorkflowAttemptJobsPage | G0EndpointKind::ArtifactsPage => {
+            &["page", "per_page"]
+        }
+        G0EndpointKind::Repository
+        | G0EndpointKind::Viewer
+        | G0EndpointKind::DefaultBranchCommit
+        | G0EndpointKind::PullRequest
+        | G0EndpointKind::Ruleset
+        | G0EndpointKind::WorkflowSource
+        | G0EndpointKind::WorkflowDependency
+        | G0EndpointKind::WorkflowDependencySource
+        | G0EndpointKind::WorkflowAttempt
+        | G0EndpointKind::CheckRun
+        | G0EndpointKind::CheckSuite
+        | G0EndpointKind::WorkflowRun
+        | G0EndpointKind::ArtifactArchive
+        | G0EndpointKind::App => &[],
     }
 }
 
@@ -2844,12 +2896,49 @@ fn g0_request_semantics(
 }
 
 fn g0_rest_query_pairs(query: &[u8]) -> Option<Vec<(String, String)>> {
-    let mut pairs = g0_rest_query_pairs_ordered(query)?;
+    let mut pairs = g0_request_query_pairs_ordered(query)?;
     pairs.sort();
     Some(pairs)
 }
 
-fn g0_rest_query_pairs_ordered(query: &[u8]) -> Option<Vec<(String, String)>> {
+/// Parse the producer's canonical REST query payload.  The acquisition
+/// collector serializes its sorted map as `key\0value\0` pairs; URL query
+/// strings are parsed separately by `g0_endpoint_query_pairs_ordered`.
+fn g0_request_query_pairs_ordered(query: &[u8]) -> Option<Vec<(String, String)>> {
+    if query.is_empty() {
+        return Some(Vec::new());
+    }
+    if query.last() != Some(&0) {
+        return None;
+    }
+    let fields = query.split(|byte| *byte == 0).collect::<Vec<_>>();
+    if fields.len() < 3 || fields.len() % 2 == 0 {
+        return None;
+    }
+    let mut keys = BTreeSet::new();
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut pair_start = 0;
+    while pair_start + 1 < fields.len() {
+        let key = std::str::from_utf8(fields[pair_start]).ok()?;
+        let value = std::str::from_utf8(fields[pair_start + 1]).ok()?;
+        if key.is_empty()
+            || value.contains('#')
+            || key.contains('%')
+            || value.contains('%')
+            || !keys.insert(key.to_owned())
+            || pairs
+                .last()
+                .is_some_and(|(previous, _)| previous.as_str() >= key)
+        {
+            return None;
+        }
+        pairs.push((key.to_owned(), value.to_owned()));
+        pair_start += 2;
+    }
+    Some(pairs)
+}
+
+fn g0_endpoint_query_pairs_ordered(query: &[u8]) -> Option<Vec<(String, String)>> {
     let query = std::str::from_utf8(query).ok()?;
     if query.is_empty() {
         return Some(Vec::new());
@@ -2880,7 +2969,8 @@ fn g0_request_stream_key(
     let variables = variables?;
     match request.api {
         G0ApiKind::Rest => {
-            let stable_query = g0_rest_query_pairs(query)?
+            let payload_pairs = g0_request_query_pairs_ordered(query)?;
+            let stable_query = g0_effective_request_query(request, &payload_pairs)?
                 .into_iter()
                 .filter(|(key, _)| key != "page" && key != "after")
                 .map(|(key, value)| format!("{key}={value}"))
@@ -2888,7 +2978,9 @@ fn g0_request_stream_key(
                 .join("&");
             Some((
                 G0ApiKind::Rest,
-                request.endpoint_or_operation.clone(),
+                g0_endpoint_path_query(&request.endpoint_or_operation)
+                    .ok()?
+                    .0,
                 digest_bytes(stable_query.as_bytes()),
                 digest_bytes(b"{}"),
             ))
@@ -2949,17 +3041,29 @@ fn g0_next_link_matches(current: &G0RequestRecord, next: &G0RequestRecord) -> bo
         let Some(url) = g0_api_url(link) else {
             return false;
         };
-        if url.path() != next.endpoint_or_operation {
+        let Some((next_path, _)) = g0_endpoint_path_query(&next.endpoint_or_operation).ok() else {
+            return false;
+        };
+        if url.path() != next_path {
             return false;
         }
-        let Some(next_query) = BASE64
+        let Some(next_payload) = BASE64
             .decode(&next.query_base64)
             .ok()
-            .and_then(|bytes| g0_rest_query_pairs_ordered(&bytes))
+            .and_then(|bytes| g0_request_query_pairs_ordered(&bytes))
         else {
             return false;
         };
-        let link_query = g0_rest_query_pairs_ordered(url.query().unwrap_or_default().as_bytes());
+        let Some(next_query) = g0_effective_request_query(next, &next_payload) else {
+            return false;
+        };
+        let link_query = g0_endpoint_query_pairs_ordered(
+            url.query().unwrap_or_default().as_bytes(),
+        )
+        .map(|mut pairs| {
+            pairs.sort();
+            pairs
+        });
         link_query == Some(next_query)
     } else {
         current.page.cursor_out.is_some() && current.page.cursor_out == next.page.cursor_in
@@ -4720,7 +4824,7 @@ fn g0_endpoint_path_query(endpoint: &str) -> Result<(String, Vec<(String, String
         let url = g0_api_url(endpoint).ok_or_else(|| {
             "endpoint URL must use the exact https://api.github.com origin".to_owned()
         })?;
-        let query = g0_rest_query_pairs_ordered(url.query().unwrap_or_default().as_bytes())
+        let query = g0_endpoint_query_pairs_ordered(url.query().unwrap_or_default().as_bytes())
             .ok_or_else(|| "endpoint URL query is not canonical".to_owned())?;
         return Ok((url.path().to_owned(), query));
     }
@@ -4731,7 +4835,7 @@ fn g0_endpoint_path_query(endpoint: &str) -> Result<(String, Vec<(String, String
     if !path.starts_with('/') || path.contains("..") || path.is_empty() {
         return Err("endpoint path is not canonical".to_owned());
     }
-    let query = g0_rest_query_pairs_ordered(query.as_bytes())
+    let query = g0_endpoint_query_pairs_ordered(query.as_bytes())
         .ok_or_else(|| "endpoint query is not canonical".to_owned())?;
     Ok((path.to_owned(), query))
 }
@@ -6045,31 +6149,25 @@ fn g0_has_workflow_source_raw(refs: &[String], collector: &G0CollectorSnapshot) 
 }
 
 fn g0_graph_node_raw_binding(node: &G0GraphNode, collector: &G0CollectorSnapshot) -> bool {
-    let kinds: &[&str] = match node.kind.as_str() {
-        "check" => &["rulesets", "ruleset", "workflow.source"],
-        "release" | "package" => &["workload.artifact", "workload.source"],
-        "artifact" => &["workflow_artifacts"],
-        _ => &["workflow.source", "workflow.dependency.source"],
-    };
+    // A graph node is a source-derived relationship, not a free-standing
+    // repository/API observation.  Ruleset, artifact-page, and other
+    // same-repository responses are validated at their typed inventory
+    // owners; accepting them here would let a caller clone bytes under a
+    // different endpoint and self-attest a graph node without source
+    // identity.  Every graph node therefore needs the exact workflow source
+    // response (or recursively captured dependency source) for its repo/SHA.
+    let kinds: &[&str] = &["workflow.source", "workflow.dependency.source"];
     node.raw_object_refs.iter().any(|raw_id| {
         collector.raw_objects.iter().any(|raw| {
             raw.raw_id == *raw_id
                 && kinds.contains(&raw.object_kind.as_str())
                 && g0_raw_response_bound(raw, collector)
-                && match raw.object_kind.as_str() {
-                    "workflow.source" | "workflow.dependency.source" => {
-                        g0_raw_source_identity_matches(
-                            raw,
-                            &node.repository,
-                            &node.source_sha,
-                            collector,
-                        )
-                    }
-                    "workload.artifact" => {
-                        collector.workload_artifact.raw_object_refs.contains(raw_id)
-                    }
-                    _ => g0_raw_request_repository_matches(raw, &node.repository, collector),
-                }
+                && g0_raw_source_identity_matches(
+                    raw,
+                    &node.repository,
+                    &node.source_sha,
+                    collector,
+                )
         })
     })
 }
@@ -6103,25 +6201,6 @@ fn g0_raw_response_bound(raw: &G0RawObjectRef, collector: &G0CollectorSnapshot) 
     collector.requests.iter().any(|request| {
         request.request_id == raw.request_id && request.response_raw_ref == raw.raw_id
     })
-}
-
-fn g0_raw_request_repository_matches(
-    raw: &G0RawObjectRef,
-    repository: &str,
-    collector: &G0CollectorSnapshot,
-) -> bool {
-    collector.requests.iter().any(|request| {
-        request.request_id == raw.request_id
-            && request.response_raw_ref == raw.raw_id
-            && g0_endpoint_repository(&request.endpoint_or_operation).as_deref() == Some(repository)
-    })
-}
-
-fn g0_endpoint_repository(endpoint: &str) -> Option<String> {
-    let (path, _) = g0_endpoint_path_query(endpoint).ok()?;
-    let parts = path.strip_prefix("/repos/")?.split('/').collect::<Vec<_>>();
-    (parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty())
-        .then(|| format!("{}/{}", parts[0], parts[1]))
 }
 
 fn g0_raw_source_identity_known(raw: &G0RawObjectRef, collector: &G0CollectorSnapshot) -> bool {
@@ -9208,15 +9287,35 @@ mod tests {
         bytes
     }
 
+    fn canonical_rest_query(query: &str) -> Vec<u8> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let mut pairs = query
+            .split('&')
+            .map(|part| part.split_once('=').expect("fixture query key/value"))
+            .collect::<Vec<_>>();
+        pairs.sort_by(|left, right| left.0.cmp(right.0));
+        let mut bytes = Vec::new();
+        for (key, value) in pairs {
+            bytes.extend_from_slice(key.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(value.as_bytes());
+            bytes.push(0);
+        }
+        bytes
+    }
+
     fn captured_page_request(endpoint: &str, query: &str, items: u32) -> G0RequestRecord {
+        let query_bytes = canonical_rest_query(query);
         G0RequestRecord {
             request_id: format!("fixture:{endpoint}"),
             api: G0ApiKind::Rest,
             method: "GET".to_owned(),
             endpoint_or_operation: endpoint.to_owned(),
-            query_base64: BASE64.encode(query.as_bytes()),
+            query_base64: BASE64.encode(&query_bytes),
             variables_base64: BASE64.encode(b"{}"),
-            query_sha256: digest_bytes(query.as_bytes()),
+            query_sha256: digest_bytes(&query_bytes),
             variables_sha256: digest_bytes(b"{}"),
             auth_identity_ref: "collector.auth".to_owned(),
             started_at_utc: "2026-09-20T07:53:35Z".to_owned(),
@@ -9399,6 +9498,7 @@ mod tests {
             } else {
                 ""
             };
+            let query_bytes = canonical_rest_query(query);
             let body = if kind == "workflow_attempt_jobs" {
                 json!({"total_count": 1, "jobs": [body]})
             } else {
@@ -9426,9 +9526,9 @@ mod tests {
                 api: G0ApiKind::Rest,
                 method: "GET".to_owned(),
                 endpoint_or_operation: endpoint,
-                query_base64: BASE64.encode(query),
+                query_base64: BASE64.encode(&query_bytes),
                 variables_base64: BASE64.encode(b"{}"),
-                query_sha256: digest_bytes(query.as_bytes()),
+                query_sha256: digest_bytes(&query_bytes),
                 variables_sha256: digest_bytes(b"{}"),
                 auth_identity_ref: "collector.auth".to_owned(),
                 started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
@@ -9691,9 +9791,9 @@ mod tests {
                 endpoint_or_operation: format!(
                     "/repos/{repository}/actions/runs/{main_run_id}/artifacts"
                 ),
-                query_base64: BASE64.encode(b"per_page=100&page=1"),
+                query_base64: BASE64.encode(&canonical_rest_query("per_page=100&page=1")),
                 variables_base64: BASE64.encode(b"{}"),
-                query_sha256: digest_bytes(b"per_page=100&page=1"),
+                query_sha256: digest_bytes(&canonical_rest_query("per_page=100&page=1")),
                 variables_sha256: digest_bytes(b"{}"),
                 auth_identity_ref: "collector.auth".to_owned(),
                 started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
@@ -10690,6 +10790,64 @@ mod tests {
         check_g0_inventory(&manifest, &snapshot, Some(&graph_tampered), &mut findings);
         assert!(g0_codes(&findings).contains("g0-dependency-graph"));
 
+        // A same-repository response with the same bytes is not a source
+        // binding. Clone the workflow body under a valid ruleset endpoint;
+        // repository-only graph provenance must reject this typed path.
+        let mut same_repository_endpoint_clone = complete_g0_fixture().2;
+        let source_raw = same_repository_endpoint_clone
+            .collector_snapshot
+            .raw_objects
+            .iter()
+            .find(|raw| raw.raw_id == "raw-workflow-1")
+            .expect("complete fixture workflow source raw")
+            .clone();
+        let source_request = same_repository_endpoint_clone
+            .collector_snapshot
+            .requests
+            .iter()
+            .find(|request| request.request_id == source_raw.request_id)
+            .expect("complete fixture workflow source request")
+            .clone();
+        let clone_raw_id = "raw-same-repository-ruleset-clone".to_owned();
+        let clone_request_id = "request-same-repository-ruleset-clone".to_owned();
+        let mut clone_raw = source_raw;
+        clone_raw.raw_id = clone_raw_id.clone();
+        clone_raw.request_id = clone_request_id.clone();
+        clone_raw.object_kind = "ruleset".to_owned();
+        let mut clone_request = source_request;
+        clone_request.request_id = clone_request_id;
+        clone_request.response_raw_ref = clone_raw_id.clone();
+        clone_request.endpoint_or_operation = "/repos/tailrocks/velnor/rulesets/1".to_owned();
+        clone_request.api_request_id = "api-same-repository-ruleset-clone".to_owned();
+        same_repository_endpoint_clone
+            .collector_snapshot
+            .raw_objects
+            .push(clone_raw);
+        same_repository_endpoint_clone
+            .collector_snapshot
+            .requests
+            .push(clone_request);
+        same_repository_endpoint_clone
+            .collector_snapshot
+            .dependency_graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == "check" && node.repository == CANONICAL_REPOSITORIES[0])
+            .expect("complete fixture check graph node")
+            .raw_object_refs = vec![clone_raw_id];
+        refresh_typed_inventory_bytes(&mut same_repository_endpoint_clone);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&same_repository_endpoint_clone),
+            &mut findings,
+        );
+        assert!(
+            g0_codes(&findings).contains("g0-dependency-source"),
+            "same-repository endpoint clone unexpectedly bound graph source: {findings:?}"
+        );
+
         let mut graph_target_tampered = complete_g0_fixture().2;
         graph_target_tampered
             .collector_snapshot
@@ -10875,6 +11033,13 @@ mod tests {
                 .trim(),
             )
             .expect("captured DCO App base64");
+        let real_run_bytes = real_api_fixture_entry("raw/velnor/run-35493166478/run.body");
+        let real_attempt_bytes =
+            real_api_fixture_entry("raw/velnor/run-35493166478/attempt-1/attempt.body");
+        let real_jobs_bytes =
+            real_api_fixture_entry("raw/velnor/run-35493166478/attempt-1/jobs/page-0001.body");
+        let real_artifacts_bytes =
+            real_api_fixture_entry("raw/velnor/run-35493166478/artifacts/page-0001.body");
         let mut real_check_request =
             captured_page_request(&real_check_endpoint, "per_page=100&filter=all&page=1", 70);
         real_check_request.request_id = "real-public-checks-request".to_owned();
@@ -10886,10 +11051,63 @@ mod tests {
         let mut real_app_request = captured_page_request("/apps/dco-2", "", 1);
         real_app_request.request_id = "real-public-app-request".to_owned();
         real_app_request.response_raw_ref = "real-public-app-raw".to_owned();
+        let capture = |raw_id: &str,
+                       request_id: &str,
+                       object_kind: &str,
+                       endpoint: &str,
+                       query: &str,
+                       items: u32,
+                       bytes: &[u8]| {
+            let mut request = captured_page_request(endpoint, query, items);
+            request.request_id = request_id.to_owned();
+            request.response_raw_ref = raw_id.to_owned();
+            let raw = captured_raw_reference(raw_id, request_id, object_kind, bytes);
+            (request, raw)
+        };
+        let (real_run_request, real_run_raw) = capture(
+            "real-public-run-raw",
+            "real-public-run-request",
+            "workflow_run",
+            "/repos/tailrocks/velnor/actions/runs/35493166478",
+            "",
+            1,
+            &real_run_bytes,
+        );
+        let (real_attempt_request, real_attempt_raw) = capture(
+            "real-public-attempt-raw",
+            "real-public-attempt-request",
+            "workflow_attempt",
+            "/repos/tailrocks/velnor/actions/runs/35493166478/attempts/1",
+            "",
+            1,
+            &real_attempt_bytes,
+        );
+        let (real_jobs_request, real_jobs_raw) = capture(
+            "real-public-jobs-raw",
+            "real-public-jobs-request",
+            "workflow_attempt_jobs",
+            "/repos/tailrocks/velnor/actions/runs/35493166478/attempts/1/jobs",
+            "per_page=100&page=1",
+            68,
+            &real_jobs_bytes,
+        );
+        let (real_artifacts_request, real_artifacts_raw) = capture(
+            "real-public-artifacts-raw",
+            "real-public-artifacts-request",
+            "workflow_artifacts",
+            "/repos/tailrocks/velnor/actions/runs/35493166478/artifacts",
+            "per_page=100&page=1",
+            2,
+            &real_artifacts_bytes,
+        );
         inventory.collector_snapshot.requests.extend([
             real_check_request.clone(),
             real_suite_request.clone(),
             real_app_request.clone(),
+            real_run_request.clone(),
+            real_attempt_request.clone(),
+            real_jobs_request.clone(),
+            real_artifacts_request.clone(),
         ]);
         inventory.collector_snapshot.raw_objects.extend([
             captured_raw_reference(
@@ -10910,6 +11128,10 @@ mod tests {
                 "app",
                 &real_app_bytes,
             ),
+            real_run_raw,
+            real_attempt_raw,
+            real_jobs_raw,
+            real_artifacts_raw,
         ]);
         let real_dco_check = G0CheckProducer {
             context: "DCO".to_owned(),
@@ -10995,6 +11217,62 @@ mod tests {
             "app",
             974_774,
             &["/apps/dco-2".to_owned()],
+            &round_tripped_collector.requests,
+            &round_tripped_collector.raw_objects,
+        )
+        .is_some());
+        assert!(g0_capture_raw_json(
+            &["real-public-run-raw".to_owned()],
+            "workflow_run",
+            35_493_166_478,
+            &["/repos/tailrocks/velnor/actions/runs/35493166478".to_owned()],
+            &round_tripped_collector.requests,
+            &round_tripped_collector.raw_objects,
+        )
+        .is_some());
+        assert!(g0_capture_raw_json(
+            &["real-public-attempt-raw".to_owned()],
+            "workflow_attempt",
+            35_493_166_478,
+            &["/repos/tailrocks/velnor/actions/runs/35493166478/attempts/1".to_owned()],
+            &round_tripped_collector.requests,
+            &round_tripped_collector.raw_objects,
+        )
+        .is_some());
+        let real_jobs: Value =
+            serde_json::from_slice(&real_jobs_bytes).expect("captured Actions jobs page JSON");
+        let qualified_job_id = real_jobs["jobs"][0]["id"]
+            .as_u64()
+            .expect("captured qualified job ID");
+        let selected_job = g0_capture_raw_json(
+            &["real-public-jobs-raw".to_owned()],
+            "workflow_attempt_jobs",
+            qualified_job_id,
+            &["/repos/tailrocks/velnor/actions/runs/35493166478/attempts/1/jobs".to_owned()],
+            &round_tripped_collector.requests,
+            &round_tripped_collector.raw_objects,
+        )
+        .expect("public serialized path selects qualified job from captured page");
+        assert_eq!(
+            g0_json_u64(&selected_job, &["run_id"]),
+            Some(35_493_166_478)
+        );
+        assert_eq!(g0_json_u64(&selected_job, &["run_attempt"]), Some(1));
+        assert!(
+            g0_json_string(&selected_job, &["html_url"]).is_some_and(|url| {
+                url.starts_with("https://github.com/tailrocks/velnor/actions/runs/35493166478/job/")
+            })
+        );
+        let real_artifacts: Value = serde_json::from_slice(&real_artifacts_bytes)
+            .expect("captured Actions artifacts page JSON");
+        let qualified_artifact_id = real_artifacts["artifacts"][0]["id"]
+            .as_u64()
+            .expect("captured qualified artifact ID");
+        assert!(g0_capture_raw_json(
+            &["real-public-artifacts-raw".to_owned()],
+            "workflow_artifacts",
+            qualified_artifact_id,
+            &["/repos/tailrocks/velnor/actions/runs/35493166478/artifacts".to_owned()],
             &round_tripped_collector.requests,
             &round_tripped_collector.raw_objects,
         )
@@ -11096,6 +11374,65 @@ mod tests {
             .any(|finding| finding.code == "g0-check-raw-evidence"));
         assert_eq!(report.status, "fail");
         assert_eq!(report.mode, "offline");
+
+        let mut unknown_actual = baseline_inventory.clone();
+        unknown_actual
+            .collector_snapshot
+            .raw_objects
+            .iter_mut()
+            .find(|raw| raw.raw_id == "real-public-jobs-raw")
+            .expect("captured jobs raw object")
+            .object_kind = "unknown.provider.response".to_owned();
+        refresh_typed_inventory_bytes(&mut unknown_actual);
+        let mut unknown_evidence = evidence.clone();
+        unknown_evidence.g0_inventory = Some(unknown_actual);
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_vec(&unknown_evidence).expect("serialize unknown-kind mutation"),
+        )
+        .expect("write unknown-kind mutation");
+        let unknown_report = check_paths(&EvidenceCheckInput {
+            stage: "G0".to_owned(),
+            manifest: manifest_path.clone(),
+            snapshot: snapshot_path.clone(),
+            evidence: evidence_path.clone(),
+            release_manifest: None,
+            live: false,
+        })
+        .expect("public checker parses unknown-kind mutation");
+        assert!(unknown_report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "g0-endpoint-contract"));
+
+        let mut missing_actual = baseline_inventory.clone();
+        missing_actual
+            .collector_snapshot
+            .raw_objects
+            .retain(|raw| raw.raw_id != "real-public-attempt-raw");
+        refresh_typed_inventory_bytes(&mut missing_actual);
+        let mut missing_evidence = evidence.clone();
+        missing_evidence.g0_inventory = Some(missing_actual);
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_vec(&missing_evidence).expect("serialize missing-raw mutation"),
+        )
+        .expect("write missing-raw mutation");
+        let missing_report = check_paths(&EvidenceCheckInput {
+            stage: "G0".to_owned(),
+            manifest: manifest_path.clone(),
+            snapshot: snapshot_path.clone(),
+            evidence: evidence_path.clone(),
+            release_manifest: None,
+            live: false,
+        })
+        .expect("public checker parses missing-raw mutation");
+        assert!(missing_report.findings.iter().any(|finding| {
+            matches!(
+                finding.code.as_str(),
+                "g0-request-incomplete" | "g0-raw-reference"
+            )
+        }));
 
         // A raw response copied under a different request identity must not
         // self-attest its source merely because its bytes and digest remain
@@ -12052,9 +12389,9 @@ mod tests {
             "api": "rest",
             "method": "GET",
             "endpoint_or_operation": "/repos/tailrocks/velnor",
-            "query_base64": BASE64.encode(b"page=1"),
+            "query_base64": BASE64.encode(&canonical_rest_query("page=1")),
             "variables_base64": BASE64.encode(b"{}"),
-            "query_sha256": digest_bytes(b"page=1"),
+            "query_sha256": digest_bytes(&canonical_rest_query("page=1")),
             "variables_sha256": digest_bytes(b"{}"),
             "auth_identity_ref": "collector.auth",
             "started_at_utc": "2026-09-20T00:00:00Z",
@@ -12130,9 +12467,9 @@ mod tests {
             api: G0ApiKind::Rest,
             method: "GET".to_owned(),
             endpoint_or_operation: "/repos/jackin-project/jackin-agent-smith/commits/b9db5b149cc46baba9c49549432307c29e3972b0/check-runs".to_owned(),
-            query_base64: BASE64.encode(b"per_page=100&filter=all&page=1"),
+            query_base64: BASE64.encode(&canonical_rest_query("per_page=100&filter=all&page=1")),
             variables_base64: BASE64.encode(b"{}"),
-            query_sha256: digest_bytes(b"per_page=100&filter=all&page=1"),
+            query_sha256: digest_bytes(&canonical_rest_query("per_page=100&filter=all&page=1")),
             variables_sha256: digest_bytes(b"{}"),
             auth_identity_ref: "collector.auth".to_owned(),
             started_at_utc: "2026-09-20T07:02:33Z".to_owned(),
@@ -12445,14 +12782,15 @@ mod tests {
             g0_endpoint_contract("check_runs", &check_endpoint).expect("check inventory contract");
         assert!(g0_response_query_contract(
             &all_request,
-            b"per_page=100&filter=all&page=1",
+            &canonical_rest_query("per_page=100&filter=all&page=1"),
             check_contract,
         ));
-        all_request.query_base64 = BASE64.encode(b"per_page=100&filter=latest&page=1");
-        all_request.query_sha256 = digest_bytes(b"per_page=100&filter=latest&page=1");
+        let latest_query = canonical_rest_query("per_page=100&filter=latest&page=1");
+        all_request.query_base64 = BASE64.encode(&latest_query);
+        all_request.query_sha256 = digest_bytes(&latest_query);
         assert!(!g0_response_query_contract(
             &all_request,
-            b"per_page=100&filter=latest&page=1",
+            &latest_query,
             check_contract,
         ));
 
@@ -12478,6 +12816,41 @@ mod tests {
                 "arbitrary evidence path was accepted: {object_kind} {endpoint}"
             );
         }
+    }
+
+    #[test]
+    fn producer_rest_query_wire_round_trips_without_url_query_alias() {
+        let endpoint = format!("/repos/tailrocks/velnor/commits/{}/check-runs", sha('a'));
+        let request = captured_page_request(&endpoint, "per_page=100&filter=all&page=1", 1);
+        let query = BASE64
+            .decode(&request.query_base64)
+            .expect("canonical producer query base64");
+        assert_eq!(
+            query,
+            canonical_rest_query("per_page=100&filter=all&page=1")
+        );
+        assert!(g0_request_semantics(&request, Some(&query), Some(b"{}")));
+
+        let mut url_query_payload = request.clone();
+        url_query_payload.query_base64 = BASE64.encode(b"per_page=100&filter=all&page=1");
+        url_query_payload.query_sha256 = digest_bytes(b"per_page=100&filter=all&page=1");
+        let mut findings = Vec::new();
+        let collector = {
+            let mut collector = minimal_g0_collector();
+            let bytes = br#"{"total_count":1,"check_runs":[{"id":1}]}"#;
+            collector.requests.push(url_query_payload);
+            collector.raw_objects.push(captured_raw_reference(
+                "fixture-raw",
+                &collector.requests[0].request_id,
+                "check_runs",
+                bytes,
+            ));
+            collector
+        };
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-request-query"));
     }
 
     #[test]
@@ -12514,34 +12887,55 @@ mod tests {
             )
         }));
 
-        collector.requests[0].query_base64 = BASE64.encode(b"per_page=50&filter=all&page=1");
-        collector.requests[0].query_sha256 = digest_bytes(b"per_page=50&filter=all&page=1");
+        // The collector may represent page two as an absolute API URL while
+        // leaving its producer query payload empty. Normalize only the
+        // endpoint URL query; do not treat it as an ampersand payload alias.
+        collector.requests[1].endpoint_or_operation =
+            format!("https://api.github.com{endpoint}?per_page=100&filter=all&page=2");
+        collector.requests[1].query_base64 = BASE64.encode(b"");
+        collector.requests[1].query_sha256 = digest_bytes(b"");
+        findings.clear();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(
+            !findings.iter().any(|finding| {
+                matches!(
+                    finding.code.as_str(),
+                    "g0-request-query" | "g0-pagination" | "g0-request-incomplete"
+                )
+            }),
+            "absolute page-2 pagination findings: {findings:?}"
+        );
+
+        let wrong_page_size = canonical_rest_query("per_page=50&filter=all&page=1");
+        collector.requests[0].query_base64 = BASE64.encode(&wrong_page_size);
+        collector.requests[0].query_sha256 = digest_bytes(&wrong_page_size);
         findings.clear();
         check_g0_request_provenance(&collector, &mut findings);
         assert!(findings
             .iter()
             .any(|finding| finding.code == "g0-request-query"));
 
-        collector.requests[0].query_base64 = BASE64.encode(b"filter=all&per_page=100&page=1");
-        collector.requests[0].query_sha256 = digest_bytes(b"filter=all&per_page=100&page=1");
+        let noncanonical_order = b"filter\0all\0per_page\0100\0page\01\0";
+        collector.requests[0].query_base64 = BASE64.encode(noncanonical_order);
+        collector.requests[0].query_sha256 = digest_bytes(noncanonical_order);
         findings.clear();
         check_g0_request_provenance(&collector, &mut findings);
         assert!(findings
             .iter()
             .any(|finding| finding.code == "g0-request-query"));
 
-        collector.requests[0].query_base64 =
-            BASE64.encode(b"per_page=100&per_page=100&filter=all&page=1");
-        collector.requests[0].query_sha256 =
-            digest_bytes(b"per_page=100&per_page=100&filter=all&page=1");
+        let duplicate_query = b"filter\0all\0filter\0all\0page\01\0per_page\0100\0";
+        collector.requests[0].query_base64 = BASE64.encode(duplicate_query);
+        collector.requests[0].query_sha256 = digest_bytes(duplicate_query);
         findings.clear();
         check_g0_request_provenance(&collector, &mut findings);
         assert!(findings
             .iter()
             .any(|finding| finding.code == "g0-request-incomplete"));
 
-        collector.requests[0].query_base64 = BASE64.encode(b"per_page=100&filter=all&page=1");
-        collector.requests[0].query_sha256 = digest_bytes(b"per_page=100&filter=all&page=1");
+        let valid_query = canonical_rest_query("per_page=100&filter=all&page=1");
+        collector.requests[0].query_base64 = BASE64.encode(&valid_query);
+        collector.requests[0].query_sha256 = digest_bytes(&valid_query);
 
         let duplicate_bytes = br#"{"total_count":2,"check_runs":[{"id":1}]}"#;
         collector.raw_objects[1] = captured_raw_reference(
@@ -12647,9 +13041,9 @@ mod tests {
             method: "GET".to_owned(),
             endpoint_or_operation:
                 "/repos/tailrocks/holla-apt/actions/runs/35079189599/attempts/1/jobs".to_owned(),
-            query_base64: BASE64.encode(b"per_page=100&page=1"),
+            query_base64: BASE64.encode(&canonical_rest_query("per_page=100&page=1")),
             variables_base64: BASE64.encode(b"{}"),
-            query_sha256: digest_bytes(b"per_page=100&page=1"),
+            query_sha256: digest_bytes(&canonical_rest_query("per_page=100&page=1")),
             variables_sha256: digest_bytes(b"{}"),
             auth_identity_ref: "collector.auth".to_owned(),
             started_at_utc: "2026-09-20T07:36:18Z".to_owned(),
@@ -13445,9 +13839,9 @@ mod tests {
             api: G0ApiKind::Rest,
             method: "GET".to_owned(),
             endpoint_or_operation: "/repos/tailrocks/velnor".to_owned(),
-            query_base64: BASE64.encode(b"page=1"),
+            query_base64: BASE64.encode(&canonical_rest_query("page=1")),
             variables_base64: BASE64.encode(b"{}"),
-            query_sha256: digest_bytes(b"page=1"),
+            query_sha256: digest_bytes(&canonical_rest_query("page=1")),
             variables_sha256: digest_bytes(b"{}"),
             auth_identity_ref: "collector.auth".to_owned(),
             started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
@@ -13496,8 +13890,8 @@ mod tests {
         });
         let mut second = collector.requests[0].clone();
         second.request_id = "request-2".to_owned();
-        second.query_base64 = BASE64.encode(b"page=2");
-        second.query_sha256 = digest_bytes(b"page=2");
+        second.query_base64 = BASE64.encode(&canonical_rest_query("page=2"));
+        second.query_sha256 = digest_bytes(&canonical_rest_query("page=2"));
         second.page.number = 2;
         second.page.link_next = None;
         second.page.has_next_page = false;
