@@ -888,14 +888,21 @@ mod tests {
         assert!(rendered.is_ok());
         assert!(SignerCallInputs::admitted("native/product", "record.json").is_err());
 
-        let matrix = SignerCallInputs::admitted_expression(
+        let matrix_result = SignerCallInputs::admitted_expression(
             "debian-packages",
             "runner-v1.2.3-${{ matrix.arch }}.deb",
-        )
-        .expect("matrix subject remains a basename expression");
-        let rendered = matrix
-            .render_yaml_for_lane(SignerLane::Debian, SOURCE_REPOSITORY)
-            .expect("complete signer input is valid");
+        );
+        assert!(
+            matrix_result.is_ok(),
+            "matrix subject remains a basename expression: {matrix_result:?}"
+        );
+        let Ok(matrix) = matrix_result else { return };
+        let rendered_result = matrix.render_yaml_for_lane(SignerLane::Debian, SOURCE_REPOSITORY);
+        assert!(
+            rendered_result.is_ok(),
+            "complete signer input is valid: {rendered_result:?}"
+        );
+        let rendered = rendered_result.unwrap_or_default();
         assert!(rendered.contains("subject-path: runner-v1.2.3-${{ matrix.arch }}.deb"));
         assert!(rendered.contains("lane: debian"));
         assert!(rendered.contains(
