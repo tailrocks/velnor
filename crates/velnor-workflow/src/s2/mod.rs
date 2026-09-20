@@ -12451,8 +12451,17 @@ lockfile = true
             );
         }
         let script = root.join("report.sh");
+        let report_script = test_now.map_or_else(
+            report_action_script,
+            |_| {
+                format!(
+                    "date() {{ if [ \"$1\" = +%s ]; then printf '%s\\n' \"$VELNOR_REPORT_TEST_NOW\"; else command date \"$@\"; fi; }}\n{}",
+                    report_action_script()
+                )
+            },
+        );
         must(
-            fs::write(&script, report_action_script()),
+            fs::write(&script, report_script),
             "write report action test script",
         );
         if let Some(log) = log {
@@ -12463,30 +12472,9 @@ lockfile = true
         }
         let summary = root.join("summary.md");
         let mut command = Command::new("bash");
-        #[cfg(unix)]
         if let Some(test_now) = test_now {
-            use std::os::unix::fs::PermissionsExt as _;
-            let date_bin = root.join("test-bin");
-            must(fs::create_dir_all(&date_bin), "create date shim directory");
-            let date = date_bin.join("date");
-            must(
-                fs::write(
-                    &date,
-                    "#!/bin/sh\nif [ \"$1\" = +%s ]; then printf '%s\\n' \"$VELNOR_REPORT_TEST_NOW\"; else exec /bin/date \"$@\"; fi\n",
-                ),
-                "write date shim",
-            );
-            must(
-                fs::set_permissions(&date, fs::Permissions::from_mode(0o755)),
-                "make date shim executable",
-            );
-            let path = std::env::var("PATH").unwrap_or_default();
-            command
-                .env("PATH", format!("{}:{path}", date_bin.display()))
-                .env("VELNOR_REPORT_TEST_NOW", test_now.to_string());
+            command.env("VELNOR_REPORT_TEST_NOW", test_now.to_string());
         }
-        #[cfg(not(unix))]
-        let _ = test_now;
         command
             .arg(&script)
             .env("RUNNER_TEMP", &root)

@@ -34,7 +34,9 @@ The fixture used `now + 1..6` before several subprocess probes, allowing its
 future markers to become past timestamps. Repair and independent verification
 were required before publication; focused-test success did not establish stability.
 The test-only clock repair passed all 1,955 tests in the full all-feature suite.
-Independent review of platform behavior remains pending; production clock
+Independent follow-up review passed the portable Bash function clock on Bash
+3.2 and 5.3; the full suite again passed all 1,955 tests. The helper now freezes
+only `date +%s` without Unix-only permissions or PATH changes. Production clock
 handling is unchanged.
 
 This repairs measurement correctness. Performance acceptance, controlled samples,
