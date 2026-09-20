@@ -43,46 +43,78 @@ hypothesis → implementation → focused checks → controlled CI → independe
 results review → commit/push → rerank. Independent research runs concurrently;
 timing experiments must account for shared runner contention.
 
-Current bounded queue (2026-09-20, after `df9fb272`):
+Current bounded queue (2026-09-20, after `112e6acc`):
 
-- Locked installation is published as `057ed827`; PR cancellation is published
-  as `35a07a59`. The CI-discovered fixture repair is published as `bb94bac9`,
-  and Rust ordering as `95432856`. Collector identity is published as
-  `21799655`; its independently audited historical replay as `df9fb272`. Each gets
-  focused checks, source-driven regeneration, and a small signed-off commit.
-- Jackin agent owns the generic transitive Mise task/tool model and typed leaf
-  declarations. Its worktree-identity patch is under Parallax independent review.
-  Policy role separation depends on that structural identity repair.
-- Velnor agent owns an executable bootstrap compatibility experiment using the
-  trusted old validator and current candidate rendering. A pin-only unregenerated
-  change is insufficient; the actual existing candidate route must be tested.
-- Collector identity repair passes 45 tests and independent CLI scenarios.
-  Seven historical JSONL/CSV pairs are regenerated from saved raw responses;
-  all timing fields are unchanged across 476 rows. Three previous datasets
-  attributed source to later PR heads. Independent audit passed; original raw
-  evidence remains unchanged.
-- Disabling Mise task auto-install remains dependent on inferred transitive tool
-  requirements. Explicit root tool versions must not request every tool.
+- Parent committed and pushed telemetry schema 2, complete cache-key evidence
+  checks, separate host declarations, regenerated action, and executable
+  regression fixtures as `112e6acc`. Independent source-action matrix: 24/24;
+  isolated generator report/parity tests: 8/8; actionlint passes. The exact
+  committed binary builds and generation check passes with the candidate-render
+  notice. Real CI acceptance remains pending.
+  Exact all-target Clippy found three overlong regression-test functions;
+  assertion-preserving helper extraction landed as `ebc05ab0` (same tree as
+  local signed commit `7397441a`). Independent strict Clippy and the parent's
+  six focused tests passed. Clean binary reports exact revision `ebc05ab0`.
+  Policy
+  run `35503026531` failed after 15 minutes waiting for the candidate product.
+  PR #968's refreshed API response reports `mergeable=false` and
+  `mergeable_state=dirty`; reconcile upstream before expecting a fresh PR run.
+- Velnor agent independently reviews upstream integration, required-gate
+  preservation, and the controlled rerun mechanism. It now owns the collector's
+  reused-result/fresh-attempt distinction. Completed MBX classification and
+  test refactoring are committed; timing-category repair remains separate.
+- Jackin agent owns transitive Mise task/tool resolution, lock/platform identity,
+  structured task execution semantics, and typed installation planning. Prior
+  independent findings must be resolved before this unit lands. Disabling broad
+  task auto-install depends on that model and real tool availability checks.
+  Phase 1 passed 14 focused tests and library Clippy, but runner-name inference
+  still misclassifies Windows ARM/custom runners. Replace guessed architecture
+  with explicit runner identity before acceptance. That agent independently
+  reviews the publication rollback boundary while implementation is paused.
+- Parallax agent owns the upstream Bash 3 publication-rollback repair and then
+  the main policy/candidate dependency cycle. The first rollback candidate was
+  rejected: `if ( verifier )` suppresses `errexit`, allowing an early failing
+  command followed by success to return zero. Keep that negative case.
+  The replacement background verifier preserves failure status in five parent
+  Bash 3 probes and 43 independently executed package tests. Cancellation and
+  Bash 5 execution remain open; a simpler foreground process is under review.
+- Source identity repair has a bounded patch and eight focused fixtures,
+  including staged paths and a 20,000-path pipe test. Parent checks standalone
+  coherence with the local candidate binding before integrating it. A local
+  binding is never CI artifact provenance.
+- Upstream main advanced through `e717de39` to `9307861d` (package publication
+  transactions, cache quota handling and shell-fragment scoping). Parent's
+  detached integration preserves campaign changes and the declared `325719f1`
+  runtime pin. Against `e717de39`, all-target Clippy passed; full nextest found
+  1,937 passes and one Bash 3 rollback failure. The merge remains uncommitted
+  until the regression is corrected and reviewed.
+- Actual `e717de39` main jobs wait on policy; policy waits for a candidate
+  emitted by one of those jobs and searches PR runs only. Runs `35499213737`
+  and `35499885181` failed acquisition; preview `35499213813` failed
+  generated-tree policy. This blocks correct default-branch cache seeding,
+  as well as release verification. Repair the graph and run identity contract.
 - Early candidate production, immutable consumer runtime distribution, typed
-  visible validation stages, selected-but-unadmitted gate rejection, cache
-  telemetry, desktop product reuse, and Docker input closure remain open.
-- Dispatcher child-result and provider-policy design is tracked in
-  [V-DISPATCH-001](experiments/V-DISPATCH-001.md). The current API returns an exact
-  child run ID; local CLI authentication failure does not exhaust alternatives.
+  visible stages, selected-but-unadmitted gate rejection, cache transport/reuse,
+  desktop product reuse, Docker input closure, and dispatcher child-result
+  propagation remain required work. They are dependencies, not waived scope.
 
-Latest exact pushed PR run `35493166478` (`df9fb272`) passed, with 68 recorded
+Latest completed successful PR run `35493166478` (`df9fb272`) had 68 recorded
 jobs: 614 seconds trigger to final completion, 2,813 seconds aggregate execution.
 Largest job: generator, 574 seconds. Separate policy run `35493165389` failed.
 The previous `21799655` PR run `35492702575` passed in 596 seconds, with 3,018
 seconds aggregate execution; its separate policy run also failed.
 
-The Rust-order candidate run `35492230871` passed in 604 seconds (aggregate
-2,734 seconds), versus the prior fixture run `35491248265` at 592 seconds
-(aggregate 2,705 seconds). These single observations are not matched repeated
-measurements. The collector check interval rose from roughly 14 to 21 seconds;
-this remains an unresolved possible regression. All figures use raw job
-completion timestamps, never workflow `updated_at`. None establishes a
-speedup or a completed plateau.
+Historical collector rerun `35491248265`, attempt 2, succeeded: 40-second job,
+18-second checks. Only the collector and two gates freshly executed; seventeen
+successful results retain earlier timestamps despite new IDs and attempt 2
+labels. This is a bounded capability probe, not a new full-workflow sample.
+
+Rust-order candidate run `35492230871` passed in 604 seconds (aggregate
+2,734 seconds), versus fixture run `35491248265` at 592 seconds (aggregate
+2,705 seconds). Single observations are not matched repeated measurements.
+The collector check interval rose from roughly 14 to 21 seconds; this remains
+an unresolved possible regression. Figures use raw job completion timestamps,
+never workflow `updated_at`. None establishes a speedup or completed plateau.
 
 ## Initial revisions and access
 

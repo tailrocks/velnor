@@ -1,7 +1,33 @@
 # V-RERUN-MEASUREMENT-001: repeat the actual PR dependency graph
 
-Status: design independently reviewed; no repetition started and no completed
-optimization iteration.
+Status: one bounded collector rerun completed; full-graph repetitions not
+started. No completed optimization iteration or accepted performance claim.
+
+## Capability probe: attempt 2
+
+Run `35491248265` attempt 2 started at `2026-09-20T09:45:10Z` and
+completed successfully. Collector job `106058435636` ran 09:45:15–09:45:55;
+its checks took 18 seconds. Checkout logs prove merge tree
+`91f2fc0e8727041087bdd08f807d062a719d5d01`, retaining the original treatment.
+The collector reported one compiler hit, zero misses, 104 operations not
+looked up and five bypasses. Its MBX archive was absent; schema 1's reported
+prefix hit was incorrect. This is not a warm compiler-cache sample.
+
+The paginated REST response contains 68 jobs, all labeled attempt 2 and with
+new job IDs. **Seventeen successful jobs retain timestamps before this
+attempt started.** Only the collector and two required gates freshly executed.
+Thirty-five skipped records have inverted synthetic timestamps. Matching
+attempt numbers and new IDs therefore cannot establish fresh full coverage.
+The measurement collector needs an explicit reused-result/freshness boundary;
+do not feed this attempt into whole-workflow speedup comparisons.
+
+Raw run, complete single-page job response, analysis and collector log are
+retained under `observations/velnor-35491248265-attempt2-*`. Exact request
+timestamp is not available in the parent record; do not substitute the
+original run creation time. The Velnor agent independently confirmed the
+raw totals: 17 reused successes account for 2,665 seconds; three fresh successes
+account for 46 seconds. Parent reproduced the collector's incorrect 2,711-second
+aggregate. A structural freshness-model repair is now in implementation.
 
 ## Independent review
 
