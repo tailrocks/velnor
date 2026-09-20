@@ -161,6 +161,10 @@ fn validate_asset_name(key: &str, value: &str) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+fn shell_quote_asset_name(value: &str) -> String {
+    format!("\"{value}\"")
+}
+
 fn validate_relative_directory(value: &str) -> Result<(), GeneratorError> {
     let path = Path::new(value);
     let valid_segment = |segment: &str| {
@@ -658,7 +662,7 @@ for name in \
         } else {
             " \\\n"
         };
-        let _ = write!(script, "  {}{}", shell_quote(name), suffix);
+        let _ = write!(script, "  {}{}", shell_quote_asset_name(name), suffix);
     }
     script.push_str(
         r#"; do
@@ -689,7 +693,7 @@ for name in \
         } else {
             " \\\n"
         };
-        let _ = write!(script, "  {}{}", shell_quote(name), suffix);
+        let _ = write!(script, "  {}{}", shell_quote_asset_name(name), suffix);
     }
     script.push_str(
         r#"; do
@@ -707,7 +711,7 @@ for name in \
         } else {
             " \\\n"
         };
-        let _ = write!(script, "  {}{}", shell_quote(name), suffix);
+        let _ = write!(script, "  {}{}", shell_quote_asset_name(name), suffix);
     }
     script.push_str(
         r#"; do
@@ -1270,6 +1274,8 @@ owner_assets="$transaction_dir/owner-assets"
 candidate_version="$(jq -er '.version | strings' "$published_dir/release-manifest.json")"
 had_release=0
 mutated=0
+preexisting_rolling_tag=0
+rolling_body_ready=0
 "#,
     );
     script.push_str(&render_publication_lock_script(true));
@@ -1348,6 +1354,33 @@ assert_release_absent() {
     echo "::error::rolling release DELETE was not verified as HTTP 404" >&2
     return 1
   fi
+}
+
+resolve_existing_rolling_release() {
+  local pages="$transaction_dir/rolling-releases"
+  local matches="$transaction_dir/rolling-release-matches"
+  if ! gh api --paginate --repo "$GITHUB_REPOSITORY" \
+    "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$pages"; then
+    return 1
+  fi
+  if ! jq -sr --arg tag "$rolling_tag" '
+    [map(.[])[] | select((.tag_name | type == "string") and .tag_name == $tag)]
+    | if length > 1 then error("multiple releases use the rolling tag")
+      elif length == 1 then .[0].id
+      else empty
+      end
+  ' "$pages" > "$matches"; then
+    return 1
+  fi
+  if [ ! -s "$matches" ]; then
+    return 2
+  fi
+  rolling_release_id="$(< "$matches")"
+  if ! gh api --repo "$GITHUB_REPOSITORY" \
+    "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" > "$rolling_body"; then
+    return 1
+  fi
+  rolling_body_ready=1
 }
 
 validate_existing_rolling_release() {
@@ -1839,6 +1872,13 @@ rollback() {
         rollback_status=1
       elif ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
         rollback_status=1
+      elif [ "$preexisting_rolling_tag" = 1 ]; then
+        if [ "$current_tag_sha" != "$owner_tag_sha" ] || [ "$current_tag_sha" != "$owner_source_commit" ]; then
+          echo "::error::pre-existing rolling tag changed before rollback; refusing mutation" >&2
+        else
+          echo "::error::pre-existing rolling tag retained without a release; retaining publication lock for manual recovery" >&2
+        fi
+        rollback_status=1
       elif [ -z "$current_tag_sha" ]; then
         :
       elif [ "$current_tag_sha" = "$owner_tag_sha" ] && [ "$current_tag_sha" = "$owner_source_commit" ]; then
@@ -1925,9 +1965,12 @@ if gh api --repo "$GITHUB_REPOSITORY" -i "repos/$GITHUB_REPOSITORY/releases/tags
   :
 fi
 rolling_http="$(awk 'NR == 1 {print $2; exit}' "$rolling_response")"
+while :; do
 case "$rolling_http" in
   200)
-    awk 'body {print; next} /^\r?$/ {body = 1}' "$rolling_response" > "$rolling_body"
+    if [ "$rolling_body_ready" != 1 ]; then
+      awk 'body {print; next} /^\r?$/ {body = 1}' "$rolling_response" > "$rolling_body"
+    fi
     had_release=1
     if ! jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" \
       '(.draft | type == "boolean") and .prerelease == $prerelease and .tag_name == $tag and (.id | type == "number")' "$rolling_body" >/dev/null; then
@@ -1972,23 +2015,42 @@ case "$rolling_http" in
         exit 1
       fi
     fi
+    break
 "#,
     );
     script.push_str(
         r#"
     ;;
   404)
+    if resolve_existing_rolling_release; then
+      rolling_http=200
+      continue
+    else
+      rolling_lookup_status="$?"
+    fi
+    if [ "$rolling_lookup_status" -ne 2 ]; then
+      echo "::error::rolling release listing failed; refusing mutation" >&2
+      exit 1
+    fi
     if ! rolling_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
       echo "::error::rolling tag lookup failed; refusing to overwrite it" >&2
       exit 1
     fi
-    test -z "$rolling_tag_sha" || { echo "::error::rolling tag exists without a release; refusing to overwrite it" >&2; exit 1; }
+    if [ -n "$rolling_tag_sha" ]; then
+      [ "$rolling_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || {
+        echo "::error::rolling tag exists without a release; refusing to overwrite it unless it resolves to the verified source commit" >&2
+        exit 1
+      }
+      preexisting_rolling_tag=1
+    fi
+    break
     ;;
   *)
     echo "::error::rolling release preflight failed with HTTP $rolling_http" >&2
     exit 1
     ;;
 esac
+done
 
 if [ "$had_release" = 0 ]; then
   mutated=1
@@ -2442,7 +2504,12 @@ fn render_publish_job(
         } else {
             " \\"
         };
-        let _ = writeln!(payload_names, "  {}{}", shell_quote(name), suffix);
+        let _ = writeln!(
+            payload_names,
+            "  {}{}",
+            shell_quote_asset_name(name),
+            suffix
+        );
     }
     let mut expected_asset_names = String::new();
     for name in release_asset_names(spec) {
@@ -2925,6 +2992,418 @@ concurrency_group = "package-release-preview"
             .find("if [ \"$had_release\" = 0 ]; then")
             .expect("rolling publication mutation boundary");
         assert!(refusal < first_mutation);
+    }
+
+    #[test]
+    fn rolling_tag_without_release_accepts_only_the_expected_source_commit() {
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        assert!(workflow.contains("preexisting_rolling_tag=0"));
+        let expected_target = workflow
+            .find("[ \"$rolling_tag_sha\" = \"$EXPECTED_SOURCE_COMMIT\" ]")
+            .expect("expected-source tag guard");
+        let preexisting_marker = workflow
+            .find("preexisting_rolling_tag=1")
+            .expect("pre-existing tag marker");
+        let refusal = workflow
+            .find("rolling tag exists without a release; refusing to overwrite it unless it resolves to the verified source commit")
+            .expect("unexpected tag refusal");
+        let first_mutation = workflow
+            .find("if [ \"$had_release\" = 0 ]; then")
+            .expect("rolling publication mutation boundary");
+        assert!(expected_target < preexisting_marker);
+        assert!(expected_target < refusal);
+        assert!(refusal < first_mutation);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rolling_tag_without_release_preflight_requires_expected_commit() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        let preflight_start = rolling_script
+            .find("while :; do\ncase \"$rolling_http\" in")
+            .expect("rolling preflight");
+        let preflight_end = rolling_script[preflight_start..]
+            .find("\n\nif [ \"$had_release\" = 0 ]; then")
+            .map(|offset| preflight_start + offset)
+            .expect("rolling mutation boundary");
+        let preflight = &rolling_script[preflight_start..preflight_end];
+        let run_preflight = |tag_sha: &str| {
+            let script = format!(
+                r#"set -Eeuo pipefail
+rolling_http=404
+rolling_tag=preview
+rolling_tag_sha=
+preexisting_rolling_tag=0
+resolve_existing_rolling_release() {{ return 2; }}
+remote_tag_sha() {{ printf '%s\n' "$TEST_TAG_SHA"; }}
+{preflight}
+printf 'marker=%s\n' "$preexisting_rolling_tag"
+"#
+            );
+            Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .env(
+                    "EXPECTED_SOURCE_COMMIT",
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                )
+                .env("TEST_TAG_SHA", tag_sha)
+                .output()
+                .expect("run rolling preflight")
+        };
+
+        let accepted = run_preflight("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert!(
+            accepted.status.success(),
+            "expected source tag was rejected:\n{}{}",
+            String::from_utf8_lossy(&accepted.stdout),
+            String::from_utf8_lossy(&accepted.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&accepted.stdout).trim(), "marker=1");
+
+        let rejected = run_preflight("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert!(!rejected.status.success(), "mismatched tag was accepted");
+        assert!(String::from_utf8_lossy(&rejected.stderr)
+            .contains("unless it resolves to the verified source commit"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn draft_rolling_release_lookup_uses_listing_before_orphan_creation() {
+        use std::process::Command;
+
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        let lookup_start = workflow
+            .find("resolve_existing_rolling_release() {")
+            .expect("draft release lookup helper");
+        let validation_start = workflow[lookup_start..]
+            .find("validate_existing_rolling_release")
+            .expect("existing release validator");
+        let lookup_end = lookup_start + validation_start - 2;
+        let lookup = &workflow[lookup_start..lookup_end];
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-draft-lookup-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create draft lookup fixture");
+        let script = format!(
+            r#"set -Eeuo pipefail
+GITHUB_REPOSITORY=example/project
+rolling_tag=preview
+transaction_dir="$TEST_TMPDIR"
+rolling_body="$transaction_dir/rolling.json"
+rolling_release_id=""
+rolling_body_ready=0
+gh() {{
+  case "$*" in
+    *"releases?per_page=100"*)
+      printf '%s\n' '[{{"id":123,"tag_name":"preview","draft":true}}]'
+      ;;
+    *"releases/123"*)
+      printf '%s\n' '{{"id":123,"tag_name":"preview","draft":true}}'
+      ;;
+    *) return 1 ;;
+  esac
+}}
+{lookup}
+resolve_existing_rolling_release
+test "$rolling_release_id" = 123
+test "$rolling_body_ready" = 1
+jq -e '.id == 123 and .tag_name == "preview" and .draft == true' "$rolling_body" >/dev/null
+"#
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env("TEST_TMPDIR", &root)
+            .output()
+            .expect("run draft release lookup fixture");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            output.status.success(),
+            "draft release lookup did not resolve the existing release:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    struct RollingPreflightCase<'a> {
+        listing: &'a str,
+        listing_status: &'a str,
+        detail: &'a str,
+        validate_status: &'a str,
+    }
+
+    fn rolling_preflight_script(lookup: &str, preflight: &str) -> String {
+        format!(
+            r#"set -Eeuo pipefail
+GITHUB_REPOSITORY=example/project
+rolling_tag=preview
+rolling_response="$TEST_TMPDIR/rolling-response"
+rolling_body="$TEST_TMPDIR/rolling.json"
+transaction_dir="$TEST_TMPDIR"
+rollback_dir="$TEST_TMPDIR/rollback"
+rolling_release_id=""
+rolling_http=404
+rolling_body_ready=0
+rolling_tag_sha=""
+had_release=0
+mutated=0
+RELEASE_PRERELEASE=true
+EXPECTED_SOURCE_COMMIT=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+candidate_version=1.0.0
+old_version=1.0.0
+old_source_commit=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+validate_existing_rolling_release() {{ return "$TEST_VALIDATE_STATUS"; }}
+remote_tag_sha() {{ printf '%s\n' "$TEST_TAG_SHA"; }}
+gh() {{
+  case "$*" in
+    *"releases?per_page=100"*)
+      [ "$TEST_LISTING_STATUS" = 0 ] || return "$TEST_LISTING_STATUS"
+      printf '%s\n' "$TEST_LISTING"
+      ;;
+    *"releases/123"*)
+      [ "$TEST_DETAIL_STATUS" = 0 ] || return "$TEST_DETAIL_STATUS"
+      printf '%s\n' "$TEST_DETAIL"
+      ;;
+    *"release download"*)
+      return 0
+      ;;
+    *"--method POST"*|*"--method PATCH"*|*"--method DELETE"*)
+      : > "$TEST_MUTATION"
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}}
+{lookup}
+{preflight}
+test "$rolling_release_id" = 123
+test "$had_release" = 1
+test "$rolling_body_ready" = 1
+jq -e '.id == 123 and .tag_name == "preview" and .draft == true and .prerelease == true' "$rolling_body" >/dev/null
+test ! -e "$TEST_MUTATION"
+"#,
+        )
+    }
+
+    fn run_rolling_preflight_case(
+        root: &std::path::Path,
+        lookup: &str,
+        preflight: &str,
+        case: &RollingPreflightCase<'_>,
+    ) -> std::process::Output {
+        let script = rolling_preflight_script(lookup, preflight);
+        std::process::Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env("TEST_TMPDIR", root)
+            .env("TEST_LISTING", case.listing)
+            .env("TEST_LISTING_STATUS", case.listing_status)
+            .env("TEST_DETAIL", case.detail)
+            .env("TEST_DETAIL_STATUS", "0")
+            .env("TEST_VALIDATE_STATUS", case.validate_status)
+            .env("TEST_TAG_SHA", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .env("TEST_MUTATION", root.join("mutation"))
+            .output()
+            .expect("run rolling preflight fixture")
+    }
+
+    fn output_text(output: &std::process::Output) -> String {
+        format!(
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
+
+    fn assert_no_mutation(root: &std::path::Path) {
+        assert!(
+            !root.join("mutation").exists(),
+            "preflight mutated publication state"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rolling_preflight_preserves_listed_draft_and_fails_before_mutation() {
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        let lookup_start = rolling_script
+            .find("resolve_existing_rolling_release() {")
+            .expect("draft release lookup helper");
+        let validation_start = rolling_script[lookup_start..]
+            .find("validate_existing_rolling_release")
+            .expect("existing release validator");
+        let lookup_end = lookup_start + validation_start - 2;
+        let lookup = &rolling_script[lookup_start..lookup_end];
+        let preflight_start = rolling_script
+            .find("while :; do\ncase \"$rolling_http\" in")
+            .expect("rolling preflight");
+        let preflight_end = rolling_script[preflight_start..]
+            .find("\n\nif [ \"$had_release\" = 0 ]; then")
+            .map(|offset| preflight_start + offset)
+            .expect("rolling mutation boundary");
+        let preflight = &rolling_script[preflight_start..preflight_end];
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-rolling-preflight-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create preflight fixture");
+        let valid = run_rolling_preflight_case(
+            &root,
+            lookup,
+            preflight,
+            &RollingPreflightCase {
+                listing: r#"[{"id":123,"tag_name":"preview"}]"#,
+                listing_status: "0",
+                detail: r#"{"id":123,"tag_name":"preview","draft":true,"prerelease":true,"name":"old","body":"old"}"#,
+                validate_status: "0",
+            },
+        );
+        assert!(
+            valid.status.success(),
+            "valid listed draft failed: {}",
+            output_text(&valid)
+        );
+
+        let invalid = run_rolling_preflight_case(
+            &root,
+            lookup,
+            preflight,
+            &RollingPreflightCase {
+                listing: r#"[{"id":123,"tag_name":"preview"}]"#,
+                listing_status: "0",
+                detail: r#"{"id":123,"tag_name":"preview","draft":true,"prerelease":true,"name":"old","body":"old"}"#,
+                validate_status: "1",
+            },
+        );
+        assert!(
+            !invalid.status.success(),
+            "invalid draft validation was accepted"
+        );
+        assert_no_mutation(&root);
+
+        let multiple = run_rolling_preflight_case(
+            &root,
+            lookup,
+            preflight,
+            &RollingPreflightCase {
+                listing: r#"[{"id":123,"tag_name":"preview"},{"id":124,"tag_name":"preview"}]"#,
+                listing_status: "0",
+                detail: "",
+                validate_status: "0",
+            },
+        );
+        assert!(!multiple.status.success(), "ambiguous listing was accepted");
+        assert_no_mutation(&root);
+
+        let failed_listing = run_rolling_preflight_case(
+            &root,
+            lookup,
+            preflight,
+            &RollingPreflightCase {
+                listing: "",
+                listing_status: "1",
+                detail: "",
+                validate_status: "0",
+            },
+        );
+        assert!(
+            !failed_listing.status.success(),
+            "listing failure was accepted"
+        );
+        assert_no_mutation(&root);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_retains_a_preexisting_rolling_tag_and_publication_lock() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        let rollback_start = rolling_script
+            .find("rollback() {")
+            .expect("rollback helper");
+        let rollback_end = rolling_script
+            .find("\ncleanup_publication() {")
+            .expect("cleanup helper");
+        let rollback = rolling_script[rollback_start..rollback_end]
+            .replace("\n  exit \"$status\"\n}", "\n  return \"$status\"\n}");
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-preexisting-tag-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create rollback fixture");
+        let script = format!(
+            r#"set -Eeuo pipefail
+GITHUB_REPOSITORY=example/project
+rolling_tag=preview
+rolling_release_id=123
+owner_draft=true
+owner_tag_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+owner_name=old-name
+owner_body=old-body
+owner_source_commit=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+preexisting_rolling_tag=1
+had_release=0
+mutated=1
+publication_lock_retain=0
+assert_rolling_ownership() {{ return 0; }}
+assert_publication_lock() {{ return 0; }}
+assert_release_absent() {{ return 0; }}
+remote_tag_sha() {{ printf '%s\n' "$owner_tag_sha"; }}
+gh() {{
+  if [[ "$*" == *"releases/123"* ]] && [[ "$*" == *"--method DELETE"* ]]; then
+    : > "$TEST_TMPDIR/release-deleted"
+    return 0
+  fi
+  if [[ "$*" == *"git/refs/tags/preview"* ]] && [[ "$*" == *"--method DELETE"* ]]; then
+    : > "$TEST_TMPDIR/tag-deleted"
+    return 0
+  fi
+  return 0
+}}
+{rollback}
+set +e
+rollback 1
+rollback_status=$?
+set -e
+test "$rollback_status" -eq 1
+test -e "$TEST_TMPDIR/release-deleted"
+test ! -e "$TEST_TMPDIR/tag-deleted"
+test "$publication_lock_retain" -eq 1
+"#
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env("TEST_TMPDIR", &root)
+            .output()
+            .expect("run pre-existing tag rollback fixture");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            output.status.success(),
+            "pre-existing tag rollback was unsafe:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
