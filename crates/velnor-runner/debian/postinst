@@ -28,15 +28,72 @@ fail() {
   exit 1
 }
 
-# Workload containers run unbounded: no quota drop-in is ever written. Older
-# packages generated a host-scaled CPUQuota drop-in here; upgrades delete
-# that stale ceiling instead of recreating it.
+# The retired writer created an untracked file and shipped no sidecar
+# provenance marker. Its exact four-line signature and CPUQuota formula are the
+# only durable ownership evidence: byte-identical copies are the same retired
+# policy and migrate too. Every other payload, symlink, or conflict fails closed.
+# The packaged Debian targets are 64-bit: getconf returns sysconf's signed long,
+# and /bin/sh arithmetic is signed intmax_t. The old positive-result guard and
+# *95 formula cap valid output at floor(INT64_MAX/95)*95 = 9223372036854775790.
+is_legacy_jobs_cpu_quota_dropin() {
+  [ -f "$JOBS_SLICE_DROPIN" ] || return 1
+  line_count=$(wc -l < "$JOBS_SLICE_DROPIN" 2>/dev/null) || return 1
+  [ "$line_count" -eq 4 ] 2>/dev/null || return 1
+
+  LC_ALL=C awk '
+    function has_legacy_cpu_quota(line, quota, i, remainder) {
+      if (line !~ /^CPUQuota=[1-9][0-9]*%$/) return 0
+      quota = substr(line, 10, length(line) - 10)
+      if (!decimal_at_most(quota, "9223372036854775790")) return 0
+      remainder = 0
+      for (i = 1; i <= length(quota); i++) {
+        remainder = (remainder * 10 + substr(quota, i, 1)) % 95
+      }
+      return remainder == 0
+    }
+
+    function decimal_at_most(value, maximum, i, value_digit, maximum_digit) {
+      if (length(value) < length(maximum)) return 1
+      if (length(value) > length(maximum)) return 0
+      for (i = 1; i <= length(value); i++) {
+        value_digit = substr(value, i, 1) + 0
+        maximum_digit = substr(maximum, i, 1) + 0
+        if (value_digit < maximum_digit) return 1
+        if (value_digit > maximum_digit) return 0
+      }
+      return 1
+    }
+
+    BEGIN { valid = 1 }
+    NR == 1 { if ($0 != "[Slice]") { valid = 0; exit } next }
+    NR == 2 { if ($0 != "# Generated from the host online CPU count during package configuration.") { valid = 0; exit } next }
+    NR == 3 { if ($0 != "# CPUQuota is 95% of one CPU per online logical CPU.") { valid = 0; exit } next }
+    NR == 4 { if (!has_legacy_cpu_quota($0)) { valid = 0; exit } next }
+    NR > 4 { valid = 0; exit }
+    END { if (NR != 4 || !valid) exit 1 }
+  ' "$JOBS_SLICE_DROPIN"
+}
+
 remove_stale_jobs_cpu_quota_dropin() {
-  if [ -e "$JOBS_SLICE_DROPIN" ]; then
-    rm -f "$JOBS_SLICE_DROPIN"
-    echo "Removed stale velnor-jobs.slice CPU quota drop-in $JOBS_SLICE_DROPIN."
+  if [ -L "$JOBS_SLICE_DROPIN_DIR" ]; then
+    fail "refusing unknown conflict at $JOBS_SLICE_DROPIN_DIR: drop-in directory is a symlink"
   fi
-  rmdir "$JOBS_SLICE_DROPIN_DIR" 2>/dev/null || true
+  [ -e "$JOBS_SLICE_DROPIN_DIR" ] || return 0
+  [ -d "$JOBS_SLICE_DROPIN_DIR" ] \
+    || fail "refusing unknown conflict at $JOBS_SLICE_DROPIN_DIR: drop-in path is not a directory"
+
+  if [ -L "$JOBS_SLICE_DROPIN" ]; then
+    fail "refusing unknown conflict at $JOBS_SLICE_DROPIN: symlinks are not the legacy Velnor file"
+  fi
+  [ -e "$JOBS_SLICE_DROPIN" ] || return 0
+  [ -f "$JOBS_SLICE_DROPIN" ] \
+    || fail "refusing unknown conflict at $JOBS_SLICE_DROPIN: not a regular file"
+  is_legacy_jobs_cpu_quota_dropin \
+    || fail "refusing unknown conflict at $JOBS_SLICE_DROPIN: contents do not match the exact legacy Velnor CPU quota file"
+
+  rm -f "$JOBS_SLICE_DROPIN" \
+    || fail "could not remove stale Velnor CPU quota drop-in $JOBS_SLICE_DROPIN"
+  echo "Removed stale Velnor CPU quota drop-in $JOBS_SLICE_DROPIN."
 }
 
 require_package_transaction_lock() {
@@ -165,7 +222,6 @@ case "$1" in
         all_velnor_units_drained || fail "refusing package configuration: active Velnor service/timer unit(s) remain (${active_units:-unknown}). Stop the exact units first."
       fi
     fi
-    remove_stale_jobs_cpu_quota_dropin
     # /run is tmpfs: recreate the transaction-lock path now (not only at boot)
     # so the documented flock wrapper works immediately after install/upgrade.
     systemd-tmpfiles --create /usr/lib/tmpfiles.d/velnor-runner.conf
@@ -231,12 +287,16 @@ case "$1" in
       fi
     fi
 
+    # Install and upgrade both reach this configure path. Remove the exact
+    # retired package file immediately before reloading systemd, after the
+    # rest of the package identity checks have succeeded.
+    remove_stale_jobs_cpu_quota_dropin
     if [ -d /run/systemd/system ]; then
       systemctl daemon-reload \
         || fail "systemd refused to reload after removing the stale velnor-jobs.slice quota drop-in"
-      # The workload slice is identity-only: prove no ceiling survived the
-      # stale drop-in removal. A quota here means an operator override outside
-      # the package, and upgrades must never silently keep one.
+      # The workload slice is identity-only: prove no ceiling remains. The
+      # exact legacy package drop-in was removed; any remaining ceiling is an
+      # unrelated override and must not silently constrain jobs.
       ceiling=$(systemctl show \
         --property=CPUQuotaPerSecUSec --property=MemoryMax --property=MemoryHigh \
         --value velnor-jobs.slice 2>/dev/null) \
@@ -245,9 +305,9 @@ case "$1" in
       # order. Every line must read `infinity` (any case): any finite value
       # is a surviving ceiling.
       printf '%s\n' "$ceiling" | grep -qiE -v '^(infinity)?$' \
-        && fail "velnor-jobs.slice carries a CPU/RAM ceiling after the quota drop-in removal: $ceiling"
+        && fail "velnor-jobs.slice carries a CPU/RAM ceiling after legacy drop-in removal: $ceiling"
       [ "$(printf '%s' "$ceiling" | grep -ci infinity)" -eq 3 ] \
-        || fail "velnor-jobs.slice resource properties are not all infinity after the quota drop-in removal: $ceiling"
+        || fail "velnor-jobs.slice resource properties are not all infinity after legacy drop-in removal: $ceiling"
       # Fleet unit enablement, masking, and activation belong to the operator.
       # Package upgrades preserve systemd's existing state for them; fresh
       # installs leave them disabled. In particular, never revive the obsolete

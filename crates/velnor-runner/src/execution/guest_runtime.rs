@@ -532,7 +532,9 @@ impl<'a> GuestDockerTeardown<'a> {
                 args.pair("--network-alias", service.network_alias.clone());
             }
             for port in &service.ports {
-                args.pair("-p", port.clone());
+                let binding = crate::container::loopback_service_port_binding(port)
+                    .ok_or_else(|| format!("guest service publish mapping is invalid: {port:?}"))?;
+                args.pair("-p", binding);
             }
             // Service credentials never reach argv: /proc/<pid>/cmdline is
             // world-readable to every co-tenant of this host.
@@ -1656,6 +1658,10 @@ mod tests {
             args.windows(2)
                 .any(|w| w == ["--network-alias", "postgres"])
         }));
+        assert!(runner
+            .calls
+            .iter()
+            .any(|(_, args)| { args.windows(2).any(|w| w == ["-p", "127.0.0.1::5432"]) }));
         assert!(effective(&runner)
             .iter()
             .any(|args| args.iter().any(|arg| arg == "CI=true")));

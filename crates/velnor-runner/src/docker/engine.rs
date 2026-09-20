@@ -14,23 +14,22 @@
 //!   `execution/unix_api.rs` precedent shows hand-rolled socket HTTP is this
 //!   codebase's established shape; this module is its async Engine sibling.
 //!
-//! Endpoint coverage is read-only control-plane, the idempotent
-//! container-lifecycle mutations, and one payload call: `version`, `info`,
+//! Endpoint coverage is read-only control-plane, container-lifecycle
+//! mutations, and one payload call: `version`, `info`,
 //! container inspect, image inspect, network inspect, the filtered
 //! container/network/volume lists, container start/stop/remove, and
 //! `exec_create`/`exec_start`/exec-inspect for run steps in containers.
 //! Paths are unversioned, which is the negotiation: the daemon serves its
 //! native schema, nothing pins an old API version, and any schema drift
-//! surfaces as an [`EngineError`] that the facade answers with its CLI
-//! fallback — never as a misread value.
+//! surfaces as an [`EngineError`] rather than a misread value. The facade
+//! falls back for read/start/stop operations; container removal fails closed
+//! after an ambiguous result to prevent a second delete.
 //!
-//! The mutations are safe under the fallback contract because they are
-//! idempotent: a timed-out API attempt that the daemon did act on is
-//! re-driven by the CLI fallback, and re-starting, re-stopping, or
-//! re-removing converges instead of erroring (re-removing a gone
-//! container reads as already-removed on both legs). Non-idempotent
-//! mutations (create, run) can never share this contract: a fallback
-//! after an ambiguous timeout could act twice.
+//! Read/start/stop mutations are safe under the fallback contract because
+//! they are idempotent. Removal uses one API attempt plus an in-flight claim:
+//! 404 is already-removed, 409 is a typed conflict, and every other error
+//! stays fail-closed because the response may be ambiguous. Non-idempotent
+//! mutations (create, run) cannot use fallback after an ambiguous timeout.
 //!
 //! Exec is the deliberate exception, scoped to the script-step path. A
 //! fallback after the exec'd process started re-runs the step —
@@ -59,14 +58,10 @@
 //!   perform no redaction. [`EngineError`]'s `Display` carries status codes,
 //!   byte counts, and I/O error strings only.
 //!
-//! The facade ([`super::client`]) owns routing: every migrated call tries
-//! the API first under a capped budget and falls back to its historical CLI
-//! call on ANY API failure, logging the fallback with telemetry. Engine
-//! errors therefore never surface and never need a
-//! `DockerErrorCategory` mapping of their own: whatever the caller sees is
-//! either an API value
-//! proven identical by test, or the CLI's own result with the CLI's own
-//! category.
+//! The facade ([`super::client`]) owns routing: read/start/stop and exec calls
+//! may fall back to their historical CLI route, while container removal
+//! never retries after a request was sent. Its definitive 409 response maps
+//! to `DockerErrorCategory::Conflict`; other Engine errors remain terminal.
 
 use super::deadline::DockerOp;
 use anyhow::{bail, Context, Result};
@@ -1008,6 +1003,26 @@ impl EngineError {
         }
     }
 
+    /// Return an exact HTTP status from a response-status fault. Status text
+    /// is internally formatted as `http NNN`; transport and parse details do
+    /// not get reinterpreted as daemon status codes.
+    #[must_use]
+    pub(crate) fn status_code(&self) -> Option<u16> {
+        let Self::Fault {
+            kind: EngineFaultKind::Status,
+            detail,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let digits = detail.strip_prefix("http ")?;
+        if digits.len() != 3 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse().ok()
+    }
+
     #[cfg(test)]
     #[allow(
         clippy::unwrap_used,
@@ -1192,8 +1207,8 @@ impl EngineClient {
             .map_err(|error| EngineError::fault(op, (EngineFaultKind::Json, error.to_string())))
     }
 
-    /// `GET /containers/{name}/json`. Serves five facade queries from one
-    /// document: readiness, running, id, exit info, published ports.
+    /// `GET /containers/{name}/json`. Serves facade queries for readiness,
+    /// running, ID, exit/create time, and published ports.
     pub(crate) async fn inspect_container(
         &self,
         name: &str,
@@ -1352,12 +1367,10 @@ impl EngineClient {
     }
 
     /// `DELETE /containers/{name}[?force=1][&v=1]`. Serves the facade's
-    /// idempotent container remove: 2xx removed it, 404 means it was
-    /// already gone (both success, proven live on 29.4.0). 409 — a
-    /// running container without force — is an API error the CLI
-    /// fallback re-derives into the typed
-    /// [`super::client::DockerErrorCategory::Conflict`], so genuine
-    /// conflicts surface instead of succeeding.
+    /// container remove: 2xx removed it, 404 means it was already gone,
+    /// and 409 — a running container without force — is a definitive error
+    /// mapped to [`super::client::DockerErrorCategory::Conflict`] without a
+    /// second delete.
     pub(crate) async fn remove_container(
         &self,
         name: &str,
@@ -2102,6 +2115,7 @@ pub(crate) struct EngineContainer {
     pub status: String,
     pub health: Option<String>,
     pub finished_at: String,
+    pub created_at: Option<String>,
     pub ports: Vec<super::client::PortMapping>,
 }
 
@@ -2223,6 +2237,10 @@ fn parse_container(value: &serde_json::Value) -> FaultResult<EngineContainer> {
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
         finished_at: require_str(value, "/State/FinishedAt")?.to_string(),
+        created_at: value
+            .get("Created")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
         ports: parse_inspect_ports(value)?,
     })
 }
@@ -2749,7 +2767,7 @@ mod tests {
     }
 
     fn inspect_body() -> &'static str {
-        r#"{"Id":"a530e70d9e1e35941b6fc12db9b51a7b19c6d02","State":{"Running":true,"Status":"running","FinishedAt":"0001-01-01T00:00:00Z","Health":{"Status":"healthy"}},"NetworkSettings":{"Ports":{"8080/tcp":[{"HostIp":"0.0.0.0","HostPort":"41062"},{"HostIp":"::","HostPort":"41062"}],"9090/tcp":null}}}"#
+        r#"{"Id":"a530e70d9e1e35941b6fc12db9b51a7b19c6d02","Created":"2026-09-10T20:11:02Z","State":{"Running":true,"Status":"running","FinishedAt":"0001-01-01T00:00:00Z","Health":{"Status":"healthy"}},"NetworkSettings":{"Ports":{"8080/tcp":[{"HostIp":"0.0.0.0","HostPort":"41062"},{"HostIp":"::","HostPort":"41062"}],"9090/tcp":null}}}"#
     }
 
     #[test]
@@ -2800,13 +2818,17 @@ mod tests {
     }
 
     #[test]
-    fn inspect_parse_reads_all_five_facade_fields() {
+    fn inspect_parse_reads_facade_fields_including_creation_time() {
         let value: serde_json::Value = serde_json::from_str(inspect_body()).unwrap();
         let container = parse_container(&value).unwrap();
         assert_eq!(container.id, "a530e70d9e1e35941b6fc12db9b51a7b19c6d02");
         assert!(container.running);
         assert_eq!(container.readiness_word(), "healthy");
         assert_eq!(container.finished_at, "0001-01-01T00:00:00Z");
+        assert_eq!(
+            container.created_at.as_deref(),
+            Some("2026-09-10T20:11:02Z")
+        );
         assert_eq!(
             container.ports,
             vec![
@@ -2840,7 +2862,7 @@ mod tests {
         // the parser never reads them, and Env carries image secrets).
         // Live notes: no `Health` key at all without a healthcheck, and
         // `Ports` is `{}` on a created container.
-        let live = r#"{"Id":"bd9ace6535cb18f6f20d0532c1276a51e50ab1db44885140c600a0c736fe2977","State":{"Status":"created","Running":false,"Paused":false,"Restarting":false,"OOMKilled":false,"Dead":false,"Pid":0,"ExitCode":0,"Error":"","StartedAt":"0001-01-01T00:00:00Z","FinishedAt":"0001-01-01T00:00:00Z"},"NetworkSettings":{"SandboxID":"","SandboxKey":"","Ports":{},"Networks":{"bridge":{"IPAMConfig":null,"Links":null,"Aliases":null,"DriverOpts":null,"GwPriority":0,"NetworkID":"","EndpointID":"","Gateway":"","IPAddress":"","MacAddress":"","IPPrefixLen":0,"IPv6Gateway":"","GlobalIPv6Address":"","GlobalIPv6PrefixLen":0,"DNSNames":null}}}}"#;
+        let live = r#"{"Id":"bd9ace6535cb18f6f20d0532c1276a51e50ab1db44885140c600a0c736fe2977","Created":"2026-09-14T01:40:37.95747574+07:00","State":{"Status":"created","Running":false,"Paused":false,"Restarting":false,"OOMKilled":false,"Dead":false,"Pid":0,"ExitCode":0,"Error":"","StartedAt":"0001-01-01T00:00:00Z","FinishedAt":"0001-01-01T00:00:00Z"},"NetworkSettings":{"SandboxID":"","SandboxKey":"","Ports":{},"Networks":{"bridge":{"IPAMConfig":null,"Links":null,"Aliases":null,"DriverOpts":null,"GwPriority":0,"NetworkID":"","EndpointID":"","Gateway":"","IPAddress":"","MacAddress":"","IPPrefixLen":0,"IPv6Gateway":"","GlobalIPv6Address":"","GlobalIPv6PrefixLen":0,"DNSNames":null}}}}"#;
         let value: serde_json::Value = serde_json::from_str(live).unwrap();
         let container = parse_container(&value).unwrap();
         assert_eq!(
@@ -2850,6 +2872,10 @@ mod tests {
         assert!(!container.running);
         assert_eq!(container.readiness_word(), "created");
         assert_eq!(container.finished_at, "0001-01-01T00:00:00Z");
+        assert_eq!(
+            container.created_at.as_deref(),
+            Some("2026-09-14T01:40:37.95747574+07:00")
+        );
         assert!(container.ports.is_empty());
     }
 
@@ -3423,8 +3449,8 @@ mod tests {
         );
 
         // Remove: 404 is already-removed success even with the live error
-        // document attached; 409 is a typed API error the facade falls
-        // back from, and its message never surfaces.
+        // document attached; 409 carries its exact HTTP status for the
+        // facade's no-retry conflict classification.
         let mock = MockEngine::serve(|_| error_response("404 Not Found", NO_SUCH), 1);
         assert_eq!(
             EngineClient::new(mock.socket.clone())
@@ -3438,6 +3464,7 @@ mod tests {
             .remove_container("svc", false, false, BUDGET)
             .await
             .unwrap_err();
+        assert_eq!(error.status_code(), Some(409));
         assert_eq!(error.kind(), Some(EngineFaultKind::Status));
         assert_eq!(format!("{error}"), "engine api remove status: http 409");
     }

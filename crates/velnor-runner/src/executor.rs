@@ -8,9 +8,7 @@ use crate::{
     cache::CacheEntryLock,
     checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
     container::{JobContainerSpec, Shell, JOB_DONE_SENTINEL},
-    docker::client::{
-        classify_docker_stderr, docker_error_category, DockerCommandError, DockerErrorCategory,
-    },
+    docker::client::{docker_error_category, DockerCommandError, DockerErrorCategory},
     execution::{
         apply_command_result, docker_post_log_prelude, drain_post_stack,
         javascript_post_log_prelude, native_post_condition, native_post_log_prelude,
@@ -185,9 +183,8 @@ fn link_command_kind(script: &str) -> Option<&'static str> {
 }
 
 fn docker_lifecycle_guard(stage: &'static str) -> Result<crate::capacity::DockerLifecycleGuard> {
-    let run_root = crate::storage::StorageLayout::resolve()
-        .map(|layout| layout.run_root)
-        .unwrap_or_else(|| std::env::temp_dir().join("velnor"));
+    let run_root =
+        crate::buildkit::claims_run_root().unwrap_or_else(|| std::env::temp_dir().join("velnor"));
     crate::capacity::DockerLifecycleGuard::lock_for_stage(&run_root, stage)
 }
 
@@ -2242,9 +2239,9 @@ where
     }
 
     /// Adopt every guard an earlier (pre-created) environment start bound.
-    /// The guards must live as long as the job container: the container
-    /// holds the lease proxy socket bind-mounted, so dropping that guard
-    /// deletes the socket inode and kills in-container docker clients
+    /// The guards must live as long as the job container: its Docker clients
+    /// use the lease endpoint (a mounted Unix socket on Linux, authenticated
+    /// TCP on macOS), so dropping that guard disconnects in-container clients
     /// (0.1.185 precreate regression, tailrocks/velnor#311 follow-up); the
     /// network guard fires `docker network rm` on drop, which against the
     /// live container's endpoint fails with "has active endpoints" and
@@ -2533,6 +2530,10 @@ where
         // `ProcessCommandRunner` registers every host process group it spawns
         // with the active token, so the current step's whole process tree is a
         // cancellation target without any call site naming it.
+        // Tests share this process-global slot across parallel test threads;
+        // serialize every executor writer with Docker Engine routing tests.
+        #[cfg(test)]
+        let _active_test_serial = crate::docker::metrics::lock_serial_for_test();
         let active_cancellation = crate::execution::cancel::set_active(self.cancellation.clone());
         // The single post-action stack, in registration (step) order; drained
         // LIFO below like upstream's `PostJobSteps`.
@@ -4512,89 +4513,20 @@ where
                 )?);
                 let cleanup =
                     input_truthy(&native_input_or(&action_state, action, "cleanup", "true")?);
-                // The post never destroys the builder: destroying it here is
-                // what kept every job's builds cold. It releases this job's
-                // hold and stops the daemon only when no holder remains; a
-                // workflow that wants destruction runs `docker buildx rm`
-                // itself. Like the old `|| true` script, the post never fails
-                // the job: a stop that fails is a maintenance failure the
-                // reclaim paths converge, reported on stderr.
-                let mut stdout =
-                    format!("Releasing builder {name} (persistent; keep-state={keep_state})\n");
-                let mut stderr = String::new();
-                // cleanup=false releases the hold but never stops: the
-                // no-op stop decides under the claim lock without acting.
-                let stop = || {
-                    if cleanup {
-                        crate::buildkit::stop_builder_daemon(&name)
-                    } else {
-                        Ok(false)
-                    }
-                };
-                let run_root = crate::buildkit::claims_run_root();
-                let outcome = match (state.temp_host.as_deref(), run_root.as_ref()) {
-                    (Some(_temp), Some(run_root)) => {
-                        match crate::buildkit::release_and_stop_if_last(
-                            run_root,
-                            &name,
-                            &container.name,
-                            stop,
-                            || crate::buildkit::start_builder_daemon(&name),
-                        ) {
-                            Ok(outcome) => Some(outcome),
-                            Err(error) => {
-                                use std::fmt::Write as _;
-                                let _ = writeln!(
-                                    stderr,
-                                    "buildx post: release of {name} failed ({error:#}); \
-                                     the hold converges via slot repair"
-                                );
-                                stdout
-                                    .push_str("Release failed: daemon left running (see stderr)\n");
-                                None
-                            }
-                        }
-                    }
-                    _ => {
-                        stdout.push_str(
-                            "No temp dir or run root: hold skipped, builder left running\n",
-                        );
-                        None
-                    }
-                };
-                match outcome {
-                    None => {}
-                    Some(outcome) if !outcome.removed_last => {
-                        stdout.push_str("Other holders remain: daemon left running\n");
-                    }
-                    // Reached only with removed_last: shared releases
-                    // matched the arm above.
-                    Some(_) if !cleanup => {
-                        stdout
-                            .push_str("No other holders: cleanup disabled, daemon left running\n");
-                    }
-                    Some(outcome) if outcome.restarted => {
-                        stdout.push_str(
-                            "No other holders at release, but a new job claimed during the \
-                             stop: daemon restarted for it, cache kept\n",
-                        );
-                    }
-                    Some(outcome) if outcome.stopped => {
-                        stdout.push_str(
-                            "No other holders: daemon stopped, cache kept for the next job\n",
-                        );
-                    }
-                    Some(_) => {
-                        stdout.push_str("No other holders: daemon already stopped, cache kept\n");
-                    }
-                }
+                // Buildx post runs while the job and its services can still
+                // use the daemon/network. Keep the durable claim until
+                // terminal teardown proves every recorded container absent.
+                let stdout = format!(
+                    "Builder {name} remains claimed through terminal teardown \
+                     (cleanup={cleanup}; keep-state={keep_state})\n"
+                );
                 Ok(StepExecutionResult {
                     exit_code: 0,
                     state: StepCommandState::default(),
                     skipped: false,
                     failure_ignored: false,
                     stdout,
-                    stderr,
+                    stderr: String::new(),
                 })
             }
             NativeActionAdapter::DockerLogin => {
@@ -5152,6 +5084,12 @@ where
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env)?);
         let requested_name = native_input_or(&action_state, action, "name", "velnor-builder")?;
+        let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
+        if driver != "docker-container" {
+            anyhow::bail!(
+                "setup-buildx only supports the isolated docker-container driver; got {driver:?}"
+            );
+        }
         let tier = buildkit_trust_tier(state);
         let name = crate::buildkit::persistent_builder_name(
             &requested_name,
@@ -5165,23 +5103,38 @@ where
             .temp_host
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("setup-buildx requires a runner temp directory"))?;
-        crate::buildkit::record_job_builder(temp, &name)?;
-        let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         let buildkitd_config_inline =
             native_input(action, &action_state, "buildkitd-config-inline")?;
-        let buildkitd_config_container = if buildkitd_config_inline.is_empty() {
-            None
-        } else {
-            let config_name = format!("buildkitd-config-{}.toml", sanitize_artifact_name(&name));
-            let config_host = state
-                .temp_host
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("setup-buildx requires a runner temp directory"))?
-                .join(&config_name);
-            fs::write(&config_host, &buildkitd_config_inline)
-                .with_context(|| format!("write BuildKit config {}", config_host.display()))?;
-            Some(format!("/__t/{config_name}"))
-        };
+        const APPROVED_INLINE_BUILDKIT_CONFIG: &str =
+            "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]";
+        if !buildkitd_config_inline.is_empty()
+            && buildkitd_config_inline != APPROVED_INLINE_BUILDKIT_CONFIG
+            && buildkitd_config_inline != format!("{APPROVED_INLINE_BUILDKIT_CONFIG}\n")
+        {
+            anyhow::bail!("setup-buildx rejected an unreviewed inline BuildKit config");
+        }
+        // Always pass a runner-owned config file. Without this, Buildx
+        // auto-discovers buildkitd.default.toml from the job-controlled
+        // Docker config/home and copies those settings into the privileged
+        // persistent daemon, bypassing manifest validation. The file lives in
+        // a runner-only directory mounted read-only into the job container;
+        // RUNNER_TEMP is writable by workflow steps and cannot safely hold it.
+        let config_name = format!("buildkitd-config-{}.toml", sanitize_artifact_name(&name));
+        container
+            .write_buildkit_config(&config_name, &buildkitd_config_inline)
+            .with_context(|| format!("write runner-owned BuildKit config {config_name}"))?;
+        let buildkitd_config_container = format!(
+            "{}/{config_name}",
+            crate::container::BUILDKIT_CONFIG_CONTAINER_DIR
+        );
+        let cleanup_on_release =
+            input_truthy(&native_input_or(&action_state, action, "cleanup", "true")?);
+        let mut required_containers = container
+            .services
+            .iter()
+            .map(|service| service.name.clone())
+            .collect::<Vec<_>>();
+        required_containers.push(container.name.clone());
         let result = {
             // Setup claims and creates/reuses under the same filesystem-wide
             // lifecycle gate the reaper takes exclusively. A job may be
@@ -5189,12 +5142,28 @@ where
             // until its current-generation name is registered again.
             let _coordinator = crate::capacity::FilesystemCoordinator::lock_shared(&run_root)
                 .context("lock BuildKit lifecycle for setup")?;
-            crate::buildkit::claim_builder(
+            crate::buildkit::claim_builder_bounded(
                 &run_root,
                 &name,
                 &job_scope_from_temp(Some(temp)),
                 &container.name,
+                &state.trust_scope,
+                tier,
+                container.repository.as_deref(),
+                &required_containers,
+                cleanup_on_release,
             )?;
+            // The durable holder is enough for teardown discovery even if
+            // this job-local journal write or later lease admission fails.
+            crate::buildkit::record_job_builder(temp, &name)
+                .context("record admitted BuildKit builder for job teardown")?;
+            if let Some(lease) = &self.docker_lease
+                && let Err(admission_error) = lease
+                    .admit_persistent_buildkit_builder(&name, buildkitd_config_inline.as_bytes())
+            {
+                return Err(admission_error)
+                    .context("admit BuildKit builder to the job Docker lease");
+            }
             let inspect_args = vec!["buildx".to_string(), "inspect".to_string(), name.clone()];
             let inspect_result =
                 self.container_docker(container, &action_state, &inspect_args, None, timeout)?;
@@ -5213,9 +5182,11 @@ where
                     driver,
                     "--use".to_string(),
                 ];
-                if let Some(config) = buildkitd_config_container {
-                    args.extend(["--config".to_string(), config]);
-                }
+                args.extend(["--config".to_string(), buildkitd_config_container]);
+                args.extend([
+                    "--driver-opt".to_string(),
+                    "provenance-add-gha=false".to_string(),
+                ]);
                 if input_truthy(&native_input_or(&action_state, action, "install", "false")?) {
                     args.push("--bootstrap".to_string());
                 }
@@ -5595,7 +5566,9 @@ where
 
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _lifecycle = docker_lifecycle_guard("cleanup")?;
-        mark_job_container_done(container);
+        self.reserve_job_buildkit_release_before_job_done(container, || {
+            mark_job_container_done(container);
+        })?;
         // Service containers hold endpoints on the job network. Remove them
         // BEFORE reclaiming job-owned resources: reclaim includes the network,
         // and `docker network rm` fails while an endpoint is still attached.
@@ -5608,15 +5581,13 @@ where
         // before reclaim. `docker rm` of Created BuildKit waits forever on
         // that lock if the lease still holds `POST /containers/{id}/start`.
         self.abort_docker_lease();
-        let owned_result = self.reclaim_job_owned_docker(&container.name);
-        let buildkit_result = self.cleanup_job_buildkit_unlocked(container);
+        container.clear_runtime_docker_endpoint();
 
-        let result = (|| {
-            container_result?;
-            owned_result?;
-            buildkit_result?;
-            service_result
-        })();
+        let result =
+            Self::finish_cleanup_after_job_removal(container_result, service_result, || {
+                self.cleanup_job_buildkit_unlocked(container)?;
+                self.reclaim_job_owned_docker(&container.name)
+            });
         if result.is_ok() {
             self.defuse_job_network_guard();
         }
@@ -5636,7 +5607,9 @@ where
     }
 
     fn cleanup_without_buildkit_unlocked(&mut self, container: &JobContainerSpec) -> Result<()> {
-        mark_job_container_done(container);
+        self.reserve_job_buildkit_release_before_job_done(container, || {
+            mark_job_container_done(container);
+        })?;
         // Services first: their endpoints block the network removal inside
         // reclaim (see `cleanup`).
         let service_result = self.cleanup_services_unlocked(container);
@@ -5645,13 +5618,13 @@ where
         // runs. Dropping the lease at the end used to leave ContainerStart
         // held, so the worker's `docker rm` of Created BuildKit hung.
         self.abort_docker_lease();
-        let owned_result = self.reclaim_job_owned_docker(&container.name);
+        container.clear_runtime_docker_endpoint();
 
-        let result = (|| {
-            container_result?;
-            owned_result?;
-            service_result
-        })();
+        let result =
+            Self::finish_cleanup_after_job_removal(container_result, service_result, || {
+                self.cleanup_job_buildkit_unlocked(container)?;
+                self.reclaim_job_owned_docker(&container.name)
+            });
         if result.is_ok() {
             self.defuse_job_network_guard();
         }
@@ -5677,16 +5650,18 @@ where
     }
 
     pub(crate) fn cleanup_job_and_network(&mut self, container: &JobContainerSpec) -> Result<()> {
-        mark_job_container_done(container);
+        self.reserve_job_buildkit_release_before_job_done(container, || {
+            mark_job_container_done(container);
+        })?;
+        let service_result = self.cleanup_services_unlocked(container);
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         self.abort_docker_lease();
-        let owned_result = self.reclaim_job_owned_docker(&container.name);
-        let buildkit_result = self.cleanup_job_buildkit(container);
-        let result = (|| {
-            container_result?;
-            owned_result?;
-            buildkit_result
-        })();
+        container.clear_runtime_docker_endpoint();
+        let result =
+            Self::finish_cleanup_after_job_removal(container_result, service_result, || {
+                self.cleanup_job_buildkit_unlocked(container)?;
+                self.reclaim_job_owned_docker(&container.name)
+            });
         if result.is_ok() {
             self.defuse_job_network_guard();
         }
@@ -5705,18 +5680,40 @@ where
         &mut self,
         container: &JobContainerSpec,
     ) -> Result<()> {
-        mark_job_container_done(container);
+        self.reserve_job_buildkit_release_before_job_done(container, || {
+            mark_job_container_done(container);
+        })?;
+        let service_result = self.cleanup_services_unlocked(container);
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         self.abort_docker_lease();
-        let owned_result = self.reclaim_job_owned_docker(&container.name);
-        let result = (|| {
-            container_result?;
-            owned_result
-        })();
+        container.clear_runtime_docker_endpoint();
+        let result =
+            Self::finish_cleanup_after_job_removal(container_result, service_result, || {
+                self.cleanup_job_buildkit_unlocked(container)?;
+                self.reclaim_job_owned_docker(&container.name)
+            });
         if result.is_ok() {
             self.defuse_job_network_guard();
         }
         result
+    }
+
+    /// The BuildKit daemon shares the job network until its verified release
+    /// detaches it. Keep this ordering explicit and injectable: a failed
+    /// service or job removal must never release the builder while a live
+    /// workload could still use it; successful release must precede network
+    /// removal so the endpoint cannot block teardown forever.
+    fn finish_cleanup_after_job_removal(
+        container_result: Result<CommandResult>,
+        service_result: Result<()>,
+        finish_after_absence: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        container_result?;
+        // A service may remain attached to the job's private network after
+        // the job container is gone. Do not detach/release BuildKit until
+        // every service removal has succeeded.
+        service_result?;
+        finish_after_absence()
     }
 
     fn reclaim_job_owned_docker(&mut self, job_id: &str) -> Result<()> {
@@ -5729,86 +5726,92 @@ where
         })
     }
 
-    /// Remove every BuildKit daemon whose buildx builder belongs to this job.
+    /// Release this job's durable BuildKit owner-registry claims.
     ///
-    /// A cancelled job can skip setup-buildx's post action. The buildx client
-    /// configuration lives inside the disposable job container, so host-side
-    /// teardown cannot use `docker buildx rm`. Buildx names its daemon and
-    /// state volume from the builder name; every native builder is suffixed
-    /// with the job's unique scope. Match that exact suffix, then remove the
-    /// daemon together with its anonymous/named state volume.
+    /// Engine names and labels do not prove builder ownership. Teardown only
+    /// acts on builders recorded by setup-buildx and validated by the durable
+    /// owner registry; retired slot/capped names get no Engine scan or delete.
     pub(crate) fn cleanup_job_buildkit(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _lifecycle = docker_lifecycle_guard("cleanup-job-buildkit")?;
         self.cleanup_job_buildkit_unlocked(container)
     }
 
+    /// Persist each admitted builder's teardown reservation before deleting
+    /// job or service containers. Otherwise the periodic reaper can interpret
+    /// their disappearance as a crashed holder and remove the claim before
+    /// cleanup detaches the daemon from this job's network.
+    fn reserve_job_buildkit_release_before_job_done(
+        &self,
+        container: &JobContainerSpec,
+        publish_job_done: impl FnOnce(),
+    ) -> Result<()> {
+        self.reserve_job_buildkit_release_unlocked(container)?;
+        publish_job_done();
+        Ok(())
+    }
+
+    fn reserve_job_buildkit_release_unlocked(&self, container: &JobContainerSpec) -> Result<()> {
+        let mut builders = crate::buildkit::read_job_builders(&container.temp_host)?;
+        let run_root = crate::buildkit::claims_run_root();
+        if let Some(run_root) = &run_root {
+            builders.extend(crate::buildkit::builders_claimed_by_job(
+                run_root,
+                &container.name,
+            )?);
+        }
+        builders.sort();
+        builders.dedup();
+        for builder in builders {
+            if !crate::buildkit::is_persistent_builder_name(&builder) {
+                continue;
+            }
+            let Some(run_root) = &run_root else {
+                bail!(
+                    "cannot reserve persistent BuildKit builder {builder} for teardown without its claim root"
+                );
+            };
+            crate::buildkit::reserve_admitted_builder_release(run_root, &builder, &container.name)?;
+        }
+        Ok(())
+    }
+
     fn cleanup_job_buildkit_unlocked(&mut self, container: &JobContainerSpec) -> Result<()> {
-        // Release this job's persistent builders first: the post step already
-        // did this on the happy path (making this a no-op), but the cancel
-        // path skips posts, so teardown is the backstop. Stopping only
-        // happens when the release removed the final hold. Errors propagate
-        // like the removal errors below: a broken run root must be loud.
-        for builder in crate::buildkit::read_job_builders(&container.temp_host)? {
+        // The job-local journal accelerates normal teardown. Recover from the
+        // locked durable owner/claim registry too: a crash between claim and
+        // journal write must not strand the holder forever.
+        let mut builders = crate::buildkit::read_job_builders(&container.temp_host)?;
+        if let Some(run_root) = crate::buildkit::claims_run_root() {
+            builders.extend(crate::buildkit::builders_claimed_by_job(
+                &run_root,
+                &container.name,
+            )?);
+        }
+        builders.sort();
+        builders.dedup();
+        for builder in builders {
             if !crate::buildkit::is_persistent_builder_name(&builder) {
                 continue;
             }
             if let Some(run_root) = crate::buildkit::claims_run_root() {
-                crate::buildkit::release_and_stop_if_last(
+                crate::buildkit::release_admitted_builder_after_network_detach(
                     &run_root,
                     &builder,
                     &container.name,
-                    || crate::buildkit::stop_builder_daemon(&builder),
-                    || crate::buildkit::start_builder_daemon(&builder),
+                    &container.network,
+                    &container.name,
+                    &container.daemon_id,
                 )?;
             }
-        }
-        let scope = job_scope_from_temp(Some(&container.temp_host));
-        let listed = self.run_docker(&crate::docker_lease::list_job_buildkit_format_args())?;
-        let ids = crate::docker::client::job_buildkit_ids_for_job(
-            &listed.stdout,
-            &container.name,
-            &scope,
-        );
-        if !ids.is_empty() {
-            crate::docker_lease::force_remove_containers_serially(&ids, |args| {
-                self.run_docker_remove_container(args).map(|_| ())
-            })?;
-        }
-
-        // Buildx creates a named `<container>_state` volume. Docker's
-        // `rm --volumes` deliberately removes only anonymous volumes, so the
-        // state volume requires a separate prefix query and removal.
-        let volume_filter = format!(
-            "name={}{scope}",
-            crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX
-        );
-        let listed_volumes = self.run_docker(&[
-            "volume".into(),
-            "ls".into(),
-            "--quiet".into(),
-            "--filter".into(),
-            volume_filter,
-        ])?;
-        let volumes = listed_volumes
-            .stdout
-            .lines()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            // The engine `name=` filter is a substring match: a slot scope
-            // that prefixes a persistent builder name would destroy shared
-            // cache. Persistent state volumes belong to the reclaim paths.
-            .filter(|name| !crate::buildkit::is_persistent_builder_object(name))
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
-        if !volumes.is_empty() {
-            let mut args = vec!["volume".into(), "rm".into(), "--force".into()];
-            args.extend(volumes);
-            self.run_docker(&args)?;
         }
         Ok(())
     }
 
     pub(crate) fn start_job_environment(&mut self, container: &JobContainerSpec) -> Result<()> {
+        // Clear an endpoint from an interrupted earlier start. Each attempt
+        // publishes its bound lease through the shared runtime handle, so the
+        // original spec and every clone use the same proxy.
+        container.clear_runtime_docker_endpoint();
+        let mut runtime_container = container.clone();
         let _span = tracing::info_span!("job-container-boot").entered();
         // The retry decision derives from the typed category attached at the
         // docker boundary, never from error text (GOAL 31). Every failure
@@ -5831,10 +5834,10 @@ where
         let deadline = Instant::now() + DOCKER_START_RETRY_DEADLINE;
         let mut attempt = 1_u32;
         loop {
-            let Err(error) = self.start_job_environment_once(container) else {
+            let Err(error) = self.start_job_environment_once(&mut runtime_container) else {
                 return Ok(());
             };
-            self.cleanup_stale(container);
+            self.cleanup_stale(&runtime_container);
 
             let category = docker_error_category(&error);
             let (max_attempts, delay) = match category {
@@ -5863,7 +5866,7 @@ where
         }
     }
 
-    fn start_job_environment_once(&mut self, container: &JobContainerSpec) -> Result<()> {
+    fn start_job_environment_once(&mut self, container: &mut JobContainerSpec) -> Result<()> {
         fs::create_dir_all(container.temp_host.join("_github_workflow")).with_context(|| {
             format!(
                 "create GitHub workflow directory under {}",
@@ -5921,19 +5924,34 @@ where
             )
         })?;
         self.seed_mise_store(container)?;
-        if container.mount_docker_socket
-            && crate::container::JobContainerSpec::guest_can_connect_host_bound_unix_lease()
-        {
+        if container.mount_docker_socket {
             container.validate_docker_host_path_mapping()?;
-            let lease_paths = container.docker_lease_paths()?;
-            self.docker_lease = Some(crate::docker_lease::DockerLeaseGuard::bind(
-                // The runner owns the listener on its host-visible path.
-                // Docker gets the separately mapped daemon-visible source in
-                // the job container's -v argument.
-                lease_paths.host_visible,
-                container.name.clone(),
-                container.daemon_id.clone(),
-            )?);
+            let lease =
+                if crate::container::JobContainerSpec::guest_can_connect_host_bound_unix_lease() {
+                    let lease_paths = container.docker_lease_paths()?;
+                    crate::docker_lease::DockerLeaseGuard::bind(
+                        // The runner owns the listener on its host-visible path.
+                        // Docker receives the separately mapped daemon-visible source.
+                        lease_paths.host_visible,
+                        container.name.clone(),
+                        container.daemon_id.clone(),
+                    )?
+                } else {
+                    crate::docker_lease::DockerLeaseGuard::bind_tcp(
+                        container.name.clone(),
+                        container.daemon_id.clone(),
+                        {
+                            container.prepare_buildkit_config_mount()?;
+                            container.docker_tls_cert_host_dir()
+                        },
+                    )?
+                };
+            lease.set_job_network(&container.network)?;
+            container.set_runtime_docker_endpoint(
+                lease.guest_docker_host().to_owned(),
+                lease.guest_docker_cert_path().map(ToOwned::to_owned),
+            );
+            self.docker_lease = Some(lease);
         }
         // Hold the host-wide Docker permit only for state-changing Engine
         // calls. Readiness polling below can take up to 30s and does not
@@ -6108,6 +6126,7 @@ where
         // Unlike terminal cleanup, startup retry must not broad-reclaim a
         // container that is still live or whose state is unknown.
         self.abort_docker_lease();
+        container.clear_runtime_docker_endpoint();
         for service in container.services.iter().rev() {
             self.run_docker_cleanup(&crate::docker_lease::remove_one_container_args(
                 &service.name,
@@ -6207,16 +6226,19 @@ where
             // started its own GC pass concurrently with our `docker rm --force`).
             // The container IS being removed — treat it as success so a clean
             // container removal does not cause the slot to cycle unnecessarily.
-            // A bounded timeout (Created/removing BuildKit) is the same class:
-            // job teardown proceeds; doctor/boot retry until the object is gone.
-            // The tolerance is the Conflict category narrowed to the in-progress
-            // needles: a stderr that also matches Transient (daemon down
-            // mid-removal) surfaces instead of masking as success.
-            let removal_in_flight = result.stderr.contains("removal of container")
-                && result.stderr.contains("is already in progress")
-                && classify_docker_stderr(&result.stderr) == DockerErrorCategory::Conflict;
-            if result.code == 124 || removal_in_flight {
+            // A timeout or an in-progress removal does not prove that the
+            // workload container is gone; teardown must retry before
+            // releasing its BuildKit network claim. Only confirmed absence
+            // permits claim release.
+            if crate::docker::client::daemon_reports_missing(&result.stderr) {
                 return Ok(result);
+            }
+            if result.code == 124 {
+                return Err(anyhow::Error::new(crate::docker::DockerTimeout::new(
+                    crate::docker::DockerOp::Remove,
+                    TEARDOWN_RM_TIMEOUT,
+                ))
+                .context(format!("docker {} timed out", args.join(" "))));
             }
             return Err(DockerCommandError::classified(
                 format!(
@@ -15223,21 +15245,22 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct BuildkitCleanupRunner {
+    struct RetiredBuildkitCleanupRunner {
         calls: Vec<Vec<String>>,
     }
 
-    impl CommandRunner for BuildkitCleanupRunner {
+    impl CommandRunner for RetiredBuildkitCleanupRunner {
         fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
             let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push(args.to_vec());
             let stdout = match args.first().map(String::as_str) {
                 Some("ps") => {
-                    "bk1\tbuildx_buildkit_velnor-builder-job-scope0\tjob\t\tcreated\n\
-                     bk2\tbuildx_buildkit_velnor-builder-job-scope0\t\t\tremoving\n"
+                    "slot-id\tbuildx_buildkit_velnor-builder-cache-slot-30\tjob\t\tcreated\n\
+                     capped-id\tbuildx_buildkit_velnor-builder-shared-trusted-branch-o_r0\tjob\t\tcreated\n"
                 }
                 Some("volume") if args.get(1).is_some_and(|arg| arg == "ls") => {
-                    "buildx_buildkit_velnor-builder-job-scope0_state\n"
+                    "buildx_buildkit_velnor-builder-cache-slot-30_state\n\
+                     buildx_buildkit_velnor-builder-shared-trusted-branch-o_r0_state\n"
                 }
                 _ => "",
             };
@@ -15600,7 +15623,7 @@ mod tests {
                     fs::write(self.temp.join("cache_state"), "primaryKey=linux-cache\n")?;
                 }
                 if has_container_env_path(args, "GITHUB_PATH", "pather_path") {
-                    fs::write(self.temp.join("pather_path"), "/root/.cargo/bin\n")?;
+                    fs::write(self.temp.join("pather_path"), "/github/home/.cargo/bin\n")?;
                 }
                 if has_container_env_path(args, "GITHUB_PATH", "mise_path") {
                     fs::write(self.temp.join("mise_path"), "/opt/mise/shims\n")?;
@@ -15612,7 +15635,10 @@ mod tests {
                     )?;
                 }
                 if has_container_env_path(args, "GITHUB_PATH", "toolchain_path") {
-                    fs::write(self.temp.join("toolchain_path"), "/root/.cargo/bin\n")?;
+                    fs::write(
+                        self.temp.join("toolchain_path"),
+                        "/github/home/.cargo/bin\n",
+                    )?;
                 }
             }
             Ok(CommandResult {
@@ -16263,7 +16289,7 @@ esac
     }
 
     fn container(temp: &Path) -> JobContainerSpec {
-        JobContainerSpec {
+        let spec = JobContainerSpec {
             name: "job".into(),
             image: "ubuntu:24.04".into(),
             network: "net".into(),
@@ -16273,6 +16299,8 @@ esac
             actions_host: temp.join("actions"),
             tools_host: temp.join("tools"),
             mount_docker_socket: false,
+            docker_host: None,
+            runtime_docker_endpoint: Default::default(),
             slot_store_key: None,
             env: Vec::new(),
             options: Vec::new(),
@@ -16288,37 +16316,53 @@ esac
             store_trust_scope: "trusted".to_owned(),
             mbx_store_host: None,
             sccache_store_host: None,
+        };
+        if cfg!(target_os = "macos") {
+            spec.set_runtime_docker_endpoint(
+                "tcp://127.0.0.1:12345".into(),
+                Some(crate::docker_lease_tls::DOCKER_TLS_GUEST_CERT_DIR.into()),
+            );
         }
+        spec
     }
 
-    fn assert_cleanup_reclaims_job_docker(
-        calls: &[(String, Vec<String>)],
-        rm_index: usize,
-        temp: &Path,
-    ) {
+    fn assert_cleanup_reclaims_job_docker(calls: &[(String, Vec<String>)], rm_index: usize) {
         assert_eq!(calls[rm_index].1[0], "rm");
+        let owned_lists = [
+            crate::docker_lease::list_owned_containers_args("job"),
+            crate::docker_lease::list_owned_networks_args("job"),
+            crate::docker_lease::list_owned_volumes_args("job"),
+        ];
+        for (offset, expected) in owned_lists.iter().enumerate() {
+            assert_eq!(
+                calls[rm_index + offset + 1].1.as_slice(),
+                expected.as_slice()
+            );
+        }
         assert_eq!(
-            calls[rm_index + 1].1,
-            crate::docker_lease::list_owned_containers_args("job")
+            calls.len(),
+            rm_index + owned_lists.len() + 1,
+            "cleanup must not scan Engine names or remove slot-scoped BuildKit objects: {calls:?}"
         );
-        assert_eq!(
-            calls[rm_index + 2].1,
-            crate::docker_lease::list_owned_networks_args("job")
+        assert_no_buildkit_inventory(calls);
+    }
+
+    fn is_buildkit_inventory_or_state_volume_delete(args: &[String]) -> bool {
+        let prefix = crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX;
+        args.iter()
+            .any(|arg| arg.starts_with(&format!("name={prefix}")))
+            || (args.first().is_some_and(|arg| arg == "volume")
+                && args.get(1).is_some_and(|arg| arg == "rm")
+                && args.iter().any(|arg| arg.starts_with(prefix)))
+    }
+
+    fn assert_no_buildkit_inventory(calls: &[(String, Vec<String>)]) {
+        assert!(
+            calls
+                .iter()
+                .all(|(_, args)| !is_buildkit_inventory_or_state_volume_delete(args)),
+            "cleanup must not query BuildKit by Engine name or delete state volumes: {calls:?}"
         );
-        assert_eq!(
-            calls[rm_index + 3].1,
-            crate::docker_lease::list_owned_volumes_args("job")
-        );
-        assert_eq!(
-            calls[rm_index + 4].1,
-            crate::docker_lease::list_job_buildkit_format_args()
-        );
-        let scope = sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap());
-        assert_eq!(calls[rm_index + 5].1[0], "volume");
-        assert!(calls[rm_index + 5].1.contains(&format!(
-            "name={}{scope}",
-            crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX
-        )));
     }
 
     fn expected_network_create_args() -> Vec<String> {
@@ -16345,7 +16389,7 @@ esac
         spec.verify_bind_mounts = true;
         let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
-        executor.start_job_environment_once(&spec).unwrap();
+        executor.start_job_environment_once(&mut spec).unwrap();
 
         let runner = executor.runner();
         let calls = &runner.calls;
@@ -16378,9 +16422,7 @@ esac
         assert!(calls.iter().any(|(_, args)| {
             args.starts_with(&["rm".into(), "--force".into(), "--".into(), "job".into()])
         }));
-        assert!(calls
-            .iter()
-            .any(|(_, args)| args == &crate::docker_lease::list_job_buildkit_format_args()));
+        assert_no_buildkit_inventory(calls);
         assert!(!calls
             .iter()
             .any(|(_, args)| args == &spec.remove_network_args()));
@@ -16397,7 +16439,10 @@ esac
                 let args: &[String] = &crate::execution::expand_env_file_args(args);
                 self.calls.push(args.to_vec());
                 let stdout = if args == crate::docker_lease::list_owned_containers_args("job") {
-                    "guest-id\tguest-postgres\nbk-id\tbuildx_buildkit_velnor-builder-job0\n".into()
+                    "guest-id\tguest-postgres\n\
+                     bk-slot-id\tbuildx_buildkit_velnor-builder-cache-slot-30\n\
+                     bk-capped-id\tbuildx_buildkit_velnor-builder-shared-trusted-branch-o_r0\n"
+                        .into()
                 } else if args == crate::docker_lease::list_owned_networks_args("job") {
                     "guest-net\n".into()
                 } else if args == crate::docker_lease::list_owned_volumes_args("job") {
@@ -16426,9 +16471,15 @@ esac
             .iter()
             .any(|args| args
                 == &crate::docker_lease::force_remove_container_args(&["guest-id".into()])));
-        assert!(calls.iter().all(|args| {
-            !(args.first().is_some_and(|arg| arg == "rm") && args.iter().any(|arg| arg == "bk-id"))
-        }));
+        for retired_id in ["bk-slot-id", "bk-capped-id"] {
+            assert!(calls.iter().all(|args| {
+                !(args.first().is_some_and(|arg| arg == "rm")
+                    && args.iter().any(|arg| arg == retired_id))
+            }));
+        }
+        assert!(calls
+            .iter()
+            .all(|args| { !is_buildkit_inventory_or_state_volume_delete(args) }));
         assert!(calls
             .iter()
             .any(|args| args
@@ -16442,138 +16493,45 @@ esac
     }
 
     #[test]
-    fn cleanup_removes_job_scoped_buildkit_daemons_and_state_volumes() {
+    fn cleanup_job_buildkit_ignores_retired_slot_and_capped_names() {
         let root = temp_dir();
-        let temp = root.join("job-scope").join("temp");
+        let temp = root
+            .join("work")
+            .join("slot-3")
+            .join("job-scope")
+            .join("temp");
         fs::create_dir_all(&temp).unwrap();
         let spec = container(&temp);
-        let mut executor = DockerJobEngine::inert(BuildkitCleanupRunner::default());
-
-        executor.cleanup_job_buildkit(&spec).unwrap();
-        // Created + removing of this job's builder must both be force-removed,
-        // one docker rm per id. Batching those ids deadlocks Engine 29 DELETE.
-
-        for call in &executor.runner().calls {
-            if call.first().map(String::as_str) != Some("rm") {
-                continue;
-            }
-            let ids: Vec<_> = call
-                .iter()
-                .skip(1)
-                .filter(|arg| !arg.starts_with('-'))
-                .collect();
-            assert!(
-                ids.len() <= 1,
-                "cleanup_job_buildkit batched docker rm {call:?}"
-            );
-        }
-
-        assert_eq!(
-            executor.runner().calls,
-            vec![
-                crate::docker_lease::list_job_buildkit_format_args(),
-                crate::docker_lease::force_remove_one_container_args("bk1"),
-                crate::docker_lease::force_remove_one_container_args("bk2"),
-                vec![
-                    "volume",
-                    "ls",
-                    "--quiet",
-                    "--filter",
-                    "name=buildx_buildkit_velnor-builder-job-scope",
-                ]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>(),
-                vec![
-                    "volume",
-                    "rm",
-                    "--force",
-                    "buildx_buildkit_velnor-builder-job-scope0_state",
-                ]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>(),
-            ]
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn cleanup_keeps_persistent_builders_and_their_state_volumes() {
-        struct PersistentCleanupRunner {
-            calls: Vec<Vec<String>>,
-        }
-        impl CommandRunner for PersistentCleanupRunner {
-            fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
-                let args: &[String] = &crate::execution::expand_env_file_args(args);
-                self.calls.push(args.to_vec());
-                let stdout = match args.first().map(String::as_str) {
-                    // The persistent daemon carries this job's label BY
-                    // DESIGN. Matching it here would destroy a daemon other
-                    // jobs share.
-                    Some("ps") => {
-                        "aaa111\tbuildx_buildkit_velnor-builder-shared-trusted-o_r0\tjob\ttrusted\tcreated\n"
-                    }
-                    Some("volume") if args.get(1).is_some_and(|arg| arg == "ls") => {
-                        "buildx_buildkit_velnor-builder-shared-trusted-o_r0_state\n"
-                    }
-                    _ => "",
-                };
-                Ok(CommandResult {
-                    code: 0,
-                    stdout: stdout.to_string(),
-                    stderr: String::new(),
-                })
-            }
-        }
-
-        let root = temp_dir();
-        let temp = root.join("job-scope").join("temp");
-        fs::create_dir_all(&temp).unwrap();
-        let spec = container(&temp);
-        crate::buildkit::record_job_builder(&temp, "velnor-builder-shared-trusted-o_r").unwrap();
-        let mut executor = DockerJobEngine::inert(PersistentCleanupRunner { calls: Vec::new() });
+        crate::buildkit::record_job_builder(&temp, "velnor-builder-cache-slot-3").unwrap();
+        crate::buildkit::record_job_builder(&temp, "velnor-builder-shared-trusted-branch-o_r")
+            .unwrap();
+        let mut executor = DockerJobEngine::inert(RetiredBuildkitCleanupRunner::default());
 
         executor.cleanup_job_buildkit(&spec).unwrap();
 
-        let calls = &executor.runner().calls;
         assert!(
-            calls
-                .iter()
-                .any(|args| args == &crate::docker_lease::list_job_buildkit_format_args()),
-            "teardown still lists builders: {calls:?}"
-        );
-        assert!(
-            !calls
-                .iter()
-                .any(|args| args.first().is_some_and(|arg| arg == "rm")
-                    && args.iter().any(|arg| arg == "aaa111")),
-            "teardown must never remove a persistent daemon: {calls:?}"
-        );
-        assert!(
-            !calls
-                .iter()
-                .any(|args| args.first().is_some_and(|arg| arg == "volume")
-                    && args.get(1).is_some_and(|arg| arg == "rm")),
-            "teardown must never remove a persistent state volume: {calls:?}"
+            executor.runner().calls.is_empty(),
+            "retired slot/capped names must not cause Engine list or remove calls: {:?}",
+            executor.runner().calls
         );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
     #[test]
-    fn cleanup_aborts_docker_lease_before_buildkit_rm() {
+    fn cleanup_aborts_docker_lease_after_job_container_removal() {
         use std::path::PathBuf;
 
         struct LeaseOrderRunner {
             lease_path: PathBuf,
             job_rm_saw_lease: bool,
-            buildkit_saw_dead_lease: bool,
+            calls: Vec<(String, Vec<String>)>,
         }
 
         impl CommandRunner for LeaseOrderRunner {
-            fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+            fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
                 let args: &[String] = &crate::execution::expand_env_file_args(args);
+                self.calls.push((program.to_string(), args.to_vec()));
                 let lease_live = self.lease_path.exists();
                 if args
                     == [
@@ -16589,13 +16547,6 @@ esac
                         "lease must stay mounted until the job container is removed"
                     );
                     self.job_rm_saw_lease = true;
-                }
-                if args == crate::docker_lease::list_job_buildkit_format_args() {
-                    assert!(
-                        !lease_live,
-                        "in-flight Engine Start must be aborted before BuildKit reclaim"
-                    );
-                    self.buildkit_saw_dead_lease = true;
                 }
                 Ok(CommandResult {
                     code: 0,
@@ -16632,7 +16583,7 @@ esac
         let mut executor = DockerJobEngine::inert(LeaseOrderRunner {
             lease_path: lease_path.clone(),
             job_rm_saw_lease: false,
-            buildkit_saw_dead_lease: false,
+            calls: Vec::new(),
         })
         .with_job_environment_guards(JobEnvironmentGuards {
             docker_lease: Some(lease),
@@ -16644,10 +16595,7 @@ esac
             runner.job_rm_saw_lease,
             "cleanup must remove the job container"
         );
-        assert!(
-            runner.buildkit_saw_dead_lease,
-            "cleanup must reclaim BuildKit after aborting the lease"
-        );
+        assert_no_buildkit_inventory(&runner.calls);
         assert!(!lease_path.exists(), "cleanup must drop the lease socket");
         fs::remove_dir_all(temp).ok();
         fs::remove_dir_all(lease_dir).ok();
@@ -16655,7 +16603,7 @@ esac
 
     #[cfg(unix)]
     #[test]
-    fn cleanup_without_buildkit_aborts_lease_before_deferred_reclaim() {
+    fn cleanup_without_buildkit_aborts_lease_before_buildkit_release() {
         use std::path::PathBuf;
 
         struct SkipBuildkitRunner {
@@ -16728,8 +16676,8 @@ esac
             runner
                 .calls
                 .iter()
-                .all(|args| args != &crate::docker_lease::list_job_buildkit_format_args()),
-            "slot path must not wait on BuildKit rm: {:?}",
+                .all(|args| !is_buildkit_inventory_or_state_volume_delete(args)),
+            "slot path must not list or delete BuildKit objects: {:?}",
             runner.calls
         );
         assert!(
@@ -16738,6 +16686,259 @@ esac
         );
         fs::remove_dir_all(temp).ok();
         fs::remove_dir_all(lease_dir).ok();
+    }
+
+    #[test]
+    fn teardown_releases_buildkit_after_job_absence_before_network_reclaim() {
+        let mut events = Vec::new();
+        let result = DockerJobEngine::<RecordingRunner>::finish_cleanup_after_job_removal(
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+            Ok(()),
+            || {
+                events.push("release-buildkit");
+                // This injected network failure occurs after the release.
+                events.push("reclaim-network");
+                Err(anyhow::anyhow!("network still has a service endpoint"))
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(events, ["release-buildkit", "reclaim-network"]);
+    }
+
+    #[test]
+    fn teardown_does_not_release_after_job_absence_while_service_remains() {
+        let mut events = Vec::new();
+        let result = DockerJobEngine::<RecordingRunner>::finish_cleanup_after_job_removal(
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+            Err(anyhow::anyhow!("service rm failed")),
+            || {
+                events.push("release-buildkit");
+                Err(anyhow::anyhow!("service rm failed"))
+            },
+        );
+        assert!(result.is_err());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn teardown_service_failure_keeps_durable_claim_for_restart_retry() {
+        use std::cell::Cell;
+
+        let temp = temp_dir();
+        let layout = crate::storage::StorageLayout::from_prefix(&temp.join("storage"));
+        let run_root = layout.run_root.clone();
+        let _storage = crate::buildkit::use_test_storage_layout(layout);
+        let builder = crate::buildkit::persistent_builder_name(
+            "service-retry",
+            "trusted",
+            crate::buildkit::TRUST_TIER_BRANCH,
+            Some("o/r"),
+        );
+        crate::buildkit::claim_builder(&run_root, &builder, "slot-1", "velnor-job-retry").unwrap();
+        let detach_count = Cell::new(0);
+        let stop_count = Cell::new(0);
+        let finish = || {
+            crate::buildkit::release_after_network_detach_if_last(
+                &run_root,
+                &builder,
+                "velnor-job-retry",
+                || {
+                    detach_count.set(detach_count.get() + 1);
+                    Ok(())
+                },
+                || {
+                    stop_count.set(stop_count.get() + 1);
+                    Ok(true)
+                },
+            )
+            .map(|_| ())
+        };
+
+        // The job container is already absent, but a service removal error
+        // proves a network peer may still use BuildKit. Simulate a process
+        // restart by reading the atomically persisted claim again before the
+        // retry.
+        let failed = DockerJobEngine::<RecordingRunner>::finish_cleanup_after_job_removal(
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+            Err(anyhow::anyhow!("service rm failed")),
+            finish,
+        );
+        assert!(failed.is_err());
+        assert_eq!(detach_count.get(), 0);
+        assert_eq!(stop_count.get(), 0);
+        assert_eq!(
+            crate::buildkit::builder_holders(&run_root, &builder, None)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        DockerJobEngine::<RecordingRunner>::finish_cleanup_after_job_removal(
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+            Ok(()),
+            finish,
+        )
+        .unwrap();
+        assert_eq!(detach_count.get(), 1);
+        assert_eq!(stop_count.get(), 1);
+        assert!(crate::buildkit::builder_holders(&run_root, &builder, None)
+            .unwrap()
+            .is_empty());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn teardown_release_intent_precedes_job_done_and_reaper_race() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let layout = crate::storage::StorageLayout::from_prefix(&temp.join("storage"));
+        let run_root = layout.run_root.clone();
+        let _storage = crate::buildkit::use_test_storage_layout(layout);
+        let spec = container(&temp);
+        let builder = crate::buildkit::persistent_builder_name(
+            "teardown-reaper-race",
+            "trusted",
+            crate::buildkit::TRUST_TIER_BRANCH,
+            Some("o/r"),
+        );
+        crate::buildkit::claim_builder(&run_root, &builder, "slot-race", &spec.name).unwrap();
+        crate::buildkit::record_job_builder(&spec.temp_host, &builder).unwrap();
+
+        // Interleave teardown and maintenance at the dangerous boundary:
+        // teardown must persist `releasing` before publishing `job.done`,
+        // which lets PID 1 exit and makes the job disappear from Engine lists.
+        let executor = DockerJobEngine::inert(RecordingRunner::default());
+        executor
+            .reserve_job_buildkit_release_before_job_done(&spec, || {
+                assert!(
+                    crate::buildkit::claim_builder(
+                        &run_root,
+                        &builder,
+                        "slot-next",
+                        "velnor-job-next"
+                    )
+                    .is_err(),
+                    "new admission must see teardown's durable reservation before job.done"
+                );
+                mark_job_container_done(&spec);
+                assert!(spec.job_done_host_path().exists());
+
+                // PID 1 can now exit. A concurrent maintenance pass sees the
+                // holder absent, but must preserve it because release intent
+                // was committed first. This is the exact interleaving that
+                // used to skip BuildKit network detach.
+                let reaper_root = run_root.clone();
+                let reaper_builder = builder.clone();
+                let repaired = std::thread::spawn(move || {
+                    crate::buildkit::repair_absent_holders(
+                        &reaper_root,
+                        &reaper_builder,
+                        &Default::default(),
+                    )
+                    .unwrap()
+                })
+                .join()
+                .unwrap();
+                assert_eq!(repaired.len(), 1);
+                assert_eq!(repaired[0].container, spec.name);
+            })
+            .unwrap();
+        drop(executor);
+
+        // A failed service removal preserves the reservation. Maintenance
+        // then observes the job/service set as absent, but cannot repair away
+        // this teardown's holder while the retry still needs its network.
+        let failed = DockerJobEngine::<RecordingRunner>::finish_cleanup_after_job_removal(
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+            Err(anyhow::anyhow!("service removal failed")),
+            || panic!("failed service removal must retain the release reservation"),
+        );
+        assert!(failed.is_err());
+        assert!(crate::buildkit::claim_builder(
+            &run_root,
+            &builder,
+            "slot-next",
+            "velnor-job-next"
+        )
+        .is_err());
+
+        let events = std::cell::RefCell::new(Vec::new());
+        let retried = DockerJobEngine::<RecordingRunner>::finish_cleanup_after_job_removal(
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+            Ok(()),
+            || {
+                let released = crate::buildkit::release_after_network_detach_if_last(
+                    &run_root,
+                    &builder,
+                    &spec.name,
+                    || {
+                        events.borrow_mut().push("network-detach");
+                        Ok(())
+                    },
+                    || {
+                        events.borrow_mut().push("daemon-stop");
+                        Ok(true)
+                    },
+                )?;
+                assert!(released.removed_last);
+                events.borrow_mut().push("claim-release");
+                events.borrow_mut().push("job-network-remove");
+                Ok(())
+            },
+        );
+        retried.unwrap();
+        assert_eq!(
+            *events.borrow(),
+            [
+                "network-detach",
+                "daemon-stop",
+                "claim-release",
+                "job-network-remove"
+            ]
+        );
+        assert!(crate::buildkit::builder_holders(&run_root, &builder, None)
+            .unwrap()
+            .is_empty());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn teardown_does_not_release_buildkit_until_job_removal_succeeds() {
+        let mut events = Vec::new();
+        let result = DockerJobEngine::<RecordingRunner>::finish_cleanup_after_job_removal(
+            Err(anyhow::anyhow!("job removal timed out")),
+            Ok(()),
+            || {
+                events.push("release-buildkit");
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(events.is_empty());
     }
 
     /// Under a teardown owner the executor must hold no network guard: not
@@ -16850,7 +17051,7 @@ esac
             codes: vec![0, 0, 1],
         });
 
-        let error = executor.start_job_environment_once(&spec).unwrap_err();
+        let error = executor.start_job_environment_once(&mut spec).unwrap_err();
 
         assert!(error.to_string().contains("Docker daemon cannot see"));
         assert!(!temp.join(DOCKER_MOUNT_CHECK_FILE).exists());
@@ -16899,7 +17100,7 @@ esac
         assert!(calls[2]
             .1
             .contains(&"GITHUB_OUTPUT=/__t/step1_output".into()));
-        assert_cleanup_reclaims_job_docker(calls, 3, &temp);
+        assert_cleanup_reclaims_job_docker(calls, 3);
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -17108,7 +17309,7 @@ esac
             .unwrap();
 
         assert_eq!(result.exit_code, 7);
-        assert_cleanup_reclaims_job_docker(&executor.runner().calls, 3, &temp);
+        assert_cleanup_reclaims_job_docker(&executor.runner().calls, 3);
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -17154,7 +17355,7 @@ esac
         assert_eq!(calls[1].1[0], "run");
         assert_eq!(calls[2].1[0], "exec");
         assert_eq!(calls[3].1[0], "exec");
-        assert_cleanup_reclaims_job_docker(calls, 4, &temp);
+        assert_cleanup_reclaims_job_docker(calls, 4);
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -19332,6 +19533,11 @@ esac
     #[test]
     fn native_docker_adapters_invoke_docker_cli_without_node_sidecars() {
         let temp = temp_dir();
+        let _storage = crate::buildkit::use_test_storage_layout(
+            crate::storage::StorageLayout::from_prefix(&temp.join("fake-storage")),
+        );
+        let _containers =
+            crate::buildkit::use_test_running_container_names(std::collections::BTreeSet::new());
         fs::create_dir_all(temp.join("work/backend-rust/bitcoin-processor-app")).unwrap();
         fs::write(
             temp.join("work/backend-rust/bitcoin-processor-app/Dockerfile"),
@@ -19545,25 +19751,29 @@ type=sha,format=long,prefix=,enable=true"
             crate::buildkit::TRUST_TIER_UNKNOWN,
             Some("unknown-repository"),
         );
-        assert_eq!(
-            builder,
-            "velnor-builder-shared-unbounded-v1-trusted-unknown-unknown-repository"
-        );
-        // Unbounded: the builder daemon is created with no resource
-        // `--driver-opt` sizing (no cpu-*/memory= entries at all).
+        assert!(crate::buildkit::is_bounded_builder_name(&builder));
+        // Unbounded: Velnor supplies its fixed provenance option but no
+        // cpu-*/memory= resource sizing.
         let create = calls
             .iter()
             .find(|c| c.contains(&format!("'buildx' 'create' '--name' '{builder}'")))
             .expect("buildx create call");
         assert!(
-            !create.contains("'--driver-opt'"),
-            "builder daemon must be created unbounded, got: {create}"
+            create.contains("'--driver-opt' 'provenance-add-gha=false'"),
+            "runner must disable guest-controlled GHA provenance, got: {create}"
         );
+        assert_eq!(create.matches("'--driver-opt'").count(), 1);
+        assert!(!create.contains("cpu=") && !create.contains("memory="));
         assert!(create.contains(&format!(
-            "'--config' '/__t/buildkitd-config-{builder}.toml'"
+            "'--config' '/__velnor-buildkit-configs/buildkitd-config-{builder}.toml'"
         )));
         assert_eq!(
-            fs::read_to_string(temp.join(format!("buildkitd-config-{builder}.toml"))).unwrap(),
+            fs::read_to_string(
+                container(&temp)
+                    .buildkit_config_host_dir()
+                    .join(format!("buildkitd-config-{builder}.toml"))
+            )
+            .unwrap(),
             "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n"
         );
         let login_call = runner.calls.iter().position(|(program, args)| {
@@ -20359,7 +20569,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     }
 
     #[test]
-    fn service_cleanup_treats_in_progress_removal_as_success() {
+    fn service_cleanup_waits_for_in_progress_removal_to_finish() {
         let temp = temp_dir();
         let mut spec = container(&temp);
         spec.services.push(ServiceContainerSpec {
@@ -20372,9 +20582,10 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             options: Vec::new(),
         });
 
-        DockerJobEngine::inert(ContainerRemovalRaceRunner)
+        let error = DockerJobEngine::inert(ContainerRemovalRaceRunner)
             .cleanup_services(&spec)
-            .unwrap();
+            .unwrap_err();
+        assert_eq!(docker_error_category(&error), DockerErrorCategory::Conflict);
     }
 
     #[derive(Default)]
@@ -20747,6 +20958,46 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             "rm failure must carry DockerCommandError: {error:#}"
         );
         assert_eq!(docker_error_category(&error), DockerErrorCategory::Conflict);
+    }
+
+    #[test]
+    fn confirmed_missing_job_container_allows_teardown_to_release_claims() {
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![1],
+            vec!["Error response from daemon: No such container: job"],
+        ));
+        let removed = executor
+            .run_docker_remove_container(&[
+                "rm".to_string(),
+                "--force".to_string(),
+                "--".to_string(),
+                "job".to_string(),
+            ])
+            .unwrap();
+        assert_eq!(removed.code, 1);
+        assert!(crate::docker::client::daemon_reports_missing(
+            &removed.stderr
+        ));
+    }
+
+    #[test]
+    fn removal_timeout_does_not_prove_job_absence() {
+        let mut executor =
+            DockerJobEngine::inert(StderrScriptRunner::scripted(vec![124], vec![""]));
+        let error = executor
+            .run_docker_remove_container(&[
+                "rm".to_string(),
+                "--force".to_string(),
+                "--".to_string(),
+                "job".to_string(),
+            ])
+            .unwrap_err();
+        assert!(
+            error.chain().any(|cause| cause
+                .downcast_ref::<crate::docker::DockerTimeout>()
+                .is_some()),
+            "timeout must remain typed and prevent claim release: {error:#}"
+        );
     }
 
     #[test]
@@ -26472,7 +26723,7 @@ fi"#
         assert_eq!(calls[2].1[0], "exec");
         assert_eq!(calls[3].1[0], "run");
         assert_eq!(calls[4].1[0], "exec");
-        assert_cleanup_reclaims_job_docker(calls, 5, &temp);
+        assert_cleanup_reclaims_job_docker(calls, 5);
         assert!(calls[3].1.contains(&"INPUT_NAME=value".into()));
         assert!(calls[3].1.contains(&"GITHUB_REPOSITORY=acme/repo".into()));
         assert!(calls[3].1.contains(&"TOKEN=ghs_token".into()));
@@ -28417,8 +28668,17 @@ fi"#
                     && !arg.starts_with("/var/run/docker.sock:")
             })
         } else {
-            args.iter()
-                .any(|arg| arg.ends_with(".sock:/var/run/docker.sock") && !arg.contains("vdl-"))
+            args.contains(&"DOCKER_TLS_VERIFY=1".into())
+                && args.iter().any(|arg| arg.starts_with("DOCKER_HOST=tcp://"))
+                && args.iter().any(|arg| {
+                    arg == &format!(
+                        "DOCKER_CERT_PATH={}",
+                        crate::docker_lease_tls::DOCKER_TLS_GUEST_CERT_DIR
+                    )
+                })
+                && !args
+                    .iter()
+                    .any(|arg| arg.ends_with(":/var/run/docker.sock"))
         }
     }
 
@@ -28593,6 +28853,11 @@ fi"#
     #[test]
     fn native_setup_buildx_reuses_existing_builder() {
         let temp = temp_dir();
+        let _storage = crate::buildkit::use_test_storage_layout(
+            crate::storage::StorageLayout::from_prefix(&temp.join("fake-storage")),
+        );
+        let _containers =
+            crate::buildkit::use_test_running_container_names(std::collections::BTreeSet::new());
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::Native {
             step_id: "buildx".into(),
@@ -28625,10 +28890,7 @@ fi"#
             crate::buildkit::TRUST_TIER_UNKNOWN,
             Some("unknown-repository"),
         );
-        assert_eq!(
-            builder,
-            "velnor-builder-shared-unbounded-v1-untrusted-unknown-unknown-repository-jackin-construct"
-        );
+        assert!(crate::buildkit::is_bounded_builder_name(&builder));
         assert_eq!(results[0].exit_code, 0);
         assert_eq!(results[0].state.outputs["name"], builder);
         assert_eq!(results[0].state.env["BUILDX_BUILDER"], builder);
@@ -28653,12 +28915,107 @@ fi"#
     }
 
     #[test]
+    fn native_setup_buildx_forces_provenance_opt_before_bootstrap() {
+        let temp = temp_dir();
+        let _storage = crate::buildkit::use_test_storage_layout(
+            crate::storage::StorageLayout::from_prefix(&temp.join("fake-storage")),
+        );
+        let _containers =
+            crate::buildkit::use_test_running_container_names(std::collections::BTreeSet::new());
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "buildx".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::DockerSetupBuildx,
+                cache_kind: None,
+                source_path: None,
+                inputs: [
+                    ("name".into(), "empty-config".into()),
+                    ("install".into(), "true".into()),
+                    // Buildx's normal action accepts driver-opts. This native
+                    // executor must not let a guest re-enable GHA provenance.
+                    ("driver-opts".into(), "provenance-add-gha=true".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
+            codes: vec![0, 0, 1],
+            ..RecordingRunner::default()
+        });
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        let builder = crate::buildkit::persistent_builder_name(
+            "empty-config",
+            "untrusted",
+            crate::buildkit::TRUST_TIER_UNKNOWN,
+            Some("unknown-repository"),
+        );
+        let calls = docker_call_strings(&executor.runner().calls);
+        let create = calls
+            .iter()
+            .find(|call| call.contains(&format!("'buildx' 'create' '--name' '{builder}'")))
+            .expect("missing builder must be created");
+        let filename = format!("buildkitd-config-{builder}.toml");
+        assert!(create.contains(&format!(
+            "'--config' '{}/{}'",
+            crate::container::BUILDKIT_CONFIG_CONTAINER_DIR,
+            filename
+        )));
+        assert_eq!(
+            create.matches("'--driver-opt'").count(),
+            1,
+            "guest driver-opts must not add or override runner-owned driver opts"
+        );
+        assert!(create.contains("'--driver-opt' 'provenance-add-gha=false'"));
+        assert!(!create.contains("provenance-add-gha=true"));
+        let driver_opt = create
+            .find("'--driver-opt'")
+            .expect("runner must disable GHA provenance");
+        let bootstrap = create
+            .find("'--bootstrap'")
+            .expect("install=true must preserve the requested bootstrap");
+        assert!(
+            driver_opt < bootstrap,
+            "runner driver opt must precede bootstrap"
+        );
+        let job = container(&temp);
+        assert_eq!(
+            fs::read_to_string(job.buildkit_config_host_dir().join(&filename)).unwrap(),
+            "",
+            "missing inline config must still override Buildx home discovery with an empty file"
+        );
+        let private_control_dir = job.job_done_host_dir();
+        fs::remove_dir_all(&temp).unwrap();
+        fs::remove_dir_all(private_control_dir).unwrap();
+    }
+
+    #[test]
     fn native_setup_buildx_post_never_destroys_the_builder() {
-        // Every cleanup/keep-state combination releases the hold host-side
-        // and never runs `buildx rm`: destroying the builder here is what
-        // kept every job's builds cold.
+        // Every post keeps the durable claim until terminal container and
+        // service teardown. The cleanup preference is read from that claim;
+        // post never races a still-running job by stopping its daemon.
+        let builder = crate::buildkit::persistent_builder_name(
+            "builder",
+            "untrusted",
+            crate::buildkit::TRUST_TIER_UNKNOWN,
+            Some("unknown-repository"),
+        );
         for (cleanup, keep_state) in [("false", "false"), ("true", "false"), ("true", "true")] {
             let temp = temp_dir();
+            let layout = crate::storage::StorageLayout::from_prefix(&temp.join("fake-storage"));
+            let run_root = layout.run_root.clone();
+            let _storage = crate::buildkit::use_test_storage_layout(layout);
+            let _containers =
+                crate::buildkit::use_test_running_container_names(["job".to_string()].into());
             fs::create_dir_all(&temp).unwrap();
             let steps = vec![ExecutableStep::Native {
                 step_id: "buildx".into(),
@@ -28682,9 +29039,16 @@ fi"#
             }];
             let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
+            let mut job = container(&temp);
+            job.slot_store_key = Some(crate::container::slot_store_key(0));
             let results = executor
-                .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
-                .unwrap();
+                .execute_ordered_steps_without_cleanup(&job, &steps, &[], &[], None, None, &temp)
+                .unwrap()
+                .step_results;
+            assert!(
+                results.iter().all(|result| result.exit_code == 0),
+                "setup/post failed: {results:#?}"
+            );
 
             let calls = executor
                 .runner()
@@ -28699,10 +29063,9 @@ fi"#
             let post = results.last().expect("post result");
             assert_eq!(post.exit_code, 0);
             assert!(
-                post.stdout.contains(
-                    "Releasing builder velnor-builder-shared-unbounded-v1-untrusted-unknown-unknown-repository-builder"
-                ),
-                "post names the persistent builder: {:?}",
+                post.stdout
+                    .contains(&format!("Builder {builder} remains claimed")),
+                "post keeps the durable holder through terminal teardown: {:?}",
                 post.stdout
             );
             assert!(
@@ -28710,14 +29073,9 @@ fi"#
                 "keep-state is logged, never silently ignored: {:?}",
                 post.stdout
             );
-            if cleanup == "false" {
-                assert!(
-                    post.stdout.contains("No temp dir or run root")
-                        || post.stdout.contains("cleanup disabled"),
-                    "cleanup=false leaves the daemon: {:?}",
-                    post.stdout
-                );
-            }
+            let holders = crate::buildkit::builder_holders(&run_root, &builder, None).unwrap();
+            assert_eq!(holders.len(), 1);
+            assert_eq!(holders[0].cleanup_on_release, cleanup == "true");
             fs::remove_dir_all(temp).unwrap();
         }
     }
@@ -29093,7 +29451,7 @@ bitcoin-processor-app.push=true")
             ExecutableStep::Script(ScriptStep {
                 id: "pather".into(),
                 display_name: String::new(),
-                script: "echo /root/.cargo/bin >> $GITHUB_PATH".into(),
+                script: "echo /github/home/.cargo/bin >> $GITHUB_PATH".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
                 env: Vec::new(),
@@ -29140,7 +29498,7 @@ bitcoin-processor-app.push=true")
             .map(|(_, args)| args)
             .unwrap();
         assert!(node_call.contains(
-            &"PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            &"PATH=/github/home/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                 .into()
         ));
         assert!(node_call.ends_with(&[
@@ -29276,7 +29634,7 @@ bitcoin-processor-app.push=true")
             ExecutableStep::Script(ScriptStep {
                 id: "toolchain".into(),
                 display_name: String::new(),
-                script: "echo CARGO_HOME=/github/home/.cargo >> \"$GITHUB_ENV\"\necho /root/.cargo/bin >> \"$GITHUB_PATH\"".into(),
+                script: "echo CARGO_HOME=/github/home/.cargo >> \"$GITHUB_ENV\"\necho /github/home/.cargo/bin >> \"$GITHUB_PATH\"".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/kestra-docker-containers".into(),
                 env: Vec::new(),
@@ -29383,7 +29741,7 @@ bitcoin-processor-app.push=true")
             assert!(call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
             assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
-            assert!(call.contains(&"PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()));
+            assert!(call.contains(&"PATH=/github/home/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()));
         }
         assert!(node_calls[0].contains(&"INPUT_REPO=casey/just".into()));
         assert!(node_calls[0].contains(&"INPUT_GITHUB-TOKEN=ghs_token".into()));
@@ -29397,11 +29755,10 @@ bitcoin-processor-app.push=true")
         fs::remove_dir_all(temp).unwrap();
     }
 
-    /// actions/runner applies recorded PATH entries to main and post node
-    /// actions alike, and on GitHub-hosted they run on the runner host where
-    /// those directories exist. The node sidecar must mount every recorded
-    /// entry at the same path, or a post step fails with `Unable to locate
-    /// executable file: cargo` while every main step of the job resolved it.
+    /// actions/runner carries recorded GITHUB_PATH lines into main and post
+    /// action environments. Velnor projects an entry into the sidecar only
+    /// when start_args gives it an approved host-backed store; CARGO_HOME/bin
+    /// is such a path and must stay available to both actions.
     #[test]
     fn node_actions_mount_recorded_path_entries_for_main_and_post() {
         let temp = temp_dir();
@@ -29410,7 +29767,7 @@ bitcoin-processor-app.push=true")
             ExecutableStep::Script(ScriptStep {
                 id: "toolchain".into(),
                 display_name: String::new(),
-                script: "echo /root/.cargo/bin >> \"$GITHUB_PATH\"".into(),
+                script: "echo /github/home/.cargo/bin >> \"$GITHUB_PATH\"".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
                 env: Vec::new(),
@@ -29445,13 +29802,14 @@ bitcoin-processor-app.push=true")
             ("GITHUB_WORKSPACE".into(), "/__w".into()),
             ("RUNNER_TEMP".into(), "/__t".into()),
         ];
+        let job_container = container(&temp);
         let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
 
         executor
-            .execute_ordered_steps(&container(&temp), &steps, &base_env, &temp)
+            .execute_ordered_steps(&job_container, &steps, &base_env, &temp)
             .unwrap();
 
         let node_calls = executor
@@ -29474,11 +29832,18 @@ bitcoin-processor-app.push=true")
             "/__a/_actions/baptiste0928_cargo-install/dist/post.js".into()
         ]));
         for call in &node_calls {
-            assert!(call
+            let cargo_mounts = call
                 .windows(2)
-                .any(|pair| pair == ["-v", "/root/.cargo/bin:/root/.cargo/bin"]));
+                .filter(|pair| pair[0] == "-v" && pair[1].ends_with(":/github/home/.cargo/bin"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                cargo_mounts.len(),
+                1,
+                "the approved Cargo store root must be mounted once: {call:?}"
+            );
+            assert!(Path::new(cargo_mounts[0][1].split(':').next().unwrap()).is_absolute());
             assert!(call.contains(
-                &"PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                &"PATH=/github/home/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                     .into()
             ));
         }

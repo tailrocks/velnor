@@ -94,6 +94,10 @@ pub fn github_job_container_spec(
     }
     let name = job_container_name(job);
     let store_trust_scope = crate::trust_scope::normalize_scope(trust_scope).to_owned();
+    let host_process_job = paths.execution_backend == velnor_model::ExecutionBackendKind::MicroVm
+        && !job_uses_container(job)
+        && job_container_image(job).is_none()
+        && docker_image.trim().is_empty();
     Ok(JobContainerSpec {
         name,
         image: job_container_image(job).unwrap_or(docker_image).to_string(),
@@ -105,10 +109,12 @@ pub fn github_job_container_spec(
         tools_host: paths.tools_host,
         mount_docker_socket: github_trust_scope_allows_host_docker(trust_scope)
             && paths.execution_backend.uses_host_docker_socket(),
+        docker_host: None,
+        runtime_docker_endpoint: Default::default(),
         slot_store_key: paths.slot_store_key,
         env: backend_advertising_env(job_container_env(job), paths.execution_backend),
         options: job_container_options(job, trust_scope),
-        services: service_containers(job, trust_scope),
+        services: service_containers(job, trust_scope, host_process_job),
         node_action_image: node_action_image.to_string(),
         docker_cli_host_path: None,
         docker_cli_plugin_host_dir: None,
@@ -432,6 +438,18 @@ fn job_container_image(job: &AgentJobRequestMessage) -> Option<&str> {
         })
 }
 
+fn job_uses_container(job: &AgentJobRequestMessage) -> bool {
+    job.job_container
+        .as_ref()
+        .is_some_and(|container| !container.is_null())
+        || job.resources.containers.iter().any(|container| {
+            container
+                .alias
+                .as_deref()
+                .is_some_and(|alias| alias == "__job" || alias.eq_ignore_ascii_case("job"))
+        })
+}
+
 fn job_container_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
     job.job_container
         .as_ref()
@@ -523,7 +541,7 @@ pub(crate) fn service_container_names(
     job: &AgentJobRequestMessage,
     trust_scope: &str,
 ) -> Vec<String> {
-    service_containers(job, trust_scope)
+    service_containers(job, trust_scope, false)
         .into_iter()
         .map(|service| service.name)
         .collect()
@@ -532,8 +550,10 @@ pub(crate) fn service_container_names(
 fn service_containers(
     job: &AgentJobRequestMessage,
     trust_scope: &str,
+    host_process_job: bool,
 ) -> Vec<ServiceContainerSpec> {
     let network = job_network_name(job);
+    let publish_host_ports = host_process_job && github_trust_scope_allows_host_docker(trust_scope);
     let allow_privileged = github_trust_scope_allows_host_docker(trust_scope)
         && privileged_container_options_allowed_from_env();
     if let Some(services) = job
@@ -556,12 +576,12 @@ fn service_containers(
                     network_alias: alias,
                     network: network.clone(),
                     env: container_env(&container),
-                    ports: if github_trust_scope_allows_host_docker(trust_scope) {
-                        container_ports(&container)
+                    ports: if publish_host_ports {
+                        loopback_service_ports(container_ports(&container))
                     } else {
                         Vec::new()
                     },
-                    options: filter_privileged_container_options(
+                    options: filter_service_container_options(
                         container_options(&container).unwrap_or_default(),
                         allow_privileged,
                     ),
@@ -588,12 +608,12 @@ fn service_containers(
                 network_alias: alias.to_string(),
                 network: network.clone(),
                 env: service_env(container),
-                ports: if github_trust_scope_allows_host_docker(trust_scope) {
-                    service_ports(container)
+                ports: if publish_host_ports {
+                    loopback_service_ports(service_ports(container))
                 } else {
                     Vec::new()
                 },
-                options: filter_privileged_container_options(
+                options: filter_service_container_options(
                     container
                         .options
                         .as_deref()
@@ -618,6 +638,21 @@ fn container_ports(value: &Value) -> Vec<String> {
         .collect::<Vec<_>>();
     ports.sort();
     ports
+}
+
+fn loopback_service_ports(ports: Vec<String>) -> Vec<String> {
+    ports
+        .into_iter()
+        .filter_map(
+            |port| match crate::container::loopback_service_port_binding(&port) {
+                Some(binding) => Some(binding),
+                None => {
+                    eprintln!("forensics.lifecycle: dropped invalid service port mapping {port:?}");
+                    None
+                }
+            },
+        )
+        .collect()
 }
 
 /// Convert the current V2 broker TemplateToken JSON (`map` entries with
@@ -839,6 +874,28 @@ fn filter_privileged_container_options(
                 "Docker option is not in the untrusted allowlist",
             );
             index += consumed_option_count(&options, index);
+        }
+    }
+    filtered
+}
+
+fn filter_service_container_options(options: Vec<String>, allow_privileged: bool) -> Vec<String> {
+    let options = filter_privileged_container_options(options, allow_privileged);
+    let mut filtered = Vec::with_capacity(options.len());
+    let mut options = options.into_iter().peekable();
+    while let Some(option) = options.next() {
+        if crate::container::is_service_publish_option(&option) {
+            log_dropped_container_option(
+                &option,
+                "service host-port publishing is runner-owned and loopback-only",
+            );
+            if crate::container::service_publish_option_takes_separate_value(&option)
+                && options.peek().is_some_and(|value| !value.starts_with('-'))
+            {
+                options.next();
+            }
+        } else {
+            filtered.push(option);
         }
     }
     filtered
@@ -1161,6 +1218,8 @@ mod tests {
             actions_host: root.join("actions"),
             tools_host: root.join("tools"),
             mount_docker_socket: true,
+            docker_host: None,
+            runtime_docker_endpoint: Default::default(),
             slot_store_key: None,
             env: Vec::new(),
             options: Vec::new(),
@@ -2345,11 +2404,10 @@ mod tests {
             "requestId": 1,
             "resources": {
                 "containers": [
-                    { "alias": "__job", "image": "ubuntu:24.04" },
                     {
                         "alias": "postgres",
                         "image": "postgres:16",
-                        "options": "--health-cmd \"pg_isready -U postgres\" --use-api-socket --gpus=all",
+                        "options": "--health-cmd \"pg_isready -U postgres\" --use-api-socket --gpus=all --publish 0.0.0.0:5432:5432 -P",
                         "environmentVariables": {
                             "POSTGRES_PASSWORD": "postgres"
                         },
@@ -2361,14 +2419,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            service_containers(&job, "trusted"),
+            service_containers(&job, "trusted", true),
             vec![ServiceContainerSpec {
                 name: "velnor-service-job_1-postgres".into(),
                 image: "postgres:16".into(),
                 network_alias: "postgres".into(),
                 network: "velnor-net-job_1".into(),
                 env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
-                ports: vec!["5432:5432".into()],
+                ports: vec!["127.0.0.1:5432:5432".into()],
                 options: vec!["--health-cmd".into(), "pg_isready -U postgres".into()],
             }]
         );
@@ -2405,14 +2463,168 @@ mod tests {
         }))
         .unwrap();
 
-        let services = service_containers(&job, "trusted");
+        let services = service_containers(&job, "trusted", true);
         assert_eq!(services.len(), 1);
         assert_eq!(services[0].network_alias, "postgres");
         assert_eq!(services[0].image, "postgres:16");
-        assert_eq!(services[0].ports, vec!["5432"]);
+        assert_eq!(services[0].ports, vec!["127.0.0.1::5432"]);
         assert_eq!(
             services[0].env,
             vec![("POSTGRES_PASSWORD".into(), "postgres".into())]
         );
+    }
+
+    #[test]
+    fn container_job_services_stay_on_job_bridge_without_host_publish() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job/1",
+            "jobDisplayName": "Container services",
+            "requestId": 1,
+            "jobContainer": { "image": "ubuntu:24.04" },
+            "jobServiceContainers": {
+                "postgres": {
+                    "image": "postgres:16",
+                    "ports": ["0.0.0.0:5432:5432"],
+                    "options": "--publish 0.0.0.0:5432:5432 -p 5432:5432 -P --publish-all"
+                }
+            }
+        }))
+        .unwrap();
+
+        let services = service_containers(&job, "trusted", false);
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].network, "velnor-net-job_1");
+        assert_eq!(services[0].network_alias, "postgres");
+        assert!(services[0].ports.is_empty());
+        assert!(services[0].options.is_empty());
+
+        let legacy_job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "legacy-container",
+            "jobDisplayName": "Legacy container services",
+            "requestId": 2,
+            "resources": { "containers": [
+                { "alias": "__job", "image": "ubuntu:24.04" },
+                {
+                    "alias": "redis",
+                    "image": "redis:7",
+                    "ports": { "6379": "6379" }
+                }
+            ] }
+        }))
+        .unwrap();
+        let legacy_services = service_containers(&legacy_job, "trusted", false);
+        assert_eq!(legacy_services.len(), 1);
+        assert!(legacy_services[0].ports.is_empty());
+        assert_eq!(legacy_services[0].network, "velnor-net-legacy-container");
+        assert_eq!(legacy_services[0].network_alias, "redis");
+    }
+
+    #[test]
+    fn service_options_cannot_reintroduce_host_publishing() {
+        let options = vec![
+            "--publish".into(),
+            "0.0.0.0:80:80".into(),
+            "--publish=0.0.0.0:81:81".into(),
+            "-p82:82".into(),
+            "-p".into(),
+            "83:83".into(),
+            "-P".into(),
+            "--publish-all".into(),
+            "-itp8084:84".into(),
+            "-ip".into(),
+            "8085:85".into(),
+            "--health-cmd".into(),
+            "healthy".into(),
+        ];
+        assert_eq!(
+            filter_service_container_options(options, true),
+            vec!["--health-cmd", "healthy"]
+        );
+    }
+
+    #[test]
+    fn default_container_job_does_not_publish_service_ports() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "default-container",
+            "jobDisplayName": "Default container",
+            "requestId": 1,
+            "jobServiceContainers": {
+                "postgres": {
+                    "image": "postgres:16",
+                    "ports": ["5432:5432"]
+                }
+            }
+        }))
+        .unwrap();
+        let spec = github_job_container_spec(
+            &job,
+            GitHubJobContainerPaths {
+                workspace_host: "/tmp/workspace".into(),
+                temp_host: "/tmp/temp".into(),
+                home_host: "/tmp/home".into(),
+                actions_host: "/tmp/actions".into(),
+                tools_host: "/tmp/tools".into(),
+                docker_host_work_dir: None,
+                execution_backend: velnor_model::ExecutionBackendKind::Docker,
+                slot_store_key: None,
+            },
+            "velnor/job:latest",
+            "",
+            "daemon".into(),
+            "trusted",
+        )
+        .unwrap();
+
+        assert_eq!(spec.image, "velnor/job:latest");
+        assert!(spec.services[0].ports.is_empty());
+    }
+
+    #[test]
+    fn guest_host_process_service_ports_are_loopback_only() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "guest-process",
+            "jobDisplayName": "Guest process",
+            "requestId": 1,
+            "jobServiceContainers": {
+                "postgres": {
+                    "image": "postgres:16",
+                    "ports": ["0.0.0.0:5432:5432"]
+                }
+            }
+        }))
+        .unwrap();
+        let spec = github_job_container_spec(
+            &job,
+            GitHubJobContainerPaths {
+                workspace_host: "/tmp/workspace".into(),
+                temp_host: "/tmp/temp".into(),
+                home_host: "/tmp/home".into(),
+                actions_host: "/tmp/actions".into(),
+                tools_host: "/tmp/tools".into(),
+                docker_host_work_dir: None,
+                execution_backend: velnor_model::ExecutionBackendKind::MicroVm,
+                slot_store_key: None,
+            },
+            "",
+            "",
+            "daemon".into(),
+            "trusted",
+        )
+        .unwrap();
+
+        assert!(spec.image.is_empty());
+        assert_eq!(spec.services[0].ports, vec!["127.0.0.1:5432:5432"]);
     }
 }

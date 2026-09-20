@@ -175,14 +175,19 @@ pub(crate) struct CgroupDriver {
     pub version: String,
 }
 
-/// A container's lifecycle word plus when it last stopped, for maintenance
-/// idleness decisions. `finished` is `None` while running (the Engine
-/// reports the zero time) and whenever the timestamp does not parse: `None`
-/// never proves idleness, so callers treat it as recently active.
+/// A container's lifecycle word and lifecycle timestamps for maintenance
+/// idleness decisions. `finished` is `None` while running (the Engine reports
+/// the zero time) and whenever a timestamp does not parse.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ExitInfo {
+    /// Immutable Engine identity observed in the same inspect response as the
+    /// lifecycle state and timestamps. Destructive maintenance binds its age
+    /// decision to this ID so a same-name replacement cannot inherit it.
+    pub id: Option<String>,
     pub status: Option<ContainerState>,
     pub finished: Option<std::time::SystemTime>,
+    /// Container creation timestamp from the Engine's top-level `Created`.
+    pub created: Option<std::time::SystemTime>,
 }
 
 /// What an idempotent container start did. Both variants are success: the
@@ -447,16 +452,17 @@ impl DockerCommandError {
 pub(crate) fn docker_error_category(error: &anyhow::Error) -> DockerErrorCategory {
     let mut category = DockerErrorCategory::Terminal;
     for cause in error.chain() {
-        let candidate = cause.downcast_ref::<DockerCommandError>().map_or_else(
-            || {
-                cause
-                    .downcast_ref::<NotFound>()
-                    .map_or(DockerErrorCategory::Terminal, |_| {
-                        DockerErrorCategory::Conflict
-                    })
-            },
-            DockerCommandError::category,
-        );
+        let candidate = if let Some(command) = cause.downcast_ref::<DockerCommandError>() {
+            command.category()
+        } else if cause.downcast_ref::<NotFound>().is_some()
+            || cause
+                .downcast_ref::<super::engine::EngineError>()
+                .is_some_and(|engine_error| engine_error.status_code() == Some(409))
+        {
+            DockerErrorCategory::Conflict
+        } else {
+            DockerErrorCategory::Terminal
+        };
         if candidate.precedence() > category.precedence() {
             category = candidate;
         }
@@ -487,7 +493,7 @@ const CONTAINER_READINESS_FORMAT: &str =
     "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}";
 const CONTAINER_RUNNING_FORMAT: &str = "{{.State.Running}}";
 const CONTAINER_ID_FORMAT: &str = "{{.Id}}";
-const CONTAINER_EXIT_FORMAT: &str = "{{.State.Status}} {{.State.FinishedAt}}";
+const CONTAINER_EXIT_FORMAT: &str = "{{.Id}} {{.State.Status}} {{.State.FinishedAt}} {{.Created}}";
 const IMAGE_ID_FORMAT: &str = "{{.Id}}";
 const CGROUP_FORMAT: &str = "{{.CgroupDriver}} {{.CgroupVersion}}";
 
@@ -538,15 +544,6 @@ pub(crate) fn exit_info_args(name: &str) -> Vec<String> {
         format!("--format={CONTAINER_EXIT_FORMAT}"),
         "--".to_string(),
         name.to_string(),
-    ]
-}
-
-pub(crate) fn buildx_disk_usage_args(builder: &str) -> Vec<String> {
-    vec![
-        "buildx".to_string(),
-        "du".to_string(),
-        "--builder".to_string(),
-        builder.to_string(),
     ]
 }
 
@@ -705,22 +702,36 @@ pub(crate) fn parse_cgroup_projection(output: &str) -> Result<CgroupDriver> {
     })
 }
 
-/// Parse the exit projection (`<status> <RFC3339 finished-at>`).
+/// Parse the exit projection (`<id> <status> <finished-at> <created-at>`).
 pub(crate) fn parse_exit_info(output: &str) -> Result<ExitInfo> {
-    let (status, finished) = output
-        .trim()
-        .split_once(char::is_whitespace)
-        .context("docker exit probe answered a single word")?;
-    let finished = finished.trim();
+    let mut fields = output.split_whitespace();
+    let id = fields
+        .next()
+        .context("docker exit probe omitted container ID")?;
+    let status = fields.next().context("docker exit probe omitted status")?;
+    let finished = fields
+        .next()
+        .context("docker exit probe omitted finished-at")?;
+    let created = fields
+        .next()
+        .context("docker exit probe omitted created-at")?;
+    if fields.next().is_some() {
+        anyhow::bail!("docker exit probe answered with extra fields");
+    }
+    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!("docker exit probe returned an invalid immutable container ID");
+    }
     Ok(ExitInfo {
+        id: Some(id.to_ascii_lowercase()),
         status: ContainerState::parse(status),
-        finished: parse_finished_at(finished),
+        finished: parse_engine_timestamp(finished),
+        created: parse_engine_timestamp(created),
     })
 }
 
-/// Parse an Engine `FinishedAt`. The zero time (still running) and anything
-/// unparseable yield `None`, which never proves idleness.
-fn parse_finished_at(value: &str) -> Option<std::time::SystemTime> {
+/// Parse an Engine RFC3339 timestamp. The zero time and anything unparseable
+/// yield `None`, which never proves idleness.
+fn parse_engine_timestamp(value: &str) -> Option<std::time::SystemTime> {
     if value.starts_with("0001-01-01") {
         return None;
     }
@@ -732,80 +743,6 @@ fn parse_finished_at(value: &str) -> Option<std::time::SystemTime> {
     }
     let nanos = u64::try_from(nanos).ok()?;
     std::time::UNIX_EPOCH.checked_add(Duration::from_nanos(nanos))
-}
-
-/// Parse `buildx du` into the builder's total cache bytes, from the `Total:`
-/// footer. Sizes are 1000-based (`4.096kB` is 4096 bytes, proven live) and
-/// display-rounded to four significant figures, so callers treat the answer
-/// as approximate — exact enough to order builders largest-first and to
-/// account reclaimed bytes within a percent.
-pub(crate) fn parse_buildx_disk_usage(output: &str) -> Result<u64> {
-    for line in output.lines() {
-        let Some(total) = line.trim().strip_prefix("Total:") else {
-            continue;
-        };
-        return parse_human_size(total.trim())
-            .with_context(|| format!("parse buildx du total {total:?}"));
-    }
-    anyhow::bail!("buildx du reported no Total line: {output:?}")
-}
-
-fn parse_human_size(value: &str) -> Option<u64> {
-    let (number, multiplier) = [
-        ("B", 1_u128),
-        ("kB", 1_000),
-        ("MB", 1_000_000),
-        ("GB", 1_000_000_000),
-        ("TB", 1_000_000_000_000),
-        ("PB", 1_000_000_000_000_000),
-    ]
-    .iter()
-    .find_map(|(unit, multiplier)| {
-        value.strip_suffix(unit).and_then(|number| {
-            // `kB` ends in `B`: only accept the bare-`B` split when nothing
-            // longer matched, i.e. the number itself carries no unit letter.
-            if *unit == "B" && number.ends_with(|ch: char| ch.is_ascii_alphabetic()) {
-                None
-            } else {
-                Some((number, *multiplier))
-            }
-        })
-    })?;
-    let number = number.trim().parse::<f64>().ok()?;
-    if !number.is_finite() || number < 0.0 {
-        return None;
-    }
-    let bytes = (number * multiplier as f64).round();
-    if bytes > u64::MAX as f64 {
-        return None;
-    }
-    Some(bytes as u64)
-}
-
-/// Names of the buildx builders Velnor owns, from `docker buildx ls` output.
-///
-/// The builder name always carries a scope suffix; ownership is the
-/// `velnor-builder` prefix, so enumerate and match the prefix instead of
-/// guessing one name.
-pub(crate) fn owned_builder_names(buildx_ls_stdout: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    for line in buildx_ls_stdout.lines() {
-        let Some(first) = line.split_whitespace().next() else {
-            continue;
-        };
-        // `docker buildx ls` marks the selected builder with a trailing `*` and
-        // indents each builder's nodes; nodes are not builders.
-        if line.starts_with(char::is_whitespace) {
-            continue;
-        }
-        let name = first.trim_end_matches('*');
-        if name.starts_with(crate::cache::OWNED_BUILDER_PREFIX)
-            && !names.iter().any(|seen| seen == name)
-        {
-            names.push(name.to_string());
-        }
-    }
-    names
 }
 
 // ---------------------------------------------------------------------------
@@ -876,13 +813,10 @@ pub(crate) fn stale_job_owned_snapshot(
     })
 }
 
-/// Split of one job's labeled containers for force removal.
+/// Generic containers owned by one job. Reserved BuildKit names stay under
+/// the durable builder registry and never enter slot or label cleanup.
 pub(crate) struct JobOwnedContainerIds {
-    /// Ordinary containers (job container, services, guests): one batched
-    /// `rm --force`.
     pub containers: Vec<String>,
-    /// Legacy BuildKit daemon rows: serial `rm --force`, never batched.
-    pub buildkit: Vec<String>,
 }
 
 /// Every container id carrying exactly `velnor.job-id == job_id`, running or
@@ -891,14 +825,13 @@ pub(crate) struct JobOwnedContainerIds {
 /// job-id \t state`). Fail-closed: a malformed row or a row whose label is
 /// not exactly `job_id` is `None` — the Docker label filter should make that
 /// impossible, so its presence means the listing cannot be trusted and
-/// nothing may be removed. Persistent builder objects are excluded: they
-/// carry the creating job's label by design but are shared with other jobs.
+/// nothing may be removed. Reserved BuildKit names stay with the durable
+/// owner registry, including names from the removed slot-scoped format.
 pub(crate) fn job_owned_container_ids(
     job_id: &str,
     formatted: &str,
 ) -> Option<JobOwnedContainerIds> {
     let mut containers = Vec::new();
-    let mut buildkit = Vec::new();
     for line in formatted.lines() {
         let fields = line.split('\t').collect::<Vec<_>>();
         if fields.len() != 4 {
@@ -911,23 +844,16 @@ pub(crate) fn job_owned_container_ids(
             return None;
         }
         ContainerState::parse(fields[3])?;
-        if crate::buildkit::is_persistent_builder_object(names) {
+        if names.contains(crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX)
+            || crate::buildkit::is_persistent_builder_object(names)
+        {
             continue;
         }
-        if names.contains(crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX) {
-            buildkit.push(id.to_string());
-        } else {
-            containers.push(id.to_string());
-        }
+        containers.push(id.to_string());
     }
     containers.sort();
     containers.dedup();
-    buildkit.sort();
-    buildkit.dedup();
-    Some(JobOwnedContainerIds {
-        containers,
-        buildkit,
-    })
+    Some(JobOwnedContainerIds { containers })
 }
 
 /// Project API container rows into the CLI `ps` shape: short ids,
@@ -949,15 +875,8 @@ fn project_owned_rows(summaries: &[super::engine::EngineContainerSummary]) -> Ve
         .collect()
 }
 
-/// Labeled job containers minus docker-container BuildKit daemons.
-///
-/// BuildKit carries `velnor.job-id`, so the generic owned-container reclaim
-/// used to `docker rm --force` it with the 6h step timeout while job-end
-/// and doctor also rm'd the same id. Concurrent Engine deletes of a Created
-/// `buildx_buildkit_velnor-builder-*` deadlock; the leftover stays. BuildKit
-/// has its own prefix reclaim with a 20s bound. Decides over typed rows —
-/// CLI text parses through [`parse_owned_container_rows`] first — so the
-/// two transports cannot disagree on what gets removed.
+/// Exclude reserved BuildKit names from generic job-container cleanup.
+/// Durable owner records alone authorize BuildKit lifecycle operations.
 pub(crate) fn owned_container_ids_excluding_buildkit_rows(rows: &[OwnedContainer]) -> Vec<String> {
     let mut ids = rows
         .iter()
@@ -967,87 +886,6 @@ pub(crate) fn owned_container_ids_excluding_buildkit_rows(rows: &[OwnedContainer
         })
         .map(|row| row.id.clone())
         .collect::<Vec<_>>();
-    ids.sort();
-    ids.dedup();
-    ids
-}
-
-/// Current-job LEGACY builders including Created/removing. Job-end must
-/// delete them even while the job container is still running (cleanup happens
-/// before rm). Persistent builders are excluded from both disjuncts: they
-/// carry the creating job's label by design, and matching it here would
-/// destroy a daemon other jobs share. They outlive teardown; the claim
-/// release stops them, and the reclaim paths own them.
-pub(crate) fn job_buildkit_ids_for_job(formatted: &str, job_id: &str, scope: &str) -> Vec<String> {
-    let needle = format!(
-        "{}{scope}",
-        crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX
-    );
-    let mut ids = Vec::new();
-    for line in formatted.lines() {
-        let mut parts = line.split('\t');
-        let id = parts.next().unwrap_or("").trim();
-        let names = parts.next().unwrap_or("").trim();
-        let labeled_job = parts.next().unwrap_or("").trim();
-        if id.is_empty() {
-            continue;
-        }
-        if crate::buildkit::is_persistent_builder_object(names) {
-            continue;
-        }
-        if labeled_job == job_id || names.contains(&needle) {
-            ids.push(id.to_string());
-        }
-    }
-    ids.sort();
-    ids.dedup();
-    ids
-}
-
-pub(crate) fn orphan_job_buildkit_ids(
-    formatted: &str,
-    live_jobs: &BTreeSet<String>,
-    daemon_id: Option<&str>,
-) -> Vec<String> {
-    let mut ids = Vec::new();
-    for line in formatted.lines() {
-        let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() != 5 {
-            continue;
-        }
-        let id = fields[0].trim();
-        let names = fields[1].trim();
-        let job_id = fields[2].trim();
-        let owner = fields[3].trim();
-        let Some(state) = ContainerState::parse(fields[4]) else {
-            continue;
-        };
-        if id.is_empty()
-            || !names.contains(crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX)
-            || crate::buildkit::is_persistent_builder_object(names)
-            || !state.safe_to_reclaim()
-        {
-            continue;
-        }
-        // Startup reclaim is daemon-scoped. An absent ownership label is
-        // not proof that this daemon owns the builder; fail closed so a
-        // co-located daemon cannot reclaim an unlabeled live resource.
-        if let Some(daemon_id) = daemon_id
-            && (owner.is_empty() || !daemon_owns_label(owner, daemon_id))
-        {
-            continue;
-        }
-        let job_live = if job_id.is_empty() {
-            live_jobs
-                .iter()
-                .any(|live| names.contains(live.trim_start_matches("velnor-job-")))
-        } else {
-            live_jobs.contains(job_id)
-        };
-        if !job_live {
-            ids.push(id.to_string());
-        }
-    }
     ids.sort();
     ids.dedup();
     ids
@@ -1242,41 +1080,6 @@ pub(crate) fn validate_legacy_testcontainer_listing(
     unlabeled.sort();
     unlabeled.dedup();
     Err(LegacyTestcontainerReclaimError::Unlabeled { ids: unlabeled })
-}
-
-pub(crate) fn daemon_owned_buildkit_volume_names(
-    formatted: &str,
-    daemon_id: &str,
-    protected_jobs: &BTreeSet<String>,
-) -> Vec<String> {
-    let mut names = formatted
-        .lines()
-        .filter_map(|line| {
-            let fields = line.split('\t').collect::<Vec<_>>();
-            if fields.len() != 3 {
-                return None;
-            }
-            let name = fields[0].trim();
-            let job_id = fields[1].trim();
-            let owner = fields[2].trim();
-            if name.is_empty()
-                || job_id.is_empty()
-                || !name.contains(crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX)
-                || crate::buildkit::is_persistent_builder_object(name)
-                || !daemon_owns_label(owner, daemon_id)
-                || protected_jobs.contains(job_id)
-                || protected_jobs
-                    .iter()
-                    .any(|live| name.contains(live.trim_start_matches("velnor-job-")))
-            {
-                return None;
-            }
-            Some(name.to_string())
-        })
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    names
 }
 
 // ---------------------------------------------------------------------------
@@ -1655,30 +1458,18 @@ impl<'r> Docker<'r> {
         }
     }
 
-    /// Engine-API fast path for one migrated call. `cli_args` is the call's
-    /// historical CLI vector: it classifies the operation and its class
-    /// deadline exactly as the CLI call would, so the API attempt and its
-    /// metrics carry the same class the policy always assigned this call.
-    ///
-    /// Returns the API value on success. On ANY API failure — transport,
-    /// timeout, status, framing, JSON, schema, dead runtime, or a job
-    /// cancellation winning the socket-wait race — records the fallback with
-    /// telemetry, logs the reason at `warn`, and returns `None` so the
-    /// caller runs its historical CLI query unchanged. Engine errors never
-    /// surface: the CLI stays the arbiter whenever the API does not
-    /// affirmatively succeed, which is what keeps results, error taxonomy
-    /// (`NotFound`, `DockerTimeout`, `DockerCommandError`), and deadlines
-    /// identical. A fallback costs exactly one subprocess: the same as
-    /// before the migration.
-    fn engine_or_cli<T, F>(
+    /// Resolve a host Engine route without sending a request. A caller may
+    /// safely use the CLI when this returns `None`: the API is disabled, the
+    /// runner cannot speak for the host, or endpoint resolution failed
+    /// before any request bytes could be sent.
+    fn engine_call_context(
         &self,
         cli_args: &[String],
-        run: impl FnOnce(super::engine::EngineClient, Duration) -> F,
-    ) -> Option<T>
-    where
-        F: std::future::Future<Output = Result<T, super::engine::EngineError>> + Send,
-        T: Send,
-    {
+    ) -> Option<(
+        super::engine::EngineClient,
+        crate::docker::DockerOp,
+        Duration,
+    )> {
         if !super::engine::engine_api_enabled() {
             return None;
         }
@@ -1699,7 +1490,6 @@ impl<'r> Docker<'r> {
             op.is_control_plane(),
             "engine fast path serves control-plane calls only"
         );
-        let budget = super::engine::api_budget(class_deadline);
         let socket = match super::engine::socket_path() {
             Ok(socket) => socket,
             Err(error) => {
@@ -1713,7 +1503,27 @@ impl<'r> Docker<'r> {
                 return None;
             }
         };
-        let engine = super::engine::EngineClient::new(socket);
+        Some((
+            super::engine::EngineClient::new(socket),
+            op,
+            super::engine::api_budget(class_deadline),
+        ))
+    }
+
+    /// Send one Engine request after its route is resolved. Query/start/stop
+    /// callers may fall back when this fails. Container deletion uses the
+    /// same attempt under an in-flight claim and deliberately surfaces an
+    /// ambiguous failure instead of starting a second delete.
+    fn run_engine_call<T, F>(
+        engine: super::engine::EngineClient,
+        op: crate::docker::DockerOp,
+        budget: Duration,
+        run: impl FnOnce(super::engine::EngineClient, Duration) -> F,
+    ) -> Result<T, super::engine::EngineError>
+    where
+        F: std::future::Future<Output = Result<T, super::engine::EngineError>> + Send,
+        T: Send,
+    {
         let started = std::time::Instant::now();
         let attempt =
             super::engine::block_on_engine(super::engine::cancel_race(run(engine, budget)));
@@ -1737,8 +1547,27 @@ impl<'r> Docker<'r> {
         match result {
             Ok(value) => {
                 crate::docker::observe_api(op, started.elapsed());
-                Some(value)
+                Ok(value)
             }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Engine-API fast path for one migrated call. On any request failure it
+    /// records a fallback and lets query/start/stop callers run their
+    /// historical CLI path.
+    fn engine_or_cli<T, F>(
+        &self,
+        cli_args: &[String],
+        run: impl FnOnce(super::engine::EngineClient, Duration) -> F,
+    ) -> Option<T>
+    where
+        F: std::future::Future<Output = Result<T, super::engine::EngineError>> + Send,
+        T: Send,
+    {
+        let (engine, op, budget) = self.engine_call_context(cli_args)?;
+        match Self::run_engine_call(engine, op, budget, run) {
+            Ok(value) => Some(value),
             Err(error) => {
                 crate::docker::observe_api_fallback(op);
                 tracing::warn!(
@@ -2009,31 +1838,24 @@ impl<'r> Docker<'r> {
         parse_cgroup_projection(&self.call(&args, "daemon cgroup")?)
     }
 
-    /// Names of the buildx builders Velnor owns.
-    pub(crate) fn buildx_builders(&mut self) -> Result<Vec<String>> {
-        let args = vec!["buildx".to_string(), "ls".to_string()];
-        Ok(owned_builder_names(&self.call(&args, "buildx builders")?))
-    }
-
     /// Lifecycle word and last stop time of one container.
     pub(crate) fn inspect_exit(&mut self, name: &str) -> Result<ExitInfo> {
         if let Some(exit) = self.engine_or_cli(&exit_info_args(name), |engine, budget| async move {
             let container = engine.inspect_container(name, budget).await?;
             Ok(ExitInfo {
+                id: Some(container.id),
                 status: ContainerState::parse(&container.status),
-                finished: parse_finished_at(&container.finished_at),
+                finished: parse_engine_timestamp(&container.finished_at),
+                created: container
+                    .created_at
+                    .as_deref()
+                    .and_then(parse_engine_timestamp),
             })
         }) {
             return Ok(exit);
         }
         let args = exit_info_args(name);
         parse_exit_info(&self.call(&args, name)?)
-    }
-
-    /// Total cache bytes one builder holds, from `buildx du`.
-    pub(crate) fn buildx_disk_usage(&mut self, builder: &str) -> Result<u64> {
-        let args = buildx_disk_usage_args(builder);
-        parse_buildx_disk_usage(&self.call(&args, builder)?)
     }
 
     /// Containers carrying `velnor.job-id=<job_id>`: short ids plus names.
@@ -2157,17 +1979,41 @@ impl<'r> Docker<'r> {
         force: bool,
         volumes: bool,
     ) -> Result<RemoveOutcome> {
-        if let Some(outcome) =
-            self.engine_or_cli(
-                &container_remove_args(name, force, volumes),
-                |engine, budget| async move {
-                    engine.remove_container(name, force, volumes, budget).await
-                },
-            )
-        {
-            return Ok(outcome);
-        }
         let args = container_remove_args(name, force, volumes);
+        if let Some((engine, op, budget)) = self.engine_call_context(&args) {
+            // Keep Engine API and CLI deletes under one per-object claim. A
+            // lost API response may follow a successful delete, so never
+            // begin a second removal while the first result is ambiguous.
+            let rm_claim = claim_docker_container_rm(&args)
+                .ok_or_else(|| anyhow::anyhow!("docker rm arguments contain no container id"))?;
+            if rm_claim.ids.is_empty() {
+                return Ok(RemoveOutcome::Removed);
+            }
+            let api_started = std::time::Instant::now();
+            return match Self::run_engine_call(engine, op, budget, |engine, budget| async move {
+                engine.remove_container(name, force, volumes, budget).await
+            }) {
+                Ok(outcome) => Ok(outcome),
+                Err(error) => {
+                    if error.status_code() == Some(409) {
+                        // A daemon 409 is a completed, definitive answer that
+                        // the running object was not removed. Count it as an
+                        // API-served result; do not send a second delete.
+                        crate::docker::observe_api(op, api_started.elapsed());
+                    }
+                    tracing::warn!(
+                        target: "velnor.docker",
+                        docker_op = op.label(),
+                        docker_transport = "engine-api-failed-closed",
+                        docker_api_fault = error.label(),
+                        reason = %error,
+                        "container removal API result is ambiguous; refusing a second delete"
+                    );
+                    Err(anyhow::Error::new(error)
+                        .context("Docker Engine container remove failed; CLI retry is unsafe"))
+                }
+            };
+        }
         match self.mutate(&args, name, "remove") {
             Ok(_) => Ok(RemoveOutcome::Removed),
             Err(error) if is_not_found(&error) => Ok(RemoveOutcome::AlreadyRemoved),
@@ -2229,11 +2075,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ids.containers, vec!["aaa111", "bbb222", "ccc333"]);
-        assert!(ids.buildkit.is_empty());
     }
 
     #[test]
-    fn job_owned_container_ids_splits_buildkit_and_skips_shared_builders() {
+    fn job_owned_container_ids_skips_reserved_buildkit_names() {
         let job_id = "velnor-job-9";
         let buildkit_prefix = crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX;
         let ids = job_owned_container_ids(
@@ -2246,7 +2091,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ids.containers, vec!["aaa111"]);
-        assert_eq!(ids.buildkit, vec!["ddd444"]);
     }
 
     #[test]
@@ -2489,8 +2333,6 @@ mod tests {
             mapped_ports_args("velnor-service-postgres"),
             image_id_args("velnor/job-ubuntu:26.04"),
             exit_info_args("buildx_buildkit_velnor-builder-shared-trusted-owner_repo0"),
-            buildx_disk_usage_args("velnor-builder-shared-trusted-owner_repo"),
-            vec!["buildx".to_string(), "ls".to_string()],
         ];
         // The listing builders the reclaim decisions consume through this
         // module's parsers must hold the same guarantee.
@@ -2502,9 +2344,6 @@ mod tests {
         queries.push(crate::docker_lease::list_daemon_owned_job_format_args());
         queries.push(crate::docker_lease::list_testcontainers_format_args());
         queries.push(crate::docker_lease::list_job_image_format_args());
-        queries.push(crate::docker_lease::list_job_buildkit_format_args());
-        queries.push(crate::docker_lease::list_job_buildkit_volume_args());
-        queries.push(crate::docker_lease::list_daemon_owned_job_buildkit_volume_format_args());
         queries.push(crate::docker_lease::list_preflight_format_args());
         for args in &queries {
             let (op, deadline) = crate::docker::deadline_for(args, SIX_HOURS);
@@ -2574,6 +2413,9 @@ mod tests {
         }
     }
 
+    const TEST_CONTAINER_ID: &str =
+        "bd9ace6535cb18f6f20d0532c1276a51e50ab1db44885140c600a0c736fe2977";
+
     fn failed(code: i32, stderr: &str) -> CommandResult {
         CommandResult {
             code,
@@ -2586,7 +2428,7 @@ mod tests {
     fn each_query_costs_exactly_one_process() {
         let mut runner = ScriptRunner::scripted(vec![
             ok("healthy\n"),
-            ok("a530e70d9e1e35941b6fc12db9b51a7b19c6d02\n"),
+            ok(&format!("{TEST_CONTAINER_ID}\n")),
             ok("8080/tcp -> 0.0.0.0:41062\n"),
             ok("systemd 2\n"),
         ]);
@@ -2660,86 +2502,38 @@ mod tests {
     }
 
     #[test]
-    fn exit_info_reports_stop_time_and_never_proves_running_idle() {
-        let exited = parse_exit_info("exited 2026-09-12T20:11:02.437775991Z\n").expect("parse");
+    fn exit_info_reports_stop_and_create_times_and_never_proves_running_idle() {
+        let id = "a".repeat(64);
+        let exited = parse_exit_info(&format!(
+            "{id} exited 2026-09-12T20:11:02.437775991Z 2026-09-10T20:11:02.437775991Z\n"
+        ))
+        .expect("parse");
+        assert_eq!(exited.id.as_deref(), Some(id.as_str()));
         assert_eq!(exited.status, Some(ContainerState::Exited));
         let finished = exited.finished.expect("stopped has a stop time");
         assert!(
             finished < std::time::SystemTime::now(),
             "a past stop reads as past"
         );
+        assert!(exited.created.expect("container has a create time") < finished);
 
         // Running reports the zero time: no idleness proof.
-        let running = parse_exit_info("running 0001-01-01T00:00:00Z\n").expect("parse");
+        let running = parse_exit_info(&format!(
+            "{id} running 0001-01-01T00:00:00Z 2026-09-10T20:11:02.437775991Z\n"
+        ))
+        .expect("parse");
         assert_eq!(running.status, Some(ContainerState::Running));
         assert_eq!(running.finished, None);
+        assert!(running.created.is_some());
 
         // Garbage timestamps never prove idleness either.
-        let broken = parse_exit_info("exited not-a-time\n").expect("parse");
+        let broken =
+            parse_exit_info(&format!("{id} exited not-a-time also-not-a-time\n")).expect("parse");
         assert_eq!(broken.status, Some(ContainerState::Exited));
         assert_eq!(broken.finished, None);
+        assert_eq!(broken.created, None);
 
-        assert!(parse_exit_info("exited\n").is_err());
-    }
-
-    #[test]
-    fn buildx_disk_usage_reads_the_total_footer_in_decimal_units() {
-        // `docker buildx du`, live: per-record rows plus the footer.
-        let output = "\
-ID                           RECLAIMABLE   SIZE      LAST ACCESSED
-qoyzm9h3t5d8kc4avc1jzrft8*   true          0B        Less than a second ago
-ut03rtsmqbdemi4moqok6mtc2    true          6.054MB   Less than a second ago
-Reclaimable:\t6.054MB
-Total:\t\t6.054MB
-";
-        assert_eq!(parse_buildx_disk_usage(output).expect("total"), 6_054_000);
-        assert_eq!(parse_buildx_disk_usage("Total:\t\t0B\n").expect("zero"), 0);
-        // 4096 bytes display as 4.096kB: units are 1000-based, proven live.
-        assert_eq!(parse_human_size("4.096kB"), Some(4096));
-        assert_eq!(parse_human_size("27.03MB"), Some(27_030_000));
-        assert_eq!(parse_human_size("1.5GB"), Some(1_500_000_000));
-        assert_eq!(parse_human_size("2TB"), Some(2_000_000_000_000));
-        assert_eq!(parse_human_size("bogus"), None);
-        assert_eq!(parse_human_size("-1MB"), None);
-        assert!(parse_buildx_disk_usage("no footer here\n").is_err());
-    }
-
-    #[test]
-    fn teardown_matcher_skips_persistent_builders_by_label_and_needle() {
-        // A persistent builder carries its creating job's label BY DESIGN;
-        // matching it here would destroy a daemon other jobs share.
-        let listed = "aaa111\tbuildx_buildkit_velnor-builder-shared-trusted-o_r0\tvelnor-job-9\n\
-             bbb222\tbuildx_buildkit_velnor-builder-slot-30\tvelnor-job-9\n\
-             ccc333\tbuildx_buildkit_velnor-builder-shared-trusted-o_r0\tvelnor-job-1\n";
-        // Label match: only the legacy builder.
-        assert_eq!(
-            job_buildkit_ids_for_job(listed, "velnor-job-9", "other-scope"),
-            vec!["bbb222".to_string()]
-        );
-        // Slot-needle match: the persistent daemon can never carry a slot
-        // suffix, and is skipped even so.
-        assert_eq!(
-            job_buildkit_ids_for_job(listed, "velnor-job-nobody", "slot-3"),
-            vec!["bbb222".to_string()]
-        );
-    }
-
-    #[test]
-    fn orphan_matcher_skips_persistent_builders_and_volumes() {
-        let live = BTreeSet::new();
-        let daemons = "aaa111\tbuildx_buildkit_velnor-builder-shared-trusted-o_r0\tvelnor-job-9\t/daemon\texited\n\
-             bbb222\tbuildx_buildkit_velnor-builder-slot-30\tvelnor-job-9\t/daemon\texited\n";
-        assert_eq!(
-            orphan_job_buildkit_ids(daemons, &live, Some("/daemon")),
-            vec!["bbb222".to_string()]
-        );
-        let volumes =
-            "buildx_buildkit_velnor-builder-shared-trusted-o_r0_state\tvelnor-job-9\t/daemon\n\
-             buildx_buildkit_velnor-builder-slot-30_state\tvelnor-job-9\t/daemon\n";
-        assert_eq!(
-            daemon_owned_buildkit_volume_names(volumes, "/daemon", &live),
-            vec!["buildx_buildkit_velnor-builder-slot-30_state".to_string()]
-        );
+        assert!(parse_exit_info(&format!("{id} exited 0001-01-01T00:00:00Z\n")).is_err());
     }
 
     #[test]
@@ -2761,9 +2555,13 @@ Total:\t\t6.054MB
     // Engine-API routing: identical values, subprocesses only on fallback
     // ------------------------------------------------------------------
 
-    const ROUTED_INSPECT: &str = r#"{"Id":"a530e70d9e1e35941b6fc12db9b51a7b19c6d02","State":{"Running":true,"Status":"running","FinishedAt":"0001-01-01T00:00:00Z","Health":{"Status":"healthy"}},"NetworkSettings":{"Ports":{"8080/tcp":[{"HostIp":"0.0.0.0","HostPort":"41062"},{"HostIp":"::","HostPort":"41062"}]}}}"#;
+    const ROUTED_INSPECT_TEMPLATE: &str = r#"{"Id":"__TEST_CONTAINER_ID__","Created":"2026-09-10T20:11:02Z","State":{"Running":true,"Status":"running","FinishedAt":"0001-01-01T00:00:00Z","Health":{"Status":"healthy"}},"NetworkSettings":{"Ports":{"8080/tcp":[{"HostIp":"0.0.0.0","HostPort":"41062"},{"HostIp":"::","HostPort":"41062"}]}}}"#;
     const ROUTED_IMAGE: &str = r#"{"Id":"sha256:feedface"}"#;
     const ROUTED_INFO: &str = r#"{"CgroupDriver":"systemd","CgroupVersion":2}"#;
+
+    fn routed_inspect() -> String {
+        ROUTED_INSPECT_TEMPLATE.replace("__TEST_CONTAINER_ID__", TEST_CONTAINER_ID)
+    }
 
     fn routed_mock(connections: usize) -> MockEngine {
         MockEngine::serve(
@@ -2773,7 +2571,7 @@ Total:\t\t6.054MB
                 } else if head.contains("GET /images/") {
                     json_response(ROUTED_IMAGE)
                 } else {
-                    json_response(ROUTED_INSPECT)
+                    json_response(&routed_inspect())
                 }
             },
             connections,
@@ -2808,11 +2606,13 @@ Total:\t\t6.054MB
         vec![
             ok("healthy\n"),
             ok("true\n"),
-            ok("a530e70d9e1e35941b6fc12db9b51a7b19c6d02\n"),
+            ok(&format!("{TEST_CONTAINER_ID}\n")),
             ok("sha256:feedface\n"),
             ok("8080/tcp -> 0.0.0.0:41062\n8080/tcp -> [::]:41062\n"),
             ok("systemd 2\n"),
-            ok("running 0001-01-01T00:00:00Z\n"),
+            ok(&format!(
+                "{TEST_CONTAINER_ID} running 0001-01-01T00:00:00Z 2026-09-10T20:11:02Z\n"
+            )),
         ]
     }
 
@@ -2822,7 +2622,7 @@ Total:\t\t6.054MB
 
         // Before: engine off (the test default), every query is one CLI call.
         let cli_values = {
-            let _serial = crate::docker::metrics::lock_serial_for_test();
+            let _guard = EngineTestGuard::disabled();
             let _scope = begin_job("seq-cli");
             let mut runner = ScriptRunner::scripted_host(cli_script_for_routed_sequence());
             let values = {
@@ -2840,6 +2640,8 @@ Total:\t\t6.054MB
             assert_eq!(counts.invocations, 0);
             values
         };
+        assert_eq!(cli_values.2, TEST_CONTAINER_ID);
+        assert_eq!(cli_values.6.id.as_deref(), Some(TEST_CONTAINER_ID));
 
         // After: engine on, the same values with no runner call at all.
         let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
@@ -2869,13 +2671,12 @@ Total:\t\t6.054MB
         );
         let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
         let _scope = begin_job("seq-fallback-status");
-        let mut runner =
-            ScriptRunner::scripted_host(vec![ok("a530e70d9e1e35941b6fc12db9b51a7b19c6d02\n")]);
+        let mut runner = ScriptRunner::scripted_host(vec![ok(&format!("{TEST_CONTAINER_ID}\n"))]);
         let id = {
             let mut docker = Docker::job(&mut runner);
             docker.container_id("svc").expect("fallback serves")
         };
-        assert_eq!(id, "a530e70d9e1e35941b6fc12db9b51a7b19c6d02");
+        assert_eq!(id, TEST_CONTAINER_ID);
         assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
         let counts = snapshot();
         assert_eq!(counts.api_calls, 0);
@@ -2887,7 +2688,7 @@ Total:\t\t6.054MB
         let mock = MockEngine::serve(
             |_| {
                 std::thread::sleep(Duration::from_millis(300));
-                json_response(ROUTED_INSPECT)
+                json_response(&routed_inspect())
             },
             1,
         );
@@ -2958,7 +2759,7 @@ Total:\t\t6.054MB
                 .container_id("svc")
                 .expect("api serves on current-thread")
         };
-        assert_eq!(id, "a530e70d9e1e35941b6fc12db9b51a7b19c6d02");
+        assert_eq!(id, TEST_CONTAINER_ID);
         assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
         assert_eq!(snapshot().api_calls, 1);
     }
@@ -2969,7 +2770,7 @@ Total:\t\t6.054MB
         MockEngine::serve(
             move |_| {
                 std::thread::sleep(delay);
-                json_response(ROUTED_INSPECT)
+                json_response(&routed_inspect())
             },
             1,
         )
@@ -3153,7 +2954,7 @@ Total:\t\t6.054MB
 
         // Before: engine off, three listings are three CLI calls.
         let cli_values = {
-            let _serial = crate::docker::metrics::lock_serial_for_test();
+            let _guard = EngineTestGuard::disabled();
             let _scope = begin_job("list-cli");
             let mut runner = ScriptRunner::scripted_host(cli_script_for_list_sequence());
             let values = {
@@ -3270,35 +3071,6 @@ Total:\t\t6.054MB
         );
     }
 
-    #[test]
-    fn buildx_queries_stay_on_cli_without_api_attempts() {
-        let mock = routed_mock(0);
-        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
-        let _scope = begin_job("seq-buildx-cli");
-        let mut runner = ScriptRunner::scripted_host(vec![
-            ok("velnor-builder-shared-trusted-o_r0\n"),
-            ok("Total:\t\t6.054MB\n"),
-        ]);
-        let (builders, usage) = {
-            let mut docker = Docker::job(&mut runner);
-            (
-                docker.buildx_builders().expect("builders list"),
-                docker
-                    .buildx_disk_usage("velnor-builder-shared-trusted-o_r0")
-                    .expect("disk usage"),
-            )
-        };
-        assert_eq!(
-            builders,
-            vec!["velnor-builder-shared-trusted-o_r0".to_string()]
-        );
-        assert_eq!(usage, 6_054_000);
-        assert_eq!(runner.calls.load(Ordering::SeqCst), 2);
-        let counts = snapshot();
-        assert_eq!(counts.api_calls, 0);
-        assert_eq!(counts.api_fallbacks, 0);
-    }
-
     // ------------------------------------------------------------------
     // Lifecycle routing: idempotent mutations, subprocesses only on
     // fallback. CLI text below is Engine 29.4.0 verbatim; API bodies
@@ -3334,7 +3106,7 @@ Total:\t\t6.054MB
     fn lifecycle_cycle_is_identical_with_zero_subprocess_on_api() {
         // Before: engine off, one start/stop/remove cycle is three CLI calls.
         let cli_values = {
-            let _serial = crate::docker::metrics::lock_serial_for_test();
+            let _guard = EngineTestGuard::disabled();
             let _scope = begin_job("lifecycle-cli");
             let mut runner =
                 ScriptRunner::scripted_host(vec![ok("svc\n"), ok("svc\n"), ok("svc\n")]);
@@ -3391,7 +3163,7 @@ Total:\t\t6.054MB
         // identically for fresh and redundant starts/stops), missing on
         // remove reads as already-removed.
         let cli_values = {
-            let _serial = crate::docker::metrics::lock_serial_for_test();
+            let _guard = EngineTestGuard::disabled();
             let _scope = begin_job("lifecycle-cli-already");
             let mut runner = ScriptRunner::scripted_host(vec![
                 ok("svc\n"),
@@ -3448,17 +3220,17 @@ Total:\t\t6.054MB
 
     #[test]
     fn genuine_conflicts_surface_typed_conflict() {
-        // Removing a running container without force: the API 409 falls
-        // back, and the CLI re-derives Conflict — never success.
+        // A definitive API 409 is a typed Conflict and must not trigger a
+        // second delete through the CLI.
         {
             let mock = MockEngine::serve(|_| error_response("409 Conflict", API_RUNNING), 1);
             let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
             let _scope = begin_job("lifecycle-conflict-rm");
-            let mut runner = ScriptRunner::scripted_host(vec![failed(1, CLI_RM_RUNNING)]);
+            let mut runner = ScriptRunner::scripted_host(Vec::new());
             let error = {
                 let mut docker = Docker::job(&mut runner);
                 docker
-                    .container_remove("svc", false, false)
+                    .container_remove("conflict-svc", false, false)
                     .expect_err("running rm without force must fail")
             };
             assert!(!is_not_found(&error));
@@ -3467,10 +3239,10 @@ Total:\t\t6.054MB
                 DockerErrorCategory::Conflict,
                 "{error:#}"
             );
-            assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
             let counts = snapshot();
-            assert_eq!(counts.api_calls, 0);
-            assert_eq!(counts.api_fallbacks, 1);
+            assert_eq!(counts.api_calls, 1);
+            assert_eq!(counts.api_fallbacks, 0);
         }
 
         // Starting a missing container: the API 404 falls back, and the
@@ -3548,7 +3320,7 @@ Total:\t\t6.054MB
         // Pure CLI leg: an in-flight removal is the desired end state
         // converging, so remove succeeds.
         {
-            let _serial = crate::docker::metrics::lock_serial_for_test();
+            let _guard = EngineTestGuard::disabled();
             let _scope = begin_job("lifecycle-cli-inflight");
             let mut runner = ScriptRunner::scripted_host(vec![failed(1, CLI_RM_IN_FLIGHT)]);
             let outcome = {
@@ -3561,28 +3333,29 @@ Total:\t\t6.054MB
             assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
         }
 
-        // API leg: a 409 carrying the in-progress sentence falls back, and
-        // the CLI leg tolerates it the same way.
+        // API leg: a 409 may arrive after an in-progress delete. The facade
+        // cannot prove that no side effect occurred, so it must not retry via
+        // CLI even when the host response happens to resemble a known error.
         {
             let mock = MockEngine::serve(|_| error_response("409 Conflict", API_IN_FLIGHT), 1);
             let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
             let _scope = begin_job("lifecycle-api-inflight");
             let mut runner = ScriptRunner::scripted_host(vec![failed(1, CLI_RM_IN_FLIGHT)]);
-            let outcome = {
+            let error = {
                 let mut docker = Docker::job(&mut runner);
                 docker
-                    .container_remove("svc", true, false)
-                    .expect("in-flight remove succeeds")
+                    .container_remove("inflight-svc", true, false)
+                    .expect_err("ambiguous API delete must fail closed")
             };
-            assert_eq!(outcome, RemoveOutcome::Removed);
-            assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
-            assert_eq!(snapshot().api_fallbacks, 1);
+            assert!(format!("{error:#}").contains("CLI retry is unsafe"));
+            assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(snapshot().api_fallbacks, 0);
         }
 
         // A stderr that also matches Transient is a sick daemon, not a
         // converging removal: it surfaces instead of masking as success.
         {
-            let _serial = crate::docker::metrics::lock_serial_for_test();
+            let _guard = EngineTestGuard::disabled();
             let _scope = begin_job("lifecycle-cli-transient");
             let mut runner = ScriptRunner::scripted_host(vec![failed(
                 1,
@@ -3591,7 +3364,7 @@ Total:\t\t6.054MB
             let error = {
                 let mut docker = Docker::job(&mut runner);
                 docker
-                    .container_remove("svc", true, false)
+                    .container_remove("transient-svc", true, false)
                     .expect_err("transient must surface")
             };
             assert_eq!(
@@ -3600,6 +3373,24 @@ Total:\t\t6.054MB
                 "{error:#}"
             );
         }
+    }
+
+    #[test]
+    fn ambiguous_engine_delete_does_not_retry_through_cli() {
+        // The Engine accepted the request but lost its response. A second
+        // transport cannot tell whether the first DELETE already completed.
+        let mock = MockEngine::serve(|_| Vec::new(), 1);
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("lifecycle-delete-lost-response");
+        let mut runner = ScriptRunner::scripted_host(vec![ok("must not run\n")]);
+
+        let error = Docker::job(&mut runner)
+            .container_remove("lost-response-svc", true, false)
+            .expect_err("ambiguous Engine delete must fail closed");
+
+        assert!(format!("{error:#}").contains("CLI retry is unsafe"));
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(snapshot().api_fallbacks, 0);
     }
 
     #[test]
@@ -3706,11 +3497,11 @@ Total:\t\t6.054MB
             let (first, second) = std::thread::scope(|scope| {
                 let first = scope.spawn(|| {
                     let mut runner = ScriptRunner::scripted_host(Vec::new());
-                    Docker::job(&mut runner).container_remove("svc", true, false)
+                    Docker::job(&mut runner).container_remove("race-remove-svc", true, false)
                 });
                 let second = scope.spawn(|| {
                     let mut runner = ScriptRunner::scripted_host(Vec::new());
-                    Docker::job(&mut runner).container_remove("svc", true, false)
+                    Docker::job(&mut runner).container_remove("race-remove-svc", true, false)
                 });
                 (
                     first.join().expect("racer joins"),
@@ -3721,10 +3512,9 @@ Total:\t\t6.054MB
                 first.expect("racing remove succeeds"),
                 second.expect("racing remove succeeds"),
             ];
-            assert!(outcomes.contains(&RemoveOutcome::Removed));
-            assert!(outcomes.contains(&RemoveOutcome::AlreadyRemoved));
+            assert_eq!(outcomes, [RemoveOutcome::Removed, RemoveOutcome::Removed]);
             let counts = snapshot();
-            assert_eq!(counts.api_calls, 2);
+            assert_eq!(counts.api_calls, 1);
             assert_eq!(counts.api_fallbacks, 0);
         }
     }

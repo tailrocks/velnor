@@ -73,14 +73,72 @@ verify_jobs_slice_inactive() {
   esac
 }
 
+# The retired writer created an untracked file and shipped no sidecar
+# provenance marker. Its exact four-line signature and CPUQuota formula are the
+# only durable ownership evidence: byte-identical copies are the same retired
+# policy and migrate too. Every other payload, symlink, or conflict fails closed.
+# The packaged Debian targets are 64-bit: getconf returns sysconf's signed long,
+# and /bin/sh arithmetic is signed intmax_t. The old positive-result guard and
+# *95 formula cap valid output at floor(INT64_MAX/95)*95 = 9223372036854775790.
+is_legacy_jobs_cpu_quota_dropin() {
+  [ -f "$JOBS_SLICE_DROPIN" ] || return 1
+  line_count=$(wc -l < "$JOBS_SLICE_DROPIN" 2>/dev/null) || return 1
+  [ "$line_count" -eq 4 ] 2>/dev/null || return 1
+
+  LC_ALL=C awk '
+    function has_legacy_cpu_quota(line, quota, i, remainder) {
+      if (line !~ /^CPUQuota=[1-9][0-9]*%$/) return 0
+      quota = substr(line, 10, length(line) - 10)
+      if (!decimal_at_most(quota, "9223372036854775790")) return 0
+      remainder = 0
+      for (i = 1; i <= length(quota); i++) {
+        remainder = (remainder * 10 + substr(quota, i, 1)) % 95
+      }
+      return remainder == 0
+    }
+
+    function decimal_at_most(value, maximum, i, value_digit, maximum_digit) {
+      if (length(value) < length(maximum)) return 1
+      if (length(value) > length(maximum)) return 0
+      for (i = 1; i <= length(value); i++) {
+        value_digit = substr(value, i, 1) + 0
+        maximum_digit = substr(maximum, i, 1) + 0
+        if (value_digit < maximum_digit) return 1
+        if (value_digit > maximum_digit) return 0
+      }
+      return 1
+    }
+
+    BEGIN { valid = 1 }
+    NR == 1 { if ($0 != "[Slice]") { valid = 0; exit } next }
+    NR == 2 { if ($0 != "# Generated from the host online CPU count during package configuration.") { valid = 0; exit } next }
+    NR == 3 { if ($0 != "# CPUQuota is 95% of one CPU per online logical CPU.") { valid = 0; exit } next }
+    NR == 4 { if (!has_legacy_cpu_quota($0)) { valid = 0; exit } next }
+    NR > 4 { valid = 0; exit }
+    END { if (NR != 4 || !valid) exit 1 }
+  ' "$JOBS_SLICE_DROPIN"
+}
+
 remove_stale_jobs_cpu_quota_dropin() {
-  # Older packages generated this exact host-scaled ceiling outside dpkg's
-  # file list. Delete only that Velnor-owned file; preserve operator drop-ins.
-  if [ -e "$JOBS_SLICE_DROPIN" ]; then
-    rm -f "$JOBS_SLICE_DROPIN"
-    echo "Removed stale velnor-jobs.slice CPU quota drop-in $JOBS_SLICE_DROPIN."
+  if [ -L "$JOBS_SLICE_DROPIN_DIR" ]; then
+    fail "refusing unknown conflict at $JOBS_SLICE_DROPIN_DIR: drop-in directory is a symlink"
   fi
-  rmdir "$JOBS_SLICE_DROPIN_DIR" 2>/dev/null || true
+  [ -e "$JOBS_SLICE_DROPIN_DIR" ] || return 0
+  [ -d "$JOBS_SLICE_DROPIN_DIR" ] \
+    || fail "refusing unknown conflict at $JOBS_SLICE_DROPIN_DIR: drop-in path is not a directory"
+
+  if [ -L "$JOBS_SLICE_DROPIN" ]; then
+    fail "refusing unknown conflict at $JOBS_SLICE_DROPIN: symlinks are not the legacy Velnor file"
+  fi
+  [ -e "$JOBS_SLICE_DROPIN" ] || return 0
+  [ -f "$JOBS_SLICE_DROPIN" ] \
+    || fail "refusing unknown conflict at $JOBS_SLICE_DROPIN: not a regular file"
+  is_legacy_jobs_cpu_quota_dropin \
+    || fail "refusing unknown conflict at $JOBS_SLICE_DROPIN: contents do not match the exact legacy Velnor CPU quota file"
+
+  rm -f "$JOBS_SLICE_DROPIN" \
+    || fail "could not remove stale Velnor CPU quota drop-in $JOBS_SLICE_DROPIN"
+  echo "Removed stale Velnor CPU quota drop-in $JOBS_SLICE_DROPIN."
 }
 
 case "$1" in
@@ -124,9 +182,14 @@ case "$1" in
       # pre-stop check permits a job started in the gap to outlive removal.
       verify_jobs_slice_inactive \
         || fail "velnor-jobs.slice is not provably inactive; aborting removal"
-      remove_stale_jobs_cpu_quota_dropin
+    fi
+    # Removal reaches this point only after loaded Velnor units and the jobs
+    # slice are inactive. Clean the exact legacy file even when systemd is not
+    # running, and leave every other drop-in in the operator's directory.
+    remove_stale_jobs_cpu_quota_dropin
+    if [ -d /run/systemd/system ]; then
       systemctl daemon-reload || {
-        echo "velnor-runner postrm: daemon-reload failed after removing the stale job-slice quota drop-in" >&2
+        echo "velnor-runner postrm: daemon-reload failed after package removal" >&2
         exit 1
       }
 

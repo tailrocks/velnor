@@ -33,6 +33,8 @@ pub mod daemon_instance;
 pub mod docker;
 mod docker_argv;
 mod docker_lease;
+#[cfg(unix)]
+mod docker_lease_tls;
 pub mod execution;
 mod executor;
 mod expression;

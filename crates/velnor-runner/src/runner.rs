@@ -12278,7 +12278,7 @@ fn take_teardown_owner(slot: &TeardownSlot) -> Option<TeardownHandle> {
 }
 
 impl TeardownHandle {
-    fn run(self, job_claim: &JobClaim, forensics: &SlotForensics) -> Result<()> {
+    fn run(self, job_claim: &JobClaim, _forensics: &SlotForensics) -> Result<()> {
         // The job process installs the job token as the process-wide active
         // cancellation. Teardown runs on a worker thread in that same process
         // and must not inherit it: `ProcessCommandRunner` registers every
@@ -12305,32 +12305,6 @@ impl TeardownHandle {
         // Do not release the claim between cleanup phases. A workspace can be
         // reused only after Docker and filesystem cleanup both succeed.
         let _job_claim = job_claim;
-        // Docker Engine can acknowledge a forced BuildKit container removal
-        // while its state volume is still attached. Run this slow, retryable
-        // cleanup in a worker, but join it before teardown returns so the
-        // duplicate-job claim remains held until the scope is fully cleaned.
-        let worker_forensics = forensics.clone();
-        let worker_container = container.clone();
-        let deferred = std::thread::Builder::new()
-            .name("velnor-buildkit-cleanup".into())
-            .spawn(move || -> Result<()> {
-                worker_forensics.lifecycle("buildkit-teardown-deferred-start");
-                let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
-                let result = executor
-                    .cleanup_job_buildkit(&worker_container)
-                    .context("BuildKit teardown");
-                match &result {
-                    Ok(()) => worker_forensics.lifecycle("buildkit-teardown-deferred-done"),
-                    Err(error) => worker_forensics.lifecycle(&format!(
-                        "buildkit-teardown-deferred-failed error={error:#}"
-                    )),
-                }
-                result
-            })
-            .context("spawn BuildKit teardown worker")?;
-        deferred
-            .join()
-            .map_err(|panic| anyhow::anyhow!("BuildKit teardown worker panicked: {panic:?}"))??;
         remove_job_workspace(&job_dir)?;
         // The job's stable workspace (if any) is released once its container
         // and job directory are gone; the next job on this slot joins this
@@ -27246,6 +27220,8 @@ runs:
             actions_host: temp.join("actions"),
             tools_host: temp.join("tools"),
             mount_docker_socket: true,
+            docker_host: None,
+            runtime_docker_endpoint: Default::default(),
             slot_store_key: None,
             env: Vec::new(),
             options: Vec::new(),

@@ -112,6 +112,8 @@ mod tests {
             actions_host: root.join("actions"),
             tools_host: root.join("tools"),
             mount_docker_socket: false,
+            docker_host: None,
+            runtime_docker_endpoint: Default::default(),
             slot_store_key: None,
             env: Vec::new(),
             options: Vec::new(),
