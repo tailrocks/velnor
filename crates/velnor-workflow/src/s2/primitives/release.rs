@@ -4351,6 +4351,8 @@ fn render_apt_discovery_feed(config: &ProjectConfig, contract: &crate::apt::AptC
         "\n          echo 'bootstrap=false' >> \"$GITHUB_OUTPUT\"\n          case \"$CHANNEL\" in\n            stable)\n              prior_tag=\"$(curl --fail --show-error --silent --location \"$feed/last-publish\")\"\n              prior_version=\"${prior_tag#v}\"\n              case \"$prior_version\" in ''|*[!0-9.]*) echo \"::error::live last-publish is not a version: $prior_tag\" >&2; exit 1 ;; esac\n              curl --fail --show-error --silent --location -o live-publication.json \"$feed/publication-record.json\"\n              curl --fail --show-error --silent --location -o live-publication.json.sig \"$feed/publication-record.json.sig\"\n              curl --fail --show-error --silent --location -o live-inrelease \"$feed/dists/stable/InRelease\"\n              for arch in amd64 arm64; do\n                curl --fail --show-error --silent --location --retry 3 -o \"live-packages-$arch\" \"$feed/dists/stable/main/binary-$arch/Packages\"\n              done\n              candidate_sha=\"$(awk '{print $1}' incoming/release-record.json.sha256)\"\n              velnor-workflow release apt-previous-pointer --selection \"$selection\" --suite stable --published live-publication.json --prior \"$prior_tag\" --candidate \"$VERSION\" --candidate-sha \"$candidate_sha\" --live-publication live-publication.json --live-publication-signature live-publication.json.sig --live-inrelease live-inrelease --live-packages-amd64 live-packages-amd64 --live-packages-arm64 live-packages-arm64 --keyring ",
     );
     output.push_str(&keyring);
+    output.push_str(" --expect-signer ");
+    output.push_str(&signer);
     output.push_str(" > previous-pointer.json\n              for arch in amd64 arm64; do\n                curl --fail --show-error --silent --location --retry 3 -o \"prev/");
     output.push_str(package_raw);
     output.push_str("_${prior_version}_${arch}.deb\" \"$feed/pool/main/");
@@ -4363,6 +4365,8 @@ fn render_apt_discovery_feed(config: &ProjectConfig, contract: &crate::apt::AptC
         "_${prior_version}_${arch}.deb\"\n              done\n              ;;\n            preview)\n              if curl --fail --show-error --silent --location --output /dev/null \"$feed/dists/preview/InRelease\"; then\n                curl --fail --show-error --silent --location -o live-publication-preview.json \"$feed/publication-record-preview.json\"\n                curl --fail --show-error --silent --location -o live-publication-preview.json.sig \"$feed/publication-record-preview.json.sig\"\n                curl --fail --show-error --silent --location -o live-inrelease-preview \"$feed/dists/preview/InRelease\"\n                for arch in amd64 arm64; do\n                  curl --fail --show-error --silent --location --retry 3 -o \"live-packages-preview-$arch\" \"$feed/dists/preview/main/binary-$arch/Packages\"\n                done\n                velnor-workflow release apt-previous-pointer --selection \"$selection\" --suite preview --live-publication live-publication-preview.json --live-publication-signature live-publication-preview.json.sig --live-inrelease live-inrelease-preview --live-packages-amd64 live-packages-preview-amd64 --live-packages-arm64 live-packages-preview-arm64 --keyring ",
     );
     output.push_str(&keyring);
+    output.push_str(" --expect-signer ");
+    output.push_str(&signer);
     output.push_str(
         " > previous-pointer.json\n                rollback_name=\"$(jq -er '.rollback_packages[] | select(.name | endswith(\"_amd64.deb\")) | .name' previous-pointer.json)\"\n                rollback=\"${rollback_name#",
     );
@@ -4472,7 +4476,14 @@ fn render_apt_discovery_feed(config: &ProjectConfig, contract: &crate::apt::AptC
     output.push_str(
         "\" ]; then\n            [ \"$PUBLISH\" = success ] || { echo \"::error::feed publication did not succeed: $PUBLISH\" >&2; exit 1; }\n            [ \"$DEPLOY\" = success ] || { echo \"::error::feed deployment did not succeed: $DEPLOY\" >&2; exit 1; }\n          else\n            [ \"$PUBLISH\" = skipped ] || { echo \"::error::unexpected publication state: $PUBLISH\" >&2; exit 1; }\n            [ \"$DEPLOY\" = skipped ] || { echo \"::error::unexpected deployment state: $DEPLOY\" >&2; exit 1; }\n          fi\n",
     );
-    output.replace("--published live-publication.json ", "")
+    let output = output.replace("--published live-publication.json ", "");
+    output.replace(
+        "apt-previous-pointer --selection \"$selection\" --suite preview --bootstrap true",
+        &format!(
+            "apt-previous-pointer --selection \"$selection\" --suite preview --expect-signer {} --bootstrap true",
+            signer
+        ),
+    )
 }
 
 fn render_package_feed(
@@ -8127,6 +8138,31 @@ mod tests {
                 ),
                 "verify_args must be closed before generated shell continues: {release}"
             );
+            assert!(
+                release.contains("apt-previous-pointer --selection \"$selection\" --suite stable"),
+                "stable recovery must consume the immutable selection: {release}"
+            );
+            assert!(
+                release.contains(
+                    "--keyring 'example.gpg' --expect-signer '0123456789ABCDEF0123456789ABCDEF01234567' > previous-pointer.json"
+                ),
+                "stable recovery must pin the live signer: {release}"
+            );
+            assert!(
+                release.contains("apt-previous-pointer --selection \"$selection\" --suite preview"),
+                "preview recovery must consume the immutable selection: {release}"
+            );
+            assert!(
+                release
+                    .contains("apt-channel-update --selection \"$selection\" --suite \"$CHANNEL\""),
+                "channel update must consume the immutable selection: {release}"
+            );
+            assert!(
+                release.contains(
+                    "apt-previous-pointer --selection \"$selection\" --suite preview --expect-signer '0123456789ABCDEF0123456789ABCDEF01234567' --bootstrap true"
+                ),
+                "preview bootstrap must carry the pinned signer: {release}"
+            );
             assert!(release.contains("apt-publish \"${args[@]}\""), "{release}");
             assert!(
                 release.contains("outputs:\n      channel: ${{ needs.verify.outputs.channel }}"),
@@ -8142,6 +8178,18 @@ mod tests {
             assert!(release.contains(consumer), "{release}");
             assert!(release.contains(source), "{release}");
             assert!(release.contains("default: github"), "{release}");
+            for forbidden in [
+                "apt-resolve-commit",
+                "gh release list",
+                "gh release view",
+                "gh release download",
+                "release download",
+            ] {
+                assert!(
+                    !release.contains(forbidden),
+                    "legacy call {forbidden}: {release}"
+                );
+            }
             assert!(
                 release.contains("PROVIDERS: ${{ github.event_name == 'workflow_dispatch'"),
                 "{release}"
