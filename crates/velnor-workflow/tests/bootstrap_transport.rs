@@ -591,6 +591,19 @@ fn generated_producer_keeps_upload_surface_after_build() {
         envs.contains(&"CARGO_TARGET_DIR=/target"),
         "producer must pin CARGO_TARGET_DIR despite builder image ENV: {envs:?}"
     );
+    let mounts: Vec<_> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| *arg == "--mount")
+        .map(|(index, _)| args[index + 1].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(
+        mounts.len(),
+        1,
+        "producer must not mount trusted control source"
+    );
+    assert!(mounts[0].contains("candidate-source"), "{mounts:?}");
+    assert!(!mounts[0].contains("candidate-control"), "{mounts:?}");
 }
 
 #[test]
