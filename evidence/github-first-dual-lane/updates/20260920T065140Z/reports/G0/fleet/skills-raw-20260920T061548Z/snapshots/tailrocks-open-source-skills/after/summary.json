@@ -1,0 +1,16 @@
+{
+  "captured_at_utc": "2026-09-20T06:17:01.355279Z",
+  "complete": true,
+  "default_branch": "main",
+  "default_sha": "6e77a448f9776e837bfc9ab18b833bd5fdc26d3a",
+  "open_prs": [],
+  "raw_requests": {
+    "default_branch": "00098-tailrocks-open-source-skills-after-default-branch",
+    "open_pr_pages": [
+      "00099-tailrocks-open-source-skills-after-open-prs-page-1"
+    ],
+    "repository": "00097-tailrocks-open-source-skills-after-repository"
+  },
+  "repo": "tailrocks-open-source-skills",
+  "snapshot": "after"
+}

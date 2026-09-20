@@ -1,0 +1,15 @@
+{
+  "complete": true,
+  "repo": "tailrocks-code-quality-skills",
+  "roles": [
+    {
+      "branch": "main",
+      "role": "default-before"
+    }
+  ],
+  "sha": "0b9a1eaa83ca2ad9b2c895741648e7cde10f6189",
+  "tree_request_id": "00026-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-tree",
+  "tree_truncated": false,
+  "workflow_paths": [],
+  "workflows": []
+}

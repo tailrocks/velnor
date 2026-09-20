@@ -1,0 +1,16 @@
+{
+  "captured_at_utc": "2026-09-20T06:15:56.092683Z",
+  "complete": true,
+  "default_branch": "main",
+  "default_sha": "f434715f7c664af431f0be62982aa379400102de",
+  "open_prs": [],
+  "raw_requests": {
+    "default_branch": "00003-tailrocks-typescript-skills-before-default-branch",
+    "open_pr_pages": [
+      "00004-tailrocks-typescript-skills-before-open-prs-page-1"
+    ],
+    "repository": "00002-tailrocks-typescript-skills-before-repository"
+  },
+  "repo": "tailrocks-typescript-skills",
+  "snapshot": "before"
+}

@@ -1,0 +1,15 @@
+{
+  "complete": true,
+  "repo": "tailrocks-open-source-skills",
+  "roles": [
+    {
+      "branch": "main",
+      "role": "default-before"
+    }
+  ],
+  "sha": "6e77a448f9776e837bfc9ab18b833bd5fdc26d3a",
+  "tree_request_id": "00040-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-tree",
+  "tree_truncated": false,
+  "workflow_paths": [],
+  "workflows": []
+}

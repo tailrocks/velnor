@@ -1,0 +1,15 @@
+{
+  "complete": true,
+  "repo": "tailrocks-typescript-skills",
+  "roles": [
+    {
+      "branch": "main",
+      "role": "default-before"
+    }
+  ],
+  "sha": "f434715f7c664af431f0be62982aa379400102de",
+  "tree_request_id": "00075-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-tree",
+  "tree_truncated": false,
+  "workflow_paths": [],
+  "workflows": []
+}

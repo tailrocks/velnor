@@ -1,0 +1,16 @@
+{
+  "captured_at_utc": "2026-09-20T06:17:03.444173Z",
+  "complete": true,
+  "default_branch": "main",
+  "default_sha": "1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2",
+  "open_prs": [],
+  "raw_requests": {
+    "default_branch": "00101-tailrocks-macos-skills-after-default-branch",
+    "open_pr_pages": [
+      "00102-tailrocks-macos-skills-after-open-prs-page-1"
+    ],
+    "repository": "00100-tailrocks-macos-skills-after-repository"
+  },
+  "repo": "tailrocks-macos-skills",
+  "snapshot": "after"
+}

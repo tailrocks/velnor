@@ -1,0 +1,15 @@
+{
+  "complete": true,
+  "repo": "tailrocks-pull-request-skills",
+  "roles": [
+    {
+      "branch": "main",
+      "role": "default-before"
+    }
+  ],
+  "sha": "2b4f71f49fd27061e64d16b2b7f83d9bd2df5612",
+  "tree_request_id": "00047-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-tree",
+  "tree_truncated": false,
+  "workflow_paths": [],
+  "workflows": []
+}

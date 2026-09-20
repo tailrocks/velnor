@@ -1,0 +1,30 @@
+{
+  "branch_protection": {
+    "branch": "main",
+    "protection_error": "http_404",
+    "protection_payload": {
+      "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-branch-protection",
+      "message": "Branch not protected",
+      "status": "404"
+    },
+    "protection_request_id": "00035-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-branch-protection",
+    "protection_status": 404,
+    "required_contexts": [],
+    "required_error": "http_404",
+    "required_payload": {
+      "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-status-checks-protection",
+      "message": "Branch not protected",
+      "status": "404"
+    },
+    "required_request_id": "00036-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-required-status-checks",
+    "required_status": 404
+  },
+  "repo": "tailrocks-macos-skills",
+  "ruleset_detail_requests": [],
+  "ruleset_list_requests": [
+    "00034-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-rulesets-page-1"
+  ],
+  "rulesets": [],
+  "rulesets_complete": true,
+  "sha": "1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2"
+}

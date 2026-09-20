@@ -1,0 +1,16 @@
+{"branch": "main", "repo": "tailrocks-code-quality-skills", "role": "default-before", "sha": "0b9a1eaa83ca2ad9b2c895741648e7cde10f6189"}
+{"branch": "main", "repo": "tailrocks-macos-skills", "role": "default-before", "sha": "1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2"}
+{"branch": "main", "repo": "tailrocks-open-source-skills", "role": "default-before", "sha": "6e77a448f9776e837bfc9ab18b833bd5fdc26d3a"}
+{"branch": "main", "repo": "tailrocks-pull-request-skills", "role": "default-before", "sha": "2b4f71f49fd27061e64d16b2b7f83d9bd2df5612"}
+{"branch": "main", "repo": "tailrocks-roadmap-skills", "role": "default-before", "sha": "66d9c79f6472ddace0e265335dc8dd36cdeb8a86"}
+{"branch": "main", "repo": "tailrocks-rust-skills", "role": "default-before", "sha": "bcc31b1d935dac4de191a6b71b3091f628d204c0"}
+{"branch": "main", "repo": "tailrocks-skill-authoring-skills", "role": "default-before", "sha": "9e25890fd63f7ca6c587490ba7cc432f5fdd98d6"}
+{"branch": "main", "repo": "tailrocks-typescript-skills", "role": "default-before", "sha": "f434715f7c664af431f0be62982aa379400102de"}
+{"branch": "main", "repo": "tailrocks-code-quality-skills", "role": "default-after", "sha": "0b9a1eaa83ca2ad9b2c895741648e7cde10f6189"}
+{"branch": "main", "repo": "tailrocks-macos-skills", "role": "default-after", "sha": "1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2"}
+{"branch": "main", "repo": "tailrocks-open-source-skills", "role": "default-after", "sha": "6e77a448f9776e837bfc9ab18b833bd5fdc26d3a"}
+{"branch": "main", "repo": "tailrocks-pull-request-skills", "role": "default-after", "sha": "2b4f71f49fd27061e64d16b2b7f83d9bd2df5612"}
+{"branch": "main", "repo": "tailrocks-roadmap-skills", "role": "default-after", "sha": "66d9c79f6472ddace0e265335dc8dd36cdeb8a86"}
+{"branch": "main", "repo": "tailrocks-rust-skills", "role": "default-after", "sha": "bcc31b1d935dac4de191a6b71b3091f628d204c0"}
+{"branch": "main", "repo": "tailrocks-skill-authoring-skills", "role": "default-after", "sha": "9e25890fd63f7ca6c587490ba7cc432f5fdd98d6"}
+{"branch": "main", "repo": "tailrocks-typescript-skills", "role": "default-after", "sha": "f434715f7c664af431f0be62982aa379400102de"}

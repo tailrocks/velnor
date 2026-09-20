@@ -1,0 +1,7 @@
+# Evidence raw-byte artifacts: preserve exact API bytes and disable all
+# text/filter conversion.  Scope is limited to skills raw partitions.
+evidence/github-first-dual-lane/updates/**/reports/G0/fleet/skills-raw-*/raw/** binary -filter
+evidence/github-first-dual-lane/updates/**/reports/G0/fleet/skills-raw-*/normalized/** -text -filter
+evidence/github-first-dual-lane/updates/**/reports/G0/fleet/skills-raw-*/snapshots/** -text -filter
+evidence/github-first-dual-lane/updates/**/reports/G0/fleet/skills-raw-*/manifest.json -text -filter
+evidence/github-first-dual-lane/updates/**/reports/G0/fleet/skills-raw-*/auth-identity.json -text -filter

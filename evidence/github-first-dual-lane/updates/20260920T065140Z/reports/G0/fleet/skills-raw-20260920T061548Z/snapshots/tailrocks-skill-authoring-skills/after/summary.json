@@ -1,0 +1,16 @@
+{
+  "captured_at_utc": "2026-09-20T06:16:52.837560Z",
+  "complete": true,
+  "default_branch": "main",
+  "default_sha": "9e25890fd63f7ca6c587490ba7cc432f5fdd98d6",
+  "open_prs": [],
+  "raw_requests": {
+    "default_branch": "00086-tailrocks-skill-authoring-skills-after-default-branch",
+    "open_pr_pages": [
+      "00087-tailrocks-skill-authoring-skills-after-open-prs-page-1"
+    ],
+    "repository": "00085-tailrocks-skill-authoring-skills-after-repository"
+  },
+  "repo": "tailrocks-skill-authoring-skills",
+  "snapshot": "after"
+}
