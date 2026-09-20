@@ -17,7 +17,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fmt;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
 #[cfg(unix)]
@@ -27,7 +27,7 @@ use std::ffi::{CStr, CString, OsStr, OsString};
 #[cfg(unix)]
 use std::fs::File;
 #[cfg(unix)]
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
@@ -323,6 +323,46 @@ impl RawObjectFileStore {
         &self.root
     }
 
+    /// Open one canonical original-byte object for the offline checkout-proof
+    /// verifier. The namespace lock stays alive with the returned reader so
+    /// retention/recovery cannot race the descriptor-relative open.
+    #[allow(
+        dead_code,
+        reason = "the standalone raw-store fixture harness does not include the checkout-proof adapter"
+    )]
+    pub(crate) fn open_original_for_checkout<'a>(
+        &'a self,
+        storage_ref: &str,
+    ) -> Result<Box<dyn Read + 'a>, RawStorageError> {
+        #[cfg(unix)]
+        {
+            let hex = storage_ref
+                .strip_prefix("sha256://")
+                .filter(|hex| {
+                    hex.len() == 64
+                        && hex
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+                })
+                .ok_or(RawStorageError::Unbound)?;
+            let name = digest_name(&format!("sha256:{hex}"))?;
+            let lock = NamespaceLock::acquire(&self.anchor.root)?;
+            self.anchor
+                .validate(&self.objects, &self.originals, &self.refs, &self.quarantine)?;
+            let file = open_named(&self.originals, &name)?.ok_or(RawStorageError::Unavailable)?;
+            let identity = stat_fd(&file).map_err(storage_io)?;
+            if !identity.is_private_regular_single_link() {
+                return Err(RawStorageError::Unbound);
+            }
+            Ok(Box::new(CheckoutOriginalReader { file, _lock: lock }))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = storage_ref;
+            Err(RawStorageError::Unavailable)
+        }
+    }
+
     #[cfg(unix)]
     fn store_unix(&mut self, object: RawObject) -> Result<RawObjectRef, RawStorageError> {
         if object.bytes.len() > MAX_RAW_OBJECT_BYTES
@@ -479,6 +519,23 @@ impl RawObjectFileStore {
         self.anchor
             .validate(&self.objects, &self.originals, &self.refs, &self.quarantine)?;
         Ok(())
+    }
+}
+
+#[cfg(unix)]
+#[allow(
+    dead_code,
+    reason = "constructed only by the production checkout-proof adapter"
+)]
+struct CheckoutOriginalReader<'a> {
+    file: File,
+    _lock: NamespaceLock<'a>,
+}
+
+#[cfg(unix)]
+impl Read for CheckoutOriginalReader<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.file.read(bytes)
     }
 }
 

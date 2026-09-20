@@ -443,6 +443,16 @@ pub(crate) trait ImmutableCasReader {
     ) -> Result<Box<dyn Read + 'a>, CheckoutProofError>;
 }
 
+impl ImmutableCasReader for crate::github_acquisition::raw_store::RawObjectFileStore {
+    fn open_original<'a>(
+        &'a self,
+        storage_ref: &str,
+    ) -> Result<Box<dyn Read + 'a>, CheckoutProofError> {
+        self.open_original_for_checkout(storage_ref)
+            .map_err(|_| CheckoutProofError::CasReadFailed)
+    }
+}
+
 pub(crate) struct MeasuredOriginalBytes {
     digest: Sha256Hex,
     byte_length: u64,
@@ -1423,6 +1433,70 @@ mod tests {
         assert_eq!(
             read_archive_member_bounded(&mut reader, 2),
             Err(CheckoutProofError::ArchiveMemberTooLarge)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reviewed_raw_store_reader_feeds_offline_cas_measurement() {
+        use crate::github_acquisition::raw_store::RawObjectFileStore;
+        use crate::github_acquisition::{RawObject, RawObjectStore};
+        use std::fs;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::current_dir()
+            .unwrap()
+            .join(".github-raw-store-fixtures")
+            .join(format!(
+                "velnor-checkout-proof-cas-{}-{}",
+                std::process::id(),
+                NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+            ));
+        fs::create_dir_all(&root).unwrap();
+        let source = br#"{"source":"original"}"#;
+        let mut store = RawObjectFileStore::new(&root).unwrap();
+        let reference = RawObjectStore::store(
+            &mut store,
+            RawObject {
+                raw_id: "checkout-proof-adapter".to_owned(),
+                request_id: "checkout-proof-request".to_owned(),
+                object_kind: "rest-response".to_owned(),
+                canonicalization: "json-canonical-v1".to_owned(),
+                media_type: "application/json".to_owned(),
+                bytes: br#"{"source":"safe"}"#.to_vec(),
+                original_bytes: source.to_vec(),
+            },
+        )
+        .unwrap();
+        let expected = Sha256Hex::parse(
+            reference
+                .original_sha256
+                .strip_prefix("sha256:")
+                .unwrap()
+                .to_owned(),
+        )
+        .unwrap();
+        let measured = read_original_from_cas(
+            &store,
+            &reference.original_storage_ref,
+            &expected,
+            CasObjectKind::Json,
+        )
+        .unwrap();
+        assert_eq!(measured.bytes(), source);
+
+        drop(store);
+        let _ = fs::remove_dir_all(&root);
+        let mut marker = b".velnor-raw-anchor-".to_vec();
+        for byte in root.file_name().unwrap().as_bytes() {
+            marker.extend(format!("{byte:02x}").bytes());
+        }
+        let _ = fs::remove_file(
+            root.parent()
+                .unwrap()
+                .join(std::ffi::OsString::from_vec(marker)),
         );
     }
 
