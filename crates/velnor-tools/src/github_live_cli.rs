@@ -32,6 +32,10 @@ pub struct G0LiveCollectArgs {
     /// Exact source revision of this collector binary.
     #[arg(long, env = "VELNOR_COLLECTOR_REVISION")]
     pub collector_revision: String,
+    /// Observed local model/session configuration JSON. The producer reads it
+    /// through one no-follow FD and stores only the measured typed payload.
+    #[arg(long, env = "VELNOR_MODEL_SESSION_CONFIG")]
+    pub model_session_config: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -78,7 +82,7 @@ pub async fn run(args: G0LiveCollectArgs) -> Result<()> {
     let (transport, auth) = authenticated_transport()?;
     let mut store = RawObjectFileStore::new(args.evidence_dir.join("raw"))
         .with_context(|| format!("create raw store below {}", args.evidence_dir.display()))?;
-    let collection = collect_live(
+    let mut collection = collect_live(
         &transport,
         &mut store,
         auth,
@@ -87,6 +91,20 @@ pub async fn run(args: G0LiveCollectArgs) -> Result<()> {
     )
     .await
     .context("collect complete read-only GitHub inventory")?;
+
+    let bindings = super::binding_producer::capture_bindings(
+        &mut store,
+        &collection,
+        &manifest,
+        &args.model_session_config,
+        &collection.observed_at_utc,
+    )
+    .context("capture producer-owned model/workload bindings")?;
+    collection.raw_objects.extend(bindings.raw_objects);
+    write_json_new(
+        &args.evidence_dir.join("binding-capture.json"),
+        &bindings.report,
+    )?;
 
     let metadata = CaptureMetadata {
         schema_version: 1,
