@@ -26,9 +26,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Args)]
 pub struct LaneCompareArgs {
@@ -915,17 +915,65 @@ fn fetch_github_job_log(repo: &str, job_id: u64) -> Result<String> {
     Ok(log)
 }
 
-/// Job page HTML via curl (public page; `gh api` cannot fetch web routes —
+fn github_auth_token() -> Result<String> {
+    for variable in ["GH_TOKEN", "GITHUB_TOKEN"] {
+        if let Ok(token) = std::env::var(variable) {
+            let token = token.trim();
+            if !token.is_empty() {
+                return Ok(token.to_owned());
+            }
+        }
+    }
+    let output = Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .context("read GitHub CLI authentication token")?;
+    if !output.status.success() {
+        bail!(
+            "gh auth token failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if token.is_empty() {
+        bail!("GitHub authentication token is empty");
+    }
+    Ok(token)
+}
+
+/// Job page HTML via authenticated curl (`gh api` cannot fetch web routes —
 /// curl also sidesteps the reqwest TLS-fingerprint throttle).
 fn fetch_job_html_steps(job: &Job) -> Result<BTreeMap<u64, HtmlStep>> {
     let url = job
         .html_url
         .as_deref()
         .with_context(|| format!("job {} has no html_url", job.id))?;
-    let output = Command::new("curl")
-        .args(["-fsSL", url])
-        .output()
+    let token = github_auth_token()?;
+    fetch_job_html_steps_with_token(job.id, url, &token)
+}
+
+fn fetch_job_html_steps_with_token(
+    job_id: u64,
+    url: &str,
+    token: &str,
+) -> Result<BTreeMap<u64, HtmlStep>> {
+    if token.trim().is_empty() {
+        bail!("GitHub authentication token is empty");
+    }
+    let mut child = Command::new("curl")
+        .args(["-fsSL", "-H", "@-", url])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("spawn curl {url}"))?;
+    let mut stdin = child.stdin.take().context("open curl header input")?;
+    writeln!(stdin, "Authorization: Bearer {}", token.trim())
+        .context("write curl authorization header")?;
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("wait for curl {url}"))?;
     if !output.status.success() {
         bail!(
             "curl {url} failed: {}",
@@ -935,7 +983,7 @@ fn fetch_job_html_steps(job: &Job) -> Result<BTreeMap<u64, HtmlStep>> {
     let html = String::from_utf8_lossy(&output.stdout);
     let steps = parse_check_steps(&html)?;
     if steps.is_empty() {
-        bail!("job {} page contained no check-step evidence", job.id);
+        bail!("job {job_id} page contained no check-step evidence");
     }
     Ok(steps)
 }
@@ -2227,6 +2275,48 @@ mod tests {
                 "databaseId,status,conclusion".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn private_job_html_fetch_sends_bearer_header() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut buffer = [0; 1024];
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line == "Authorization: Bearer fixture-token"),
+                "missing bearer header in request: {request}"
+            );
+            let body = b"<check-step data-number=\"1\" data-log-url=\"/log\"></check-step>";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        });
+
+        let steps =
+            fetch_job_html_steps_with_token(42, &format!("http://{address}/job"), "fixture-token")
+                .unwrap();
+        server.join().unwrap();
+        assert_eq!(steps.keys().copied().collect::<Vec<_>>(), vec![1]);
     }
 
     fn html_for_steps(numbers: &[u64]) -> BTreeMap<u64, HtmlStep> {
