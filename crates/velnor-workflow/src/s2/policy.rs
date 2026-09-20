@@ -2621,9 +2621,14 @@ fn is_full_sha_reference(value: &str) -> bool {
 /// reference outside `.github/actions/` stays rejected below. The owner
 /// policy job's setup composite resolves out of its sibling checkout
 /// instead of the root (a root checkout would wipe `policy-checkout/`),
-/// so that exact reference is reviewed too — but no second sibling path.
+/// so that exact reference is reviewed too. The owner package publisher has
+/// a separate, exact `source/` checkout for repository verification tasks;
+/// arbitrary checkout-root action paths remain rejected.
 fn is_approved_local_action(value: &str) -> bool {
-    if value == super::VELNOR_WORKFLOW_POLICY_SETUP_ACTION {
+    if matches!(
+        value,
+        super::VELNOR_WORKFLOW_POLICY_SETUP_ACTION | super::VELNOR_WORKFLOW_SOURCE_SETUP_ACTION
+    ) {
         return true;
     }
     let Some(path) = value.strip_prefix("./.github/actions/") else {
