@@ -1803,6 +1803,7 @@ pub(crate) struct DiscoverySelection {
     pub(crate) manifest_schema: String,
     pub(crate) manifest_sha256: String,
     pub(crate) release_id: String,
+    pub(crate) provider_repository_id: u64,
     pub(crate) provider_release_id: u64,
     pub(crate) release_url: String,
     pub(crate) published_at: String,
@@ -2282,6 +2283,7 @@ fn parse_discovery_selection(
             "manifest_sha256",
             "package",
             "product_id",
+            "provider_repository_id",
             "provider_release_id",
             "published_at",
             "release_assets",
@@ -2387,6 +2389,7 @@ fn parse_discovery_selection(
         ));
     }
     let provider_release_id = positive_field(document, "provider_release_id")?;
+    let provider_repository_id = positive_field(document, "provider_repository_id")?;
     let parsed_release_id = release_id.parse::<u64>().map_err(|_| {
         GeneratorError::usage("discovery release_id does not fit the provider ID type")
     })?;
@@ -2540,6 +2543,7 @@ fn parse_discovery_selection(
         manifest_schema,
         manifest_sha256,
         release_id,
+        provider_repository_id,
         provider_release_id,
         release_url: expected_release_url,
         published_at,
@@ -2928,6 +2932,7 @@ fn validate_provider_facts(
         .map(|(owner, _)| owner)
         .ok_or_else(|| GeneratorError::usage("GitHub provider repository owner is missing"))?;
     if facts.repository_id == 0
+        || facts.repository_id != selection.provider_repository_id
         || facts.owner_id == 0
         || facts.owner_login != expected_owner
         || !matches!(facts.owner_type.as_str(), "User" | "Organization")
@@ -3074,6 +3079,61 @@ fn provider_source_commit(
     Ok(())
 }
 
+/// Bind the repository's embedded owner object to the separately fetched
+/// typed owner response. GitHub uses `/users/{login}` in the repository shape
+/// even for organizations; the endpoint prefix is selected from the typed
+/// owner and checked independently.
+fn validate_provider_owner(
+    source_repository: &str,
+    repository: &serde_json::Value,
+    owner_document: &serde_json::Value,
+    owner_api_prefix: &str,
+) -> Result<(u64, String), GeneratorError> {
+    let owner_login = source_repository
+        .split_once('/')
+        .map(|(owner, _)| owner)
+        .ok_or_else(|| GeneratorError::usage("GitHub provider repository owner is missing"))?;
+    let owner = repository
+        .get("owner")
+        .ok_or_else(|| GeneratorError::usage("GitHub provider repository owner is missing"))?;
+    let owner_id = positive_field(owner, "id")?;
+    let repository_owner_login = field(owner, "login")?;
+    let owner_type = field(owner, "type")?.to_owned();
+    let expected_owner_api_prefix = match owner_type.as_str() {
+        "User" => "users",
+        "Organization" => "orgs",
+        _ => {
+            return Err(GeneratorError::usage(
+                "GitHub provider repository owner type is not canonical",
+            ));
+        }
+    };
+    let expected_embedded_owner_api_url = format!("https://api.github.com/users/{owner_login}");
+    let expected_owner_detail_api_url =
+        format!("https://api.github.com/{owner_api_prefix}/{owner_login}");
+    let expected_owner_html_url = format!("https://github.com/{owner_login}");
+    if owner_api_prefix != expected_owner_api_prefix
+        || repository_owner_login != owner_login
+        || field(owner, "url")? != expected_embedded_owner_api_url
+        || field(owner, "html_url")? != expected_owner_html_url
+    {
+        return Err(GeneratorError::usage(
+            "GitHub provider repository owner identity is not canonical",
+        ));
+    }
+    if positive_field(owner_document, "id")? != owner_id
+        || field(owner_document, "login")? != owner_login
+        || field(owner_document, "type")? != owner_type
+        || field(owner_document, "url")? != expected_owner_detail_api_url
+        || field(owner_document, "html_url")? != expected_owner_html_url
+    {
+        return Err(GeneratorError::usage(
+            "GitHub provider owner endpoint differs from repository identity",
+        ));
+    }
+    Ok((owner_id, owner_type))
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "provider release reconciliation is one exact immutable contract gate"
@@ -3085,6 +3145,11 @@ fn acquire_provider_release(
     let repository_endpoint = format!("repos/{}", selection.source_repository);
     let repository = provider_api_json(&repository_endpoint, false, path_overlay)?;
     let repository_id = positive_field(&repository, "id")?;
+    if repository_id != selection.provider_repository_id {
+        return Err(GeneratorError::usage(
+            "GitHub provider repository ID differs from immutable selection",
+        ));
+    }
     let owner_login = selection
         .source_repository
         .split_once('/')
@@ -3093,10 +3158,8 @@ fn acquire_provider_release(
     let owner = repository
         .get("owner")
         .ok_or_else(|| GeneratorError::usage("GitHub provider repository owner is missing"))?;
-    let owner_id = positive_field(owner, "id")?;
-    let repository_owner_login = field(owner, "login")?;
-    let owner_type = field(owner, "type")?.to_owned();
-    let owner_api_prefix = match owner_type.as_str() {
+    let owner_type_for_route = field(owner, "type")?;
+    let owner_api_prefix = match owner_type_for_route {
         "User" => "users",
         "Organization" => "orgs",
         _ => {
@@ -3105,33 +3168,14 @@ fn acquire_provider_release(
             ));
         }
     };
-    // The repository response embeds a user-shaped owner object. GitHub uses
-    // its `/users/` URL even when the owner type is Organization; the typed
-    // owner endpoint below is a separate REST resource.
-    let expected_embedded_owner_api_url = format!("https://api.github.com/users/{owner_login}");
-    let expected_owner_detail_api_url =
-        format!("https://api.github.com/{owner_api_prefix}/{owner_login}");
-    let expected_owner_html_url = format!("https://github.com/{owner_login}");
-    if repository_owner_login != owner_login
-        || field(owner, "url")? != expected_embedded_owner_api_url
-        || field(owner, "html_url")? != expected_owner_html_url
-    {
-        return Err(GeneratorError::usage(
-            "GitHub provider repository owner identity is not canonical",
-        ));
-    }
     let owner_endpoint = format!("{owner_api_prefix}/{owner_login}");
     let owner_document = provider_api_json(&owner_endpoint, false, path_overlay)?;
-    if positive_field(&owner_document, "id")? != owner_id
-        || field(&owner_document, "login")? != owner_login
-        || field(&owner_document, "type")? != owner_type
-        || field(&owner_document, "url")? != expected_owner_detail_api_url
-        || field(&owner_document, "html_url")? != expected_owner_html_url
-    {
-        return Err(GeneratorError::usage(
-            "GitHub provider owner endpoint differs from repository identity",
-        ));
-    }
+    let (owner_id, owner_type) = validate_provider_owner(
+        &selection.source_repository,
+        &repository,
+        &owner_document,
+        owner_api_prefix,
+    )?;
     if field(&repository, "full_name")? != selection.source_repository
         || field(&repository, "html_url")?
             != format!("https://github.com/{}", selection.source_repository)
@@ -8105,17 +8149,32 @@ mod tests {
     const FIXTURE_SCHEMA: &str = "example.test/apt-manifest-v1";
     const FIXTURE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
     const FIXTURE_FPR: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
-    // Raw owner objects extracted from the captured tailrocks/velnor REST
-    // response and its separately probed organization endpoint. Keep the
-    // two URL forms distinct: GitHub's embedded repository owner is a
-    // user-shaped object, while the typed organization route is /orgs/.
-    const CAPTURED_REPOSITORY_OWNER: &[u8] = br#"{"login":"tailrocks","id":78806509,"url":"https://api.github.com/users/tailrocks","html_url":"https://github.com/tailrocks","type":"Organization"}"#;
-    const CAPTURED_ORGANIZATION_OWNER: &[u8] = br#"{"login":"tailrocks","id":78806509,"url":"https://api.github.com/orgs/tailrocks","html_url":"https://github.com/tailrocks","type":"Organization"}"#;
-    // User-owned repositories use the same embedded `/users/` shape. This is
-    // a raw-byte shape fixture, not live authority; the provider identity
-    // checks below still require equal ID/login/type across both responses.
-    const USER_REPOSITORY_OWNER: &[u8] = br#"{"login":"tailrocks","id":78806509,"url":"https://api.github.com/users/tailrocks","html_url":"https://github.com/tailrocks","type":"User"}"#;
-    const USER_OWNER_DETAIL: &[u8] = br#"{"login":"tailrocks","id":78806509,"url":"https://api.github.com/users/tailrocks","html_url":"https://github.com/tailrocks","type":"User"}"#;
+    // These bytes are copied from the immutable real-api fixture corpus
+    // (G0/real-api-fixture-corpus-20260920T080318Z), not reshaped JSON.
+    // Keep the embedded `/users/` owner URL distinct from the typed `/orgs/`
+    // detail response.
+    const CAPTURED_REPOSITORY: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/provider-owner/tailrocks-velnor-repository.json"
+    ));
+    const CAPTURED_ORGANIZATION_OWNER: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/provider-owner/tailrocks-organization.json"
+    ));
+    const CAPTURED_TAILROCKS_USER: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/provider-owner/tailrocks-user.json"
+    ));
+    // Actual User-owned octocat/Hello-World bytes, fetched read-only with the
+    // same GitHub JSON/API-version headers as production.
+    const CAPTURED_USER_REPOSITORY: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/provider-owner/octocat-hello-world-repository.json"
+    ));
+    const CAPTURED_USER_OWNER: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/provider-owner/octocat-user.json"
+    ));
     const NATIVE_ASSEMBLED_PRODUCT_MANIFEST: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/native-product/product-manifest.json"
@@ -8590,6 +8649,7 @@ mod tests {
             "manifest_sha256": manifest_sha,
             "package": package,
             "product_id": "velnor",
+            "provider_repository_id": 1255367013,
             "provider_release_id": 123,
             "published_at": "2026-09-20T00:00:00Z",
             "release_assets": release_assets,
@@ -8859,6 +8919,7 @@ mod tests {
             "manifest_sha256": manifest_sha256,
             "package": FIXTURE_PACKAGE,
             "product_id": "velnor",
+            "provider_repository_id": 1255367013,
             "provider_release_id": 123,
             "published_at": "2026-09-20T00:00:00Z",
             "release_assets": release_assets,
@@ -8937,20 +8998,14 @@ mod tests {
             "prerelease": false,
             "assets": release_assets
         });
-        let repository_owner = must(
-            serde_json::from_slice::<serde_json::Value>(CAPTURED_REPOSITORY_OWNER),
-            "parse captured repository owner",
+        let repository = must(
+            serde_json::from_slice::<serde_json::Value>(CAPTURED_REPOSITORY),
+            "parse captured repository response",
         );
         let owner = must(
             serde_json::from_slice::<serde_json::Value>(CAPTURED_ORGANIZATION_OWNER),
-            "parse captured organization owner",
+            "parse captured organization response",
         );
-        let repository = serde_json::json!({
-            "id": 1255367013,
-            "full_name": FIXTURE_SOURCE,
-            "html_url": format!("https://github.com/{FIXTURE_SOURCE}"),
-            "owner": repository_owner
-        });
         let tag_ref = serde_json::json!({
             "ref": "refs/tags/v1.2.3",
             "object": {"type": "commit", "sha": FIXTURE_COMMIT}
@@ -9065,6 +9120,15 @@ mod tests {
                 Box::new(|root| {
                     rewrite_fixture_json(&root.join("repository.json"), |repository| {
                         repository["full_name"] = serde_json::json!("evil/app");
+                    });
+                }),
+            ),
+            (
+                "wrong-repository-id",
+                "provider repository ID",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("repository.json"), |repository| {
+                        repository["id"] = serde_json::json!(999);
                     });
                 }),
             ),
@@ -9263,29 +9327,62 @@ mod tests {
     }
 
     #[test]
-    fn provider_owner_user_shape_is_supported() {
-        let fixture = discovery_fixture("provider-owner-user");
-        let bin = discovery_gh_stub(&fixture);
-        let user_repository_owner = must(
-            serde_json::from_slice::<serde_json::Value>(USER_REPOSITORY_OWNER),
-            "parse raw User repository owner fixture",
+    fn provider_owner_user_shape_uses_captured_octocat_bytes() {
+        let repository = must(
+            serde_json::from_slice::<serde_json::Value>(CAPTURED_USER_REPOSITORY),
+            "parse captured octocat repository response",
         );
-        let user_owner_detail = must(
-            serde_json::from_slice::<serde_json::Value>(USER_OWNER_DETAIL),
-            "parse raw User owner detail fixture",
+        let owner = must(
+            serde_json::from_slice::<serde_json::Value>(CAPTURED_USER_OWNER),
+            "parse captured octocat user response",
         );
-        rewrite_fixture_json(&fixture.root.join("repository.json"), |repository| {
-            repository["owner"] = user_repository_owner;
-        });
-        rewrite_fixture_json(&fixture.root.join("owner.json"), |owner| {
-            *owner = user_owner_detail;
-        });
-        let fetched = fixture.root.join("fetched");
-        must(
-            run_fetch_selection(&fixture.selection_path, &fetched, Some(&bin)),
-            "accept User-shaped provider owner",
+        assert_eq!(
+            must(field(&repository, "full_name"), "read octocat repository"),
+            "octocat/Hello-World"
         );
-        let _ = std::fs::remove_dir_all(&fixture.root);
+        let (owner_id, owner_type) = must(
+            validate_provider_owner("octocat/Hello-World", &repository, &owner, "users"),
+            "validate captured octocat owner",
+        );
+        assert_eq!(owner_id, 583_231);
+        assert_eq!(owner_type, "User");
+    }
+
+    #[test]
+    fn captured_tailrocks_user_and_org_routes_keep_distinct_urls() {
+        let repository = must(
+            serde_json::from_slice::<serde_json::Value>(CAPTURED_REPOSITORY),
+            "parse captured tailrocks repository response",
+        );
+        let organization = must(
+            serde_json::from_slice::<serde_json::Value>(CAPTURED_ORGANIZATION_OWNER),
+            "parse captured tailrocks organization response",
+        );
+        let user = must(
+            serde_json::from_slice::<serde_json::Value>(CAPTURED_TAILROCKS_USER),
+            "parse captured tailrocks user response",
+        );
+        let embedded = repository
+            .get("owner")
+            .ok_or_else(|| GeneratorError::usage("captured owner is missing"));
+        let embedded = must(embedded, "read captured embedded owner");
+        for key in ["id", "login", "type", "html_url"] {
+            assert_eq!(embedded[key], user[key], "users endpoint drifted for {key}");
+            assert_eq!(
+                embedded[key], organization[key],
+                "org endpoint drifted for {key}"
+            );
+        }
+        assert_eq!(
+            user["url"],
+            serde_json::json!("https://api.github.com/users/tailrocks")
+        );
+        assert_eq!(
+            organization["url"],
+            serde_json::json!("https://api.github.com/orgs/tailrocks")
+        );
+        assert_eq!(embedded["url"], user["url"]);
+        assert_ne!(embedded["url"], organization["url"]);
     }
 
     #[cfg(unix)]
@@ -9414,6 +9511,7 @@ mod tests {
             "manifest_sha256": manifest_sha256,
             "package": "velnor-runner",
             "product_id": product_id,
+            "provider_repository_id": 1255367013,
             "provider_release_id": 12345,
             "published_at": "2026-09-20T00:00:00Z",
             "release_assets": release_assets,
