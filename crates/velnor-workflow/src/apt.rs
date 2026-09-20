@@ -56,6 +56,13 @@ pub(crate) const PACKAGE_STATE_SCHEMA: &str = "velnor.apt-package-state.v1";
 pub(crate) const PRODUCT_MANIFEST_SCHEMA: &str = "velnor.product-manifest/v1";
 /// The one canonical application manifest asset selected by discovery.
 pub(crate) const PRODUCT_MANIFEST_ASSET: &str = "product-manifest.json";
+/// The producer's provider-bound attestation over the product manifest and
+/// complete artifact inventory.
+pub(crate) const RELEASE_ATTESTATION_FILE: &str = "release-attestation.json";
+const RELEASE_ATTESTATION_SCHEMA: &str = "velnor.github-release-attestation/v1";
+const PROVENANCE_SIGNER_WORKFLOW: &str = "ci-release-package-signer.yml";
+const PROVENANCE_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
+const PROVENANCE_PREDICATE: &str = "https://slsa.dev/provenance/v1";
 /// The persisted discovery result copied into the incoming artifact set.
 pub(crate) const DISCOVERY_SELECTION_FILE: &str = "discovery.json";
 /// The rolling release tag that carries preview coherence inputs.
@@ -1657,7 +1664,7 @@ fn gpgv_argv(homedir: &str, keyring: &str, inputs: &[&str]) -> Vec<String> {
 }
 
 /// Extract one VALIDSIG and bind its signing key to the configured primary.
-/// GnuPG reports the signing-subkey fingerprint first and the primary-key
+/// `GnuPG` reports the signing-subkey fingerprint first and the primary-key
 /// fingerprint last; accepting any valid signing subkey under the pinned
 /// primary keeps normal keyrings usable without broadening publisher trust.
 fn gpgv_signer(output: &[u8], expected: &str, label: &str) -> Result<(), GeneratorError> {
@@ -1737,6 +1744,9 @@ pub(crate) struct DiscoverySelection {
     pub(crate) release_id: String,
     pub(crate) provider_release_id: u64,
     pub(crate) release_url: String,
+    pub(crate) published_at: String,
+    pub(crate) target_commitish: String,
+    pub(crate) source_ref_resolution: serde_json::Value,
     pub(crate) release_assets: Vec<DiscoveryAsset>,
     pub(crate) manifest: serde_json::Value,
 }
@@ -2330,8 +2340,22 @@ fn parse_discovery_selection(
             "discovery release_url is not the canonical GitHub release URL",
         ));
     }
-    let _ = field(document, "target_commitish")?;
-    let _ = field(document, "published_at")?;
+    let target_commitish = field(document, "target_commitish")?.to_owned();
+    if target_commitish != source_commit {
+        return Err(GeneratorError::usage(
+            "discovery target_commitish does not bind the full source commit",
+        ));
+    }
+    let published_at = field(document, "published_at")?.to_owned();
+    if published_at.is_empty() {
+        return Err(GeneratorError::usage(
+            "discovery published_at must be non-empty",
+        ));
+    }
+    let source_ref_resolution = document
+        .get("source_ref_resolution")
+        .cloned()
+        .ok_or_else(|| GeneratorError::usage("discovery source-ref proof is missing"))?;
     let manifest = document
         .get("manifest")
         .cloned()
@@ -2408,6 +2432,7 @@ fn parse_discovery_selection(
         MANIFEST_SIDECAR,
         PREVIEW_MANIFEST_FILE,
         SHA256SUMS_FILE,
+        RELEASE_ATTESTATION_FILE,
     ] {
         if !seen_names.contains(required) {
             return Err(GeneratorError::usage(format!(
@@ -2433,6 +2458,7 @@ fn parse_discovery_selection(
         MANIFEST_SIDECAR.to_owned(),
         PREVIEW_MANIFEST_FILE.to_owned(),
         SHA256SUMS_FILE.to_owned(),
+        RELEASE_ATTESTATION_FILE.to_owned(),
     ]);
     if seen_names != allowed_names {
         return Err(GeneratorError::usage(
@@ -2455,6 +2481,9 @@ fn parse_discovery_selection(
         release_id,
         provider_release_id,
         release_url: expected_release_url,
+        published_at,
+        target_commitish,
+        source_ref_resolution,
         release_assets,
         manifest,
     })
@@ -2606,6 +2635,609 @@ fn verify_discovery_subordinates(
     Ok(())
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProviderReleaseFacts {
+    repository_id: u64,
+    release_id: u64,
+    tag: String,
+    target_commitish: String,
+    published_at: String,
+    html_url: String,
+    assets: Vec<DiscoveryAsset>,
+}
+
+/// Read one JSON response from the fixed GitHub API command. The endpoint is
+/// assembled only from already-validated repository/ID scalars; no caller
+/// supplied URL or shell fragment reaches `gh`.
+fn provider_api_json(
+    endpoint: &str,
+    paginate: bool,
+    path_overlay: Option<&Path>,
+) -> Result<serde_json::Value, GeneratorError> {
+    let mut args = vec!["api".to_owned()];
+    if paginate {
+        args.push("--paginate".to_owned());
+        args.push("--slurp".to_owned());
+    }
+    args.extend([
+        "--header".to_owned(),
+        "Accept: application/vnd.github+json".to_owned(),
+        endpoint.to_owned(),
+    ]);
+    let bytes = run_fixed("gh", &args, None, path_overlay)?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        GeneratorError::usage(format!(
+            "GitHub provider API returned invalid JSON: {error}"
+        ))
+    })
+}
+
+fn provider_asset_rows(
+    document: &serde_json::Value,
+    label: &str,
+    source_repository: &str,
+    tag: &str,
+) -> Result<Vec<DiscoveryAsset>, GeneratorError> {
+    let rows = document
+        .as_array()
+        .ok_or_else(|| GeneratorError::usage(format!("{label} is not an array")))?;
+    let mut flattened = Vec::new();
+    if rows.iter().all(serde_json::Value::is_array) {
+        for page in rows {
+            flattened.extend(
+                page.as_array()
+                    .ok_or_else(|| GeneratorError::usage(format!("{label} page is invalid")))?
+                    .iter()
+                    .cloned(),
+            );
+        }
+    } else if rows.iter().all(serde_json::Value::is_object) {
+        // A single-page response is accepted for provider doubles which do
+        // not implement `--paginate`; production always asks for `--slurp`.
+        flattened.extend(rows.iter().cloned());
+    } else {
+        return Err(GeneratorError::usage(format!(
+            "{label} has a mixed pagination shape"
+        )));
+    }
+    if flattened.is_empty() {
+        return Err(GeneratorError::usage(format!("{label} is empty")));
+    }
+    let mut names = BTreeSet::new();
+    let mut ids = BTreeSet::new();
+    let mut assets = Vec::with_capacity(flattened.len());
+    for asset in flattened {
+        let id = positive_field(&asset, "id")?;
+        let name = field(&asset, "name")?.to_owned();
+        let size = positive_field(&asset, "size")?;
+        let state = field(&asset, "state")?.to_owned();
+        if !valid_discovery_asset_name(&name)
+            || state != "uploaded"
+            || !names.insert(name.clone())
+            || !ids.insert(id)
+        {
+            return Err(GeneratorError::usage(format!(
+                "{label} has a duplicate, unsafe, or incomplete asset"
+            )));
+        }
+        let browser_download_url = field(&asset, "browser_download_url")?.to_owned();
+        let expected_url =
+            format!("https://github.com/{source_repository}/releases/download/{tag}/{name}");
+        if browser_download_url != expected_url {
+            return Err(GeneratorError::usage(format!(
+                "{label} asset URL is not canonical"
+            )));
+        }
+        let api_url = field(&asset, "url")?;
+        let expected_api_url =
+            format!("https://api.github.com/repos/{source_repository}/releases/assets/{id}");
+        if api_url != expected_api_url {
+            return Err(GeneratorError::usage(format!(
+                "{label} asset API URL is not canonical"
+            )));
+        }
+        assets.push(DiscoveryAsset {
+            id,
+            name,
+            size,
+            state,
+            browser_download_url,
+        });
+    }
+    assets.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(assets)
+}
+
+fn compare_provider_asset_census(
+    expected: &[DiscoveryAsset],
+    actual: &[DiscoveryAsset],
+    label: &str,
+) -> Result<(), GeneratorError> {
+    let mut expected = expected.to_vec();
+    let mut actual = actual.to_vec();
+    expected.sort_by(|left, right| left.name.cmp(&right.name));
+    actual.sort_by(|left, right| left.name.cmp(&right.name));
+    if expected != actual {
+        return Err(GeneratorError::usage(format!(
+            "{label} differs from the immutable provider asset census"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_provider_facts(
+    facts: &ProviderReleaseFacts,
+    selection: &DiscoverySelection,
+) -> Result<(), GeneratorError> {
+    if facts.repository_id == 0
+        || facts.release_id != selection.provider_release_id
+        || facts.tag != selection.release_tag
+        || facts.target_commitish != selection.source_commit
+        || facts.published_at != selection.published_at
+        || facts.html_url != selection.release_url
+    {
+        return Err(GeneratorError::usage(
+            "verified GitHub provider facts differ from immutable selection",
+        ));
+    }
+    compare_provider_asset_census(
+        &selection.release_assets,
+        &facts.assets,
+        "verified GitHub provider facts",
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "provider source proof is one exact immutable contract gate"
+)]
+fn provider_source_commit(
+    selection: &DiscoverySelection,
+    path_overlay: Option<&Path>,
+) -> Result<(), GeneratorError> {
+    let endpoint = format!(
+        "repos/{}/git/ref/tags/{}",
+        selection.source_repository, selection.release_tag
+    );
+    let reference = provider_api_json(&endpoint, false, path_overlay)?;
+    if field(&reference, "ref")? != format!("refs/tags/{}", selection.release_tag) {
+        return Err(GeneratorError::usage(
+            "GitHub provider tag ref differs from immutable release tag",
+        ));
+    }
+    let object = reference
+        .get("object")
+        .ok_or_else(|| GeneratorError::usage("GitHub provider tag object is missing"))?;
+    let object_type = field(object, "type")?;
+    let object_sha = field(object, "sha")?;
+    let commit = if object_type == "commit" {
+        object_sha.to_owned()
+    } else if object_type == "tag" {
+        let endpoint = format!(
+            "repos/{}/git/tags/{}",
+            selection.source_repository, object_sha
+        );
+        let annotated = provider_api_json(&endpoint, false, path_overlay)?;
+        let annotated_object = annotated
+            .get("object")
+            .ok_or_else(|| GeneratorError::usage("GitHub provider tag target is missing"))?;
+        if field(annotated_object, "type")? != "commit" {
+            return Err(GeneratorError::usage(
+                "GitHub provider annotated tag does not resolve to a commit",
+            ));
+        }
+        field(annotated_object, "sha")?.to_owned()
+    } else {
+        return Err(GeneratorError::usage(
+            "GitHub provider tag object has an unsupported type",
+        ));
+    };
+    if !valid_commit(&commit) || commit != selection.source_commit {
+        return Err(GeneratorError::usage(
+            "GitHub provider tag does not resolve to the immutable source commit",
+        ));
+    }
+    if selection.channel == "preview" {
+        let endpoint = format!(
+            "repos/{}/compare/main...{}",
+            selection.source_repository, selection.source_commit
+        );
+        let compare = provider_api_json(&endpoint, false, path_overlay)?;
+        let status = field(&compare, "status")?;
+        if !matches!(status, "behind" | "identical")
+            || field(
+                compare.get("merge_base_commit").ok_or_else(|| {
+                    GeneratorError::usage("GitHub provider preview merge base is missing")
+                })?,
+                "sha",
+            )? != selection.source_commit
+            || !valid_commit(field(
+                compare.get("base_commit").ok_or_else(|| {
+                    GeneratorError::usage("GitHub provider preview base commit is missing")
+                })?,
+                "sha",
+            )?)
+            || field(
+                compare.get("head_commit").ok_or_else(|| {
+                    GeneratorError::usage("GitHub provider preview head commit is missing")
+                })?,
+                "sha",
+            )? != selection.source_commit
+        {
+            return Err(GeneratorError::usage(
+                "GitHub provider preview source is not an immutable main-branch ancestor",
+            ));
+        }
+        let base_commit = compare.get("base_commit").ok_or_else(|| {
+            GeneratorError::usage("GitHub provider preview base commit is missing")
+        })?;
+        let base_commit_sha = field(base_commit, "sha")?;
+        let declared = selection
+            .source_ref_resolution
+            .get("declared_ref_provenance")
+            .ok_or_else(|| GeneratorError::usage("preview branch provenance is missing"))?;
+        for (key, expected) in [
+            ("base_commit", base_commit_sha),
+            ("head_commit", selection.source_commit.as_str()),
+            ("merge_base_commit", selection.source_commit.as_str()),
+            ("ref", PREVIEW_SOURCE_REF),
+            ("status", status),
+        ] {
+            if field(declared, key)? != expected {
+                return Err(GeneratorError::usage(
+                    "provider preview provenance differs from immutable selection",
+                ));
+            }
+        }
+        let relation = if status == "identical" {
+            "tip"
+        } else {
+            "ancestor"
+        };
+        if field(declared, "relation")? != relation {
+            return Err(GeneratorError::usage(
+                "provider preview relation differs from immutable selection",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn acquire_provider_release(
+    selection: &DiscoverySelection,
+    path_overlay: Option<&Path>,
+) -> Result<ProviderReleaseFacts, GeneratorError> {
+    let repository_endpoint = format!("repos/{}", selection.source_repository);
+    let repository = provider_api_json(&repository_endpoint, false, path_overlay)?;
+    let repository_id = positive_field(&repository, "id")?;
+    if field(&repository, "full_name")? != selection.source_repository
+        || field(&repository, "html_url")?
+            != format!("https://github.com/{}", selection.source_repository)
+    {
+        return Err(GeneratorError::usage(
+            "GitHub provider repository identity differs from immutable selection",
+        ));
+    }
+    let release_endpoint = format!(
+        "repos/{}/releases/{}",
+        selection.source_repository, selection.provider_release_id
+    );
+    let release = provider_api_json(&release_endpoint, false, path_overlay)?;
+    let release_id = positive_field(&release, "id")?;
+    let expected_url = &selection.release_url;
+    let expected_api_url = format!(
+        "https://api.github.com/repos/{}/releases/{}",
+        selection.source_repository, selection.provider_release_id
+    );
+    if release_id != selection.provider_release_id
+        || field(&release, "tag_name")? != selection.release_tag
+        || field(&release, "target_commitish")? != selection.source_commit
+        || field(&release, "html_url")? != expected_url
+        || field(&release, "url")? != expected_api_url
+        || field(&release, "published_at")? != selection.published_at
+        || release.get("draft") != Some(&serde_json::Value::Bool(false))
+        || release.get("prerelease")
+            != Some(&serde_json::Value::Bool(selection.channel == "preview"))
+    {
+        return Err(GeneratorError::usage(
+            "GitHub provider release identity or publication status differs from immutable selection",
+        ));
+    }
+    let release_assets = provider_asset_rows(
+        release
+            .get("assets")
+            .ok_or_else(|| GeneratorError::usage("GitHub provider release assets are missing"))?,
+        "GitHub provider release assets",
+        &selection.source_repository,
+        &selection.release_tag,
+    )?;
+    let assets_endpoint = format!(
+        "repos/{}/releases/{}/assets?per_page=100",
+        selection.source_repository, selection.provider_release_id
+    );
+    let paginated_assets = provider_api_json(&assets_endpoint, true, path_overlay)?;
+    let api_assets = provider_asset_rows(
+        &paginated_assets,
+        "GitHub provider paginated release assets",
+        &selection.source_repository,
+        &selection.release_tag,
+    )?;
+    compare_provider_asset_census(&release_assets, &api_assets, "GitHub provider asset APIs")?;
+    compare_provider_asset_census(
+        &selection.release_assets,
+        &api_assets,
+        "discovery selection",
+    )?;
+    provider_source_commit(selection, path_overlay)?;
+    Ok(ProviderReleaseFacts {
+        repository_id,
+        release_id,
+        tag: selection.release_tag.clone(),
+        target_commitish: selection.source_commit.clone(),
+        published_at: selection.published_at.clone(),
+        html_url: expected_url.clone(),
+        assets: api_assets,
+    })
+}
+
+fn validate_release_attestation(
+    document: &serde_json::Value,
+    selection: &DiscoverySelection,
+) -> Result<(), GeneratorError> {
+    exact_object_keys(
+        document,
+        &[
+            "assets",
+            "manifest_sha256",
+            "provider",
+            "release_id",
+            "release_tag",
+            "release_url",
+            "resolved_source_commit",
+            "resolved_source_ref",
+            "schema",
+            "source_commit",
+            "source_ref",
+            "source_repository",
+            "target_commitish",
+        ],
+        "provider release attestation",
+    )?;
+    if field(document, "schema")? != RELEASE_ATTESTATION_SCHEMA
+        || field(document, "provider")? != "github"
+        || field(document, "source_repository")? != selection.source_repository
+        || field(document, "source_ref")? != selection.source_ref
+        || field(document, "source_commit")? != selection.source_commit
+        || field(document, "resolved_source_ref")? != selection.source_ref
+        || field(document, "resolved_source_commit")? != selection.source_commit
+        || field(document, "release_tag")? != selection.release_tag
+        || field(document, "release_id")? != selection.release_id
+        || field(document, "target_commitish")? != selection.target_commitish
+        || field(document, "release_url")? != selection.release_url
+        || field(document, "manifest_sha256")? != selection.manifest_sha256
+    {
+        return Err(GeneratorError::usage(
+            "provider release attestation does not bind immutable source or release facts",
+        ));
+    }
+    if document.get("assets") != selection.manifest.get("artifacts") {
+        return Err(GeneratorError::usage(
+            "provider release attestation inventory differs from canonical product manifest",
+        ));
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "provider attestation validation is one exact identity gate"
+)]
+fn verify_provider_attestation(
+    subject: &Path,
+    expected_digest: &str,
+    selection: &DiscoverySelection,
+    path_overlay: Option<&Path>,
+) -> Result<(), GeneratorError> {
+    if !valid_digest(expected_digest) {
+        return Err(GeneratorError::usage(
+            "provider attestation expected subject digest is invalid",
+        ));
+    }
+    let subject_name = subject
+        .to_str()
+        .ok_or_else(|| GeneratorError::usage("provider attestation subject path is not UTF-8"))?;
+    let signer_workflow = format!(
+        "{}/.github/workflows/{PROVENANCE_SIGNER_WORKFLOW}",
+        selection.source_repository
+    );
+    let bytes = run_fixed(
+        "gh",
+        &[
+            "attestation".to_owned(),
+            "verify".to_owned(),
+            subject_name.to_owned(),
+            "--repo".to_owned(),
+            selection.source_repository.clone(),
+            "--signer-workflow".to_owned(),
+            signer_workflow.clone(),
+            "--source-ref".to_owned(),
+            selection.source_ref.clone(),
+            "--source-digest".to_owned(),
+            selection.source_commit.clone(),
+            "--cert-oidc-issuer".to_owned(),
+            PROVENANCE_OIDC_ISSUER.to_owned(),
+            "--predicate-type".to_owned(),
+            PROVENANCE_PREDICATE.to_owned(),
+            "--deny-self-hosted-runners".to_owned(),
+            "--format".to_owned(),
+            "json".to_owned(),
+        ],
+        None,
+        path_overlay,
+    )?;
+    let document = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| {
+        GeneratorError::usage(format!(
+            "GitHub provider attestation returned invalid JSON: {error}"
+        ))
+    })?;
+    let records = document
+        .as_array()
+        .ok_or_else(|| GeneratorError::usage("GitHub provider attestation is not an array"))?;
+    if records.is_empty() {
+        return Err(GeneratorError::usage(
+            "GitHub provider attestation returned no verified records",
+        ));
+    }
+    let expected_repository_uri = format!("https://github.com/{}", selection.source_repository);
+    let expected_signer_prefix = format!("https://github.com/{signer_workflow}@");
+    let matched = records.iter().any(|record| {
+        let Some(result) = record.get("verificationResult") else {
+            return false;
+        };
+        let Some(certificate) = result
+            .get("signature")
+            .and_then(|signature| signature.get("certificate"))
+        else {
+            return false;
+        };
+        let Some(statement) = result.get("statement") else {
+            return false;
+        };
+        let Some(subjects) = statement
+            .get("subject")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return false;
+        };
+        let subject_digest = subjects.iter().any(|subject| {
+            subject
+                .get("digest")
+                .and_then(|digest| digest.get("sha256"))
+                .and_then(serde_json::Value::as_str)
+                == Some(expected_digest)
+        });
+        certificate
+            .get("issuer")
+            .and_then(serde_json::Value::as_str)
+            == Some(PROVENANCE_OIDC_ISSUER)
+            && certificate
+                .get("runnerEnvironment")
+                .and_then(serde_json::Value::as_str)
+                == Some("github-hosted")
+            && certificate
+                .get("sourceRepositoryURI")
+                .and_then(serde_json::Value::as_str)
+                == Some(expected_repository_uri.as_str())
+            && certificate
+                .get("sourceRepositoryRef")
+                .and_then(serde_json::Value::as_str)
+                == Some(selection.source_ref.as_str())
+            && certificate
+                .get("sourceRepositoryDigest")
+                .and_then(serde_json::Value::as_str)
+                == Some(selection.source_commit.as_str())
+            && certificate
+                .get("buildSignerURI")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| value.starts_with(&expected_signer_prefix))
+            && result
+                .get("verifiedTimestamps")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|timestamps| !timestamps.is_empty())
+            && statement
+                .get("predicateType")
+                .and_then(serde_json::Value::as_str)
+                == Some(PROVENANCE_PREDICATE)
+            && subject_digest
+    });
+    if !matched {
+        return Err(GeneratorError::usage(
+            "GitHub provider attestation identity or subject digest is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_provider_asset_payloads(
+    selection: &DiscoverySelection,
+    provider: &ProviderReleaseFacts,
+    incoming: &Path,
+    path_overlay: Option<&Path>,
+) -> Result<(), GeneratorError> {
+    validate_provider_facts(provider, selection)?;
+    let manifest_path = incoming.join(PRODUCT_MANIFEST_ASSET);
+    let manifest_bytes = read_regular_file(&manifest_path)?;
+    if sha256_hex(&manifest_bytes) != selection.manifest_sha256 {
+        return Err(GeneratorError::usage(
+            "provider product manifest bytes differ from immutable selection",
+        ));
+    }
+    let manifest =
+        serde_json::from_slice::<serde_json::Value>(&manifest_bytes).map_err(|error| {
+            GeneratorError::usage(format!(
+                "provider product manifest is not valid JSON: {error}"
+            ))
+        })?;
+    if manifest != selection.manifest {
+        return Err(GeneratorError::usage(
+            "provider product manifest differs from immutable selection",
+        ));
+    }
+    let sidecar_path = incoming.join("product-manifest.json.sha256");
+    if product_manifest_sidecar_digest_bytes(&read_regular_file(&sidecar_path)?, &sidecar_path)?
+        != selection.manifest_sha256
+    {
+        return Err(GeneratorError::usage(
+            "provider product manifest sidecar differs from immutable selection",
+        ));
+    }
+    let attestation_path = incoming.join(RELEASE_ATTESTATION_FILE);
+    let attestation_bytes = read_regular_file(&attestation_path)?;
+    let attestation =
+        serde_json::from_slice::<serde_json::Value>(&attestation_bytes).map_err(|error| {
+            GeneratorError::usage(format!(
+                "provider release attestation is not valid JSON: {error}"
+            ))
+        })?;
+    validate_release_attestation(&attestation, selection)?;
+    let mut subjects = vec![
+        (
+            PRODUCT_MANIFEST_ASSET.to_owned(),
+            sha256_hex(&manifest_bytes),
+        ),
+        (
+            "product-manifest.json.sha256".to_owned(),
+            sha256_file(&sidecar_path)?,
+        ),
+        (
+            RELEASE_ATTESTATION_FILE.to_owned(),
+            sha256_hex(&attestation_bytes),
+        ),
+    ];
+    for artifact in selection
+        .manifest
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| GeneratorError::usage("provider product artifacts are missing"))?
+    {
+        subjects.push((
+            field(artifact, "name")?.to_owned(),
+            field(artifact, "sha256")?.to_owned(),
+        ));
+    }
+    for (name, expected_digest) in subjects {
+        let path = incoming.join(&name);
+        let bytes = read_regular_file(&path)?;
+        if sha256_hex(&bytes) != expected_digest {
+            return Err(GeneratorError::usage(format!(
+                "provider product asset bytes differ from canonical inventory: {name}"
+            )));
+        }
+        verify_provider_attestation(&path, &expected_digest, selection, path_overlay)?;
+    }
+    Ok(())
+}
+
 /// Download precisely the assets named by a validated discovery result. The
 /// old tag/pointer download selector is intentionally not reachable here:
 /// every request is keyed by the immutable provider asset ID.
@@ -2617,6 +3249,10 @@ pub(crate) fn run_fetch_selection(
 ) -> Result<DiscoverySelection, GeneratorError> {
     let selected_document = read_json(selection_path)?;
     let selection = parse_discovery_selection(&selected_document)?;
+    // The discovery script is an index, not an authority. Reconcile the
+    // selected repository/release/ref/assets against fresh provider facts
+    // before any selected asset can enter the incoming tree.
+    let provider = acquire_provider_release(&selection, path_overlay)?;
     #[cfg(unix)]
     let directory = open_or_create_directory(dir)?;
     #[cfg(unix)]
@@ -2717,6 +3353,9 @@ pub(crate) fn run_fetch_selection(
             })?;
         }
     }
+    // Product bytes and their signed provider attestations are checked before
+    // the selection is persisted as the handoff consumed by verify/publish.
+    verify_provider_asset_payloads(&selection, &provider, dir, path_overlay)?;
     let persisted = serde_json::to_vec(&selected_document).map_err(|error| {
         GeneratorError::usage(format!("serialize discovery selection: {error}"))
     })?;
@@ -2816,6 +3455,16 @@ pub(crate) fn verify_discovery_incoming(
             "canonical product manifest sidecar differs from discovery",
         ));
     }
+    let attestation_path = incoming.join(RELEASE_ATTESTATION_FILE);
+    let attestation_bytes = read_regular_file(&attestation_path)?;
+    let attestation =
+        serde_json::from_slice::<serde_json::Value>(&attestation_bytes).map_err(|error| {
+            GeneratorError::usage(format!(
+                "{} is not valid JSON: {error}",
+                attestation_path.display()
+            ))
+        })?;
+    validate_release_attestation(&attestation, &selection)?;
     let artifacts = selection
         .manifest
         .get("artifacts")
@@ -7462,6 +8111,28 @@ mod tests {
             &dir.join("product-manifest.json.sha256"),
             format!("{manifest_sha}  {PRODUCT_MANIFEST_ASSET}\n").as_bytes(),
         );
+        let release_attestation = serde_json::json!({
+            "schema": RELEASE_ATTESTATION_SCHEMA,
+            "provider": "github",
+            "source_repository": source,
+            "source_ref": source_ref,
+            "source_commit": commit,
+            "resolved_source_ref": source_ref,
+            "resolved_source_commit": commit,
+            "release_tag": release_tag,
+            "release_id": release_id,
+            "target_commitish": commit,
+            "release_url": format!("https://github.com/{source}/releases/tag/{release_tag}"),
+            "manifest_sha256": manifest_sha,
+            "assets": artifact_values.clone()
+        });
+        write_bytes(
+            &dir.join(RELEASE_ATTESTATION_FILE),
+            &must(
+                serde_json::to_vec(&release_attestation),
+                "serialize fixture release attestation",
+            ),
+        );
 
         // Bind both package-specific subordinate records to the external
         // product digest, preserving their existing role-specific fields.
@@ -7610,6 +8281,13 @@ mod tests {
                 "read fixture sums",
             ),
         ));
+        raw_assets.push((
+            RELEASE_ATTESTATION_FILE.to_owned(),
+            must(
+                std::fs::read(dir.join(RELEASE_ATTESTATION_FILE)),
+                "read fixture release attestation",
+            ),
+        ));
         for (name, bytes) in artifact_assets_from_manifest(&artifact_values, dir) {
             raw_assets.push((name, bytes));
         }
@@ -7666,7 +8344,7 @@ mod tests {
             "source_ref_resolution": source_ref_resolution,
             "source_repository": source,
             "tag": release_tag,
-            "target_commitish": release_tag,
+            "target_commitish": commit,
             "version": product_version.replace("~preview.", "-preview.")
         });
         let selection_bytes = must(
@@ -7810,6 +8488,25 @@ mod tests {
             "serialize discovery product manifest",
         );
         let manifest_sha256 = sha256_hex(&manifest_bytes);
+        let release_attestation = serde_json::json!({
+            "schema": RELEASE_ATTESTATION_SCHEMA,
+            "provider": "github",
+            "source_repository": FIXTURE_SOURCE,
+            "source_ref": "refs/tags/v1.2.3",
+            "source_commit": FIXTURE_COMMIT,
+            "resolved_source_ref": "refs/tags/v1.2.3",
+            "resolved_source_commit": FIXTURE_COMMIT,
+            "release_tag": "v1.2.3",
+            "release_id": "123",
+            "target_commitish": FIXTURE_COMMIT,
+            "release_url": format!("https://github.com/{FIXTURE_SOURCE}/releases/tag/v1.2.3"),
+            "manifest_sha256": manifest_sha256,
+            "assets": manifest["artifacts"].clone()
+        });
+        let release_attestation_bytes = must(
+            serde_json::to_vec(&release_attestation),
+            "serialize discovery release attestation",
+        );
         let record_bytes = must(
             serde_json::to_vec(&serde_json::json!({
                 "parent_manifest_sha256": manifest_sha256,
@@ -7868,6 +8565,10 @@ mod tests {
             ),
             (PREVIEW_MANIFEST_FILE.to_owned(), release_manifest_bytes),
             (SHA256SUMS_FILE.to_owned(), sums.into_bytes()),
+            (
+                RELEASE_ATTESTATION_FILE.to_owned(),
+                release_attestation_bytes,
+            ),
         ];
         for (asset_name, bytes) in artifact_assets {
             raw_assets.push((asset_name.clone(), bytes.clone()));
@@ -7916,7 +8617,7 @@ mod tests {
             },
             "source_repository": FIXTURE_SOURCE,
             "tag": "v1.2.3",
-            "target_commitish": "v1.2.3",
+            "target_commitish": FIXTURE_COMMIT,
             "version": "1.2.3"
         });
         let document_bytes = must(
@@ -7943,10 +8644,89 @@ mod tests {
         must(std::fs::create_dir_all(&bin), "create gh stub bin");
         must(std::fs::create_dir_all(&asset_root), "create gh asset root");
         let log = fixture.root.join("gh.log");
+        let release_assets = fixture.document["release_assets"]
+            .as_array()
+            .expect("fixture release assets")
+            .iter()
+            .map(|asset| {
+                let mut asset = asset.clone();
+                let id = asset["id"].as_u64().expect("fixture asset id");
+                asset["url"] = serde_json::json!(format!(
+                    "https://api.github.com/repos/{FIXTURE_SOURCE}/releases/assets/{id}"
+                ));
+                asset
+            })
+            .collect::<Vec<_>>();
+        let release = serde_json::json!({
+            "id": fixture.document["provider_release_id"],
+            "tag_name": fixture.document["release_tag"],
+            "html_url": fixture.document["release_url"],
+            "url": format!(
+                "https://api.github.com/repos/{FIXTURE_SOURCE}/releases/{}",
+                fixture.document["provider_release_id"]
+            ),
+            "target_commitish": FIXTURE_COMMIT,
+            "published_at": fixture.document["published_at"],
+            "draft": false,
+            "prerelease": false,
+            "assets": release_assets
+        });
+        let repository = serde_json::json!({
+            "id": 456,
+            "full_name": FIXTURE_SOURCE,
+            "html_url": format!("https://github.com/{FIXTURE_SOURCE}")
+        });
+        let tag_ref = serde_json::json!({
+            "ref": "refs/tags/v1.2.3",
+            "object": {"type": "commit", "sha": FIXTURE_COMMIT}
+        });
+        let midpoint = release_assets.len() / 2;
+        let pages = serde_json::json!([
+            release_assets[..midpoint].to_vec(),
+            release_assets[midpoint..].to_vec()
+        ]);
+        for (name, value) in [
+            ("repository.json", repository),
+            ("release.json", release),
+            ("tag.json", tag_ref),
+            ("asset-pages.json", pages),
+        ] {
+            write_bytes(
+                &fixture.root.join(name),
+                &must(serde_json::to_vec(&value), "serialize provider fixture"),
+            );
+        }
         let mut script = format!(
-            "#!/bin/sh\nendpoint=\"\"\nfor arg in \"$@\"; do endpoint=\"$arg\"; done\nprintf '%s\\n' \"$endpoint\" >> \"{}\"\ncase \"$endpoint\" in\n",
-            log.display()
+            "#!/bin/sh\nendpoint=\"\"\nfor arg in \"$@\"; do endpoint=\"$arg\"; done\nprintf '%s\\n' \"$endpoint\" >> \"{}\"\nif [ \"$1\" = attestation ] && [ \"$2\" = verify ]; then\n  subject=\"$3\"\n  digest=\"$(shasum -a 256 \"$subject\" | awk '{{print $1}}')\"\n  attestation_source_ref='refs/tags/v1.2.3'\n  attestation_signer=\"https://github.com/{FIXTURE_SOURCE}/.github/workflows/{PROVENANCE_SIGNER_WORKFLOW}@refs/tags/v1.2.3\"\n  if [ -f \"{}/attestation-wrong-source\" ]; then attestation_source_ref='refs/tags/evil'; fi\n  if [ -f \"{}/attestation-wrong-signer\" ]; then attestation_signer=\"https://github.com/{FIXTURE_SOURCE}/.github/workflows/evil.yml@refs/tags/v1.2.3\"; fi\n  if [ -f \"{}/attestation-wrong-digest\" ]; then digest='0000000000000000000000000000000000000000000000000000000000000000'; fi\n  jq -n --arg digest \"$digest\" --arg source_ref \"$attestation_source_ref\" --arg source_commit '{FIXTURE_COMMIT}' --arg signer \"$attestation_signer\" '[{{verificationResult:{{signature:{{certificate:{{issuer:\"{PROVENANCE_OIDC_ISSUER}\",runnerEnvironment:\"github-hosted\",sourceRepositoryURI:\"https://github.com/{FIXTURE_SOURCE}\",sourceRepositoryRef:$source_ref,sourceRepositoryDigest:$source_commit,buildSignerURI:$signer}}}},verifiedTimestamps:[{{kind:\"rekor\"}}],statement:{{predicateType:\"{PROVENANCE_PREDICATE}\",subject:[{{name:(\"subject\"),digest:{{sha256:$digest}}}}]}}}}}}]'\n  exit 0\nfi\ncase \"$endpoint\" in\n",
+            log.display(),
+            fixture.root.display(),
+            fixture.root.display(),
+            fixture.root.display()
         );
+        writeln!(
+            &mut script,
+            "  repos/{FIXTURE_SOURCE}) cat \"{}/repository.json\" ;;",
+            fixture.root.display()
+        )
+        .expect("append provider repository case");
+        writeln!(
+            &mut script,
+            "  repos/{FIXTURE_SOURCE}/releases/123) cat \"{}/release.json\" ;;",
+            fixture.root.display()
+        )
+        .expect("append provider release case");
+        writeln!(
+            &mut script,
+            "  repos/{FIXTURE_SOURCE}/releases/123/assets\\?per_page=100) cat \"{}/asset-pages.json\" ;;",
+            fixture.root.display()
+        )
+        .expect("append provider assets case");
+        writeln!(
+            &mut script,
+            "  repos/{FIXTURE_SOURCE}/git/ref/tags/v1.2.3) cat \"{}/tag.json\" ;;",
+            fixture.root.display()
+        )
+        .expect("append provider ref case");
         for (id, _, bytes) in &fixture.assets {
             write_bytes(&asset_root.join(format!("asset-{id}")), bytes);
             must(
@@ -7962,6 +8742,144 @@ mod tests {
         write_bytes(&bin.join("gh"), script.as_bytes());
         make_executable(&bin.join("gh"));
         bin
+    }
+
+    fn rewrite_fixture_json<F>(path: &Path, mutate: F)
+    where
+        F: FnOnce(&mut serde_json::Value),
+    {
+        let mut document = must(
+            serde_json::from_slice::<serde_json::Value>(&must(
+                std::fs::read(path),
+                "read provider fixture JSON",
+            )),
+            "parse provider fixture JSON",
+        );
+        mutate(&mut document);
+        write_bytes(
+            path,
+            &must(
+                serde_json::to_vec(&document),
+                "serialize provider fixture JSON",
+            ),
+        );
+    }
+
+    #[test]
+    fn provider_snapshot_rejects_adversarial_release_facts() {
+        let cases: Vec<(&str, Box<dyn Fn(&Path)>)> = vec![
+            (
+                "wrong-release",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("release.json"), |release| {
+                        release["id"] = serde_json::json!(999);
+                    });
+                }),
+            ),
+            (
+                "wrong-source",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("repository.json"), |repository| {
+                        repository["full_name"] = serde_json::json!("evil/app");
+                    });
+                }),
+            ),
+            (
+                "wrong-tag",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("release.json"), |release| {
+                        release["tag_name"] = serde_json::json!("v9.9.9");
+                    });
+                }),
+            ),
+            (
+                "wrong-asset",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("asset-pages.json"), |pages| {
+                        pages[0].as_array_mut().expect("asset page").pop();
+                    });
+                }),
+            ),
+            (
+                "wrong-asset-url",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("asset-pages.json"), |pages| {
+                        pages[0][0]["browser_download_url"] =
+                            serde_json::json!("https://evil.example/download");
+                    });
+                }),
+            ),
+            (
+                "wrong-asset-api-url",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("asset-pages.json"), |pages| {
+                        pages[0][0]["url"] = serde_json::json!("https://evil.example/api");
+                    });
+                }),
+            ),
+            (
+                "duplicate-asset",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("asset-pages.json"), |pages| {
+                        let first = pages[0][0].clone();
+                        pages[1].as_array_mut().expect("asset page").push(first);
+                    });
+                }),
+            ),
+            (
+                "mixed-pagination",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("asset-pages.json"), |pages| {
+                        pages[1] = serde_json::json!({"id": 999});
+                    });
+                }),
+            ),
+            (
+                "incomplete-status",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("release.json"), |release| {
+                        release["draft"] = serde_json::json!(true);
+                    });
+                }),
+            ),
+            (
+                "wrong-attestation-source",
+                Box::new(|root| write_bytes(&root.join("attestation-wrong-source"), b"1")),
+            ),
+            (
+                "wrong-attestation-signer",
+                Box::new(|root| write_bytes(&root.join("attestation-wrong-signer"), b"1")),
+            ),
+            (
+                "wrong-attestation-digest",
+                Box::new(|root| write_bytes(&root.join("attestation-wrong-digest"), b"1")),
+            ),
+            (
+                "wrong-payload-digest",
+                Box::new(|root| {
+                    let path = root.join("asset-by-id/asset-100");
+                    let mut bytes = must(std::fs::read(&path), "read fixture payload");
+                    bytes[0] ^= 1;
+                    write_bytes(&path, &bytes);
+                }),
+            ),
+            (
+                "api-failure",
+                Box::new(|root| write_bytes(&root.join("release.json"), b"not-json")),
+            ),
+        ];
+        for (name, mutate) in cases {
+            let fixture = discovery_fixture(&format!("provider-adversarial-{name}"));
+            let bin = discovery_gh_stub(&fixture);
+            mutate(&fixture.root);
+            let fetched = fixture.root.join("fetched");
+            let error = must_fail(
+                run_fetch_selection(&fixture.selection_path, &fetched, Some(&bin)),
+                name,
+            );
+            assert!(!error.is_empty(), "{name}: {error}");
+            let _ = std::fs::remove_dir_all(&fixture.root);
+        }
     }
 
     #[test]
@@ -8024,6 +8942,7 @@ mod tests {
             MANIFEST_SIDECAR,
             PREVIEW_MANIFEST_FILE,
             SHA256SUMS_FILE,
+            RELEASE_ATTESTATION_FILE,
         ] {
             asset_sizes.insert(name.to_owned(), 1);
         }
@@ -8050,7 +8969,7 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        assert_eq!(release_assets.len(), 28);
+        assert_eq!(release_assets.len(), 29);
         let source_commit = must(field(&manifest, "source_commit"), "read source commit");
         let source_ref = must(field(&manifest, "source_ref"), "read source ref");
         let version = must(field(&manifest, "version"), "read product version");
@@ -8079,7 +8998,7 @@ mod tests {
             },
             "source_repository": source_repository,
             "tag": release_tag,
-            "target_commitish": release_tag,
+            "target_commitish": source_commit,
             "version": version
         });
         let root = fixture_dir("native-assembly-selection");
@@ -8097,7 +9016,7 @@ mod tests {
         );
         assert_eq!(parsed.manifest_sha256, manifest_sha256);
         assert_eq!(parsed.release_id, "12345");
-        assert_eq!(parsed.release_assets.len(), 28);
+        assert_eq!(parsed.release_assets.len(), 29);
         assert_eq!(
             parsed
                 .manifest
@@ -8143,7 +9062,12 @@ mod tests {
             .map(|asset| format!("repos/{}/releases/assets/{}", FIXTURE_SOURCE, asset.id))
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(log.trim_end(), expected);
+        let observed = log
+            .lines()
+            .filter(|line| line.contains("/releases/assets/"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(observed, expected);
 
         must(
             verify_discovery_incoming(&fixture.selection_path, &fetched),
@@ -8183,6 +9107,20 @@ mod tests {
             "{error}"
         );
         write_bytes(&fetched.join("example-1.2.3-amd64.deb"), b"amd64-deb");
+        let attestation_path = fetched.join(RELEASE_ATTESTATION_FILE);
+        let attestation_bytes = must(
+            std::fs::read(&attestation_path),
+            "read provider release attestation",
+        );
+        rewrite_fixture_json(&attestation_path, |attestation| {
+            attestation["source_commit"] = serde_json::json!("0".repeat(40));
+        });
+        let error = must_fail(
+            verify_discovery_incoming(&fixture.selection_path, &fetched),
+            "reject provider attestation source tamper",
+        );
+        assert!(error.contains("provider release attestation"), "{error}");
+        write_bytes(&attestation_path, &attestation_bytes);
         write_bytes(&fetched.join(".unexpected"), b"hidden");
         let error = must_fail(
             verify_discovery_incoming(&fixture.selection_path, &fetched),
