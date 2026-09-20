@@ -465,6 +465,16 @@ fn render_workflow(
     let blocked_targets_json_q = shell_quote(&blocked_targets_json);
     let components_json_q = shell_quote(&components_json);
     let default_branch_q = shell_quote(&ctx.config.default_branch);
+    let workflow_call_inputs = if channel == "preview" {
+        "    inputs:\n      product-version:\n        required: true\n        type: string\n      product-source-ref:\n        required: true\n        type: string\n      product-release-tag:\n        required: true\n        type: string\n"
+    } else {
+        ""
+    };
+    let preview_identity_env = if channel == "preview" {
+        "      PRODUCT_VERSION_INPUT: ${{{{ inputs.product-version }}}}\n      PRODUCT_SOURCE_REF_INPUT: ${{{{ inputs.product-source-ref }}}}\n      PRODUCT_RELEASE_TAG_INPUT: ${{{{ inputs.product-release-tag }}}}\n"
+    } else {
+        ""
+    };
 
     let mut output = format!(
         "{GENERATED_HEADER}# Build-only producer. release.yml is the sole provider publisher.\nname: Native product build\nrun-name: Native product build · ${{{{ github.ref_name }}}}\n\non:\n  workflow_call:\n\nconcurrency:\n  group: native-product-build-${{{{ github.workflow }}}}-${{{{ github.run_id }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n{blocked_jobs}  build:\n    name: Build product / ${{{{ matrix.target }}}}\n    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 90\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    permissions:\n      contents: read\n    env:\n      TARGET: ${{{{ matrix.target }}}}\n      PRODUCT_ID: {product_id_q}\n      CHANNEL: {channel_q}\n      SOURCE_REPOSITORY: {source_repository_q}\n      MANIFEST_SCHEMA: {manifest_schema_q}\n      ARCHIVE_COMPONENT: {archive_component_q}\n      ARCHIVE_IDENTITY_SCHEMA: {archive_identity_schema_q}\n      ARCHIVE_MANIFEST_SCHEMA: {archive_manifest_schema_q}\n      DEFAULT_BRANCH: {default_branch_q}\n      TARGETS_JSON: {targets_json_q}\n      BLOCKED_TARGETS_JSON: {blocked_targets_json_q}\n      COMPONENTS_JSON: {components_json_q}\n    steps:\n      - name: Checkout exact source\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Prove exact source identity\n        run: |\n          set -euo pipefail\n          actual=\"$(git rev-parse HEAD)\"\n          case \"$actual\" in ''|*[!0-9a-f]*) echo '::error::checkout is not a lowercase 40-hex commit' >&2; exit 1 ;; esac\n          [ \"${{{{#actual}}}}\" -eq 40 ] && [ \"$actual\" = \"$GITHUB_SHA\" ] || {{ echo '::error::checkout source differs from event source' >&2; exit 1; }}\n          test -z \"$(git status --porcelain)\" || {{ echo '::error::native product checkout is dirty' >&2; exit 1; }}\n      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Read Cargo component metadata\n        run: cargo metadata --locked --no-deps --format-version 1 > cargo-metadata.json\n      - name: Build and verify typed sibling inventory\n        run: |\n          set -euo pipefail\n          if [ \"$CHANNEL\" = stable ]; then\n            PRODUCT_VERSION=\"${{{{ github.ref_name }}}}\"\n            PRODUCT_VERSION=\"${{PRODUCT_VERSION#v}}\"\n            [[ \"$PRODUCT_VERSION\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] || {{ echo '::error::stable product source tag is not SemVer' >&2; exit 1; }}\n          else\n            PRODUCT_VERSION=\"0.0.0-preview.${{{{ github.run_number }}}}+$(printf '%s' \"$GITHUB_SHA\" | cut -c1-7)\"\n          fi\n          SOURCE_COMMIT=\"$GITHUB_SHA\"\n          SOURCE_REF=\"$GITHUB_REF\"\n          RELEASE_TAG=\"$GITHUB_REF_NAME\"\n          export PRODUCT_VERSION SOURCE_COMMIT SOURCE_REF RELEASE_TAG\n          mkdir -p \"dist/$TARGET/package\"\n          : > \"dist/$TARGET/artifacts-$TARGET.jsonl\"\n          : > \"dist/$TARGET/components-$TARGET.jsonl\"\n{build_steps}          jq -S -n --arg schema \"$MANIFEST_SCHEMA\" --arg product_id \"$PRODUCT_ID\" --arg channel \"$CHANNEL\" --arg source_repository \"$SOURCE_REPOSITORY\" --arg source_ref \"$SOURCE_REF\" --arg source_commit \"$SOURCE_COMMIT\" --arg release_tag \"$RELEASE_TAG\" --arg version \"$PRODUCT_VERSION\" --arg archive_component \"$ARCHIVE_COMPONENT\" --arg archive_identity_schema \"$ARCHIVE_IDENTITY_SCHEMA\" --arg archive_manifest_schema \"$ARCHIVE_MANIFEST_SCHEMA\" --argjson targets \"$TARGETS_JSON\" --argjson blocked_targets \"$BLOCKED_TARGETS_JSON\" --argjson components \"$COMPONENTS_JSON\" '{{schema:$schema,product_id:$product_id,channel:$channel,source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit,release_tag:$release_tag,version:$version,archive_component:$archive_component,archive_identity_schema:$archive_identity_schema,archive_manifest_schema:$archive_manifest_schema,targets:$targets,blocked_targets:$blocked_targets,components:$components}}' > \"dist/$TARGET/product-contract-$TARGET.json\"\n          test \"$(jq -s 'map(.name) | unique | sort | length' \"dist/$TARGET/components-$TARGET.jsonl\")\" -eq {component_count}\n          test \"$(jq -s 'map(.target) | unique | sort | length' \"dist/$TARGET/components-$TARGET.jsonl\")\" -eq 1\n      - name: Upload source-bound product build\n        uses: {upload}\n        with:\n          name: native-product-${{{{ matrix.target }}}}\n          path: dist/${{{{ matrix.target }}}}\n          if-no-files-found: error\n          retention-days: 2\n\n# The stable release workflow downloads these build artifacts, asks the provider\n# for its numeric release id, then writes {PRODUCT_MANIFEST_FILE}; this file\n# never calls gh release create/upload and cannot publish a competing product.\n",
@@ -472,6 +482,14 @@ fn render_workflow(
         blocked_jobs = blocked_jobs,
         build_steps = build_steps,
         component_count = components.len(),
+    )
+    .replace(
+        "on:\n  workflow_call:\n",
+        &format!("on:\n  workflow_call:\n{workflow_call_inputs}\n"),
+    )
+    .replace(
+        "    steps:\n",
+        &format!("{preview_identity_env}    steps:\n"),
     )
     .replace("${{#actual}}", "${#actual}")
     .replace(
@@ -507,6 +525,37 @@ fn render_workflow(
         "__disabled_legacy_native_component_row__",
         " --arg target \"$TARGET\" --arg feature \"$component_feature\" --arg identity \"$component_identity\" '{name:$name,crate:$crate,version:$version,binary:$binary,target:$target,feature:(if $feature == \"\" then null else $feature end),identity:$identity}' >> \"dist/$TARGET/components-$TARGET.jsonl\"\n",
     );
+    if channel == "preview" {
+        output = output.replace(
+            r#"          if [ "$CHANNEL" = stable ]; then
+            PRODUCT_VERSION="${{ github.ref_name }}"
+            PRODUCT_VERSION="${PRODUCT_VERSION#v}"
+            [[ "$PRODUCT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo '::error::stable product source tag is not SemVer' >&2; exit 1; }
+          else
+            PRODUCT_VERSION="0.0.0-preview.${{ github.run_number }}+$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"
+          fi
+          SOURCE_COMMIT="$GITHUB_SHA"
+          SOURCE_REF="$GITHUB_REF"
+          RELEASE_TAG="$GITHUB_REF_NAME"
+"#,
+            r#"          SOURCE_COMMIT="$GITHUB_SHA"
+          if [ "$CHANNEL" = stable ]; then
+            PRODUCT_VERSION="${{ github.ref_name }}"
+            PRODUCT_VERSION="${PRODUCT_VERSION#v}"
+            SOURCE_REF="$GITHUB_REF"
+            RELEASE_TAG="$GITHUB_REF_NAME"
+            [[ "$PRODUCT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo '::error::stable product source tag is not SemVer' >&2; exit 1; }
+          else
+            PRODUCT_VERSION="$PRODUCT_VERSION_INPUT"
+            SOURCE_REF="$PRODUCT_SOURCE_REF_INPUT"
+            RELEASE_TAG="$PRODUCT_RELEASE_TAG_INPUT"
+            [[ "$PRODUCT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-preview\.[1-9][0-9]*\+[0-9a-f]{7}$ ]] || { echo '::error::preview product version is not canonical SemVer' >&2; exit 1; }
+            [[ "$SOURCE_REF" = "refs/heads/$DEFAULT_BRANCH" ]] || { echo '::error::preview product source ref is not the configured default branch' >&2; exit 1; }
+            [[ "$RELEASE_TAG" = "preview-$SOURCE_COMMIT" ]] || { echo '::error::preview product release tag must bind the full source commit' >&2; exit 1; }
+          fi
+"#,
+        );
+    }
     output
 }
 
@@ -674,5 +723,8 @@ mod tests {
         assert!(source.contains("architecture does not match"));
         assert!(source.contains("component version differs"));
         assert!(source.contains("typed sibling mode was lost before upload"));
+        assert!(source.contains("product-version:"));
+        assert!(source.contains("PRODUCT_VERSION_INPUT"));
+        assert!(source.contains("PRODUCT_RELEASE_TAG_INPUT"));
     }
 }
