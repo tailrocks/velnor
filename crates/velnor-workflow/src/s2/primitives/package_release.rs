@@ -983,8 +983,9 @@ struct PublishVerification<'a> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn publication_lock_script() -> &'static str {
-    r#"
+fn render_publication_lock_script(include_retention: bool) -> String {
+    let mut script = String::from(
+        r#"
 # This permanent branch is the repository-wide lock namespace for generated
 # publication writers. The Contents API create-without-sha operation is
 # create-only: an existing lock is never taken over, including after a stale
@@ -994,12 +995,19 @@ publication_lock_branch="${VELNOR_PUBLICATION_LOCK_BRANCH:?missing VELNOR_PUBLIC
 publication_lock_path=".package-release-publication-lock.json"
 publication_lock_sha="${VELNOR_PUBLICATION_LOCK_SHA:-}"
 publication_lock_acquired=0
-publication_lock_retain="${VELNOR_PUBLICATION_LOCK_RETAIN:-0}"
 publication_lock_released="${VELNOR_PUBLICATION_LOCK_RELEASED:-0}"
 if [ -n "$publication_lock_sha" ]; then
   publication_lock_acquired=1
 fi
 publication_lock_token="${GITHUB_REPOSITORY}:${GITHUB_WORKFLOW:-unknown}:${GITHUB_RUN_ID:-unknown}:${GITHUB_RUN_ATTEMPT:-unknown}"
+
+"#,
+    );
+
+    if include_retention {
+        script.push_str(
+            r#"
+publication_lock_retain="${VELNOR_PUBLICATION_LOCK_RETAIN:-0}"
 
 mark_publication_lock_retain() {
   publication_lock_retain=1
@@ -1008,19 +1016,25 @@ mark_publication_lock_retain() {
   fi
 }
 
+clear_publication_lock_retain() {
+  publication_lock_retain=0
+  if [ -n "${GITHUB_ENV:-}" ]; then
+    printf 'VELNOR_PUBLICATION_LOCK_RETAIN=0\n' >> "$GITHUB_ENV"
+  fi
+}
+
+"#,
+        );
+    }
+
+    script.push_str(
+        r#"
 mark_publication_lock_released() {
   publication_lock_released=1
   publication_lock_acquired=0
   publication_lock_sha=""
   if [ -n "${GITHUB_ENV:-}" ]; then
     printf 'VELNOR_PUBLICATION_LOCK_RELEASED=1\nVELNOR_PUBLICATION_LOCK_RETAIN=0\n' >> "$GITHUB_ENV"
-  fi
-}
-
-clear_publication_lock_retain() {
-  publication_lock_retain=0
-  if [ -n "${GITHUB_ENV:-}" ]; then
-    printf 'VELNOR_PUBLICATION_LOCK_RETAIN=0\n' >> "$GITHUB_ENV"
   fi
 }
 
@@ -1128,7 +1142,9 @@ release_publication_lock() {
   fi
   mark_publication_lock_released
 }
-"#
+"#,
+    );
+    script
 }
 
 fn render_publication_lock_acquire_script() -> String {
@@ -1138,7 +1154,7 @@ transaction_dir="$(mktemp -d)"
 publication_lock_handoff=0
 "#,
     );
-    script.push_str(publication_lock_script());
+    script.push_str(&render_publication_lock_script(false));
     script.push_str(
         r#"
 cleanup_publication_lock_acquisition() {
@@ -1183,7 +1199,7 @@ fn render_publication_lock_finalizer_script() -> String {
 transaction_dir="$(mktemp -d)"
 "#,
     );
-    script.push_str(publication_lock_script());
+    script.push_str(&render_publication_lock_script(true));
     script.push_str(
         r#"
 cleanup_publication_lock_finalizer() {
@@ -1256,7 +1272,7 @@ had_release=0
 mutated=0
 "#,
     );
-    script.push_str(publication_lock_script());
+    script.push_str(&render_publication_lock_script(true));
     script.push_str(
         r#"
 remote_tag_sha() {
@@ -2198,7 +2214,6 @@ verify_asset_bytes() {
   done < "$names_file"
 }
 
-{
 "#
 }
 
@@ -2208,7 +2223,7 @@ verify_asset_bytes() {
 #[allow(clippy::too_many_lines)]
 fn render_immutable_publish_script(spec: &PackageReleaseSpec) -> String {
     let mut script = String::from(immutable_publish_script_prelude());
-    script.push_str(publication_lock_script());
+    script.push_str(&render_publication_lock_script(true));
     script.push_str(
         r#"
 immutable_publication_mutated=0
@@ -2247,6 +2262,7 @@ if [ -z "${GITHUB_ENV:-}" ]; then
 fi
 printf 'VELNOR_PUBLICATION_LOCK_SHA=%s\n' "$publication_lock_sha" >> "$GITHUB_ENV"
 
+{
 "#,
     );
     for name in release_asset_names(spec) {
@@ -3074,6 +3090,51 @@ concurrency_group = "package-release-preview"
             .expect_err("missing pre-publish task must fail closed");
         assert!(error.to_string().contains("missing-migration"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn publication_lock_renderer_scopes_retention_helpers_to_mutating_fragments() {
+        let acquire = render_publication_lock_acquire_script();
+        assert!(acquire.contains("mark_publication_lock_released()"));
+        assert!(!acquire.contains("publication_lock_retain="));
+        assert!(!acquire.contains("mark_publication_lock_retain()"));
+        assert!(!acquire.contains("clear_publication_lock_retain()"));
+
+        let finalizer = render_publication_lock_finalizer_script();
+        assert!(finalizer.contains("publication_lock_retain="));
+        assert!(finalizer.contains("mark_publication_lock_retain()"));
+        assert!(finalizer.contains("clear_publication_lock_retain()"));
+    }
+
+    #[test]
+    fn immutable_publication_scopes_asset_group_after_all_helper_definitions() {
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let script = render_immutable_publish_script(&spec);
+        let group_start = script
+            .find("\n{\n  printf '%s\\n' 'release-manifest.json'\n")
+            .expect("expected asset group");
+        let group_end = script
+            .find("\n} | LC_ALL=C sort > \"$expected_assets\"")
+            .expect("expected asset group terminator");
+        let verify_helper = script
+            .find("verify_asset_bytes()")
+            .expect("verify asset helper");
+        let lock_helper = script
+            .find("publication_lock_branch=")
+            .expect("publication lock initialization");
+        let handoff = script
+            .find("printf 'VELNOR_PUBLICATION_LOCK_SHA=")
+            .expect("publication lock handoff");
+        assert!(verify_helper < group_start);
+        assert!(lock_helper < group_start);
+        assert!(handoff < group_start);
+
+        let asset_group = &script[group_start..group_end];
+        assert_eq!(
+            asset_group.matches("printf '%s\\n'").count(),
+            release_asset_names(&spec).len()
+        );
+        assert!(!asset_group.contains("() {"));
     }
 
     #[test]
