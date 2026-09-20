@@ -1,0 +1,207 @@
+{
+  "status": "transport-admitted-semantic-rejected-no-approval",
+  "observed_at": "2026-09-20",
+  "repository": "tailrocks/velnor",
+  "revisions": {
+    "origin_main": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+    "main_parent": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+    "old_validator_source": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+    "old_validator_closure": "8b96d5108550dfa61a57ff65c6c357b4119493c660417bf3beb4af2b03742269",
+    "old_validator_binary": "/private/tmp/velnor-old-target/release/velnor-workflow",
+    "old_validator_binary_sha256": "ade826fd3a27de43cfce55acfda870493b4921770199fe0afaa653b9a96f1750",
+    "new_renderer_source": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+    "new_renderer_closure": "9179c5421fa9bc4ef1ca424696df211cdbf1ee6fdaea3dcdfbccde943011e0830",
+    "new_renderer_binary": "/private/tmp/velnor-current-generator-target/release/velnor-workflow",
+    "new_renderer_binary_sha256": "07e184bb6e6388023a06716147e177a7d212fe00db2c78c97b68a09fa6f888c7",
+    "old_package_release_source_sha256": "9941dc21202ac8b0107eaf4ed92defa600931bba8d02c65d81253325f4a86f0b"
+  },
+  "constraints": {
+    "candidate_executed": false,
+    "candidate_manifest": "",
+    "pin_build_used": false,
+    "mac_runner_used": false,
+    "mac_docker_used": false,
+    "production_source_changed": false,
+    "authority_write": false,
+    "release_or_dispatch": false,
+    "ruleset_changed": false,
+    "force_used_for_reported_results": false
+  },
+  "commands": {
+    "old_render": "OLD=/private/tmp/velnor-old-target/release/velnor-workflow; OLD --plain --output OLD_OUT ROOT",
+    "old_check": "OLD --plain --check ROOT",
+    "old_policy": "OLD policy --workflow-root ROOT --head-sha d20d4d1d17590cca85b501d982cbaad70d42c641 --base-sha 1048337062ea625fada1b4f7c07f2feed75f60c7 --base-revision 0dc79895ff1c5e88be7c3822c437e1c5b5282e12 --ruleset-contexts DCO,Policy,ci-required --candidate-manifest ''",
+    "new_render_1": "NEW --plain --output NEW_OUT_1 ROOT",
+    "new_render_2": "NEW --plain --output NEW_OUT_2 ROOT",
+    "raw_current_main_check": "OLD --plain --check /private/tmp/velnor-current-d20-admission-fixture",
+    "raw_current_main_policy": "OLD policy --workflow-root /private/tmp/velnor-current-d20-admission-fixture --head-sha d20d4d1d17590cca85b501d982cbaad70d42c641 --base-sha 1048337062ea625fada1b4f7c07f2feed75f60c7 --base-revision 0dc79895ff1c5e88be7c3822c437e1c5b5282e12 --ruleset-contexts DCO,Policy,ci-required --candidate-manifest ''"
+  },
+  "fixtures": {
+    "package_release_unpinned_fixedpoint": {
+      "root": "/private/tmp/velnor-package-unpinned-fixedpoint-final",
+      "head": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+      "digest": "6520a6f3d3b97080ef25c2a6cc24379e31c36f28e9a774eb5654912b036db95a",
+      "config_sha256": "a998b9aa2dc85912981ec2a2bd01b6cd2a26cbe4ac4a6492e9d77dea5cc80d21",
+      "old_render_exit": 0,
+      "old_check_exit": 0,
+      "old_policy_exit": 0,
+      "old_policy_rules": "11 rules, 0 failed",
+      "old_workflow_sha256": "697b5232b455c911f5055147004cd0a75c750b4b7f778d06aebe77b59d3edb58",
+      "new_render_exit": 0,
+      "new_repeat_exit": 0,
+      "new_repeat_byte_identical": true,
+      "new_workflow_sha256": "6bac4af85f02a9e19e291b018be8436186050ac5706a4aa36177644e4437f7e3",
+      "config_revision_omitted": true,
+      "old_generated_runtime_revision": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+      "new_generated_runtime_revision": "d20d4d1d17590cca85b501d982cbaad70d42c641"
+    },
+    "static_publisher_transport": {
+      "root": "/private/tmp/velnor-static-publisher-fixture",
+      "head": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+      "digest": "e430c39a264d96f47a39d6dd31a3e7f3c6a2c48803c49d0cfbf1ced1a0d441c8",
+      "source": ".github-gen/sources/workflows/ci-policy-validator-products.yml",
+      "target": ".github/workflows/ci-policy-validator-products.yml",
+      "source_sha256": "697b5232b455c911f5055147004cd0a75c750b4b7f778d06aebe77b59d3edb58",
+      "old_destination_sha256": "697b5232b455c911f5055147004cd0a75c750b4b7f778d06aebe77b59d3edb58",
+      "old_render_exit": 0,
+      "old_check_exit": 0,
+      "old_policy_exit": 0,
+      "old_policy_rules": "11 rules, 0 failed",
+      "new_render_exit": 0,
+      "new_repeat_exit": 0,
+      "new_repeat_byte_identical": true,
+      "fixture_body_is_b_contract": false,
+      "fixture_body_provenance": "old package-release render copied only to exercise static byte transport"
+    },
+    "raw_current_main": {
+      "root": "/private/tmp/velnor-current-d20-admission-fixture",
+      "head": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+      "old_check_exit": 1,
+      "old_policy_exit": 1,
+      "old_policy_failed_rules": ["generated-tree"],
+      "old_check_differences": [
+        ".github/actionlint.yaml",
+        ".github/workflows/ci-runtime-products.yml",
+        ".github/ci/.github-actions-generator-state"
+      ]
+    }
+  },
+  "typed_input": {
+    "primitive": "package-release",
+    "old_parser_accepts": true,
+    "accepted_schema_keys": [
+      "build_tasks",
+      "channel",
+      "concurrency_group",
+      "consumer_branch",
+      "consumer_repository",
+      "github_release_type",
+      "manifest_schema",
+      "package_dir",
+      "payloads",
+      "publish_environment",
+      "release_tag",
+      "release_title_prefix",
+      "source_ref",
+      "source_repository",
+      "supporting_assets",
+      "update_commit_message",
+      "updater",
+      "updater_token_secret"
+    ],
+    "unknown_product_id_result": "`[[declare]]` primitive `package-release` does not accept the argument `product_id`; accepted arguments: build_tasks, channel, concurrency_group, consumer_branch, consumer_repository, github_release_type, manifest_schema, package_dir, payloads, publish_environment, release_tag, release_title_prefix, source_ref, source_repository, supporting_assets, update_commit_message, updater, updater_token_secret",
+    "semantic_b_verdict": "reject"
+  },
+  "static_files": {
+    "schema": "[[static_files]] file=.github/... source=repository-relative",
+    "semantic_validation": false,
+    "publisher_mapping_tested": true,
+    "publisher_mapping": {
+      "file": ".github/workflows/ci-policy-validator-products.yml",
+      "source": ".github-gen/sources/workflows/ci-policy-validator-products.yml"
+    },
+    "existing_main_mappings": [
+      {
+        "file": ".github/actions/setup-velnor-workflow/action.yml",
+        "source": ".github-gen/sources/actions/setup-velnor-workflow/action.yml"
+      },
+      {
+        "file": ".github/actions/report-velnor-ci-outcomes/action.yml",
+        "source": ".github-gen/sources/actions/report-velnor-ci-outcomes/action.yml"
+      },
+      {
+        "file": ".github/workflows/AGENTS.md",
+        "source": ".github-gen/sources/workflows-AGENTS.md"
+      }
+    ],
+    "missing_current_b_sources": [
+      ".github-gen/sources/workflows/ci-policy-validator-products.yml",
+      ".github-gen/sources/actions/setup-velnor-policy-validator/action.yml",
+      "B-specific report source/action"
+    ],
+    "adoption_sidecar_excluded": ".github/ci/validator-pin-adoption.json"
+  },
+  "b_semantic_gaps": [
+    "No product_id, purpose, or platform config keys; product_id is rejected as an unknown primitive argument",
+    "Tag is RELEASE_TAG plus full source SHA, not closure16; generic lane also force-refreshes mutable RELEASE_TAG",
+    "Only build/publish jobs; no fixed build-linux-x64, reserve-release, isolated attest, verify-B, numeric artifact/job/check binding, or custom B predicate",
+    "Publish permissions include pull-requests: write and an updater secret",
+    "Consumer checkout, branch push, and consumer PR creation are intrinsic",
+    "Generated setup invokes renderer/policy revision; omitted config revision falls back to binary source revision",
+    "Existing runtime-products publisher is fixed to the application and three platforms, so reuse violates namespace/platform separation",
+    "Static files copy bytes only and do not establish semantic authority"
+  ],
+  "main_push_observation": {
+    "runtime_run": 35475920678,
+    "ci_main_run": 35475920826,
+    "preview_run": 35475920808,
+    "runtime_created": "2026-09-19T23:21:55Z",
+    "mac_runtime_job": 105985069822,
+    "mac_runtime_start": "2026-09-19T23:22:25Z",
+    "old_policy_job": 105985041123,
+    "old_policy_start": "2026-09-19T23:22:47Z",
+    "old_candidate_acquisition_observed": "2026-09-19T23:22:56Z",
+    "current_mac_label": "macos-26",
+    "spec_required_mac_label": "xcode-27",
+    "historical_old_mac_label": "macos-15",
+    "ordering_verdict": "runtime native cell starts before old Policy; post-push B cannot retroactively transfer old Policy or prevent that cell"
+  },
+  "preflight_assertions": [
+    {
+      "id": "BASE_HEAD_CAS_RACE",
+      "requirement": "Immediately before merge, live base ref SHA equals captured base CAS; post-merge parent order is (BASE_SHA, PR_HEAD_SHA), exact tree and lease match",
+      "negative": "base drift, PR head/tree drift, second writer, or merge response mismatch aborts; no ETag assumption"
+    },
+    {
+      "id": "APP_INTEGRATION_BOUND",
+      "requirement": "Exact App/installation/Checks integration, repository, workflow path/SHA, event, head/base/tree, run/attempt/job/check IDs bind the check",
+      "negative": "context-name-only, wrong provider, stale attempt, duplicate integration, or unbound status rejects"
+    },
+    {
+      "id": "PREMERGE_CHILD_CENSUS",
+      "requirement": "DCO and ci-required plus every exact premerge child run/check attempt terminal success, non-neutral, non-skipped, exact PR tree",
+      "negative": "green aggregate with skipped/absent/queued/cancelled/wrong-SHA child rejects"
+    },
+    {
+      "id": "OWNER_LEASE_FREEZE",
+      "requirement": "Signed lease binds operator, base, PR/tree, ruleset hashes, expiry, endpoints, watchdog and independent recovery actor; freeze bypass/writers",
+      "negative": "missing expiry, shared builder/recovery identity, stale lease, or unverified full-object ruleset PUT blocks"
+    },
+    {
+      "id": "MAIN_NATIVE_CENSUS",
+      "requirement": "First resulting-main run has exact Linux-X64, Linux-ARM64, xcode-27 and publish jobs, all terminal success, exact SHA/attempt",
+      "negative": "macos-15, macos-26, missing/empty/skipped Mac, fallback, or B replacing application publisher rejects"
+    },
+    {
+      "id": "B_RELEASE_CENSUS",
+      "requirement": "Nonzero draft release ID precedes manifest; exact closure16 tag, main target, one Linux-X64 asset, raw/inner/binary digests, numeric run/job/check/artifact IDs and signed predicate; publish then reverify live APIs",
+      "negative": "zero ID, mutable latest, overwrite, name/run-only binding, app namespace, candidate/fork source, or missing binding rejects"
+    },
+    {
+      "id": "BASE_POLICY_HANDOFF",
+      "requirement": "Base policy has a direct dependency on verified B in the exact run before required Policy emits, while DCO and all CI children remain required",
+      "negative": "B published after old Policy, wrapper/context shortcut, candidate result, or old checker remaining authoritative rejects"
+    }
+  ],
+  "conclusion": "Under no-new-policy-field, no-permanent-B-pin, no-application-publisher-reuse, no-compatibility-sidecar, and no-candidate-authority constraints, no existing input proves the actual B contract. package-release is old-parser-safe but semantically rejected; static_files is transport-only. Require owner-supplied reviewed B source body and protected pre-main authority/handoff before any approval."
+}

@@ -1,0 +1,30 @@
+{
+  "schema": "velnor.binding-schema-resolution.v1",
+  "status": "canonical-current-v3-contract",
+  "owner_plan": {
+    "path": "../AUTHORITY-CHANGE-PLAN-2026-09-20-v3.md",
+    "sha256": "eb130052633ba5a2fec067d835a6a2c2d4e7c89c567563d618f7902a4ca54871"
+  },
+  "canonical_schemas": {
+    "temporary_tree_a_admission": {
+      "path": "temporary-bootstrap-admission.schema.json",
+      "role": "sole current Tree-A external admission schema",
+      "sha256": "7db213e1845657345e9c40b28902ffffa96d2de3429d594c31a2038b4f51aace",
+      "previous_v2_sha256": "a81466360882825c2bb34f7b42d7223bcb8d402e4271e2a8068f9503ea23ace2"
+    },
+    "permanent_main_b_binding": {
+      "path": "permanent-b-product-binding.schema.json",
+      "role": "sole current Main-B typed product binding schema",
+      "predicate_namespace": "https://velnor.dev/attestations/",
+      "sha256": "427cbae0d9a238ae5e22a1afac2c8f840e4a8ad136983ac28a863651e533aed7",
+      "previous_v2_sha256": "879464fc0d2084ce137cd1cca0d041f923c019f0026fb11bdf0b7c3f3a1549f0"
+    }
+  },
+  "historical_schema": {
+    "path": "../validator-binding-audit-2026-09-20/binding-predicate.schema.json",
+    "sha256": "4bcd53cdd4e1900d4edf240f46da4c14ab570fc7be09f37484a9f56402da3b06",
+    "role": "retained historical 34-fixture audit only; not a current v3 schema, not a producer implementation, and not an authority input",
+    "replacement": "permanent-b-product-binding.schema.json"
+  },
+  "resolution_rule": "New authority-contract-separation fixtures and results MUST resolve schemas by the canonical filenames in this directory. The historical binding-predicate schema remains byte-preserved for audit reproducibility and MUST NOT be selected for current Main-B validation."
+}

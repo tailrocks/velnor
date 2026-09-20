@@ -1,0 +1,149 @@
+{
+  "schema": "velnor.authority-contract-separation-results.v1",
+  "status": "contract-only-unexecuted",
+  "gate_claim": false,
+  "claim": "The strict temporary-A and permanent-main-B contracts are structurally testable. No real Velnor verifier, live B publisher, GitHub run, artifact, release, or attestation pass is claimed.",
+  "observed_date": "2026-09-20",
+  "owner_plan": {
+    "path": "../AUTHORITY-CHANGE-PLAN-2026-09-20-v3.md",
+    "sha256": "eb130052633ba5a2fec067d835a6a2c2d4e7c89c567563d618f7902a4ca54871",
+    "superseded_v2_path": "../AUTHORITY-CHANGE-PLAN-2026-09-20-v2.md",
+    "v3_machine_readable_plan": "absent; v2 JSON retained as predecessor only",
+    "superseded_v2_sha256": "8609f29fafb092608696c825553a0a85d2fa53d277c749026aa5d2eb0e229e",
+    "json_path": "../AUTHORITY-CHANGE-PLAN-2026-09-20-v2.json",
+    "json_sha256": "06617493908f55938ccff54bfc0cb4cb3aabd33edbd90266f8c605de50b8e062",
+    "status": "approval_required_no_mutation",
+    "current_main_sha": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+    "parent_main_sha": "1048337062ea625fada1b4f7c07f2feed75f60c7"
+  },
+  "authority_separation": {
+    "temporary": {
+      "context": "Policy-bootstrap-A",
+      "schema": "temporary-bootstrap-admission.schema.json",
+      "schema_sha256": "7db213e1845657345e9c40b28902ffffa96d2de3429d594c31a2038b4f51aace",
+      "positive_fixture": "temporary-admission-positive.json",
+      "positive_fixture_sha256": "7dd682fde34ec566bdecb68938779259c4f54088088312be764b0f3437d5e37b",
+      "allowed_identity": "operator/build-image/head/base/prospective-tree/lease/review-digest/transaction evidence only",
+      "forbidden_claims": ["GitHub Actions run ID", "job ID", "artifact ID", "release ID", "signed artifact subject", "permanent main product", "permanent_B_pin", "release write", "attestation write"],
+      "source_ref": "refs/pull/<PR>/merge",
+      "value_status": "synthetic fixture values; no Actions IDs are fabricated"
+    },
+    "permanent_main_b": {
+      "context": "Policy-bootstrap-B",
+      "schema": "permanent-b-product-binding.schema.json",
+      "schema_sha256": "427cbae0d9a238ae5e22a1afac2c8f840e4a8ad136983ac28a863651e533aed7",
+      "positive_fixture": "permanent-b-binding-positive.json",
+      "positive_fixture_sha256": "b0b1e2419c7d02c43fa02803ec6b2ecf6596866b6eb64eb5d531e7d822e530b2",
+      "required_identity": "actual main source/ref/tree/closure, trusted publisher workflow/ref/SHA, run/database/attempt, job/check-run, artifact REST/raw ZIP/inner payload, upload outputs, release, manifest, custom predicates, and terminal step census",
+      "source_ref": "refs/heads/main",
+      "value_status": "synthetic fixture values; all nonzero IDs are placeholders and no live B exists"
+    },
+    "final_consumer_context": "Policy",
+    "temporary_key_is_permanent_root": false
+  },
+  "schema_and_fixture_files": {
+    "canonical_root_manifest": "canonical-root-manifest.json",
+    "canonical_root_manifest_sha256": "cdc77d552ada64c3b222b712f689a0958f4164c1e354c5e2557921bc13cf98b5",
+    "schema_resolution": "schema-resolution.json",
+    "schema_resolution_sha256": "07d63ed5091b3ec1bb58fa1bafe958fca0bca8742a20553528660d724831de60",
+    "report": "REPORT.md",
+    "report_sha256": "8d6cc6f98c652e871b240b93dc72ed9ba48b70ecf9c35cfdd99f8c8136c4f495",
+    "permanent_trust_storage_contract": "permanent-b-trust-storage-contract.json",
+    "permanent_trust_storage_contract_sha256": "430876b3784c80c53e6eb0d72478d867462046266615fb457794e86a72f8c661",
+    "fixture_bundle": "authority-separation-fixtures.json",
+    "fixture_bundle_sha256": "015e8d3a127d427a66b17e1cf92d85ae5e9fe26c3f494cde3360c006bcde287c",
+    "fixture_index": "authority-separation-fixtures.index.json",
+    "fixture_index_sha256": "53245a2976df5d1614f3a563d1b5d8117e9b08dff986b7faa1c271d085d06891",
+    "materializer": "materialize-authority-separation-fixtures.py",
+    "materializer_sha256": "95bb27e7f4e51253b0b2810456108c1d09fd25189622a027ed7fd4ea3b181f43",
+    "case_count": 30,
+    "expected_counts": {
+      "schema-reject": 26,
+      "semantic-reject": 4
+    }
+  },
+  "structural_validation": {
+    "status": "pass",
+    "engine": "Python jsonschema Draft202012Validator",
+    "engine_version": "4.26.0",
+    "format_checker": "date-time",
+    "base_documents": "temporary and permanent positive documents both validated",
+    "fixture_result": "all 30 materialized fixtures matched expected schema-reject or schema-accept-before-semantic-reject classification",
+    "semantic_cases": [
+      "B08-permanent-service-digest-mismatch",
+      "B09-permanent-inner-binary-confusion",
+      "B10-permanent-source-sha-mismatch",
+      "B18-permanent-rerun-attempt-mismatch"
+    ]
+  },
+  "real_verifier": {
+    "status": "unimplemented",
+    "inventory_file": "origin-main-verifier-inventory.json",
+    "inventory_sha256": "4fd1cf2cee907949bd9a424363db283b6115e90f015ff5e5314057ef25d2db03",
+    "authoritative_revision": "origin/main",
+    "authoritative_sha": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+    "inspected_paths": [
+      "crates/velnor-runner/src/attestation.rs",
+      "crates/velnor-workflow/src/policy.rs",
+      "crates/velnor-workflow/src/s2/policy.rs",
+      ".github/workflows/ci-policy.yml"
+    ],
+    "finding": "origin/main contains existing provenance signing and legacy candidate/runtime binding code, but no typed permanent-B product verifier, no bootstrap-admission verifier, and no .github/workflows/ci-policy-validator-products.yml publisher.",
+    "execution": "The 30 fixtures were not executed against a real verifier. Structural rejection is not cryptographic or live-API evidence."
+  },
+  "official_action_contract": {
+    "evidence_file": "official-action-contract-evidence.json",
+    "evidence_sha256": "aee8fbddff716c33f36723c4174f1d5d9511af1a7c6739ef9ef8cd30b9c57343",
+    "upload_artifact_sha": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "upload_artifact_ref_evidence": "HEAD, refs/heads/main, refs/tags/v7.0.1",
+    "upload_artifact_validator_pin_status": "official ref exists, but v3 requires a separately reviewed validator-workflow pin; this is not live Velnor B evidence",
+    "attest_sha": "1e69f48acb82d1966a394da916b4c1698aa569d6",
+    "attest_ref_evidence": "refs/tags/v4, refs/tags/v4.2.2",
+    "verification_scope": "official Git refs and action.yml inputs verified read-only; this does not establish Velnor implementation or trust"
+  },
+  "permanent_binding_contract": {
+    "publisher": ".github/workflows/ci-policy-validator-products.yml@refs/heads/main",
+    "oidc_issuer": "https://token.actions.githubusercontent.com",
+    "repository": "tailrocks/velnor",
+    "source_ref": "refs/heads/main",
+    "temporary_key_used": false,
+    "permissions": {
+      "build_and_verify": ["contents:read", "actions:read"],
+      "reserve_and_publish": ["contents:write"],
+      "attest": ["contents:read", "actions:read", "id-token:write", "attestations:write"],
+      "artifact_metadata_write": false,
+      "push_to_registry": false,
+      "create_storage_record": false
+    },
+    "custom_attestation": {
+      "subject_name": "velnor-workflow-policy-validator-artifact-<ARTIFACT_ID>.zip",
+      "subject_digest": "sha256:<RAW_SERVICE_ZIP_SHA256>",
+      "predicate_type": "https://velnor.dev/attestations/policy-validator-binding/v1",
+      "predicate_path": "attestations/velnor-policy-validator-binding.v1.json",
+      "release_predicate_type": "https://velnor.dev/attestations/policy-validator-release/v1",
+      "release_predicate_path": "attestations/velnor-policy-validator-release.v1.json",
+      "verify_command": "gh attestation verify <service.zip> --repo tailrocks/velnor --signer-workflow tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml --source-ref refs/heads/main --predicate-type https://velnor.dev/attestations/policy-validator-binding/v1 --format json",
+      "v3_release_predicate_status": "derived namespace/path; v3 specifies the artifact predicate exactly but leaves the release predicate URI/path to the reviewed implementation contract",
+      "raw_rest_requirement": "Fetch artifact by numeric ID, hash the raw REST ZIP bytes, compare REST digest and upload-artifact digest, safely extract, independently hash inner payload and binary, then verify the signed custom predicate. Extracted payload or name alone is insufficient.",
+      "draft_first_requirement": "Create exact immutable draft tag first; require nonzero release.id; sign manifest/custom release predicate only after draft ID exists; publish only after assets and attestations verify."
+    }
+  },
+  "historical_34_fixture_audit": {
+    "path": "../validator-binding-audit-2026-09-20/validator-binding-fixtures.json",
+    "schema_path": "../validator-binding-audit-2026-09-20/binding-predicate.schema.json",
+    "schema_sha256": "4bcd53cdd4e1900d4edf240f46da4c14ab570fc7be09f37484a9f56402da3b06",
+    "fixture_sha256": "3fa58aab41a0893fb386f55257474cce04036753440525d0d938f424226f1e6d",
+    "report_sha256": "6adfc96925cfda77d6db1329c7e3592da63f541af21d68f8c53267686270b9d8",
+    "hostile_index_sha256": "1652ebf312aa4ccf047b4cf93c77f2fe8e3feff72a490ccf022c528226fb5912",
+    "status": "unexecuted-against-real-verifier"
+  },
+  "not_run": [
+    "live GitHub Actions run/job/attempt/artifact/release API checks",
+    "raw REST artifact ZIP download and safe extraction",
+    "cryptographic attestation verification",
+    "publisher workflow execution",
+    "source implementation or workflow mutation",
+    "ruleset change, merge, release, dispatch, or publication"
+  ],
+  "required_next_verification": "Implement the reviewed verifier and Main-B publisher under separate approval, then execute both the 34 binding fixtures and the 30 authority-separation fixtures against live API/attestation evidence. Keep all temporary and permanent trust roots disjoint and retain no gate claim until every semantic case rejects forged data."
+}

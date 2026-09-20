@@ -1,0 +1,27 @@
+{
+  "schema": "velnor.origin-main-verifier-inventory.v1",
+  "status": "read-only",
+  "repository": "tailrocks/velnor",
+  "ref": "origin/main",
+  "sha": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+  "parent_sha": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+  "paths": {
+    ".github/workflows/ci-policy-validator-products.yml": "absent",
+    "crates/velnor-runner/src/attestation.rs": "present; provenance signing/upload implementation",
+    "crates/velnor-workflow/src/policy.rs": "present; legacy candidate/runtime binding implementation",
+    "crates/velnor-workflow/src/s2/policy.rs": "present; existing policy implementation",
+    ".github/workflows/ci-policy.yml": "present; legacy base policy workflow"
+  },
+  "search_terms": {
+    "velnor.validator-b-product-binding.v1": "absent",
+    "velnor.formal.bootstrap-admission.v1": "absent",
+    "velnor.dev/attestations/policy-validator-binding/v1": "absent",
+    "tailrocks.dev/velnor/attestation/validator-artifact-binding/v1": "absent; superseded namespace from v2",
+    "Policy-bootstrap-A": "absent",
+    "Policy-bootstrap-B": "absent",
+    "actions/attest generic custom predicate publisher": "absent",
+    "legacy actions/upload-artifact references": "present"
+  },
+  "finding": "No real typed permanent-B product verifier, temporary-A admission verifier, or validator-B publisher exists at the authoritative live revision. Existing attestation code signs runtime provenance but is not this product binding verifier.",
+  "scope": "This inventory is evidence of verifier absence only; it is not implementation approval or a gate result."
+}

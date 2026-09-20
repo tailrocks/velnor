@@ -1,0 +1,61 @@
+{
+  "schema": "velnor.permanent-b-trust-storage-contract.v1",
+  "status": "contract-only-no-source-adoption",
+  "trust_root": {
+    "oidc_issuer": "https://token.actions.githubusercontent.com",
+    "repository": "tailrocks/velnor",
+    "workflow_path": ".github/workflows/ci-policy-validator-products.yml",
+    "workflow_ref": "tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml@refs/heads/main",
+    "source_ref": "refs/heads/main",
+    "source_sha": "must_equal_live_Main-B_resulting_main_sha; no placeholder accepted",
+    "workflow_sha": "must_equal_live_publisher_workflow_commit; no mutable alias accepted",
+    "product_id": "velnor-workflow-policy-validator",
+    "product_schema": "velnor.workflow-policy-validator.v1",
+    "platform": "Linux-X64",
+    "closure": "must_equal_independently_recomputed_source_and_binary_closure",
+    "artifact_subject_name": "velnor-workflow-policy-validator-artifact-<ARTIFACT_ID>.zip",
+    "artifact_subject_digest": "sha256:<RAW_SERVICE_ZIP_SHA256>",
+    "binding_predicate_type": "https://velnor.dev/attestations/policy-validator-binding/v1",
+    "binding_predicate_path": "attestations/velnor-policy-validator-binding.v1.json",
+    "release_predicate_type": "https://velnor.dev/attestations/policy-validator-release/v1",
+    "release_predicate_path": "attestations/velnor-policy-validator-release.v1.json",
+    "release_predicate_status": "derived namespace/path pending explicit v3 implementation review",
+    "temporary_key_used": false
+  },
+  "consumer_source_paths_required_in_reviewed_tree_b": [
+    ".github/workflows/ci-policy-validator-products.yml",
+    ".github/workflows/ci-policy.yml",
+    ".github/workflows/ci-pr.yml",
+    ".github/workflows/preview.yml",
+    ".github/workflows/release.yml",
+    ".github/workflows/ci-unit-rust.yml",
+    ".github-gen/sources/actions/setup-velnor-workflow/action.yml"
+  ],
+  "external_append_only_root": "../permanent-b-trust/",
+  "required_external_records": [
+    "policy-revision.json",
+    "publisher-workflow-source.json",
+    "oidc-certificate-chain.json",
+    "binding-verification.json",
+    "release-api.json",
+    "artifact-api.json",
+    "raw-service-zip.sha256",
+    "inner-payload.sha256",
+    "binary.sha256",
+    "manifest.sha256",
+    "rotation-history.jsonl",
+    "revocation-history.jsonl"
+  ],
+  "rotation_contract": [
+    "Introduce a new permanent policy revision only through a reviewed Tree-B or later normal PR.",
+    "Pin the exact publisher workflow commit, action commits, source ref, repository ID, predicate types, and product namespace in the new revision.",
+    "Verify a new live Main-B-equivalent binding before retiring the previous revision; retain both revisions and historical evidence during overlap.",
+    "Re-run historical verification against the immutable evidence records after each rotation."
+  ],
+  "revocation_contract": [
+    "Revoke the temporary velnor-bootstrap-authority App/key only after Tree-B permanent trust and clean-checkout consumer verification pass.",
+    "Archive the temporary public-key fingerprint, verifier revision, lease, and transition evidence; never use it as a permanent B signer.",
+    "Do not remove or clean up the permanent B publisher workflow, OIDC/Sigstore policy, or its historical verification records."
+  ],
+  "historical_verification": "Every retained policy revision and evidence record is addressed by SHA-256 and rechecked against the recorded signer workflow/ref, source SHA, raw ZIP digest, inner payload digest, binary digest, release target, and predicate type."
+}

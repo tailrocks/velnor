@@ -1,0 +1,28 @@
+{
+  "schema": "velnor.official-action-contract-evidence.v1",
+  "status": "read-only-official-source-verified",
+  "observed_date": "2026-09-20",
+  "sources": [
+    {
+      "repository": "actions/upload-artifact",
+      "commit": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+      "refs_observed": ["HEAD", "refs/heads/main", "refs/tags/v7.0.1"],
+      "action_yml_url": "https://raw.githubusercontent.com/actions/upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml",
+      "action_yml_sha256": "c5979822866a72362e609844b6ebe77d4b7e759af68cc1c2c425dcf51481fab4",
+      "required_outputs_observed": ["artifact-id", "artifact-digest"],
+      "immutable_name_semantics_observed": "overwrite=false is the default and a matching artifact name fails rather than mutating an existing artifact",
+      "validator_product_pin_status": "official commit exists, but v3 still requires a separately reviewed validator-workflow pin; existing origin/main use is runtime-only"
+    },
+    {
+      "repository": "actions/attest",
+      "commit": "1e69f48acb82d1966a394da916b4c1698aa569d6",
+      "refs_observed": ["refs/tags/v4", "refs/tags/v4.2.2"],
+      "action_yml_url": "https://raw.githubusercontent.com/actions/attest/1e69f48acb82d1966a394da916b4c1698aa569d6/action.yml",
+      "action_yml_sha256": "9e4a1b808433f9ec87120b534e11fc35469a039bdbdc62b019441444c9ad0449",
+      "required_inputs_observed": ["subject-name", "subject-digest", "predicate-type", "predicate-path", "create-storage-record", "push-to-registry"],
+      "custom_predicate_semantics_observed": "predicate-type plus exactly one predicate or predicate-path is required for custom attestations; subject-name is required when identifying a subject by subject-digest",
+      "storage_record_semantics_observed": "create-storage-record requires push-to-registry=true; default is true, so the contract must explicitly set false for this non-OCI subject"
+    }
+  ],
+  "scope_limit": "These refs and action inputs are official contract evidence only. They do not prove a Velnor publisher, verifier, live run, artifact, release, or attestation exists."
+}

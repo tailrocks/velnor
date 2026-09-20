@@ -1,0 +1,238 @@
+{
+  "$schema": "velnor.authority-contract-separation-fixtures.v1",
+  "status": "contract-only-unexecuted",
+  "owner_plan": {
+    "path": "../AUTHORITY-CHANGE-PLAN-2026-09-20-v3.md",
+    "sha256": "eb130052633ba5a2fec067d835a6a2c2d4e7c89c567563d618f7902a4ca54871",
+    "superseded_v2_path": "../AUTHORITY-CHANGE-PLAN-2026-09-20-v2.md",
+    "superseded_v2_sha256": "8609f29fafb092608696c825553a0a85d2fa53d277c749026aa5d2eb7b0e229e",
+    "v3_machine_readable_plan": "absent; v2 JSON retained as predecessor only",
+    "current_main_sha": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+    "parent_main_sha": "1048337062ea625fada1b4f7c07f2feed75f60c7"
+  },
+  "schema_inputs": {
+    "temporary": "temporary-bootstrap-admission.schema.json",
+    "permanent": "permanent-b-product-binding.schema.json"
+  },
+  "bases": {
+    "temporary": "temporary-admission-positive.json",
+    "permanent": "permanent-b-binding-positive.json"
+  },
+  "cases": [
+    {
+      "id": "T01-temporary-run-id-forbidden",
+      "base": "temporary",
+      "mutations": [{"path": "/run_id", "op": "add", "value": 88001}],
+      "expected": "schema-reject",
+      "reason": "Tree-A admission cannot fabricate or carry an Actions workflow run ID."
+    },
+    {
+      "id": "T02-temporary-job-id-forbidden",
+      "base": "temporary",
+      "mutations": [{"path": "/job_id", "op": "add", "value": 99001}],
+      "expected": "schema-reject",
+      "reason": "Tree-A admission cannot claim a permanent producer job identity."
+    },
+    {
+      "id": "T03-temporary-artifact-id-forbidden",
+      "base": "temporary",
+      "mutations": [{"path": "/artifact_id", "op": "add", "value": 77001}],
+      "expected": "schema-reject",
+      "reason": "Tree-A admission has no Actions artifact and cannot carry an artifact ID."
+    },
+    {
+      "id": "T04-temporary-release-id-forbidden",
+      "base": "temporary",
+      "mutations": [{"path": "/release_id", "op": "add", "value": 90001}],
+      "expected": "schema-reject",
+      "reason": "Tree-A admission cannot claim a B release ID."
+    },
+    {
+      "id": "T05-temporary-attestation-subject-forbidden",
+      "base": "temporary",
+      "mutations": [{"path": "/attestation_subject", "op": "add", "value": "velnor-workflow-policy-validator-artifact-77001.zip"}],
+      "expected": "schema-reject",
+      "reason": "The temporary App check is not a signed B artifact attestation."
+    },
+    {
+      "id": "T06-temporary-release-write-forbidden",
+      "base": "temporary",
+      "mutations": [{"path": "/authority/release_write_authority", "op": "replace", "value": true}],
+      "expected": "schema-reject",
+      "reason": "The admission App must not become the B release publisher."
+    },
+    {
+      "id": "T07-temporary-product-identity-forbidden",
+      "base": "temporary",
+      "mutations": [{"path": "/decision/product_id", "op": "replace", "value": "velnor-workflow-policy-validator"}],
+      "expected": "schema-reject",
+      "reason": "Tree-A admission has no product identity; product B is post-merge."
+    },
+    {
+      "id": "T08-temporary-main-ref-claim-forbidden",
+      "base": "temporary",
+      "mutations": [{"path": "/source/source_ref", "op": "replace", "value": "refs/heads/main"}],
+      "expected": "schema-reject",
+      "reason": "Pre-main admission must bind the PR merge ref and prospective tree, not claim main provenance."
+    },
+    {
+      "id": "T09-temporary-pr-code-execution-forbidden",
+      "base": "temporary",
+      "mutations": [{"path": "/build_image/pr_supplied_code_executed", "op": "replace", "value": true}],
+      "expected": "schema-reject",
+      "reason": "The external semantic verifier must inspect source/tree data without executing PR-supplied code."
+    },
+    {
+      "id": "T10-temporary-permanent-pin-forbidden",
+      "base": "temporary",
+      "mutations": [{"path": "/decision/permanent_B_pin", "op": "replace", "value": "velnor-workflow-policy-validator-v1-1111111111111111"}],
+      "expected": "schema-reject",
+      "reason": "Tree A must not smuggle a permanent B consumer pin into temporary admission."
+    },
+    {
+      "id": "T11-temporary-main-b-check-forbidden",
+      "base": "temporary",
+      "mutations": [{"path": "/authority/check_name", "op": "replace", "value": "Policy-bootstrap-B"}],
+      "expected": "schema-reject",
+      "reason": "Tree-A admission is Policy-bootstrap-A; Main-B gets a distinct check only after the real main publisher exists."
+    },
+    {
+      "id": "T12-temporary-main-b-context-forbidden",
+      "base": "temporary",
+      "mutations": [{"path": "/decision/temporary_context", "op": "replace", "value": "Policy-bootstrap-B"}],
+      "expected": "schema-reject",
+      "reason": "Temporary admission cannot relabel itself as the permanent/Main-B authority."
+    },
+    {
+      "id": "B01-permanent-temporary-authority-forbidden",
+      "base": "permanent",
+      "mutations": [{"path": "/authority", "op": "add", "value": {"authority_id": "velnor-bootstrap-authority"}}],
+      "expected": "schema-reject",
+      "reason": "Permanent B binding cannot contain the temporary App authority object."
+    },
+    {
+      "id": "B02-permanent-lease-forbidden",
+      "base": "permanent",
+      "mutations": [{"path": "/lease", "op": "add", "value": {"lease_id": "lease-tree-a-20260920"}}],
+      "expected": "schema-reject",
+      "reason": "Temporary transaction leases do not establish permanent product trust."
+    },
+    {
+      "id": "B03-permanent-build-image-authority-forbidden",
+      "base": "permanent",
+      "mutations": [{"path": "/build_image", "op": "add", "value": {"image_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}}],
+      "expected": "schema-reject",
+      "reason": "A temporary operator build image is not the permanent GitHub OIDC/Sigstore publisher identity."
+    },
+    {
+      "id": "B04-permanent-pr-source",
+      "base": "permanent",
+      "mutations": [{"path": "/source/ref", "op": "replace", "value": "refs/pull/957/merge"}],
+      "expected": "schema-reject",
+      "reason": "Permanent B must be bound to actual refs/heads/main, never a PR merge ref."
+    },
+    {
+      "id": "B05-permanent-zero-identities",
+      "base": "permanent",
+      "mutations": [
+        {"path": "/run/id", "op": "replace", "value": 0},
+        {"path": "/job/id", "op": "replace", "value": 0},
+        {"path": "/artifact/id", "op": "replace", "value": 0},
+        {"path": "/release/id", "op": "replace", "value": 0}
+      ],
+      "expected": "schema-reject",
+      "reason": "Every permanent producer/job/artifact/release identity must be nonzero."
+    },
+    {
+      "id": "B06-permanent-missing-check-run",
+      "base": "permanent",
+      "mutations": [{"path": "/job/check_run_id", "op": "delete"}],
+      "expected": "schema-reject",
+      "reason": "The permanent binding requires the numeric producer check-run ID."
+    },
+    {
+      "id": "B07-permanent-missing-raw-digest",
+      "base": "permanent",
+      "mutations": [{"path": "/artifact/service_zip_sha256", "op": "delete"}],
+      "expected": "schema-reject",
+      "reason": "A permanent binding without the raw service ZIP digest cannot prove transport identity."
+    },
+    {
+      "id": "B08-permanent-service-digest-mismatch",
+      "base": "permanent",
+      "mutations": [{"path": "/artifact/service_zip_sha256", "op": "replace", "value": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}],
+      "expected": "semantic-reject",
+      "reason": "Artifact REST, upload output, raw ZIP, and attestation subject digest must be equal."
+    },
+    {
+      "id": "B09-permanent-inner-binary-confusion",
+      "base": "permanent",
+      "mutations": [{"path": "/artifact/inner_payload_sha256", "op": "replace", "value": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}],
+      "expected": "semantic-reject",
+      "reason": "Inner payload and extracted binary digests are distinct layers and must be recomputed."
+    },
+    {
+      "id": "B10-permanent-source-sha-mismatch",
+      "base": "permanent",
+      "mutations": [{"path": "/source/sha", "op": "replace", "value": "3333333333333333333333333333333333333333"}],
+      "expected": "semantic-reject",
+      "reason": "Source SHA must equal trusted main, run head, release target, binary revision, and live API facts."
+    },
+    {
+      "id": "B11-permanent-signer-pr-ref",
+      "base": "permanent",
+      "mutations": [{"path": "/attestation/signer_source_ref", "op": "replace", "value": "refs/pull/957/merge"}],
+      "expected": "schema-reject",
+      "reason": "Permanent signer identity must be the protected main workflow source."
+    },
+    {
+      "id": "B12-permanent-temporary-authority-used",
+      "base": "permanent",
+      "mutations": [{"path": "/verification/temporary_authority_used", "op": "replace", "value": true}],
+      "expected": "schema-reject",
+      "reason": "The permanent trust decision must not depend on the temporary App key."
+    },
+    {
+      "id": "B13-permanent-runtime-publisher-substitution",
+      "base": "permanent",
+      "mutations": [{"path": "/publisher/path", "op": "replace", "value": ".github/workflows/ci-runtime-products.yml"}],
+      "expected": "schema-reject",
+      "reason": "Application runtime publisher identity cannot satisfy the distinct validator product contract."
+    },
+    {
+      "id": "B14-permanent-subject-name-mismatch",
+      "base": "permanent",
+      "mutations": [{"path": "/attestation/binding_subject_name", "op": "replace", "value": "github-actions-artifact:77001"}],
+      "expected": "schema-reject",
+      "reason": "The permanent binding subject must be the exact validator artifact ID-derived ZIP name."
+    },
+    {
+      "id": "B15-permanent-predicate-path-mismatch",
+      "base": "permanent",
+      "mutations": [{"path": "/attestation/binding_predicate_path", "op": "replace", "value": "./attacker-predicate.json"}],
+      "expected": "schema-reject",
+      "reason": "The custom predicate must come from the isolated binding path covered by the publisher contract."
+    },
+    {
+      "id": "B16-permanent-attestation-before-draft",
+      "base": "permanent",
+      "mutations": [{"path": "/release/attestation_signed_after_draft_id", "op": "replace", "value": false}],
+      "expected": "schema-reject",
+      "reason": "The release ID must exist before the manifest and custom predicates are signed."
+    },
+    {
+      "id": "B17-permanent-step-census-missing",
+      "base": "permanent",
+      "mutations": [{"path": "/steps/attest_binding", "op": "delete"}],
+      "expected": "schema-reject",
+      "reason": "A successful wrapper or artifact name cannot replace terminal attest/publish step evidence."
+    },
+    {
+      "id": "B18-permanent-rerun-attempt-mismatch",
+      "base": "permanent",
+      "mutations": [{"path": "/run/attempt", "op": "replace", "value": 2}],
+      "expected": "semantic-reject",
+      "reason": "The signed attempt must equal the live run and exact-attempt jobs response; a rerun cannot reuse an earlier binding."
+    }
+  ]
+}

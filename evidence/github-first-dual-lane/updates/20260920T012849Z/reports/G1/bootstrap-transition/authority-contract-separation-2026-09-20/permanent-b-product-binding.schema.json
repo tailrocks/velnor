@@ -1,0 +1,267 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velnor.dev/schemas/policy-validator-main-b-binding/v1",
+  "title": "Velnor permanent main-bound validator B product binding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "product", "source", "publisher", "verifier", "actions", "trust", "run", "job", "artifact", "upload", "binary", "release", "manifest", "attestation", "steps", "verification"],
+  "properties": {
+    "kind": { "const": "velnor.validator-b-product-binding.v1" },
+    "product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["product_id", "schema", "purpose", "platform", "runner", "profile", "features", "asset", "tag", "mutable_latest", "overwrite", "application_namespace_reuse"],
+      "properties": {
+        "product_id": { "const": "velnor-workflow-policy-validator" },
+        "schema": { "const": "velnor.workflow-policy-validator.v1" },
+        "purpose": { "const": "policy-validator" },
+        "platform": { "const": "Linux-X64" },
+        "runner": { "const": "ubuntu-24.04" },
+        "profile": { "const": "release" },
+        "features": { "const": "" },
+        "asset": { "const": "velnor-workflow-policy-validator-Linux-X64" },
+        "tag": { "type": "string", "pattern": "^velnor-workflow-policy-validator-v1-[0-9a-f]{16}$" },
+        "mutable_latest": { "const": false },
+        "overwrite": { "const": false },
+        "application_namespace_reuse": { "const": false }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "repository_id", "ref", "sha", "tree_sha", "closure"],
+      "properties": {
+        "repository": { "const": "tailrocks/velnor" },
+        "repository_id": { "$ref": "#/$defs/positiveInteger" },
+        "ref": { "const": "refs/heads/main" },
+        "sha": { "$ref": "#/$defs/sha40" },
+        "tree_sha": { "$ref": "#/$defs/sha40" },
+        "closure": { "$ref": "#/$defs/hex64" }
+      }
+    },
+    "publisher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "path", "ref", "sha", "head_sha", "event", "head_branch", "repository_id", "build_permissions", "reserve_publish_permissions", "attest_permissions"],
+      "properties": {
+        "repository": { "const": "tailrocks/velnor" },
+        "path": { "const": ".github/workflows/ci-policy-validator-products.yml" },
+        "ref": { "const": "tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml@refs/heads/main" },
+        "sha": { "$ref": "#/$defs/sha40" },
+        "head_sha": { "$ref": "#/$defs/sha40" },
+        "event": { "const": "push" },
+        "head_branch": { "const": "main" },
+        "repository_id": { "$ref": "#/$defs/positiveInteger" },
+        "build_permissions": { "const": ["contents:read", "actions:read"] },
+        "reserve_publish_permissions": { "const": ["contents:write"] },
+        "attest_permissions": { "const": ["contents:read", "actions:read", "id-token:write", "attestations:write"] }
+      }
+    },
+    "verifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["check_name", "provider_app_id", "integration_id", "verifier_revision", "permissions", "write_authority"],
+      "properties": {
+        "check_name": { "const": "Policy-bootstrap-B" },
+        "provider_app_id": { "$ref": "#/$defs/positiveInteger" },
+        "integration_id": { "$ref": "#/$defs/positiveInteger" },
+        "verifier_revision": { "$ref": "#/$defs/sha40" },
+        "permissions": { "const": ["metadata:read", "contents:read", "actions:read", "checks:read/write"] },
+        "write_authority": { "const": false }
+      }
+    },
+    "actions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["upload_artifact_sha", "attest_sha", "artifact_metadata_write", "push_to_registry", "create_storage_record"],
+      "properties": {
+        "upload_artifact_sha": { "const": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" },
+        "attest_sha": { "const": "1e69f48acb82d1966a394da916b4c1698aa569d6" },
+        "artifact_metadata_write": { "const": false },
+        "push_to_registry": { "const": false },
+        "create_storage_record": { "const": false }
+      }
+    },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["oidc_issuer", "oidc_policy_revision_sha256", "signer_repository", "signer_workflow", "source_ref", "source_sha", "repository_id", "temporary_key_used"],
+      "properties": {
+        "oidc_issuer": { "const": "https://token.actions.githubusercontent.com" },
+        "oidc_policy_revision_sha256": { "$ref": "#/$defs/hex64" },
+        "signer_repository": { "const": "tailrocks/velnor" },
+        "signer_workflow": { "const": "tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml" },
+        "source_ref": { "const": "refs/heads/main" },
+        "source_sha": { "$ref": "#/$defs/sha40" },
+        "repository_id": { "$ref": "#/$defs/positiveInteger" },
+        "temporary_key_used": { "const": false }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "database_id", "attempt", "status", "conclusion", "event", "head_branch", "head_sha", "workflow_sha", "repository_id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/positiveInteger" },
+        "database_id": { "$ref": "#/$defs/positiveInteger" },
+        "attempt": { "$ref": "#/$defs/positiveInteger" },
+        "status": { "const": "completed" },
+        "conclusion": { "const": "success" },
+        "event": { "const": "push" },
+        "head_branch": { "const": "main" },
+        "head_sha": { "$ref": "#/$defs/sha40" },
+        "workflow_sha": { "$ref": "#/$defs/sha40" },
+        "repository_id": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "id", "run_id", "run_attempt", "check_run_id", "head_sha", "status", "conclusion"],
+      "properties": {
+        "key": { "const": "build-linux-x64" },
+        "id": { "$ref": "#/$defs/positiveInteger" },
+        "run_id": { "$ref": "#/$defs/positiveInteger" },
+        "run_attempt": { "$ref": "#/$defs/positiveInteger" },
+        "check_run_id": { "$ref": "#/$defs/positiveInteger" },
+        "head_sha": { "$ref": "#/$defs/sha40" },
+        "status": { "const": "completed" },
+        "conclusion": { "const": "success" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "rest_service_zip_sha256", "rest_service_zip_size", "service_zip_sha256", "service_zip_size", "inner_payload_sha256", "inner_payload_size", "workflow_run_id", "expired"],
+      "properties": {
+        "id": { "$ref": "#/$defs/positiveInteger" },
+        "name": { "type": "string", "pattern": "^policy-validator-[0-9a-f]{16}-Linux-X64$" },
+        "rest_service_zip_sha256": { "$ref": "#/$defs/digest" },
+        "rest_service_zip_size": { "$ref": "#/$defs/positiveInteger" },
+        "service_zip_sha256": { "$ref": "#/$defs/digest" },
+        "service_zip_size": { "$ref": "#/$defs/positiveInteger" },
+        "inner_payload_sha256": { "$ref": "#/$defs/digest" },
+        "inner_payload_size": { "$ref": "#/$defs/positiveInteger" },
+        "workflow_run_id": { "$ref": "#/$defs/positiveInteger" },
+        "expired": { "const": false }
+      }
+    },
+    "upload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_id", "artifact_id_output", "artifact_digest_output"],
+      "properties": {
+        "step_id": { "const": "upload-validator" },
+        "artifact_id_output": { "$ref": "#/$defs/positiveInteger" },
+        "artifact_digest_output": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "binary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "size", "architecture", "mode", "revision", "closure"],
+      "properties": {
+        "sha256": { "$ref": "#/$defs/digest" },
+        "size": { "$ref": "#/$defs/positiveInteger" },
+        "architecture": { "const": "x86_64" },
+        "mode": { "const": 493 },
+        "revision": { "$ref": "#/$defs/sha40" },
+        "closure": { "$ref": "#/$defs/hex64" }
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "tag", "target_sha", "draft_reserved", "published", "draft_first", "manifest_signed_after_draft_id", "attestation_signed_after_draft_id", "tag_immutable"],
+      "properties": {
+        "id": { "$ref": "#/$defs/positiveInteger" },
+        "tag": { "type": "string", "pattern": "^velnor-workflow-policy-validator-v1-[0-9a-f]{16}$" },
+        "target_sha": { "$ref": "#/$defs/sha40" },
+        "draft_reserved": { "const": true },
+        "published": { "const": true },
+        "draft_first": { "const": true },
+        "manifest_signed_after_draft_id": { "const": true },
+        "attestation_signed_after_draft_id": { "const": true },
+        "tag_immutable": { "const": true }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "size"],
+      "properties": {
+        "sha256": { "$ref": "#/$defs/digest" },
+        "size": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["binding_subject_name", "binding_subject_sha256", "binding_predicate_type", "binding_predicate_path", "binding_digest", "release_manifest_subject_sha256", "release_predicate_type", "release_predicate_path", "signer_repository", "signer_workflow", "signer_source_ref", "certificate_verified"],
+      "properties": {
+        "binding_subject_name": { "type": "string", "pattern": "^velnor-workflow-policy-validator-artifact-[1-9][0-9]*\\.zip$" },
+        "binding_subject_sha256": { "$ref": "#/$defs/digest" },
+        "binding_predicate_type": { "const": "https://velnor.dev/attestations/policy-validator-binding/v1" },
+        "binding_predicate_path": { "const": "attestations/velnor-policy-validator-binding.v1.json" },
+        "binding_digest": { "$ref": "#/$defs/digest" },
+        "release_manifest_subject_sha256": { "$ref": "#/$defs/digest" },
+        "release_predicate_type": { "const": "https://velnor.dev/attestations/policy-validator-release/v1" },
+        "release_predicate_path": { "const": "attestations/velnor-policy-validator-release.v1.json" },
+        "signer_repository": { "const": "tailrocks/velnor" },
+        "signer_workflow": { "const": "tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml" },
+        "signer_source_ref": { "const": "refs/heads/main" },
+        "certificate_verified": { "const": true }
+      }
+    },
+    "steps": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["build", "upload", "reserve_release", "attest_binding", "attest_release", "publish"],
+      "properties": {
+        "build": { "$ref": "#/$defs/successfulStep" },
+        "upload": { "$ref": "#/$defs/successfulStep" },
+        "reserve_release": { "$ref": "#/$defs/successfulStep" },
+        "attest_binding": { "$ref": "#/$defs/successfulStep" },
+        "attest_release": { "$ref": "#/$defs/successfulStep" },
+        "publish": { "$ref": "#/$defs/successfulStep" }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_state", "main_ref_verified", "producer_api_verified", "raw_zip_verified", "inner_payload_verified", "cryptographic_attestation_verified", "release_api_verified", "custom_predicate_verified", "binding_digest_verified", "manifest_verified", "draft_first_verified", "permanent_trust_policy_sha256", "temporary_authority_used"],
+      "properties": {
+        "evidence_state": { "const": "live-api-and-attestation-verified" },
+        "main_ref_verified": { "const": true },
+        "producer_api_verified": { "const": true },
+        "raw_zip_verified": { "const": true },
+        "inner_payload_verified": { "const": true },
+        "cryptographic_attestation_verified": { "const": true },
+        "release_api_verified": { "const": true },
+        "custom_predicate_verified": { "const": true },
+        "binding_digest_verified": { "const": true },
+        "manifest_verified": { "const": true },
+        "draft_first_verified": { "const": true },
+        "permanent_trust_policy_sha256": { "$ref": "#/$defs/hex64" },
+        "temporary_authority_used": { "const": false }
+      }
+    }
+  },
+  "$defs": {
+    "sha40": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "positiveInteger": { "type": "integer", "minimum": 1 },
+    "successfulStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "status", "conclusion"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "status": { "const": "completed" },
+        "conclusion": { "const": "success" }
+      }
+    }
+  }
+}

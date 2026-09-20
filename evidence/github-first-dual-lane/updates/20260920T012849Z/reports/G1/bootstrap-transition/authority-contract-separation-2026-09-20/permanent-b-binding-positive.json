@@ -1,0 +1,168 @@
+{
+  "$schema": "permanent-b-product-binding.schema.json",
+  "fixture_id": "B00-valid-main-bound-product",
+  "execution_status": "contract-only-unexecuted",
+  "values_are_synthetic": true,
+  "document": {
+    "kind": "velnor.validator-b-product-binding.v1",
+    "product": {
+      "product_id": "velnor-workflow-policy-validator",
+      "schema": "velnor.workflow-policy-validator.v1",
+      "purpose": "policy-validator",
+      "platform": "Linux-X64",
+      "runner": "ubuntu-24.04",
+      "profile": "release",
+      "features": "",
+      "asset": "velnor-workflow-policy-validator-Linux-X64",
+      "tag": "velnor-workflow-policy-validator-v1-1111111111111111",
+      "mutable_latest": false,
+      "overwrite": false,
+      "application_namespace_reuse": false
+    },
+    "source": {
+      "repository": "tailrocks/velnor",
+      "repository_id": 1255367013,
+      "ref": "refs/heads/main",
+      "sha": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+      "tree_sha": "7777777777777777777777777777777777777777",
+      "closure": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "publisher": {
+      "repository": "tailrocks/velnor",
+      "path": ".github/workflows/ci-policy-validator-products.yml",
+      "ref": "tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml@refs/heads/main",
+      "sha": "8888888888888888888888888888888888888888",
+      "head_sha": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+      "event": "push",
+      "head_branch": "main",
+      "repository_id": 1255367013,
+      "build_permissions": ["contents:read", "actions:read"],
+      "reserve_publish_permissions": ["contents:write"],
+      "attest_permissions": ["contents:read", "actions:read", "id-token:write", "attestations:write"]
+    },
+    "verifier": {
+      "check_name": "Policy-bootstrap-B",
+      "provider_app_id": 72001,
+      "integration_id": 72002,
+      "verifier_revision": "9999999999999999999999999999999999999999",
+      "permissions": ["metadata:read", "contents:read", "actions:read", "checks:read/write"],
+      "write_authority": false
+    },
+    "actions": {
+      "upload_artifact_sha": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+      "attest_sha": "1e69f48acb82d1966a394da916b4c1698aa569d6",
+      "artifact_metadata_write": false,
+      "push_to_registry": false,
+      "create_storage_record": false
+    },
+    "trust": {
+      "oidc_issuer": "https://token.actions.githubusercontent.com",
+      "oidc_policy_revision_sha256": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "signer_repository": "tailrocks/velnor",
+      "signer_workflow": "tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml",
+      "source_ref": "refs/heads/main",
+      "source_sha": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+      "repository_id": 1255367013,
+      "temporary_key_used": false
+    },
+    "run": {
+      "id": 88001,
+      "database_id": 88001,
+      "attempt": 1,
+      "status": "completed",
+      "conclusion": "success",
+      "event": "push",
+      "head_branch": "main",
+      "head_sha": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+      "workflow_sha": "8888888888888888888888888888888888888888",
+      "repository_id": 1255367013
+    },
+    "job": {
+      "key": "build-linux-x64",
+      "id": 99001,
+      "run_id": 88001,
+      "run_attempt": 1,
+      "check_run_id": 99002,
+      "head_sha": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    "artifact": {
+      "id": 77001,
+      "name": "policy-validator-1111111111111111-Linux-X64",
+      "rest_service_zip_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "rest_service_zip_size": 321000,
+      "service_zip_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "service_zip_size": 321000,
+      "inner_payload_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "inner_payload_size": 123456,
+      "workflow_run_id": 88001,
+      "expired": false
+    },
+    "upload": {
+      "step_id": "upload-validator",
+      "artifact_id_output": 77001,
+      "artifact_digest_output": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "binary": {
+      "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "size": 123456,
+      "architecture": "x86_64",
+      "mode": 493,
+      "revision": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+      "closure": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "release": {
+      "id": 90001,
+      "tag": "velnor-workflow-policy-validator-v1-1111111111111111",
+      "target_sha": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+      "draft_reserved": true,
+      "published": true,
+      "draft_first": true,
+      "manifest_signed_after_draft_id": true,
+      "attestation_signed_after_draft_id": true,
+      "tag_immutable": true
+    },
+    "manifest": {
+      "sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "size": 4096
+    },
+    "attestation": {
+      "binding_subject_name": "velnor-workflow-policy-validator-artifact-77001.zip",
+      "binding_subject_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "binding_predicate_type": "https://velnor.dev/attestations/policy-validator-binding/v1",
+      "binding_predicate_path": "attestations/velnor-policy-validator-binding.v1.json",
+      "binding_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "release_manifest_subject_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "release_predicate_type": "https://velnor.dev/attestations/policy-validator-release/v1",
+      "release_predicate_path": "attestations/velnor-policy-validator-release.v1.json",
+      "signer_repository": "tailrocks/velnor",
+      "signer_workflow": "tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml",
+      "signer_source_ref": "refs/heads/main",
+      "certificate_verified": true
+    },
+    "steps": {
+      "build": {"id": "build-validator", "name": "Build policy validator", "status": "completed", "conclusion": "success"},
+      "upload": {"id": "upload-validator", "name": "Upload validator artifact", "status": "completed", "conclusion": "success"},
+      "reserve_release": {"id": "reserve-release", "name": "Reserve draft release", "status": "completed", "conclusion": "success"},
+      "attest_binding": {"id": "attest-binding", "name": "Attest artifact binding", "status": "completed", "conclusion": "success"},
+      "attest_release": {"id": "attest-release", "name": "Attest release predicate", "status": "completed", "conclusion": "success"},
+      "publish": {"id": "publish-release", "name": "Publish release", "status": "completed", "conclusion": "success"}
+    },
+    "verification": {
+      "evidence_state": "live-api-and-attestation-verified",
+      "main_ref_verified": true,
+      "producer_api_verified": true,
+      "raw_zip_verified": true,
+      "inner_payload_verified": true,
+      "cryptographic_attestation_verified": true,
+      "release_api_verified": true,
+      "custom_predicate_verified": true,
+      "binding_digest_verified": true,
+      "manifest_verified": true,
+      "draft_first_verified": true,
+      "permanent_trust_policy_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "temporary_authority_used": false
+    }
+  }
+}

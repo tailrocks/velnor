@@ -1,0 +1,67 @@
+{
+  "$schema": "velnor.external-evidence-update.v1",
+  "attestation": "none",
+  "captured_at_utc": "2026-09-20T01:28:49Z",
+  "excluded": [
+    "mutable session.json and active ledgers",
+    "G0/fleet/push-checkpoint-current.json and live/current/monitor/push-named recovery snapshots",
+    "raw logs, harness worktrees, generated target/build trees, binaries, caches, credentials, research clones",
+    "individual live checker fixture trees still regenerating; finalized checker rereviews retained",
+    "symlink entries: none selected; no links dereferenced"
+  ],
+  "gate_statement": "This append-only evidence snapshot does not establish G0, G1, G2, G3, G4, G5, G6, or G7 success.",
+  "gate_status": "not-evaluated",
+  "included_entry_count_before_manifests": 63,
+  "included_file_count_before_manifests": 63,
+  "included_groups": {
+    "G0": 22,
+    "G1": 41
+  },
+  "included_source_bytes": 1335680,
+  "included_symlink_count_before_manifests": 0,
+  "integrity": {
+    "inventory": "INVENTORY.tsv",
+    "manifest_scope": "All regular files in this update except SHA256SUMS itself; inventory covers copied source files only.",
+    "sha256_manifest": "SHA256SUMS",
+    "source_hash_scope": "All 63 copied regular source files with path, bytes, source mtime UTC, SHA-256 in INVENTORY.tsv.",
+    "symlink_policy": "No symlinks selected; no symlink dereferenced."
+  },
+  "new_cutoff_utc": "2026-09-20T01:28:49Z",
+  "original_evidence_root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence",
+  "parent_checkpoint_commit": "2aff30fb95c1227d50cd22d2f39b38eb813ce802",
+  "prior_cutoff_utc": "2026-09-19T23:51:00Z",
+  "publication_owner": "/root",
+  "records_owner": "/root/g0_records",
+  "ref": "refs/heads/evidence/github-first-dual-lane-20260919T181508Z",
+  "remote_before_copy": "2aff30fb95c1227d50cd22d2f39b38eb813ce802",
+  "repository": "tailrocks/velnor",
+  "selection_notes": [
+    "Frozen authority-plan v2-v5 chain retained; v5 pair explicitly requested.",
+    "Canonical authority-contract-separation bundle retained with schemas, synthetic positives, fixture bundle/index, source inventory, and official action evidence.",
+    "Finalized checker/store/native/scan/bootstrap and independent reports selected by immutable exact-review documents; rejected findings remain evidence, not approval.",
+    "ca18d011 checker rereview included per owner request; no install_collector/live authority approval."
+  ],
+  "source_base_revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+  "source_observation": {
+    "after_copy_utc": "2026-09-20T01:28:49Z",
+    "before_copy_utc": "2026-09-20T01:28:49Z",
+    "candidate_rule": "Only finalized immutable reports/plans/contracts and canonical authority files selected. Ongoing/live/current/monitor/push snapshots, raw logs, builds, clones, caches, targets, binaries, and credentials excluded.",
+    "destination_hashes_match_source": true,
+    "final_source_reread_utc": "2026-09-20T01:28:49Z",
+    "source_changed_during_copy": false,
+    "source_hash_inventory_verified": true,
+    "source_snapshot_equal": true,
+    "source_symlinks": 0
+  },
+  "update_id": "20260920T012849Z",
+  "validation": {
+    "active_writer_paths_excluded": true,
+    "json_and_manifest_files_parsed": 21,
+    "ndjson_files_parsed": 0,
+    "prior_snapshot_preserved": true,
+    "secret_pattern_hits": 0,
+    "source_base_unchanged": true,
+    "source_branch_written": false,
+    "source_changed": false
+  }
+}

@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tailrocks.dev/velnor/attestation/bootstrap-admission/v1",
+  "title": "Velnor one-use Tree-A bootstrap admission",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "state", "authority", "source", "lease", "build_image", "review", "decision"],
+  "properties": {
+    "kind": { "const": "velnor.formal.bootstrap-admission.v1" },
+    "state": { "enum": ["prepared", "app-green", "ruleset-temporary", "merge-requested", "main-observed", "recovery", "closed"] },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authority_id", "verifier_revision", "app_public_key_sha256", "check_name", "repository_id", "provider_app_id", "integration_id", "release_write_authority", "attestation_write_authority"],
+      "properties": {
+        "authority_id": { "const": "velnor-bootstrap-authority" },
+        "verifier_revision": { "$ref": "#/$defs/sha40" },
+        "app_public_key_sha256": { "$ref": "#/$defs/hex64" },
+        "check_name": { "const": "Policy-bootstrap-A" },
+        "repository_id": { "$ref": "#/$defs/positiveInteger" },
+        "provider_app_id": { "$ref": "#/$defs/positiveInteger" },
+        "integration_id": { "$ref": "#/$defs/positiveInteger" },
+        "release_write_authority": { "const": false },
+        "attestation_write_authority": { "const": false }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "pr_number", "source_ref", "head_sha", "base_sha", "synthetic_merge_sha", "prospective_tree_sha", "main_before_sha"],
+      "properties": {
+        "repository": { "const": "tailrocks/velnor" },
+        "pr_number": { "$ref": "#/$defs/positiveInteger" },
+        "source_ref": { "type": "string", "pattern": "^refs/pull/[1-9][0-9]*/merge$" },
+        "head_sha": { "$ref": "#/$defs/sha40" },
+        "base_sha": { "$ref": "#/$defs/sha40" },
+        "synthetic_merge_sha": { "$ref": "#/$defs/sha40" },
+        "prospective_tree_sha": { "$ref": "#/$defs/sha40" },
+        "main_before_sha": { "$ref": "#/$defs/sha40" }
+      }
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lease_id", "transaction_id", "state", "expires_at", "ruleset_before_sha256", "temporary_ruleset_sha256", "allowed_actor_set_sha256", "watchdog_ack_sha256", "exclusive_freeze_proof_sha256"],
+      "properties": {
+        "lease_id": { "type": "string", "pattern": "^lease-[A-Za-z0-9._-]{8,}$" },
+        "transaction_id": { "type": "string", "pattern": "^bootstrap-[A-Za-z0-9._-]{8,}$" },
+        "state": { "enum": ["prepared", "app-green", "ruleset-temporary", "merge-requested", "main-observed", "recovery", "closed"] },
+        "expires_at": { "format": "date-time", "type": "string" },
+        "ruleset_before_sha256": { "$ref": "#/$defs/hex64" },
+        "temporary_ruleset_sha256": { "$ref": "#/$defs/hex64" },
+        "allowed_actor_set_sha256": { "$ref": "#/$defs/hex64" },
+        "watchdog_ack_sha256": { "$ref": "#/$defs/hex64" },
+        "exclusive_freeze_proof_sha256": { "$ref": "#/$defs/hex64" }
+      }
+    },
+    "build_image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image_ref", "image_digest", "builder_revision", "platform", "network_disabled", "pr_supplied_code_executed"],
+      "properties": {
+        "image_ref": { "type": "string", "pattern": "^.+@sha256:[0-9a-f]{64}$" },
+        "image_digest": { "$ref": "#/$defs/digest" },
+        "builder_revision": { "$ref": "#/$defs/sha40" },
+        "platform": { "const": "linux/amd64" },
+        "network_disabled": { "const": true },
+        "pr_supplied_code_executed": { "const": false }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tree_a_review_sha256", "semantic_check_sha256", "required_run_census_sha256", "workload_census_sha256", "ruleset_review_sha256", "merge_proof_sha256", "reviewer_ids", "reviewed_at"],
+      "properties": {
+        "tree_a_review_sha256": { "$ref": "#/$defs/hex64" },
+        "semantic_check_sha256": { "$ref": "#/$defs/hex64" },
+        "required_run_census_sha256": { "$ref": "#/$defs/hex64" },
+        "workload_census_sha256": { "$ref": "#/$defs/hex64" },
+        "ruleset_review_sha256": { "$ref": "#/$defs/hex64" },
+        "merge_proof_sha256": { "$ref": "#/$defs/hex64" },
+        "reviewer_ids": { "type": "array", "minItems": 2, "items": { "type": "string", "minLength": 1 } },
+        "reviewed_at": { "format": "date-time", "type": "string" }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tree_a_admitted", "temporary_context", "product_id", "release_id", "artifact_id", "attestation_subject", "permanent_B_pin", "normal_policy_authorized"],
+      "properties": {
+        "tree_a_admitted": { "const": true },
+        "temporary_context": { "const": "Policy-bootstrap-A" },
+        "product_id": { "type": "null" },
+        "release_id": { "type": "null" },
+        "artifact_id": { "type": "null" },
+        "attestation_subject": { "type": "null" },
+        "permanent_B_pin": { "type": "null" },
+        "normal_policy_authorized": { "const": false }
+      }
+    }
+  },
+  "$defs": {
+    "sha40": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "positiveInteger": { "type": "integer", "minimum": 1 }
+  }
+}

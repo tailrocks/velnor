@@ -1,0 +1,70 @@
+{
+  "$schema": "temporary-bootstrap-admission.schema.json",
+  "fixture_id": "T00-valid-tree-a-admission",
+  "execution_status": "contract-only-unexecuted",
+  "values_are_synthetic": true,
+  "document": {
+    "kind": "velnor.formal.bootstrap-admission.v1",
+    "state": "app-green",
+    "authority": {
+      "authority_id": "velnor-bootstrap-authority",
+      "verifier_revision": "1111111111111111111111111111111111111111",
+      "app_public_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "check_name": "Policy-bootstrap-A",
+      "repository_id": 1255367013,
+      "provider_app_id": 71001,
+      "integration_id": 70001,
+      "release_write_authority": false,
+      "attestation_write_authority": false
+    },
+    "source": {
+      "repository": "tailrocks/velnor",
+      "pr_number": 957,
+      "source_ref": "refs/pull/957/merge",
+      "head_sha": "3333333333333333333333333333333333333333",
+      "base_sha": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+      "synthetic_merge_sha": "4444444444444444444444444444444444444444",
+      "prospective_tree_sha": "5555555555555555555555555555555555555555",
+      "main_before_sha": "d20d4d1d17590cca85b501d982cbaad70d42c641"
+    },
+    "lease": {
+      "lease_id": "lease-tree-a-20260920",
+      "transaction_id": "bootstrap-tree-a-20260920",
+      "state": "app-green",
+      "expires_at": "2026-09-20T02:00:00Z",
+      "ruleset_before_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "temporary_ruleset_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "allowed_actor_set_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "watchdog_ack_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "exclusive_freeze_proof_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    "build_image": {
+      "image_ref": "ghcr.io/tailrocks/velnor/bootstrap-verifier@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "image_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "builder_revision": "6666666666666666666666666666666666666666",
+      "platform": "linux/amd64",
+      "network_disabled": true,
+      "pr_supplied_code_executed": false
+    },
+    "review": {
+      "tree_a_review_sha256": "1212121212121212121212121212121212121212121212121212121212121212",
+      "semantic_check_sha256": "1313131313131313131313131313131313131313131313131313131313131313",
+      "required_run_census_sha256": "1717171717171717171717171717171717171717171717171717171717171717",
+      "workload_census_sha256": "1414141414141414141414141414141414141414141414141414141414141414",
+      "ruleset_review_sha256": "1515151515151515151515151515151515151515151515151515151515151515",
+      "merge_proof_sha256": "1616161616161616161616161616161616161616161616161616161616161616",
+      "reviewer_ids": ["g0_reviewer", "authority_transition_review"],
+      "reviewed_at": "2026-09-20T00:30:00Z"
+    },
+    "decision": {
+      "tree_a_admitted": true,
+      "temporary_context": "Policy-bootstrap-A",
+      "product_id": null,
+      "release_id": null,
+      "artifact_id": null,
+      "attestation_subject": null,
+      "permanent_B_pin": null,
+      "normal_policy_authorized": false
+    }
+  }
+}

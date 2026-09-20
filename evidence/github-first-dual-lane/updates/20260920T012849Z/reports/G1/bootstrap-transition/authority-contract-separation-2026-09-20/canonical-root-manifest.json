@@ -1,0 +1,24 @@
+{
+  "schema": "velnor.canonical-evidence-root-manifest.v1",
+  "canonical_root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence",
+  "previous_handoff_root": "/Users/donbeave/Projects/tailrocks/dual-lane-evidence",
+  "previous_handoff_root_status": "absent-at-reconciliation",
+  "copy_status": "Canonical files were already present byte-for-byte at the canonical root; no source tree remained at the previous root to copy. Originals were preserved; no destructive cleanup was performed.",
+  "owner_plan": {
+    "path": "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v3.md",
+    "sha256": "eb130052633ba5a2fec067d835a6a2c2d4e7c89c567563d618f7902a4ca54871"
+  },
+  "stable_file_hashes": {
+    "G1/bootstrap-transition/authority-contract-separation-2026-09-20/temporary-bootstrap-admission.schema.json": "7db213e1845657345e9c40b28902ffffa96d2de3429d594c31a2038b4f51aace",
+    "G1/bootstrap-transition/authority-contract-separation-2026-09-20/permanent-b-product-binding.schema.json": "427cbae0d9a238ae5e22a1afac2c8f840e4a8ad136983ac28a863651e533aed7",
+    "G1/bootstrap-transition/authority-contract-separation-2026-09-20/temporary-admission-positive.json": "7dd682fde34ec566bdecb68938779259c4f54088088312be764b0f3437d5e37b",
+    "G1/bootstrap-transition/authority-contract-separation-2026-09-20/permanent-b-binding-positive.json": "b0b1e2419c7d02c43fa02803ec6b2ecf6596866b6eb64eb5d531e7d822e530b2",
+    "G1/bootstrap-transition/authority-contract-separation-2026-09-20/authority-separation-fixtures.json": "015e8d3a127d427a66b17e1cf92d85ae5e9fe26c3f494cde3360c006bcde287c",
+    "G1/bootstrap-transition/authority-contract-separation-2026-09-20/authority-separation-fixtures.index.json": "53245a2976df5d1614f3a563d1b5d8117e9b08dff986b7faa1c271d085d06891",
+    "G1/bootstrap-transition/authority-contract-separation-2026-09-20/schema-resolution.json": "07d63ed5091b3ec1bb58fa1bafe958fca0bca8742a20553528660d724831de60",
+    "G1/bootstrap-transition/authority-contract-separation-2026-09-20/permanent-b-trust-storage-contract.json": "430876b3784c80c53e6eb0d72478d867462046266615fb457794e86a72f8c661",
+    "G1/bootstrap-transition/authority-contract-separation-2026-09-20/origin-main-verifier-inventory.json": "4fd1cf2cee907949bd9a424363db283b6115e90f015ff5e5314057ef25d2db03",
+    "G1/bootstrap-transition/authority-contract-separation-2026-09-20/official-action-contract-evidence.json": "aee8fbddff716c33f36723c4174f1d5d9511af1a7c6739ef9ef8cd30b9c57343"
+  },
+  "historical_schema_resolution": "validator-binding-audit-2026-09-20/binding-predicate.schema.json remains retained with its original hash and is not selected for current v3 validation."
+}
