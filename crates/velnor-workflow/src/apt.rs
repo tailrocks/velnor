@@ -26,7 +26,7 @@ use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
@@ -1596,12 +1596,12 @@ fn dir_names(dir: &Path) -> Result<Vec<String>, GeneratorError> {
 /// `stdin_bytes` feeds tools that take secrets on standard input so secrets
 /// never appear in an argument vector. Diagnostics name the program and its
 /// failure only; argument values stay out of error text.
-fn run_fixed(
+fn spawn_fixed(
     program: &str,
     args: &[String],
     stdin_bytes: Option<&[u8]>,
     path_overlay: Option<&Path>,
-) -> Result<Vec<u8>, GeneratorError> {
+) -> Result<Output, GeneratorError> {
     let mut command = Command::new(program);
     command.args(args);
     if let Some(dir) = path_overlay {
@@ -1636,9 +1636,65 @@ fn run_fixed(
     let output = child
         .wait_with_output()
         .map_err(|_| GeneratorError::usage(format!("{program} did not finish")))?;
+    Ok(output)
+}
+
+fn run_fixed(
+    program: &str,
+    args: &[String],
+    stdin_bytes: Option<&[u8]>,
+    path_overlay: Option<&Path>,
+) -> Result<Vec<u8>, GeneratorError> {
+    let output = spawn_fixed(program, args, stdin_bytes, path_overlay)?;
     if !output.status.success() {
         return Err(GeneratorError::usage(format!(
             "{program} failed with status {}",
+            output.status
+        )));
+    }
+    Ok(output.stdout)
+}
+
+const REJECTED_GPGV_STATUSES: [&str; 8] = [
+    "BADSIG",
+    "ERRSIG",
+    "EXPSIG",
+    "EXPKEYSIG",
+    "REVKEYSIG",
+    "NO_PUBKEY",
+    "NODATA",
+    "FAILURE",
+];
+
+fn reject_gpgv_statuses(output: &[u8], label: &str) -> Result<(), GeneratorError> {
+    let text = String::from_utf8(output.to_vec())
+        .map_err(|_| GeneratorError::usage(format!("{label} signer status is not UTF-8")))?;
+    for line in text.lines() {
+        let Some(status) = line
+            .strip_prefix("[GNUPG:] ")
+            .and_then(|value| value.split_whitespace().next())
+        else {
+            continue;
+        };
+        if REJECTED_GPGV_STATUSES.contains(&status) {
+            return Err(GeneratorError::usage(format!(
+                "{label} gpgv reported rejected status {status}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn run_gpgv(
+    args: &[String],
+    label: &str,
+    path_overlay: Option<&Path>,
+) -> Result<Vec<u8>, GeneratorError> {
+    let output = spawn_fixed("gpgv", args, None, path_overlay)?;
+    reject_gpgv_statuses(&output.stdout, label)?;
+    if !output.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "{label} gpgv failed with status {}",
             output.status
         )));
     }
@@ -1668,6 +1724,7 @@ fn gpgv_argv(homedir: &str, keyring: &str, inputs: &[&str]) -> Vec<String> {
 /// fingerprint last; accepting any valid signing subkey under the pinned
 /// primary keeps normal keyrings usable without broadening publisher trust.
 fn gpgv_signer(output: &[u8], expected: &str, label: &str) -> Result<(), GeneratorError> {
+    reject_gpgv_statuses(output, label)?;
     let text = String::from_utf8(output.to_vec())
         .map_err(|_| GeneratorError::usage(format!("{label} signer status is not UTF-8")))?;
     let signers = text
@@ -2347,9 +2404,9 @@ fn parse_discovery_selection(
         ));
     }
     let published_at = field(document, "published_at")?.to_owned();
-    if published_at.is_empty() {
+    if !valid_provider_timestamp(&published_at) {
         return Err(GeneratorError::usage(
-            "discovery published_at must be non-empty",
+            "discovery published_at is not a canonical UTC timestamp",
         ));
     }
     let source_ref_resolution = document
@@ -2635,9 +2692,70 @@ fn verify_discovery_subordinates(
     Ok(())
 }
 
+fn fixed_decimal(value: &[u8]) -> Option<u32> {
+    if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    value.iter().try_fold(0u32, |number, digit| {
+        number
+            .checked_mul(10)?
+            .checked_add(u32::from(*digit - b'0'))
+    })
+}
+
+fn valid_provider_timestamp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return false;
+    }
+    let year = fixed_decimal(&bytes[0..4]);
+    let month = fixed_decimal(&bytes[5..7]);
+    let day = fixed_decimal(&bytes[8..10]);
+    let hour = fixed_decimal(&bytes[11..13]);
+    let minute = fixed_decimal(&bytes[14..16]);
+    let second = fixed_decimal(&bytes[17..19]);
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) =
+        (year, month, day, hour, minute, second)
+    else {
+        return false;
+    };
+    if year == 0 || !(1..=12).contains(&month) || hour > 23 || minute > 59 || second > 59 {
+        return false;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if day == 0 || day > days {
+        return false;
+    }
+    match bytes[19] {
+        b'Z' => true,
+        b'.' => {
+            let fraction_len = bytes.len().saturating_sub(21);
+            bytes.last() == Some(&b'Z')
+                && (1..=9).contains(&fraction_len)
+                && bytes[20..bytes.len() - 1].iter().all(u8::is_ascii_digit)
+        }
+        _ => false,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ProviderReleaseFacts {
     repository_id: u64,
+    owner_id: u64,
+    owner_login: String,
+    owner_type: String,
     release_id: u64,
     tag: String,
     target_commitish: String,
@@ -2677,11 +2795,17 @@ fn provider_asset_rows(
     label: &str,
     source_repository: &str,
     tag: &str,
+    paginated: bool,
 ) -> Result<Vec<DiscoveryAsset>, GeneratorError> {
     let rows = document
         .as_array()
         .ok_or_else(|| GeneratorError::usage(format!("{label} is not an array")))?;
     let mut flattened = Vec::new();
+    if paginated && !rows.iter().all(serde_json::Value::is_array) {
+        return Err(GeneratorError::usage(format!(
+            "{label} is not a strict paginated response"
+        )));
+    }
     if rows.iter().all(serde_json::Value::is_array) {
         for page in rows {
             flattened.extend(
@@ -2691,9 +2815,7 @@ fn provider_asset_rows(
                     .cloned(),
             );
         }
-    } else if rows.iter().all(serde_json::Value::is_object) {
-        // A single-page response is accepted for provider doubles which do
-        // not implement `--paginate`; production always asks for `--slurp`.
+    } else if !paginated && rows.iter().all(serde_json::Value::is_object) {
         flattened.extend(rows.iter().cloned());
     } else {
         return Err(GeneratorError::usage(format!(
@@ -2769,7 +2891,15 @@ fn validate_provider_facts(
     facts: &ProviderReleaseFacts,
     selection: &DiscoverySelection,
 ) -> Result<(), GeneratorError> {
+    let expected_owner = selection
+        .source_repository
+        .split_once('/')
+        .map(|(owner, _)| owner)
+        .ok_or_else(|| GeneratorError::usage("GitHub provider repository owner is missing"))?;
     if facts.repository_id == 0
+        || facts.owner_id == 0
+        || facts.owner_login != expected_owner
+        || !matches!(facts.owner_type.as_str(), "User" | "Organization")
         || facts.release_id != selection.provider_release_id
         || facts.tag != selection.release_tag
         || facts.target_commitish != selection.source_commit
@@ -2903,6 +3033,10 @@ fn provider_source_commit(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "provider release reconciliation is one exact immutable contract gate"
+)]
 fn acquire_provider_release(
     selection: &DiscoverySelection,
     path_overlay: Option<&Path>,
@@ -2910,6 +3044,34 @@ fn acquire_provider_release(
     let repository_endpoint = format!("repos/{}", selection.source_repository);
     let repository = provider_api_json(&repository_endpoint, false, path_overlay)?;
     let repository_id = positive_field(&repository, "id")?;
+    let owner_login = selection
+        .source_repository
+        .split_once('/')
+        .map(|(owner, _)| owner)
+        .ok_or_else(|| GeneratorError::usage("GitHub provider repository owner is missing"))?;
+    let owner = repository
+        .get("owner")
+        .ok_or_else(|| GeneratorError::usage("GitHub provider repository owner is missing"))?;
+    let owner_id = positive_field(owner, "id")?;
+    let repository_owner_login = field(owner, "login")?;
+    let owner_type = field(owner, "type")?.to_owned();
+    if repository_owner_login != owner_login
+        || !matches!(owner_type.as_str(), "User" | "Organization")
+    {
+        return Err(GeneratorError::usage(
+            "GitHub provider repository owner identity is not canonical",
+        ));
+    }
+    let owner_endpoint = format!("users/{owner_login}");
+    let owner_document = provider_api_json(&owner_endpoint, false, path_overlay)?;
+    if positive_field(&owner_document, "id")? != owner_id
+        || field(&owner_document, "login")? != owner_login
+        || field(&owner_document, "type")? != owner_type
+    {
+        return Err(GeneratorError::usage(
+            "GitHub provider owner endpoint differs from repository identity",
+        ));
+    }
     if field(&repository, "full_name")? != selection.source_repository
         || field(&repository, "html_url")?
             != format!("https://github.com/{}", selection.source_repository)
@@ -2935,6 +3097,7 @@ fn acquire_provider_release(
         || field(&release, "html_url")? != expected_url
         || field(&release, "url")? != expected_api_url
         || field(&release, "published_at")? != selection.published_at
+        || !valid_provider_timestamp(field(&release, "published_at")?)
         || release.get("draft") != Some(&serde_json::Value::Bool(false))
         || release.get("prerelease")
             != Some(&serde_json::Value::Bool(selection.channel == "preview"))
@@ -2950,6 +3113,7 @@ fn acquire_provider_release(
         "GitHub provider release assets",
         &selection.source_repository,
         &selection.release_tag,
+        false,
     )?;
     let assets_endpoint = format!(
         "repos/{}/releases/{}/assets?per_page=100",
@@ -2961,6 +3125,7 @@ fn acquire_provider_release(
         "GitHub provider paginated release assets",
         &selection.source_repository,
         &selection.release_tag,
+        true,
     )?;
     compare_provider_asset_census(&release_assets, &api_assets, "GitHub provider asset APIs")?;
     compare_provider_asset_census(
@@ -2971,6 +3136,9 @@ fn acquire_provider_release(
     provider_source_commit(selection, path_overlay)?;
     Ok(ProviderReleaseFacts {
         repository_id,
+        owner_id,
+        owner_login: owner_login.to_owned(),
+        owner_type,
         release_id,
         tag: selection.release_tag.clone(),
         target_commitish: selection.source_commit.clone(),
@@ -5950,14 +6118,13 @@ pub(crate) fn read_verified_live_publication(
         let gpgv_homedir_name = gpgv_homedir
             .to_str()
             .ok_or_else(|| GeneratorError::usage("materialized gpgv home is not UTF-8"))?;
-        let signature_status = run_fixed(
-            "gpgv",
+        let signature_status = run_gpgv(
             &gpgv_argv(
                 gpgv_homedir_name,
                 keyring_name,
                 &[signature_name, publication_name],
             ),
-            None,
+            "live publication record",
             path_overlay,
         )?;
         gpgv_signer(
@@ -5965,10 +6132,9 @@ pub(crate) fn read_verified_live_publication(
             &expected_signer,
             "live publication record",
         )?;
-        let inrelease_status = run_fixed(
-            "gpgv",
+        let inrelease_status = run_gpgv(
             &gpgv_argv(gpgv_homedir_name, keyring_name, &[inrelease_name]),
-            None,
+            "live InRelease",
             path_overlay,
         )?;
         gpgv_signer(&inrelease_status, &expected_signer, "live InRelease")?;
@@ -8674,7 +8840,13 @@ mod tests {
         let repository = serde_json::json!({
             "id": 456,
             "full_name": FIXTURE_SOURCE,
-            "html_url": format!("https://github.com/{FIXTURE_SOURCE}")
+            "html_url": format!("https://github.com/{FIXTURE_SOURCE}"),
+            "owner": {"id": 789, "login": "example", "type": "Organization"}
+        });
+        let owner = serde_json::json!({
+            "id": 789,
+            "login": "example",
+            "type": "Organization"
         });
         let tag_ref = serde_json::json!({
             "ref": "refs/tags/v1.2.3",
@@ -8687,6 +8859,7 @@ mod tests {
         ]);
         for (name, value) in [
             ("repository.json", repository),
+            ("owner.json", owner),
             ("release.json", release),
             ("tag.json", tag_ref),
             ("asset-pages.json", pages),
@@ -8709,6 +8882,12 @@ mod tests {
             fixture.root.display()
         )
         .expect("append provider repository case");
+        writeln!(
+            &mut script,
+            "  users/example) cat \"{}/owner.json\" ;;",
+            fixture.root.display()
+        )
+        .expect("append provider owner case");
         writeln!(
             &mut script,
             "  repos/{FIXTURE_SOURCE}/releases/123) cat \"{}/release.json\" ;;",
@@ -8767,9 +8946,10 @@ mod tests {
 
     #[test]
     fn provider_snapshot_rejects_adversarial_release_facts() {
-        let cases: Vec<(&str, Box<dyn Fn(&Path)>)> = vec![
+        let cases: Vec<(&str, &str, Box<dyn Fn(&Path)>)> = vec![
             (
                 "wrong-release",
+                "provider release identity",
                 Box::new(|root| {
                     rewrite_fixture_json(&root.join("release.json"), |release| {
                         release["id"] = serde_json::json!(999);
@@ -8778,6 +8958,7 @@ mod tests {
             ),
             (
                 "wrong-source",
+                "provider repository identity",
                 Box::new(|root| {
                     rewrite_fixture_json(&root.join("repository.json"), |repository| {
                         repository["full_name"] = serde_json::json!("evil/app");
@@ -8785,7 +8966,17 @@ mod tests {
                 }),
             ),
             (
+                "wrong-owner",
+                "owner endpoint",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("owner.json"), |owner| {
+                        owner["id"] = serde_json::json!(999);
+                    });
+                }),
+            ),
+            (
                 "wrong-tag",
+                "provider release identity",
                 Box::new(|root| {
                     rewrite_fixture_json(&root.join("release.json"), |release| {
                         release["tag_name"] = serde_json::json!("v9.9.9");
@@ -8794,6 +8985,7 @@ mod tests {
             ),
             (
                 "wrong-asset",
+                "provider asset APIs",
                 Box::new(|root| {
                     rewrite_fixture_json(&root.join("asset-pages.json"), |pages| {
                         pages[0].as_array_mut().expect("asset page").pop();
@@ -8802,6 +8994,7 @@ mod tests {
             ),
             (
                 "wrong-asset-url",
+                "asset URL is not canonical",
                 Box::new(|root| {
                     rewrite_fixture_json(&root.join("asset-pages.json"), |pages| {
                         pages[0][0]["browser_download_url"] =
@@ -8811,6 +9004,7 @@ mod tests {
             ),
             (
                 "wrong-asset-api-url",
+                "asset API URL is not canonical",
                 Box::new(|root| {
                     rewrite_fixture_json(&root.join("asset-pages.json"), |pages| {
                         pages[0][0]["url"] = serde_json::json!("https://evil.example/api");
@@ -8819,6 +9013,7 @@ mod tests {
             ),
             (
                 "duplicate-asset",
+                "duplicate",
                 Box::new(|root| {
                     rewrite_fixture_json(&root.join("asset-pages.json"), |pages| {
                         let first = pages[0][0].clone();
@@ -8828,6 +9023,7 @@ mod tests {
             ),
             (
                 "mixed-pagination",
+                "strict paginated",
                 Box::new(|root| {
                     rewrite_fixture_json(&root.join("asset-pages.json"), |pages| {
                         pages[1] = serde_json::json!({"id": 999});
@@ -8835,7 +9031,23 @@ mod tests {
                 }),
             ),
             (
+                "flat-pagination",
+                "strict paginated",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("asset-pages.json"), |pages| {
+                        let flattened = pages
+                            .as_array()
+                            .expect("asset pages")
+                            .iter()
+                            .flat_map(|page| page.as_array().expect("asset page").iter().cloned())
+                            .collect::<Vec<_>>();
+                        *pages = serde_json::Value::Array(flattened);
+                    });
+                }),
+            ),
+            (
                 "incomplete-status",
+                "provider release identity",
                 Box::new(|root| {
                     rewrite_fixture_json(&root.join("release.json"), |release| {
                         release["draft"] = serde_json::json!(true);
@@ -8843,19 +9055,32 @@ mod tests {
                 }),
             ),
             (
+                "invalid-published-at",
+                "provider release identity",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("release.json"), |release| {
+                        release["published_at"] = serde_json::json!("not-a-timestamp");
+                    });
+                }),
+            ),
+            (
                 "wrong-attestation-source",
+                "attestation identity",
                 Box::new(|root| write_bytes(&root.join("attestation-wrong-source"), b"1")),
             ),
             (
                 "wrong-attestation-signer",
+                "attestation identity",
                 Box::new(|root| write_bytes(&root.join("attestation-wrong-signer"), b"1")),
             ),
             (
                 "wrong-attestation-digest",
+                "attestation identity",
                 Box::new(|root| write_bytes(&root.join("attestation-wrong-digest"), b"1")),
             ),
             (
                 "wrong-payload-digest",
+                "provider product manifest bytes",
                 Box::new(|root| {
                     let path = root.join("asset-by-id/asset-100");
                     let mut bytes = must(std::fs::read(&path), "read fixture payload");
@@ -8865,10 +9090,11 @@ mod tests {
             ),
             (
                 "api-failure",
+                "invalid JSON",
                 Box::new(|root| write_bytes(&root.join("release.json"), b"not-json")),
             ),
         ];
-        for (name, mutate) in cases {
+        for (name, expected_error, mutate) in cases {
             let fixture = discovery_fixture(&format!("provider-adversarial-{name}"));
             let bin = discovery_gh_stub(&fixture);
             mutate(&fixture.root);
@@ -8877,7 +9103,10 @@ mod tests {
                 run_fetch_selection(&fixture.selection_path, &fetched, Some(&bin)),
                 name,
             );
-            assert!(!error.is_empty(), "{name}: {error}");
+            assert!(
+                error.contains(expected_error),
+                "{name}: expected {expected_error}, got {error}"
+            );
             let _ = std::fs::remove_dir_all(&fixture.root);
         }
     }
@@ -9811,6 +10040,32 @@ mod tests {
     }
 
     #[test]
+    fn provider_published_at_requires_canonical_utc_timestamp() {
+        for valid in [
+            "2026-09-20T00:00:00Z",
+            "2026-09-20T00:00:00.123Z",
+            "2000-02-29T23:59:59.999999999Z",
+        ] {
+            assert!(valid_provider_timestamp(valid), "{valid}");
+        }
+        for invalid in [
+            "",
+            "2026-09-20T00:00:00+00:00",
+            "2026-09-20T00:00:00",
+            "2026-09-20 00:00:00Z",
+            "2026-02-29T00:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-09-31T00:00:00Z",
+            "2026-09-20T24:00:00Z",
+            "2026-09-20T00:00:60Z",
+            "2026-09-20T00:00:00.Z",
+            "2026-09-20T00:00:00.1234567890Z",
+        ] {
+            assert!(!valid_provider_timestamp(invalid), "{invalid}");
+        }
+    }
+
+    #[test]
     fn gpgv_status_requires_one_pinned_primary() {
         // This is the exact VALIDSIG field shape emitted by gpgv for a real
         // signing subkey: the subkey fingerprint is first and its primary
@@ -9856,6 +10111,14 @@ mod tests {
             "reject non-UTF-8 signer status",
         );
         assert!(error.contains("not UTF-8"), "{error}");
+        for status in REJECTED_GPGV_STATUSES {
+            let output = format!("[GNUPG:] {status} {FIXTURE_FPR}\n");
+            let error = must_fail(
+                gpgv_signer(output.as_bytes(), FIXTURE_FPR, "record"),
+                "reject unsafe gpgv status",
+            );
+            assert!(error.contains("rejected status"), "{status}: {error}");
+        }
     }
 
     #[cfg(unix)]
