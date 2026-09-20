@@ -1,0 +1,17 @@
+{
+  "source_head": "e90b353",
+  "base_available_on_target": "57a53bb0a3ea137a46f218eff74d40ede7dd04d6",
+  "bundle_sha256": "1e385ccd15287410f4da5476324536b0c50ca12ed9cf1b95981e7c0ec51559b8",
+  "parts": [
+    {
+      "path": "work.bundle.part-000",
+      "bytes": 41943040,
+      "sha256": "e8e2741b62b459e1d271aa30ad474eb751292c82dc5e5d253d6c4853a56732a7"
+    },
+    {
+      "path": "work.bundle.part-001",
+      "bytes": 5431501,
+      "sha256": "e3dd7a31447f40717932880e65dcc6283b53169d1c26fa6cae6c95fae1508c90"
+    }
+  ]
+}
