@@ -884,10 +884,11 @@ mod tests {
             opening_prs: Vec::new(),
             closing_prs: Vec::new(),
             reconciliation: super::super::IdentityReconciliation {
-                pre_state: Vec::new(),
-                post_state: Vec::new(),
-                changed_refs: Vec::new(),
-                invalidated: Vec::new(),
+                opening: Vec::new(),
+                closing: Vec::new(),
+                changes: Vec::new(),
+                duplicate_keys: Vec::new(),
+                stable: true,
             },
         };
         let prepared =
