@@ -4,14 +4,15 @@ title: "Velnor"
 
 # Velnor
 
-Velnor is a Linux GitHub Actions runner and control plane. It receives jobs
-from GitHub, checks trust and capability requirements before side effects, and
-executes admitted jobs in exactly one selected backend: Docker or Firecracker
-microVM.
+Velnor is a Linux GitHub Actions control plane with two local execution lanes.
+The native lane uses Velnor runner slots and an explicitly selected Docker or
+Firecracker microVM backend. The optional Scale Set lane runs an official
+one-job Actions runner container with its own private Docker-in-Docker (DinD)
+daemon. Both lanes share one host-wide permit ledger; GitHub remains the
+scheduler and source of truth.
 
-GitHub remains the scheduler and source of truth. Velnor supplies ephemeral
-runner slots, admission, execution, supervision, and bounded local operational
-state.
+Velnor supplies registration, admission, lifecycle supervision, execution,
+and bounded local operational state.
 
 Velnor is a research project. Expect breaking changes. Current documentation
 describes implemented behavior; it is not a production-readiness claim.
@@ -32,7 +33,7 @@ New to Velnor? Follow this path:
 | Need | Read |
 | --- | --- |
 | Install, configure, register, and run a first workflow | [Getting started](/getting-started) |
-| Configure labels, scope, slots, and backend | [Operator guide](/guides/operator) |
+| Configure labels, scope, slots, the native backend, or the Scale Set lane | [Operator guide](/guides/operator), [Configuration](/reference/configuration) |
 | Run an on-demand host from a Mac | [macOS on-demand host](/guides/macos-host) |
 | Understand GitHub communication and execution | [Architecture](/concepts/architecture), [Execution](/guides/execution), [Integrations](/reference/integrations) |
 | Inspect a running node | [Observability](/operations/observability), [CLI/interface reference](/reference/interface) |
@@ -44,11 +45,19 @@ New to Velnor? Follow this path:
 ## Current boundaries
 
 - The packaged runtime targets Debian hosts and systemd.
-- A backend is explicit. Docker and microVM do not fall back to each other.
-- Capability admission is strict and cannot be bypassed.
-- The operator PAT registers runners and accesses GitHub management APIs. Job
-  credentials come from the acquired GitHub job and are not substituted with
-  the PAT.
+- The native lane selects Docker or microVM explicitly; neither falls back to
+  the other. The optional Scale Set lane uses its official runner and private
+  DinD worker profile.
+- Native action and capability admission is strict and cannot be bypassed.
+  Scale Set offer classification uses the event plus owner and repository:
+  unparseable events, missing owner/repository, `pull_request`-family events,
+  and `workflow_run` stay `unknown`; other parseable events with both nonempty
+  owner and repository fields are `trusted`.
+- Native registration uses an operator PAT; Scale Set administration uses a
+  separately configured GitHub App or PAT reference. Native job credentials
+  come from the acquired GitHub payload; Scale Set job credentials come through
+  the official runner's GitHub session. Neither admin credential replaces job
+  credentials.
 - The control socket exposes reads, events, logs, and telemetry. Lifecycle
   mutation routes, reconciliation actions, and diagnostics bundles are not
   currently available through the public control interface.
