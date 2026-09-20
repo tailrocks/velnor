@@ -7460,10 +7460,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assembly.push('\n');
-        let provider_start = assembly
-            .find("provider_release=\"")
-            .expect("assembly must serialize before provider verification");
-        assembly.truncate(provider_start);
+        assert!(
+            assembly.contains("provider_release=\""),
+            "assembly must emit the provider-bound attestation"
+        );
 
         let root = std::env::temp_dir().join(format!(
             "velnor-native-product-assembly-{}",
@@ -7531,6 +7531,25 @@ mod tests {
             .expect("write metadata command");
         fs::set_permissions(&cargo_path, fs::Permissions::from_mode(0o755))
             .expect("make metadata command executable");
+        let release_tool_path = root.join(format!("artifacts/{}-release-tool", release.binary));
+        fs::write(&release_tool_path, "#!/bin/sh\nexit 0\n")
+            .expect("write release verifier command");
+        fs::set_permissions(&release_tool_path, fs::Permissions::from_mode(0o755))
+            .expect("make release verifier executable");
+        let gh_path = root.join("fake-bin/gh");
+        fs::write(
+            &gh_path,
+            r#"#!/bin/sh
+set -eu
+test "${1:-}" = api
+cat <<'JSON'
+{"id":12345,"html_url":"https://github.com/tailrocks/velnor/releases/tag/v1.2.3","target_commitish":"0123456789abcdef0123456789abcdef01234567"}
+JSON
+"#,
+        )
+        .expect("write provider API command");
+        fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755))
+            .expect("make provider API command executable");
 
         let targets = contract["targets"]
             .as_array()
@@ -7681,6 +7700,61 @@ mod tests {
                 );
             }
         };
+        let attestation: Value = serde_json::from_slice(
+            &fs::read(root.join("product-assets/release-attestation.json"))
+                .expect("read assembled release attestation"),
+        )
+        .expect("assembled release attestation must be JSON");
+        let mut attestation_keys = attestation
+            .as_object()
+            .expect("assembled release attestation must be an object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        attestation_keys.sort();
+        assert_eq!(
+            attestation_keys,
+            vec![
+                "assets",
+                "manifest_sha256",
+                "provider",
+                "release_id",
+                "release_tag",
+                "release_url",
+                "resolved_source_commit",
+                "resolved_source_ref",
+                "schema",
+                "source_commit",
+                "source_ref",
+                "source_repository",
+                "target_commitish",
+            ]
+        );
+        assert_eq!(
+            attestation["schema"],
+            json!("velnor.github-release-attestation/v1")
+        );
+        assert_eq!(attestation["provider"], json!("github"));
+        assert_eq!(attestation["source_repository"], json!("tailrocks/velnor"));
+        assert_eq!(attestation["source_ref"], json!("refs/tags/v1.2.3"));
+        assert_eq!(
+            attestation["source_commit"],
+            json!("0123456789abcdef0123456789abcdef01234567")
+        );
+        assert_eq!(attestation["release_tag"], json!("v1.2.3"));
+        assert_eq!(attestation["release_id"], json!("12345"));
+        assert_eq!(
+            attestation["release_url"],
+            json!("https://github.com/tailrocks/velnor/releases/tag/v1.2.3")
+        );
+        assert_eq!(
+            attestation["manifest_sha256"],
+            json!(digest_of_bytes(&manifest_bytes))
+        );
+        assert_eq!(
+            attestation["assets"],
+            serde_json::to_value(&manifest.artifacts).expect("serialize manifest artifacts")
+        );
         let component_contract = NativeProductContract::from_bytes(
             &fs::read(root.join("product-component-contract.json"))
                 .expect("read component contract"),
