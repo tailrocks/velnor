@@ -119,6 +119,43 @@ pub(crate) const CANDIDATE_ARTIFACT_NAME: &str = "velnor-workflow-candidate-linu
 pub(crate) const CANDIDATE_HANDOFF_ARTIFACT_NAME: &str = "velnor-workflow-candidate-handoff";
 pub(crate) const CANDIDATE_RESULT_ARTIFACT_NAME: &str = "velnor-workflow-candidate-result";
 pub(crate) const CANDIDATE_MANIFEST_SCHEMA: &str = "velnor.bootstrap-producer-manifest.v1";
+/// The producer manifest schema is embedded in the base-owned policy
+/// renderer.  The policy job writes this exact text before it accepts a
+/// candidate, so a pull request cannot add or replace a schema fixture in the
+/// audited tree and make its own manifest authoritative.
+pub(crate) const CANDIDATE_MANIFEST_SCHEMA_JSON: &str = r#"{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velnor.invalid/bootstrap/producer-manifest-v1.json",
+  "title": "Velnor G1 base-owned producer manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "profile",
+    "features",
+    "platform",
+    "repository",
+    "run_id",
+    "revision",
+    "closure",
+    "binary_sha256"
+  ],
+  "properties": {
+    "schema": { "const": "velnor.bootstrap-producer-manifest.v1" },
+    "profile": { "const": "debug" },
+    "features": { "const": [] },
+    "platform": { "const": "linux-amd64" },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "run_id": { "type": "integer", "minimum": 1 },
+    "revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "closure": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "binary_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}
+"#;
 pub(crate) const CANDIDATE_CHECKOUT_ACTION_REVISION: &str =
     "3d3c42e5aac5ba805825da76410c181273ba90b1";
 pub(crate) const CANDIDATE_CHECKOUT_ACTION_ARCHIVE_SHA256: &str =
@@ -4589,6 +4626,141 @@ fn audited_pin_script() -> &'static str {
 "#
 }
 
+/// Shell/Python proof that the candidate artifact namespace has one fixed
+/// uploader in both the immutable base workflow tree and the pull-request
+/// head.  The base contract check below protects the producer job's complete
+/// bytes; this census closes the other hole where a second workflow (or a
+/// dynamically named upload step) could publish the same namespace through a
+/// reusable workflow or an alias.
+fn candidate_namespace_scan_script() -> String {
+    r#"          base_workflow_archive="$RUNNER_TEMP/base-workflows.tar"
+          head_workflow_archive="$RUNNER_TEMP/head-workflows.tar"
+          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$BASE_SHA" .github/workflows > "$base_workflow_archive"
+          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$HEAD_SHA" .github/workflows > "$head_workflow_archive"
+          python3 - "$base_workflow_archive" "$head_workflow_archive" <<'PY'
+          import re
+          import sys
+          import tarfile
+
+          candidate = "__CANDIDATE_ARTIFACT__"
+          handoff = "__CANDIDATE_HANDOFF__"
+          result = "__CANDIDATE_RESULT__"
+          dynamic_marker = "$" + "{{"
+          allowed = {candidate, handoff, result}
+          job_pattern = re.compile(r"  ([A-Za-z0-9_-]+):\s*$")
+          step_pattern = re.compile(r"^( +)- name:\s*")
+          upload_pattern = re.compile(r"^\s+uses:\s*actions/upload-artifact@")
+          uploads = []
+          for archive_name in sys.argv[1:]:
+              with tarfile.open(archive_name, "r:") as archive:
+                  for member in archive.getmembers():
+                      if not member.isfile() or not member.name.endswith((".yml", ".yaml")):
+                          continue
+                      stream = archive.extractfile(member)
+                      if stream is None:
+                          raise SystemExit("workflow archive member is unreadable")
+                      lines = stream.read().decode("utf-8").splitlines()
+                      job = None
+                      for index, line in enumerate(lines):
+                          matched_job = job_pattern.fullmatch(line)
+                          if matched_job:
+                              job = matched_job.group(1)
+                              continue
+                          step = step_pattern.match(line)
+                          if step is None:
+                              continue
+                          indent = len(step.group(1))
+                          end = index + 1
+                          while end < len(lines):
+                              if lines[end].startswith(" " * indent + "- name:") or job_pattern.fullmatch(lines[end]):
+                                  break
+                              end += 1
+                          block = lines[index:end]
+                          if not any(upload_pattern.match(item) for item in block):
+                              continue
+                          name_prefix = " " * (indent + 4) + "name:"
+                          id_prefix = " " * (indent + 2) + "id:"
+                          names = [item[len(name_prefix):].strip() for item in block if item.startswith(name_prefix)]
+                          ids = [item[len(id_prefix):].strip() for item in block if item.startswith(id_prefix)]
+                          if len(names) != 1:
+                              raise SystemExit(f"{member.name}: upload step has no unique with.name")
+                          name = names[0].split(" #", 1)[0].strip().strip("\\\"'")
+                          step_id = ids[0] if len(ids) == 1 else ""
+                          uploads.append((archive_name, member.name, job, step_id, name))
+
+          for archive_name in sys.argv[1:]:
+              found = [row for row in uploads if row[0] == archive_name and row[4] == candidate]
+              if len(found) != 1:
+                  raise SystemExit(f"{archive_name}: candidate namespace uploader count is {len(found)}, expected 1")
+              row = found[0]
+              if row[1] != ".github/workflows/ci-pr.yml" or row[2] != "candidate_producer" or row[3] != "candidate_upload":
+                  raise SystemExit(f"{archive_name}: candidate uploader is not the fixed producer contract")
+
+          for archive_name, path, job, step_id, name in uploads:
+              lower = name.lower()
+              candidate_like = "candidate" in lower or candidate in name
+              if job == "candidate_producer" and name != candidate:
+                  raise SystemExit(f"{path}: candidate producer has a second or non-static uploader")
+              if candidate_like and name not in allowed:
+                  raise SystemExit(f"{path}: candidate-like uploader name is not a fixed transport namespace")
+              if dynamic_marker in name and candidate_like:
+                  raise SystemExit(f"{path}: candidate namespace is computed dynamically")
+          PY
+"#.replace("__CANDIDATE_ARTIFACT__", crate::s2::CANDIDATE_ARTIFACT_NAME)
+        .replace("__CANDIDATE_HANDOFF__", crate::s2::CANDIDATE_HANDOFF_ARTIFACT_NAME)
+        .replace("__CANDIDATE_RESULT__", crate::s2::CANDIDATE_RESULT_ARTIFACT_NAME)
+}
+
+/// Apply the base-owned manifest schema with a small fail-closed validator
+/// available on the hosted runner.  The policy job does not trust a
+/// candidate-provided JSON schema or assume that an optional third-party
+/// jsonschema package is installed.
+fn candidate_manifest_validation_script() -> &'static str {
+    r#"          python3 "$manifest_schema" "$manifest" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          schema = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          manifest = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          if schema.get("type") != "object" or schema.get("additionalProperties") is not False:
+              raise SystemExit("producer manifest schema is not a closed object")
+          required = schema.get("required")
+          properties = schema.get("properties")
+          if not isinstance(required, list) or not isinstance(properties, dict):
+              raise SystemExit("producer manifest schema is incomplete")
+          if set(manifest) != set(required) or set(properties) != set(required):
+              raise SystemExit("producer manifest keys do not match the base schema")
+          for key in required:
+              rule = properties.get(key)
+              value = manifest.get(key)
+              if not isinstance(rule, dict):
+                  raise SystemExit(f"schema rule missing for {key}")
+              if "const" in rule and value != rule["const"]:
+                  raise SystemExit(f"manifest const mismatch for {key}")
+              value_type = rule.get("type")
+              if value_type == "string" and not isinstance(value, str):
+                  raise SystemExit(f"manifest {key} is not a string")
+              if value_type == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
+                  raise SystemExit(f"manifest {key} is not an integer")
+              pattern = rule.get("pattern")
+              if pattern is not None and (not isinstance(value, str) or re.fullmatch(pattern, value) is None):
+                  raise SystemExit(f"manifest {key} does not match the base schema")
+              minimum = rule.get("minimum")
+              if minimum is not None and (not isinstance(value, int) or value < minimum):
+                  raise SystemExit(f"manifest {key} is below the base schema minimum")
+          PY
+"#
+}
+
+fn candidate_manifest_schema_script() -> String {
+    CANDIDATE_MANIFEST_SCHEMA_JSON
+        .lines()
+        .map(|line| format!("          {line}\n"))
+        .collect()
+}
+
 /// Owner policy step acquiring the PR producer artifact.
 ///
 /// The acquire role is base-owned and data-only: it selects one exact
@@ -4662,9 +4834,10 @@ fn policy_candidate_step(revision: &str) -> String {
           source_home="$RUNNER_TEMP/target-source-home"
           rm -rf "$source_repo" "$source_home"
           mkdir -m 0700 "$source_home"
+          export GIT_NO_REPLACE_OBJECTS=1
           GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -c init.templateDir=/dev/null init --bare "$source_repo" >/dev/null
           for source_sha in "$HEAD_SHA" "$BASE_SHA"; do
-            GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" -c core.hooksPath=/dev/null fetch --no-tags --depth=1 "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$source_sha"
+            GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git --no-replace-objects -C "$source_repo" -c core.hooksPath=/dev/null fetch --no-tags --depth=1 "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$source_sha"
           done
           test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" show -s --format=%T "$HEAD_SHA")" = "$head_tree_sha"
           test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" show -s --format=%T "$BASE_SHA")" = "$base_tree_sha"
@@ -4693,6 +4866,7 @@ fn policy_candidate_step(revision: &str) -> String {
           test "$(grep -Ec '^[[:space:]]+uses: .*upload-artifact@' <<<"$candidate_block")" = 1
           test "$(grep -Fxc "          path: ${{{{ runner.temp }}}}/velnor-workflow-candidate" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "          name: {artifact}" "$contract")" = 1
+{namespace_scan}
           contract_sha256="$(sha256sum "$contract" | awk '{{print $1}}')"
 
           workflow="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml")"
@@ -4778,9 +4952,11 @@ fn policy_candidate_step(revision: &str) -> String {
           manifest="$candidate/candidate-manifest.json"
           binary="$candidate/velnor-workflow"
           manifest_schema="$RUNNER_TEMP/producer-manifest.schema.json"
-          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" show "$BASE_SHA:crates/velnor-workflow/tests/fixtures/bootstrap-hostile-producer/producer-manifest.schema.json" > "$manifest_schema"
+          cat > "$manifest_schema" <<'JSON'
+{manifest_schema_json}          JSON
           manifest_schema_sha256="$(sha256sum "$manifest_schema" | awk '{{print $1}}')"
           if [[ ! "$manifest_schema_sha256" =~ ^[0-9a-f]{{64}}$ ]]; then exit 1; fi
+{manifest_validation}
           jq -e --arg schema "{manifest_schema}" --arg repo "$HEAD_REPOSITORY" --arg head "$HEAD_SHA" --argjson run_id "$run_id" \
             'type == "object" and (keys | sort == ["binary_sha256", "closure", "features", "platform", "profile", "repository", "revision", "run_id", "schema"]) and .schema == $schema and .profile == "debug" and .features == [] and .platform == "linux-amd64" and .repository == $repo and .run_id == $run_id and .revision == $head and (.closure | strings | test("^[0-9a-f]{{64}}$")) and (.binary_sha256 | strings | test("^[0-9a-f]{{64}}$"))' "$manifest" >/dev/null
           manifest_closure="$(jq -er '.closure' "$manifest")"
@@ -4865,6 +5041,9 @@ fn policy_candidate_step(revision: &str) -> String {
         download_action_revision = crate::s2::CANDIDATE_DOWNLOAD_ACTION_REVISION,
         handoff = crate::s2::CANDIDATE_HANDOFF_ARTIFACT_NAME,
         manifest_schema = crate::s2::CANDIDATE_MANIFEST_SCHEMA,
+        manifest_schema_json = candidate_manifest_schema_script(),
+        manifest_validation = candidate_manifest_validation_script(),
+        namespace_scan = candidate_namespace_scan_script(),
         upload_action_archive_sha256 = crate::s2::CANDIDATE_UPLOAD_ACTION_ARCHIVE_SHA256,
         upload_action_revision = crate::s2::CANDIDATE_UPLOAD_ACTION_REVISION,
         upload = ActionPin::UploadArtifact.reference(),
@@ -5228,6 +5407,9 @@ fn policy_renderer_steps(repository: &str, revision: &str) -> String {
 /// run/job/repository/tree contract from a clean checkout before the policy
 /// command sees the render.
 fn policy_candidate_result_verification_step() -> String {
+    let manifest_validation = candidate_manifest_validation_script()
+        .replace("$manifest_schema", "$verifier_manifest_schema")
+        .replace("$manifest", "$producer_manifest");
     format!(
         r#"      - name: Verify candidate transport provenance
         id: candidate_provenance
@@ -5471,6 +5653,7 @@ fn policy_candidate_result_verification_step() -> String {
           PY
           producer_manifest="$producer_dir/candidate-manifest.json"
           producer_binary="$producer_dir/velnor-workflow"
+{manifest_validation}
           jq -e --slurpfile handoff "$handoff_json" '
             type == "object" and (keys | sort == ["binary_sha256", "closure", "features", "platform", "profile", "repository", "revision", "run_id", "schema"]) and
             .schema == "{manifest_schema}" and .profile == $handoff[0].profile and .features == $handoff[0].features and
@@ -5507,14 +5690,16 @@ fn policy_candidate_result_verification_step() -> String {
           verifier_source_home="$RUNNER_TEMP/verifier-source-home"
           rm -rf "$verifier_source_repo" "$verifier_source_home"
           mkdir -m 0700 "$verifier_source_home"
+          export GIT_NO_REPLACE_OBJECTS=1
           GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -c init.templateDir=/dev/null init --bare "$verifier_source_repo" >/dev/null
           for source_sha in "$HEAD_SHA" "$BASE_SHA"; do
-            GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" -c core.hooksPath=/dev/null fetch --no-tags --depth=1 "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$source_sha"
+            GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git --no-replace-objects -C "$verifier_source_repo" -c core.hooksPath=/dev/null fetch --no-tags --depth=1 "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$source_sha"
           done
           test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" show -s --format=%T "$HEAD_SHA")" = "$head_tree_sha"
           test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" show -s --format=%T "$BASE_SHA")" = "$base_tree_sha"
           verifier_manifest_schema="$RUNNER_TEMP/verifier-producer-manifest.schema.json"
-          GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" show "$BASE_SHA:crates/velnor-workflow/tests/fixtures/bootstrap-hostile-producer/producer-manifest.schema.json" > "$verifier_manifest_schema"
+          cat > "$verifier_manifest_schema" <<'JSON'
+{manifest_schema_json}          JSON
           verifier_manifest_schema_sha256="$(sha256sum "$verifier_manifest_schema" | awk '{{print $1}}')"
           test "$verifier_manifest_schema_sha256" = "$(jq -er .manifest_schema_sha256 "$handoff_json")"
           verifier_source_archive="$RUNNER_TEMP/verifier-source.tar"
@@ -5566,6 +5751,8 @@ fn policy_candidate_result_verification_step() -> String {
         download_action_revision = crate::s2::CANDIDATE_DOWNLOAD_ACTION_REVISION,
         handoff = crate::s2::CANDIDATE_HANDOFF_ARTIFACT_NAME,
         manifest_schema = crate::s2::CANDIDATE_MANIFEST_SCHEMA,
+        manifest_schema_json = candidate_manifest_schema_script(),
+        manifest_validation = manifest_validation,
         result = crate::s2::CANDIDATE_RESULT_ARTIFACT_NAME,
         upload_action_archive_sha256 = crate::s2::CANDIDATE_UPLOAD_ACTION_ARCHIVE_SHA256,
         upload_action_revision = crate::s2::CANDIDATE_UPLOAD_ACTION_REVISION,
