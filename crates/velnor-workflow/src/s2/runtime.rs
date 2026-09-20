@@ -31,9 +31,9 @@ use rustix::event::{poll, PollFd, PollFlags, Timespec};
 #[cfg(unix)]
 use rustix::fs::{fstat, FileType};
 #[cfg(unix)]
-use rustix::io::{dup, Errno};
+use rustix::io::dup;
 #[cfg(unix)]
-use rustix::process::{kill_process, kill_process_group, Pid, Signal};
+use rustix::process::{kill_process_group, Pid, Signal};
 
 use sha2::{Digest, Sha256};
 
@@ -2737,6 +2737,10 @@ static RUN_CMD_TEST_FAIL_GROUP_KILL_PID: AtomicU32 = AtomicU32::new(0);
 static RUN_CMD_TEST_FAIL_DIRECT_KILL_PID: AtomicU32 = AtomicU32::new(0);
 #[cfg(all(unix, test))]
 static RUN_CMD_TEST_FAIL_REAP_PID: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(unix, test))]
+static RUN_CMD_TEST_FAIL_RELAY_SPAWN_AFTER: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(unix, test))]
+static RUN_CMD_TEST_FAIL_COMMAND_SPAWN: AtomicU32 = AtomicU32::new(0);
 
 fn run_cmd_stall_limit() -> Duration {
     parse_run_cmd_stall_limit(env::var(RUN_CMD_STALL_ENV).ok().as_deref())
@@ -2824,21 +2828,26 @@ fn run_command_with_stall_guard(
 }
 
 /// A command plus an unreaped process-group leader. The keeper is a single
-/// `sleep` process and remains alive until cleanup, so group signaling never
-/// reuses the direct child's PID after its status is reaped or leaves a keeper
-/// descendant behind.
+/// `sleep` process and remains alive until cleanup, so the process-group ID is
+/// stable after the command child exits. Unix cleanup owns that kernel process
+/// group; it does not infer ownership from inherited descriptors or a process
+/// table scan.
 struct SpawnedRunCommand {
     child: Child,
     #[cfg(unix)]
     group_keeper: Child,
-    #[cfg(unix)]
-    owner_marker: PathBuf,
 }
 
 #[cfg(unix)]
 /// Owns a child-side sink writer. The relay process may block on the caller's
 /// shared stdout/stderr descriptor, but the stall owner writes only to the
 /// relay's private pipe and can kill/reap the relay on every error path.
+///
+/// Process containment is deliberately the inherited Unix process group held
+/// by `SpawnedRunCommand::group_keeper`. A command that calls `setsid` or
+/// otherwise leaves that group is outside this runtime's supported cleanup
+/// contract; no portable stable process handle exists here to claim arbitrary
+/// detached descendants. Group-kill and relay cleanup failures are returned.
 struct SinkRelay {
     child: Child,
     cleaned: bool,
@@ -2869,6 +2878,27 @@ impl SinkRelay {
                 "spawn {label} sink relay: child stdin unavailable; cleanup: {cleanup}"
             )));
         };
+        #[cfg(test)]
+        let inject_setup_failure = RUN_CMD_TEST_FAIL_RELAY_SPAWN_AFTER
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                if remaining == 0 {
+                    None
+                } else {
+                    Some(remaining - 1)
+                }
+            })
+            .is_ok_and(|remaining| remaining == 1);
+        #[cfg(test)]
+        if inject_setup_failure {
+            drop(input);
+            let cleanup = finish_group_keeper(&mut child);
+            return Err(GeneratorError::usage(match cleanup {
+                Ok(()) => format!("spawn {label} sink relay: synthetic setup failure"),
+                Err(error) => {
+                    format!("spawn {label} sink relay: synthetic setup failure; cleanup: {error}")
+                }
+            }));
+        }
         Ok((
             Self {
                 child,
@@ -2937,17 +2967,6 @@ fn spawn_run_command(
     command: &str,
 ) -> Result<SpawnedRunCommand, GeneratorError> {
     #[cfg(unix)]
-    // FD 198 is reserved for the ownership marker. Descendants inherit it,
-    // including a child that calls setsid; cleanup scans this exact marker
-    // before killing any escaped process and fails closed if one remains.
-    let owner_marker = fs::canonicalize(root)
-        .map_err(|error| {
-            GeneratorError::usage(format!(
-                "run CI command {unit_id}: canonicalize owner marker root: {error}"
-            ))
-        })?
-        .join(format!(".velnor-run-owner-{}", crate::s2::unique_suffix()));
-    #[cfg(unix)]
     let mut group_keeper = Command::new("sleep")
         .arg("3600")
         .current_dir(root)
@@ -2961,11 +2980,9 @@ fn spawn_run_command(
                 "run CI command {unit_id}: spawn process-group keeper: {error}"
             ))
         })?;
-    #[cfg(unix)]
-    let command = format!("exec 198>>{}; {command}", shell_quote_path(&owner_marker));
     let mut command_builder = Command::new("bash");
     command_builder
-        .args(["-euo", "pipefail", "-c", &command])
+        .args(["-euo", "pipefail", "-c", command])
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -2973,19 +2990,39 @@ fn spawn_run_command(
     #[cfg(unix)]
     {
         let Ok(group_id) = i32::try_from(group_keeper.id()) else {
-            let _ = finish_group_keeper(&mut group_keeper);
-            return Err(GeneratorError::usage(format!(
-                "run CI command {unit_id}: process-group keeper pid is out of range"
-            )));
+            let cleanup = finish_group_keeper(&mut group_keeper);
+            return Err(GeneratorError::usage(match cleanup {
+                Ok(()) => format!(
+                    "run CI command {unit_id}: process-group keeper pid is out of range"
+                ),
+                Err(error) => format!(
+                    "run CI command {unit_id}: process-group keeper pid is out of range; keeper cleanup: {error}"
+                ),
+            }));
         };
         command_builder.process_group(group_id);
+    }
+    #[cfg(all(unix, test))]
+    if RUN_CMD_TEST_FAIL_COMMAND_SPAWN.swap(0, Ordering::SeqCst) != 0 {
+        let cleanup = finish_group_keeper(&mut group_keeper);
+        return Err(GeneratorError::usage(match cleanup {
+            Ok(()) => format!("run CI command {unit_id}: synthetic command spawn failure"),
+            Err(error) => format!(
+                "run CI command {unit_id}: synthetic command spawn failure; keeper cleanup: {error}"
+            ),
+        }));
     }
     let child = match command_builder.spawn() {
         Ok(child) => child,
         Err(error) => {
             #[cfg(unix)]
             {
-                let _ = finish_group_keeper(&mut group_keeper);
+                let cleanup = finish_group_keeper(&mut group_keeper);
+                if let Err(cleanup_error) = cleanup {
+                    return Err(GeneratorError::usage(format!(
+                        "run CI command {unit_id}: {error}; keeper cleanup: {cleanup_error}"
+                    )));
+                }
             }
             return Err(GeneratorError::usage(format!(
                 "run CI command {unit_id}: {error}"
@@ -2996,107 +3033,7 @@ fn spawn_run_command(
         child,
         #[cfg(unix)]
         group_keeper,
-        #[cfg(unix)]
-        owner_marker,
     })
-}
-
-#[cfg(unix)]
-fn shell_quote_path(path: &Path) -> String {
-    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
-}
-
-#[cfg(unix)]
-fn owned_process_pids(marker: &Path) -> Result<Vec<u32>, String> {
-    #[cfg(target_os = "linux")]
-    {
-        let entries = fs::read_dir("/proc").map_err(|error| format!("read /proc: {error}"))?;
-        let mut pids = Vec::new();
-        for entry in entries.flatten() {
-            let Some(pid) = entry
-                .file_name()
-                .to_str()
-                .and_then(|value| value.parse().ok())
-            else {
-                continue;
-            };
-            let Ok(fds) = fs::read_dir(entry.path().join("fd")) else {
-                continue;
-            };
-            if fds.flatten().any(|fd| {
-                fs::read_link(fd.path())
-                    .ok()
-                    .is_some_and(|path| path == marker)
-            }) {
-                pids.push(pid);
-            }
-        }
-        return Ok(pids);
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let output = Command::new("lsof")
-            .args(["-t"])
-            .arg(marker)
-            .output()
-            .map_err(|error| format!("scan marker owners with lsof: {error}"))?;
-        if !output.status.success() && output.status.code() != Some(1) {
-            return Err(format!(
-                "scan marker owners with lsof failed: {}",
-                output.status
-            ));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| line.trim().parse().ok())
-            .collect())
-    }
-}
-
-#[cfg(unix)]
-fn cleanup_owned_processes(marker: &Path) -> Result<(), String> {
-    let deadline = Instant::now() + RUN_CMD_CLEANUP_GRACE;
-    let mut found_owned_process = false;
-    loop {
-        let pids = owned_process_pids(marker)?;
-        if pids.is_empty() {
-            match fs::remove_file(marker) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(format!("remove ownership marker: {error}")),
-            }
-            return if found_owned_process {
-                Err(String::from(
-                    "detached owned descendant was killed during bounded cleanup",
-                ))
-            } else {
-                Ok(())
-            };
-        }
-        found_owned_process = true;
-        for raw_pid in pids.iter().copied() {
-            let still_owned = owned_process_pids(marker)?.contains(&raw_pid);
-            if !still_owned {
-                continue;
-            }
-            let raw_pid = i32::try_from(raw_pid)
-                .map_err(|_| format!("owned process pid {raw_pid} is out of range"))?;
-            let Some(pid) = Pid::from_raw(raw_pid) else {
-                return Err(format!("owned process pid {raw_pid} is invalid"));
-            };
-            if let Err(error) = kill_process(pid, Signal::KILL)
-                && error != Errno::SRCH
-            {
-                return Err(format!("kill owned process {raw_pid}: {error}"));
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "owned process marker remained after bounded cleanup: {pids:?}"
-            ));
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
 }
 
 #[cfg(unix)]
@@ -3117,15 +3054,23 @@ where
     {
         Ok(relay) => relay,
         Err(error) => {
-            let _ = stdout_relay.abort();
-            return Err(error);
+            drop(stdout_input);
+            let relay_cleanup = stdout_relay.abort();
+            return Err(with_relay_setup_cleanup(error, relay_cleanup));
         }
     };
-    let spawned = spawn_run_command(root, unit_id, command)?;
+    let spawned = match spawn_run_command(root, unit_id, command) {
+        Ok(spawned) => spawned,
+        Err(error) => {
+            drop(stdout_input);
+            drop(stderr_input);
+            let relay_cleanup = abort_sink_relays(&mut stdout_relay, &mut stderr_relay);
+            return Err(with_relay_setup_cleanup(error, relay_cleanup));
+        }
+    };
     let SpawnedRunCommand {
         child,
         group_keeper,
-        owner_marker,
     } = spawned;
     let outcome = run_command_with_polling(
         child,
@@ -3140,19 +3085,11 @@ where
     );
     drop(stdout_input);
     drop(stderr_input);
-    let owner_cleanup = cleanup_owned_processes(&owner_marker);
     let relay_cleanup = finish_sink_relays(&mut stdout_relay, &mut stderr_relay);
-    let mut cleanup_errors = Vec::new();
-    if let Err(error) = owner_cleanup {
-        cleanup_errors.push(format!("owned descendant cleanup: {error}"));
-    }
-    if let Err(error) = relay_cleanup {
-        cleanup_errors.push(format!("write stdout/stderr through sink relay: {error}"));
-    }
-    if cleanup_errors.is_empty() {
-        return outcome;
-    }
-    let cleanup = cleanup_errors.join(", ");
+    let cleanup = match relay_cleanup {
+        Ok(()) => return outcome,
+        Err(error) => error,
+    };
     match outcome {
         Ok(()) => Err(GeneratorError::usage(format!(
             "run CI command {unit_id}: {cleanup}"
@@ -3564,6 +3501,35 @@ fn finish_sink_relays(stdout: &mut SinkRelay, stderr: &mut SinkRelay) -> Result<
 }
 
 #[cfg(unix)]
+fn abort_sink_relays(stdout: &mut SinkRelay, stderr: &mut SinkRelay) -> Result<(), String> {
+    let errors = [
+        stdout.abort().err().map(|error| format!("stdout: {error}")),
+        stderr.abort().err().map(|error| format!("stderr: {error}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join(", "))
+    }
+}
+
+#[cfg(unix)]
+fn with_relay_setup_cleanup(
+    setup_error: GeneratorError,
+    relay_cleanup: Result<(), String>,
+) -> GeneratorError {
+    match relay_cleanup {
+        Ok(()) => setup_error,
+        Err(cleanup_error) => GeneratorError::usage(format!(
+            "{setup_error}; sink relay setup cleanup failed: {cleanup_error}"
+        )),
+    }
+}
+
+#[cfg(unix)]
 fn write_marker_to<W>(root: &Path, sink: &W, marker: &str) -> Result<(), GeneratorError>
 where
     W: std::os::fd::AsFd,
@@ -3601,8 +3567,9 @@ fn abort_child_with_relays(
     stderr: &mut SinkRelay,
 ) -> String {
     let mut errors = vec![abort_child(child, group_keeper)];
-    errors.extend(stdout.abort().err());
-    errors.extend(stderr.abort().err());
+    if let Err(error) = abort_sink_relays(stdout, stderr) {
+        errors.push(error);
+    }
     errors
         .into_iter()
         .filter(|error| !error.is_empty())
@@ -4175,12 +4142,12 @@ fn run_unit(root: &Path, unit: &CiUnit, commands: &[String]) -> Result<(), Gener
 #[cfg(test)]
 mod run_cmd_stall_tests {
     use super::{
-        abort_child, cleanup_owned_processes, dup, finish_group_keeper, forward_ready_child_stream,
-        kill_child_group, parse_run_cmd_stall_limit, run_command_with_stall_guard,
-        run_command_with_stall_guard_to, spawn_run_command, write_marker_to, ChildStreamRead,
-        Command, PendingOutput, Stdio, DEFAULT_RUN_CMD_STALL_SECS,
+        abort_child, dup, finish_group_keeper, forward_ready_child_stream, kill_child_group,
+        parse_run_cmd_stall_limit, run_command_with_stall_guard, run_command_with_stall_guard_to,
+        spawn_run_command, write_marker_to, ChildStreamRead, Command, PendingOutput, Stdio,
+        DEFAULT_RUN_CMD_STALL_SECS, RUN_CMD_TEST_FAIL_COMMAND_SPAWN,
         RUN_CMD_TEST_FAIL_DIRECT_KILL_PID, RUN_CMD_TEST_FAIL_GROUP_KILL_PID,
-        RUN_CMD_TEST_FAIL_REAP_PID,
+        RUN_CMD_TEST_FAIL_REAP_PID, RUN_CMD_TEST_FAIL_RELAY_SPAWN_AFTER,
     };
     use std::fs::{self, File};
     use std::io::Read;
@@ -4422,33 +4389,33 @@ mod run_cmd_stall_tests {
 
     #[cfg(unix)]
     #[test]
-    fn detached_descendant_is_killed_and_reported() {
+    fn closing_a_descriptor_does_not_escape_process_group_cleanup() {
         let root = std::env::temp_dir().join(format!(
-            "velnor-workflow-detached-descendant-{}",
+            "velnor-workflow-process-group-escape-{}",
             crate::s2::unique_suffix()
         ));
         must(
             fs::create_dir_all(&root),
-            "create detached descendant fixture",
+            "create process-group escape fixture",
         );
         let result = run_command_with_stall_guard(
             &root,
-            "detached-descendant",
-            "(python3 -c 'import os,time; os.setsid(); time.sleep(30)') >/dev/null 2>&1 & sleep 0.2; exit 0",
-            Duration::from_secs(3),
+            "closed-marker-descriptor",
+            "exec 198>&-; exec sleep 30",
+            Duration::from_millis(200),
         );
         let message = match result {
             Ok(()) => String::from("<unexpected success>"),
             Err(error) => error.to_string(),
         };
         assert!(
-            message.contains("detached owned descendant"),
-            "detached descendants must fail closed, got: {message}"
+            message.contains("stall"),
+            "a command closing an unrelated descriptor must still be group-cleaned, got: {message}"
         );
-        assert_no_fixture_processes(&root, "detached descendant");
+        assert_no_fixture_processes(&root, "closed descriptor process group");
         must(
             fs::remove_dir_all(&root),
-            "remove detached descendant fixture",
+            "remove process-group escape fixture",
         );
     }
 
@@ -4648,6 +4615,72 @@ mod run_cmd_stall_tests {
 
     #[cfg(unix)]
     #[test]
+    fn relay_setup_failure_aborts_already_started_relays() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-relay-setup-failure-{}",
+            crate::s2::unique_suffix()
+        ));
+        must(fs::create_dir_all(&root), "create relay setup fixture");
+        let mut stdout = must(File::create(root.join("stdout")), "create relay stdout");
+        let mut stderr = must(File::create(root.join("stderr")), "create relay stderr");
+        RUN_CMD_TEST_FAIL_RELAY_SPAWN_AFTER.store(2, Ordering::SeqCst);
+        let result = run_command_with_stall_guard_to(
+            &root,
+            "relay-setup-failure",
+            "exit 0",
+            Duration::from_secs(3),
+            &mut stdout,
+            &mut stderr,
+        );
+        let message = match result {
+            Ok(()) => String::from("<unexpected success>"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("synthetic setup failure"),
+            "relay setup failure must remain explicit, got: {message}"
+        );
+        drop(stdout);
+        drop(stderr);
+        assert_no_fixture_processes(&root, "relay setup failure");
+        must(fs::remove_dir_all(&root), "remove relay setup fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_setup_failure_aborts_both_relays() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-command-setup-failure-{}",
+            crate::s2::unique_suffix()
+        ));
+        must(fs::create_dir_all(&root), "create command setup fixture");
+        let mut stdout = must(File::create(root.join("stdout")), "create command stdout");
+        let mut stderr = must(File::create(root.join("stderr")), "create command stderr");
+        RUN_CMD_TEST_FAIL_COMMAND_SPAWN.store(1, Ordering::SeqCst);
+        let result = run_command_with_stall_guard_to(
+            &root,
+            "command-setup-failure",
+            "exit 0",
+            Duration::from_secs(3),
+            &mut stdout,
+            &mut stderr,
+        );
+        let message = match result {
+            Ok(()) => String::from("<unexpected success>"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("synthetic command spawn failure"),
+            "command setup failure must remain explicit, got: {message}"
+        );
+        drop(stdout);
+        drop(stderr);
+        assert_no_fixture_processes(&root, "command setup failure");
+        must(fs::remove_dir_all(&root), "remove command setup fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn closed_output_sink_fails_instead_of_reporting_success() {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-output-closed-{}",
@@ -4671,7 +4704,7 @@ mod run_cmd_stall_tests {
             Err(error) => error.to_string(),
         };
         assert!(
-            message.contains("write stdout"),
+            message.contains("write stdout") || message.contains("stdout: sink relay"),
             "closed output must be reported as a write failure, got: {message}"
         );
         drop(stdout);
@@ -4722,6 +4755,35 @@ mod run_cmd_stall_tests {
 
     #[cfg(unix)]
     #[test]
+    fn process_group_cleanup_keeps_a_live_group_after_child_exit() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-live-process-group-{}",
+            crate::s2::unique_suffix()
+        ));
+        must(
+            fs::create_dir_all(&root),
+            "create live process-group fixture",
+        );
+        let spawned = must(
+            spawn_run_command(&root, "live-process-group", "exit 0"),
+            "spawn live process-group command",
+        );
+        let mut child = spawned.child;
+        let mut keeper = spawned.group_keeper;
+        must(child.wait(), "wait live process-group command");
+        must(
+            finish_group_keeper(&mut keeper),
+            "cleanup live process-group keeper",
+        );
+        assert_no_fixture_processes(&root, "live process group");
+        must(
+            fs::remove_dir_all(&root),
+            "remove live process-group fixture",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn cleanup_group_kill_fault_uses_direct_reap_fallback() {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-group-kill-fault-{}",
@@ -4767,7 +4829,6 @@ mod run_cmd_stall_tests {
             spawn_run_command(&root, "kill-reap-fault", "exec sleep 30"),
             "spawn kill-reap fault command",
         );
-        let owner_marker = spawned.owner_marker.clone();
         let mut child = spawned.child;
         let mut keeper = spawned.group_keeper;
         let child_pid = child.id();
@@ -4784,10 +4845,6 @@ mod run_cmd_stall_tests {
             cleanup.contains("synthetic process-group kill failure")
                 && cleanup.contains("synthetic direct kill failure"),
             "kill faults must remain explicit: {cleanup}"
-        );
-        must(
-            cleanup_owned_processes(&owner_marker),
-            "clean kill-reap ownership marker",
         );
         assert_no_fixture_processes(&root, "kill-reap fault");
         must(fs::remove_dir_all(&root), "remove kill-reap fault fixture");
