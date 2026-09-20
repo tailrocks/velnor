@@ -15,6 +15,14 @@ use crate::s2::{
     UnitKind,
 };
 
+/// Toolchain pin files every Swift cache key hashes, mirroring how Rust keys
+/// hash `rust-toolchain.toml`: a Swift/Xcode toolchain change must
+/// invalidate dependency and intermediate state, never reuse it. `hashFiles`
+/// ignores patterns that match nothing, so repos without these files keep
+/// their existing keys; the Swift tools version is deliberately absent — it
+/// is a minimum-version floor, not a toolchain identity.
+const APPLE_TOOLCHAIN_PIN_KEY_FILES: [&str; 3] = ["mise.lock", ".swift-version", ".xcode-version"];
+
 /// One `.binaryTarget` stanza: a local `path` artifact or a remote `url`
 /// artifact. `None` means the stanza had no literal value for that key — a
 /// variable or computed expression the static scan cannot resolve.
@@ -749,6 +757,11 @@ fn xcodegen_generate_unit(
     };
     let spec_part = identifier_suffix(spec_file);
     let mut cache_key_files = spec.files.clone();
+    cache_key_files.extend(
+        APPLE_TOOLCHAIN_PIN_KEY_FILES
+            .iter()
+            .map(std::string::ToString::to_string),
+    );
     cache_key_files.sort();
     cache_key_files.dedup();
     let root_watch = if root == "." {
@@ -773,7 +786,7 @@ fn xcodegen_generate_unit(
         cache: Some(CacheSpec {
             key_files: cache_key_files,
             paths: vec!["~/Library/Developer/Xcode/DerivedData".to_owned()],
-            purpose: CachePurpose::Generic,
+            purpose: CachePurpose::XcodeIntermediates,
             mbx_output_cache_justification: None,
             mutable_mount_seed: false,
         }),
@@ -804,6 +817,18 @@ fn swift_package_unit(package_root: &str, facts: &PackageFacts) -> Unit {
     if facts.has_tests {
         commands.push(format!("{command_prefix}swift test --parallel"));
     }
+    let mut cache_key_files = vec![
+        join_repo_path(package_root, "Package.swift"),
+        join_repo_path(package_root, "Package.resolved"),
+        join_repo_path(package_root, ".swiftpm/Package.resolved"),
+    ];
+    cache_key_files.extend(
+        APPLE_TOOLCHAIN_PIN_KEY_FILES
+            .iter()
+            .map(std::string::ToString::to_string),
+    );
+    cache_key_files.sort();
+    cache_key_files.dedup();
     let mut result = unit(
         UnitKind::Swift,
         package_root,
@@ -817,13 +842,9 @@ fn swift_package_unit(package_root: &str, facts: &PackageFacts) -> Unit {
         ],
         commands,
         Some(CacheSpec {
-            key_files: vec![
-                join_repo_path(package_root, "Package.swift"),
-                join_repo_path(package_root, "Package.resolved"),
-                join_repo_path(package_root, ".swiftpm/Package.resolved"),
-            ],
+            key_files: cache_key_files,
             paths: vec!["~/.swiftpm".to_owned()],
-            purpose: CachePurpose::Generic,
+            purpose: CachePurpose::SwiftPmSources,
             mbx_output_cache_justification: None,
             mutable_mount_seed: false,
         }),
@@ -963,6 +984,11 @@ fn xcode_scheme_unit(
             cache_key_files.push(format!("{project}/project.pbxproj"));
         }
     }
+    cache_key_files.extend(
+        APPLE_TOOLCHAIN_PIN_KEY_FILES
+            .iter()
+            .map(std::string::ToString::to_string),
+    );
     cache_key_files.sort();
     cache_key_files.dedup();
     let root_watch = if container_root == "." {
@@ -1002,7 +1028,7 @@ fn xcode_scheme_unit(
         cache: Some(CacheSpec {
             key_files: cache_key_files,
             paths: vec!["~/Library/Developer/Xcode/DerivedData".to_owned()],
-            purpose: CachePurpose::Generic,
+            purpose: CachePurpose::XcodeIntermediates,
             mbx_output_cache_justification: None,
             mutable_mount_seed: false,
         }),
@@ -1829,6 +1855,112 @@ mod tests {
             "{:?}",
             shape.limitations
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn swift_package_unit_caches_sources_with_toolchain_pins() {
+        let root = native_fixture(&[(
+            "clients/desktop/Package.swift",
+            &native_package(".target(name: \"Bridge\")"),
+        )]);
+        let shape = scan_native(&root);
+        let unit = must_some(
+            shape
+                .units
+                .iter()
+                .find(|unit| unit.id == "swift-package-clients-desktop"),
+            "swift package unit",
+        );
+        let cache = must_some(unit.cache.as_ref(), "package unit declares a cache");
+        assert_eq!(
+            cache.purpose,
+            crate::s2::CachePurpose::SwiftPmSources,
+            "package downloads are a source layer, not intermediates"
+        );
+        assert_eq!(cache.paths, vec!["~/.swiftpm".to_owned()]);
+        assert_eq!(
+            cache.key_files,
+            vec![
+                ".swift-version".to_owned(),
+                ".xcode-version".to_owned(),
+                "clients/desktop/.swiftpm/Package.resolved".to_owned(),
+                "clients/desktop/Package.resolved".to_owned(),
+                "clients/desktop/Package.swift".to_owned(),
+                "mise.lock".to_owned(),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn xcodegen_unit_caches_intermediates_with_toolchain_pins() {
+        let root = native_fixture(&[("app/project.yml", MINIMAL_APP)]);
+        let shape = scan_native(&root);
+        let unit = must_some(
+            shape
+                .units
+                .iter()
+                .find(|unit| unit.id.starts_with("swift-xcodegen-")),
+            "xcodegen unit",
+        );
+        let cache = must_some(unit.cache.as_ref(), "xcodegen unit declares a cache");
+        assert_eq!(
+            cache.purpose,
+            crate::s2::CachePurpose::XcodeIntermediates,
+            "DerivedData is an intermediate seed, not a source bundle"
+        );
+        assert_eq!(
+            cache.paths,
+            vec!["~/Library/Developer/Xcode/DerivedData".to_owned()]
+        );
+        for key in [
+            "app/project.yml",
+            "mise.lock",
+            ".swift-version",
+            ".xcode-version",
+        ] {
+            assert!(
+                cache.key_files.iter().any(|file| file == key),
+                "key files contain {key}: {:?}",
+                cache.key_files
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn xcode_scheme_unit_caches_intermediates_with_toolchain_pins() {
+        let root = native_fixture(&[(
+            "apps/one/One.xcodeproj/xcshareddata/xcschemes/App.xcscheme",
+            "<Scheme/>\n",
+        )]);
+        let shape = scan_native(&root);
+        let unit = must_some(
+            shape
+                .units
+                .iter()
+                .find(|unit| unit.id.starts_with("swift-xcodeproj-")),
+            "xcode scheme unit",
+        );
+        let cache = must_some(unit.cache.as_ref(), "scheme unit declares a cache");
+        assert_eq!(
+            cache.purpose,
+            crate::s2::CachePurpose::XcodeIntermediates,
+            "DerivedData is an intermediate seed, not a source bundle"
+        );
+        for key in [
+            "apps/one/One.xcodeproj/project.pbxproj",
+            "mise.lock",
+            ".swift-version",
+            ".xcode-version",
+        ] {
+            assert!(
+                cache.key_files.iter().any(|file| file == key),
+                "key files contain {key}: {:?}",
+                cache.key_files
+            );
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

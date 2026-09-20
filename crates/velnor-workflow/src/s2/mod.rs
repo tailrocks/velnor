@@ -768,6 +768,17 @@ pub(crate) enum CachePurpose {
     /// unit's declared cache contract, so it never reaches the cache-transport
     /// validation a unit contract passes through.
     Toolchains,
+    /// `SwiftPM` dependency downloads and checkouts (the shared `SwiftPM` cache).
+    /// Keyed by the package manifest, resolution files, and toolchain pins;
+    /// `SwiftPM` validates content against the resolution, so restoring them
+    /// never duplicates or poisons compiler state. Never carries build
+    /// outputs: those are [`CachePurpose::XcodeIntermediates`].
+    SwiftPmSources,
+    /// Xcode and `SwiftPM` build intermediates (`DerivedData`, package
+    /// `.build` trees). An acceleration seed only: the build tool still runs
+    /// and validates freshness afterward. Keyed by project/spec inputs plus
+    /// toolchain pins; a toolchain change must invalidate, never reuse.
+    XcodeIntermediates,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

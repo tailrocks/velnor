@@ -215,7 +215,12 @@ impl CacheBackend {
                     // through this match. Docker seeds render their own lifecycle.
                     // Refuse rather than silently enable either non-generic cache.
                     None | Some(CachePurpose::Toolchains | CachePurpose::DockerSeed) => false,
-                    Some(CachePurpose::CargoSources | CachePurpose::Generic) => true,
+                    Some(
+                        CachePurpose::CargoSources
+                        | CachePurpose::Generic
+                        | CachePurpose::SwiftPmSources
+                        | CachePurpose::XcodeIntermediates,
+                    ) => true,
                     Some(CachePurpose::Outputs) => {
                         !ir.uses_mr_boxington(unit)
                             || unit

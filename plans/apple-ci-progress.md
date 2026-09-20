@@ -54,13 +54,19 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
   is one `CacheSpec` (`s2/mod.rs:774`: key_files/paths/purpose);
   `NamedProduct` is name/task/env/outputs (`s2/platform.rs:30`);
   handoff tests live in `tests/selection_artifact_handoff.rs` and
-  `tests/prepared_tool_handoff.rs`. Slices: 4a Swift/Xcode cache
-  layers (new `CachePurpose` variants, toolchain key boundary,
-  scanner assignment); 4b exact native-product identity
-  (transitive input digest + per-file output manifest +
+  `tests/prepared_tool_handoff.rs`. Slices: 4a done (typed
+  `SwiftPmSources`/`XcodeIntermediates` purposes, `mise.lock` /
+  `.swift-version` / `.xcode-version` key boundary, retention
+  recognizes `swift-` keys in `unit-caches`; both layers share the
+  kind-level `swift` key segment until callees partition by
+  purpose; 5 new tests, lib 1899 green). 4b exact native-product
+  identity (transitive input digest + per-file output manifest +
   validation); 4c staging + binding-drift check before install;
   4d verified cross-job artifact transport; 4e per-layer
-  cache-state reporting (`snapshot.rs`).
+  cache-state reporting (`snapshot.rs`). Follow-ups: `.build`
+  intermediates need multi-layer cache support; scoped
+  `derivedDataPath` per unit; runtime actual-Xcode probe (needs
+  macOS runs).
 - Increments 5-8 per goal: hosted macOS, Jackin migration (#1013
   incl. Landlock P1), native provider, proof/cleanup.
 - Benchmarks: none yet; set latency goals after first controlled baseline.
@@ -68,7 +74,7 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
 ## Continue
 
 1. `git checkout integrate/apple-ci-s2`; `cargo test -p velnor-workflow`.
-2. Next edit surface: 4a Swift cache layers —
-   `s2/mod.rs` (`CachePurpose`), `s2/scan/swift.rs` (assignment),
-   `s2/primitives/ir.rs` (rendering).
+2. Next edit surface: 4b exact native-product identity —
+   `s2/platform.rs` (identity/output manifest), `s2/scan/rust.rs`
+   (input closure facts).
 3. Keep one branch per repo; merge main in, never rebase; `git commit -s`.

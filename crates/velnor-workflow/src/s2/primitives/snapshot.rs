@@ -293,9 +293,13 @@ pub(crate) enum Tier {
 impl From<CachePurpose> for Tier {
     fn from(purpose: CachePurpose) -> Self {
         match purpose {
-            CachePurpose::CargoSources | CachePurpose::Toolchains => Self::Protected,
+            CachePurpose::CargoSources
+            | CachePurpose::Toolchains
+            | CachePurpose::SwiftPmSources => Self::Protected,
             CachePurpose::DockerSeed => Self::Baseline,
-            CachePurpose::Generic | CachePurpose::Outputs => Self::Rolling,
+            CachePurpose::Generic | CachePurpose::Outputs | CachePurpose::XcodeIntermediates => {
+                Self::Rolling
+            }
         }
     }
 }
@@ -312,13 +316,16 @@ pub(crate) enum CacheKeyMatcher {
     /// the broad `ci-` prefix.
     CiRustCargoSources,
     /// Non-Rust unit dependency bundles under the same anchored `ci-` /
-    /// `ci-release-` namespace: `bun-`, `docs-`, and `opentofu-` units.
+    /// `ci-release-` namespace: `bun-`, `docs-`, `opentofu-`, and `swift-`
+    /// units. Swift package and Xcode units share the kind-level `swift` key
+    /// segment (the collapsed callee renders one cache step per kind), so
+    /// both land in `unit-caches` until callees partition by cache purpose.
     CiGenericUnitCaches,
 }
 
 fn ci_prefixed_unit(key: &str) -> Option<(&str, &str)> {
     const PREFIXES: [&str; 2] = ["ci-release-", "ci-"];
-    const UNIT_MARKERS: [&str; 4] = ["-rust-", "-bun-", "-docs-", "-opentofu-"];
+    const UNIT_MARKERS: [&str; 5] = ["-rust-", "-bun-", "-docs-", "-opentofu-", "-swift-"];
     for prefix in PREFIXES {
         let Some(rest) = key.strip_prefix(prefix) else {
             continue;
@@ -349,6 +356,7 @@ impl CacheKeyMatcher {
                 unit.starts_with("bun-")
                     || unit.starts_with("docs-")
                     || unit.starts_with("opentofu-")
+                    || unit.starts_with("swift-")
             }),
         }
     }
@@ -1229,6 +1237,8 @@ mod tests {
             "ci-Linux-bun-package-abc123",
             "ci-Linux-opentofu-opentofu-abc123",
             "ci-release-Linux-bun-example-abc123",
+            "ci-macOS-swift-package-abc123",
+            "ci-release-macOS-swift-example-abc123",
             "prefix-ci-Linux-rust-unit-abc123",
             "ci-Linux-rustlike-abc123",
         ] {
@@ -1242,6 +1252,8 @@ mod tests {
             "ci-Linux-bun-package-abc123",
             "ci-Linux-opentofu-opentofu-abc123",
             "ci-release-Linux-bun-example-abc123",
+            "ci-macOS-swift-package-abc123",
+            "ci-release-macOS-swift-example-abc123",
         ] {
             assert!(
                 CacheKeyMatcher::CiGenericUnitCaches.matches(key),
@@ -1258,6 +1270,7 @@ mod tests {
         for key in [
             "prefix-ci-Linux-rust-unit-abc123",
             "ci-Linux-rustlike-abc123",
+            "ci-macOS-swiftlike-abc123",
         ] {
             let actual = generic_class(key);
             assert_eq!(
@@ -1266,6 +1279,20 @@ mod tests {
                 "unknown key must remain unclassified: {key}"
             );
         }
+    }
+
+    #[test]
+    fn apple_purposes_map_to_source_and_intermediate_tiers() {
+        assert_eq!(
+            Tier::from(CachePurpose::SwiftPmSources),
+            Tier::Protected,
+            "dependency downloads are reserved like Cargo sources"
+        );
+        assert_eq!(
+            Tier::from(CachePurpose::XcodeIntermediates),
+            Tier::Rolling,
+            "DerivedData seeds evict first like other build outputs"
+        );
     }
 
     #[test]

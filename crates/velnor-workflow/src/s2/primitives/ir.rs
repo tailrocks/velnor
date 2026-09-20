@@ -800,6 +800,52 @@ mod tests {
     }
 
     #[test]
+    fn apple_cache_purposes_enable_actions_cache_and_render() {
+        let cache = |purpose| {
+            Some(crate::s2::CacheSpec {
+                key_files: vec!["Package.swift".to_owned(), "mise.lock".to_owned()],
+                paths: vec!["~/.swiftpm".to_owned()],
+                purpose,
+                mbx_output_cache_justification: None,
+                mutable_mount_seed: false,
+            })
+        };
+        let mut package = rust_unit("swift-package-native", "native");
+        package.kind = UnitKind::Swift;
+        package.platform = crate::s2::provider::Platform::MacosArm64;
+        package.cache = cache(crate::s2::CachePurpose::SwiftPmSources);
+        let mut scheme = rust_unit("swift-xcodeproj-app", "native");
+        scheme.kind = UnitKind::Swift;
+        scheme.platform = crate::s2::provider::Platform::MacosArm64;
+        scheme.cache = cache(crate::s2::CachePurpose::XcodeIntermediates);
+        let ir = owner_test_ir("example/fixture", vec![package, scheme]);
+        for unit in &ir.units {
+            assert!(
+                crate::s2::primitives::CacheBackend::Detected.provider_enables_actions_cache(
+                    crate::s2::provider::ProviderId::GithubHosted,
+                    &ir,
+                    unit,
+                ),
+                "apple cache enables restore/save steps: {}",
+                unit.id
+            );
+        }
+        let rendered = must_ok(
+            ir.render_kind_unit_workflow(UnitKind::Swift, None),
+            "swift kind reusable renders",
+        );
+        let workflow = must_some(rendered, "swift kind has members").1;
+        assert!(
+            workflow.contains("Restore unit cache"),
+            "swift cache renders a restore step: {workflow}"
+        );
+        assert!(
+            workflow.contains("-swift-${{ hashFiles(inputs.cache_key_files) }}"),
+            "swift cache keeps the kind-level key segment: {workflow}"
+        );
+    }
+
+    #[test]
     fn candidate_publish_flags_only_the_hosted_owner_of_the_generator_crate() {
         let owner = workflow_setup_action_repository().to_owned();
         let mut documentation = rust_unit("docs-generator-root", "crates/velnor-workflow");
