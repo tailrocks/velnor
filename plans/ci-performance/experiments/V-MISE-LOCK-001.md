@@ -53,3 +53,36 @@ Independent contract review by `/root/parallax_inventory` confirmed both-schema
 missing-lock and duplicate rejection, the emitted locked command, and exclusion
 of the deferred auto-install change. Parent separately tested the isolated
 complete patch and the real Mise boundary described above.
+
+## Published identity
+
+Local signed-off commit `64cef5ef93a90660983b3f2ec9dc42cfebda73c3` could not push
+because the SSH agent failed signing. The independently reviewed API fallback
+published identical tree `971c60e49840504b5948542dd232d9e2294b61ab` as
+`057ed827ab487a8b7b818ab95a4b3c24dff4fe69`, preserving parent and trailers.
+The clean default-feature build reports that exact published revision and
+candidate closure `323c62fdd1423cd428411cd3a331c172c80a5d58b0eb526ba1cf6b0a8a97cf0b`.
+A lean no-default-features build has a different, valid identity and cannot
+satisfy the current default-feature candidate exception; its check rejection
+is retained as a compatibility observation, not a generator-drift result.
+
+Exact-revision runs started:
+[PR 35490258957](https://github.com/tailrocks/velnor/actions/runs/35490258957) and
+[policy 35490256957](https://github.com/tailrocks/velnor/actions/runs/35490256957).
+PR run concluded cancelled after a prior generator test failure: integration
+fixture `an_unknown_event_stops_generation` declared tools without a lock, so
+strict lock validation preceded its expected unknown-event error. Job
+`106023966065` failed at 05:00:06 UTC, before the next push. Raw complete jobs
+and the failure excerpt are retained. Fixture repair and complete integration
+target replay are required; this is not a successful performance baseline.
+Separate policy outcome remains pending.
+
+## Integration fixture repair
+
+The canonical scheduled-check fixture now declares and locks ripgrep 14.1.1;
+the unknown-event test first generates its valid baseline before changing the
+event. Parent independently verified all 1,916 nextest tests with the initial
+fixture prerequisite repair, then all seven scheduled-profile tests after the
+canonical lock and explicit positive-control refinement. All-target Clippy
+passes. No production validation was weakened. Exact-push CI of this repair
+remains pending.
