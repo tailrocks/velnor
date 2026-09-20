@@ -642,6 +642,7 @@ fn owner_entrypoint_renders_the_isolated_candidate_transport() {
     );
     assert!(job.contains("repository_api"), "{job}");
     assert!(job.contains("artifact_raw_zip_sha256"), "{job}");
+    assert!(job.contains("fromdateiso8601 > now"), "{job}");
     assert!(
         job.contains("test \"$raw_zip_sha256\" = \"$service_digest\""),
         "{job}"

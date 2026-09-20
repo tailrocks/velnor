@@ -4680,6 +4680,7 @@ fn policy_candidate_step(revision: &str) -> String {
           artifact_size="$(jq -er '.size_in_bytes | numbers' <<<"$artifact")"
           artifact_digest="$(jq -er '.digest | strings | select(test("^sha256:[0-9a-f]{{64}}$"))' <<<"$artifact")"
           expires_at="$(jq -er '.expires_at | strings' <<<"$artifact")"
+          jq -e '.expired == false and (.expires_at | strings | fromdateiso8601 > now)' <<<"$artifact" >/dev/null
 
           archive="$RUNNER_TEMP/candidate.zip"
           available_kib="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 {{print $4}}')"
@@ -5154,7 +5155,7 @@ fn policy_candidate_result_verification_step() -> String {
           test "$HEAD_REPOSITORY_ID" = "$TARGET_REPOSITORY_ID"
           result_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RESULT_ID")"
           jq -e --argjson id "$RESULT_ID" --arg digest "$RESULT_DIGEST" --arg name "{result}" --argjson run_id "$GITHUB_RUN_ID" '
-            .id == $id and .name == $name and .expired == false and .digest == $digest and
+            .id == $id and .name == $name and .expired == false and (.expires_at | strings | fromdateiso8601 > now) and .digest == $digest and
             ((.workflow_run.id | tonumber) == $run_id)
           ' <<<"$result_api" >/dev/null
           result_archive="$RUNNER_TEMP/candidate-result.zip"
@@ -5239,7 +5240,7 @@ fn policy_candidate_result_verification_step() -> String {
           handoff_digest="$(jq -er '.handoff_digest | strings | select(test("^sha256:[0-9a-f]{{64}}$"))' "$result_json")"
           handoff_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$handoff_id")"
           jq -e --argjson id "$handoff_id" --arg digest "$handoff_digest" --arg name "{handoff}" --argjson run_id "$GITHUB_RUN_ID" '
-            .id == $id and .name == $name and .expired == false and .digest == $digest and
+            .id == $id and .name == $name and .expired == false and (.expires_at | strings | fromdateiso8601 > now) and .digest == $digest and
             ((.workflow_run.id | tonumber) == $run_id)
           ' <<<"$handoff_api" >/dev/null
           handoff_archive="$RUNNER_TEMP/candidate-handoff.zip"
@@ -5298,7 +5299,7 @@ fn policy_candidate_result_verification_step() -> String {
           producer_digest="$(jq -er '.artifact_service_digest | strings | select(test("^sha256:[0-9a-f]{{64}}$"))' "$handoff_json")"
           producer_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$producer_id")"
           jq -e --argjson id "$producer_id" --arg digest "$producer_digest" --arg name "{artifact}" --argjson run_id "$(jq -er .run_id "$handoff_json")" '
-            .id == $id and .name == $name and .expired == false and .digest == $digest and
+            .id == $id and .name == $name and .expired == false and (.expires_at | strings | fromdateiso8601 > now) and .digest == $digest and
             ((.workflow_run.id | tonumber) == $run_id)
           ' <<<"$producer_api" >/dev/null
           producer_archive="$RUNNER_TEMP/candidate-producer-verified.zip"
