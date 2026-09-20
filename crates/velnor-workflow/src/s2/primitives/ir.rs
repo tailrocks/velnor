@@ -830,6 +830,17 @@ mod tests {
             producer.contains("CANDIDATE_BUILD_IMAGE_DIGEST"),
             "{producer}"
         );
+        assert!(producer.contains("path: candidate-control"), "{producer}");
+        assert!(producer.contains("path: candidate-source"), "{producer}");
+        assert!(producer.contains("CANDIDATE_BASE_SHA"), "{producer}");
+        assert!(
+            producer.contains("trusted_source=\"$GITHUB_WORKSPACE/candidate-control\""),
+            "{producer}"
+        );
+        assert!(
+            producer.contains("source=\"$GITHUB_WORKSPACE/candidate-source\""),
+            "{producer}"
+        );
         assert!(
             producer.contains("test -z \"${GITHUB_TOKEN:-}\""),
             "{producer}"
@@ -2983,22 +2994,33 @@ macro_rules! render_candidate_producer_template {
     timeout-minutes: 20
     permissions: {{}}
     steps:
-      - name: Check out pull-request head
+      - name: Check out base-owned producer control source
+        uses: {checkout}
+        with:
+          repository: ${{{{ github.repository }}}}
+          ref: ${{{{ github.event.pull_request.base.sha }}}}
+          path: candidate-control
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pull-request head source
         uses: {checkout}
         with:
           repository: ${{{{ github.event.pull_request.head.repo.full_name }}}}
           ref: ${{{{ github.event.pull_request.head.sha }}}}
+          path: candidate-source
           fetch-depth: 1
           persist-credentials: false
       - name: Build candidate generator
         id: candidate_build
         env:
           CANDIDATE_ARTIFACT_NAME: {artifact}
+          CANDIDATE_BASE_SHA: ${{{{ github.event.pull_request.base.sha }}}}
           CANDIDATE_HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
           CANDIDATE_BUILD_IMAGE_REPOSITORY: {build_image_repository}
           CANDIDATE_BUILD_IMAGE_DIGEST: "{build_image_digest}"
         run: |
           set -euo pipefail
+          if [[ ! "$CANDIDATE_BASE_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
           if [[ ! "$CANDIDATE_HEAD_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
           test "$CANDIDATE_ARTIFACT_NAME" = "{artifact}"
           test "$CANDIDATE_BUILD_IMAGE_REPOSITORY" = "{build_image_repository}"
@@ -3031,8 +3053,14 @@ macro_rules! render_candidate_producer_template {
           stage="$RUNNER_TEMP/velnor-workflow-candidate"
           rm -rf "$stage"
           mkdir -m 0700 "$stage"
-          source="$GITHUB_WORKSPACE"
+          trusted_source="$GITHUB_WORKSPACE/candidate-control"
+          source="$GITHUB_WORKSPACE/candidate-source"
+          test -d "$trusted_source"
           test -d "$source"
+          test "$(git -C "$trusted_source" rev-parse HEAD)" = "$CANDIDATE_BASE_SHA"
+          test "$(git -C "$source" rev-parse HEAD)" = "$CANDIDATE_HEAD_SHA"
+          test -z "$(find -P "$trusted_source" -type l -print -quit)"
+          test -z "$(find -P "$trusted_source" ! -type f ! -type d ! -type l -print -quit)"
           test -z "$(find -P "$source" -type l -print -quit)"
           test -z "$(find -P "$source" ! -type f ! -type d ! -type l -print -quit)"
           uid=65532; gid=65532

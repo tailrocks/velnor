@@ -351,6 +351,8 @@ impl TransportFixture {
     fn run_producer_build(&self) -> Output {
         let _ = fs::remove_dir_all(&self.run_temp);
         fs::create_dir_all(&self.run_temp).expect("run temp");
+        fs::create_dir_all(self.root.join("candidate-control")).expect("control checkout fixture");
+        fs::create_dir_all(self.root.join("candidate-source")).expect("source checkout fixture");
         let script = self.generated.producer.clone();
         // The b981 generator intentionally leaves the builder pin empty until the
         // published image is assigned. Supply only a fixture-local digest so the
@@ -373,6 +375,7 @@ impl TransportFixture {
             .env("RUNNER_ARCH", "X64")
             .env("FIXTURE_SCENARIO", &self.scenario)
             .env("CANDIDATE_ARTIFACT_NAME", &self.generated.artifact_name)
+            .env("CANDIDATE_BASE_SHA", BASE_SHA)
             .env("CANDIDATE_HEAD_SHA", HEAD_SHA)
             .env(
                 "CANDIDATE_BUILD_IMAGE_REPOSITORY",
@@ -921,7 +924,13 @@ elif command == "fetch":
     pass
 elif command == "rev-parse":
     target = rest[-1]
-    if target.startswith(os.environ["BASE_SHA"]):
+    if target == "HEAD":
+        print(
+            os.environ.get("BASE_SHA", os.environ["CANDIDATE_BASE_SHA"])
+            if any("candidate-control" in arg for arg in args)
+            else os.environ.get("HEAD_SHA", os.environ["CANDIDATE_HEAD_SHA"])
+        )
+    elif target.startswith(os.environ["BASE_SHA"]):
         print(scenario["object_base_tree"])
     else:
         print(scenario["object_head_tree"])
@@ -934,7 +943,7 @@ elif command == "show":
         sha = target
         print(scenario["object_base_tree"] if sha == os.environ["BASE_SHA"] else scenario["object_head_tree"])
 elif command == "archive":
-    if ".github" in rest:
+    if "--" in rest:
         contract = os.environ["FIXTURE_HEAD_CONTRACT"] if os.environ["HEAD_SHA"] in rest else os.environ["FIXTURE_CONTRACT"]
         payload = open(contract, "rb").read()
         with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as archive:
