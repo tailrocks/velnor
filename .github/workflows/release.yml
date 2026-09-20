@@ -4306,7 +4306,7 @@ jobs:
             | $source + {components:$components}
           ' "$source_component_contract" > product-component-contract.json
           jq -e --slurpfile source "$source_component_contract" '
-            .schema == $source[0].schema and
+            .schema == $source[0].manifest_schema and
             .product_id == $source[0].product_id and
             .channel == $source[0].channel and
             .manifest_schema == $source[0].manifest_schema and
@@ -4390,7 +4390,7 @@ jobs:
             | $source + {components:$components}
           ' "$source_component_contract" > product-component-contract.json
           jq -e --slurpfile source "$source_component_contract" '
-            .schema == $source[0].schema and
+            .schema == $source[0].manifest_schema and
             .product_id == $source[0].product_id and
             .channel == $source[0].channel and
             .manifest_schema == $source[0].manifest_schema and
@@ -4423,12 +4423,12 @@ jobs:
             component_file="native-product/components-$target.jsonl"
             artifact_file="native-product/artifacts-$target.jsonl"
             test -s "$component_file" && test -s "$artifact_file" || { echo "::error::missing rows for $target" >&2; exit 1; }
-            jq -e --arg target "$target" --slurpfile expected product-component-contract.json '
+            jq -s -e --arg target "$target" --slurpfile expected product-component-contract.json '
               (map({name,crate,binary,version,feature,identity,target}) | sort_by(.name)) ==
               ($expected[0].components | map(. + {target:$target}) | map({name,crate,binary,version,feature,identity,target}) | sort_by(.name))
               and all(.[]; (keys | sort) == ["binary","crate","feature","identity","name","target","version"])
             ' "$component_file" >/dev/null || { echo "::error::native product component rows differ from source contract for $target" >&2; exit 1; }
-            jq -e --arg target "$target" --slurpfile expected product-component-contract.json '
+            jq -s -e --arg target "$target" --slurpfile expected product-component-contract.json '
               (map(.name) | sort) == ($expected[0].components | map(.binary + "-" + $target) | sort)
               and all(.[]; .name as $name |
                 (keys | sort) == ["kind","name","sha256","size","target"] and
@@ -4446,7 +4446,7 @@ jobs:
               cp -- "$source" "product-assets/$asset"
               [ "$(sha256sum "$source" | awk '{print $1}')" = "$(jq -er '.sha256' <<<"$row")" ] || { echo "::error::native sibling digest mismatch: $asset" >&2; exit 1; }
               printf '%s\n' "$row" >> product-artifact-rows.jsonl
-            done < <(jq -c '.[]' "$artifact_file")
+            done < <(jq -c '.' "$artifact_file")
             archive="$archive_prefix-$product_version-$target.tar.gz"
             archive_kind=archive; case "$target" in *-apple-darwin) archive_kind=homebrew-archive ;; esac
             archive_dir="$(mktemp -d)"
@@ -4460,16 +4460,17 @@ jobs:
             archive_components="$(jq -S --arg target "$target" --arg release_version "$product_version" --arg source_commit "$source_commit" --argjson artifacts "$artifact_json" '[.components[] | select((.targets | index($target)) != null) | . as $component | ($artifacts[] | select(.target == $target and .kind == "binary" and .name == ($component.binary + "-" + $target))) as $artifact | {name:$component.name,crate:$component.crate,crate_version:$component.version,feature:$component.feature,identity:$component.identity,release_version:$release_version,source_commit:$source_commit,binary_sha256:$artifact.sha256}] | sort_by(.name)' product-component-contract.json)"
             jq -S -n --arg schema "$archive_manifest_schema" --argjson components "$archive_components" --arg product_id "$product_id" --arg version "$product_version" --arg source_ref "$source_ref" --arg source_commit "$source_commit" --arg release_tag "$release_tag" --arg parent_manifest_id "$PRODUCT_RELEASE_ID" '{schema:$schema,product_id:$product_id,channel:"stable",version:$version,source_repository:$ENV.GITHUB_REPOSITORY,source_ref:$source_ref,source_commit:$source_commit,release_tag:$release_tag,parent_manifest_id:$parent_manifest_id,components:$components}' > "$archive_dir/manifest.json"
             archive_path="$PWD/product-assets/$archive"
-            (cd "$archive_dir" && tar -czf "$archive_path" -- *)
+            (cd "$archive_dir" && COPYFILE_DISABLE=1 tar -czf "$archive_path" -- *)
             digest="$(sha256sum "product-assets/$archive" | awk '{print $1}')"; size="$(wc -c <"product-assets/$archive" | tr -d '[:space:]')"
             jq -cn --arg name "$archive" --arg target "$target" --arg kind "$archive_kind" --arg sha256 "$digest" --argjson size "$size" '{name:$name,target:$target,kind:$kind,sha256:$sha256,size:$size}' >> product-artifact-rows.jsonl
           done < <(jq -r '.[]' <<<"$expected_targets")
           for tuple in 'x86_64-unknown-linux-gnu amd64' 'aarch64-unknown-linux-gnu arm64'; do read -r target arch <<<"$tuple"; deb="artifacts/velnor-runner-${VERSION}-$arch.deb"; test -s "$deb" || { echo "::error::missing Linux package for $target" >&2; exit 1; }; name="$(basename "$deb")"; cp -- "$deb" "product-assets/$name"; digest="$(sha256sum "$deb" | awk '{print $1}')"; size="$(wc -c <"$deb" | tr -d '[:space:]')"; jq -cn --arg name "$name" --arg target "$target" --arg sha256 "$digest" --argjson size "$size" '{name:$name,target:$target,kind:"apt-package",sha256:$sha256,size:$size}' >> product-artifact-rows.jsonl; done
           actual_components="$(jq -s 'sort_by(.name,.target) | group_by(.name) | map(if (map({crate,version,binary,feature,identity}) | unique | length) != 1 then error("component identity differs across targets") else {name:.[0].name,crate:.[0].crate,feature:.[0].feature,identity:.[0].identity,version:.[0].version,binary:.[0].binary,targets:(map(.target) | sort)} end) | sort_by(.name)' product-component-rows.jsonl)"
-          jq -e --argjson actual "$actual_components" '($actual | map({name,crate,binary,feature,identity,version,targets}) | sort_by(.name)) == (.components | map({name,crate,binary,feature,identity,version,targets}) | sort_by(.name))' product-component-contract.json >/dev/null || { echo '::error::grouped component identity differs from source contract' >&2; exit 1; }
+          jq -e --argjson actual "$actual_components" '($actual | map({name,crate,binary,feature,identity,targets:(.targets | sort)}) | sort_by(.name)) == (.components | map({name,crate,binary,feature,identity,targets:(.targets | sort)}) | sort_by(.name))' "$contract" >/dev/null || { echo '::error::grouped component identity differs from source contract' >&2; exit 1; }
+          jq -e --argjson actual "$actual_components" '($actual | map({name,crate,binary,feature,identity,version,targets:(.targets | sort)}) | sort_by(.name)) == (.components | map({name,crate,binary,feature,identity,version,targets:(.targets | sort)}) | sort_by(.name))' product-component-contract.json >/dev/null || { echo '::error::grouped component identity differs from generated component contract' >&2; exit 1; }
           [ "$(jq -c '[.[].name] | sort' <<<"$actual_components")" = "$expected_components" ] || { echo '::error::grouped component identity differs from contract' >&2; exit 1; }
           jq -s 'sort_by([.target,.kind,.name])' product-artifact-rows.jsonl > product-artifacts.json
-          jq -S -n --arg schema "$manifest_schema" --arg product_id "$product_id" --arg version "$product_version" --arg source_ref "$source_ref" --arg source_commit "$source_commit" --arg release_tag "$release_tag" --arg release_id "$PRODUCT_RELEASE_ID" --slurpfile artifacts product-artifacts.json --argjson components "$actual_components" '{schema:$schema,product_id:$product_id,channel:"stable",version:$version,source_repository:$ENV.GITHUB_REPOSITORY,source_ref:$source_ref,source_commit:$source_commit,release_tag:$release_tag,release_id:$release_id,artifacts:$artifacts[0],components:$components}' > product-assets/product-manifest.json
+          jq -n --arg schema "$manifest_schema" --arg product_id "$product_id" --arg version "$product_version" --arg source_ref "$source_ref" --arg source_commit "$source_commit" --arg release_tag "$release_tag" --arg release_id "$PRODUCT_RELEASE_ID" --slurpfile artifacts product-artifacts.json --argjson components "$actual_components" '{schema:$schema,product_id:$product_id,channel:"stable",version:$version,source_repository:$ENV.GITHUB_REPOSITORY,source_ref:$source_ref,source_commit:$source_commit,release_tag:$release_tag,release_id:$release_id,artifacts:$artifacts[0],components:$components}' > product-assets/product-manifest.json
           jq -e --arg release_id "$PRODUCT_RELEASE_ID" --arg commit "$source_commit" --arg tag "$release_tag" --arg version "$product_version" '.release_id == $release_id and (.release_id | test("^[1-9][0-9]*$")) and .source_commit == $commit and .release_tag == $tag and .version == $version and ([.artifacts[].name] | index("product-manifest.json") | not)' product-assets/product-manifest.json >/dev/null
           manifest_sha256="$(cd product-assets && sha256sum -- product-manifest.json | awk '{print $1}')"
           printf '%s  product-manifest.json\n' "$manifest_sha256" > product-assets/product-manifest.json.sha256

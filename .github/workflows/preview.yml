@@ -974,7 +974,7 @@ jobs:
           contract="${contracts[0]}"
           for candidate in "${contracts[@]}"; do cmp -- "$contract" "$candidate" || { echo '::error::native product preview contracts disagree' >&2; exit 1; }; done
           jq -e --slurpfile source "$source_contract" '
-            .schema == $source[0].schema and
+            .schema == $source[0].manifest_schema and
             .product_id == $source[0].product_id and
             .channel == $source[0].channel and
             .manifest_schema == $source[0].manifest_schema and
