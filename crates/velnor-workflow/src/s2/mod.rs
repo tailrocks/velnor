@@ -7390,7 +7390,7 @@ fn stage_generated_file(path: &Path, content: &str) -> Result<PathBuf, Generator
         let staged = parent.join(format!(
             ".{filename}.stage-{}-{}-{attempt}",
             std::process::id(),
-            unique_suffix()
+            crate::unique_suffix()
         ));
         match fs::OpenOptions::new()
             .write(true)
@@ -7433,7 +7433,7 @@ fn reserve_backup_path(path: &Path) -> Result<(PathBuf, PathBuf), GeneratorError
         let directory = parent.join(format!(
             ".velnor-workflow-backup-{}-{}-{attempt}",
             std::process::id(),
-            unique_suffix()
+            crate::unique_suffix()
         ));
         match fs::create_dir(&directory) {
             Ok(()) => return Ok((directory.clone(), directory.join(filename))),
@@ -7476,22 +7476,6 @@ fn preimage_changed(relative: &Path) -> GeneratorError {
         "generated file changed after preflight: {}; review again",
         relative.display()
     ))
-}
-
-/// Uniqueness must never depend on clock resolution: parallel tests that
-/// start in the same instant previously collided on one temporary root and
-/// spuriously failed generation with "another generation is in progress".
-/// The atomic sequence guarantees in-process uniqueness; the process id
-/// separates concurrent test binaries; the timestamp keeps names legible.
-pub(crate) fn unique_suffix() -> u128 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    (nanos << 64)
-        | (u128::from(std::process::id()) << 32)
-        | u128::from(SEQUENCE.fetch_add(1, Ordering::Relaxed))
 }
 
 enum RepositorySource {
@@ -7804,7 +7788,7 @@ impl Checkout {
     fn clone_github(owner: &str, repository: &str) -> Result<Self, GeneratorError> {
         let mut target = env::temp_dir().join(format!(
             "velnor-workflow-{owner}-{repository}-{}",
-            unique_suffix()
+            crate::unique_suffix()
         ));
         let mut attempts = 0;
         loop {
@@ -7819,7 +7803,7 @@ impl Checkout {
                     }
                     target = env::temp_dir().join(format!(
                         "velnor-workflow-{owner}-{repository}-{}",
-                        unique_suffix()
+                        crate::unique_suffix()
                     ));
                 }
                 Err(error) => {
@@ -8070,7 +8054,10 @@ mod tests {
     }
 
     fn temporary_repository(name: &str) -> PathBuf {
-        let root = env::temp_dir().join(format!("velnor-workflow-test-{name}-{}", unique_suffix()));
+        let root = env::temp_dir().join(format!(
+            "velnor-workflow-test-{name}-{}",
+            crate::unique_suffix()
+        ));
         must(fs::create_dir_all(&root), "create test repository");
         // A Rust repository must pin its toolchain for the scan to accept it,
         // and most tests add Rust packages. The pin is inert where no Rust
@@ -8088,9 +8075,20 @@ mod tests {
     /// An empty scratch directory: for assertions that a refused write left a
     /// location untouched, which a scan-ready repository would fail.
     fn temporary_directory(name: &str) -> PathBuf {
-        let root = env::temp_dir().join(format!("velnor-workflow-test-{name}-{}", unique_suffix()));
+        let root = env::temp_dir().join(format!(
+            "velnor-workflow-test-{name}-{}",
+            crate::unique_suffix()
+        ));
         must(fs::create_dir_all(&root), "create test directory");
         root
+    }
+
+    #[test]
+    fn root_and_s2_unique_suffix_calls_are_distinct() {
+        let root_suffix = crate::unique_suffix();
+        let s2_suffix = crate::unique_suffix();
+
+        assert_ne!(root_suffix, s2_suffix);
     }
 
     #[expect(

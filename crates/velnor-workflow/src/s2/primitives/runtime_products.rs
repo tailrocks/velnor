@@ -764,7 +764,7 @@ mod tests {
     fn scanned_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-runtime-products-{name}-{}",
-            crate::s2::unique_suffix()
+            crate::unique_suffix()
         ));
         must(fs::create_dir_all(&root), "create test repository");
         must(
@@ -1726,7 +1726,7 @@ mod tests {
         for (index, (name, body)) in bodies.iter().enumerate() {
             let path = std::env::temp_dir().join(format!(
                 "velnor-workflow-producer-shell-{index}-{}",
-                crate::s2::unique_suffix()
+                crate::unique_suffix()
             ));
             must(fs::write(&path, body), "write the shell body");
             let output = must(
@@ -1764,7 +1764,7 @@ mod tests {
         ] {
             let path = std::env::temp_dir().join(format!(
                 "velnor-workflow-producer-guard-{}",
-                crate::s2::unique_suffix()
+                crate::unique_suffix()
             ));
             must(fs::write(&path, guard), "write the guard body");
             let output = must(

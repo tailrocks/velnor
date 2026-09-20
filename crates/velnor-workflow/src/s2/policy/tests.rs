@@ -33,7 +33,7 @@ fn must_fail<T, E>(result: Result<T, E>, context: &str) -> E {
 fn temporary_directory(name: &str) -> PathBuf {
     let root = env::temp_dir().join(format!(
         "velnor-workflow-policy-{name}-{}",
-        crate::s2::unique_suffix()
+        crate::unique_suffix()
     ));
     must(fs::create_dir_all(&root), "create test directory");
     root

@@ -4324,7 +4324,7 @@ mod tests {
     fn digest_fixture(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-digests-{name}-{}",
-            crate::s2::unique_suffix()
+            crate::unique_suffix()
         ));
         must(std::fs::create_dir_all(&root), "create digest fixture");
         root
