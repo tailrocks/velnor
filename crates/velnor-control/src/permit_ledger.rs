@@ -1179,10 +1179,17 @@ impl PermitLedger {
         Ok(report)
     }
 
-    /// Startup compatibility hook. Process death and one daemon's local
-    /// roots cannot prove that a peer daemon has completed teardown, so no
-    /// uncertain row is swept here. Only the owning lifecycle may release
-    /// its permit after confirmed cleanup or handoff.
+    /// Release uncertain native permits whose acquiring process is dead.
+    ///
+    /// This is the only path that deletes without an explicit release, and
+    /// it is narrow on purpose: only `uncertain` rows in the native lane
+    /// with a recorded pid for which `is_alive` returns false, and never a
+    /// holder in `protected` (the caller's in-flight set — a cleanup
+    /// failure retains its visible reservation until lifecycle
+    /// reconciliation converges it, even across restarts).
+    ///
+    /// A reused pid reads as alive and skips the sweep: the error direction
+    /// is retention, never a double-spend. Returns the swept holders.
     pub fn sweep_dead_uncertain(
         &mut self,
         is_alive: &dyn Fn(u32) -> bool,
@@ -1941,7 +1948,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_sweep_retains_uncertain_even_when_process_is_dead() {
+    fn sweep_releases_only_dead_unprotected_uncertain_natives() {
         use std::collections::BTreeSet;
         let (mut ledger, dir) = temp_ledger("sweep");
         ledger.set_max_jobs(8).unwrap();
@@ -2011,13 +2018,10 @@ mod tests {
         let protected: BTreeSet<String> = ["kept".to_string()].into_iter().collect();
         assert_eq!(
             ledger.sweep_dead_uncertain(&is_alive, &protected).unwrap(),
-            Vec::<String>::new()
+            vec!["dead".to_string()]
         );
-        assert_eq!(ledger.occupied().unwrap(), 6);
-        assert_eq!(
-            ledger.holder_state("dead").unwrap(),
-            Some(PermitState::Uncertain)
-        );
+        assert_eq!(ledger.occupied().unwrap(), 5);
+        assert!(ledger.holder_state("dead").unwrap().is_none());
 
         std::fs::remove_dir_all(dir).unwrap();
     }

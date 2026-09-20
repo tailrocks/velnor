@@ -104,22 +104,13 @@ pub fn apply_max_jobs(
     slots: usize,
 ) -> Result<(u32, bool), LedgerError> {
     let configured = ledger.max_jobs()?;
-    if let Some(n) = explicit.filter(|max| *max > 0) {
-        if configured == Some(n) {
-            return Ok((n, false));
+    match adopt_max_jobs(configured, explicit, slots) {
+        AdoptMaxJobs::Set(n) => {
+            ledger.set_max_jobs(n)?;
+            Ok((n, true))
         }
-        ledger.set_max_jobs(n)?;
-        return Ok((n, true));
+        AdoptMaxJobs::Keep(n) => Ok((n, false)),
     }
-
-    if let Some(n) = configured {
-        return Ok((n, false));
-    }
-
-    let fallback = resolve_max_jobs(None, slots);
-    let adopted = ledger.set_max_jobs_if_unset(fallback)?;
-    let effective = ledger.max_jobs()?.unwrap_or(fallback);
-    Ok((effective, adopted))
 }
 
 /// Whether a host pid names a live process. Pid reuse reads as alive: the
