@@ -329,20 +329,33 @@ jobs:
             fi
           fi
           exit $rc
+      - name: Mark BUNDLE cache-save start
+        if: always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true'
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CACHE_BUNDLE_SAVE_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
       - name: Save unit cache
+        id: unit_cache_save
         if: always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ inputs.cache_paths }}
           key: ci-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-bun-${{ hashFiles(inputs.cache_key_files) }}
-      - name: Mark cleanup end
-        if: always()
+      - name: Mark BUNDLE cache-save end
+        if: always() && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') && steps.unit_cache_save.outcome == 'success'
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
           mkdir -p "$timing_dir"
-          marker="$timing_dir/CLEANUP_ENDED"
+          marker="$timing_dir/CACHE_BUNDLE_SAVE_ENDED"
           if [[ ! -e "$marker" ]]; then
             if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
               chmod 0444 "$marker" 2>/dev/null || true
@@ -514,18 +527,6 @@ jobs:
             fi
           fi
           exit $rc
-      - name: Mark cleanup end
-        if: always()
-        run: |
-          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
-          umask 077
-          mkdir -p "$timing_dir"
-          marker="$timing_dir/CLEANUP_ENDED"
-          if [[ ! -e "$marker" ]]; then
-            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
-              chmod 0444 "$marker" 2>/dev/null || true
-            fi
-          fi
       - name: Report phase timings and cache outcomes
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes

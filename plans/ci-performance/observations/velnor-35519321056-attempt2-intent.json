@@ -1,0 +1,16 @@
+{
+  "experiment": "V-WARM-BASELINE-17318",
+  "source_sha": "17318e523e361698771ce41ec0abc5e2911bce88",
+  "run_id": 35519321056,
+  "attempt": 2,
+  "operation": "gh run rerun 35519321056 --repo tailrocks/velnor",
+  "operation_exit": 0,
+  "condition": "unchanged source/config full rerun; cache layer warmth to be established from logs",
+  "purpose": "estimate repeated-input baseline variability before candidate acceptance",
+  "sample_credit": "repetition within experiment; not a substantive iteration",
+  "comparison_caveats": [
+    "PR now merged; cache visibility/content may differ from original attempt",
+    "runner hardware/image and cache outcomes must be verified",
+    "no source-edit or dependency-edit claim"
+  ]
+}

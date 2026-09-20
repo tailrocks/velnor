@@ -23,6 +23,7 @@ use crate::{
     GeneratorError, ProjectConfig, ReleaseJobSpec, ReleaseSpec, RunnerMode, Unit, UnitKind,
     GENERATED_HEADER, VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
 };
+use crate::rust_validation::{RustPhase, RustProvider, RustScope};
 
 /// The release-side file families and the canonical file each one renders.
 /// Every entry the generated surface owns gets a default row, unless the
@@ -3433,12 +3434,39 @@ fn render_release_unit_job(
         skip_when_offline_ready,
     );
     let cargo_offline = checks_env(unit);
-    let _ = writeln!(
-        output,
-        "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
-        yaml_scalar(&unit.id),
+    let validation_env = format!(
+        "        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n",
         yaml_scalar(&unit.id)
     );
+    let rust_provider = match lane {
+        RunnerMode::Github => RustProvider::Github,
+        RunnerMode::Velnor => RustProvider::Velnor,
+        RunnerMode::Both => unreachable!("release unit job has one lane"),
+    };
+    let rust_phases = (unit.kind == UnitKind::Rust).then(|| {
+        super::ir::rust_validation_phases(unit, rust_provider, &[RustScope::Full])
+    });
+    let rendered_typed = rust_phases.flatten().is_some_and(|phases| {
+        if phases.is_empty() {
+            return false;
+        }
+        for phase in phases {
+            let run = format!(
+                "velnor-workflow run --config .github/ci/project.toml --phase {} --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\"",
+                phase.slug()
+            );
+            super::ir::append_rust_phase_step(output, phase, None, &validation_env, &run);
+        }
+        true
+    });
+    if !rendered_typed {
+        let _ = writeln!(
+            output,
+            "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
+            yaml_scalar(&unit.id),
+            yaml_scalar(&unit.id)
+        );
+    }
     id
 }
 
@@ -5698,6 +5726,7 @@ cp "$record" "$out"
             github_full_commands: None,
             velnor_pr_commands: None,
             velnor_full_commands: None,
+            rust_validation: None,
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,

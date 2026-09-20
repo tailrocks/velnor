@@ -1930,6 +1930,51 @@ mod tests {
         );
         Ok(())
     }
+    #[test]
+    fn package_root_watch_covers_opaque_renames_deletes_and_product_edges(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched("rust-base", &["crates/base/**"], &[]),
+            watched("bun-app", &["packages/app/**"], &["rust-base"]),
+            watched("rust-consumer", &["crates/consumer/**"], &["bun-app"]),
+            watched("bun-sibling", &["packages/sibling/**"], &["rust-base"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[renamed(
+                "packages/app/assets/old.snapshot",
+                "packages/app/config/build.graphql",
+            )],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert_eq!(
+            selection.full_units,
+            BTreeSet::from(["bun-app".to_owned(), "rust-consumer".to_owned()]),
+            "an opaque package rename selects the producer and its product consumer"
+        );
+        assert_eq!(
+            selection.required,
+            BTreeSet::from([
+                "rust-base".to_owned(),
+                "bun-app".to_owned(),
+                "rust-consumer".to_owned(),
+            ]),
+            "the producer's prerequisite is required without selecting an independent sibling"
+        );
+        let deletion = select_affected(
+            &units,
+            &[change(
+                "packages/app/config/removed.unknown",
+                ChangeKind::Deleted,
+            )],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert_eq!(
+            deletion.required, selection.required,
+            "deleting an opaque package input keeps the same product closure"
+        );
+        Ok(())
+    }
 
     #[test]
     fn selection_fails_closed_on_duplicate_ids_and_bad_globs() {

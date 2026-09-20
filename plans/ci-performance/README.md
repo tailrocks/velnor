@@ -24,6 +24,8 @@ observations are retained below; they are not matched performance treatments.
 | `27bfb54b` | 35511815559 | 559s | 1,359s | 525s | 184s |
 | `32733948` | 35513481769 | 546s | 1,324s | 518s | 170s |
 | `2da37b63` | 35517547611 | 539s | 1,320s | 475s | 186s |
+| `17318e52` | 35519321056 / 1 | 568s | 1,263s | 520s | 178s |
+| `17318e52` | 35519321056 / 2 | 543s | 1,338s | 514s | 169s |
 
 Each observation includes 68 job records: 20 executed and 48 skipped.
 Generator coverage increased from 1,947 to 1,955 passing tests; runner coverage
@@ -34,6 +36,15 @@ Raw timestamps, compressed logs, collector JSONL/CSV and summaries are in
 Runner jobs remain the longest observed component. These differing revisions,
 uncontrolled hardware/contention and small samples support no speedup or
 plateau claim. Substantive optimization iteration credit remains zero.
+
+The unchanged `17318e52` full rerun passed with 20 executed and 48 skipped jobs.
+Attempt 2 has separate raw attempt metadata, job timestamps, logs and normalized
+outputs; attempt 1 is retained. These two observations are not a noise estimate
+sufficient for a speedup claim. The PR was merged between attempts, cache
+contents may differ, and new telemetry correctness CI overlapped the latter part
+of attempt 2. Runner reports still show 1,879/1,807 operations not looked up and
+131 bypasses; there were no recorded crate downloads. Schema 2 phase categories
+remain historical evidence and must not be treated as schema 4 measurements.
 
 ## Current integration checkpoint
 
@@ -56,11 +67,68 @@ the final control job completed at 545s. Policy executed for 258s separately.
 The runner remains longest, with 1,879/1,807 MBX operations not looked up and
 131 bypasses in each check/test report. Successful CI does not prove reuse.
 
-Current ownership: parent integrates Parallax and preserves exact-head CI;
-Jackin agent repairs telemetry partial-order validation; Velnor agent repairs
-typed Rust component identity, then Parallax product file-type validation;
-Parallax agent resolves MBX cache authority and namespace design. Candidates
-remain isolated until independent findings and deterministic checks pass.
+PR #968 was merged as `845d4740`; its remote campaign branch was deleted.
+The merge tree is byte-identical to `17318e52`. Further work uses one successor
+branch, `codex/ci-performance-next`, based on that merge.
+
+Current ownership: parent integrates reviewed code and retains exact-head CI;
+Jackin agent implements the same-repository PR cache writer; Velnor agent
+prepares Parallax's directory-transport runtime upgrade; Parallax agent reviews
+complete package input selection. Typed Rust ownership and the portable
+telemetry clock have passed independent review.
+
+Parallax UI guard/input selection is published as `43d18415` in PR #118, based
+on current main `e28a88ec`. It retains runtime `048a7bda`, GitHub-only execution,
+scan exclusions and declared UI prerequisites. Policy run `35521049485` passed.
+PR run `35521049612` failed its CLI job before checks: MBX 1.11.1 exceeded quota
+while importing a 1,347,231,023-byte compressed cache. This attempt is retained;
+local validation does not replace successful full CI. Isolated Rust consumers
+still build their own UI products, so no build-once or speedup claim is made.
+Upstream #117 cache safeguards were integrated and pushed as `60cf651b`,
+retaining the UI guard, whole-package watch and both sets of contract assertions.
+The structural runtime transport upgrade remains a separate candidate.
+
+## September 20 follow-up checkpoint
+
+Parallax `60cf651b` passed PR [35522592113](https://github.com/tailrocks/parallax/actions/runs/35522592113)
+and policy [35522590702](https://github.com/tailrocks/parallax/actions/runs/35522590702).
+Its required result completed 841 seconds after trigger; aggregate execution
+was 2,028 seconds. Server took 787 seconds, CLI 201 seconds, UI 111 seconds.
+The provisional 10× targets are 84.1 seconds end-to-required, 78.7 seconds
+server and 20.1 seconds CLI. One observation is not a baseline distribution.
+Server reported zero MBX hits, 1,654/1,569 operations not looked up and
+128/126 bypasses despite a prefix archive restore. Compatible compiler reuse
+remains unproven. The original failed quota attempt remains in the ledger.
+
+Velnor telemetry commit `de6e1811` passed PR
+[35522199636](https://github.com/tailrocks/velnor/actions/runs/35522199636)
+and policy [35522199497](https://github.com/tailrocks/velnor/actions/runs/35522199497).
+Required-result latency was 593 seconds; aggregate execution 1,367 seconds.
+Runner took 542 seconds; generator 180 seconds. Corresponding provisional
+10× targets are 59.3, 54.2 and 18 seconds. Generator schema 4 measured candidate
+preparation/publication as 3/7 seconds; post-job cache cost remains explicitly
+unobserved. Raw timestamps, normalized rows and compressed logs are retained.
+No speedup comparison is valid across these differing revisions and cache states.
+
+Upstream runner changes from `97bac4c` were integrated without modifying their
+source as `3fb38643`. All 2,997 core tests passed, with five existing skips
+and one checkout-process leak report. Policy passed; its PR run was cancelled
+when the next candidate was pushed. The preceding `49b8e560` policy run was
+also cancelled; no successful exact-head PR run exists for that revision.
+Retain these attempts rather than substituting adjacent successes.
+
+Typed Mise/Rust ownership is committed as `4f70cf74` after independent review,
+1,988 tests and strict Clippy; one APT-process leak report remains investigated.
+Complete package-input selection is committed as `c107796` after independent
+review, 1,991 tests and strict Clippy. It broadens correctness coverage for
+root packages and does not itself establish a performance improvement.
+
+Current ownership: parent integrates, commits, pushes and collects exact-head
+evidence; Jackin agent reviews Parallax runtime transport then prepares Jackin
+consumer migration; Parallax agent reviews the same-repository PR cache writer;
+Velnor agent implements reviewed environment partitions and diagnoses leaked
+processes. Consumers and runtime candidates depend on reviewed generator source.
+Substantive iteration and plateau credit remain zero.
 
 ## Completion contract
 

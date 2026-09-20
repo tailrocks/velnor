@@ -18,6 +18,7 @@ use super::{
     MUTABLE_MOUNT_HOST_DIR,
 };
 use crate::reuse::REQUIRED_CHECK;
+use crate::rust_validation::{RustPhase, RustProvider, RustScope};
 use crate::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
     hosted_cargo_bin_toolchain_save, hosted_cargo_bin_toolchain_verify, hosted_mold_setup,
@@ -168,6 +169,7 @@ mod tests {
             github_full_commands: None,
             velnor_pr_commands: None,
             velnor_full_commands: None,
+            rust_validation: None,
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
@@ -1108,18 +1110,15 @@ mod tests {
             "report step renders",
         );
         let candidate = &hosted[start..end];
-        assert_eq!(
-            hosted
-                .matches(
-                    "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}"
-                )
-                .count(),
-            1,
+        assert!(
+            hosted.contains(
+                "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}"
+            ),
             "the prepare step carries the input gate merged with the pull-request same-repo gate: {hosted}"
         );
         assert!(
             hosted.contains(
-                "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true') }}"
+                "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate.outcome == 'success') }}"
             ),
             "the publish step additionally gates on the prepare step's skip output: {hosted}"
         );
@@ -1305,15 +1304,15 @@ mod tests {
             solo_content
                 .matches("if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository\n")
                 .count(),
-            1,
-            "the prepare step keeps the bare pull-request same-repo gate: {solo_content}"
+            3,
+            "phase start and prepare keep the bare pull-request same-repo gate: {solo_content}"
         );
         assert_eq!(
             solo_content
-                .matches("if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'\n")
+                .matches("if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate.outcome == 'success'\n")
                 .count(),
-            1,
-            "the publish step adds the skip gate: {solo_content}"
+            2,
+            "phase start and publish add the skip gate: {solo_content}"
         );
         assert!(
             !solo_content.contains("inputs.candidate_publish &&"),
@@ -1331,8 +1330,31 @@ mod tests {
             "the prepare gate is the pull-request same-repo gate: {steps}"
         );
         assert!(
-            steps.contains("      - name: Publish candidate generator product\n        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'\n"),
+            steps.contains("      - name: Publish candidate generator product\n        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate.outcome == 'success'\n"),
             "the publish gate adds the skip output: {steps}"
+        );
+        for marker in [
+            "Mark candidate preparation start",
+            "Mark candidate preparation end",
+            "Mark candidate publication start",
+            "Mark candidate publication end",
+        ] {
+            assert!(
+                steps.contains(marker),
+                "candidate phase marker missing: {marker}: {steps}"
+            );
+        }
+        assert!(steps.contains("id: candidate_publication"));
+        assert!(steps.contains(
+            "Mark candidate preparation end\n        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outcome == 'success'",
+        ));
+        assert!(steps.contains(
+            "Mark candidate publication end\n        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate_publication.outcome == 'success'",
+        ));
+        assert!(
+            !steps.contains("Mark candidate preparation start\n        if: always()")
+                && !steps.contains("Mark candidate publication start\n        if: always()"),
+            "failed checks cannot start candidate timing markers: {steps}"
         );
     }
 
@@ -1626,11 +1648,54 @@ fn render_epoch_marker_commands(epoch_key: &str, indent: &str) -> String {
 }
 
 /// Append one immutable file marker step for CI phase timing.
-fn render_phase_epoch_marker(output: &mut String, epoch_key: &str, step_name: &str) {
+fn render_phase_epoch_marker_if(
+    output: &mut String,
+    epoch_key: &str,
+    step_name: &str,
+    condition: &str,
+) {
     let marker = render_epoch_marker_commands(epoch_key, "          ");
     let _ = writeln!(
         output,
-        "      - name: {step_name}\n        if: always()\n        run: |\n{marker}"
+        "      - name: {step_name}\n        if: {condition}\n        run: |\n{marker}"
+    );
+}
+
+fn render_phase_epoch_marker(output: &mut String, epoch_key: &str, step_name: &str) {
+    render_phase_epoch_marker_if(output, epoch_key, step_name, "always()");
+}
+
+fn render_phase_epoch_marker_text(epoch_key: &str, step_name: &str, condition: &str) -> String {
+    let mut output = String::new();
+    render_phase_epoch_marker_if(&mut output, epoch_key, step_name, condition);
+    output
+}
+
+fn cache_save_completion_gate(save_gate: &str, step_id: &str) -> String {
+    format!("always() && ({save_gate}) && steps.{step_id}.outcome == 'success'")
+}
+
+fn render_cache_save_start_marker(output: &mut String, kind: &str, save_gate: &str) {
+    render_phase_epoch_marker_if(
+        output,
+        &format!("CACHE_{kind}_SAVE_STARTED"),
+        &format!("Mark {kind} cache-save start"),
+        save_gate,
+    );
+}
+
+fn render_cache_save_end_marker(
+    output: &mut String,
+    kind: &str,
+    save_gate: &str,
+    save_step_id: &str,
+) {
+    let completion_gate = cache_save_completion_gate(save_gate, save_step_id);
+    render_phase_epoch_marker_if(
+        output,
+        &format!("CACHE_{kind}_SAVE_ENDED"),
+        &format!("Mark {kind} cache-save end"),
+        &completion_gate,
     );
 }
 
@@ -1657,10 +1722,6 @@ pub(crate) fn render_ci_cache_prep_end_marker(output: &mut String) {
 
 pub(crate) fn render_ci_cargo_fetch_end_marker(output: &mut String) {
     render_phase_epoch_marker(output, "CARGO_FETCH_ENDED", "Mark cargo fetch end");
-}
-
-pub(crate) fn render_ci_cleanup_end_marker(output: &mut String) {
-    render_phase_epoch_marker(output, "CLEANUP_ENDED", "Mark cleanup end");
 }
 
 /// Emit the post-checks report step shared by both render paths.
@@ -2039,6 +2100,128 @@ fn unit_commands(unit: &Unit) -> impl Iterator<Item = &String> {
         .chain(unit.velnor_full_commands.iter().flatten())
 }
 
+/// The phases a statically selected unit can run for the supplied provider
+/// and runtime scopes. Scope is dynamic in reusable workflows, so callers
+/// pass both sets and the renderer emits their canonical union.
+pub(crate) fn rust_validation_phases(
+    unit: &Unit,
+    provider: RustProvider,
+    scopes: &[RustScope],
+) -> Option<Vec<RustPhase>> {
+    let validation = unit.rust_validation.as_ref()?;
+    Some(
+        RustPhase::ORDER
+            .into_iter()
+            .filter(|phase| {
+                scopes
+                    .iter()
+                    .any(|scope| validation.set(provider, *scope).has_phase(*phase))
+            })
+            .collect(),
+    )
+}
+
+fn rust_provider_for_lane(lane: RunnerMode) -> RustProvider {
+    match lane {
+        RunnerMode::Github => RustProvider::Github,
+        RunnerMode::Velnor => RustProvider::Velnor,
+        RunnerMode::Both => unreachable!("rendered Rust job always has one lane"),
+    }
+}
+
+fn rust_validation_phases_for_members(
+    members: &[&Unit],
+    provider: RustProvider,
+    scopes: &[RustScope],
+) -> Option<Vec<RustPhase>> {
+    if members
+        .iter()
+        .any(|unit| unit.rust_validation.is_none())
+    {
+        return None;
+    }
+    Some(
+        RustPhase::ORDER
+            .into_iter()
+            .filter(|phase| {
+                members.iter().any(|unit| {
+                    let validation = unit
+                        .rust_validation
+                        .as_ref()
+                        .expect("all collapsed Rust members have validation contracts");
+                    scopes
+                        .iter()
+                        .any(|scope| validation.set(provider, *scope).has_phase(*phase))
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Append one named Rust phase step. Release verification uses a direct
+/// command; normal CI supplies a shell block with logging and timing markers.
+pub(crate) fn append_rust_phase_step(
+    output: &mut String,
+    phase: RustPhase,
+    id: Option<&str>,
+    env: &str,
+    run: &str,
+) {
+    let _ = writeln!(output, "      - name: {}", phase.step_name());
+    if let Some(id) = id {
+        let _ = writeln!(output, "        id: {id}");
+    }
+    if !env.is_empty() {
+        output.push_str(env);
+        if !env.ends_with('\n') {
+            output.push('\n');
+        }
+    }
+    let _ = writeln!(output, "        run: {run}");
+}
+
+/// Render ordered phase commands in the ordinary CI check sequence. Each
+/// command remains its own GitHub step, whose default success condition makes
+/// later phases depend on earlier ones. The final marker runs after failures.
+fn render_rust_validation_check_steps(
+    output: &mut String,
+    phases: &[RustPhase],
+    env: &str,
+    offline_prelude: &str,
+) -> bool {
+    if phases.is_empty() {
+        return false;
+    }
+    let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
+    for (index, phase) in phases.iter().enumerate() {
+        let mut run = String::from("|\n          set -o pipefail\n");
+        if index == 0 {
+            run.push_str("          : > \"$RUNNER_TEMP/velnor-unit-log.txt\"\n");
+            run.push_str(&checks_started_marker);
+        }
+        run.push_str(offline_prelude);
+        let _ = writeln!(
+            run,
+            "          rc=0\n          velnor-workflow run --config .github/ci/project.toml --phase {} --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee -a \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          exit $rc",
+            phase.slug(),
+        );
+        append_rust_phase_step(
+            output,
+            *phase,
+            (index == 0).then_some("rust_validation_start"),
+            env,
+            &run,
+        );
+    }
+
+    let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
+    let _ = writeln!(
+        output,
+        "      - name: Mark unit checks end\n        if: always() && steps.rust_validation_start.outcome != 'skipped'\n        run: |\n{checks_ended_marker}"
+    );
+    true
+}
+
 /// Whether the unit runs the generator's own regeneration gate
 /// (`--plain --check`), whose D19 guard needs the pinned policy binary while
 /// the checks run with the network restricted.
@@ -2087,9 +2270,38 @@ fn unit_owns_workflow_crate(unit: &Unit) -> bool {
 /// and the publish step additionally gates on the prepare step's `skip`
 /// output, so the collapsed renderer can add the per-unit input gate without
 /// touching them.
+fn candidate_phase_marker_text() -> (String, String, String, String) {
+    let event_gate =
+        "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository";
+    (
+        render_phase_epoch_marker_text(
+            "CANDIDATE_PREPARATION_STARTED",
+            "Mark candidate preparation start",
+            event_gate,
+        ),
+        render_phase_epoch_marker_text(
+            "CANDIDATE_PREPARATION_ENDED",
+            "Mark candidate preparation end",
+            "always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outcome == 'success'",
+        ),
+        render_phase_epoch_marker_text(
+            "CANDIDATE_PUBLICATION_STARTED",
+            "Mark candidate publication start",
+            "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate.outcome == 'success'",
+        ),
+        render_phase_epoch_marker_text(
+            "CANDIDATE_PUBLICATION_ENDED",
+            "Mark candidate publication end",
+            "always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate_publication.outcome == 'success'",
+        ),
+    )
+}
+
 fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
+    let (preparation_start, preparation_end, publication_start, publication_end) =
+        candidate_phase_marker_text();
     format!(
-        r#"      - name: Prepare candidate generator product
+        r#"{preparation_start}      - name: Prepare candidate generator product
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         id: candidate
         env:
@@ -2157,25 +2369,33 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
             trap - EXIT
           fi
           echo "name=velnor-workflow-candidate-${{head_closure:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}" >> "$GITHUB_OUTPUT"
-      - name: Publish candidate generator product
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'
+{preparation_end}{publication_start}      - name: Publish candidate generator product
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate.outcome == 'success'
+        id: candidate_publication
         uses: {upload_artifact_pin}
         with:
           name: ${{{{ steps.candidate.outputs.name }}}}
           path: ${{{{ runner.temp }}}}/velnor-workflow-candidate
           if-no-files-found: error
           retention-days: 1
-"#,
+{publication_end}"#,
     )
 }
 
-/// Whether any of the unit's commands drive the test runner through Cargo or
-/// Mr. Boxington. One predicate feeds both the `ToolRequirement` selection and
-/// the mise install list, so the two can never disagree about what a unit
-/// needs.
+/// Whether the unit's typed validation contract selects Nextest in any
+/// provider/scope. One predicate feeds both tool-requirement and mise setup;
+/// command spelling never changes runner installation.
 pub(crate) fn needs_nextest(unit: &Unit) -> bool {
-    unit_commands(unit)
-        .any(|command| command.contains("cargo nextest") || command.contains("mbx nextest"))
+    let Some(validation) = &unit.rust_validation else {
+        return false;
+    };
+    [RustProvider::Github, RustProvider::Velnor]
+        .into_iter()
+        .any(|provider| {
+            [RustScope::Affected, RustScope::Full]
+                .into_iter()
+                .any(|scope| validation.set(provider, scope).nextest_required())
+        })
 }
 
 /// The two spellings a lock may pin the nextest runner under. Locks mix bare
@@ -2825,12 +3045,14 @@ fn render_seed_collection_steps(
         MUTABLE_MOUNT_SEED_FILES[MUTABLE_MOUNT_SEED_FILES.len() - 1]
     );
     if let Some((paths, key)) = save {
+        let save_gate = dependency_bundle_cache_save_if(&ir.default_branch);
+        render_cache_save_start_marker(output, "SEED", &save_gate);
         let _ = writeln!(
             output,
-            "      - name: Save Docker build seed\n        if: {}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {key}",
-            dependency_bundle_cache_save_if(&ir.default_branch),
+            "      - name: Save Docker build seed\n        id: docker_seed_cache_save\n        if: {save_gate}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {key}",
             ir.pins.cache_save
         );
+        render_cache_save_end_marker(output, "SEED", &save_gate, "docker_seed_cache_save");
     }
 }
 
@@ -5246,13 +5468,30 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
 
         // Verification. No pin-fetch step: the tool fetches the declared pin
         // itself before closure verification, so no lane needs its own.
-        let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
-        let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
         let token_env = docker_build_token_env_for_members(lane, members);
-        let _ = writeln!(
-            output,
-            "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
+        let checks_step_env = format!(
+            "        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n"
         );
+        let rust_phases = if kind == UnitKind::Rust {
+            rust_validation_phases_for_members(
+                members,
+                rust_provider_for_lane(lane),
+                &[RustScope::Affected, RustScope::Full],
+            )
+        } else {
+            None
+        };
+        let rendered_typed = rust_phases.as_deref().is_some_and(|phases| {
+            render_rust_validation_check_steps(output, phases, &checks_step_env, "")
+        });
+        if !rendered_typed {
+            let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
+            let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
+            let _ = writeln!(
+                output,
+                "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
+            );
+        }
 
         // Stage-1 candidate packaging, after the checks that build the
         // binary it reuses: only the hosted job of the generator crate's
@@ -5260,14 +5499,29 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // that event gate themselves), and only on success (no `always()`).
         let candidate = FeatureCoverage::over(&facts, |facts| facts.candidate_publish);
         if github_lane && candidate.any {
-            output.push_str(&gated(
-                candidate_publish_steps(self.pins.upload_artifact),
-                candidate,
-                lane_input::CANDIDATE_PUBLISH,
-            ));
+            let mut block = String::new();
+            let candidate_event_gate =
+                "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository";
+            let candidate_event_complete_gate =
+                "always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate_publication.outcome == 'success'";
+            render_phase_epoch_marker_if(
+                &mut block,
+                "CANDIDATE_STARTED",
+                "Mark candidate phase start",
+                candidate_event_gate,
+            );
+            block.push_str(&candidate_publish_steps(self.pins.upload_artifact));
+            render_phase_epoch_marker_if(
+                &mut block,
+                "CANDIDATE_ENDED",
+                "Mark candidate phase end",
+                candidate_event_complete_gate,
+            );
+            output.push_str(&gated(block, candidate, lane_input::CANDIDATE_PUBLISH));
         }
 
         // Cache collection.
+        let cache_save_bundle = cache_save && github_lane && bundle.any;
         if seed.any {
             let mut block = String::new();
             render_mutable_mount_seed_collection_from_input(
@@ -5278,22 +5532,23 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             );
             output.push_str(&gated(block, seed, lane_input::SEED_COMPAT));
         }
-        if cache_save && github_lane && bundle.any {
+        if cache_save_bundle {
             let (cache_key, _) = format_cargo_bundle_cache_key(
                 kind.id_prefix(),
                 &format!("inputs.{}", lane_input::CACHE_KEY_FILES),
             );
             let mut block = String::new();
+            let save_gate = dependency_bundle_cache_save_if(&self.default_branch);
+            render_cache_save_start_marker(&mut block, "BUNDLE", &save_gate);
             let _ = writeln!(
                 block,
-                "      - name: Save unit cache\n        if: {}\n        uses: {}\n        with:\n          path: |\n            {}\n          key: {cache_key}",
-                dependency_bundle_cache_save_if(&self.default_branch),
+                "      - name: Save unit cache\n        id: unit_cache_save\n        if: {save_gate}\n        uses: {}\n        with:\n          path: |\n            {}\n          key: {cache_key}",
                 self.pins.cache_save,
                 lane_input::expression(lane_input::CACHE_PATHS),
             );
+            render_cache_save_end_marker(&mut block, "BUNDLE", &save_gate, "unit_cache_save");
             output.push_str(&gated(block, bundle, lane_input::CACHE_KEY_FILES));
         }
-        render_ci_cleanup_end_marker(output);
         let report = members
             .iter()
             .map(|unit| CacheReportFacts::for_unit(lane, unit, self))
@@ -5624,14 +5879,38 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         } else {
             String::new()
         };
-        let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
-        let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
-        let _ = writeln!(
-            output,
-            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {unit_id_value}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}{token_env}\n        run: |\n          set -o pipefail\n{offline_prelude}{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
-            yaml_scalar(&unit.label),
+        let checks_step_env = format!(
+            "        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {unit_id_value}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}{token_env}\n",
             checks_env,
         );
+        let rust_phases = if unit.kind == UnitKind::Rust {
+            let scopes = [RustScope::Affected, RustScope::Full];
+            if runtime_unit_id {
+                rust_validation_phases_for_members(members, rust_provider_for_lane(lane), &scopes)
+            } else {
+                rust_validation_phases(unit, rust_provider_for_lane(lane), &scopes)
+            }
+        } else {
+            None
+        };
+        let rendered_typed = rust_phases.as_deref().is_some_and(|phases| {
+            render_rust_validation_check_steps(
+                output,
+                phases,
+                &checks_step_env,
+                &offline_prelude,
+            )
+        });
+        if !rendered_typed {
+            let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
+            let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
+            let _ = writeln!(
+                output,
+                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {unit_id_value}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}{token_env}\n        run: |\n          set -o pipefail\n{offline_prelude}{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
+                yaml_scalar(&unit.label),
+                checks_env,
+            );
+        }
         if seed && lane == RunnerMode::Github {
             render_mutable_mount_seed_collection(output, self, unit, cache_save);
         } else if cache_save
@@ -5643,15 +5922,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             let id_segment = unit.kind.id_prefix();
             let hash = cargo_source_cache_hash_expression(unit);
             let (cache_key, _) = format_cargo_bundle_cache_key(id_segment, &hash);
+            let save_gate = dependency_bundle_cache_save_if(&self.default_branch);
+            render_cache_save_start_marker(output, "BUNDLE", &save_gate);
             let _ = writeln!(
                 output,
-                "      - name: Save {} cache\n        if: {}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}",
+                "      - name: Save {} cache\n        id: unit_cache_save\n        if: {save_gate}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}",
                 yaml_scalar(&unit.label),
-                dependency_bundle_cache_save_if(&self.default_branch),
                 self.pins.cache_save
             );
+            render_cache_save_end_marker(output, "BUNDLE", &save_gate, "unit_cache_save");
         }
-        render_ci_cleanup_end_marker(output);
         render_phase_report_step(
             output,
             &self.ci_report_action_uses(),
@@ -6219,19 +6499,39 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             );
             render_ci_cargo_fetch_end_marker(output);
             let base_sha = self.base_sha_expression();
-            let checks_started_marker =
-                render_epoch_marker_commands("CHECKS_STARTED", "          ");
-            let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
             let token_env = docker_build_token_env_for_members(lane, &[unit]);
-            let _ = writeln!(
-                output,
-                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ {} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
-                verify_name,
+            let checks_step_env = format!(
+                "        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ {} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}{token_env}\n",
                 yaml_scalar(&unit.id),
                 base_sha,
                 checks_env(unit),
-                yaml_scalar(&unit.id),
             );
+            let rust_phases = if unit.kind == UnitKind::Rust {
+                rust_validation_phases(
+                    unit,
+                    rust_provider_for_lane(lane),
+                    &[RustScope::Affected, RustScope::Full],
+                )
+            } else {
+                None
+            };
+            let rendered_typed = rust_phases.as_deref().is_some_and(|phases| {
+                render_rust_validation_check_steps(output, phases, &checks_step_env, "")
+            });
+            if !rendered_typed {
+                let checks_started_marker =
+                    render_epoch_marker_commands("CHECKS_STARTED", "          ");
+                let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
+                let _ = writeln!(
+                    output,
+                    "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ {} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
+                    verify_name,
+                    yaml_scalar(&unit.id),
+                    base_sha,
+                    checks_env(unit),
+                    yaml_scalar(&unit.id),
+                );
+            }
             if cache_save
                 && lane == RunnerMode::Github
                 && CacheBackend::Detected.lane_enables_actions_cache(lane, self, unit)
@@ -6245,15 +6545,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 };
                 let hash = cargo_source_cache_hash_expression(unit);
                 let (cache_key, _) = format_cargo_bundle_cache_key(id_segment, &hash);
+                let save_gate = dependency_bundle_cache_save_if(&self.default_branch);
+                render_cache_save_start_marker(output, "BUNDLE", &save_gate);
                 let _ = writeln!(
-                    output,
-                    "      - name: Save {} cache\n        if: {}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}",
-                    verify_name,
-                    dependency_bundle_cache_save_if(&self.default_branch),
-                    self.pins.cache_save,
-                );
+                        output,
+                        "      - name: Save {} cache\n        id: unit_cache_save\n        if: {save_gate}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}",
+                        verify_name,
+                        self.pins.cache_save,
+                    );
+                render_cache_save_end_marker(output, "BUNDLE", &save_gate, "unit_cache_save");
             }
-            render_ci_cleanup_end_marker(output);
             render_phase_report_step(
                 output,
                 &self.ci_report_action_uses(),

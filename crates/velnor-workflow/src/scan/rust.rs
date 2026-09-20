@@ -13,6 +13,10 @@ use crate::{
     identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec,
     GeneratorError, RustToolchain, Unit, UnitKind,
 };
+use crate::rust_validation::{
+    RustCommandMatrix, RustPhase, RustPhaseCommand, RustPhaseSet, RustTestRunner,
+    RustValidationContract, RustWorkload,
+};
 
 /// The scanner's Rust dependency-policy unit. Its commands resolve the
 /// advisory databases themselves, so the Cargo-network restrictions applied to
@@ -226,6 +230,10 @@ pub(crate) struct CargoManifestFacts {
     pub(crate) root: String,
     pub(crate) has_package: bool,
     pub(crate) package_name: Option<String>,
+    pub(crate) auto_lib: bool,
+    pub(crate) has_explicit_lib: bool,
+    pub(crate) lib_target_path: Option<String>,
+    pub(crate) lib_doctest: bool,
     pub(crate) has_workspace: bool,
     pub(crate) workspace_members: Vec<String>,
     pub(crate) workspace_excludes: Vec<String>,
@@ -452,32 +460,28 @@ fn analyze_rust_manifests(
         } else {
             ""
         };
-        let test_command = if has_nextest {
-            // Crates without any test target must still verify green: without
-            // the flag nextest exits nonzero on an empty collection, failing
-            // test-less crates that fmt and clippy accept.
-            format!(
-                "{command_prefix}cargo nextest run {cargo_lock_flag} --all-features {package_selector} --no-tests pass"
-            )
+        let test_runner = if has_nextest {
+            RustTestRunner::Nextest
         } else {
-            format!(
-                "{command_prefix}cargo test {cargo_lock_flag} --all-features {package_selector}"
-            )
+            RustTestRunner::CargoTest
         };
-        let clippy_command = format!(
-            "{command_prefix}cargo clippy {cargo_lock_flag} --profile test --no-deps --all-targets --all-features {package_selector} -- -D warnings"
+        // Crates without test targets still verify green: Nextest receives
+        // `--no-tests pass`, while Cargo test accepts an empty target set.
+        // Both schema scanners use this shared constructor so flags cannot
+        // drift between runtime contracts.
+        let phase_set = RustPhaseSet::crate_validation(
+            &command_prefix,
+            &shell_quote("Cargo.toml"),
+            cargo_lock_flag,
+            &package_selector,
+            test_runner,
+            has_doctestable_library(manifest, file_set),
         );
-        // Clippy before tests: report lint failures before compiling and
-        // running the test targets. Keep every command and its exact flags;
-        // the test command still covers test-less crates through `--no-tests`.
-        let commands = vec![
-            format!(
-                "{command_prefix}cargo fmt --manifest-path {} -- --check",
-                shell_quote("Cargo.toml")
-            ),
-            clippy_command,
-            test_command,
-        ];
+        let commands = phase_set.flattened();
+        let rust_validation = Some(RustValidationContract::new(RustCommandMatrix {
+            affected: phase_set.clone(),
+            full: phase_set,
+        }));
         let mut watch = vec![
             manifest_path.clone(),
             "Cargo.lock".to_owned(),
@@ -594,6 +598,7 @@ fn analyze_rust_manifests(
             github_full_commands: None,
             velnor_pr_commands: None,
             velnor_full_commands: None,
+            rust_validation,
             depends_on: Vec::new(),
             pinned_lockfile: file_set.contains("Cargo.lock"),
             cache: Some(CacheSpec {
@@ -654,6 +659,32 @@ fn analyze_rust_manifests(
             github_full_commands: None,
             velnor_pr_commands: None,
             velnor_full_commands: None,
+            rust_validation: Some(RustValidationContract::new(RustCommandMatrix {
+                affected: RustPhaseSet::new(
+                    RustWorkload::DependencyPolicy,
+                    None,
+                    commands
+                        .iter()
+                        .cloned()
+                        .map(|command| RustPhaseCommand {
+                            phase: RustPhase::Custom,
+                            command,
+                        })
+                        .collect(),
+                ),
+                full: RustPhaseSet::new(
+                    RustWorkload::DependencyPolicy,
+                    None,
+                    commands
+                        .iter()
+                        .cloned()
+                        .map(|command| RustPhaseCommand {
+                            phase: RustPhase::Custom,
+                            command,
+                        })
+                        .collect(),
+                ),
+            })),
             depends_on: Vec::new(),
             pinned_lockfile: file_set.contains("Cargo.lock"),
             cache: Some(CacheSpec {
@@ -992,6 +1023,10 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
         root: root.to_owned(),
         has_package: false,
         package_name: None,
+        auto_lib: true,
+        has_explicit_lib: false,
+        lib_target_path: None,
+        lib_doctest: true,
         has_workspace: false,
         workspace_members: Vec::new(),
         workspace_excludes: Vec::new(),
@@ -1024,6 +1059,9 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
             if section == "workspace" {
                 facts.has_workspace = true;
             }
+            if section == "lib" {
+                facts.has_explicit_lib = true;
+            }
             continue;
         }
         let Some((key, first_value)) = line.split_once('=') else {
@@ -1039,6 +1077,9 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
         match section.as_str() {
             "package" if key == "name" => facts.package_name = toml_string_value(&value),
             "package" if key == "build" => facts.build_script = toml_string_value(&value),
+            "package" if key == "autolib" => {
+                facts.auto_lib = toml_bool_value(&value).unwrap_or(true);
+            }
             "workspace" if key == "members" => {
                 facts.workspace_members = toml_array_values(&value);
             }
@@ -1059,6 +1100,10 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
                 facts.crate_types = toml_string_value(&value)
                     .map_or_else(|| toml_array_values(&value), |single| vec![single]);
             }
+            "lib" if key == "path" => facts.lib_target_path = toml_string_value(&value),
+            "lib" if key == "doctest" => {
+                facts.lib_doctest = toml_bool_value(&value).unwrap_or(true);
+            }
             "features" => facts.features.push(key),
             section if is_cargo_dependency_section(section) => {
                 facts.dependencies.push(CargoDependency {
@@ -1071,6 +1116,25 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
         }
     }
     facts
+}
+
+fn toml_bool_value(value: &str) -> Option<bool> {
+    match value.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn has_doctestable_library(manifest: &CargoManifestFacts, file_set: &BTreeSet<String>) -> bool {
+    if !manifest.lib_doctest {
+        return false;
+    }
+    if !manifest.has_explicit_lib && !manifest.auto_lib {
+        return false;
+    }
+    let path = manifest.lib_target_path.as_deref().unwrap_or("src/lib.rs");
+    file_set.contains(&join_repo_path(&manifest.root, path))
 }
 
 fn is_cargo_dependency_section(section: &str) -> bool {

@@ -22,6 +22,10 @@ use serde::Deserialize;
 
 use sha2::{Digest, Sha256};
 
+use crate::rust_validation::{
+    RustPhase, RustPhaseSet, RustProvider, RustScope, RustValidationContract, RustWorkload,
+};
+
 use super::primitives::prepared_tools::{
     classify_and_verify, fetch_producer_conclusion, format_failure_output, format_install_outputs,
     format_save_check_output, save_is_legal, ApiResponse, HandoffFailure, OutcomeFetchError,
@@ -140,6 +144,8 @@ struct CiUnit {
     /// workspace coverage without broadening every topology match.
     #[serde(default)]
     workspace_check: bool,
+    #[serde(default)]
+    rust_validation: Option<RustValidationContract>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,6 +172,20 @@ impl RunnerLane {
     fn current() -> Self {
         Self::from_execution_backend(env::var("VELNOR_EXECUTION_BACKEND").ok().as_deref())
     }
+
+    fn rust_provider(self) -> RustProvider {
+        match self {
+            Self::Github => RustProvider::Github,
+            Self::Velnor => RustProvider::Velnor,
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Github => "github",
+            Self::Velnor => "velnor",
+        }
+    }
 }
 
 impl CiUnit {
@@ -183,22 +203,24 @@ impl CiUnit {
     /// runtimes infer the gate from the emitted `cargo check --workspace`
     /// command contract.
     fn is_workspace_check(&self) -> bool {
-        if self.workspace_check {
-            return true;
-        }
-        [
-            &self.github_pr_commands,
-            &self.github_full_commands,
-            &self.velnor_pr_commands,
-            &self.velnor_full_commands,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|command| {
-            command.contains("check --workspace --all-targets")
-                && (command.contains("cargo check --workspace")
-                    || command.contains("mbx check --workspace"))
+        self.workspace_check
+    }
+
+    fn rust_validation(&self) -> Result<&RustValidationContract, GeneratorError> {
+        self.rust_validation.as_ref().ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "Rust CI unit `{}` is missing its rust_validation contract",
+                self.id
+            ))
         })
+    }
+
+    fn rust_set(
+        &self,
+        provider: RustProvider,
+        scope: RustScope,
+    ) -> Result<&RustPhaseSet, GeneratorError> {
+        Ok(self.rust_validation()?.set(provider, scope))
     }
 
     /// Return the Cargo lockfile root recorded by the generator metadata.
@@ -226,6 +248,85 @@ impl CiUnit {
     }
 }
 
+fn validate_rust_unit_contract(unit: &CiUnit) -> Result<(), GeneratorError> {
+    if unit.kind != "rust" {
+        if unit.rust_validation.is_some() {
+            return Err(GeneratorError::usage(format!(
+                "non-Rust CI unit `{}` declares a rust_validation contract",
+                unit.id
+            )));
+        }
+        return Ok(());
+    }
+
+    let contract = unit.rust_validation()?;
+    contract.validate().map_err(|error| {
+        GeneratorError::usage(format!(
+            "invalid Rust validation contract for unit `{}`: {error}",
+            unit.id
+        ))
+    })?;
+
+    let parity_checks = [
+        (
+            RustProvider::Github,
+            RustScope::Affected,
+            &unit.github_pr_commands,
+            "github",
+            "affected",
+        ),
+        (
+            RustProvider::Github,
+            RustScope::Full,
+            &unit.github_full_commands,
+            "github",
+            "full",
+        ),
+        (
+            RustProvider::Velnor,
+            RustScope::Affected,
+            &unit.velnor_pr_commands,
+            "velnor",
+            "affected",
+        ),
+        (
+            RustProvider::Velnor,
+            RustScope::Full,
+            &unit.velnor_full_commands,
+            "velnor",
+            "full",
+        ),
+    ];
+    for (provider, scope, legacy, provider_name, scope_name) in parity_checks {
+        if contract.set(provider, scope).flattened() != *legacy {
+            return Err(GeneratorError::usage(format!(
+                "Rust validation contract does not match legacy command list for unit `{}` ({provider_name}/{scope_name})",
+                unit.id
+            )));
+        }
+    }
+
+    if unit.workspace_check
+        && [
+            (RustProvider::Github, RustScope::Affected),
+            (RustProvider::Github, RustScope::Full),
+            (RustProvider::Velnor, RustScope::Affected),
+            (RustProvider::Velnor, RustScope::Full),
+        ]
+        .into_iter()
+        .any(|(provider, scope)| {
+            contract.set(provider, scope).workload != RustWorkload::CompileOnly
+        })
+    {
+        return Err(GeneratorError::usage(format!(
+            "workspace-check Rust unit `{}` must declare CompileOnly workload for every provider and scope",
+            unit.id
+        )));
+    }
+
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Scope {
     Affected,
@@ -241,6 +342,27 @@ impl Scope {
                 "unsupported CI scope: {value}"
             ))),
         }
+    }
+
+    const fn rust_scope(self) -> RustScope {
+        match self {
+            Self::Affected => RustScope::Affected,
+            Self::Full => RustScope::Full,
+        }
+    }
+}
+
+fn parse_rust_phase(value: &str) -> Result<RustPhase, GeneratorError> {
+    match value {
+        "format" => Ok(RustPhase::Format),
+        "clippy" => Ok(RustPhase::Clippy),
+        "tests" => Ok(RustPhase::Tests),
+        "doctests" => Ok(RustPhase::Doctests),
+        "compile" => Ok(RustPhase::Compile),
+        "custom" => Ok(RustPhase::Custom),
+        _ => Err(GeneratorError::usage(format!(
+            "unsupported Rust phase: {value}"
+        ))),
     }
 }
 
@@ -411,18 +533,24 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             Ok(true)
         }
         "run" => {
-            let options = parse_options(&arguments[1..], &["config", "scope", "unit"])?;
+            let options =
+                parse_options(&arguments[1..], &["config", "scope", "unit", "phase"])?;
             let root = env::current_dir()
                 .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
             let config = resolve_config_path(options.get("config"));
             let scope = options
                 .get("scope")
                 .map_or(Ok(Scope::Full), |value| Scope::parse(value))?;
-            run_units(
+            let phase = options
+                .get("phase")
+                .map(|value| parse_rust_phase(value))
+                .transpose()?;
+            run_units_for_phase(
                 &root,
                 &config,
                 scope,
                 options.get("unit").map(String::as_str),
+                phase,
             )?;
             Ok(true)
         }
@@ -1461,6 +1589,7 @@ fn validate_config(config: &CiConfig) -> Result<CiConfig, GeneratorError> {
                 unit.id
             )));
         }
+        validate_rust_unit_contract(unit)?;
     }
     for unit in &config.unit {
         for dependency in &unit.depends_on {
@@ -1843,6 +1972,7 @@ mod runner_lane_tests {
             tool_version: None,
             cache: None,
             workspace_check: false,
+            rust_validation: None,
         };
         assert_eq!(
             unit.commands(RunnerLane::Github, Scope::Affected),
@@ -1879,6 +2009,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workspace_check: false,
+                rust_validation: None,
             },
             CiUnit {
                 id: "changed".to_owned(),
@@ -1894,6 +2025,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workspace_check: false,
+                rust_validation: None,
             },
             CiUnit {
                 id: "sibling".to_owned(),
@@ -1909,6 +2041,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workspace_check: false,
+                rust_validation: None,
             },
             CiUnit {
                 id: "leaf".to_owned(),
@@ -1924,6 +2057,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workspace_check: false,
+                rust_validation: None,
             },
         ];
         let selected = expand_affected_units(&units, ["changed".to_owned()].into_iter().collect());
@@ -1952,6 +2086,7 @@ mod runner_lane_tests {
             tool_version: None,
             cache: None,
             workspace_check: false,
+            rust_validation: None,
         };
         // A Swift consumer of a Rust FFI producer: the closure is kind-blind,
         // so an FFI change selects the Swift unit without naming its kind.
@@ -1990,6 +2125,7 @@ mod runner_lane_tests {
             tool_version: None,
             cache: None,
             workspace_check: false,
+            rust_validation: None,
         };
         let units = vec![
             unit("rust-base", "rust", &[]),
@@ -2026,11 +2162,28 @@ pub(crate) fn run_units(
     scope: Scope,
     only_unit: Option<&str>,
 ) -> Result<(), GeneratorError> {
+    run_units_for_phase(root, config_path, scope, only_unit, None)
+}
+
+fn run_units_for_phase(
+    root: &Path,
+    config_path: &Path,
+    scope: Scope,
+    only_unit: Option<&str>,
+    phase: Option<RustPhase>,
+) -> Result<(), GeneratorError> {
     let selection_file = env::var_os("VELNOR_SELECTION_FILE").map_or_else(
         || root.join(".velnor-ci-selection/velnor-ci-selection"),
         PathBuf::from,
     );
-    run_units_with_selection_file(root, config_path, scope, only_unit, &selection_file)
+    run_units_with_selection_file_for_phase(
+        root,
+        config_path,
+        scope,
+        only_unit,
+        &selection_file,
+        phase,
+    )
 }
 
 pub(crate) fn run_units_with_selection_file(
@@ -2039,6 +2192,24 @@ pub(crate) fn run_units_with_selection_file(
     scope: Scope,
     only_unit: Option<&str>,
     selection_file: &Path,
+) -> Result<(), GeneratorError> {
+    run_units_with_selection_file_for_phase(
+        root,
+        config_path,
+        scope,
+        only_unit,
+        selection_file,
+        None,
+    )
+}
+
+fn run_units_with_selection_file_for_phase(
+    root: &Path,
+    config_path: &Path,
+    scope: Scope,
+    only_unit: Option<&str>,
+    selection_file: &Path,
+    phase: Option<RustPhase>,
 ) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
     if matches!(env::var("EVENT_NAME").as_deref(), Ok("push" | "schedule")) && scope != Scope::Full
@@ -2073,7 +2244,7 @@ pub(crate) fn run_units_with_selection_file(
     }
     let full_units = selection.full_units;
     let selected = select_units_for_job(selected, only_unit)?;
-    run_layers(root, &selected, scope, &full_units)
+    run_layers(root, &selected, scope, &full_units, phase)
 }
 
 fn select_units_for_job<'a>(
@@ -2518,8 +2689,14 @@ fn run_layers(
     units: &[&CiUnit],
     run_scope: Scope,
     full_units: &BTreeSet<String>,
+    phase: Option<RustPhase>,
 ) -> Result<(), GeneratorError> {
     let runner_lane = RunnerLane::current();
+    if phase.is_some() && units.iter().any(|unit| unit.kind != "rust") {
+        return Err(GeneratorError::usage(
+            "--phase can only run Rust CI units; select a Rust unit with --unit",
+        ));
+    }
     let mut finished = BTreeSet::new();
     while finished.len() < units.len() {
         let ready = units
@@ -2545,10 +2722,22 @@ fn run_layers(
         thread::scope(|thread_scope| {
             for unit in ready.iter().copied() {
                 let sender = sender.clone();
-                let commands = if full_units.contains(&unit.id) {
-                    unit.commands(runner_lane, run_scope).to_vec()
+                let commands = if unit.kind == "rust" {
+                    let rust_scope = run_scope.rust_scope();
+                    let set = unit.rust_set(runner_lane.rust_provider(), rust_scope);
+                    match set {
+                        Ok(set) => rust_commands_for_run(
+                            set,
+                            full_units.contains(&unit.id),
+                            phase,
+                        ),
+                        Err(error) => {
+                            let _ = sender.send((unit.id.clone(), Err(error)));
+                            continue;
+                        }
+                    }
                 } else {
-                    prerequisite_commands(unit, runner_lane, run_scope)
+                    unit.commands(runner_lane, run_scope).to_vec()
                 };
                 thread_scope.spawn(move || {
                     let result = run_unit(root, unit, &commands);
@@ -2565,24 +2754,40 @@ fn run_layers(
     Ok(())
 }
 
-fn prerequisite_commands(unit: &CiUnit, lane: RunnerLane, scope: Scope) -> Vec<String> {
-    if unit.kind != "rust" {
-        return Vec::new();
-    }
-    unit.commands(lane, scope)
+fn rust_commands_for_run(
+    set: &RustPhaseSet,
+    full: bool,
+    selected_phase: Option<RustPhase>,
+) -> Vec<String> {
+    let phases: &[RustPhase] = match (full, set.workload) {
+        (true, RustWorkload::Crate) => &[
+            RustPhase::Format,
+            RustPhase::Clippy,
+            RustPhase::Tests,
+            RustPhase::Doctests,
+            RustPhase::Custom,
+        ],
+        (true, RustWorkload::CompileOnly) => &[
+            RustPhase::Format,
+            RustPhase::Clippy,
+            RustPhase::Compile,
+            RustPhase::Custom,
+        ],
+        (true, RustWorkload::DependencyPolicy | RustWorkload::Custom) => {
+            &[RustPhase::Custom]
+        }
+        (false, RustWorkload::Crate | RustWorkload::CompileOnly) => &[
+            RustPhase::Format,
+            RustPhase::Clippy,
+            RustPhase::Compile,
+        ],
+        (false, RustWorkload::DependencyPolicy | RustWorkload::Custom) => &[],
+    };
+    phases
         .iter()
-        .filter(|command| command.contains(" clippy "))
-        .map(|command| {
-            let command = command
-                .replacen(" clippy ", " check ", 1)
-                .replace(" -- -D warnings", "");
-            if lane == RunnerLane::Velnor {
-                // `mbx check` does not expose Cargo's `--no-deps` flag.
-                command.replace(" --no-deps", "")
-            } else {
-                command
-            }
-        })
+        .copied()
+        .filter(|phase| selected_phase.is_none_or(|selected| selected == *phase))
+        .flat_map(|phase| set.commands_for(phase).map(str::to_owned))
         .collect()
 }
 
@@ -2893,14 +3098,38 @@ pub(crate) fn test_crates(
         if !value.get("package").is_some_and(toml::Value::is_table) {
             continue;
         }
-        println!("::group::cargo tests: {}", manifest.display());
         let default_cargo =
             if env::var(super::MR_BOXINGTON_ENABLED_ENV).is_ok_and(|value| value == "1") {
                 Path::new("mbx")
             } else {
                 Path::new("cargo")
             };
-        let mut command = Command::new(cargo_program.unwrap_or(default_cargo));
+        let cargo_program = cargo_program.unwrap_or(default_cargo);
+        let mr_boxington = cargo_program.file_name().is_some_and(|name| name == "mbx");
+
+        let mut command = Command::new(cargo_program);
+        command
+            .arg("fmt")
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .args(["--", "--check"]);
+        run_test_crates_command(root, &manifest, "formatting", &mut command)?;
+
+        let mut command = Command::new(cargo_program);
+        command.arg("clippy").args(["--profile", "test"]);
+        if locked {
+            command.arg("--locked");
+        }
+        if !mr_boxington {
+            command.arg("--no-deps");
+        }
+        command
+            .args(["--all-targets", "--all-features", "--manifest-path"])
+            .arg(&manifest)
+            .args(["--", "-D", "warnings"]);
+        run_test_crates_command(root, &manifest, "Clippy", &mut command)?;
+
+        let mut command = Command::new(cargo_program);
         command
             .arg(if nextest { "nextest" } else { "test" })
             .arg(if nextest { "run" } else { "--all-features" });
@@ -2911,19 +3140,69 @@ pub(crate) fn test_crates(
             command.arg("--locked");
         }
         command.arg("--manifest-path").arg(&manifest);
-        let status = command
-            .current_dir(root)
-            .status()
-            .map_err(|error| GeneratorError::usage(format!("run Cargo tests: {error}")))?;
-        println!("::endgroup::");
-        if !status.success() {
-            return Err(GeneratorError::usage(format!(
-                "Cargo tests failed: {}",
-                manifest.display()
-            )));
+        run_test_crates_command(root, &manifest, "tests", &mut command)?;
+
+        if nextest && manifest_supports_doctests(&manifest, &value) {
+            let mut command = Command::new(cargo_program);
+            command.arg("test").args(["--doc", "--all-features"]);
+            if locked {
+                command.arg("--locked");
+            }
+            command.arg("--manifest-path").arg(&manifest);
+            run_test_crates_command(root, &manifest, "doctests", &mut command)?;
         }
     }
     Ok(())
+}
+
+fn run_test_crates_command(
+    root: &Path,
+    manifest: &Path,
+    phase: &str,
+    command: &mut Command,
+) -> Result<(), GeneratorError> {
+    println!("::group::cargo {phase}: {}", manifest.display());
+    let status = command.current_dir(root).status();
+    println!("::endgroup::");
+    let status = status
+        .map_err(|error| GeneratorError::usage(format!("run Cargo {phase}: {error}")))?;
+    if !status.success() {
+        return Err(GeneratorError::usage(format!(
+            "Cargo {phase} failed: {}",
+            manifest.display()
+        )));
+    }
+    Ok(())
+}
+
+fn manifest_supports_doctests(manifest: &Path, value: &toml::Value) -> bool {
+    let package = value.get("package").and_then(toml::Value::as_table);
+    let lib = value.get("lib").and_then(toml::Value::as_table);
+    if lib
+        .and_then(|lib| lib.get("doctest"))
+        .and_then(toml::Value::as_bool)
+        == Some(false)
+    {
+        return false;
+    }
+    if let Some(lib) = lib {
+        if let Some(path) = lib.get("path").and_then(toml::Value::as_str) {
+            return manifest
+                .parent()
+                .is_some_and(|parent| parent.join(path).is_file());
+        }
+        return true;
+    }
+    if package
+        .and_then(|package| package.get("autolib"))
+        .and_then(toml::Value::as_bool)
+        == Some(false)
+    {
+        return false;
+    }
+    manifest
+        .parent()
+        .is_some_and(|parent| parent.join("src/lib.rs").is_file())
 }
 
 fn collect_manifests(
@@ -4831,6 +5110,7 @@ pub(crate) mod tests {
             tool_version: None,
             cache: None,
             workspace_check: false,
+            rust_validation: None,
         };
         CiConfig {
             schema: 2,
@@ -5257,6 +5537,7 @@ workspace_check = true
             tool_version: None,
             cache: None,
             workspace_check: false,
+            rust_validation: None,
         };
         CiConfig {
             schema: 2,
@@ -5446,35 +5727,48 @@ workspace_check = true
     }
 
     #[test]
-    fn prerequisite_tier_rewrites_rust_clippy_to_check() {
-        let unit = CiUnit {
-            id: "rust-app".to_owned(),
-            label: "rust-app".to_owned(),
-            kind: "rust".to_owned(),
-            root: ".".to_owned(),
-            watch: vec!["crates/app/**".to_owned()],
-            github_pr_commands: vec![
-                "cargo fmt --check".to_owned(),
-                "cargo clippy --locked --no-deps --all-targets -- -D warnings".to_owned(),
-                "cargo nextest run --locked".to_owned(),
-            ],
-            github_full_commands: vec!["true".to_owned()],
-            velnor_pr_commands: vec![
-                "mbx clippy --locked --no-deps --all-targets -- -D warnings".to_owned()
-            ],
-            velnor_full_commands: vec!["true".to_owned()],
-            depends_on: Vec::new(),
-            tool_version: None,
-            cache: None,
-            workspace_check: false,
+    fn prerequisite_tier_runs_only_explicit_format_clippy_and_compile_phases() {
+        use crate::rust_validation::{
+            RustPhase, RustPhaseCommand, RustPhaseSet, RustTestRunner, RustWorkload,
         };
-        assert_eq!(
-            prerequisite_commands(&unit, RunnerLane::Github, Scope::Affected),
-            vec!["cargo check --locked --no-deps --all-targets"]
+
+        let set = RustPhaseSet::new(
+            RustWorkload::Crate,
+            Some(RustTestRunner::Nextest),
+            vec![
+                RustPhaseCommand {
+                    phase: RustPhase::Format,
+                    command: "cargo fmt --check".to_owned(),
+                },
+                RustPhaseCommand {
+                    phase: RustPhase::Clippy,
+                    command: "cargo clippy --all-targets -- -D warnings".to_owned(),
+                },
+                RustPhaseCommand {
+                    phase: RustPhase::Compile,
+                    command: "cargo check --all-targets".to_owned(),
+                },
+                RustPhaseCommand {
+                    phase: RustPhase::Tests,
+                    command: "cargo nextest run".to_owned(),
+                },
+            ],
         );
         assert_eq!(
-            prerequisite_commands(&unit, RunnerLane::Velnor, Scope::Affected),
-            vec!["mbx check --locked --all-targets"]
+            rust_commands_for_run(&set, false, None),
+            vec![
+                "cargo fmt --check",
+                "cargo clippy --all-targets -- -D warnings",
+                "cargo check --all-targets",
+            ]
+        );
+        assert_eq!(
+            rust_commands_for_run(&set, false, Some(RustPhase::Tests)),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            rust_commands_for_run(&set, false, Some(RustPhase::Compile)),
+            vec!["cargo check --all-targets"]
         );
     }
 
@@ -5647,6 +5941,7 @@ workspace_check = true
             tool_version: None,
             cache: None,
             workspace_check: false,
+            rust_validation: None,
         };
         let mut config = selection_config();
         config.workflow.version_bump_units = vec![

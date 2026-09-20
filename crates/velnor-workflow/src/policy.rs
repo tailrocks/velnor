@@ -63,7 +63,9 @@ const POLICY_ENTRYPOINT: &str = ".github/workflows/ci-policy.yml";
 /// The pull-request aggregate whose job display names are the ruleset's
 /// status-check contexts.
 const PULL_REQUEST_AGGREGATE: &str = ".github/workflows/ci-pr.yml";
-/// Names the manifest binding the env-slot candidate binary.
+/// Names the distinct candidate binary used only for render diagnostics.
+pub use super::VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV;
+/// Names the manifest binding the diagnostic candidate binary.
 pub use super::VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV;
 /// Names a `velnor-workflow` binary built at the pinned revision.
 pub use super::VELNOR_WORKFLOW_PINNED_BINARY_ENV;
@@ -445,9 +447,8 @@ fn pin_rules(
         .push(generated_tree_report(pin, comparison, mainline));
 }
 
-/// Report the `generated-tree` verdict. The candidate exception passes on
-/// pull requests (a generator change in flight) but fails on mainline: once
-/// merged, the pin must advance so the tight invariant holds again.
+/// Report the `generated-tree` verdict. Candidate output never replaces the
+/// declared published renderer, on pull requests or mainline.
 fn generated_tree_report(
     pin: &str,
     comparison: Result<TreeComparison, GeneratorError>,
@@ -467,11 +468,12 @@ fn generated_tree_report(
             ),
             Vec::new(),
         ),
-        Ok(TreeComparison::Candidate(closure)) => RuleReport::pass(
+        Ok(TreeComparison::Candidate(closure)) => RuleReport::fail(
             "generated-tree",
             format!(
-                "the tree matches the candidate render ({closure}), not the render of velnor-workflow at {pin}: a generator change in flight; run `velnor-workflow promote --rev HEAD` after merge"
+                "the tree matches the candidate render ({closure}), not the render of velnor-workflow at {pin}; candidate output cannot authorize tracked generated files"
             ),
+            Vec::new(),
         ),
         Ok(TreeComparison::Differences(differences)) => RuleReport::fail(
             "generated-tree",
@@ -575,12 +577,9 @@ pub(crate) fn verify_declared_pin_renders_tree(
         &source,
     )? {
         TreeComparison::Pin => Ok(()),
-        TreeComparison::Candidate(closure) => {
-            eprintln!(
-                "notice: the tree matches the candidate render ({closure}), not the render of the declared pin {pin}; run `velnor-workflow promote --rev HEAD` after merge"
-            );
-            Ok(())
-        }
+        TreeComparison::Candidate(closure) => Err(GeneratorError::usage(format!(
+            "the tree matches the candidate render ({closure}), not the render of the declared pin {pin}; candidate output cannot authorize tracked generated files"
+        ))),
         TreeComparison::Differences(differences) => Err(GeneratorError::usage(format!(
             "the declared generator pin {pin} renders the tree differently; set `[generator] revision` in {GENERATION_CONFIG} to the last generator commit and regenerate:\n{}",
             differences.join("\n")
@@ -1112,6 +1111,8 @@ pub(crate) fn expected_closures(repo: &Path, pin: &str) -> Result<Vec<String>, G
 pub(crate) struct PinnedBinaryLookup {
     /// [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`].
     pinned_binary: Option<PathBuf>,
+    /// [`VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV`], diagnostic only.
+    candidate_binary: Option<PathBuf>,
     /// `PATH`.
     search_path: Option<OsString>,
     /// Where an earlier resolution built the pin.
@@ -1132,6 +1133,9 @@ impl PinnedBinaryLookup {
     ) -> Self {
         Self {
             pinned_binary: env::var_os(VELNOR_WORKFLOW_PINNED_BINARY_ENV).map(PathBuf::from),
+            candidate_binary: env::var_os(VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
             search_path: env::var_os("PATH"),
             install_root: policy_install_root(revision),
             build_forbidden: !build_pin
@@ -1550,8 +1554,8 @@ fn render_with_candidate(
         }
     };
     let mut binaries = Vec::new();
-    if let Some(pinned) = &lookup.pinned_binary {
-        binaries.push(pinned.clone());
+    if let Some(candidate) = &lookup.candidate_binary {
+        binaries.push(candidate.clone());
     }
     if let Some(current) = &current_exe
         && !binaries.contains(current)

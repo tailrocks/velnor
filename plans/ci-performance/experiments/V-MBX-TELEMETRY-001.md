@@ -1,7 +1,10 @@
 # V-MBX-TELEMETRY-001: preserve cache evidence boundaries
 
-Status: source implementation complete locally; generated action regeneration,
-independent review, and live CI validation remain required before integration.
+Status: schema 2 cache classification was integrated in `112e6acc` and is
+present in the successful `17318e52` CI checkpoint. The text below records the
+original experiment. Subsequent phase-boundary work is tracked in
+[the schema 4 review](../telemetry-schema4-review.md); it remains unaccepted
+until its fixture repair and exact-head validation pass.
 
 Run 35492230871, job 106029138322, contains `No mbx cache found` at
 `2026-09-20T05:40:46.5166507Z`, while its report says

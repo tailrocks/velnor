@@ -25,6 +25,7 @@ use crate::s2::{
     GeneratorError, ProjectConfig, ReleaseJobSpec, ReleaseSpec, Unit, UnitKind, GENERATED_HEADER,
     MACOS_HOSTED_RUNS_ON, VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
 };
+use crate::rust_validation::{RustProvider, RustScope};
 
 /// The release-side file families and the canonical file each one renders.
 /// Every entry the generated surface owns gets a default row, unless the
@@ -3392,12 +3393,39 @@ fn render_release_unit_job(
     // history, but release checkouts are shallow: the hosted leg fetches the
     // pin before the checks, like the unit provider job.
     render_release_pin_fetch(output, provider, unit);
-    let _ = writeln!(
-        output,
-        "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}{token_env}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
-        yaml_scalar(&unit.id),
+    let validation_env = format!(
+        "        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}{token_env}\n",
         yaml_scalar(&unit.id)
     );
+    let rust_provider = if provider.is_local() {
+        RustProvider::Velnor
+    } else {
+        RustProvider::Github
+    };
+    let rust_phases = (unit.kind == UnitKind::Rust).then(|| {
+        super::ir::rust_validation_phases(unit, rust_provider, &[RustScope::Full])
+    });
+    let rendered_typed = rust_phases.flatten().is_some_and(|phases| {
+        if phases.is_empty() {
+            return false;
+        }
+        for phase in phases {
+            let run = format!(
+                "velnor-workflow run --config .github/ci/project.toml --phase {} --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\"",
+                phase.slug()
+            );
+            super::ir::append_rust_phase_step(output, phase, None, &validation_env, &run);
+        }
+        true
+    });
+    if !rendered_typed {
+        let _ = writeln!(
+            output,
+            "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}{token_env}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
+            yaml_scalar(&unit.id),
+            yaml_scalar(&unit.id)
+        );
+    }
     id
 }
 
@@ -5388,6 +5416,7 @@ cp "$record" "$out"
             watch: vec!["Cargo.toml".to_owned()],
             pr_commands: vec!["cargo check".to_owned()],
             full_commands: vec!["cargo check".to_owned()],
+            rust_validation: None,
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
