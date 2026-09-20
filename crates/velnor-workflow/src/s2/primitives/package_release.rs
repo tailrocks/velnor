@@ -3117,8 +3117,6 @@ else
 fi
 test "$validation_failed" -eq 1
 "#,
-            source_commit = source_commit,
-            digest = digest,
         )
         .expect("render malformed release validation fixture");
         let output = Command::new("bash")
@@ -3138,6 +3136,7 @@ test "$validation_failed" -eq 1
 
     #[cfg(unix)]
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn typed_draft_cleanup_refuses_release_state_and_tag_drift() {
         use std::process::Command;
 
@@ -3443,7 +3442,6 @@ set -e
 test "$rollback_status" -eq 1
 test ! -e "$TEST_TMPDIR/mutation"
 "#,
-            source_commit = source_commit,
         )
         .expect("render asset drift regression shell");
         let output = Command::new("bash")
@@ -3484,14 +3482,13 @@ test ! -e "$TEST_TMPDIR/mutation"
         ));
         std::fs::create_dir_all(&root).expect("create shell fixture");
         let script = format!(
-            r#"set -Eeuo pipefail
+            r"set -Eeuo pipefail
 {helper}
 git() {{ return 42; }}
 if remote_tag_sha preview; then
   exit 1
 fi
-"#,
-            helper = helper
+",
         );
         let output = Command::new("bash")
             .arg("-c")
