@@ -4922,6 +4922,26 @@ pub enum TaskResult {
     Abandoned,
 }
 
+impl TaskResult {
+    /// Parse a wire `result` string into the protocol enum.
+    ///
+    /// `actions/runner` serializes the C# enum PascalCase while Velnor
+    /// canonicalizes lowercase; both spellings arrive on the wire, so
+    /// this mirrors the serde `rename` + `alias` pairs above exactly.
+    /// Unknown spellings return `None` and never guess.
+    #[must_use]
+    pub fn parse_wire(raw: &str) -> Option<Self> {
+        match raw {
+            "succeeded" | "Succeeded" => Some(Self::Succeeded),
+            "failed" | "Failed" => Some(Self::Failed),
+            "canceled" | "Canceled" => Some(Self::Canceled),
+            "skipped" | "Skipped" => Some(Self::Skipped),
+            "abandoned" | "Abandoned" => Some(Self::Abandoned),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerStatus {
@@ -11329,6 +11349,39 @@ mod tests {
         );
         assert!(matches!(request.result, Some(TaskResult::Succeeded)));
         assert_eq!(request.job_name.as_deref(), Some("check"));
+    }
+
+    #[test]
+    fn task_result_parse_wire_accepts_both_casings() {
+        for (raw, expected) in [
+            ("succeeded", TaskResult::Succeeded),
+            ("Succeeded", TaskResult::Succeeded),
+            ("failed", TaskResult::Failed),
+            ("Failed", TaskResult::Failed),
+            ("canceled", TaskResult::Canceled),
+            ("Canceled", TaskResult::Canceled),
+            ("skipped", TaskResult::Skipped),
+            ("Skipped", TaskResult::Skipped),
+            ("abandoned", TaskResult::Abandoned),
+            ("Abandoned", TaskResult::Abandoned),
+        ] {
+            assert_eq!(TaskResult::parse_wire(raw), Some(expected), "{raw}");
+            let parsed: TaskResult = serde_json::from_value(serde_json::json!(raw)).unwrap();
+            assert_eq!(
+                parsed, expected,
+                "serde must agree with parse_wire for {raw}"
+            );
+        }
+        for raw in [
+            "",
+            "cancelled",
+            "CANCELED",
+            "success",
+            " canceled",
+            "canceled ",
+        ] {
+            assert_eq!(TaskResult::parse_wire(raw), None, "{raw}");
+        }
     }
 
     #[test]

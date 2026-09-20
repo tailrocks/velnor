@@ -35,6 +35,7 @@ use velnor_model::{
     ScaleSetJobStarted,
 };
 
+use crate::protocol::TaskResult;
 use crate::scaleset::capacity::{
     reserve_for_offer, CapacityLedger, LedgerLane, LedgerPermitState, ReserveOutcome,
 };
@@ -602,7 +603,13 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             .holder_state(&holder)
             .map_err(|error| ScaleError::Ledger(ledger_error(error)))?
             .is_some();
-        let canceled = completed.result == "canceled";
+        // The wire carries both `actions/runner` PascalCase and Velnor
+        // lowercase spellings; parse via the protocol result type so a
+        // `Canceled` completion takes the cancel path too.
+        let canceled = matches!(
+            TaskResult::parse_wire(&completed.result),
+            Some(TaskResult::Canceled)
+        );
         if row.state == DemandState::Terminal && !held {
             if canceled {
                 self.ledger
@@ -1352,6 +1359,38 @@ mod tests {
         assert!(processor.lane_mut().assigned.is_empty());
         assert!(processor.lane_mut().terminals.is_empty());
         assert!(processor.lane_mut().canceled.is_empty());
+    }
+
+    #[tokio::test]
+    async fn completed_result_casings_both_take_cancel_path() {
+        // The wire carries both `actions/runner` PascalCase and Velnor
+        // lowercase `result` spellings; both must take the cancel path
+        // (close without driving the lane terminal).
+        for (index, result) in ["canceled", "Canceled"].iter().enumerate() {
+            let id = 910 + index as i64;
+            let path = temp_path(&format!("completed-result-casing-{result}"));
+            let mut processor = processor(&path, ScriptedQueue::default());
+            let generation = processor.ledger_mut().generation().unwrap();
+            processor
+                .demand_mut()
+                .submit_offer(7, &push_offer(id), generation)
+                .unwrap();
+            processor
+                .demand_mut()
+                .set_state(id, DemandState::Granted, None, generation)
+                .unwrap();
+            assert!(processor.observe_completed(&completed(id, result)).unwrap());
+            assert_eq!(
+                processor.demand_mut().get(id).unwrap().unwrap().state,
+                DemandState::Terminal,
+                "result {result} must close the attempt"
+            );
+            assert_eq!(processor.ledger_mut().occupied().unwrap(), 0);
+            assert!(
+                processor.lane_mut().terminals.is_empty(),
+                "result {result} must take the cancel path, not the lane terminal"
+            );
+        }
     }
 
     #[tokio::test]
