@@ -1,0 +1,183 @@
+{
+  "schema": "velnor.product-manifest/v1",
+  "product_id": "velnor",
+  "channel": "stable",
+  "version": "1.2.3",
+  "source_repository": "tailrocks/velnor",
+  "source_ref": "refs/tags/v1.2.3",
+  "source_commit": "0123456789abcdef0123456789abcdef01234567",
+  "release_tag": "v1.2.3",
+  "release_id": "12345",
+  "artifacts": [
+    {
+      "name": "velnor-runner-aarch64-apple-darwin",
+      "target": "aarch64-apple-darwin",
+      "kind": "binary",
+      "sha256": "c51708027fcd289641d482c98adb8ffd8f36dd40f62bae4765d675506d50bc21",
+      "size": 50
+    },
+    {
+      "name": "velnor-workflow-aarch64-apple-darwin",
+      "target": "aarch64-apple-darwin",
+      "kind": "binary",
+      "sha256": "63a97fedd8f2466740c24fecc7747178e988919bad37d5998c410bb3448cca52",
+      "size": 52
+    },
+    {
+      "name": "velnorctl-aarch64-apple-darwin",
+      "target": "aarch64-apple-darwin",
+      "kind": "binary",
+      "sha256": "4cc81243f7285c771d640d588ad28f15066165a46260ea3b1081b4cf3fe6eda5",
+      "size": 46
+    },
+    {
+      "name": "velnorctl-1.2.3-aarch64-apple-darwin.tar.gz",
+      "target": "aarch64-apple-darwin",
+      "kind": "homebrew-archive",
+      "sha256": "8fadefc8f110d4ad3261cc398c4ff35d4e89f1139c1717c673480ebb185603a4",
+      "size": 989
+    },
+    {
+      "name": "velnor-runner-1.2.3-arm64.deb",
+      "target": "aarch64-unknown-linux-gnu",
+      "kind": "apt-package",
+      "sha256": "d331d8e1a514086f51bfda486a284b9146926d47f113d2afc56c10c9d3d23816",
+      "size": 18
+    },
+    {
+      "name": "velnorctl-1.2.3-aarch64-unknown-linux-gnu.tar.gz",
+      "target": "aarch64-unknown-linux-gnu",
+      "kind": "archive",
+      "sha256": "ae5ab82ecdbcc03dd7bab1431719c1d6ac9b0ffedbeceb1fec620a94bfc3ef7f",
+      "size": 999
+    },
+    {
+      "name": "velnor-runner-aarch64-unknown-linux-gnu",
+      "target": "aarch64-unknown-linux-gnu",
+      "kind": "binary",
+      "sha256": "86d31ced31e5bc40dc203de1c51fd82a364766ee9b25bc2e89feaa66ea1acea2",
+      "size": 67
+    },
+    {
+      "name": "velnor-workflow-aarch64-unknown-linux-gnu",
+      "target": "aarch64-unknown-linux-gnu",
+      "kind": "binary",
+      "sha256": "3ad12ac643ab3a84786ee67fa9933af48f3aaf4db8f80d5084a681917210f8a6",
+      "size": 69
+    },
+    {
+      "name": "velnorctl-aarch64-unknown-linux-gnu",
+      "target": "aarch64-unknown-linux-gnu",
+      "kind": "binary",
+      "sha256": "c186a7547bfcdaab9ee85fae454e3fc4ef1be2b5c95ef1c8c0929d409053b4d8",
+      "size": 63
+    },
+    {
+      "name": "velnor-runner-x86_64-apple-darwin",
+      "target": "x86_64-apple-darwin",
+      "kind": "binary",
+      "sha256": "919b14a8daba215924c1f88793cb08984b5fbc304a60d57c2fa7062d77faed64",
+      "size": 49
+    },
+    {
+      "name": "velnor-workflow-x86_64-apple-darwin",
+      "target": "x86_64-apple-darwin",
+      "kind": "binary",
+      "sha256": "99e800d66431f500cdd7d8a772ab076e26bd09873675b49da720ef8acc3c6ddb",
+      "size": 51
+    },
+    {
+      "name": "velnorctl-x86_64-apple-darwin",
+      "target": "x86_64-apple-darwin",
+      "kind": "binary",
+      "sha256": "b0e36b31d213d9962994785fb06f9d04e2fc08a61e1af66f90ff54c884bd1abb",
+      "size": 45
+    },
+    {
+      "name": "velnorctl-1.2.3-x86_64-apple-darwin.tar.gz",
+      "target": "x86_64-apple-darwin",
+      "kind": "homebrew-archive",
+      "sha256": "dcc3b6c08011f5565079fe2d72c3e6fe11270976b0f53ea85f4cf59ac8983341",
+      "size": 991
+    },
+    {
+      "name": "velnor-runner-1.2.3-amd64.deb",
+      "target": "x86_64-unknown-linux-gnu",
+      "kind": "apt-package",
+      "sha256": "fc3c5144520234eecff920df67216dcc84e1c6916530391907f6e7168e5fd05d",
+      "size": 18
+    },
+    {
+      "name": "velnorctl-1.2.3-x86_64-unknown-linux-gnu.tar.gz",
+      "target": "x86_64-unknown-linux-gnu",
+      "kind": "archive",
+      "sha256": "467e12090d19d87f6c2d874fb16d8a126eee05d6b51d8b09b07e3593d382d770",
+      "size": 996
+    },
+    {
+      "name": "velnor-runner-x86_64-unknown-linux-gnu",
+      "target": "x86_64-unknown-linux-gnu",
+      "kind": "binary",
+      "sha256": "d452027191554c6bbaf89060fa9b87836d6807bb86a78faf0179f7485ca457ca",
+      "size": 66
+    },
+    {
+      "name": "velnor-workflow-x86_64-unknown-linux-gnu",
+      "target": "x86_64-unknown-linux-gnu",
+      "kind": "binary",
+      "sha256": "ffa09508bcc5dc1f2b1ecbd9c90e2e1cb7e968e672bbef056a1beae0adf4fca9",
+      "size": 68
+    },
+    {
+      "name": "velnorctl-x86_64-unknown-linux-gnu",
+      "target": "x86_64-unknown-linux-gnu",
+      "kind": "binary",
+      "sha256": "f597502b004bfbd435d948aa221f51288c9120e82fa0ee78b588d9937d1b4a6a",
+      "size": 62
+    }
+  ],
+  "components": [
+    {
+      "name": "velnor-runner",
+      "crate": "velnor-runner",
+      "feature": "release-build",
+      "identity": "version",
+      "version": "0.1.0",
+      "binary": "velnor-runner",
+      "targets": [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu"
+      ]
+    },
+    {
+      "name": "velnor-workflow",
+      "crate": "velnor-workflow",
+      "feature": null,
+      "identity": "revision",
+      "version": "0.1.0",
+      "binary": "velnor-workflow",
+      "targets": [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu"
+      ]
+    },
+    {
+      "name": "velnorctl",
+      "crate": "velnorctl",
+      "feature": "release-build",
+      "identity": "version",
+      "version": "0.1.0",
+      "binary": "velnorctl",
+      "targets": [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu"
+      ]
+    }
+  ]
+}

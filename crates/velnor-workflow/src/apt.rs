@@ -7296,6 +7296,14 @@ mod tests {
     const FIXTURE_SCHEMA: &str = "example.test/apt-manifest-v1";
     const FIXTURE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
     const FIXTURE_FPR: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
+    const NATIVE_ASSEMBLED_PRODUCT_MANIFEST: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/native-product/product-manifest.json"
+    ));
+    const NATIVE_ASSEMBLED_PRODUCT_MANIFEST_SIDECAR: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/native-product/product-manifest.json.sha256"
+    ));
 
     #[expect(
         clippy::panic,
@@ -8040,6 +8048,153 @@ mod tests {
         write_bytes(&bin.join("gh"), script.as_bytes());
         make_executable(&bin.join("gh"));
         bin
+    }
+
+    #[test]
+    fn native_assembly_manifest_is_consumable_by_apt_projection() {
+        // These bytes were emitted by the native producer's rendered
+        // assembly at checkpoint 384e2e4e. Provider release metadata below is
+        // synthetic fixture input only; it is never treated as live authority.
+        let manifest: serde_json::Value = must(
+            serde_json::from_slice(NATIVE_ASSEMBLED_PRODUCT_MANIFEST),
+            "parse native assembly manifest fixture",
+        );
+        assert_eq!(
+            manifest["components"][0]["feature"],
+            serde_json::json!("release-build")
+        );
+        assert_eq!(
+            manifest["components"][1]["identity"],
+            serde_json::json!("revision")
+        );
+        let manifest_sha256 = sha256_hex(NATIVE_ASSEMBLED_PRODUCT_MANIFEST);
+        assert_eq!(
+            must(
+                product_manifest_sidecar_digest_bytes(
+                    NATIVE_ASSEMBLED_PRODUCT_MANIFEST_SIDECAR.as_bytes(),
+                    Path::new("product-manifest.json.sha256"),
+                ),
+                "parse native assembly manifest sidecar",
+            ),
+            manifest_sha256
+        );
+
+        let source_repository = must(
+            field(&manifest, "source_repository"),
+            "read source repository",
+        );
+        let release_tag = must(field(&manifest, "release_tag"), "read release tag");
+        let mut asset_sizes = BTreeMap::new();
+        for artifact in manifest
+            .get("artifacts")
+            .and_then(serde_json::Value::as_array)
+            .expect("native assembly artifacts array")
+        {
+            asset_sizes.insert(
+                must(field(artifact, "name"), "read native artifact name").to_owned(),
+                must(
+                    artifact
+                        .get("size")
+                        .and_then(serde_json::Value::as_u64)
+                        .ok_or_else(|| GeneratorError::usage("native artifact size is invalid")),
+                    "read native artifact size",
+                ),
+            );
+        }
+        for name in [
+            PRODUCT_MANIFEST_ASSET,
+            "product-manifest.json.sha256",
+            RECORD_FILE,
+            RECORD_SIDECAR,
+            MANIFEST_FILE,
+            MANIFEST_SIDECAR,
+            PREVIEW_MANIFEST_FILE,
+            SHA256SUMS_FILE,
+        ] {
+            asset_sizes.insert(name.to_owned(), 1);
+        }
+        let deb_names = asset_sizes
+            .keys()
+            .filter(|name| name.ends_with(".deb"))
+            .cloned()
+            .collect::<Vec<_>>();
+        for name in deb_names {
+            asset_sizes.insert(format!("{name}.sha256"), 1);
+        }
+        let release_assets = asset_sizes
+            .into_iter()
+            .enumerate()
+            .map(|(offset, (name, size))| {
+                serde_json::json!({
+                    "id": 5000 + offset as u64,
+                    "name": name,
+                    "size": size,
+                    "state": "uploaded",
+                    "browser_download_url": format!(
+                        "https://github.com/{source_repository}/releases/download/{release_tag}/{name}"
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(release_assets.len(), 28);
+        let source_commit = must(field(&manifest, "source_commit"), "read source commit");
+        let source_ref = must(field(&manifest, "source_ref"), "read source ref");
+        let version = must(field(&manifest, "version"), "read product version");
+        let product_id = must(field(&manifest, "product_id"), "read product ID");
+        let release_id = must(field(&manifest, "release_id"), "read release ID");
+        let selection = serde_json::json!({
+            "channel": "stable",
+            "manifest": manifest,
+            "manifest_asset": PRODUCT_MANIFEST_ASSET,
+            "manifest_schema": PRODUCT_MANIFEST_SCHEMA,
+            "manifest_sha256": manifest_sha256,
+            "package": "velnor-runner",
+            "product_id": product_id,
+            "provider_release_id": 12345,
+            "published_at": "2026-09-20T00:00:00Z",
+            "release_assets": release_assets,
+            "release_id": release_id,
+            "release_tag": release_tag,
+            "release_url": format!("https://github.com/{source_repository}/releases/tag/{release_tag}"),
+            "source_commit": source_commit,
+            "source_ref": source_ref,
+            "source_ref_resolution": {
+                "method": "github-git-ref",
+                "proof_ref": format!("refs/tags/{release_tag}"),
+                "resolved_commit": source_commit
+            },
+            "source_repository": source_repository,
+            "tag": release_tag,
+            "target_commitish": release_tag,
+            "version": version
+        });
+        let root = fixture_dir("native-assembly-selection");
+        let path = root.join(DISCOVERY_SELECTION_FILE);
+        write_bytes(
+            &path,
+            &must(
+                serde_json::to_vec(&selection),
+                "serialize native assembly selection",
+            ),
+        );
+        let parsed = must(
+            read_discovery_selection(&path),
+            "parse native producer output through APT selection contract",
+        );
+        assert_eq!(parsed.manifest_sha256, manifest_sha256);
+        assert_eq!(parsed.release_id, "12345");
+        assert_eq!(parsed.release_assets.len(), 28);
+        assert_eq!(
+            parsed
+                .manifest
+                .get("artifacts")
+                .expect("parsed native artifacts"),
+            selection
+                .get("manifest")
+                .and_then(|value| value.get("artifacts"))
+                .expect("selection native artifacts")
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
