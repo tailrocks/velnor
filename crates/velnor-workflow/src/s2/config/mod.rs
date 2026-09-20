@@ -395,6 +395,12 @@ pub(crate) struct ReleaseSection {
     platforms: Vec<String>,
     /// The trusted producer workflow a `workflow_run` event must come from.
     producer_workflow: Option<String>,
+    /// The immutable Actions workflow identity paired with
+    /// `producer_workflow`. Names are display labels and are not trust
+    /// boundaries; a bound producer must declare both its numeric ID and
+    /// repository workflow path.
+    producer_workflow_id: Option<u64>,
+    producer_workflow_path: Option<String>,
     /// The producer conclusion the publish gate requires (`success`).
     producer_conclusion: Option<String>,
     /// The dispatch modes the workflows offer. `publish` is never a dispatch
@@ -837,6 +843,14 @@ impl ReleaseSection {
 
     pub(crate) fn producer_workflow(&self) -> Option<&str> {
         self.producer_workflow.as_deref()
+    }
+
+    pub(crate) fn producer_workflow_id(&self) -> Option<u64> {
+        self.producer_workflow_id
+    }
+
+    pub(crate) fn producer_workflow_path(&self) -> Option<&str> {
+        self.producer_workflow_path.as_deref()
     }
 
     pub(crate) fn producer_conclusion(&self) -> Option<&str> {
@@ -3406,6 +3420,8 @@ fn validate_release_binding_kind(release: &ReleaseSection) -> Result<(), Generat
         return Ok(());
     }
     let bound = release.producer_workflow.is_some()
+        || release.producer_workflow_id.is_some()
+        || release.producer_workflow_path.is_some()
         || !release.modes.is_empty()
         || release.archive_checksum.is_some()
         || release.archive_retention_days.is_some()
@@ -3422,6 +3438,42 @@ fn validate_release_binding_kind(release: &ReleaseSection) -> Result<(), Generat
 fn validate_release_bindings(release: &ReleaseSection) -> Result<(), GeneratorError> {
     validate_release_naming(release)?;
     validate_release_binding_kind(release)?;
+    match (
+        release.producer_workflow.as_deref(),
+        release.producer_workflow_id,
+        release.producer_workflow_path.as_deref(),
+    ) {
+        (Some(workflow), Some(workflow_id), Some(path))
+            if !workflow.is_empty() && workflow_id > 0 && valid_producer_workflow_path(path) => {}
+        (None, None, None) => {}
+        (Some(_), Some(_), Some(_)) => {
+            let workflow = release.producer_workflow.as_deref().unwrap_or_default();
+            let path = release
+                .producer_workflow_path
+                .as_deref()
+                .unwrap_or_default();
+            if workflow.is_empty() {
+                return Err(GeneratorError::usage(
+                    "[release] producer_workflow must be non-empty when producer binding is declared",
+                ));
+            }
+            if release.producer_workflow_id.unwrap_or_default() == 0 {
+                return Err(GeneratorError::usage(
+                    "[release] producer_workflow_id must be a positive Actions workflow ID",
+                ));
+            }
+            if !valid_producer_workflow_path(path) {
+                return Err(GeneratorError::usage(format!(
+                    "[release] producer_workflow_path must be a repository workflow path under `.github/workflows/`, found `{path}`"
+                )));
+            }
+        }
+        _ => {
+            return Err(GeneratorError::usage(
+                "[release] producer_workflow, producer_workflow_id, and producer_workflow_path must be declared together",
+            ));
+        }
+    }
     if let Some(conclusion) = release.producer_conclusion.as_deref()
         && conclusion != "success"
     {
@@ -3487,6 +3539,17 @@ fn validate_release_bindings(release: &ReleaseSection) -> Result<(), GeneratorEr
         }
     }
     Ok(())
+}
+
+/// A workflow path is an immutable repository object identity, not a display
+/// name. Keep the accepted shape narrow because the value travels into the
+/// privileged admission command as a shell argument.
+fn valid_producer_workflow_path(path: &str) -> bool {
+    let suffix = path.strip_prefix(".github/workflows/").unwrap_or_default();
+    !suffix.is_empty()
+        && !suffix.contains('/')
+        && !suffix.chars().any(char::is_whitespace)
+        && (suffix.ends_with(".yml") || suffix.ends_with(".yaml"))
 }
 
 /// Whether `value` is a portable archive member name: a bare file name over
@@ -5561,7 +5624,7 @@ mod tests {
             ),
             (
                 "bad-conclusion",
-                "[release]\nproducer_workflow = \"CI\"\nproducer_conclusion = \"completed\"\n",
+                "[release]\nproducer_workflow = \"CI\"\nproducer_workflow_id = 42\nproducer_workflow_path = \".github/workflows/ci.yml\"\nproducer_conclusion = \"completed\"\n",
                 "must be `success`",
             ),
             (
@@ -5621,7 +5684,7 @@ mod tests {
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [release]\nenabled = true\nkind = \"rust-binary\"\npackage = \"example\"\n\
              binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n\
-             producer_workflow = \"CI\"\nproducer_conclusion = \"success\"\n\
+             producer_workflow = \"CI\"\nproducer_workflow_id = 42\nproducer_workflow_path = \".github/workflows/ci.yml\"\nproducer_conclusion = \"success\"\n\
              modes = [\"validate\", \"build\", \"rehearse\"]\n\
              archive_members = [\"example-role\"]\narchive_checksum = \"sha256\"\n\
              archive_retention_days = 14\n\
