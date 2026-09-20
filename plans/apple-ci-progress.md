@@ -27,16 +27,22 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
   squatter grandchildren cost 1s, not 10s.
 - `exec` returns message strings; each runtime wraps in its own private
   `GeneratorError` (s1/s2 error types are distinct).
+- Increment 2 adds `outputs` (normal-form repo-relative paths) to s2
+  `NamedProduct` + `[[units]]` product rows. `resolve()` runs
+  `validate_product_graph` before materialization: normal-form checks,
+  one-producer-per-path, self-edge and cycle rejection with closed paths.
+  Unknown producer/product errors keep naming known units/offered products.
+  Schema-1 product types intentionally untouched. Lib: 1841 tests green.
 
 ## Outstanding
 
-- Increment 2: typed product contract (`platform.rs` evolution).
-- Increments 3-8 per goal: discovery, cache/artifact, hosted macOS, Jackin
+- Increment 3: Swift/XcodeGen discovery without code execution.
+- Increments 4-8 per goal: cache/artifact, hosted macOS, Jackin
   migration (#1013 incl. Landlock P1), native provider, proof/cleanup.
 - Benchmarks: none yet; set latency goals after first controlled baseline.
 
 ## Continue
 
 1. `git checkout integrate/apple-ci-s2`; `cargo test -p velnor-workflow`.
-2. Next edit surface: `crates/velnor-workflow/src/s2/platform.rs`.
+2. Next edit surface: `crates/velnor-workflow/src/s2/scan/swift.rs`.
 3. Keep one branch per repo; merge main in, never rebase; `git commit -s`.

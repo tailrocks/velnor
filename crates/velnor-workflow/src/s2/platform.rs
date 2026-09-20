@@ -13,7 +13,7 @@
 //! into prepare commands (so the consumer rebuilds the product locally before
 //! its own checks), with environment flowing from task inputs to job outputs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
@@ -22,8 +22,10 @@ use crate::s2::{GeneratorError, ProjectConfig, Unit, UnitKind};
 /// A named build product one unit produces for others: an `XCFramework`
 /// bundle, a generated header set, a packed archive. `task` is the repository
 /// task that rebuilds it (run through the task runner, never a shell string),
-/// and `env` carries the task's outputs — the paths and flags consumers need
-/// once the product exists.
+/// `env` carries the task's outputs — the paths and flags consumers need
+/// once the product exists — and `outputs` declares the repo-relative artifact
+/// paths the rebuild materializes, so later stages can validate, cache, and
+/// transport the product instead of re-running blind.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub(crate) struct NamedProduct {
     pub(crate) name: String,
@@ -31,6 +33,8 @@ pub(crate) struct NamedProduct {
     pub(crate) task: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) outputs: Vec<String>,
 }
 
 /// One prerequisite edge: `producer` builds `product` for this consumer.
@@ -97,6 +101,22 @@ pub(crate) fn valid_env_value(value: &str) -> bool {
     value.len() <= 4096 && !value.chars().any(char::is_control)
 }
 
+/// A declared product output: a repo-relative path in normal form. Absolute
+/// paths, escapes, `.` segments, backslashes, and empty segments are all
+/// refused, so two equal strings always name the same file and output
+/// identity needs no further normalization.
+pub(crate) fn valid_product_output(value: &str) -> bool {
+    if value.is_empty() || value.len() > 500 || value.starts_with('/') {
+        return false;
+    }
+    if value.bytes().any(|byte| byte == b'\\') || value.chars().any(char::is_control) {
+        return false;
+    }
+    !value
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+}
+
 /// Validate one env map.
 ///
 /// # Errors
@@ -150,12 +170,106 @@ pub(crate) fn prepare_command(task: &str, env: &BTreeMap<String, String>) -> Str
 ///
 /// # Errors
 /// Returns a usage error for an edge that names an unknown producer or a
-/// product the producer does not declare, for an object-transport toggle on a
-/// unit that cannot use it, and for a unit no enabled lane can execute.
+/// product the producer does not declare, for an invalid, duplicated, or
+/// conflicting product output, for a self-edge or dependency cycle, for an
+/// object-transport toggle on a unit that cannot use it, and for a unit no
+/// enabled lane can execute.
 pub(crate) fn resolve(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
     validate_mbx_toggles(config)?;
+    validate_product_graph(config)?;
     materialize_prerequisites(config)?;
     Ok(())
+}
+
+/// Validate the product graph before compilation: every declared output is a
+/// normal-form repo-relative path claimed by exactly one product, no unit
+/// requires its own product, and the consumer-to-producer edges are acyclic.
+/// Unknown producers and products stay `materialize_prerequisites` errors,
+/// which already name the known units and offered products.
+fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    let mut owners: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
+    for unit in &config.units {
+        for product in &unit.products {
+            for output in &product.outputs {
+                if !valid_product_output(output) {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` declares product `{}` with output `{output}`, which is not a repo-relative path in normal form; use forward slashes without leading `/`, `.`, `..`, or empty segments",
+                        unit.id, product.name,
+                    )));
+                }
+                if let Some((owner_unit, owner_product)) =
+                    owners.insert(output.as_str(), (unit.id.as_str(), product.name.as_str()))
+                {
+                    if owner_unit == unit.id && owner_product == product.name {
+                        return Err(GeneratorError::usage(format!(
+                            "unit `{}` declares product `{}` output `{output}` twice; one entry per path",
+                            unit.id, product.name,
+                        )));
+                    }
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` product `{}` claims output `{output}`, already claimed by unit `{owner_unit}` product `{owner_product}`; one producer per path",
+                        unit.id, product.name,
+                    )));
+                }
+            }
+        }
+        for prerequisite in &unit.prerequisites {
+            if prerequisite.producer == unit.id {
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` requires its own product `{}`; a unit cannot consume what it produces",
+                    unit.id, prerequisite.product,
+                )));
+            }
+        }
+    }
+    if let Some(cycle) = find_product_cycle(config) {
+        return Err(GeneratorError::usage(format!(
+            "prerequisite edges contain a cycle: {}; break the cycle so producers build before consumers",
+            cycle.join(" -> "),
+        )));
+    }
+    Ok(())
+}
+
+/// The first consumer-to-producer cycle, as a closed id path, if one exists.
+/// Edges that name unknown units contribute no outgoing edges here; the
+/// unknown-producer error reports them with the known units instead.
+fn find_product_cycle(config: &ProjectConfig) -> Option<Vec<String>> {
+    fn visit(
+        config: &ProjectConfig,
+        id: &str,
+        stack: &mut Vec<String>,
+        done: &mut BTreeSet<String>,
+    ) -> Option<Vec<String>> {
+        if done.contains(id) {
+            return None;
+        }
+        if let Some(start) = stack.iter().position(|each| each == id) {
+            let mut cycle = stack[start..].to_vec();
+            cycle.push(id.to_owned());
+            return Some(cycle);
+        }
+        stack.push(id.to_owned());
+        if let Some(unit) = config.units.iter().find(|unit| unit.id == id) {
+            for prerequisite in &unit.prerequisites {
+                if let Some(cycle) = visit(config, &prerequisite.producer, stack, done) {
+                    return Some(cycle);
+                }
+            }
+        }
+        stack.pop();
+        done.insert(id.to_owned());
+        None
+    }
+
+    let mut done = BTreeSet::new();
+    for unit in &config.units {
+        let mut stack = Vec::new();
+        if let Some(cycle) = visit(config, &unit.id, &mut stack, &mut done) {
+            return Some(cycle);
+        }
+    }
+    None
 }
 
 fn validate_mbx_toggles(config: &ProjectConfig) -> Result<(), GeneratorError> {
@@ -329,11 +443,13 @@ pub(crate) fn agreed_env(
 #[cfg(test)]
 mod tests {
     use super::{
-        agreed_env, is_ffi_crate_type, prepare_command, valid_env_name, valid_env_value,
-        valid_product_name, valid_task_name, NamedProduct, Prerequisite,
+        agreed_env, is_ffi_crate_type, prepare_command, resolve, valid_env_name, valid_env_value,
+        valid_product_name, valid_product_output, valid_task_name, NamedProduct, Prerequisite,
     };
-    use crate::s2::provider::{Capabilities, Platform, TrustReq};
-    use crate::s2::{Unit, UnitKind};
+    use crate::s2::provider::{Capabilities, Platform, ProviderId, TrustReq};
+    use crate::s2::scan::default_selectors;
+    use crate::s2::{AnalysisSummary, MaintenanceSpec, ProjectConfig, RustNeeds, Unit, UnitKind};
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[expect(
         clippy::panic,
@@ -354,6 +470,17 @@ mod tests {
         match result {
             Ok(_) => panic!("{context}: expected a failure, got success"),
             Err(error) => error,
+        }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_find<'a>(units: &'a [Unit], id: &str) -> &'a Unit {
+        match units.iter().find(|unit| unit.id == id) {
+            Some(unit) => unit,
+            None => panic!("unit `{id}` survives resolve"),
         }
     }
 
@@ -435,6 +562,7 @@ mod tests {
             name: "xcframework".to_owned(),
             task: Some("build-xcframework".to_owned()),
             env: std::collections::BTreeMap::new(),
+            outputs: Vec::new(),
         };
         let plain = Prerequisite {
             producer: "rust-ffi".to_owned(),
@@ -473,5 +601,257 @@ mod tests {
             "agreeing env merges",
         );
         assert_eq!(agreed.get("KEY").map(String::as_str), Some("one"));
+    }
+
+    fn product(name: &str, outputs: &[&str]) -> NamedProduct {
+        NamedProduct {
+            name: name.to_owned(),
+            task: Some(format!("build-{name}")),
+            env: BTreeMap::new(),
+            outputs: outputs.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    fn requires(producer: &str, product: &str) -> Prerequisite {
+        Prerequisite {
+            producer: producer.to_owned(),
+            product: product.to_owned(),
+            task: None,
+            env: BTreeMap::new(),
+        }
+    }
+
+    fn project_config(units: Vec<Unit>) -> ProjectConfig {
+        ProjectConfig {
+            repository: String::new(),
+            workflow_revision: "test-revision".to_owned(),
+            profile: "generic".to_owned(),
+            analysis: AnalysisSummary {
+                method: "test".to_owned(),
+                detected: Vec::new(),
+                limitations: Vec::new(),
+            },
+            verified: true,
+            workflow_files: Vec::new(),
+            notes: Vec::new(),
+            version_bump_units: Vec::new(),
+            default_branch: "main".to_owned(),
+            providers: ProviderId::ALL.into_iter().collect(),
+            automatic_providers: ProviderId::ALL.into_iter().collect(),
+            default_dispatch_providers: ProviderId::ALL.into_iter().collect(),
+            selectors: default_selectors(),
+            release_enabled: false,
+            release_reason: String::new(),
+            release: None,
+            renovate_enabled: false,
+            renovate_reason: String::new(),
+            renovate: None,
+            docs_enabled: false,
+            docs_reason: String::new(),
+            docs: None,
+            check_profiles: Vec::new(),
+            maintenance: MaintenanceSpec::default(),
+            units,
+            workflow_templates: BTreeMap::new(),
+            adopted_workflow_surface: true,
+            actionlint_config_variables_null: false,
+            ci_required: true,
+            ruleset_required_status_checks: Vec::new(),
+            ruleset_external_status_checks: Vec::new(),
+            package_update_channels: None,
+            rust_needs: RustNeeds::Parallel,
+            concurrency_group: None,
+            serial_stack_groups: false,
+            static_files: Vec::new(),
+            declared_surface: false,
+            mise_lock_keys: BTreeSet::new(),
+            github_cache: crate::s2::config::CacheGithubSection::default(),
+            velnor_host_cache: crate::s2::config::CacheVelnorSection::default(),
+        }
+    }
+
+    fn clean_graph() -> Vec<Unit> {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        producer.products = vec![product(
+            "xcframework",
+            &["native/out/JackinFFI.xcframework", "native/out/JackinFFI.h"],
+        )];
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.prerequisites = vec![requires("rust-ffi", "xcframework")];
+        vec![producer, consumer]
+    }
+
+    #[test]
+    fn product_output_accepts_normal_repo_relative_paths() {
+        for accepted in [
+            "out/lib.a",
+            "native/out/JackinFFI.xcframework",
+            "a",
+            "a/b/c",
+            "with-dash/under_score/file.tar.gz",
+        ] {
+            assert!(valid_product_output(accepted), "should accept `{accepted}`");
+        }
+    }
+
+    #[test]
+    fn product_output_rejects_non_normal_paths() {
+        let long = "x".repeat(501);
+        let rejected = vec![
+            "",
+            "/absolute/path",
+            "trailing/slash/",
+            "double//slash",
+            "dot/./segment",
+            "up/../segment",
+            "..",
+            ".",
+            "../escape",
+            "back\\slash",
+            "tab\tchar",
+            long.as_str(),
+        ];
+        for value in rejected {
+            assert!(!valid_product_output(value), "should reject `{value}`");
+        }
+    }
+
+    #[test]
+    fn resolve_accepts_clean_graph_and_materializes_edges() {
+        let mut config = project_config(clean_graph());
+        must_ok(resolve(&mut config), "clean product graph resolves");
+        let consumer = must_find(&config.units, "swift-app");
+        assert_eq!(consumer.depends_on, vec!["rust-ffi".to_owned()]);
+        assert!(
+            consumer
+                .pr_commands
+                .iter()
+                .any(|command| command.contains("build-xcframework")),
+            "consumer rebuilds the product first: {:?}",
+            consumer.pr_commands
+        );
+    }
+
+    #[test]
+    fn resolve_is_deterministic_for_identical_graphs() {
+        let mut left = project_config(clean_graph());
+        let mut right = project_config(clean_graph());
+        must_ok(resolve(&mut left), "left graph resolves");
+        must_ok(resolve(&mut right), "right graph resolves");
+        assert_eq!(left.units, right.units);
+    }
+
+    #[test]
+    fn resolve_rejects_duplicate_output_within_one_product() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        producer.products = vec![product(
+            "xcframework",
+            &["native/out/lib.a", "native/out/lib.a"],
+        )];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer])),
+            "duplicate output fails closed",
+        );
+        assert!(
+            error.to_string().contains("twice"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_output_claimed_by_two_products() {
+        let mut first = unit("rust-ffi", UnitKind::Rust);
+        first.products = vec![product("xcframework", &["native/out/shared.a"])];
+        let mut second = unit("other-ffi", UnitKind::Rust);
+        second.products = vec![product("staticlib", &["native/out/shared.a"])];
+        let error = must_err(
+            resolve(&mut project_config(vec![first, second])),
+            "conflicting output fails closed",
+        );
+        assert!(
+            error.to_string().contains("already claimed"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_non_normal_output() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        producer.products = vec![product("xcframework", &["../escape/lib.a"])];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer])),
+            "escaping output fails closed",
+        );
+        assert!(
+            error.to_string().contains("normal form"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_self_edge() {
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.products = vec![product("app", &["out/app.zip"])];
+        consumer.prerequisites = vec![requires("swift-app", "app")];
+        let error = must_err(
+            resolve(&mut project_config(vec![consumer])),
+            "self edge fails closed",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("cannot consume what it produces"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_dependency_cycle_with_closed_path() {
+        let mut left = unit("unit-a", UnitKind::Swift);
+        left.products = vec![product("product-a", &["out/a.zip"])];
+        left.prerequisites = vec![requires("unit-b", "product-b")];
+        let mut right = unit("unit-b", UnitKind::Swift);
+        right.products = vec![product("product-b", &["out/b.zip"])];
+        right.prerequisites = vec![requires("unit-a", "product-a")];
+        let error = must_err(
+            resolve(&mut project_config(vec![left, right])),
+            "dependency cycle fails closed",
+        );
+        let message = error.to_string();
+        assert!(message.contains("cycle"), "unexpected error: {message}");
+        assert!(
+            message.contains("unit-a -> unit-b -> unit-a"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_unknown_producer_naming_known_units() {
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.prerequisites = vec![requires("ghost", "xcframework")];
+        let error = must_err(
+            resolve(&mut project_config(vec![consumer])),
+            "unknown producer fails closed",
+        );
+        assert!(
+            error.to_string().contains("known units: swift-app"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_unknown_product_naming_offered_products() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        producer.products = vec![product("xcframework", &["native/out/lib.a"])];
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.prerequisites = vec![requires("rust-ffi", "ghost")];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer, consumer])),
+            "unknown product fails closed",
+        );
+        assert!(
+            error.to_string().contains("it declares: xcframework"),
+            "unexpected error: {error}"
+        );
     }
 }
