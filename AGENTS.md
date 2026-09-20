@@ -1,6 +1,8 @@
 # Rules
 
 - `actions/runner` (https://github.com/actions/runner) is the protocol source of truth: before writing runner protocol code (job messages, broker, expressions, credentials, run-service, or timeline), find and match its equivalent logic exactly. Never guess.
+- Use the latest available versions of all dependencies, tools, runtimes, images, and platforms. Recheck official sources; keep version, action, and image references immutable with verified SHA/digest pins, never floating references or silent downgrades.
+- GitHub-hosted macOS jobs must use the highest major actually offered, including a public preview when it is newest, with the exact official label for the required architecture. If that major lacks the required-architecture label, block explicitly—never invent aliases, use `macos-latest`, fall back to an older major, or substitute architecture. Recheck the official [runner image matrix](https://github.com/actions/runner-images#available-images) whenever workflows change.
 - No legacy code. Finish every migration: remove old paths completely—no compatibility shims, aliases, or deprecation periods. Breaking changes are preferred.
 - This is a research project. It is unsafe and expected to contain breaking changes; never treat it as production-ready. Break things when needed and deliver new implementations fast.
 - Always apply these principles:
