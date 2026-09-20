@@ -33,6 +33,7 @@ pub struct RegistrationPlan {
 
 impl RegistrationPlan {
     fn validate(&self) -> Result<()> {
+        crate::platform::validate_self_hosted_runner_labels(&self.labels)?;
         if self.group_id.is_none() && self.group_name.as_ref().is_none_or(String::is_empty) {
             anyhow::bail!("scale-set registration needs a runner group ID or name");
         }
@@ -301,6 +302,15 @@ mod tests {
             ..plan()
         };
         assert!(empty_name.validate().is_err());
+        let reserved_label = RegistrationPlan {
+            labels: vec!["uBuNtU-24.04".into()],
+            ..plan()
+        };
+        assert!(reserved_label
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("reserved for GitHub-hosted runner selection"));
         assert!(plan().validate().is_ok());
     }
 

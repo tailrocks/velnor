@@ -1,5 +1,20 @@
 use anyhow::{bail, Result};
 
+/// GitHub-hosted selector reserved by Velnor policy workflows.
+pub const RESERVED_GITHUB_HOSTED_RUNNER_LABEL: &str = "ubuntu-24.04";
+
+/// Reject Velnor labels that could make a self-hosted runner match a
+/// GitHub-hosted workflow selector.
+pub fn validate_self_hosted_runner_labels(labels: &[String]) -> Result<()> {
+    if let Some(label) = labels
+        .iter()
+        .find(|label| label.eq_ignore_ascii_case(RESERVED_GITHUB_HOSTED_RUNNER_LABEL))
+    {
+        bail!("Velnor self-hosted label '{label}' is reserved for GitHub-hosted runner selection");
+    }
+    Ok(())
+}
+
 pub fn validate_arm_label_matches_host(labels: &[String], host_arch: &str) -> Result<()> {
     let has_arm_label = labels
         .iter()

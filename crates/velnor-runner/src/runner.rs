@@ -1789,6 +1789,7 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         args.target_mvp_labels,
         args.target_mvp_arm_label,
     );
+    platform::validate_self_hosted_runner_labels(&labels)?;
     validate_linux_only_labels(&labels)?;
     validate_trusted_label_requires_trusted_scope(&labels, args.trust_scope.as_deref())?;
     platform::validate_arm_label_matches_host(&labels, std::env::consts::ARCH)?;
@@ -2541,6 +2542,7 @@ async fn run_with_jit_prewarmer(
     wait_for_prior_slot_teardown(&dir).await?;
     preflight_before_executable_run(&args, &dir).map_err(local_failure)?;
     let stored = config::load(&dir).map_err(local_identity_unavailable)?;
+    platform::validate_self_hosted_runner_labels(&stored.settings.labels).map_err(local_failure)?;
     let agent_id = stored.settings.agent_id.ok_or_else(|| {
         local_identity_unavailable(anyhow::anyhow!(
             "runner is not configured: missing agent_id"
@@ -3088,6 +3090,7 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
 
 async fn daemon_lifetime(args: DaemonArgs) -> Result<DaemonExit> {
     let slots = validate_daemon_slots(args.slots)?;
+    validate_daemon_runner_labels(&args)?;
     if args.complete_noop && args.execute_scripts {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
@@ -3675,6 +3678,7 @@ pub(crate) async fn run_daemon_slot(
     slot_id: SlotId,
     generation: Generation,
 ) -> Result<()> {
+    validate_daemon_runner_labels(&args)?;
     let storage_mode = daemon_storage_mode(&args);
     if args.url.is_none() {
         let slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
@@ -16941,6 +16945,7 @@ fn status_one(args: &StatusArgs, dir: &Path) -> Result<()> {
 
 fn validate_target_mvp_status(stored: &StoredRunnerConfig) -> Result<()> {
     let mut missing = Vec::new();
+    platform::validate_self_hosted_runner_labels(&stored.settings.labels)?;
     validate_linux_only_labels(&stored.settings.labels)?;
     platform::validate_arm_label_matches_host(&stored.settings.labels, std::env::consts::ARCH)?;
     if !stored.settings.use_v2_flow {
@@ -16981,12 +16986,7 @@ fn validate_target_mvp_status(stored: &StoredRunnerConfig) -> Result<()> {
 }
 
 fn target_mvp_required_x64_labels() -> &'static [&'static str] {
-    &[
-        "hetzner-sentry-ci",
-        "ubuntu-24.04",
-        "ubuntu-latest",
-        "velnor-target-mvp",
-    ]
+    &["hetzner-sentry-ci", "ubuntu-latest", "velnor-target-mvp"]
 }
 
 /// The label trust-gated Velnor jobs append to `runs-on`
@@ -17028,6 +17028,15 @@ pub fn normalize_labels(
     labels.sort();
     labels.dedup();
     labels
+}
+
+fn validate_daemon_runner_labels(args: &DaemonArgs) -> Result<()> {
+    let labels = normalize_labels(
+        args.labels.clone(),
+        args.target_mvp_labels,
+        args.target_mvp_arm_label,
+    );
+    platform::validate_self_hosted_runner_labels(&labels)
 }
 
 fn validate_linux_only_labels(labels: &[String]) -> Result<()> {
@@ -20180,7 +20189,7 @@ jobs:
         args.url = Some("https://github.com/owner/repo".into());
         args.pat = Some("pat".into());
         args.name = Some("velnor-ci".into());
-        args.labels = vec!["velnor".into(), "ubuntu-24.04".into()];
+        args.labels = vec!["velnor".into(), "dogfood".into()];
         args.replace = true;
         args.pool_name = Some("Default".into());
 
@@ -20196,7 +20205,7 @@ jobs:
         );
         assert_eq!(
             configure_args.labels,
-            vec!["velnor".to_string(), "ubuntu-24.04".to_string()]
+            vec!["velnor".to_string(), "dogfood".to_string()]
         );
         assert!(!configure_args.replace);
         assert_eq!(configure_args.pool_name.as_deref(), Some("Default"));
@@ -20365,6 +20374,30 @@ jobs:
         assert_eq!(
             format!("stored JIT config for slot-1 is stale ({drift}); re-registering"),
             "stored JIT config for slot-1 is stale (labels dogfood,self-hosted,velnor,velnor-target-mvp → dogfood,self-hosted,velnor,velnor-host-docker,velnor-target-mvp); re-registering"
+        );
+    }
+
+    #[test]
+    fn stored_jit_config_with_reserved_hosted_label_is_stale() {
+        let args = dogfood_daemon_args(
+            "https://github.com/tailrocks/velnor",
+            &["velnor", "velnor-target-mvp", "dogfood"],
+        );
+        let mut stored = stored_config_registered_by(&args, 1, 2);
+        stored
+            .settings
+            .labels
+            .push(platform::RESERVED_GITHUB_HOSTED_RUNNER_LABEL.to_owned());
+
+        let drift = stored_jit_config_drift(&args, 1, 5, &stored.settings).unwrap();
+
+        assert_eq!(
+            drift.to_string(),
+            "labels dogfood,self-hosted,ubuntu-24.04,velnor,velnor-target-mvp → dogfood,self-hosted,velnor,velnor-target-mvp"
+        );
+        assert!(
+            format!("stored JIT config for slot-1 is stale ({drift}); re-registering")
+                .contains("re-registering")
         );
     }
 
@@ -20631,6 +20664,80 @@ jobs:
         fs::remove_dir_all(base).unwrap();
     }
 
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn target_mvp_registration_with_reserved_label_is_deleted_and_replaced() {
+        use wiremock::{
+            matchers::{body_partial_json, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let url = format!("{}/owner/repo", server.uri());
+        let mut args = dogfood_daemon_args(&url, &["velnor", "dogfood"]);
+        args.target_mvp_labels = true;
+        args.pat = Some("token".into());
+        let requested_labels = normalize_labels(args.labels.clone(), true, false);
+        assert!(!requested_labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("ubuntu-24.04")));
+        let agent_name = daemon_slot_agent_name(args.name.as_deref(), 1, 5).unwrap();
+
+        Mock::given(method("DELETE"))
+            .and(path("/api/v3/repos/owner/repo/actions/runners/2"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/v3/repos/owner/repo/actions/runners/generate-jitconfig",
+            ))
+            .and(body_partial_json(serde_json::json!({
+                "name": agent_name,
+                "runner_group_id": 1,
+                "labels": requested_labels,
+            })))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(jit_config_response(
+                    &server.uri(),
+                    9,
+                    &agent_name,
+                    &requested_labels,
+                )),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let base = unique_temp_dir("target-mvp-reserved-label-reregister");
+        let slot_dir = daemon_slot_config_dir(&base, 1, 5);
+        let mut old = stored_config_registered_by(&args, 1, 2);
+        old.settings
+            .labels
+            .push(platform::RESERVED_GITHUB_HOSTED_RUNNER_LABEL.to_owned());
+        config::save(&slot_dir, &old).unwrap();
+
+        let drift = stored_jit_config_drift_at(&args, &slot_dir, 1, 5).unwrap();
+        assert!(drift.to_string().contains("ubuntu-24.04"));
+        retry_daemon_slot_jit_config(&args, &base, 1, 5, 1)
+            .await
+            .unwrap();
+
+        let fresh = config::load(&slot_dir).unwrap();
+        assert_eq!(fresh.settings.agent_id, Some(9));
+        assert_eq!(fresh.settings.labels, requested_labels);
+        assert!(fresh
+            .settings
+            .labels
+            .iter()
+            .all(|label| !label.eq_ignore_ascii_case("ubuntu-24.04")));
+        server.verify().await;
+        fs::remove_dir_all(base).unwrap();
+    }
+
     /// (c) A successor pre-created by an earlier worker with a stale label
     /// set is deleted from GitHub and discarded before promotion; the slot
     /// then registers a fresh identity for the current configuration instead
@@ -20786,6 +20893,36 @@ jobs:
         assert!(!stored.settings.ephemeral);
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn configure_rejects_mixed_case_github_hosted_label() {
+        let dir = unique_temp_dir("configure-reserved-hosted-label");
+        let error = configure(ConfigureArgs {
+            url: "https://github.com/owner/repo".into(),
+            pat: None,
+            name: Some("velnor-invalid-label".into()),
+            labels: vec!["velnor".into(), "uBuNtU-24.04".into()],
+            target_mvp_labels: false,
+            target_mvp_arm_label: false,
+            replace: false,
+            pool_id: None,
+            pool_name: None,
+            pool_id_pre_resolved: false,
+            dry_run: true,
+            config_dir: Some(dir.clone()),
+            trust_scope: None,
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            error.contains("Velnor self-hosted label 'uBuNtU-24.04'"),
+            "{error}"
+        );
+        assert!(!dir.join("runner.json").exists());
+        fs::remove_dir_all(dir).ok();
     }
 
     #[tokio::test]
@@ -24780,17 +24917,19 @@ jobs:
 
     #[test]
     fn target_mvp_labels_cover_current_x64_linux_target_jobs() {
+        let labels = normalize_labels(vec!["custom".into()], true, false);
         assert_eq!(
-            normalize_labels(vec!["custom".into()], true, false),
+            labels,
             vec![
                 "custom",
                 "hetzner-sentry-ci",
                 "self-hosted",
-                "ubuntu-24.04",
                 "ubuntu-latest",
                 "velnor-target-mvp"
             ]
         );
+        assert!(labels.iter().any(|label| label == "velnor-target-mvp"));
+        platform::validate_self_hosted_runner_labels(&labels).unwrap();
     }
 
     #[test]
@@ -24803,6 +24942,10 @@ jobs:
         stored.settings.labels = normalize_labels(Vec::new(), true, false);
 
         assert!(validate_target_mvp_status(&stored).is_ok());
+
+        stored.settings.labels.push("uBuNtU-24.04".to_owned());
+        let error = validate_target_mvp_status(&stored).unwrap_err().to_string();
+        assert!(error.contains("reserved for GitHub-hosted runner selection"));
 
         stored.settings.labels = vec!["velnor".into()];
         let error = validate_target_mvp_status(&stored).unwrap_err().to_string();
@@ -24821,12 +24964,26 @@ jobs:
             vec![
                 "hetzner-sentry-ci",
                 "self-hosted",
-                "ubuntu-24.04",
                 "ubuntu-24.04-arm",
                 "ubuntu-latest",
                 "velnor",
                 "velnor-target-mvp"
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_rejects_mixed_case_reserved_label_from_environment_input() {
+        // The packaged systemd unit expands VELNOR_LABELS into --labels.
+        // daemon_lifetime sees that same parsed label vector before startup.
+        let mut args = daemon_args(1);
+        args.labels = vec!["velnor".into(), "UbUnTu-24.04".into()];
+
+        let error = daemon_lifetime(args).await.unwrap_err().to_string();
+
+        assert!(
+            error.contains("Velnor self-hosted label 'UbUnTu-24.04'"),
+            "{error}"
         );
     }
 

@@ -49,7 +49,7 @@ fn daemon_dry_run_jit_config_cli_writes_slot_configs_and_exits() {
                 "--name",
                 "velnor-ci",
                 "--labels",
-                "velnor,ubuntu-24.04",
+                "velnor,dogfood",
                 "--slots",
                 &configured.to_string(),
                 "--once",
@@ -115,6 +115,39 @@ fn daemon_dry_run_jit_config_cli_writes_slot_configs_and_exits() {
         }
         fs::remove_dir_all(config_dir).unwrap();
     }
+}
+
+#[test]
+fn daemon_rejects_reserved_hosted_label_from_labels_argument_before_configuring() {
+    let config_dir = unique_temp_dir("daemon-reserved-hosted-label");
+    let labels_from_environment_file = "velnor,UbUnTu-24.04";
+    let output = Command::new(env!("CARGO_BIN_EXE_velnor-runner"))
+        .env("VELNOR_LABELS", labels_from_environment_file)
+        .args([
+            "daemon",
+            "--url",
+            "https://github.com/owner/repo",
+            "--name",
+            "velnor-ci",
+            // The packaged systemd unit expands VELNOR_LABELS into this flag.
+            "--labels",
+            labels_from_environment_file,
+            "--config-dir",
+            config_dir.to_str().unwrap(),
+            "--dry-run-jit-config",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Velnor self-hosted label 'UbUnTu-24.04'")
+    );
+    assert!(
+        !config_dir.join("runner.json").exists() && !config_dir.join("slots").exists(),
+        "reserved label rejection must precede runner configuration"
+    );
+    fs::remove_dir_all(config_dir).ok();
 }
 
 #[test]

@@ -128,6 +128,7 @@ impl ScaleSetFileConfig {
         if self.owner.is_empty() {
             anyhow::bail!("scale-set config: owner is required");
         }
+        crate::platform::validate_self_hosted_runner_labels(&self.labels)?;
         // Registration validates the rest at reconcile time; fail fast on
         // the shape here too so a bad file never reaches the network.
         if self.group_id.is_none() && self.group_name.as_ref().is_none_or(String::is_empty) {
@@ -611,6 +612,23 @@ mod tests {
             config.auth.resolve().unwrap(),
             ResolvedAuth::App(_)
         ));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn config_rejects_github_hosted_selector_as_a_self_hosted_label() {
+        let body = app_body("private_key_env = \"NEVER_SET_VELNOR_TEST\"").replace(
+            "labels = [\"velnor\", \"linux\"]",
+            "labels = [\"UbUnTu-24.04\"]",
+        );
+        let path = write_config("reserved-label", &body);
+
+        let error = load_file_config(&path).unwrap_err().to_string();
+
+        assert!(
+            error.contains("Velnor self-hosted label 'UbUnTu-24.04'"),
+            "{error}"
+        );
         std::fs::remove_file(&path).unwrap();
     }
 
