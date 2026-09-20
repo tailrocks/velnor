@@ -802,7 +802,6 @@ mod tests {
         let nodes = aggregate_fixture_nodes(&ir);
         let callers = ir.required_callers(&nodes, None);
         let script = required_gate_script(&ir, &nodes, false);
-        let selected = r#"[{"unit_id":"rust","providers":["github-hosted"]}]"#;
         let mut needs = serde_json::Map::from_iter([(
             "plan".to_owned(),
             serde_json::json!({"result": "success"}),
@@ -813,22 +812,30 @@ mod tests {
                 serde_json::json!({"result": "skipped"}),
             );
         }
-        for admission in ["false", "", "unknown"] {
-            let admissions = [("PROVIDER_ADMITTED_GITHUB_HOSTED", admission)];
-            assert!(
-                run_required_gate_with_admissions(&script, &needs, "[]", &callers, &admissions),
-                "unselected work remains explicitly nonapplicable"
-            );
-            assert!(
-                !run_required_gate_with_admissions(
-                    &script,
-                    &needs,
-                    selected,
-                    &callers,
-                    &admissions,
-                ),
-                "admission {admission:?} cannot erase a frozen selected obligation"
-            );
+        for caller in callers.iter().filter(|caller| !caller.prerequisite) {
+            let selected = serde_json::json!([{
+                "unit_id": caller.unit_id,
+                "providers": [caller.provider.as_str()],
+            }])
+            .to_string();
+            for admission in ["false", "", "unknown"] {
+                let admissions = [(caller.admission.env_name(), admission)];
+                assert!(
+                    run_required_gate_with_admissions(&script, &needs, "[]", &callers, &admissions,),
+                    "unselected work remains explicitly nonapplicable"
+                );
+                assert!(
+                    !run_required_gate_with_admissions(
+                        &script,
+                        &needs,
+                        &selected,
+                        &callers,
+                        &admissions,
+                    ),
+                    "admission {admission:?} cannot erase frozen obligation {}",
+                    caller.job_id
+                );
+            }
         }
     }
 

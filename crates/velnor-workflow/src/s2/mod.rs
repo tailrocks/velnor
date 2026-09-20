@@ -9914,11 +9914,9 @@ mod tests {
             "the trust-gated caller is judged by the trusted class's admission: {block}"
         );
         assert!(
-            block.contains("skipped) ;;")
-                && block.contains(
-                    "ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED="
-                ),
-            "an unadmitted lane must be exactly `skipped`, never merely tolerated: {block}"
+            block.contains("contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=")
+                && block.contains("exit 1"),
+            "a selected obligation cannot be erased by failed trusted admission: {block}"
         );
         let admissions = required_check_admissions(&pr);
         let trusted = must_some(
