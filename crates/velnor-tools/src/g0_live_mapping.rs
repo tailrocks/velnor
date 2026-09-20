@@ -166,6 +166,7 @@ pub struct G0ArtifactObservationSupplement {
     pub repository: String,
     pub artifact_id: u64,
     pub run_id: u64,
+    pub run_attempt: Option<u32>,
     pub run_head_sha: String,
     pub name: String,
     pub digest: String,
@@ -598,6 +599,7 @@ fn map_supplement(live: &LiveCollection, canonical: &[u8]) -> G0MappingSupplemen
                     repository: repository.repository.clone(),
                     artifact_id: artifact.artifact_id,
                     run_id: artifact.run_id,
+                    run_attempt: artifact.run_attempt,
                     run_head_sha: artifact.run_head_sha.clone(),
                     name: artifact.name.clone(),
                     digest: artifact.digest.clone(),
@@ -803,7 +805,7 @@ fn map_repository(
             &["workflow_artifacts"],
         )?;
         if artifact.run_id == 0
-            || artifact.run_attempt == 0
+            || artifact.run_attempt.is_none()
             || !is_sha(&artifact.run_head_sha)
             || !is_sha256_digest(&artifact.digest)
             || artifact.expired.is_none()
@@ -891,7 +893,9 @@ fn map_repository(
             Ok(G0ArtifactObservation {
                 artifact_id: artifact.artifact_id,
                 run_id: artifact.run_id,
-                run_attempt: artifact.run_attempt,
+                run_attempt: artifact.run_attempt.ok_or_else(|| {
+                    anyhow!("artifact {} lacks attempt identity", artifact.artifact_id)
+                })?,
                 run_head_sha: artifact.run_head_sha.clone(),
                 name: artifact.name.clone(),
                 digest: artifact.digest.clone(),
@@ -1303,8 +1307,26 @@ fn map_check(
             check.context
         )
     })?;
+    let check_run_attempt = check
+        .run_attempt
+        .ok_or_else(|| anyhow!("check {} lacks run attempt", check.context))?;
+    let matching_executions = executions
+        .into_iter()
+        .flatten()
+        .filter(|run| run.run_id == workflow_run_id && run.run_attempt == check_run_attempt)
+        .collect::<Vec<_>>();
+    if matching_executions.len() != 1 {
+        bail!(
+            "check {} must bind exactly one workflow execution for run {workflow_run_id} attempt {check_run_attempt}, found {}",
+            check.context,
+            matching_executions.len()
+        );
+    }
     let execution = executions
-        .and_then(|runs| runs.iter().find(|run| run.run_id == workflow_run_id))
+        .and_then(|runs| {
+            runs.iter()
+                .find(|run| run.run_id == workflow_run_id && run.run_attempt == check_run_attempt)
+        })
         .ok_or_else(|| anyhow!("check {} lacks concrete workflow execution", check.context))?;
     if execution.source_sha != check.source_sha {
         bail!(
@@ -1333,17 +1355,20 @@ fn map_check(
             workflow.path
         );
     }
-    let job = execution
+    let matching_jobs = execution
         .jobs
         .iter()
-        .find(|job| job.check_run_id == check.check_run_id)
-        .ok_or_else(|| {
-            anyhow!(
-                "check {} lacks a job whose API check_run_url binds check {}",
-                check.context,
-                check.check_run_id
-            )
-        })?;
+        .filter(|job| job.check_run_id == check.check_run_id)
+        .collect::<Vec<_>>();
+    if matching_jobs.len() != 1 {
+        bail!(
+            "check {} must bind exactly one job for check {}, found {}",
+            check.context,
+            check.check_run_id,
+            matching_jobs.len()
+        );
+    }
+    let job = matching_jobs[0];
     if job.run_id != execution.run_id
         || job.run_attempt != execution.run_attempt
         || job.source_sha.as_deref() != Some(check.source_sha.as_str())
@@ -1360,10 +1385,7 @@ fn map_check(
         .or_else(|| execution.checkout.actual_checkout_sha())
         .map(str::to_owned)
         .ok_or_else(|| anyhow!("check {} lacks checkout identity", check.context))?;
-    let run_attempt = check
-        .run_attempt
-        .or(Some(execution.run_attempt))
-        .ok_or_else(|| anyhow!("check {} lacks run attempt", check.context))?;
+    let run_attempt = check_run_attempt;
     if run_attempt != execution.run_attempt {
         bail!(
             "check {} attempt differs from workflow execution",
