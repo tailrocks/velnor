@@ -36,7 +36,10 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
 
 ## Outstanding
 
-- Increment 3: Swift/XcodeGen discovery without code execution.
+- Increment 3: Swift/XcodeGen discovery without code execution. 3a done
+  (`581e0d42`: static Package.swift facts, build-only units, local vs
+  remote binaryTarget; lib 1857 green). Next: 3b XcodeGen spec
+  recognition + 3c renamed fixtures.
 - Increments 4-8 per goal: cache/artifact, hosted macOS, Jackin
   migration (#1013 incl. Landlock P1), native provider, proof/cleanup.
 - Benchmarks: none yet; set latency goals after first controlled baseline.
