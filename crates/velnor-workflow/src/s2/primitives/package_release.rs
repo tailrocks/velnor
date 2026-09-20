@@ -1471,6 +1471,19 @@ adopt_owned_asset_set_from_files() {
   fi
 }
 
+asset_was_in_old_set() (
+  local asset_name="$1"
+  local grep_status
+  set +e
+  grep -Fqx -- "$asset_name" "$old_assets"
+  grep_status="$?"
+  case "$grep_status" in
+    0) exit 0 ;;
+    1) exit 1 ;;
+    *) exit 2 ;;
+  esac
+)
+
 rollback() {
   local status="$1"
   local current_tag_sha
@@ -1495,14 +1508,17 @@ rollback() {
         fi
         if [ "$rollback_status" -eq 0 ]; then
           while IFS=$'\t' read -r asset_id asset_name; do
-            if grep -Fqx -- "$asset_name" "$old_assets"; then
-              continue
-            fi
-            grep_status="$?"
-            if [ "$grep_status" -ne 1 ]; then
-              rollback_status=1
-              break
-            fi
+            asset_status=0
+            asset_was_in_old_set "$asset_name"
+            asset_status="$?"
+            case "$asset_status" in
+              0) continue ;;
+              1) ;;
+              *)
+                rollback_status=1
+                break
+                ;;
+            esac
             if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit" \
               || ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >/dev/null \
               || ! replace_owned_asset_after_delete "$asset_id" "$asset_name"; then
@@ -3454,6 +3470,95 @@ test ! -e "$TEST_TMPDIR/mutation"
         assert!(
             output.status.success(),
             "rollback asset drift was not fail-closed:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_deletes_candidate_only_asset_before_restoring_previous_set() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        let helper_start = rolling_script
+            .find("asset_was_in_old_set() (")
+            .expect("asset membership helper");
+        let rollback_end = rolling_script
+            .find("\ntrap 'rollback")
+            .expect("rollback trap");
+        let helpers = &rolling_script[helper_start..rollback_end];
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-rollback-candidate-only-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create shell fixture");
+        let mut script = String::from("set -Eeuo pipefail\n");
+        script.push_str(helpers);
+        script.push_str(
+            r#"
+GITHUB_REPOSITORY=example/project
+RELEASE_PRERELEASE=true
+rolling_tag=preview
+rolling_release_id=123
+owner_draft=false
+owner_tag_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+owner_name='Preview 1.0.0-preview.1+aaaaaaa'
+owner_body='old-body'
+owner_source_commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+owner_assets="$TEST_TMPDIR/owner-assets"
+old_assets="$TEST_TMPDIR/old-assets"
+rollback_dir="$TEST_TMPDIR/rollback"
+transaction_dir="$TEST_TMPDIR/transaction"
+old_tag_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+old_source_commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+old_name="$owner_name"
+old_body="$owner_body"
+old_draft=false
+old_prerelease=true
+had_release=1
+mutated=1
+mkdir -p "$transaction_dir"
+: > "$old_assets"
+printf '%s\n' '7	candidate.tar.gz	sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > "$owner_assets"
+assert_rolling_ownership() { return 0; }
+replace_owned_asset_after_delete() {
+  test "$1" = 7
+  test "$2" = candidate.tar.gz
+  : > "$owner_assets"
+}
+verify_restored_assets() { return 0; }
+remote_tag_sha() { printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; }
+gh() {
+  if [[ "$*" == *"releases/assets/7"* ]]; then
+    printf '%s\n' deleted >> "$TEST_TMPDIR/deleted"
+  fi
+  return 0
+}
+set +e
+(rollback 1)
+rollback_status=$?
+set -e
+test "$rollback_status" -eq 1
+test -s "$TEST_TMPDIR/deleted"
+test "$(wc -l < "$TEST_TMPDIR/deleted")" -eq 1
+test ! -s "$owner_assets"
+"#,
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env("TEST_TMPDIR", &root)
+            .output()
+            .expect("run candidate-only rollback regression");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            output.status.success(),
+            "candidate-only asset was not deleted during rollback:\n{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
