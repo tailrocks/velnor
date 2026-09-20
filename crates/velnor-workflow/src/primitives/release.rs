@@ -52,6 +52,11 @@ pub(crate) fn is_release_side(primitive: &str) -> bool {
 /// and the package consumer refuse any other tag.
 const RELEASE_RECORD_SCHEMA: &str = "velnor.release-record/v1";
 
+/// Keep downloaded identity artifacts outside the checkout. The preview
+/// runner build proves the source tree is clean before embedding identity;
+/// a repository-root `metadata/` download would make that proof fail.
+const RELEASE_METADATA_DIR: &str = "${{ runner.temp }}/velnor-release-metadata";
+
 /// The source URL stamped into OCI labels and the release record: the
 /// release contract's own source repository on github.com.
 fn release_source_url(release: &ReleaseSpec) -> String {
@@ -1490,19 +1495,23 @@ fn debian_identity_steps(
     kind: &str,
     crate_expr: &str,
     preview: bool,
+    metadata_dir: &str,
 ) -> String {
     let release_dir = shell_quote(release_dir);
     let repository = shell_quote(repository);
-    let tool = format!("metadata/{binary}-release-tool");
+    let metadata_dir = shell_quote(metadata_dir);
+    let tool = format!("{metadata_dir}/{binary}-release-tool");
     let source_check = if preview {
-        "          jq -e --arg sha \"$SOURCE_COMMIT\" '.source_sha == $sha' metadata/build-identity.json >/dev/null \\\n            || { echo \"::error::build identity source_sha != preview source commit $SOURCE_COMMIT\" >&2; exit 1; }\n"
+        format!(
+            "          jq -e --arg sha \"$SOURCE_COMMIT\" '.source_sha == $sha' {metadata_dir}/build-identity.json >/dev/null \\\n            || {{ echo \"::error::build identity source_sha != preview source commit $SOURCE_COMMIT\" >&2; exit 1; }}\n"
+        )
     } else {
-        ""
+        String::new()
     };
     let commit_value = if preview {
         "\"$SOURCE_COMMIT\"".to_owned()
     } else {
-        "$(jq -er '.source_sha' metadata/build-identity.json)".to_owned()
+        format!("$(jq -er '.source_sha' {metadata_dir}/build-identity.json)")
     };
     let record_check = if preview {
         format!(
@@ -1512,7 +1521,7 @@ fn debian_identity_steps(
         String::new()
     };
     format!(
-        "      - name: Stage acyclic identity files packaged into the deb\n        run: |\n          set -euo pipefail\n          test -s metadata/build-identity.json || {{ echo \"::error::release metadata missing build-identity.json\" >&2; exit 1; }}\n          test -s metadata/manifest.json || {{ echo \"::error::release metadata missing manifest.json\" >&2; exit 1; }}\n          jq -e '.source_sha and .crate_version' metadata/build-identity.json >/dev/null\n          jq -e 'type == \"object\"' metadata/manifest.json >/dev/null\n{source_check}          mkdir -p {release_dir}\n          cp metadata/build-identity.json metadata/manifest.json {release_dir}/\n      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n          chmod +x {tool}\n          binary=\"target/$TARGET/release/{binary}\"\n          test -s \"$binary\" || {{ echo \"::error::missing cross-built runner binary\" >&2; exit 1; }}\n          binary_sha256=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n          manifest_sha256=\"$(sha256sum metadata/manifest.json | awk '{{print $1}}')\"\n          manifest_version=\"$(jq -er '.version | numbers' metadata/manifest.json)\"\n          source_sha={commit_value}\n          jq -n \\\n            --arg schema \"velnor.package-record/v1\" \\\n            --arg repo {repository} \\\n            --arg kind \"{kind}\" \\\n            --arg commit \"$source_sha\" \\\n            --arg crate {crate_expr} \\\n            --arg debian \"$VERSION\" \\\n            --argjson mv \"$manifest_version\" \\\n            --arg mhash \"$manifest_sha256\" \\\n            --arg arch \"${{{{ matrix.arch }}}}\" \\\n            --arg target \"$TARGET\" \\\n            --arg binary \"$binary_sha256\" \\\n            '{{\n              schema: $schema,\n              build: {{ repository: $repo, kind: $kind, commit: $commit,\n                       crate_version: $crate, debian_version: $debian,\n                       manifest_version: $mv, manifest_sha256: $mhash }},\n              architecture: {{ arch: $arch, target: $target, binary_sha256: $binary }}\n            }}' > package-record.candidate.json\n          {tool} release emit \\\n            --record package-record.candidate.json \\\n            --binary \"$binary\" \\\n            --out {release_dir}/package-record.json\n{record_check}"
+        "      - name: Stage acyclic identity files packaged into the deb\n        run: |\n          set -euo pipefail\n          test -s {metadata_dir}/build-identity.json || {{ echo \"::error::release metadata missing build-identity.json\" >&2; exit 1; }}\n          test -s {metadata_dir}/manifest.json || {{ echo \"::error::release metadata missing manifest.json\" >&2; exit 1; }}\n          jq -e '.source_sha and .crate_version' {metadata_dir}/build-identity.json >/dev/null\n          jq -e 'type == \"object\"' {metadata_dir}/manifest.json >/dev/null\n{source_check}          mkdir -p {release_dir}\n          cp {metadata_dir}/build-identity.json {metadata_dir}/manifest.json {release_dir}/\n      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n          chmod +x {tool}\n          binary=\"target/$TARGET/release/{binary}\"\n          test -s \"$binary\" || {{ echo \"::error::missing cross-built runner binary\" >&2; exit 1; }}\n          binary_sha256=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n          manifest_sha256=\"$(sha256sum {metadata_dir}/manifest.json | awk '{{print $1}}')\"\n          manifest_version=\"$(jq -er '.version | numbers' {metadata_dir}/manifest.json)\"\n          source_sha={commit_value}\n          jq -n \\\n            --arg schema \"velnor.package-record/v1\" \\\n            --arg repo {repository} \\\n            --arg kind \"{kind}\" \\\n            --arg commit \"$source_sha\" \\\n            --arg crate {crate_expr} \\\n            --arg debian \"$VERSION\" \\\n            --argjson mv \"$manifest_version\" \\\n            --arg mhash \"$manifest_sha256\" \\\n            --arg arch \"${{{{ matrix.arch }}}}\" \\\n            --arg target \"$TARGET\" \\\n            --arg binary \"$binary_sha256\" \\\n            '{{\n              schema: $schema,\n              build: {{ repository: $repo, kind: $kind, commit: $commit,\n                       crate_version: $crate, debian_version: $debian,\n                       manifest_version: $mv, manifest_sha256: $mhash }},\n              architecture: {{ arch: $arch, target: $target, binary_sha256: $binary }}\n            }}' > package-record.candidate.json\n          {tool} release emit \\\n            --record package-record.candidate.json \\\n            --binary \"$binary\" \\\n            --out {release_dir}/package-record.json\n{record_check}"
     )
 }
 
@@ -1593,6 +1602,10 @@ fn debian_reuse_release_steps(config: &ProjectConfig, release: &ReleaseSpec) -> 
     )
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the release Debian job keeps its ordered packaging steps together"
+)]
 fn render_identity_debian_job(
     config: &ProjectConfig,
     release: &ReleaseSpec,
@@ -1662,8 +1675,9 @@ fn render_identity_debian_job(
     } else {
         "release-metadata"
     };
+    let metadata_dir = RELEASE_METADATA_DIR;
     let mut steps = format!(
-        "      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Set up sccache\n        uses: {sccache}\n        with:\n          version: v0.16.0\n      - name: Install cargo-deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          cargo install cargo-deb --version 3.7.0 --locked\n          cargo-deb --version\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: {metadata_artifact}\n          path: metadata\n",
+        "      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Set up sccache\n        uses: {sccache}\n        with:\n          version: v0.16.0\n      - name: Install cargo-deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          cargo install cargo-deb --version 3.7.0 --locked\n          cargo-deb --version\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: {metadata_artifact}\n          path: {metadata_dir}\n",
     );
     if preview {
         let _ = writeln!(
@@ -1681,6 +1695,7 @@ fn render_identity_debian_job(
         kind,
         crate_expr,
         preview,
+        RELEASE_METADATA_DIR,
     ));
     if guest {
         steps.push_str(&debian_guest_steps(config, release, cargo_cmd));
@@ -5908,11 +5923,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "2cef6177dcabde81d31c57e62a02659d2801738a913dd0d1041ca5911c605b3a",
+                "f1055ad2cb2575ce61322fd4c7fee9f2477bcebad5a80464bac732b3db19f2f5",
             ),
             (
                 "preview.yml",
-                "b579999c9879f2dc10ea71ee260ebdb4e8355d24084370ad0b5e4ec9084b7de7",
+                "4d237e4c71f8ffe60baf74703258c37557859d7a02b6946b30834e01292e6a36",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -7661,6 +7676,14 @@ mod tests {
         assert!(
             preview_debian.contains("Build release runner binary"),
             "{preview_debian}"
+        );
+        assert!(
+            preview_debian.contains("path: ${{ runner.temp }}/velnor-release-metadata"),
+            "preview metadata must stay outside the checkout: {preview_debian}"
+        );
+        assert!(
+            !preview_debian.contains("path: metadata\n"),
+            "preview metadata must not dirty the checkout: {preview_debian}"
         );
         assert!(
             !preview.contains("Reuse the build job's release binary"),
