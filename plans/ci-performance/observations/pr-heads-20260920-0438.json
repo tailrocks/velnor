@@ -1,0 +1,134 @@
+{
+  "retrieval_utc_approximate": "2026-09-20T04:38:00Z",
+  "repositories": [
+    {
+      "repository": "tailrocks/velnor",
+      "pulls": [
+        {
+          "number": 968,
+          "head": "b6b4f2e14ab035def118612596df28e1f10d148b",
+          "base": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+          "title": "ci: establish measured cross-repository performance improvements"
+        },
+        {
+          "number": 967,
+          "head": "d3c95ec3f4fafdedc38b4d4a88858df6361331ab",
+          "base": "e94b48406c4ed206fce2bbf39b788264e72cf39c",
+          "title": "fix(ci): avoid Mr. Boxington import quota failures"
+        },
+        {
+          "number": 966,
+          "head": "575225b536f530c0af1d8dcbc7f083a10c4ef421",
+          "base": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+          "title": "fix(package-release): refuse legacy rolling mutation"
+        },
+        {
+          "number": 963,
+          "head": "056362aadb738279924ef05597f9a014392f48bf",
+          "base": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+          "title": "feat: integrate approved workflow scanner sources"
+        },
+        {
+          "number": 962,
+          "head": "ea9686f0eb522e402441ecd461bd1f458b731d06",
+          "base": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+          "title": "fix: route arm64 release producers to native hosted runners"
+        },
+        {
+          "number": 961,
+          "head": "5b9a16a620951b65bbfe0a5cf7b1ffe04a317303",
+          "base": "b5a4b4afaa6ca807927cacc03659b570a895dd5c",
+          "title": "feat: integrate approved generic workflow scanners"
+        },
+        {
+          "number": 960,
+          "head": "c8f7a2b353f9d2d6a60d3ad8bb2dc6299a108ceb",
+          "base": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+          "title": "fix(workflow): keep release metadata out of checkout"
+        },
+        {
+          "number": 957,
+          "head": "92387e88c32f933a9061b819256e535662655cb2",
+          "base": "b5a4b4afaa6ca807927cacc03659b570a895dd5c",
+          "title": "docs: require latest GitHub macOS runners"
+        },
+        {
+          "number": 952,
+          "head": "a5c1c0bd5c92c4c52d58ccb21042b1b2c0b08637",
+          "base": "3123f8ae63a1fe98fe1d4dc86fb25b212defcd59",
+          "title": "fix(workflow): restore the Docker seed and fetch the D19 pin in release legs"
+        },
+        {
+          "number": 948,
+          "head": "ab82b08746ec312558981f8461a32a1e3350d802",
+          "base": "c2883fb3b1545127e89f290d853dd286e1ce805c",
+          "title": "C1 prep: bastion host-setup provisioner (authoring only, do not execute)"
+        }
+      ]
+    },
+    {
+      "repository": "jackin-project/jackin",
+      "pulls": [
+        {
+          "number": 1007,
+          "head": "95b437e735aafea5fe9b2e638c122345c5d141c3",
+          "base": "41796158b1e45535ae4e74d5ff048cb5bb4e0488",
+          "title": "ci: pin the attested workflow runtime and regenerate"
+        },
+        {
+          "number": 1006,
+          "head": "972fe82aeae4abe24809ca7e4f6f1c05c566e209",
+          "base": "41796158b1e45535ae4e74d5ff048cb5bb4e0488",
+          "title": "fix(config): preserve atomicity for versioned workspace splits"
+        },
+        {
+          "number": 1005,
+          "head": "1d13eca74212f950d9848104fdb7d7d05e02cfa7",
+          "base": "72feee236162468aeeeb416e8139a97db06538eb",
+          "title": "docs: complete PR #1002 evidence ledger audit"
+        },
+        {
+          "number": 1004,
+          "head": "a0e18c458d8c1b6cb5101ee597830f49c8712255",
+          "base": "3b1e1fc0a20a7d861454746c9ebb50a335c9b412",
+          "title": "feat(release): verify preview package handoff"
+        },
+        {
+          "number": 1002,
+          "head": "72feee236162468aeeeb416e8139a97db06538eb",
+          "base": "41796158b1e45535ae4e74d5ff048cb5bb4e0488",
+          "title": "feat(multi-account): settings, usage, workspace selection, container support"
+        }
+      ]
+    },
+    {
+      "repository": "tailrocks/parallax",
+      "pulls": [
+        {
+          "number": 112,
+          "head": "dcf1d08c9ee9700ddc6ed3ab32639b102cf4a9b0",
+          "base": "6a12bf47a816b63e848b563aaa45ef9694159c79",
+          "title": "ci: use the published source-bound workflow runtime"
+        },
+        {
+          "number": 111,
+          "head": "6fcc10be6409e73cfb5e9eeb7eb48dbaadbec05d",
+          "base": "6a12bf47a816b63e848b563aaa45ef9694159c79",
+          "title": "test(release): align test with generated release contract"
+        },
+        {
+          "number": 110,
+          "head": "de3fd1c7d347ec8cc98bf4f811b73ec639506236",
+          "base": "6a12bf47a816b63e848b563aaa45ef9694159c79",
+          "title": "chore(ci): bootstrap published Velnor workflow runtime"
+        },
+        {
+          "number": 109,
+          "head": "93cee3556b3bf08c9ba38a43aace43312c233c0a",
+          "base": "6a12bf47a816b63e848b563aaa45ef9694159c79",
+          "title": "fix(ci): build embedded UI before Rust checks"
+        }
+      ]
+    }
+  ]
+}

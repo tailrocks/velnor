@@ -149,7 +149,8 @@ The timing evidence does not yet prove that job-level `always()` caused the
 03:10:34Z, but the old run's longest reusable child, `Rust · velnor-workflow ·
 github-hosted`, ran 03:09:19–03:18:43Z and completed successfully. The old
 `ci-required` and `Control / Required` jobs then ran 03:18:46–03:18:53Z; the
-run was marked cancelled at 03:18:54Z. The replacement planning job started
+run API was updated at 03:18:54Z, which does not prove the cancellation time.
+The replacement planning job started
 03:18:56Z. This proves stale work occupied the path, but it does not identify
 the cancellation request time or show that an `always()` gate held the run.
 The child log reaches successful checks and cleanup at 03:18:40Z.
@@ -219,3 +220,23 @@ selection, trust, and verdict expressions retained. Main/nightly/release output
 is byte-identical in this isolated comparison. Generator revisions are schema
 1 = 59 and schema 2 = 61. No elapsed-time improvement is accepted from these
 local checks.
+
+## First published replay observation
+
+Published candidate `35a07a59242fb5c4931413d6f206ad1273bcd4f8` has the identical
+verified tree of local `99b204e70db0a19d42eb88487f059fd993819c53`; the reviewed
+API fallback preserved parent/trailers. Its clean default-feature binary reports
+closure `fafa74973fd17c52ee2e325c9e7d314ff31d789fdba018d20ffdade6f2a35195` and
+passes generator check.
+
+Replacement run `35490606803` was created at 05:01:23 UTC. The prior
+`35490258957` reports cancelled but had already failed an integration fixture
+at 05:00:06. Its remaining runner job completed at 05:02:20 and its failed gates
+completed through 05:02:33. Replacement planning began at 05:02:35: 72 seconds
+of unclassified pre-start time. This failed prior run is a cancellation
+observation, not a successful baseline or proof of the guard mechanism.
+The candidate child jobs were observed running before the next replay push;
+the captured partial run/job responses are explicitly labeled before-replay.
+However, candidate run `35490606803` finished with a fixture failure before
+the next push. That push did not inject cancellation into the candidate run.
+The required candidate cancellation replay remains unperformed.

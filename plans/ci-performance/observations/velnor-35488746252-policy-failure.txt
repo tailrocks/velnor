@@ -1,0 +1,4 @@
+2026-09-20T04:25:23.9847032Z error: workflow policy failed: generated-tree
+2026-09-20T04:25:23.9855537Z        - VELNOR_WORKFLOW_PINNED_BINARY=/home/runner/work/_temp/velnor-workflow-candidate/velnor-workflow is not the declared pin: reports closure 7d9834aff07643961fe1fb9023d62d67c2e93c82b6f9487b22bc230e8bae7624, which is not the pin's closure
+2026-09-20T04:25:23.9861115Z policy: 11 rules, 1 failed
+2026-09-20T04:25:23.9871415Z ##[error]Process completed with exit code 1.

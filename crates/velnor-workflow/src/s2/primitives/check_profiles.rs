@@ -436,6 +436,7 @@ fn render_profile_job(
     config: &ProjectConfig,
     profile: &CheckProfileSpec,
 ) -> Result<(), GeneratorError> {
+    validate_mise_env(profile)?;
     let _ = writeln!(output, "  {}:", profile.id);
     let _ = writeln!(output, "    name: {}", yaml_scalar(&profile.name));
     if !profile.needs.is_empty() {
@@ -447,12 +448,7 @@ fn render_profile_job(
     if profile.advisory {
         output.push_str("    continue-on-error: true\n");
     }
-    if !profile.env.is_empty() {
-        output.push_str("    env:\n");
-        for (key, value) in &profile.env {
-            let _ = writeln!(output, "      {key}: {}", yaml_scalar(value));
-        }
-    }
+    render_mise_env(output, profile);
     output.push_str("    steps:\n");
     render_checkout_step(output);
     render_tool_steps(output, config, profile);
@@ -494,11 +490,44 @@ fn render_checkout_step(output: &mut String) {
     );
 }
 
-/// Tool provisioning per profile runner. Hosted runners install through the
-/// pinned `mise` action, which the Velnor fleet cannot admit, so Velnor
-/// installs with the preinstalled `mise` binary instead. Every profile runs
-/// named tasks, so hosted runners always set up even when no tool needs
-/// installing.
+/// Mise settings owned by the generated profile job. `profile.tools` is the
+/// explicit closure supplied by the config resolver; task-local tools outside
+/// that closure must fail at task execution instead of being installed by a
+/// hidden mise fallback.
+const MISE_AUTO_INSTALL_KEYS: &[&str] = &[
+    "MISE_AUTO_INSTALL",
+    "MISE_EXEC_AUTO_INSTALL",
+    "MISE_NOT_FOUND_AUTO_INSTALL",
+    "MISE_TASK_RUN_AUTO_INSTALL",
+];
+
+fn validate_mise_env(profile: &CheckProfileSpec) -> Result<(), GeneratorError> {
+    for key in MISE_AUTO_INSTALL_KEYS {
+        if profile.env.contains_key(*key) {
+            return Err(GeneratorError::usage(format!(
+                "check profile `{}` env `{key}` conflicts with generated Mise auto-install policy; omit it",
+                profile.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn render_mise_env(output: &mut String, profile: &CheckProfileSpec) {
+    output.push_str("    env:\n");
+    for (key, value) in &profile.env {
+        let _ = writeln!(output, "      {key}: {}", yaml_scalar(value));
+    }
+    for key in MISE_AUTO_INSTALL_KEYS {
+        let _ = writeln!(output, "      {key}: \"false\"");
+    }
+}
+
+/// Tool provisioning per profile runner. Hosted runners use one pinned
+/// `mise` action: non-empty profiles pass only their explicit `install_args`,
+/// while empty profiles bootstrap the runtime without installing the
+/// repository's root tool set. The Velnor fleet uses its preinstalled `mise`
+/// binary instead.
 fn render_tool_steps(output: &mut String, config: &ProjectConfig, profile: &CheckProfileSpec) {
     let mise = ActionPin::Mise.reference();
     if profile.runner == "velnor" {
@@ -790,15 +819,28 @@ mod tests {
             "{workflow}"
         );
         assert_eq!(
-            workflow.matches(crate::ActionPin::Mise.reference()).count(),
+            workflow
+                .matches(crate::s2::ActionPin::Mise.reference())
+                .count(),
             1,
             "one hosted profile owns one Mise bootstrap action: {workflow}"
+        );
+        assert!(
+            !workflow.contains("name: Set up Mise tools"),
+            "tool installation and runtime setup must not be split into two actions: {workflow}"
         );
         assert!(workflow.contains("MISE_TOOLS: ripgrep"), "{workflow}");
         assert!(
             workflow.contains("mise --yes --locked install \"${tools[@]}\""),
-            "{workflow}"
+            "Velnor check profiles must install only locked Mise tools: {workflow}"
         );
+        for key in MISE_AUTO_INSTALL_KEYS {
+            assert_eq!(
+                workflow.matches(&format!("      {key}: \"false\"")).count(),
+                3,
+                "every profile must disable {key}: {workflow}"
+            );
+        }
         let mut bare_job = String::new();
         must(
             render_profile_job(&mut bare_job, &config, &config.check_profiles[2]),
@@ -808,10 +850,44 @@ mod tests {
             !bare_job.contains("Install declared Mise tools"),
             "a tool-less Velnor job installs nothing: {bare_job}"
         );
+        assert!(bare_job.contains("Run check-bare"), "{bare_job}");
+        assert!(
+            bare_job.contains("MISE_TASK_RUN_AUTO_INSTALL: \"false\""),
+            "a task-local tool omitted from the explicit closure must fail visibly: {bare_job}"
+        );
+        let mut empty_hosted_job = String::new();
+        let empty_hosted = profile("empty-hosted");
+        must(
+            render_profile_job(&mut empty_hosted_job, &config, &empty_hosted),
+            "render the tool-less hosted job",
+        );
+        assert!(
+            empty_hosted_job.contains("install: false"),
+            "{empty_hosted_job}"
+        );
+        assert!(
+            !empty_hosted_job.contains("install_args:"),
+            "{empty_hosted_job}"
+        );
         assert!(
             workflow.contains(crate::s2::ActionPin::Mise.reference()),
             "{workflow}"
         );
+    }
+
+    #[test]
+    fn profile_cannot_override_mise_auto_install_policy() {
+        let mut unsafe_profile = profile("unsafe");
+        unsafe_profile
+            .env
+            .insert("MISE_AUTO_INSTALL".to_owned(), "true".to_owned());
+        let config = profile_config(vec![unsafe_profile.clone()]);
+        let error = must_fail(
+            render_profile_job(&mut String::new(), &config, &unsafe_profile),
+            "a profile must not override generated Mise settings",
+        );
+        assert!(error.to_string().contains("MISE_AUTO_INSTALL"), "{error}");
+        assert!(error.to_string().contains("conflicts"), "{error}");
     }
 
     #[test]

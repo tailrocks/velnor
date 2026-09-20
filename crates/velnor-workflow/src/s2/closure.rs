@@ -50,9 +50,9 @@
 use std::path::Path;
 use std::process::Command;
 
-use sha2::{Digest, Sha256};
-
 use super::GeneratorError;
+
+use crate::closure::worktree_identity;
 
 /// Closure algorithm version. Bump when the inputs or canonical form change;
 /// digests minted under different versions never compare equal because the
@@ -106,29 +106,7 @@ pub(crate) fn product_tag(closure: &str) -> String {
 /// Canonical digest over `ls_tree_lines` (raw `git ls-tree -r` output lines,
 /// without trailing newlines) with the given feature set and profile.
 pub(crate) fn canonical_digest(ls_tree_lines: &[String], features: &str, profile: &str) -> String {
-    let mut lines: Vec<&str> = ls_tree_lines.iter().map(String::as_str).collect();
-    lines.sort_unstable();
-    let mut bytes = Vec::new();
-    for line in lines {
-        bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\n');
-    }
-    bytes.extend_from_slice(
-        format!("closure-version:{CLOSURE_VERSION}\nfeatures:{features}\nprofile:{profile}\n")
-            .as_bytes(),
-    );
-    hex_digest(&bytes)
-}
-
-/// Lowercase hex SHA-256 of `bytes`.
-fn hex_digest(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        let _ = write!(output, "{byte:02x}");
-    }
-    output
+    worktree_identity::canonical_digest(ls_tree_lines, CLOSURE_VERSION, features, profile)
 }
 
 /// Digest of the closure inputs at `rev` in the repository at `repo`.
@@ -175,6 +153,24 @@ pub(crate) fn closure_of_tree(
 /// disagree about which product a revision's candidate is.
 pub(crate) fn candidate_closure_of_tree(repo: &Path, rev: &str) -> Result<String, GeneratorError> {
     closure_of_tree(repo, rev, DEV_FEATURES, PROFILE_DEBUG)
+}
+
+/// Digest the candidate closure from the bytes and modes currently in the
+/// checkout.  This is the local `--check` binding; CI artifacts still use the
+/// external manifest contract and the clean Git-tree function above.
+pub(crate) fn candidate_closure_of_worktree(
+    repo: &Path,
+    rev: &str,
+) -> Result<String, GeneratorError> {
+    worktree_identity::worktree_digest(
+        repo,
+        rev,
+        CLOSURE_PATHS,
+        CLOSURE_VERSION,
+        DEV_FEATURES,
+        PROFILE_DEBUG,
+    )
+    .map_err(|error| GeneratorError::usage(format!("compute worktree closure: {error}")))
 }
 
 #[cfg(test)]

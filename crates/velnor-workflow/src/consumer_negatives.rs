@@ -445,6 +445,7 @@ fn candidate_verify_tail(revision: &str) -> String {
         "gh run download",
         "candidate digest mismatch",
         "is not the head's candidate",
+        "VELNOR_WORKFLOW_CANDIDATE_BINARY=",
         "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=",
     ] {
         assert!(
@@ -909,6 +910,7 @@ impl ConsumerFixture {
             ),
             ("name", name),
             ("run_id", run_id),
+            ("HEAD_SHA", self.revision.as_str()),
             ("head_candidate", head_candidate),
         ];
         env.extend_from_slice(extra);
@@ -1526,8 +1528,12 @@ fn candidate_acquire_exports_bound_product() {
     );
     let env = must(fs::read_to_string(&env_file), "read github env");
     assert!(
-        env.contains("VELNOR_WORKFLOW_PINNED_BINARY="),
-        "the binary exports: {env}"
+        env.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY="),
+        "the candidate binary exports in its own slot: {env}"
+    );
+    assert!(
+        !env.contains("VELNOR_WORKFLOW_PINNED_BINARY="),
+        "the candidate does not populate the declared-pin slot: {env}"
     );
     assert!(
         env.contains("VELNOR_WORKFLOW_CANDIDATE_MANIFEST="),

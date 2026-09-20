@@ -13,6 +13,7 @@
 //! output owns. Nothing about a specific repository lives in the generator.
 
 pub(crate) mod canonical;
+pub(crate) mod mise_closure;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -352,6 +353,10 @@ pub(crate) struct CheckProfileSection {
     name: Option<String>,
     schedule: Option<String>,
     runner: Option<String>,
+    /// The exact Mise lockfile platform for this profile's target runner.
+    /// Runner labels are routing only and cannot prove OS or architecture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    platform: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1064,6 +1069,10 @@ impl CheckProfileSection {
 
     pub(crate) fn runner(&self) -> Option<&str> {
         self.runner.as_deref()
+    }
+
+    pub(crate) fn platform(&self) -> Option<&str> {
+        self.platform.as_deref()
     }
 
     pub(crate) fn tools(&self) -> Option<&[String]> {
@@ -3304,6 +3313,11 @@ fn validate_check_profile_row(
                 "[[check_profile]] {id} runner must be one of: github, macos, velnor; found `{runner}`"
             )));
         }
+    }
+    if let Some(platform) = row.platform.as_deref() {
+        crate::config::mise_closure::validate_platform(platform).map_err(|error| {
+            GeneratorError::usage(format!("[[check_profile]] {id} platform: {error}"))
+        })?;
     }
     if row.runner.as_deref().unwrap_or("github") == "velnor" {
         if config.workflow.runners.as_deref() == Some("github") {

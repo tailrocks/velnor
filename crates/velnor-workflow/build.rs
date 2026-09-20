@@ -17,12 +17,12 @@
 //!   the render-with-X-stamp-X binding holds for release products and
 //!   development builds alike.
 //!
-//! The closure duplicates the canonicalization in `src/closure.rs` (a build
-//! script cannot import the crate it builds): `git ls-tree -r HEAD` over the
-//! closure paths, re-sorted in byte order, plus the footer, hashed with
-//! SHA-256. The footer version and path list are pinned by unit tests against
-//! `src/closure.rs`, so the two implementations cannot drift silently: any
-//! drift fails closed (digests mismatch, no product is accepted).
+//! The closure uses the shared canonicalization in `src/identity.rs` (a build
+//! script cannot import the crate it builds). Clean trees retain the exact
+//! `git ls-tree -r HEAD` v1 lines; dirty trees hash the current bytes, modes,
+//! symlink targets, additions, and deletions before the same footer. The
+//! footer version and path list remain pinned by closure tests, so a drift
+//! fails closed (digests mismatch, no product is accepted).
 //!
 //! A tree without git (or a git failure) stamps `unknown` for both values,
 //! which no pinned-revision or closure probe can ever match.
@@ -30,7 +30,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use sha2::{Digest, Sha256};
+#[path = "src/identity.rs"]
+mod identity;
 
 /// Closure paths, mirroring `closure::CLOSURE_PATHS`.
 const CLOSURE_PATHS: &[&str] = &[
@@ -79,39 +80,21 @@ fn main() {
     );
 }
 
-/// Closure digest of the checkout's `HEAD` tree, or `None` when it cannot be
-/// proven (no git, unknown `HEAD`, or no closure inputs tracked).
+/// Closure digest of the checkout's `HEAD` baseline and current worktree, or
+/// `None` when it cannot be proven (no git, unknown `HEAD`, no closure inputs,
+/// or an unsupported worktree path).
 fn self_closure(manifest_dir: &Path) -> Option<String> {
     let root = git(manifest_dir, &["rev-parse", "--show-toplevel"])?;
     let root = PathBuf::from(root);
-    let mut arguments = vec!["ls-tree", "-r", "HEAD", "--"];
-    arguments.extend_from_slice(CLOSURE_PATHS);
-    let listing = git(&root, &arguments)?;
-    let mut lines: Vec<&str> = listing.lines().collect();
-    if lines.is_empty() {
-        return None;
-    }
-    lines.sort_unstable();
-    let mut bytes = Vec::new();
-    for line in lines {
-        bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\n');
-    }
-    bytes.extend_from_slice(
-        format!(
-            "closure-version:{CLOSURE_VERSION}\nfeatures:{}\nprofile:{}\n",
-            cargo_features(),
-            std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_owned())
-        )
-        .as_bytes(),
-    );
-    let digest = Sha256::digest(&bytes);
-    let mut output = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        output.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
-        output.push(char::from(b"0123456789abcdef"[usize::from(byte & 0x0f)]));
-    }
-    Some(output)
+    identity::worktree_digest(
+        &root,
+        "HEAD",
+        CLOSURE_PATHS,
+        CLOSURE_VERSION,
+        &cargo_features(),
+        &std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_owned()),
+    )
+    .ok()
 }
 
 /// Enabled Cargo features as a sorted comma list (`CARGO_FEATURE_*` is set

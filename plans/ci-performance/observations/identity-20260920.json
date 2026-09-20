@@ -1,0 +1,75 @@
+{
+  "experiment": "V-IDENTITY-001",
+  "observed_at": "2026-09-20",
+  "fixture": {
+    "path": "/tmp/velnor-identity-kMtqNC/repo",
+    "target_path": "/tmp/velnor-identity-kMtqNC/target",
+    "source_head": "f0fb1c012adc2b7e604eaab332785eb5bf780caa",
+    "toolchain": "1.98.1",
+    "profile": "debug",
+    "features": "tui"
+  },
+  "reproduction": [
+    {
+      "case": "clean_head",
+      "reported_revision": "f0fb1c012adc2b7e604eaab332785eb5bf780caa",
+      "reported_closure": "b510e2700de756686a995968ad999cbfd1b14d170d21e1a18b3e76ed366875e5"
+    },
+    {
+      "case": "dirty_tracked_closure_source",
+      "head_unchanged": true,
+      "reported_revision": "f0fb1c012adc2b7e604eaab332785eb5bf780caa",
+      "reported_closure": "b510e2700de756686a995968ad999cbfd1b14d170d21e1a18b3e76ed366875e5",
+      "committed_expected_closure": "0a3252c54330ad14f3984b9cf5e1ff6fc8f632243a0487e2b7f4339dfa44da0e",
+      "duration_seconds_documented": 18.02
+    },
+    {
+      "case": "committed_closure_source",
+      "reported_revision": "0eb175a4a5e4fd015b085edc44c7f92232141646",
+      "reported_closure": "0a3252c54330ad14f3984b9cf5e1ff6fc8f632243a0487e2b7f4339dfa44da0e"
+    },
+    {
+      "case": "warm_no_source_change_with_sentinel",
+      "reported_real_seconds": 2.57,
+      "fingerprint": "missing velnor-workflow-source-sha.always-rerun"
+    },
+    {
+      "case": "repeated_warm_no_source_change_with_sentinel",
+      "reported_real_seconds": 2.50
+    },
+    {
+      "case": "unrelated_readme_commit",
+      "reported_revision": "c803e41374be843a7bf25671a14959e479cbf776",
+      "reported_closure": "0a3252c54330ad14f3984b9cf5e1ff6fc8f632243a0487e2b7f4339dfa44da0e",
+      "reported_real_seconds": 2.98
+    }
+  ],
+  "raw_logs": [
+    {
+      "path": "/tmp/velnor-identity-kMtqNC/fingerprint.log",
+      "sha256": "721581bda96c8ad3c81eae4c5ee6e84d6d522cc58845d385c1a0a4d1f83d41f2"
+    },
+    {
+      "path": "/tmp/velnor-identity-kMtqNC/noop-cargo-2.log",
+      "sha256": "8eb98c32340fed4beded2e7505866a3e316fa618fd85675c1cc6ae50ec685f01"
+    },
+    {
+      "path": "/tmp/velnor-identity-kMtqNC/docs-build.log",
+      "sha256": "d70417fcbb8a8188c15e1ee4c8cdc7fa5ef7417e23619474aa8d0c99f87da094"
+    },
+    {
+      "path": "/tmp/velnor-identity-kMtqNC/commit.txt",
+      "sha256": "8f39c45cadba5125b34202950e809c09c94487f588d6a3ab1c1d0ac7ac6a0d66"
+    },
+    {
+      "path": "/tmp/velnor-identity-kMtqNC/docs-commit.txt",
+      "sha256": "d0976eb19ace4645e394c390c0edaa4f9069f7af11234371734abfa6fe903b0a"
+    },
+    {
+      "path": "/tmp/velnor-identity-kMtqNC/noop-time.txt",
+      "sha256": "607170f12090f98b08f24cdd28d738d16954afb92f29fa9c266a635212facf9e"
+    }
+  ],
+  "implementation_status": "pending_independent_final_review_and_clean_ci",
+  "accepted": false
+}

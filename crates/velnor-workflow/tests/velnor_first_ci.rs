@@ -799,6 +799,7 @@ fn candidate_manifest_env_fallback_binds_the_env_slot_candidate() {
     let sentinel = write_cargo_shim(&shim_dir);
     let outcome = check_command(&root, &output, &shim_dir, &sentinel)
         .env("VELNOR_WORKFLOW_PINNED_BINARY", &fake)
+        .env("VELNOR_WORKFLOW_CANDIDATE_BINARY", &fake)
         .env("VELNOR_WORKFLOW_CANDIDATE_MANIFEST", &manifest)
         .output()
         .expect("check with env manifest");

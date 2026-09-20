@@ -1,8 +1,9 @@
 # V-BUN-001: preserve discovered package inputs
 
-Status: deterministic checks and independent review passed; exact-push CI pending.
+Status: deterministic checks, independent review, and exact-push PR CI passed;
+consumer delivery and separate policy repair remain pending.
 Baseline: `29279ab2` (same generator source as `0dcd61ad`).
-Candidate: bounded S2 watch change, generator revision 59; commit pending.
+Candidate: `b6b4f2e14ab035def118612596df28e1f10d148b`, S2 generator revision 59.
 
 ## Hypothesis and structural cause
 
@@ -57,3 +58,21 @@ defect. That defect remains required follow-up; Docker parsing is separate too.
 
 No performance delta is claimed. This restores required relevance correctness
 before measuring a correct baseline.
+
+## Exact pushed revision
+
+The clean candidate binary reports revision `b6b4f2e14ab035def118612596df28e1f10d148b`
+and closure `7d9834aff07643961fe1fb9023d62d67c2e93c82b6f9487b22bc230e8bae7624`.
+Its own checkout was clean after build, and generator check passed with the
+declared pin provisioned separately.
+
+[PR run 35488747612](https://github.com/tailrocks/velnor/actions/runs/35488747612)
+passed all executed jobs and required gates. Its complete 68-job response
+shows 580 seconds trigger-to-final-required result and 2,831 seconds aggregate
+execution. Runner was largest at 543 seconds. These are single observations,
+not evidence of a speedup from the relevance correction.
+
+[Policy run 35488746252](https://github.com/tailrocks/velnor/actions/runs/35488746252)
+failed because the acquired candidate occupied the declared-pin slot. Raw
+metadata and the exact failure excerpt are retained with those run-ID prefixes
+under `observations`. Do not label the entire revision all green.

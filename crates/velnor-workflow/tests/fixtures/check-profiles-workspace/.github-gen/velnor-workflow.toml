@@ -30,6 +30,7 @@ id = "fleet"
 name = "Fleet probe"
 schedule = "23 2 * * *"
 runner = "velnor"
+platform = "linux-x64"
 tasks = ["check-fleet"]
 timeout_minutes = 45
 

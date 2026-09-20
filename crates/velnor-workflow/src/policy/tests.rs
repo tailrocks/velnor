@@ -91,31 +91,53 @@ fn fake_legacy_velnor_workflow(directory: &Path, revision: &str) -> PathBuf {
 }
 
 fn lookup(
-    pinned_binary: Option<PathBuf>,
+    pin_binary: Option<PathBuf>,
     search_path: Option<std::ffi::OsString>,
     install_root: PathBuf,
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
-        pinned_binary,
+        pin_renderer: pin_binary.map(|binary| PinRenderer { binary }),
         search_path,
         install_root,
         build_forbidden: true,
-        candidate_manifest: None,
+        candidate_renderer: None,
     }
 }
 
 fn lookup_with_manifest(
-    pinned_binary: Option<PathBuf>,
+    candidate_binary: Option<PathBuf>,
     search_path: Option<std::ffi::OsString>,
     install_root: PathBuf,
-    candidate_manifest: PathBuf,
+    manifest: PathBuf,
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
-        pinned_binary,
+        pin_renderer: None,
         search_path,
         install_root,
         build_forbidden: true,
-        candidate_manifest: Some(candidate_manifest),
+        candidate_renderer: candidate_binary.map(|binary| CandidateRenderer {
+            binary,
+            binding: CandidateBinding::Manifest(manifest),
+        }),
+    }
+}
+
+fn lookup_with_pin_and_candidate(
+    pin_binary: PathBuf,
+    candidate_binary: PathBuf,
+    search_path: Option<std::ffi::OsString>,
+    install_root: PathBuf,
+    manifest: PathBuf,
+) -> PinnedBinaryLookup {
+    PinnedBinaryLookup {
+        pin_renderer: Some(PinRenderer { binary: pin_binary }),
+        search_path,
+        install_root,
+        build_forbidden: true,
+        candidate_renderer: Some(CandidateRenderer {
+            binary: candidate_binary,
+            binding: CandidateBinding::Manifest(manifest),
+        }),
     }
 }
 
@@ -153,6 +175,25 @@ fn pinned_binary_env_is_used_only_when_it_proves_the_pin() {
         "an explicit pointer at the wrong closure is refused, not skipped: {error}"
     );
     assert!(error.contains(PIN_A), "{error}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_pin_pointer_precedes_source_self_recognition() {
+    if !crate::closure::is_full_closure(SOURCE_CLOSURE) {
+        return;
+    }
+    let root = temporary_directory("explicit-pin-precedence");
+    let wrong = fake_velnor_workflow(&root, PIN_A, CLOSURE_B);
+    let lookup = lookup(Some(wrong), None, root.join("install"));
+    let expected = [SOURCE_CLOSURE.to_owned()];
+    let error = must_fail(
+        resolve_pinned_binary(PIN_A, Some(&expected), &lookup, &checkout_source(&root)),
+        "an invalid explicit pin must not be bypassed",
+    )
+    .to_string();
+    assert!(error.contains(VELNOR_WORKFLOW_PINNED_BINARY_ENV), "{error}");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -365,6 +406,21 @@ fn pin_rules_pass_when_the_declared_pin_descends_from_the_base_validator() {
     );
     let same = pin_monotonic(&root, &validator, &validator, &head, Some(&validator));
     assert!(same.passed, "{}", same.reason);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn requested_head_must_match_the_audited_checkout() {
+    let root = temporary_directory("head-binding");
+    git_ok(&root, &["init", "-q", "-b", "main"]);
+    let actual = commit(&root, "audited head");
+    let error = must_fail(
+        resolve_head(&root, Some(PIN_A)),
+        "a mismatched head is rejected",
+    );
+    assert!(error.contains("audited checkout HEAD"), "{error}");
+    assert!(error.contains(&actual), "{error}");
+    assert!(error.contains(PIN_A), "{error}");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1131,6 +1187,29 @@ fn cli_requires_the_base_validator_revision() {
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
+#[test]
+fn source_candidate_binds_dirty_worktree_without_self_manifest() {
+    let (root, head) = closure_fixture("source-candidate-direct");
+    let clean = must(
+        crate::closure::candidate_closure_of_tree(&root, &head),
+        "clean candidate closure",
+    );
+    write(
+        &root.join("crates/velnor-workflow/src/lib.rs"),
+        "pub fn dirty() {}\n",
+    );
+    let source = must(
+        source_candidate_contract(&root),
+        "direct source candidate binding",
+    );
+    let CandidateBinding::Local { closure, .. } = &source.renderer.binding else {
+        panic!("source candidate used an external manifest binding");
+    };
+    assert_ne!(closure, &clean, "dirty bytes must change local identity");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
 fn fake_candidate_renderer(directory: &Path, closure: &str) -> PathBuf {
     let binary = directory.join("candidate");
     must(
@@ -1168,7 +1247,7 @@ fn closure_fixture(name: &str) -> (PathBuf, String) {
 }
 
 // NOTE: `candidate_render_is_accepted_only_from_a_head_authentic_binary` was
-// deleted here. It asserted that an env-slot binary is accepted when its
+// deleted here. It asserted that an unbound candidate binary is accepted when its
 // `--closure` stdout echoes the wanted closure — but that expectation WAS
 // the vulnerability itself: a `--closure` echo is a self-report by
 // untrusted bytes, and treating it as authenticity let any binary that
@@ -1264,6 +1343,56 @@ fn bound_candidate_matching_head_tree_is_accepted() {
     let _ = fs::remove_dir_all(scratch);
 }
 
+/// The declared pin and the candidate are different renderer roles. The pin
+/// intentionally renders nothing, while the manifest-bound candidate copies
+/// the audited tree; accepting `Candidate` proves the candidate was reached
+/// only after the declared-pin comparison used its own binary.
+#[cfg(unix)]
+#[test]
+fn declared_pin_and_candidate_use_distinct_renderer_slots() {
+    let (root, head) = closure_fixture("candidate-separate-slots");
+    let pin_closures = must(expected_closures(&root, &head), "pin closures");
+    let wanted = pin_closures[2].clone();
+    let pin_dir = temporary_directory("candidate-separate-slots-pin");
+    let pin_binary = fake_pin_renderer(&pin_dir, &head, &pin_closures[0]);
+    let candidate_binary = fake_candidate_renderer(&root, &wanted);
+    let manifest = candidate_manifest_for(
+        &root,
+        "candidate-manifest.json",
+        &candidate_binary,
+        &wanted,
+        &head,
+    );
+    let lookup = lookup_with_pin_and_candidate(
+        pin_binary,
+        candidate_binary,
+        None,
+        root.join("install"),
+        manifest,
+    );
+    let result = must(
+        regenerate_and_compare(
+            &root,
+            &root,
+            &head,
+            "main",
+            &BTreeSet::new(),
+            &lookup,
+            &checkout_source(&root),
+        ),
+        "pin then bound candidate render",
+    );
+    match result {
+        TreeComparison::Candidate(closure) => assert_eq!(closure, wanted),
+        TreeComparison::Pin => panic!("the intentionally empty pin render must differ"),
+        TreeComparison::Differences(differences) => {
+            panic!("the bound candidate should reproduce the tree: {differences:?}")
+        }
+    }
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(pin_dir);
+}
+
 #[cfg(unix)]
 #[test]
 fn lying_binary_whose_digest_misses_the_manifest_is_rejected() {
@@ -1328,28 +1457,42 @@ fn candidate_manifest_for_another_tree_is_rejected() {
 
 #[cfg(unix)]
 #[test]
-fn unbound_env_candidate_is_rejected_without_manifest() {
-    let (root, head) = closure_fixture("candidate-unbound");
+fn candidate_manifest_revision_is_bound_to_checkout_head() {
+    let (root, head) = closure_fixture("candidate-wrong-head");
     let wanted = must(
         crate::closure::candidate_closure_of_tree(&root, &head),
         "candidate closure of the fixture",
     );
+    let scratch = temporary_directory("candidate-wrong-head-scratch");
+    let binary = fake_candidate_renderer(&root, &wanted);
+    let manifest =
+        candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, PIN_A);
+    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    let error = must_fail(
+        render_with_candidate(&root, &root, &scratch, "main", &BTreeSet::new(), &lookup),
+        "a candidate receipt for another checkout head",
+    )
+    .to_string();
+    assert!(error.contains("names revision"), "{error}");
+    assert!(error.contains(&head), "{error}");
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_render_is_disabled_without_typed_binding() {
+    let (root, _head) = closure_fixture("candidate-unbound");
     let scratch = temporary_directory("candidate-unbound-scratch");
-    let sentinel = root.join("closure-probed");
-    let binary = fake_probed_candidate_renderer(&root, &wanted, &sentinel);
-    let lookup = lookup(Some(binary), None, root.join("install"));
+    let lookup = lookup(None, None, root.join("install"));
     let excludes = std::collections::BTreeSet::new();
     assert!(
         must(
             render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-            "missing manifest never errors, it disables the env slot",
+            "without a typed candidate binding, candidate rendering is disabled",
         )
         .is_none(),
-        "an env-slot binary without a manifest is never the candidate"
-    );
-    assert!(
-        !sentinel.exists(),
-        "an unbound env-slot binary is skipped, never executed"
+        "an unconfigured candidate is never executed"
     );
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(scratch);
@@ -1426,7 +1569,7 @@ fn candidate_manifest_source_prefers_flag_over_env() {
     );
     // An explicit empty flag disables the binding.
     assert_eq!(candidate_manifest_source(Some("")), None);
-    // Without either source the env-slot candidate is disabled. Like
+    // Without either source the candidate renderer is disabled. Like
     // `cli_requires_the_base_validator_revision`, this relies on the ambient
     // test environment not exporting the variable.
     assert_eq!(candidate_manifest_source(None), None);
@@ -1435,21 +1578,23 @@ fn candidate_manifest_source_prefers_flag_over_env() {
 #[test]
 fn from_env_consent_mapping_is_fail_closed() {
     // Without `--pin-build` the pin is never built, in every environment.
-    assert!(PinnedBinaryLookup::from_env(PIN_A, false, None).build_forbidden);
     assert!(
-        PinnedBinaryLookup::from_env(PIN_A, false, Some(PathBuf::from("/manifest.json")))
-            .build_forbidden
+        must(
+            PinnedBinaryLookup::from_env(PIN_A, false, None),
+            "read environment without candidate binding"
+        )
+        .build_forbidden
     );
-    // The explicit manifest survives; without one the environment fallback
-    // applies (unset in the ambient test environment, so `None` here).
-    assert_eq!(
-        PinnedBinaryLookup::from_env(PIN_A, false, Some(PathBuf::from("/manifest.json")))
-            .candidate_manifest,
-        Some(PathBuf::from("/manifest.json"))
-    );
-    assert_eq!(
-        PinnedBinaryLookup::from_env(PIN_A, false, None).candidate_manifest,
-        None
+    // A manifest without its separately typed binary is a configuration
+    // error, not a disabled candidate or a pin fallback.
+    let error = must_fail(
+        PinnedBinaryLookup::from_env(PIN_A, false, Some(PathBuf::from("/manifest.json"))),
+        "candidate manifest without candidate binary",
+    )
+    .to_string();
+    assert!(
+        error.contains(VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV),
+        "{error}"
     );
     // `CARGO_NET_OFFLINE=true` forbids the build even with `--pin-build`;
     // setting process env needs `unsafe`, which this crate forbids, so that

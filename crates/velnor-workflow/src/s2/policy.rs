@@ -29,13 +29,15 @@
 //! bootstrap escape hatch, never emitted into generated CI — permits building
 //! the pin from the audited tree.
 //!
-//! The candidate exception binds the env-slot candidate binary by manifest
-//! before executing it: the manifest's closure must equal the audited tree's
-//! candidate closure (computed locally from git history) and the binary's
-//! digest must match the manifest first, because a `--closure` echo is an
-//! assertion by untrusted bytes, not proof. The manifest arrives via
-//! `--candidate-manifest` or `VELNOR_WORKFLOW_CANDIDATE_MANIFEST`; without
-//! either, env-slot binaries are skipped, never executed.
+//! The candidate exception uses a separately typed candidate renderer. An
+//! external manifest closure must equal the audited tree's clean candidate
+//! closure; a source `--check` binding instead carries the current worktree
+//! closure directly. In both cases the binary digest is checked before
+//! execution, because a `--closure` echo is an assertion by untrusted bytes,
+//! not proof. External candidate bytes arrive via
+//! `--candidate-manifest`/`VELNOR_WORKFLOW_CANDIDATE_MANIFEST`; without a
+//! binding, candidate rendering is skipped, while a one-sided external binding
+//! is a usage error.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -63,7 +65,9 @@ const POLICY_ENTRYPOINT: &str = ".github/workflows/ci-policy.yml";
 /// The pull-request aggregate whose job display names are the ruleset's
 /// status-check contexts.
 const PULL_REQUEST_AGGREGATE: &str = ".github/workflows/ci-pr.yml";
-/// Names the manifest binding the env-slot candidate binary.
+/// Names the separately acquired candidate renderer binary.
+pub use super::VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV;
+/// Names the manifest binding the candidate renderer.
 pub use super::VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV;
 /// Names a `velnor-workflow` binary built at the pinned revision.
 pub use super::VELNOR_WORKFLOW_PINNED_BINARY_ENV;
@@ -101,7 +105,7 @@ pub(crate) struct PolicyOptions {
     /// from the audited tree. Only an explicit `--pin-build` (local
     /// development and bootstrap) sets this; generated CI never does.
     pub(crate) build_pin: bool,
-    /// Manifest binding the env-slot candidate binary; `None` disables it.
+    /// Manifest selecting and binding the candidate renderer; `None` disables it.
     pub(crate) candidate_manifest: Option<PathBuf>,
 }
 
@@ -206,9 +210,10 @@ impl PolicyReport {
 ///
 /// `--pin-build` is a local-development and bootstrap escape hatch: without
 /// it an unprovisioned pin fails closed instead of compiling from source.
-/// `--candidate-manifest` binds the env-slot candidate binary to a manifest
-/// (falling back to [`VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV`]); without
-/// either the candidate exception skips env-slot binaries.
+/// `--candidate-manifest` binds the candidate renderer to a manifest (falling
+/// back to [`VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV`]); without either a
+/// manifest or candidate bytes, the candidate exception is disabled. A
+/// one-sided binding fails closed as a usage error.
 ///
 /// # Errors
 /// Usage errors, unreadable inputs, and a failed evaluation (the rendered
@@ -309,7 +314,7 @@ pub(crate) fn run_cli(arguments: &[OsString]) -> Result<(), GeneratorError> {
     )))
 }
 
-/// Resolve the candidate manifest the policy run binds env-slot candidates
+/// Resolve the candidate manifest the policy run binds candidate bytes
 /// to: the `--candidate-manifest` flag wins (an empty value disables the
 /// binding), else [`VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV`], else none.
 fn candidate_manifest_source(cli: Option<&str>) -> Option<PathBuf> {
@@ -428,18 +433,20 @@ fn pin_rules(
         }
     });
     report.rules.push(entrypoint_pin(root, pin));
-    let lookup =
-        PinnedBinaryLookup::from_env(pin, options.build_pin, options.candidate_manifest.clone());
     let mainline = matches!((&head, &base), (Ok(head), Some(base)) if head == base);
-    let comparison = regenerate_and_compare(
-        root,
-        root,
-        pin,
-        &declared.default_branch,
-        &declared.excludes,
-        &lookup,
-        &source,
-    );
+    let comparison =
+        PinnedBinaryLookup::from_env(pin, options.build_pin, options.candidate_manifest.clone())
+            .and_then(|lookup| {
+                regenerate_and_compare(
+                    root,
+                    root,
+                    pin,
+                    &declared.default_branch,
+                    &declared.excludes,
+                    &lookup,
+                    &source,
+                )
+            });
     report
         .rules
         .push(generated_tree_report(pin, comparison, mainline));
@@ -546,6 +553,7 @@ pub(crate) fn verify_declared_pin_renders_tree(
     checkout: &Path,
     config: &ProjectConfig,
     build_pin: bool,
+    source_candidate: &SourceCandidate,
 ) -> Result<(), GeneratorError> {
     let pin = &config.workflow_revision;
     if !super::is_full_revision(pin) {
@@ -564,16 +572,26 @@ pub(crate) fn verify_declared_pin_renders_tree(
             .as_ref()
             .and_then(config::RepoGenerationConfig::repository),
     );
-    let lookup = PinnedBinaryLookup::from_env(pin, build_pin, None);
-    match regenerate_and_compare(
-        checkout,
-        output_root,
-        pin,
-        &config.default_branch,
-        &excludes,
-        &lookup,
-        &source,
-    )? {
+    let verdict = PinnedBinaryLookup::from_env(pin, build_pin, None).and_then(|mut lookup| {
+        // `--check` is an explicit source-candidate caller. Keep the
+        // candidate in the typed renderer slot even when no CI artifact
+        // supplied one; the slot is still bound by revision, closure, and
+        // bytes before execution. A CI artifact binding, when present,
+        // remains authoritative.
+        if lookup.candidate_renderer.is_none() {
+            lookup.candidate_renderer = Some(source_candidate.renderer.clone());
+        }
+        regenerate_and_compare(
+            checkout,
+            output_root,
+            pin,
+            &config.default_branch,
+            &excludes,
+            &lookup,
+            &source,
+        )
+    });
+    match verdict? {
         TreeComparison::Pin => Ok(()),
         TreeComparison::Candidate(closure) => {
             eprintln!(
@@ -586,6 +604,48 @@ pub(crate) fn verify_declared_pin_renders_tree(
             differences.join("\n")
         ))),
     }
+}
+
+/// A source `--check` caller's explicit candidate binding. It lives in memory
+/// and is derived from the current worktree; no self-issued manifest can
+/// convert a dirty checkout into a clean HEAD claim.
+#[derive(Debug)]
+pub(crate) struct SourceCandidate {
+    renderer: CandidateRenderer,
+}
+
+/// Bind the running source product for the generator's own `--check` call.
+/// This is a caller-owned contract, not a resolver exemption: the checkout
+/// `HEAD`, candidate closure, and binary digest are all recorded before the
+/// candidate renderer can execute.
+pub(crate) fn source_candidate_contract(
+    checkout: &Path,
+) -> Result<SourceCandidate, GeneratorError> {
+    let binary = env::current_exe().map_err(|error| {
+        GeneratorError::usage(format!("resolve source candidate binary: {error}"))
+    })?;
+    let binary = binary.canonicalize().map_err(|error| {
+        GeneratorError::io("canonicalize source candidate binary", &binary, &error)
+    })?;
+    let head = git(checkout, &["rev-parse", "HEAD"])?
+        .ok_or_else(|| GeneratorError::usage("source candidate checkout has no HEAD"))?;
+    if !super::is_full_revision(&head) {
+        return Err(GeneratorError::usage(format!(
+            "source candidate checkout HEAD is not a full commit SHA: {head}"
+        )));
+    }
+    let closure = closure_identity::candidate_closure_of_worktree(checkout, &head)?;
+    let digest = sha256_file(&binary).map_err(GeneratorError::usage)?;
+    Ok(SourceCandidate {
+        renderer: CandidateRenderer {
+            binary,
+            binding: CandidateBinding::Local {
+                revision: head,
+                closure,
+                binary_sha256: digest,
+            },
+        },
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -730,23 +790,30 @@ fn git(root: &Path, arguments: &[&str]) -> Result<Option<String>, GeneratorError
     }
 }
 
-fn resolve_head(root: &Path, head: Option<&str>) -> Result<String, String> {
-    let head = match head {
-        Some(head) => head.to_owned(),
-        None => match git(root, &["rev-parse", "HEAD"]) {
-            Ok(Some(head)) => head,
-            Ok(None) => {
-                return Err("workflow root is not a git checkout; pass --head-sha".to_owned())
-            }
-            Err(error) => return Err(error.to_string()),
-        },
+fn resolve_head(root: &Path, requested: Option<&str>) -> Result<String, String> {
+    let actual = match git(root, &["rev-parse", "HEAD"]) {
+        Ok(Some(head)) => head,
+        Ok(None) => return Err("workflow root is not a git checkout; pass --head-sha".to_owned()),
+        Err(error) => return Err(error.to_string()),
     };
-    if !super::is_full_revision(&head) {
+    if !super::is_full_revision(&actual) {
         return Err(format!(
-            "head must be a full 40-character SHA, got {head:?}"
+            "checkout HEAD must be a full 40-character SHA, got {actual:?}"
         ));
     }
-    Ok(head)
+    if let Some(head) = requested {
+        if !super::is_full_revision(head) {
+            return Err(format!(
+                "head must be a full 40-character SHA, got {head:?}"
+            ));
+        }
+        if head != actual {
+            return Err(format!(
+                "audited checkout HEAD {actual} does not match requested --head-sha {head}"
+            ));
+        }
+    }
+    Ok(actual)
 }
 
 fn commit_exists(root: &Path, revision: &str) -> bool {
@@ -1060,11 +1127,35 @@ pub(crate) fn expected_closures(repo: &Path, pin: &str) -> Result<Vec<String>, G
     ])
 }
 
+/// A renderer explicitly bound to the declared generator pin.
+#[derive(Clone, Debug)]
+pub(crate) struct PinRenderer {
+    binary: PathBuf,
+}
+
+/// A candidate renderer paired with either an external manifest or the typed
+/// in-memory binding used by a local source `--check`.
+#[derive(Clone, Debug)]
+pub(crate) struct CandidateRenderer {
+    binary: PathBuf,
+    binding: CandidateBinding,
+}
+
+#[derive(Clone, Debug)]
+enum CandidateBinding {
+    Manifest(PathBuf),
+    Local {
+        revision: String,
+        closure: String,
+        binary_sha256: String,
+    },
+}
+
 /// The process environment the pinned-binary lookup reads, captured once so
 /// tests can drive the resolver without mutating global state.
 pub(crate) struct PinnedBinaryLookup {
-    /// [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`].
-    pinned_binary: Option<PathBuf>,
+    /// [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`] when it names the declared pin.
+    pin_renderer: Option<PinRenderer>,
     /// `PATH`.
     search_path: Option<OsString>,
     /// Where an earlier resolution built the pin.
@@ -1072,9 +1163,8 @@ pub(crate) struct PinnedBinaryLookup {
     /// Never build without an explicit `--pin-build`, or under
     /// `CARGO_NET_OFFLINE=true`.
     build_forbidden: bool,
-    /// Manifest binding the env-slot candidate binary. `None` disables the
-    /// env-slot candidate; the running binary stays manifest-exempt.
-    candidate_manifest: Option<PathBuf>,
+    /// Candidate bytes and their manifest. `None` disables candidate render.
+    candidate_renderer: Option<CandidateRenderer>,
 }
 
 impl PinnedBinaryLookup {
@@ -1082,19 +1172,43 @@ impl PinnedBinaryLookup {
         revision: &str,
         build_pin: bool,
         candidate_manifest: Option<PathBuf>,
-    ) -> Self {
-        Self {
-            pinned_binary: env::var_os(VELNOR_WORKFLOW_PINNED_BINARY_ENV).map(PathBuf::from),
+    ) -> Result<Self, GeneratorError> {
+        let pin_binary = env::var_os(VELNOR_WORKFLOW_PINNED_BINARY_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let candidate_binary = env::var_os(VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let candidate_manifest = candidate_manifest.or_else(|| {
+            env::var_os(VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        });
+        let candidate_renderer = match (candidate_binary, candidate_manifest) {
+            (Some(binary), Some(manifest)) => Some(CandidateRenderer {
+                binary,
+                binding: CandidateBinding::Manifest(manifest),
+            }),
+            (None, None) => None,
+            (Some(_), None) => {
+                return Err(GeneratorError::usage(format!(
+                    "{VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV} requires {VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV}"
+                )));
+            }
+            (None, Some(_)) => {
+                return Err(GeneratorError::usage(format!(
+                    "{VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV} requires {VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV}"
+                )));
+            }
+        };
+        Ok(Self {
+            pin_renderer: pin_binary.map(|binary| PinRenderer { binary }),
             search_path: env::var_os("PATH"),
             install_root: policy_install_root(revision),
             build_forbidden: !build_pin
                 || env::var("CARGO_NET_OFFLINE").is_ok_and(|value| value == "true"),
-            candidate_manifest: candidate_manifest.or_else(|| {
-                env::var_os(VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV)
-                    .filter(|value| !value.is_empty())
-                    .map(PathBuf::from)
-            }),
-        }
+            candidate_renderer,
+        })
     }
 
     /// Every `velnor-workflow` on the search path, in search order.
@@ -1117,9 +1231,11 @@ impl PinnedBinaryLookup {
 /// proven by the source closure it reports (`--closure`), never by where it
 /// lives:
 ///
-/// 1. the running binary, when its closure is one of `expected`;
-/// 2. [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`] — an explicit pointer; a binary
-///    there that is not the pin is a configuration error, not a fallback;
+/// 1. [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`] — an explicit pin pointer; a
+///    binary there that is not the pin is a configuration error, not a
+///    fallback;
+/// 2. the running binary, when its closure is one of `expected` and it is not
+///    the separately bound candidate;
 /// 3. a `velnor-workflow` on `PATH` (hosted jobs install the pinned runtime
 ///    there; release/preview/maintenance jobs install the pin itself);
 /// 4. a binary this resolver built earlier under [`policy_install_root`];
@@ -1141,25 +1257,11 @@ pub(crate) fn resolve_pinned_binary(
     lookup: &PinnedBinaryLookup,
     source: &PinSource,
 ) -> Result<PathBuf, GeneratorError> {
-    match expected {
-        Some(set) => {
-            if set.contains(&SOURCE_CLOSURE.to_owned())
-                && let Ok(current) = env::current_exe()
-            {
-                return Ok(current);
-            }
-        }
-        None => {
-            if SOURCE_REVISION == revision
-                && closure_identity::is_full_closure(SOURCE_CLOSURE)
-                && let Ok(current) = env::current_exe()
-            {
-                return Ok(current);
-            }
-        }
-    }
-    let mut attempts = Vec::new();
-    if let Some(binary) = lookup.pinned_binary.clone() {
+    // An explicit pointer is a hard contract. Validate it before any
+    // self-recognition path so a bad pin cannot be bypassed merely because
+    // the current process happens to carry a matching closure.
+    if let Some(renderer) = lookup.pin_renderer.clone() {
+        let binary = renderer.binary;
         return match prove_candidate(&binary, revision, expected) {
             Ok(()) => Ok(binary),
             Err(detail) => Err(GeneratorError::usage(format!(
@@ -1168,6 +1270,36 @@ pub(crate) fn resolve_pinned_binary(
             ))),
         };
     }
+    // A candidate may currently arrive through the historical pinned-binary
+    // environment slot. If the policy process itself is that candidate, do
+    // not let the self-recognition fast path promote it to the declared pin.
+    let current_is_candidate = lookup.candidate_renderer.as_ref().is_some_and(|candidate| {
+        env::current_exe()
+            .ok()
+            .and_then(|current| current.canonicalize().ok())
+            .zip(candidate.binary.canonicalize().ok())
+            .is_some_and(|(current, candidate)| current == candidate)
+    });
+    match expected {
+        Some(set) => {
+            if !current_is_candidate
+                && set.contains(&SOURCE_CLOSURE.to_owned())
+                && let Ok(current) = env::current_exe()
+            {
+                return Ok(current);
+            }
+        }
+        None => {
+            if !current_is_candidate
+                && SOURCE_REVISION == revision
+                && closure_identity::is_full_closure(SOURCE_CLOSURE)
+                && let Ok(current) = env::current_exe()
+            {
+                return Ok(current);
+            }
+        }
+    }
+    let mut attempts = Vec::new();
     let install_root = &lookup.install_root;
     let installed = install_root.join("bin").join("velnor-workflow");
     let mut candidates = lookup.path_binaries();
@@ -1196,9 +1328,9 @@ pub(crate) fn resolve_pinned_binary(
 /// The candidate manifest the publisher wrote beside the candidate binary
 /// (`profile`, `platform`, `repository`, `run_id`, `revision`, `closure`,
 /// `binary_sha256`, plus `build_revision`). The consume-side binding uses
-/// only the closure and the digest: `revision` names the PR head the
-/// publisher built for, which a legit older pin may still equal on closure
-/// paths, so closure equality is the content binding.
+/// the audited checkout HEAD, closure, and digest together. A publisher may
+/// build from a merge checkout; that producing revision stays in the separate
+/// `build_revision` field and is never substituted for the audited HEAD.
 #[derive(serde::Deserialize)]
 struct CandidateManifest {
     revision: String,
@@ -1456,13 +1588,13 @@ pub(crate) fn regenerate_and_compare(
 /// render, it may still be legitimate — a generator change in flight renders
 /// with the audited tree's own candidate, not with the pin.
 ///
-/// Acceptance requires the manifest binding, not `--closure` alone: the
-/// manifest's closure must equal the audited checkout's own candidate
-/// closure (computed locally from git history), the env-slot binary's digest
-/// must match the manifest before any execution, and only then does the
-/// `--closure` self-report stay as a final tripwire. A `--closure` echo is an
-/// assertion by untrusted bytes, not proof. Returns the proving closure, or
-/// `None` when no bound candidate reproduces the tree.
+/// Acceptance requires a typed binding, not `--closure` alone: an external
+/// manifest's closure must equal the audited checkout's clean candidate
+/// closure, while a local source binding must equal the current worktree
+/// closure. In both cases the candidate binary digest is checked before any
+/// execution, and only then does the `--closure` self-report stay as a final
+/// tripwire. Returns the proving closure, or `None` when no bound candidate
+/// reproduces the tree.
 fn render_with_candidate(
     checkout: &Path,
     tree: &Path,
@@ -1477,16 +1609,23 @@ fn render_with_candidate(
     if !super::is_full_revision(&head) {
         return Ok(None);
     }
-    let Ok(wanted) = closure_identity::candidate_closure_of_tree(checkout, &head) else {
-        return Ok(None);
-    };
-    let current_exe = env::current_exe().ok();
     // The manifest gate fails closed loudly: a manifest path that cannot be
     // loaded, or names another tree, is a configuration error, not a skip.
-    let manifest = match &lookup.candidate_manifest {
-        None => None,
-        Some(path) => {
+    let Some(candidate) = &lookup.candidate_renderer else {
+        return Ok(None);
+    };
+    let (wanted, expected_digest) = match &candidate.binding {
+        CandidateBinding::Manifest(path) => {
             let manifest = load_candidate_manifest(path).map_err(GeneratorError::usage)?;
+            let wanted = closure_identity::candidate_closure_of_tree(checkout, &head)
+                .map_err(|error| GeneratorError::usage(error.to_string()))?;
+            if manifest.revision != head {
+                return Err(GeneratorError::usage(format!(
+                    "candidate manifest {} names revision {}, but the audited checkout HEAD is {head}",
+                    path.display(),
+                    manifest.revision
+                )));
+            }
             if manifest.closure != wanted {
                 return Err(GeneratorError::usage(format!(
                     "candidate manifest {} names closure {}, but the audited tree's candidate closure is {wanted}",
@@ -1494,49 +1633,49 @@ fn render_with_candidate(
                     manifest.closure
                 )));
             }
-            Some(manifest)
+            (wanted, manifest.binary_sha256)
+        }
+        CandidateBinding::Local {
+            revision,
+            closure,
+            binary_sha256,
+        } => {
+            if revision != &head {
+                return Err(GeneratorError::usage(format!(
+                    "local source candidate names revision {revision}, but the audited checkout HEAD is {head}"
+                )));
+            }
+            let wanted = closure_identity::candidate_closure_of_worktree(checkout, &head)?;
+            if closure != &wanted {
+                return Err(GeneratorError::usage(format!(
+                    "local source candidate closure {closure} is stale; current worktree closure is {wanted}"
+                )));
+            }
+            (wanted, binary_sha256.clone())
         }
     };
-    let mut binaries = Vec::new();
-    if let Some(pinned) = &lookup.pinned_binary {
-        binaries.push(pinned.clone());
+    let binary = &candidate.binary;
+    if !binary.is_file() {
+        return Ok(None);
     }
-    if let Some(current) = &current_exe
-        && !binaries.contains(current)
-    {
-        binaries.push(current.clone());
+    // Digest before any exec: both `binary_closure` and rendering run the
+    // candidate, so every candidate path must be manifest-bound.
+    let Ok(digest) = sha256_file(binary) else {
+        return Ok(None);
+    };
+    if digest != expected_digest {
+        return Ok(None);
     }
-    for binary in binaries {
-        if !binary.is_file() {
-            continue;
-        }
-        // The running binary stays manifest-exempt: in CI it is the base
-        // product itself, and locally the operator trusts their own binary —
-        // which preserves the `--check`/bootstrap self-recognition path.
-        let is_self = current_exe.as_deref() == Some(binary.as_path());
-        if !is_self {
-            let Some(bound) = &manifest else {
-                continue;
-            };
-            // Digest before any exec: `binary_closure` runs the binary.
-            let Ok(digest) = sha256_file(&binary) else {
-                continue;
-            };
-            if digest != bound.binary_sha256 {
-                continue;
-            }
-        }
-        let Ok(reported) = binary_closure(&binary) else {
-            continue;
-        };
-        if reported != wanted {
-            continue;
-        }
-        let differences =
-            render_and_compare(&binary, checkout, tree, scratch, default_branch, excludes)?;
-        if differences.is_empty() {
-            return Ok(Some(reported));
-        }
+    let Ok(reported) = binary_closure(binary) else {
+        return Ok(None);
+    };
+    if reported != wanted {
+        return Ok(None);
+    }
+    let differences =
+        render_and_compare(binary, checkout, tree, scratch, default_branch, excludes)?;
+    if differences.is_empty() {
+        return Ok(Some(reported));
     }
     Ok(None)
 }

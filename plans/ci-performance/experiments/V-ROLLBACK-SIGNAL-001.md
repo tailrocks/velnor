@@ -83,3 +83,17 @@ Generator preparation (three seconds) and upload (six seconds) still appear
 as cleanup in schema-2 telemetry; phase attribution remains a separate defect.
 Raw JSON, logs, collector JSONL/CSV and validation limits are retained under
 `observations/velnor-35508236735-*`.
+
+## Independent Linux confirmation (2026-09-20)
+
+Reviewer replayed the exact pushed generator log
+`/tmp/velnor-signal-generator.log`. Run `35508236735`, attempt 1, completed
+successfully with 68 jobs: 20 executed, 48 configured skips, and no skipped
+generator tests. All 1,943 generator tests passed. The cancellation-specific
+checks `process_group_validation_rejects_broadcast_and_shared_groups` and
+`rolling_verifier_cancellation_retains_lock_without_release` passed. This is
+a correctness PASS for the owned-process signal boundary and preserved test
+coverage. It is one fresh observation; it supplies no speedup or critical-path
+claim. PR973 must retain this `fecc59e9` foreground verifier and typed signal
+implementation when rebased; its pre-`fecc59e9` file otherwise removes that
+coverage and regresses the cancellation boundary.
