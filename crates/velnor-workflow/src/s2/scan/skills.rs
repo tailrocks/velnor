@@ -54,12 +54,14 @@ impl SkillsCheck {
     }
 }
 
-fn verification_commands(bun: &str, generated_docs: bool) -> Vec<String> {
+fn verification_commands(bun: &str, generated_docs: bool, helper_syntax: bool) -> Vec<String> {
     let mut commands = Vec::new();
     if generated_docs {
         commands.push(SkillsCheck::GeneratedDocs.command(bun));
     }
-    commands.push(SkillsCheck::HelperSyntax.command(bun));
+    if helper_syntax {
+        commands.push(SkillsCheck::HelperSyntax.command(bun));
+    }
     commands
 }
 
@@ -196,6 +198,7 @@ pub(crate) fn detect(
     let template_files = template_files(context, &catalog.names);
     validate_templates(context, &template_files)?;
     let bun_version = target_bun_version(context, &template_files)?;
+    let helper_syntax = has_helper_sources(context, &template_files);
     if generated_docs && !context.file_set.contains("scripts/generate-docs.ts") {
         return Err(GeneratorError::usage(
             "skills plugin is missing scripts/generate-docs.ts",
@@ -221,7 +224,7 @@ pub(crate) fn detect(
         None,
     );
     skill_unit.tool_version = Some(bun_version.clone());
-    let commands = verification_commands(&bun_version, generated_docs);
+    let commands = verification_commands(&bun_version, generated_docs, helper_syntax);
     skill_unit.pr_commands.clone_from(&commands);
     skill_unit.full_commands.clone_from(&commands);
     shape.units.push(skill_unit);
@@ -238,6 +241,15 @@ fn has_generated_docs_surface(context: &ScanContext<'_>) -> bool {
         || context.file_set.contains(DOCS_README)
         || context.file_set.contains("scripts/generate-docs.ts")
         || context.files.iter().any(|file| file.starts_with("docs/"))
+}
+
+fn has_helper_sources(context: &ScanContext<'_>, template_files: &BTreeSet<String>) -> bool {
+    context.files.iter().any(|file| {
+        file.starts_with("scripts/")
+            && file.ends_with(".ts")
+            && file != "scripts/generate-docs.ts"
+            && !template_files.contains(file)
+    })
 }
 
 fn has_plugin_marker(context: &ScanContext<'_>) -> bool {
@@ -1804,6 +1816,21 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
             .pr_commands
             .iter()
             .all(|command| !command.contains("generate-docs.ts")));
+    }
+
+    #[test]
+    fn provider_without_typescript_helpers_omits_helper_syntax_check() {
+        let mut fixture = Fixture::new();
+        fixture
+            .files
+            .retain(|file| !file.starts_with("docs/") && !file.starts_with("scripts/"));
+        let (_, shape) = fixture
+            .run_detect()
+            .unwrap_or_else(|error| panic!("helper-free plugin must detect: {error}"));
+        assert!(shape.units[0]
+            .pr_commands
+            .iter()
+            .all(|command| !command.contains("bun build")));
     }
 
     #[test]
