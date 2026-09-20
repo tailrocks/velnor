@@ -2972,6 +2972,151 @@ fn render_required_caller_verdicts(output: &mut String, callers: &[RequiredCalle
     }
 }
 
+macro_rules! render_candidate_producer_template {
+    ($this:expr, $output:expr) => {{
+        let _ = writeln!(
+            $output,
+            r#"  {job}:
+    name: candidate_producer
+    if: ${{{{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id }}}}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions: {{}}
+    steps:
+      - name: Check out pull-request head
+        uses: {checkout}
+        with:
+          repository: ${{{{ github.event.pull_request.head.repo.full_name }}}}
+          ref: ${{{{ github.event.pull_request.head.sha }}}}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Build candidate generator
+        id: candidate_build
+        env:
+          CANDIDATE_ARTIFACT_NAME: {artifact}
+          CANDIDATE_HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
+          CANDIDATE_BUILD_IMAGE_REPOSITORY: {build_image_repository}
+          CANDIDATE_BUILD_IMAGE_DIGEST: "{build_image_digest}"
+        run: |
+          set -euo pipefail
+          if [[ ! "$CANDIDATE_HEAD_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
+          test "$CANDIDATE_ARTIFACT_NAME" = "{artifact}"
+          test "$CANDIDATE_BUILD_IMAGE_REPOSITORY" = "{build_image_repository}"
+          if [[ ! "$CANDIDATE_BUILD_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{{64}}$ ]]; then echo "::error::candidate builder image is not pinned" >&2; exit 1; fi
+          test -z "${{GITHUB_TOKEN:-}}"
+          test -z "${{ACTIONS_RUNTIME_TOKEN:-}}"
+          test -z "${{ACTIONS_RUNTIME_URL:-}}"
+          test -z "${{ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}}"
+          case "$GITHUB_RUN_ID" in ''|*[!0-9]*) exit 1 ;; esac
+          command -v docker >/dev/null
+          command -v jq >/dev/null
+          command -v git >/dev/null
+          command -v sha256sum >/dev/null
+          command -v timeout >/dev/null
+          docker_cmd() {{
+            env -i PATH="$PATH" HOME=/tmp/candidate-home DOCKER_CONFIG="$RUNNER_TEMP/docker-config" docker "$@"
+          }}
+          docker_cmd info >/dev/null
+          test "$(docker_cmd info --format '{{{{.OSType}}}}')" = linux
+          builder_image="$CANDIDATE_BUILD_IMAGE_REPOSITORY@$CANDIDATE_BUILD_IMAGE_DIGEST"
+          docker_cmd buildx imagetools inspect --raw "$builder_image" > "$RUNNER_TEMP/candidate-builder-index.json"
+          jq -e '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest")] | length == 1' "$RUNNER_TEMP/candidate-builder-index.json" >/dev/null
+          builder_platform_digest="$(jq -er '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest") | .digest] | if length == 1 then .[0] else error("builder platform digest is not unique") end' "$RUNNER_TEMP/candidate-builder-index.json")"
+          if [[ ! "$builder_platform_digest" =~ ^sha256:[0-9a-f]{{64}}$ ]]; then exit 1; fi
+          builder_platform_image="$CANDIDATE_BUILD_IMAGE_REPOSITORY@$builder_platform_digest"
+          docker_cmd pull --quiet --platform linux/amd64 "$builder_platform_image"
+          docker_cmd image inspect "$builder_platform_image" --format '{{{{json .}}}}' > "$RUNNER_TEMP/candidate-builder-local.json"
+          jq -e --arg ref "$builder_platform_image" '.[0].RepoDigests | index($ref) != null' "$RUNNER_TEMP/candidate-builder-local.json" >/dev/null
+          jq -e '.[0].Os == "linux" and .[0].Architecture == "amd64" and ((.[0].Config.Env // []) | all(test("^(GITHUB_|ACTIONS_|RUNNER_|GH_TOKEN|AWS_|AZURE_|GOOGLE_|CARGO_REGISTRIES_).*" ) | not)) and .[0].Config.Volumes == null' "$RUNNER_TEMP/candidate-builder-local.json" >/dev/null
+          stage="$RUNNER_TEMP/velnor-workflow-candidate"
+          rm -rf "$stage"
+          mkdir -m 0700 "$stage"
+          source="$GITHUB_WORKSPACE"
+          test -d "$source"
+          test -z "$(find -P "$source" -type l -print -quit)"
+          test -z "$(find -P "$source" ! -type f ! -type d ! -type l -print -quit)"
+          uid=65532; gid=65532
+          cid="$(docker_cmd create --name "velnor-candidate-build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --platform linux/amd64 --pull=never --network=none --read-only --pid=private --cap-drop=ALL --security-opt no-new-privileges=true --pids-limit=256 --memory=4096m --memory-swap=4096m --cpus=2 --ulimit fsize=268435456:268435456 --ulimit nofile=2048:2048 --ulimit core=0 --shm-size=64m --stop-timeout=10 --log-driver=none --user "$uid:$gid" --workdir /src --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m,nr_inodes=8192,mode=700,uid=$uid,gid=$gid --tmpfs /target:rw,nosuid,nodev,size=2048m,nr_inodes=200000,mode=700,uid=$uid,gid=$gid --tmpfs /output:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --mount "type=bind,src=$source,dst=/src,readonly,bind-propagation=rprivate" --env CANDIDATE_HEAD_SHA="$CANDIDATE_HEAD_SHA" --env CARGO_HOME=/tmp/cargo --env CARGO_NET_OFFLINE=true --env CARGO_TARGET_DIR=/target --env CARGO_TERM_COLOR=never --env HOME=/tmp/home --env PATH=/usr/local/cargo/bin:/usr/local/rustup/toolchain/stable-x86_64-unknown-linux-gnu/bin:/usr/bin:/bin --entrypoint /bin/sh "$builder_platform_image" -ceu 'cargo build --locked --offline -p velnor-workflow && install -m 0555 target/debug/velnor-workflow /output/velnor-workflow')"
+          cleanup() {{
+            status=$?
+            if [[ -n "${{cid:-}}" ]]; then docker_cmd rm -f "$cid" >/dev/null 2>&1 || status=1; fi
+            trap - EXIT
+            exit "$status"
+          }}
+          trap cleanup EXIT
+          docker_cmd inspect "$cid" > "$stage/container.json"
+          jq -e --arg user "$uid:$gid" --arg source "$source" '
+            .[0].HostConfig.NetworkMode == "none" and .[0].HostConfig.ReadonlyRootfs == true and
+            .[0].HostConfig.Privileged == false and ((.[0].HostConfig.CapDrop // []) | index("ALL") != null) and
+            ((.[0].HostConfig.CapAdd // []) | length == 0) and ((.[0].HostConfig.PidMode // "") == "private") and
+            ((.[0].HostConfig.IpcMode // "") == "private") and ((.[0].HostConfig.SecurityOpt // []) | index("no-new-privileges=true") != null) and
+            ((.[0].HostConfig.SecurityOpt // []) | all(. != "seccomp=unconfined")) and .[0].HostConfig.PidsLimit == 256 and
+            .[0].HostConfig.Memory == 4294967296 and .[0].HostConfig.MemorySwap == 4294967296 and .[0].HostConfig.NanoCpus == 2000000000 and
+            .[0].HostConfig.LogConfig.Type == "none" and .[0].Config.User == $user and .[0].Config.WorkingDir == "/src" and
+            .[0].Config.Entrypoint == ["/bin/sh"] and ((.[0].Config.Env | map(split("=")[0]) | sort) == ["CANDIDATE_HEAD_SHA","CARGO_HOME","CARGO_NET_OFFLINE","CARGO_TARGET_DIR","CARGO_TERM_COLOR","HOME","PATH"]) and
+            ((.[0].HostConfig.Binds // []) | length == 0) and ((.[0].HostConfig.Devices // []) | length == 0) and
+            ([.[0].Mounts[] | select(.Type == "bind" and .Destination == "/src" and .Source == $source and .RW == false and .Propagation == "rprivate")] | length == 1) and
+            ([.[0].Mounts[] | select(.Type == "bind")] | length == 1) and
+            ([.[0].Mounts[] | select(.Type == "tmpfs" and (.Destination == "/tmp" or .Destination == "/target" or .Destination == "/output"))] | length == 3)
+          ' "$stage/container.json" >/dev/null
+          docker_cmd start "$cid" >/dev/null
+          if ! timeout --foreground --kill-after=10s 900s env -i PATH="$PATH" HOME=/tmp/candidate-home DOCKER_CONFIG="$RUNNER_TEMP/docker-config" docker wait "$cid" > "$stage/exit"; then
+            docker_cmd kill "$cid" >/dev/null 2>&1 || true
+            exit 1
+          fi
+          docker_cmd inspect "$cid" > "$stage/after.json"
+          jq -e '.[0].State.Status == "exited" and .[0].State.ExitCode == 0 and .[0].State.OOMKilled == false and .[0].State.Error == ""' "$stage/after.json" >/dev/null
+          output="$stage/output"
+          mkdir -m 0700 "$output"
+          docker_cmd cp "$cid:/output/." "$output/"
+          test "$(find -P "$output" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1
+          test -f "$output/velnor-workflow"
+          test ! -L "$output/velnor-workflow"
+          test -z "$(find -P "$output" -type l -print -quit)"
+          test -z "$(find -P "$output" ! -type f ! -type d ! -type l -print -quit)"
+          install -m 0555 "$output/velnor-workflow" "$stage/velnor-workflow"
+          chmod 0555 "$stage/velnor-workflow"
+          binary_sha256="$(sha256sum "$stage/velnor-workflow" | awk '{{print $1}}')"
+          closure_input="$stage/closure-input"
+          git -C "$source" ls-tree -r "$CANDIDATE_HEAD_SHA" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo \
+            | LC_ALL=C sort > "$closure_input"
+          printf 'closure-version:1\\nfeatures:\\nprofile:debug\\n' >> "$closure_input"
+          candidate_closure="$(sha256sum "$closure_input" | awk '{{print $1}}')"
+          if [[ ! "$candidate_closure" =~ ^[0-9a-f]{{64}}$ ]]; then exit 1; fi
+          jq -n \
+            --arg schema "{manifest_schema}" \
+            --arg profile debug \
+            --argjson features '[]' \
+            --arg platform linux-amd64 \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --arg revision "$CANDIDATE_HEAD_SHA" \
+            --arg closure "$candidate_closure" \
+            --arg binary_sha256 "$binary_sha256" \
+            '{{schema: $schema, profile: $profile, features: $features, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
+      - name: Upload candidate generator product
+        id: candidate_upload
+        uses: {upload}
+        with:
+          name: {artifact}
+          path: ${{{{ runner.temp }}}}/velnor-workflow-candidate
+          if-no-files-found: error
+          retention-days: 1
+      - name: Remove candidate build workspace
+        if: always()
+        run: rm -rf -- "${{{{ runner.temp }}}}/velnor-workflow-candidate"
+"#,
+            job = CANDIDATE_PRODUCER_JOB,
+            artifact = crate::s2::CANDIDATE_ARTIFACT_NAME,
+            build_image_repository = crate::s2::CANDIDATE_BUILD_IMAGE_REPOSITORY,
+            build_image_digest = crate::s2::CANDIDATE_BUILD_IMAGE_DIGEST,
+            manifest_schema = crate::s2::CANDIDATE_MANIFEST_SCHEMA,
+            checkout = $this.pins.checkout,
+            upload = $this.pins.upload_artifact,
+        );
+    }};
+}
+
 #[allow(dead_code)]
 impl WorkflowIr {
     pub(crate) fn from_config(config: &ProjectConfig) -> Self {
@@ -3142,148 +3287,8 @@ impl WorkflowIr {
     /// workflow's fresh hosted execute job and is deliberately not rendered
     /// here.
     fn render_candidate_producer(&self, output: &mut String) {
-        let _ = writeln!(
-            output,
-            r#"  {job}:
-    name: candidate_producer
-    if: ${{{{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id }}}}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions: {{}}
-    steps:
-      - name: Check out pull-request head
-        uses: {checkout}
-        with:
-          repository: ${{{{ github.event.pull_request.head.repo.full_name }}}}
-          ref: ${{{{ github.event.pull_request.head.sha }}}}
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Build candidate generator
-        id: candidate_build
-        env:
-          CANDIDATE_ARTIFACT_NAME: {artifact}
-          CANDIDATE_HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
-          CANDIDATE_BUILD_IMAGE_REPOSITORY: {build_image_repository}
-          CANDIDATE_BUILD_IMAGE_DIGEST: "{build_image_digest}"
-        run: |
-          set -euo pipefail
-          if [[ ! "$CANDIDATE_HEAD_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
-          test "$CANDIDATE_ARTIFACT_NAME" = "{artifact}"
-          test "$CANDIDATE_BUILD_IMAGE_REPOSITORY" = "{build_image_repository}"
-          if [[ ! "$CANDIDATE_BUILD_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{{64}}$ ]]; then echo "::error::candidate builder image is not pinned" >&2; exit 1; fi
-          test -z "${{GITHUB_TOKEN:-}}"
-          test -z "${{ACTIONS_RUNTIME_TOKEN:-}}"
-          test -z "${{ACTIONS_RUNTIME_URL:-}}"
-          test -z "${{ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}}"
-          case "$GITHUB_RUN_ID" in ''|*[!0-9]*) exit 1 ;; esac
-          command -v docker >/dev/null
-          command -v jq >/dev/null
-          command -v git >/dev/null
-          command -v sha256sum >/dev/null
-          command -v timeout >/dev/null
-          docker_cmd() {{
-            env -i PATH="$PATH" HOME=/tmp/candidate-home DOCKER_CONFIG="$RUNNER_TEMP/docker-config" docker "$@"
-          }}
-          docker_cmd info >/dev/null
-          test "$(docker_cmd info --format '{{{{.OSType}}}}')" = linux
-          builder_image="$CANDIDATE_BUILD_IMAGE_REPOSITORY@$CANDIDATE_BUILD_IMAGE_DIGEST"
-          docker_cmd buildx imagetools inspect --raw "$builder_image" > "$RUNNER_TEMP/candidate-builder-index.json"
-          jq -e '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest")] | length == 1' "$RUNNER_TEMP/candidate-builder-index.json" >/dev/null
-          builder_platform_digest="$(jq -er '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest") | .digest] | if length == 1 then .[0] else error("builder platform digest is not unique") end' "$RUNNER_TEMP/candidate-builder-index.json")"
-          if [[ ! "$builder_platform_digest" =~ ^sha256:[0-9a-f]{{64}}$ ]]; then exit 1; fi
-          builder_platform_image="$CANDIDATE_BUILD_IMAGE_REPOSITORY@$builder_platform_digest"
-          docker_cmd pull --quiet --platform linux/amd64 "$builder_platform_image"
-          docker_cmd image inspect "$builder_platform_image" --format '{{{{json .}}}}' > "$RUNNER_TEMP/candidate-builder-local.json"
-          jq -e --arg ref "$builder_platform_image" '.[0].RepoDigests | index($ref) != null' "$RUNNER_TEMP/candidate-builder-local.json" >/dev/null
-          jq -e '.[0].Os == "linux" and .[0].Architecture == "amd64" and ((.[0].Config.Env // []) | all(test("^(GITHUB_|ACTIONS_|RUNNER_|GH_TOKEN|AWS_|AZURE_|GOOGLE_|CARGO_REGISTRIES_).*" ) | not)) and .[0].Config.Volumes == null' "$RUNNER_TEMP/candidate-builder-local.json" >/dev/null
-          stage="$RUNNER_TEMP/velnor-workflow-candidate"
-          rm -rf "$stage"
-          mkdir -m 0700 "$stage"
-          source="$GITHUB_WORKSPACE"
-          test -d "$source"
-          test -z "$(find -P "$source" -type l -print -quit)"
-          test -z "$(find -P "$source" ! -type f ! -type d ! -type l -print -quit)"
-          uid=65532; gid=65532
-          cid="$(docker_cmd create --name "velnor-candidate-build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --platform linux/amd64 --pull=never --network=none --read-only --pid=private --cap-drop=ALL --security-opt no-new-privileges=true --pids-limit=256 --memory=4096m --memory-swap=4096m --cpus=2 --ulimit fsize=268435456:268435456 --ulimit nofile=2048:2048 --ulimit core=0 --shm-size=64m --stop-timeout=10 --log-driver=none --user "$uid:$gid" --workdir /src --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m,nr_inodes=8192,mode=700,uid=$uid,gid=$gid --tmpfs /target:rw,nosuid,nodev,size=2048m,nr_inodes=200000,mode=700,uid=$uid,gid=$gid --tmpfs /output:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --mount "type=bind,src=$source,dst=/src,readonly,bind-propagation=rprivate" --env CANDIDATE_HEAD_SHA="$CANDIDATE_HEAD_SHA" --env CARGO_HOME=/tmp/cargo --env CARGO_NET_OFFLINE=true --env CARGO_TARGET_DIR=/target --env CARGO_TERM_COLOR=never --env HOME=/tmp/home --env PATH=/usr/local/cargo/bin:/usr/local/rustup/toolchain/stable-x86_64-unknown-linux-gnu/bin:/usr/bin:/bin --entrypoint /bin/sh "$builder_platform_image" -ceu 'cargo build --locked --offline -p velnor-workflow && install -m 0555 target/debug/velnor-workflow /output/velnor-workflow')"
-          cleanup() {{
-            status=$?
-            if [[ -n "${{cid:-}}" ]]; then docker_cmd rm -f "$cid" >/dev/null 2>&1 || status=1; fi
-            trap - EXIT
-            exit "$status"
-          }}
-          trap cleanup EXIT
-          docker_cmd inspect "$cid" > "$stage/container.json"
-          jq -e --arg user "$uid:$gid" --arg source "$source" '
-            .[0].HostConfig.NetworkMode == "none" and .[0].HostConfig.ReadonlyRootfs == true and
-            .[0].HostConfig.Privileged == false and ((.[0].HostConfig.CapDrop // []) | index("ALL") != null) and
-            ((.[0].HostConfig.CapAdd // []) | length == 0) and ((.[0].HostConfig.PidMode // "") == "private") and
-            ((.[0].HostConfig.IpcMode // "") == "private") and ((.[0].HostConfig.SecurityOpt // []) | index("no-new-privileges=true") != null) and
-            ((.[0].HostConfig.SecurityOpt // []) | all(. != "seccomp=unconfined")) and .[0].HostConfig.PidsLimit == 256 and
-            .[0].HostConfig.Memory == 4294967296 and .[0].HostConfig.MemorySwap == 4294967296 and .[0].HostConfig.NanoCpus == 2000000000 and
-            .[0].HostConfig.LogConfig.Type == "none" and .[0].Config.User == $user and .[0].Config.WorkingDir == "/src" and
-            .[0].Config.Entrypoint == ["/bin/sh"] and ((.[0].Config.Env | map(split("=")[0]) | sort) == ["CANDIDATE_HEAD_SHA","CARGO_HOME","CARGO_NET_OFFLINE","CARGO_TARGET_DIR","CARGO_TERM_COLOR","HOME","PATH"]) and
-            ((.[0].HostConfig.Binds // []) | length == 0) and ((.[0].HostConfig.Devices // []) | length == 0) and
-            ([.[0].Mounts[] | select(.Type == "bind" and .Destination == "/src" and .Source == $source and .RW == false and .Propagation == "rprivate")] | length == 1) and
-            ([.[0].Mounts[] | select(.Type == "bind")] | length == 1) and
-            ([.[0].Mounts[] | select(.Type == "tmpfs" and (.Destination == "/tmp" or .Destination == "/target" or .Destination == "/output"))] | length == 3)
-          ' "$stage/container.json" >/dev/null
-          docker_cmd start "$cid" >/dev/null
-          if ! timeout --foreground --kill-after=10s 900s env -i PATH="$PATH" HOME=/tmp/candidate-home DOCKER_CONFIG="$RUNNER_TEMP/docker-config" docker wait "$cid" > "$stage/exit"; then
-            docker_cmd kill "$cid" >/dev/null 2>&1 || true
-            exit 1
-          fi
-          docker_cmd inspect "$cid" > "$stage/after.json"
-          jq -e '.[0].State.Status == "exited" and .[0].State.ExitCode == 0 and .[0].State.OOMKilled == false and .[0].State.Error == ""' "$stage/after.json" >/dev/null
-          output="$stage/output"
-          mkdir -m 0700 "$output"
-          docker_cmd cp "$cid:/output/." "$output/"
-          test "$(find -P "$output" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1
-          test -f "$output/velnor-workflow"
-          test ! -L "$output/velnor-workflow"
-          test -z "$(find -P "$output" -type l -print -quit)"
-          test -z "$(find -P "$output" ! -type f ! -type d ! -type l -print -quit)"
-          install -m 0555 "$output/velnor-workflow" "$stage/velnor-workflow"
-          chmod 0555 "$stage/velnor-workflow"
-          binary_sha256="$(sha256sum "$stage/velnor-workflow" | awk '{{print $1}}')"
-          closure_input="$stage/closure-input"
-          git -C "$source" ls-tree -r "$CANDIDATE_HEAD_SHA" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo \
-            | LC_ALL=C sort > "$closure_input"
-          printf 'closure-version:1\\nfeatures:\\nprofile:debug\\n' >> "$closure_input"
-          candidate_closure="$(sha256sum "$closure_input" | awk '{{print $1}}')"
-          if [[ ! "$candidate_closure" =~ ^[0-9a-f]{{64}}$ ]]; then exit 1; fi
-          jq -n \
-            --arg schema "{manifest_schema}" \
-            --arg profile debug \
-            --argjson features '[]' \
-            --arg platform linux-amd64 \
-            --arg repository "$GITHUB_REPOSITORY" \
-            --argjson run_id "$GITHUB_RUN_ID" \
-            --arg revision "$CANDIDATE_HEAD_SHA" \
-            --arg closure "$candidate_closure" \
-            --arg binary_sha256 "$binary_sha256" \
-            '{{schema: $schema, profile: $profile, features: $features, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
-      - name: Upload candidate generator product
-        id: candidate_upload
-        uses: {upload}
-        with:
-          name: {artifact}
-          path: ${{{{ runner.temp }}}}/velnor-workflow-candidate
-          if-no-files-found: error
-          retention-days: 1
-      - name: Remove candidate build workspace
-        if: always()
-        run: rm -rf -- "${{{{ runner.temp }}}}/velnor-workflow-candidate"
-"#,
-            job = CANDIDATE_PRODUCER_JOB,
-            artifact = crate::s2::CANDIDATE_ARTIFACT_NAME,
-            build_image_repository = crate::s2::CANDIDATE_BUILD_IMAGE_REPOSITORY,
-            build_image_digest = crate::s2::CANDIDATE_BUILD_IMAGE_DIGEST,
-            manifest_schema = crate::s2::CANDIDATE_MANIFEST_SCHEMA,
-            checkout = self.pins.checkout,
-            upload = self.pins.upload_artifact,
-        );
+        render_candidate_producer_template!(self, output);
     }
-
     /// Nightly is a scheduled dispatcher of `ci-main.yml` on the default branch.
     /// `workflow_dispatch` on ci-main is trusted for mbx saves; schedule alone is not.
     pub(crate) fn render_nightly_dispatcher(&self) -> String {

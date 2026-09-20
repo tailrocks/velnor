@@ -4648,8 +4648,8 @@ fn audited_pin_script() -> &'static str {
 /// bytes; this census closes the other hole where a second workflow (or a
 /// dynamically named upload step) could publish the same namespace through a
 /// reusable workflow or an alias.
-fn candidate_namespace_scan_script() -> String {
-    r#"          base_workflow_archive="$RUNNER_TEMP/base-workflows.tar"
+const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
+          base_workflow_archive="$RUNNER_TEMP/base-workflows.tar"
           head_workflow_archive="$RUNNER_TEMP/head-workflows.tar"
           GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$BASE_SHA" .github/workflows > "$base_workflow_archive"
           GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$HEAD_SHA" .github/workflows > "$head_workflow_archive"
@@ -4788,12 +4788,21 @@ fn candidate_namespace_scan_script() -> String {
                   if dynamic_marker in name and candidate_like:
                       raise SystemExit(f"{path}: candidate namespace is computed dynamically")
           PY
-"#.replace("__CANDIDATE_ARTIFACT__", crate::s2::CANDIDATE_ARTIFACT_NAME)
-        .replace("__CANDIDATE_HANDOFF__", crate::s2::CANDIDATE_HANDOFF_ARTIFACT_NAME)
-        .replace("__CANDIDATE_RESULT__", crate::s2::CANDIDATE_RESULT_ARTIFACT_NAME)
+"#;
+
+fn candidate_namespace_scan_script() -> String {
+    CANDIDATE_NAMESPACE_SCAN_SCRIPT
+        .replace("__CANDIDATE_ARTIFACT__", crate::s2::CANDIDATE_ARTIFACT_NAME)
+        .replace(
+            "__CANDIDATE_HANDOFF__",
+            crate::s2::CANDIDATE_HANDOFF_ARTIFACT_NAME,
+        )
+        .replace(
+            "__CANDIDATE_RESULT__",
+            crate::s2::CANDIDATE_RESULT_ARTIFACT_NAME,
+        )
 }
 
-/// Apply the base-owned manifest schema with a small fail-closed validator
 /// available on the hosted runner.  The policy job does not trust a
 /// candidate-provided JSON schema or assume that an optional third-party
 /// jsonschema package is installed.
@@ -4854,8 +4863,9 @@ fn candidate_manifest_schema_script() -> String {
 /// executes candidate bytes.
 /// Candidate JSON is descriptive only; all identity fields in handoff.json
 /// come from the trusted API responses and the base workflow contract.
-fn policy_candidate_step(revision: &str) -> String {
-    format!(
+macro_rules! policy_candidate_step_template {
+    ($revision:expr) => {
+        format!(
         r#"      - name: Acquire candidate generator product
         working-directory: policy-checkout
         env:
@@ -5125,6 +5135,7 @@ fn policy_candidate_step(revision: &str) -> String {
           retention-days: 1
 "#,
         artifact = crate::s2::CANDIDATE_ARTIFACT_NAME,
+        revision = $revision,
         checkout = ActionPin::Checkout.reference(),
         checkout_action_archive_sha256 = crate::s2::CANDIDATE_CHECKOUT_ACTION_ARCHIVE_SHA256,
         checkout_action_revision = crate::s2::CANDIDATE_CHECKOUT_ACTION_REVISION,
@@ -5138,7 +5149,12 @@ fn policy_candidate_step(revision: &str) -> String {
         upload_action_archive_sha256 = crate::s2::CANDIDATE_UPLOAD_ACTION_ARCHIVE_SHA256,
         upload_action_revision = crate::s2::CANDIDATE_UPLOAD_ACTION_REVISION,
         upload = ActionPin::UploadArtifact.reference(),
-    )
+        )
+    };
+}
+
+fn policy_candidate_step(revision: &str) -> String {
+    policy_candidate_step_template!(revision)
 }
 
 /// The three hosted roles that make the PR candidate transport acyclic:
@@ -5146,9 +5162,10 @@ fn policy_candidate_step(revision: &str) -> String {
 /// sandbox, and policy is the fresh verifier. Candidate bytes cross jobs only
 /// through the numeric artifact IDs emitted by the trusted uploader; neither
 /// a candidate manifest nor a mutable artifact name selects a producer.
-fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str) -> String {
-    let acquire = policy_candidate_step(revision);
-    format!(
+macro_rules! policy_candidate_role_jobs_template {
+    ($runner:expr, $revision:expr, $default_branch:expr) => {{
+        let acquire = policy_candidate_step($revision);
+        format!(
         r#"  policy_acquire:
     name: policy_acquire
     if: ${{{{ github.event_name == 'pull_request_target' }}}}
@@ -5451,16 +5468,21 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
         checkout_action_archive_sha256 = CANDIDATE_CHECKOUT_ACTION_ARCHIVE_SHA256,
         download_action_archive_sha256 = CANDIDATE_DOWNLOAD_ACTION_ARCHIVE_SHA256,
         upload_action_archive_sha256 = CANDIDATE_UPLOAD_ACTION_ARCHIVE_SHA256,
-        default_branch = default_branch,
+        default_branch = $default_branch,
         download = ActionPin::DownloadArtifact.reference(),
         handoff = CANDIDATE_HANDOFF_ARTIFACT_NAME,
         image_digest = CANDIDATE_SANDBOX_IMAGE_DIGEST,
         image_repository = CANDIDATE_SANDBOX_IMAGE_REPOSITORY,
         manifest_schema = crate::s2::CANDIDATE_MANIFEST_SCHEMA,
         result = CANDIDATE_RESULT_ARTIFACT_NAME,
-        runner = runner,
+        runner = $runner,
         upload = ActionPin::UploadArtifact.reference(),
-    )
+        )
+    }};
+}
+
+fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str) -> String {
+    policy_candidate_role_jobs_template!(runner, revision, default_branch)
 }
 
 /// Consumer policy steps acquiring the audited tree's declared generator as
@@ -5501,11 +5523,9 @@ fn policy_renderer_steps(repository: &str, revision: &str) -> String {
 /// numeric artifact records and ZIP transports, then rechecks the producer
 /// run/job/repository/tree contract from a clean checkout before the policy
 /// command sees the render.
-fn policy_candidate_result_verification_step() -> String {
-    let manifest_validation = candidate_manifest_validation_script()
-        .replace("$manifest_schema", "$verifier_manifest_schema")
-        .replace("$manifest", "$producer_manifest");
-    format!(
+macro_rules! policy_candidate_result_verification_template {
+    ($manifest_validation:expr) => {
+        format!(
         r#"      - name: Verify candidate transport provenance
         id: candidate_provenance
         if: github.event_name == 'pull_request_target'
@@ -5859,11 +5879,92 @@ fn policy_candidate_result_verification_step() -> String {
         handoff = crate::s2::CANDIDATE_HANDOFF_ARTIFACT_NAME,
         manifest_schema = crate::s2::CANDIDATE_MANIFEST_SCHEMA,
         manifest_schema_json = candidate_manifest_schema_script(),
-        manifest_validation = manifest_validation,
+        manifest_validation = $manifest_validation,
         result = crate::s2::CANDIDATE_RESULT_ARTIFACT_NAME,
         upload_action_archive_sha256 = crate::s2::CANDIDATE_UPLOAD_ACTION_ARCHIVE_SHA256,
         upload_action_revision = crate::s2::CANDIDATE_UPLOAD_ACTION_REVISION,
-    )
+        )
+    };
+}
+
+fn policy_candidate_result_verification_step() -> String {
+    let manifest_validation = candidate_manifest_validation_script()
+        .replace("$manifest_schema", "$verifier_manifest_schema")
+        .replace("$manifest", "$producer_manifest");
+    policy_candidate_result_verification_template!(manifest_validation)
+}
+
+struct PolicyJobRender<'a> {
+    name: &'a str,
+    trusted_gate: &'a str,
+    runner: &'a str,
+    revision: &'a str,
+    setup_checkout: &'a str,
+    validator: &'a str,
+    renderer: &'a str,
+    ruleset_step: &'a str,
+    candidate_command_arguments: &'a str,
+    actionlint_setup: &'a str,
+}
+
+fn render_policy_job(
+    parts: &PolicyJobRender<'_>,
+    candidate_graph: bool,
+    policy_permissions: &str,
+    candidate_roles: &str,
+    candidate_result_verification: &str,
+    candidate_render_argument: &str,
+) -> String {
+    let PolicyJobRender {
+        name,
+        trusted_gate,
+        runner,
+        revision,
+        setup_checkout,
+        validator,
+        renderer,
+        ruleset_step,
+        candidate_command_arguments,
+        actionlint_setup,
+    } = *parts;
+    let mut policy = format!
+        (
+        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: this job is the fresh verifier. It executes only the\n    # base-pinned validator and compares the isolated candidate's rendered\n    # bytes against a clean checkout; candidate code never runs in this job.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{setup_checkout}{validator}{renderer}{ruleset_step}      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\"{candidate_command_arguments}\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
+        ActionPin::Checkout.reference(),
+            actionlint_setup = actionlint_setup,
+    );
+    policy = policy.replacen(
+        "    permissions:\n",
+        "    # Candidate execution runs with no secret references or persisted credentials.\n    permissions:\n",
+        1,
+    );
+    if candidate_graph {
+        policy = policy.replacen(
+            "    permissions:\n      contents: read\n",
+            &format!("    permissions:\n{policy_permissions}"),
+            1,
+        );
+        policy = policy.replacen(
+            "  policy:\n    name:",
+            "  policy:\n    needs: [candidate_execute]\n    if: ${{ always() && (github.event_name != 'pull_request_target' || needs.candidate_execute.result == 'success') }}\n    name:",
+            1,
+        );
+        policy = policy.replacen(
+            "          set -euo pipefail\n          velnor-workflow policy \\\n",
+            &format!(
+                "          set -euo pipefail\n{candidate_render_argument}          velnor-workflow policy \\\n"
+            ),
+            1,
+        );
+        policy = policy.replacen(
+            "      - name: Resolve required status checks\n",
+            &format!(
+                "{candidate_result_verification}      - name: Resolve required status checks\n"
+            ),
+            1,
+        );
+    }
+    format!("{candidate_roles}{policy}")
 }
 
 /// The policy job body. It is deliberately a `steps` job, not a
@@ -5978,44 +6079,27 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     } else {
         "\n".to_owned()
     };
-    let mut policy = format!
-        (
-        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: this job is the fresh verifier. It executes only the\n    # base-pinned validator and compares the isolated candidate's rendered\n    # bytes against a clean checkout; candidate code never runs in this job.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{setup_checkout}{validator}{renderer}{ruleset_step}      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\"{candidate_command_arguments}\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
-        ActionPin::Checkout.reference(),
-        actionlint_setup = actionlint_setup_step(cache_backend),
-    );
-    policy = policy.replacen(
-        "    permissions:\n",
-        "    # Candidate execution runs with no secret references or persisted credentials.\n    permissions:\n",
-        1,
-    );
-    if candidate_graph {
-        policy = policy.replacen(
-            "    permissions:\n      contents: read\n",
-            &format!("    permissions:\n{policy_permissions}"),
-            1,
-        );
-        policy = policy.replacen(
-            "  policy:\n    name:",
-            "  policy:\n    needs: [candidate_execute]\n    if: ${{ always() && (github.event_name != 'pull_request_target' || needs.candidate_execute.result == 'success') }}\n    name:",
-            1,
-        );
-        policy = policy.replacen(
-            "          set -euo pipefail\n          velnor-workflow policy \\\n",
-            &format!(
-                "          set -euo pipefail\n{candidate_render_argument}          velnor-workflow policy \\\n"
-            ),
-            1,
-        );
-        policy = policy.replacen(
-            "      - name: Resolve required status checks\n",
-            &format!(
-                "{candidate_result_verification}      - name: Resolve required status checks\n"
-            ),
-            1,
-        );
-    }
-    format!("{candidate_roles}{policy}")
+    let actionlint_setup = actionlint_setup_step(cache_backend);
+    let parts = PolicyJobRender {
+        name,
+        trusted_gate,
+        runner,
+        revision,
+        setup_checkout: &setup_checkout,
+        validator: &validator,
+        renderer: &renderer,
+        ruleset_step: &ruleset_step,
+        candidate_command_arguments: &candidate_command_arguments,
+        actionlint_setup: &actionlint_setup,
+    };
+    render_policy_job(
+        &parts,
+        candidate_graph,
+        policy_permissions,
+        &candidate_roles,
+        &candidate_result_verification,
+        candidate_render_argument,
+    )
 }
 
 /// The step that provisions the pinned actionlint for the policy job. The

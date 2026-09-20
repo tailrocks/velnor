@@ -589,153 +589,8 @@ fn owner_entrypoint_renders_the_isolated_candidate_transport() {
         declared_ruleset_contexts: "ci-required,Policy",
         acquire_pull_request_candidate: true,
     });
-    assert!(job.contains("policy_acquire:\n"), "{job}");
-    assert!(job.contains("candidate_execute:\n"), "{job}");
-    assert!(job.contains("  policy:\n"), "{job}");
-    assert!(job.contains("needs: [candidate_execute]"), "{job}");
-    assert!(
-        job.contains("needs.policy_acquire.outputs.handoff_id"),
-        "{job}"
-    );
-    assert!(job.contains("RESULT_ID:"), "{job}");
-    assert!(
-        job.contains("name: velnor-workflow-candidate-linux-x64"),
-        "{job}"
-    );
-    assert!(
-        job.contains("name: velnor-workflow-candidate-handoff"),
-        "{job}"
-    );
-    assert!(
-        job.contains("name: velnor-workflow-candidate-result"),
-        "{job}"
-    );
-    assert!(
-        job.contains("actions/runs/$run_id/jobs?per_page=100"),
-        "{job}"
-    );
-    assert!(
-        job.contains("actions/runs/$run_id/artifacts?per_page=100"),
-        "{job}"
-    );
-    assert!(job.contains("actions/artifacts/$artifact_id/zip"), "{job}");
-    assert!(job.contains("/commits/$HEAD_SHA"), "{job}");
-    assert!(job.contains(".commit.tree.sha"), "{job}");
-    assert!(
-        job.contains("git -c init.templateDir=/dev/null init --bare"),
-        "{job}"
-    );
-    assert!(
-        job.contains("fetch --no-tags --depth=1 \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\""),
-        "{job}"
-    );
-    assert!(
-        job.contains("git -C \"$source_repo\" archive --format=tar \"$HEAD_SHA\""),
-        "{job}"
-    );
-    assert!(
-        job.contains("git -C \"$verifier_source_repo\" ls-tree -r \"$HEAD_SHA\""),
-        "{job}"
-    );
-    assert!(
-        !job.contains("git rev-parse \"$HEAD_SHA^{{tree}}\""),
-        "{job}"
-    );
-    assert!(job.contains("repository_api"), "{job}");
-    assert!(job.contains("artifact_raw_zip_sha256"), "{job}");
-    assert!(job.contains("fromdateiso8601 > now"), "{job}");
-    assert!(
-        job.contains("test \"$raw_zip_sha256\" = \"$service_digest\""),
-        "{job}"
-    );
-    assert!(
-        job.contains("test \"$result_raw_zip_sha256\" = \"$result_service_digest\""),
-        "{job}"
-    );
-    assert!(
-        job.contains("test \"$handoff_raw_zip_sha256\" = \"$handoff_service_digest\""),
-        "{job}"
-    );
-    assert!(
-        job.contains("test \"$(sha256sum \"$producer_archive\" | awk '{print $1}')\" = \"$producer_service_digest\""),
-        "{job}"
-    );
-    assert!(job.contains("candidate_closure"), "{job}");
-    assert!(
-        job.contains("Verify candidate transport provenance"),
-        "{job}"
-    );
-    assert!(job.contains("workflow_id"), "{job}");
-    assert!(job.contains(".workflow_run.id | tonumber"), "{job}");
-    assert!(job.contains("actions: read\n      contents: read"), "{job}");
-    assert!(job.contains("run_attempt"), "{job}");
-    assert!(job.contains("target_repository_id"), "{job}");
-    assert!(job.contains("uses: actions/checkout@"), "{job}");
-    assert!(job.contains(".pr_number == $expected_pr"), "{job}");
-    assert!(job.contains(".pr_number == $pr"), "{job}");
-    assert!(
-        job.contains(".head_repository.full_name == $head_repo"),
-        "{job}"
-    );
-    assert!(
-        job.contains("grep -Ec '^[[:space:]]+uses: .*upload-artifact@'"),
-        "{job}"
-    );
-    assert!(job.contains("PR_NUMBER:"), "{job}");
-    assert!(job.contains(".pull_requests | any"), "{job}");
-    assert!(
-        job.contains("PR workflow changed the trusted candidate producer contract"),
-        "{job}"
-    );
-    assert!(job.contains("--network=none"), "{job}");
-    assert!(job.contains("--read-only"), "{job}");
-    assert!(job.contains("--pid=private"), "{job}");
-    assert!(job.contains("--cap-drop=ALL"), "{job}");
-    assert!(job.contains("uid=65532; gid=65532"), "{job}");
-    assert!(job.contains("SOURCE_CLOSURE"), "{job}");
-    assert!(job.contains("docker_cmd()"), "{job}");
-    assert!(job.contains("env -i PATH=\"$PATH\""), "{job}");
-    assert!(!job.contains("--hostname=velnor-sandbox"), "{job}");
-    assert!(!job.contains("--env HOSTNAME=velnor-sandbox"), "{job}");
-    assert!(
-        job.contains("--tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m"),
-        "{job}"
-    );
-    assert!(job.contains("nr_inodes=4096"), "{job}");
-    assert!(job.contains("--ulimit fsize=67108864:67108864"), "{job}");
-    assert!(job.contains("--log-driver=none"), "{job}");
-    assert!(
-        job.contains("--security-opt no-new-privileges=true"),
-        "{job}"
-    );
-    assert!(
-        job.contains("--mount \"type=bind,src=$input,dst=/input,readonly"),
-        "{job}"
-    );
-    assert!(
-        job.contains("--mount \"type=bind,src=$candidate,dst=/candidate,readonly"),
-        "{job}"
-    );
-    assert!(
-        job.contains("--candidate-render \"$RUNNER_TEMP/candidate-result-verified/render\""),
-        "{job}"
-    );
-    assert!(job.contains("result archive has too many members"), "{job}");
-    assert!(job.contains("result archive is incomplete"), "{job}");
-    assert!(
-        !job.contains("Download candidate verification result"),
-        "{job}"
-    );
-    assert!(job.contains("SANDBOX_IMAGE_DIGEST"), "{job}");
-    assert!(job.contains("test -n \"$SANDBOX_IMAGE_DIGEST\""), "{job}");
-    assert!(job.contains("if name.endswith(\"/\")"), "{job}");
-    assert!(job.contains("if not member.isdir()"), "{job}");
-    assert!(job.contains("unsafe source archive member"), "{job}");
-    assert!(!job.contains("gh run download"), "{job}");
-    assert!(
-        !job.contains("--candidate-manifest"),
-        "the hosted verifier consumes result bytes, not the legacy manifest path: {job}"
-    );
+    assert_candidate_transport_acquisition(&job);
+    assert_candidate_transport_sandbox(&job);
     let template = hosted_entrypoint(PIN_A);
     let (prefix, _) = must_some(template.split_once("jobs:\n"), "hosted workflow jobs");
     let root = entrypoint_tree("entrypoint-owner-pin", &format!("{prefix}jobs:\n{job}"));
@@ -1272,5 +1127,157 @@ fn policy_sibling_setup_action_is_a_reviewed_local_path() {
     assert!(
         !is_approved_local_action("./policy-setup-action/.github/workflows/ci-pr.yml"),
         "the sibling checkout carries no reusable workflows"
+    );
+}
+fn assert_candidate_transport_acquisition(job: &str) {
+    assert!(job.contains("policy_acquire:\n"), "{job}");
+    assert!(job.contains("candidate_execute:\n"), "{job}");
+    assert!(job.contains("  policy:\n"), "{job}");
+    assert!(job.contains("needs: [candidate_execute]"), "{job}");
+    assert!(
+        job.contains("needs.policy_acquire.outputs.handoff_id"),
+        "{job}"
+    );
+    assert!(job.contains("RESULT_ID:"), "{job}");
+    assert!(
+        job.contains("name: velnor-workflow-candidate-linux-x64"),
+        "{job}"
+    );
+    assert!(
+        job.contains("name: velnor-workflow-candidate-handoff"),
+        "{job}"
+    );
+    assert!(
+        job.contains("name: velnor-workflow-candidate-result"),
+        "{job}"
+    );
+    assert!(
+        job.contains("actions/runs/$run_id/jobs?per_page=100"),
+        "{job}"
+    );
+    assert!(
+        job.contains("actions/runs/$run_id/artifacts?per_page=100"),
+        "{job}"
+    );
+    assert!(job.contains("actions/artifacts/$artifact_id/zip"), "{job}");
+    assert!(job.contains("/commits/$HEAD_SHA"), "{job}");
+    assert!(job.contains(".commit.tree.sha"), "{job}");
+    assert!(
+        job.contains("git -c init.templateDir=/dev/null init --bare"),
+        "{job}"
+    );
+    assert!(
+        job.contains("fetch --no-tags --depth=1 \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\""),
+        "{job}"
+    );
+    assert!(
+        job.contains("git -C \"$source_repo\" archive --format=tar \"$HEAD_SHA\""),
+        "{job}"
+    );
+    assert!(
+        job.contains("git -C \"$verifier_source_repo\" ls-tree -r \"$HEAD_SHA\""),
+        "{job}"
+    );
+    assert!(
+        !job.contains("git rev-parse \"$HEAD_SHA^{{tree}}\""),
+        "{job}"
+    );
+    assert!(job.contains("repository_api"), "{job}");
+    assert!(job.contains("artifact_raw_zip_sha256"), "{job}");
+    assert!(job.contains("fromdateiso8601 > now"), "{job}");
+    assert!(
+        job.contains("test \"$raw_zip_sha256\" = \"$service_digest\""),
+        "{job}"
+    );
+    assert!(
+        job.contains("test \"$result_raw_zip_sha256\" = \"$result_service_digest\""),
+        "{job}"
+    );
+    assert!(
+        job.contains("test \"$handoff_raw_zip_sha256\" = \"$handoff_service_digest\""),
+        "{job}"
+    );
+    assert!(
+        job.contains("test \"$(sha256sum \"$producer_archive\" | awk '{print $1}')\" = \"$producer_service_digest\""),
+        "{job}"
+    );
+    assert!(job.contains("candidate_closure"), "{job}");
+    assert!(
+        job.contains("Verify candidate transport provenance"),
+        "{job}"
+    );
+    assert!(job.contains("workflow_id"), "{job}");
+    assert!(job.contains(".workflow_run.id | tonumber"), "{job}");
+    assert!(job.contains("actions: read\n      contents: read"), "{job}");
+    assert!(job.contains("run_attempt"), "{job}");
+    assert!(job.contains("target_repository_id"), "{job}");
+    assert!(job.contains("uses: actions/checkout@"), "{job}");
+    assert!(job.contains(".pr_number == $expected_pr"), "{job}");
+    assert!(job.contains(".pr_number == $pr"), "{job}");
+    assert!(
+        job.contains(".head_repository.full_name == $head_repo"),
+        "{job}"
+    );
+    assert!(
+        job.contains("grep -Ec '^[[:space:]]+uses: .*upload-artifact@'"),
+        "{job}"
+    );
+    assert!(job.contains("PR_NUMBER:"), "{job}");
+    assert!(job.contains(".pull_requests | any"), "{job}");
+    assert!(
+        job.contains("PR workflow changed the trusted candidate producer contract"),
+        "{job}"
+    );
+}
+
+fn assert_candidate_transport_sandbox(job: &str) {
+    assert!(job.contains("--network=none"), "{job}");
+    assert!(job.contains("--read-only"), "{job}");
+    assert!(job.contains("--pid=private"), "{job}");
+    assert!(job.contains("--cap-drop=ALL"), "{job}");
+    assert!(job.contains("uid=65532; gid=65532"), "{job}");
+    assert!(job.contains("SOURCE_CLOSURE"), "{job}");
+    assert!(job.contains("docker_cmd()"), "{job}");
+    assert!(job.contains("env -i PATH=\"$PATH\""), "{job}");
+    assert!(!job.contains("--hostname=velnor-sandbox"), "{job}");
+    assert!(!job.contains("--env HOSTNAME=velnor-sandbox"), "{job}");
+    assert!(
+        job.contains("--tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m"),
+        "{job}"
+    );
+    assert!(job.contains("nr_inodes=4096"), "{job}");
+    assert!(job.contains("--ulimit fsize=67108864:67108864"), "{job}");
+    assert!(job.contains("--log-driver=none"), "{job}");
+    assert!(
+        job.contains("--security-opt no-new-privileges=true"),
+        "{job}"
+    );
+    assert!(
+        job.contains("--mount \"type=bind,src=$input,dst=/input,readonly"),
+        "{job}"
+    );
+    assert!(
+        job.contains("--mount \"type=bind,src=$candidate,dst=/candidate,readonly"),
+        "{job}"
+    );
+    assert!(
+        job.contains("--candidate-render \"$RUNNER_TEMP/candidate-result-verified/render\""),
+        "{job}"
+    );
+    assert!(job.contains("result archive has too many members"), "{job}");
+    assert!(job.contains("result archive is incomplete"), "{job}");
+    assert!(
+        !job.contains("Download candidate verification result"),
+        "{job}"
+    );
+    assert!(job.contains("SANDBOX_IMAGE_DIGEST"), "{job}");
+    assert!(job.contains("test -n \"$SANDBOX_IMAGE_DIGEST\""), "{job}");
+    assert!(job.contains("if name.endswith(\"/\")"), "{job}");
+    assert!(job.contains("if not member.isdir()"), "{job}");
+    assert!(job.contains("unsafe source archive member"), "{job}");
+    assert!(!job.contains("gh run download"), "{job}");
+    assert!(
+        !job.contains("--candidate-manifest"),
+        "the hosted verifier consumes result bytes, not the legacy manifest path: {job}"
     );
 }
