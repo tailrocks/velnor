@@ -1,0 +1,132 @@
+[
+  {
+    "case": "selected succeeds",
+    "exit": 0,
+    "expected_success": true
+  },
+  {
+    "case": "plan failure",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "plan cancelled",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "plan skipped",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "plan None",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "policy failure",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "policy cancelled",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "policy skipped",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "policy None",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "github-hosted-rust-velnor-workflow failure",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "github-hosted-rust-velnor-workflow cancelled",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "github-hosted-rust-velnor-workflow skipped",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "github-hosted-rust-velnor-workflow None",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "empty selection skipped is valid",
+    "exit": 0,
+    "expected_success": true
+  },
+  {
+    "case": "undeclared success",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "nonapplicable github-hosted-rust-velnor-workflow failure",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "nonapplicable github-hosted-rust-velnor-workflow cancelled",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "nonapplicable github-hosted-rust-velnor-workflow None",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "nonapplicable velnor-rust-velnor-workflow failure",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "nonapplicable velnor-rust-velnor-workflow cancelled",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "nonapplicable velnor-rust-velnor-workflow None",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "nonapplicable prepare-cargo failure",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "nonapplicable prepare-cargo cancelled",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "nonapplicable prepare-cargo None",
+    "exit": 1,
+    "expected_success": false
+  },
+  {
+    "case": "selected but not admitted requires skip",
+    "exit": 0,
+    "expected_success": true
+  },
+  {
+    "case": "selected but not admitted cannot run",
+    "exit": 1,
+    "expected_success": false
+  }
+]

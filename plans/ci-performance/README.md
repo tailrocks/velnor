@@ -2,6 +2,10 @@
 
 Status: active; no performance improvement accepted yet. Started 2026-09-20.
 
+The focused Velnor CI reliability task is tracked in
+[the reliability execution record](reliability.md), including failure
+dispositions, hook isolation, required gates, and protected integration.
+
 This directory is the canonical record for the cross-repository campaign.
 Historical work remains in [the September 16 cache plan](../2026-09-16-ci-workflow-and-cache-plan.md)
 and [the September 17 behavior ledger](../2026-09-17-pr994-behavior-ledger.md).

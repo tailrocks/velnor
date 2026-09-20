@@ -260,14 +260,14 @@ mod tests {
         assert!(
             pr.contains("cancel-in-progress: true")
                 && pr.contains("ci-required:\n    name:")
-                && pr.contains("if: ${{ !cancelled() }}"),
-            "PR concurrency and required checks use the cancellation-aware aggregate guard"
+                && pr.contains("if: ${{ always() }}"),
+            "PR work remains cancellable while required verdicts always run"
         );
         let direct_pr = ir.render(WorkflowKind::PullRequest);
         assert!(
             direct_pr.contains("cancel-in-progress: true")
-                && direct_pr.contains("if: ${{ !cancelled() }}"),
-            "the legacy direct renderer carries the same PR guard"
+                && direct_pr.contains("if: ${{ always() }}"),
+            "the direct renderer also always evaluates required verdicts"
         );
 
         for kind in [WorkflowKind::Main, WorkflowKind::Nightly] {
@@ -288,6 +288,34 @@ mod tests {
     }
 
     #[test]
+    fn every_required_verdict_runs_unconditionally_on_hosted_control_plane() {
+        for runners in [RunnerMode::Github, RunnerMode::Velnor, RunnerMode::Both] {
+            let mut ir = owner_test_ir("example/verdict-control", vec![rust_unit("rust", ".")]);
+            ir.runners = runners;
+            let nodes = aggregate_fixture_nodes(&ir);
+            for kind in [WorkflowKind::PullRequest, WorkflowKind::Main] {
+                for surface in [ir.render(kind), ir.render_nested(kind, &nodes, None)] {
+                    let document = must_ok(
+                        serde_yaml::from_str::<serde_yaml::Value>(&surface),
+                        "required workflow parses",
+                    );
+                    for job in [super::REQUIRED_CHECK, "required"] {
+                        let verdict = &document["jobs"][job];
+                        assert_eq!(verdict["if"].as_str(), Some("${{ always() }}"));
+                        assert_eq!(verdict["runs-on"].as_str(), Some(ir.github_runner.as_str()));
+                        assert!(
+                            verdict["steps"].as_sequence().is_some_and(|steps| {
+                                steps.iter().all(|step| step.get("uses").is_none())
+                            }),
+                            "verdict-only control executes no repository code"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn required_gate_rejects_failed_skipped_and_cancelled_selected_callers() {
         let ir = owner_test_ir(
             "example/cancellation-results",
@@ -302,7 +330,6 @@ mod tests {
             &mut rendered,
             false,
             super::REQUIRED_CHECK,
-            false,
             false,
         );
         let script = must_some(
@@ -3116,8 +3143,9 @@ fn aggregate_concurrency_block(
 }
 
 /// PR aggregates may be superseded while they are waiting on a dependency.
-/// Keep their callers and required mirrors out of the cancelled run while
+/// Keep expensive callers out of the cancelled run while
 /// retaining the explicit result/admission predicates below the status guard.
+/// Required verdicts are separate: they always evaluate terminal dependencies.
 /// Main and nightly aggregates must finish their publishing and alert paths.
 fn aggregate_job_guard(cancel_in_progress: bool) -> &'static str {
     if cancel_in_progress {
@@ -3806,12 +3834,7 @@ impl WorkflowIr {
         // check. Only the PR and main workflows own the stable `ci-required`
         // check that repository rulesets gate on.
         if kind != WorkflowKind::Nightly && self.ci_required {
-            self.render_required(
-                &mut output,
-                runners,
-                kind == WorkflowKind::PullRequest,
-                kind != WorkflowKind::PullRequest,
-            );
+            self.render_required(&mut output, runners, kind != WorkflowKind::PullRequest);
         }
         while output.ends_with("\n\n") {
             output.pop();
@@ -3896,7 +3919,6 @@ impl WorkflowIr {
                 true,
                 "nightly-required",
                 true,
-                cancel_in_progress,
             );
             self.render_nightly_alert(&mut output, "nightly-required", None);
         } else if self.ci_required {
@@ -3907,7 +3929,6 @@ impl WorkflowIr {
                 kind != WorkflowKind::PullRequest,
                 REQUIRED_CHECK,
                 false,
-                cancel_in_progress,
             );
         }
         while output.ends_with("\n\n") {
@@ -4258,10 +4279,6 @@ impl WorkflowIr {
     }
 
     /// The aggregate required check over every contributed unit node.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the required gate has independent plan, policy, simulation, and cancellation inputs"
-    )]
     pub(crate) fn render_nodes_required(
         &self,
         nodes: &[GraphNode],
@@ -4270,7 +4287,6 @@ impl WorkflowIr {
         include_policy: bool,
         check_name: &str,
         simulate_failure: bool,
-        cancel_in_progress: bool,
     ) {
         let callers = self.required_callers(nodes, contracts);
         let mut needs = vec!["plan".to_owned()];
@@ -4286,22 +4302,13 @@ impl WorkflowIr {
             "nightly-required" => crate::control_job_name("Nightly aggregate"),
             other => yaml_scalar(other),
         };
-        let if_condition = if self.control_plane_lane() == RunnerMode::Velnor {
-            format!(
-                "{} && ({})",
-                aggregate_job_guard(cancel_in_progress),
-                self.velnor_control_plane_expression()
-            )
-        } else {
-            aggregate_job_guard(cancel_in_progress).to_owned()
-        };
         let needs_json = github_expression("toJSON(needs)");
         let selected_units = github_expression("needs.plan.outputs.units");
         let _ = write!(
             output,
-            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n{}",
+            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n{}",
             needs.join(", "),
-            self.runner_for(self.control_plane_lane()),
+            self.runner_for(RunnerMode::Github),
             render_required_admission_env(self, &callers),
         );
         if simulate_failure {
@@ -4334,20 +4341,11 @@ impl WorkflowIr {
         output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
         render_required_caller_verdicts(output, &callers);
         if check_name == REQUIRED_CHECK {
-            let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
-                format!(
-                    "{} && ({})",
-                    aggregate_job_guard(cancel_in_progress),
-                    self.velnor_control_plane_expression()
-                )
-            } else {
-                aggregate_job_guard(cancel_in_progress).to_owned()
-            };
             let _ = writeln!(
                 output,
-                "  required:\n    name: {}\n    if: ${{{{ {required_gate} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
+                "  required:\n    name: {}\n    if: ${{{{ always() }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
                 crate::control_job_name("Required"),
-                self.runner_for(self.control_plane_lane())
+                self.runner_for(RunnerMode::Github)
             );
         }
     }
@@ -6674,7 +6672,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         &self,
         output: &mut String,
         runners: RunnerMode,
-        cancel_in_progress: bool,
         include_policy: bool,
     ) {
         let display_name = yaml_scalar(REQUIRED_CHECK);
@@ -6707,22 +6704,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 });
             }
         }
-        let gate = if self.control_plane_lane() == RunnerMode::Velnor {
-            format!(
-                "{} && ({})",
-                aggregate_job_guard(cancel_in_progress),
-                self.velnor_control_plane_expression()
-            )
-        } else {
-            aggregate_job_guard(cancel_in_progress).to_owned()
-        };
         let needs_json = github_expression("toJSON(needs)");
         let selected_units = github_expression("needs.plan.outputs.units");
         let _ = writeln!(
             output,
-            "  ci-required:\n    name: {display_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n{}        shell: bash\n        run: |\n          set -euo pipefail\n          result_for_job() {{\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }}",
+            "  ci-required:\n    name: {display_name}\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n{}        shell: bash\n        run: |\n          set -euo pipefail\n          result_for_job() {{\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }}",
             needs.join(", "),
-            self.runner_for(self.control_plane_lane()),
+            self.runner_for(RunnerMode::Github),
             render_required_admission_env(self, &callers),
         );
         for job in needs
@@ -6741,20 +6729,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
         output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
         render_required_caller_verdicts(output, &callers);
-        let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
-            format!(
-                "{} && ({})",
-                aggregate_job_guard(cancel_in_progress),
-                self.velnor_control_plane_expression()
-            )
-        } else {
-            aggregate_job_guard(cancel_in_progress).to_owned()
-        };
         let _ = writeln!(
             output,
-            "  required:\n    name: {}\n    if: ${{{{ {required_gate} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
+            "  required:\n    name: {}\n    if: ${{{{ always() }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
             crate::control_job_name("Required"),
-            self.runner_for(self.control_plane_lane())
+            self.runner_for(RunnerMode::Github)
         );
     }
 

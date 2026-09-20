@@ -1420,7 +1420,7 @@ jobs:
       unit_admission: velnor-trust-gated
   ci-required:
     name: ci-required
-    if: ${{ !cancelled() }}
+    if: ${{ always() }}
     needs: [plan, github-hosted-bun-velnor, velnor-bun-velnor, github-hosted-docker, velnor-docker, github-hosted-docs, velnor-docs, github-hosted-opentofu, velnor-opentofu, prepare-cargo, github-hosted-rust-policy, velnor-rust-policy, github-hosted-rust-unit-collector, velnor-rust-unit-collector, github-hosted-rust-velnor-bench, velnor-rust-velnor-bench, github-hosted-rust-velnor-client, velnor-rust-velnor-client, github-hosted-rust-velnor-control, velnor-rust-velnor-control, github-hosted-rust-velnor-model, velnor-rust-velnor-model, github-hosted-rust-velnor-render, velnor-rust-velnor-render, github-hosted-rust-velnor-runner, velnor-rust-velnor-runner, github-hosted-rust-velnor-tools, velnor-rust-velnor-tools, github-hosted-rust-velnor-workflow, velnor-rust-velnor-workflow, github-hosted-rust-velnor-workflow-contract, velnor-rust-velnor-workflow-contract, github-hosted-rust-velnorctl, velnor-rust-velnorctl, github-hosted-rust-production-topology, velnor-rust-production-topology]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -2277,7 +2277,7 @@ jobs:
           fi
   required:
     name: "Control / Required"
-    if: ${{ !cancelled() }}
+    if: ${{ always() }}
     needs: [ci-required]
     runs-on: ubuntu-24.04
     timeout-minutes: 5

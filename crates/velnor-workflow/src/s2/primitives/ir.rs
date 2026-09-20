@@ -278,8 +278,8 @@ mod tests {
         assert!(
             pr.contains("cancel-in-progress: true")
                 && pr.contains("ci-required:\n    name:")
-                && pr.contains("if: ${{ !cancelled() }}"),
-            "PR concurrency and required checks use the cancellation-aware aggregate guard"
+                && pr.contains("if: ${{ always() }}"),
+            "PR work remains cancellable while required verdicts always run"
         );
 
         for kind in [WorkflowKind::Main, WorkflowKind::Nightly] {
@@ -601,7 +601,6 @@ mod tests {
             include_policy,
             REQUIRED_CHECK,
             false,
-            false,
         );
         let script = must_some(
             rendered
@@ -639,10 +638,22 @@ mod tests {
             };
             needs.insert(caller.job_id.clone(), serde_json::json!({"result": result}));
         }
+        run_required_gate_with_needs(script, &needs, selected_units, callers)
+    }
+
+    fn run_required_gate_with_needs(
+        script: &str,
+        needs: &serde_json::Map<String, serde_json::Value>,
+        selected_units: &str,
+        callers: &[RequiredCaller],
+    ) -> bool {
         let output = must_ok(
             Command::new("bash")
                 .args(["-euo", "pipefail", "-c", script])
-                .env("NEEDS_JSON", serde_json::Value::Object(needs).to_string())
+                .env(
+                    "NEEDS_JSON",
+                    serde_json::Value::Object(needs.clone()).to_string(),
+                )
                 .env("SELECTED_UNITS", selected_units)
                 .env("PLAN_DIGEST", "synthetic-plan-digest")
                 .env("EXCLUDED", "[]")
@@ -661,6 +672,117 @@ mod tests {
             "bash and jq execute the rendered gate",
         );
         output.status.success()
+    }
+
+    /// Validate the rendered graph, rather than finding an unrelated `always()`
+    /// elsewhere in the file. Mutations below prove both edges and guards matter.
+    fn required_graph_is_complete(surface: &str, expected: &BTreeSet<String>) -> bool {
+        let Ok(document) = serde_yaml::from_str::<serde_yaml::Value>(surface) else {
+            return false;
+        };
+        let jobs = &document["jobs"];
+        let gate = &jobs[REQUIRED_CHECK];
+        let Some(needs) = gate["needs"].as_sequence() else {
+            return false;
+        };
+        let actual = needs
+            .iter()
+            .filter_map(|job| job.as_str().map(str::to_owned))
+            .collect::<BTreeSet<_>>();
+        gate["if"].as_str() == Some("${{ always() }}")
+            && actual == *expected
+            && actual.len() == needs.len()
+            && jobs["required"]["if"].as_str() == Some("${{ always() }}")
+            && jobs["required"]["needs"]
+                .as_sequence()
+                .is_some_and(|needs| needs.len() == 1 && needs[0].as_str() == Some(REQUIRED_CHECK))
+    }
+
+    #[test]
+    fn required_graph_rejects_cancelled_guard_and_missing_dependency_mutations() {
+        let ir = owner_test_ir("example/required-graph", vec![rust_unit("rust", ".")]);
+        let nodes = aggregate_fixture_nodes(&ir);
+        let callers = ir.required_callers(&nodes, None);
+        let mut expected = BTreeSet::from(["plan".to_owned()]);
+        expected.extend(callers.iter().map(|caller| caller.job_id.clone()));
+        let surface = ir.render_nested(WorkflowKind::PullRequest, &nodes, None);
+        assert!(required_graph_is_complete(&surface, &expected));
+        let document = must_ok(
+            serde_yaml::from_str::<serde_yaml::Value>(&surface),
+            "rendered PR parses",
+        );
+        for job in [REQUIRED_CHECK, "required"] {
+            let mut mutated = document.clone();
+            mutated["jobs"][job]["if"] = "${{ !cancelled() }}".into();
+            let yaml = must_ok(serde_yaml::to_string(&mutated), "serialize guard mutation");
+            assert!(!required_graph_is_complete(&yaml, &expected));
+        }
+        for dependency in &expected {
+            let mut mutated = document.clone();
+            let needs = must_some(
+                mutated["jobs"][REQUIRED_CHECK]["needs"].as_sequence_mut(),
+                "required needs sequence",
+            );
+            needs.retain(|value| value.as_str() != Some(dependency.as_str()));
+            let yaml = must_ok(serde_yaml::to_string(&mutated), "serialize missing edge");
+            assert!(
+                !required_graph_is_complete(&yaml, &expected),
+                "missing dependency {dependency} must invalidate the final gate"
+            );
+        }
+    }
+
+    #[test]
+    fn required_gate_executes_expected_and_nonapplicable_result_contracts() {
+        let ir = owner_test_ir("example/required-results", vec![rust_unit("rust", ".")]);
+        let nodes = aggregate_fixture_nodes(&ir);
+        let callers = ir.required_callers(&nodes, None);
+        let script = required_gate_script(&ir, &nodes, false);
+        let selected = r#"[{"unit_id":"rust","providers":["github-hosted"]}]"#;
+        let selected_caller = must_some(
+            callers
+                .iter()
+                .find(|caller| caller.provider == ProviderId::GithubHosted),
+            "hosted caller",
+        );
+        let mut needs = serde_json::Map::from_iter([(
+            "plan".to_owned(),
+            serde_json::json!({"result": "success"}),
+        )]);
+        for caller in &callers {
+            needs.insert(
+                caller.job_id.clone(),
+                serde_json::json!({"result": "skipped"}),
+            );
+        }
+        assert!(run_required_gate_with_needs(
+            &script, &needs, "[]", &callers
+        ));
+        needs.insert(
+            selected_caller.job_id.clone(),
+            serde_json::json!({"result": "success"}),
+        );
+        assert!(run_required_gate_with_needs(
+            &script, &needs, selected, &callers
+        ));
+        assert!(
+            !run_required_gate_with_needs(&script, &needs, "[]", &callers),
+            "an undeclared successful execution must not hide a selection error"
+        );
+        for job in ["plan", selected_caller.job_id.as_str()] {
+            for result in [Some("failure"), Some("cancelled"), Some("skipped"), None] {
+                let mut invalid = needs.clone();
+                if let Some(result) = result {
+                    invalid.insert(job.to_owned(), serde_json::json!({"result": result}));
+                } else {
+                    invalid.remove(job);
+                }
+                assert!(
+                    !run_required_gate_with_needs(&script, &invalid, selected, &callers),
+                    "{job} with result {result:?} must fail the emitted shell gate"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3308,8 +3430,9 @@ fn aggregate_concurrency_block(
 }
 
 /// PR aggregates may be superseded while they are waiting on a dependency.
-/// Keep their callers and required mirrors out of the cancelled run while
+/// Keep expensive callers out of the cancelled run while
 /// retaining the explicit result/admission predicates below the status guard.
+/// Required verdicts are separate: they always evaluate terminal dependencies.
 /// Main and nightly aggregates must finish their publishing and alert paths.
 fn aggregate_job_guard(cancel_in_progress: bool) -> &'static str {
     if cancel_in_progress {
@@ -4021,7 +4144,6 @@ impl WorkflowIr {
                 true,
                 "nightly-required",
                 true,
-                cancel_in_progress,
             );
             self.render_nightly_alert(&mut output, "nightly-required", None);
         } else if self.ci_required {
@@ -4032,7 +4154,6 @@ impl WorkflowIr {
                 kind != WorkflowKind::PullRequest,
                 REQUIRED_CHECK,
                 false,
-                cancel_in_progress,
             );
         }
         while output.ends_with("\n\n") {
@@ -4358,10 +4479,6 @@ impl WorkflowIr {
     }
 
     /// The aggregate required check over every contributed unit node.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the required gate has independent plan, policy, simulation, and cancellation inputs"
-    )]
     pub(crate) fn render_nodes_required(
         &self,
         nodes: &[GraphNode],
@@ -4370,7 +4487,6 @@ impl WorkflowIr {
         include_policy: bool,
         check_name: &str,
         simulate_failure: bool,
-        cancel_in_progress: bool,
     ) {
         let controls = required_controls(include_policy);
         let callers = self.required_callers(nodes, contracts);
@@ -4391,8 +4507,7 @@ impl WorkflowIr {
         let expected_callers = required_execution_contract(&callers);
         let _ = write!(
             output,
-            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n          EXPECTED_CALLERS: {}\n{}",
-            aggregate_job_guard(cancel_in_progress),
+            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n          EXPECTED_CALLERS: {}\n{}",
             needs.join(", "),
             self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
             yaml_scalar(&expected_callers),
@@ -4443,10 +4558,9 @@ impl WorkflowIr {
         if check_name == REQUIRED_CHECK {
             let _ = writeln!(
                 output,
-                "  required:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
+                "  required:\n    name: {}\n    if: ${{{{ always() }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
                 crate::s2::control_job_name("Required"),
-                aggregate_job_guard(cancel_in_progress),
-                self.runs_on_yaml(CONTROL_PLANE_PROVIDER)
+                    self.runs_on_yaml(CONTROL_PLANE_PROVIDER)
             );
         }
     }
