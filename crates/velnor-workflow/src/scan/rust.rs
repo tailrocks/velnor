@@ -379,8 +379,9 @@ fn analyze_rust_manifests(
                     })))
         })
         .collect::<Vec<_>>();
-    let package_roots = package_facts
+    let package_roots = facts
         .iter()
+        .filter(|manifest| manifest.has_package)
         .map(|manifest| manifest.root.clone())
         .collect::<Vec<_>>();
 

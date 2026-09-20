@@ -429,8 +429,9 @@ fn analyze_rust_manifests(
         }
     }
 
-    let package_roots = package_facts
+    let package_roots = facts
         .iter()
+        .filter(|manifest| manifest.has_package)
         .map(|manifest| manifest.root.clone())
         .collect::<Vec<_>>();
     let workspace_manifest = workspace_root
