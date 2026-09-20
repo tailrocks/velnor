@@ -1275,6 +1275,7 @@ candidate_version="$(jq -er '.version | strings' "$published_dir/release-manifes
 had_release=0
 mutated=0
 preexisting_rolling_tag=0
+rolling_body_ready=0
 "#,
     );
     script.push_str(&render_publication_lock_script(true));
@@ -1353,6 +1354,33 @@ assert_release_absent() {
     echo "::error::rolling release DELETE was not verified as HTTP 404" >&2
     return 1
   fi
+}
+
+resolve_existing_rolling_release() {
+  local pages="$transaction_dir/rolling-releases"
+  local matches="$transaction_dir/rolling-release-matches"
+  if ! gh api --paginate --repo "$GITHUB_REPOSITORY" \
+    "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$pages"; then
+    return 1
+  fi
+  if ! jq -sr --arg tag "$rolling_tag" '
+    [map(.[])[] | select((.tag_name | type == "string") and .tag_name == $tag)]
+    | if length > 1 then error("multiple releases use the rolling tag")
+      elif length == 1 then .[0].id
+      else empty
+      end
+  ' "$pages" > "$matches"; then
+    return 1
+  fi
+  if [ ! -s "$matches" ]; then
+    return 2
+  fi
+  rolling_release_id="$(< "$matches")"
+  if ! gh api --repo "$GITHUB_REPOSITORY" \
+    "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" > "$rolling_body"; then
+    return 1
+  fi
+  rolling_body_ready=1
 }
 
 validate_existing_rolling_release() {
@@ -1937,9 +1965,12 @@ if gh api --repo "$GITHUB_REPOSITORY" -i "repos/$GITHUB_REPOSITORY/releases/tags
   :
 fi
 rolling_http="$(awk 'NR == 1 {print $2; exit}' "$rolling_response")"
+while :; do
 case "$rolling_http" in
   200)
-    awk 'body {print; next} /^\r?$/ {body = 1}' "$rolling_response" > "$rolling_body"
+    if [ "$rolling_body_ready" = 0 ]; then
+      awk 'body {print; next} /^\r?$/ {body = 1}' "$rolling_response" > "$rolling_body"
+    fi
     had_release=1
     if ! jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" \
       '(.draft | type == "boolean") and .prerelease == $prerelease and .tag_name == $tag and (.id | type == "number")' "$rolling_body" >/dev/null; then
@@ -1984,12 +2015,23 @@ case "$rolling_http" in
         exit 1
       fi
     fi
+    break
 "#,
     );
     script.push_str(
         r#"
     ;;
   404)
+    if resolve_existing_rolling_release; then
+      rolling_http=200
+      continue
+    else
+      rolling_lookup_status="$?"
+    fi
+    if [ "$rolling_lookup_status" -ne 2 ]; then
+      echo "::error::rolling release listing failed; refusing mutation" >&2
+      exit 1
+    fi
     if ! rolling_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
       echo "::error::rolling tag lookup failed; refusing to overwrite it" >&2
       exit 1
@@ -2001,12 +2043,14 @@ case "$rolling_http" in
       }
       preexisting_rolling_tag=1
     fi
+    break
     ;;
   *)
     echo "::error::rolling release preflight failed with HTTP $rolling_http" >&2
     exit 1
     ;;
 esac
+done
 
 if [ "$had_release" = 0 ]; then
   mutated=1
@@ -2980,7 +3024,7 @@ concurrency_group = "package-release-preview"
         };
         let rolling_script = render_rolling_refresh_script("", "", "", &verification);
         let preflight_start = rolling_script
-            .find("case \"$rolling_http\" in")
+            .find("while :; do\ncase \"$rolling_http\" in")
             .expect("rolling preflight");
         let preflight_end = rolling_script[preflight_start..]
             .find("\n\nif [ \"$had_release\" = 0 ]; then")
@@ -2994,6 +3038,7 @@ rolling_http=404
 rolling_tag=preview
 rolling_tag_sha=
 preexisting_rolling_tag=0
+resolve_existing_rolling_release() {{ return 2; }}
 remote_tag_sha() {{ printf '%s\n' "$TEST_TAG_SHA"; }}
 {preflight}
 printf 'marker=%s\n' "$preexisting_rolling_tag"
@@ -3024,6 +3069,67 @@ printf 'marker=%s\n' "$preexisting_rolling_tag"
         assert!(!rejected.status.success(), "mismatched tag was accepted");
         assert!(String::from_utf8_lossy(&rejected.stderr)
             .contains("unless it resolves to the verified source commit"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn draft_rolling_release_lookup_uses_listing_before_orphan_creation() {
+        use std::process::Command;
+
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        let lookup_start = workflow
+            .find("resolve_existing_rolling_release() {")
+            .expect("draft release lookup helper");
+        let validation_start = workflow[lookup_start..]
+            .find("validate_existing_rolling_release")
+            .expect("existing release validator");
+        let lookup_end = lookup_start + validation_start - 2;
+        let lookup = &workflow[lookup_start..lookup_end];
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-draft-lookup-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create draft lookup fixture");
+        let script = format!(
+            r#"set -Eeuo pipefail
+GITHUB_REPOSITORY=example/project
+rolling_tag=preview
+transaction_dir="$TEST_TMPDIR"
+rolling_body="$transaction_dir/rolling.json"
+rolling_release_id=""
+rolling_body_ready=0
+gh() {{
+  case "$*" in
+    *"releases?per_page=100"*)
+      printf '%s\n' '[{{"id":123,"tag_name":"preview","draft":true}}]'
+      ;;
+    *"releases/123"*)
+      printf '%s\n' '{{"id":123,"tag_name":"preview","draft":true}}'
+      ;;
+    *) return 1 ;;
+  esac
+}}
+{lookup}
+resolve_existing_rolling_release
+test "$rolling_release_id" = 123
+test "$rolling_body_ready" = 1
+jq -e '.id == 123 and .tag_name == "preview" and .draft == true' "$rolling_body" >/dev/null
+"#
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env("TEST_TMPDIR", &root)
+            .output()
+            .expect("run draft release lookup fixture");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            output.status.success(),
+            "draft release lookup did not resolve the existing release:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[cfg(unix)]
