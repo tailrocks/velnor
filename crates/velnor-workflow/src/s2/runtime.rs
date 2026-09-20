@@ -6894,7 +6894,7 @@ workspace_check = true
         // A proven success passes silently.
         let root = std::env::temp_dir().join(format!(
             "velnor-prepared-tool-outcome-{}",
-            std::process::id()
+            crate::unique_suffix()
         ));
         let outputs = root.join("outputs");
         must(fs::create_dir_all(&root), "create outcome directory");
