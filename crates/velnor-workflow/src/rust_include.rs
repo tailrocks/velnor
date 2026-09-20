@@ -240,9 +240,16 @@ fn evaluate_static_macro(
             Ok(combined)
         }
         "env" => {
-            if arguments.len() != 1 {
+            if !(1..=2).contains(&arguments.len()) {
                 return Err(format!(
-                    "{include_macro} env! must use exactly one string literal argument"
+                    "{include_macro} env! must use a variable name and optional string diagnostic"
+                ));
+            }
+            if let Some(diagnostic) = arguments.get(1)
+                && !matches!(diagnostic, Expr::Lit(literal) if matches!(&literal.lit, Lit::Str(_)))
+            {
+                return Err(format!(
+                    "{include_macro} env! diagnostic must be a string literal"
                 ));
             }
             match arguments.first() {
@@ -507,6 +514,20 @@ mod tests {
             Some(vec![IncludeString::ManifestDir(vec![
                 ManifestPart::ManifestDir,
                 ManifestPart::Literal("/src/lib.rs".to_owned()),
+            ])])
+        );
+    }
+
+    #[test]
+    fn accepts_env_optional_diagnostic_argument() {
+        assert_eq!(
+            parse_include_paths(
+                "include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\", \"Cargo must set this\"), \"/asset.txt\"));"
+            )
+            .ok(),
+            Some(vec![IncludeString::ManifestDir(vec![
+                ManifestPart::ManifestDir,
+                ManifestPart::Literal("/asset.txt".to_owned()),
             ])])
         );
     }
