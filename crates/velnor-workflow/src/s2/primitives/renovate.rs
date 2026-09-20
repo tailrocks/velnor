@@ -485,7 +485,7 @@ mod tests {
     fn audited_tree(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-renovate-{name}-{}",
-            crate::s2::unique_suffix()
+            crate::unique_suffix()
         ));
         match std::fs::create_dir_all(root.join(".github/workflows")) {
             Ok(()) => {}

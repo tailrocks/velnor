@@ -23,6 +23,8 @@ use crate::s2::{
 struct PackageReleaseSpec {
     build_tasks: Vec<String>,
     verify_tasks: Vec<String>,
+    pre_publish_tasks: Vec<String>,
+    publication_lock_branch: String,
     package_dir: String,
     manifest_schema: String,
     source_repository: String,
@@ -52,6 +54,8 @@ impl Primitive for PackageRelease {
     fn schema(&self) -> &'static [&'static str] {
         &[
             "build_tasks",
+            "pre_publish_tasks",
+            "publication_lock_branch",
             "verify_tasks",
             "channel",
             "concurrency_group",
@@ -76,6 +80,7 @@ impl Primitive for PackageRelease {
     fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
         let spec = parse_spec(args)?;
         validate_mise_tasks(ctx.root, "verify_tasks", &spec.verify_tasks)?;
+        validate_mise_tasks(ctx.root, "pre_publish_tasks", &spec.pre_publish_tasks)?;
         if !ctx.config.providers.contains(&ProviderId::GithubHosted) {
             return Err(GeneratorError::usage(
                 "package-release requires the github-hosted provider for GitHub release and attestation APIs",
@@ -296,6 +301,43 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
         }
     }
 
+    let pre_publish_tasks_value = args.strings("pre_publish_tasks")?;
+    let pre_publish_tasks = pre_publish_tasks_value.clone().unwrap_or_default();
+    if pre_publish_tasks_value.is_some() && pre_publish_tasks.is_empty() {
+        return Err(GeneratorError::usage(
+            "package-release pre_publish_tasks must contain at least one mise task when declared",
+        ));
+    }
+    for task in &pre_publish_tasks {
+        if !crate::s2::config::valid_check_profile_task(task) {
+            return Err(GeneratorError::usage(format!(
+                "package-release pre_publish_tasks entry {task} is not a plain mise task"
+            )));
+        }
+        if verify_tasks.iter().any(|verify_task| verify_task == task) {
+            return Err(GeneratorError::usage(format!(
+                "package-release pre_publish_tasks entry {task} overlaps verify_tasks"
+            )));
+        }
+    }
+    for (index, task) in pre_publish_tasks.iter().enumerate() {
+        if pre_publish_tasks[..index]
+            .iter()
+            .any(|previous| previous == task)
+        {
+            return Err(GeneratorError::usage(format!(
+                "package-release pre_publish_tasks contains duplicate entry {task}"
+            )));
+        }
+    }
+
+    let publication_lock_branch = required_string(args, "publication_lock_branch")?;
+    if !crate::s2::runtime::valid_branch(&publication_lock_branch) {
+        return Err(GeneratorError::usage(
+            "package-release publication_lock_branch must be a valid branch name",
+        ));
+    }
+
     let package_dir = required_string(args, "package_dir")?;
     validate_relative_directory(&package_dir)?;
     let manifest_schema = required_string(args, "manifest_schema")?;
@@ -421,6 +463,8 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
     Ok(PackageReleaseSpec {
         build_tasks,
         verify_tasks,
+        pre_publish_tasks,
+        publication_lock_branch,
         package_dir,
         manifest_schema,
         source_repository,
@@ -911,6 +955,7 @@ fn render_workflow(
         &publish_runtime_setup,
         mise,
         &spec.verify_tasks,
+        &spec.pre_publish_tasks,
         &publish_attestation_targets,
         &attestation_flags,
         &workspace_expr,
@@ -935,6 +980,252 @@ fn render_workflow(
 struct PublishVerification<'a> {
     script: &'a str,
     attestation_flags: &'a str,
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_publication_lock_script(include_retention: bool) -> String {
+    let mut script = String::from(
+        r#"
+# This permanent branch is the repository-wide lock namespace for generated
+# publication writers. The Contents API create-without-sha operation is
+# create-only: an existing lock is never taken over, including after a stale
+# or abandoned run. Only the owner that still has the exact blob SHA may
+# delete the lock file; the branch itself is intentionally retained.
+publication_lock_branch="${VELNOR_PUBLICATION_LOCK_BRANCH:?missing VELNOR_PUBLICATION_LOCK_BRANCH}"
+publication_lock_path=".package-release-publication-lock.json"
+publication_lock_sha="${VELNOR_PUBLICATION_LOCK_SHA:-}"
+publication_lock_acquired=0
+publication_lock_released="${VELNOR_PUBLICATION_LOCK_RELEASED:-0}"
+if [ -n "$publication_lock_sha" ]; then
+  publication_lock_acquired=1
+fi
+publication_lock_token="${GITHUB_REPOSITORY}:${GITHUB_WORKFLOW:-unknown}:${GITHUB_RUN_ID:-unknown}:${GITHUB_RUN_ATTEMPT:-unknown}"
+
+"#,
+    );
+
+    if include_retention {
+        script.push_str(
+            r#"
+publication_lock_retain="${VELNOR_PUBLICATION_LOCK_RETAIN:-0}"
+
+mark_publication_lock_retain() {
+  publication_lock_retain=1
+  if [ -n "${GITHUB_ENV:-}" ]; then
+    printf 'VELNOR_PUBLICATION_LOCK_RETAIN=1\n' >> "$GITHUB_ENV"
+  fi
+}
+
+clear_publication_lock_retain() {
+  publication_lock_retain=0
+  if [ -n "${GITHUB_ENV:-}" ]; then
+    printf 'VELNOR_PUBLICATION_LOCK_RETAIN=0\n' >> "$GITHUB_ENV"
+  fi
+}
+
+"#,
+        );
+    }
+
+    script.push_str(
+        r#"
+mark_publication_lock_released() {
+  publication_lock_released=1
+  publication_lock_acquired=0
+  publication_lock_sha=""
+  if [ -n "${GITHUB_ENV:-}" ]; then
+    printf 'VELNOR_PUBLICATION_LOCK_RELEASED=1\nVELNOR_PUBLICATION_LOCK_RETAIN=0\n' >> "$GITHUB_ENV"
+  fi
+}
+
+publication_lock_http_status() {
+  awk '/^HTTP\/[0-9.]+ [0-9]+/ {print $2; exit}' "$1"
+}
+
+ensure_publication_lock_branch() {
+  local response="$transaction_dir/publication-lock-branch"
+  local response_http
+  if gh api --repo "$GITHUB_REPOSITORY" -i \
+    "repos/$GITHUB_REPOSITORY/git/ref/heads/$publication_lock_branch" > "$response" 2>/dev/null; then
+    response_http="$(publication_lock_http_status "$response")"
+    if [ "$response_http" = 200 ]; then
+      return 0
+    fi
+    return 1
+  fi
+  response_http="$(publication_lock_http_status "$response")"
+  if [ "$response_http" != 404 ]; then
+    return 1
+  fi
+  if ! gh api --method POST --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs" \
+    -f "ref=refs/heads/$publication_lock_branch" -f "sha=$EXPECTED_SOURCE_COMMIT" >/dev/null; then
+    return 1
+  fi
+  if ! gh api --repo "$GITHUB_REPOSITORY" -i \
+    "repos/$GITHUB_REPOSITORY/git/ref/heads/$publication_lock_branch" > "$response" 2>/dev/null; then
+    return 1
+  fi
+  response_http="$(publication_lock_http_status "$response")"
+  if [ "$response_http" = 200 ]; then
+    return 0
+  fi
+  return 1
+}
+
+acquire_publication_lock() {
+  local payload="$transaction_dir/publication-lock.json"
+  local encoded lock_response
+  if ! ensure_publication_lock_branch; then
+    return 1
+  fi
+  if ! jq -cn \
+    --arg token "$publication_lock_token" \
+    --arg repository "$GITHUB_REPOSITORY" \
+    --arg run "${GITHUB_RUN_ID:-unknown}" \
+    --arg attempt "${GITHUB_RUN_ATTEMPT:-unknown}" \
+    '{schema: 1, token: $token, repository: $repository, run: $run, attempt: $attempt}' > "$payload"; then
+    return 1
+  fi
+  if ! encoded="$(base64 < "$payload" | tr -d '\n')"; then
+    return 1
+  fi
+  if ! lock_response="$(gh api --method PUT --repo "$GITHUB_REPOSITORY" \
+    "repos/$GITHUB_REPOSITORY/contents/$publication_lock_path" \
+    -f "message=Acquire Velnor publication lock $publication_lock_token" \
+    -f "content=$encoded" -f "branch=$publication_lock_branch")"; then
+    echo "::error::Velnor publication lock is held; refusing release validation and mutation" >&2
+    return 1
+  fi
+  if ! publication_lock_sha="$(jq -er '.content.sha | strings | select(test("^[0-9a-f]{40}$"))' <<<"$lock_response")"; then
+    echo "::error::Velnor publication lock response did not contain an exact lock SHA; manual recovery is required" >&2
+    return 1
+  fi
+  publication_lock_acquired=1
+}
+
+assert_publication_lock() {
+  local lock_response current_sha
+  if [ "$publication_lock_acquired" != 1 ] || [ -z "$publication_lock_sha" ]; then
+    return 1
+  fi
+  if ! lock_response="$(gh api --repo "$GITHUB_REPOSITORY" \
+    "repos/$GITHUB_REPOSITORY/contents/$publication_lock_path?ref=$publication_lock_branch")"; then
+    return 1
+  fi
+  if ! jq -e --arg path "$publication_lock_path" \
+    '.type == "file" and .path == $path' <<<"$lock_response" >/dev/null; then
+    return 1
+  fi
+  if ! current_sha="$(jq -er '.sha | strings | select(test("^[0-9a-f]{40}$"))' <<<"$lock_response")"; then
+    return 1
+  fi
+  if [ "$current_sha" != "$publication_lock_sha" ]; then
+    return 1
+  fi
+  return 0
+}
+
+release_publication_lock() {
+  if [ "$publication_lock_acquired" = 0 ] || [ "$publication_lock_released" = 1 ]; then
+    return 0
+  fi
+  if ! assert_publication_lock; then
+    echo "::error::Velnor publication lock ownership changed; retaining lock for manual recovery" >&2
+    return 1
+  fi
+  if ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" \
+    "repos/$GITHUB_REPOSITORY/contents/$publication_lock_path" \
+    -f "message=Release Velnor publication lock $publication_lock_token" \
+    -f "sha=$publication_lock_sha" -f "branch=$publication_lock_branch" >/dev/null; then
+    echo "::error::Velnor publication lock release failed; retaining lock for manual recovery" >&2
+    return 1
+  fi
+  mark_publication_lock_released
+}
+"#,
+    );
+    script
+}
+
+fn render_publication_lock_acquire_script() -> String {
+    let mut script = String::from(
+        r#"set -Eeuo pipefail
+transaction_dir="$(mktemp -d)"
+publication_lock_handoff=0
+"#,
+    );
+    script.push_str(&render_publication_lock_script(false));
+    script.push_str(
+        r#"
+cleanup_publication_lock_acquisition() {
+  local status="$1"
+  trap - EXIT
+  if [ "$publication_lock_acquired" = 1 ] && [ "$publication_lock_handoff" = 0 ]; then
+    if ! release_publication_lock; then
+      status=1
+    fi
+  fi
+  if ! rm -rf -- "$transaction_dir"; then
+    status=1
+  fi
+  exit "$status"
+}
+trap 'cleanup_publication_lock_acquisition "$?"' EXIT
+
+if [ "$publication_lock_acquired" = 0 ]; then
+  if ! acquire_publication_lock; then
+    echo "::error::Velnor publication lock could not be acquired; refusing publication" >&2
+    exit 1
+  fi
+fi
+if ! assert_publication_lock; then
+  echo "::error::Velnor publication lock could not be verified; refusing publication" >&2
+  exit 1
+fi
+if [ -z "${GITHUB_ENV:-}" ]; then
+  echo "::error::GITHUB_ENV is unavailable; refusing publication without a lock handoff" >&2
+  exit 1
+fi
+printf 'VELNOR_PUBLICATION_LOCK_SHA=%s\n' "$publication_lock_sha" >> "$GITHUB_ENV"
+publication_lock_handoff=1
+"#,
+    );
+    script
+}
+
+fn render_publication_lock_finalizer_script() -> String {
+    let mut script = String::from(
+        r#"set -Eeuo pipefail
+transaction_dir="$(mktemp -d)"
+"#,
+    );
+    script.push_str(&render_publication_lock_script(true));
+    script.push_str(
+        r#"
+cleanup_publication_lock_finalizer() {
+  local status="$1"
+  trap - EXIT
+  if ! rm -rf -- "$transaction_dir"; then
+    status=1
+  fi
+  exit "$status"
+}
+trap 'cleanup_publication_lock_finalizer "$?"' EXIT
+
+if [ "$publication_lock_acquired" = 0 ] || [ "$publication_lock_released" = 1 ]; then
+  exit 0
+fi
+if [ "$publication_lock_retain" = 1 ]; then
+  echo "::warning::Velnor publication lock retained for manual recovery after an uncertain remote mutation" >&2
+  exit 0
+fi
+if ! release_publication_lock; then
+  echo "::error::Velnor publication lock finalizer could not release its owned lock" >&2
+  exit 1
+fi
+"#,
+    );
+    script
 }
 
 #[allow(clippy::too_many_lines)]
@@ -970,44 +1261,129 @@ old_draft=""
 old_prerelease=""
 old_source_commit=""
 old_version=""
+owner_draft=""
+owner_tag_sha=""
+owner_name=""
+owner_body=""
+owner_source_commit=""
+owner_assets="$transaction_dir/owner-assets"
 candidate_version="$(jq -er '.version | strings' "$published_dir/release-manifest.json")"
 had_release=0
 mutated=0
-
+"#,
+    );
+    script.push_str(&render_publication_lock_script(true));
+    script.push_str(
+        r#"
 remote_tag_sha() {
   local tag_name="$1"
-  local sha
-  sha="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name^{}" | awk 'NR == 1 {print $1}')"
+  local refs sha
+  if ! refs="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name^{}")"; then
+    return 1
+  fi
+  if ! sha="$(awk 'NR == 1 {print $1}' <<<"$refs")"; then
+    return 1
+  fi
   if [ -z "$sha" ]; then
-    sha="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name" | awk 'NR == 1 {print $1}')"
+    if ! refs="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name")"; then
+      return 1
+    fi
+    if ! sha="$(awk 'NR == 1 {print $1}' <<<"$refs")"; then
+      return 1
+    fi
+  fi
+  if [ -n "$sha" ] && ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+    return 1
   fi
   printf '%s\n' "$sha"
+}
+
+read_rolling_asset_set() {
+  local output="$1"
+  local asset_set
+  if ! asset_set="$(gh api --paginate --repo "$GITHUB_REPOSITORY" \
+    "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id/assets" \
+    --jq '.[] | if (type == "object" and (.id | type == "number" and floor == . and . > 0) and (.name | type == "string" and length > 0 and test("^[-A-Za-z0-9._+~]+$")) and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))) then [.id, .name, .digest] | @tsv else error("invalid rolling release asset") end')"; then
+    return 1
+  fi
+  if [ -n "$asset_set" ]; then
+    if ! LC_ALL=C sort <<<"$asset_set" > "$output"; then
+      return 1
+    fi
+  else
+    if ! : > "$output"; then
+      return 1
+    fi
+  fi
+  if ! awk -F '\t' '
+    NF == 3 && ++ids[$1] == 1 && ++names[$2] == 1 { next }
+    { exit 1 }
+  ' "$output"; then
+    return 1
+  fi
+}
+
+assert_asset_names() {
+  local asset_set="$1"
+  local expected_names="$2"
+  local actual_names="$transaction_dir/asset-names"
+  if ! cut -f2 "$asset_set" | LC_ALL=C sort > "$actual_names"; then
+    return 1
+  fi
+  cmp -s "$expected_names" "$actual_names"
+}
+
+assert_release_absent() {
+  local response="$transaction_dir/release-absence"
+  local response_http
+  if gh api --repo "$GITHUB_REPOSITORY" -i \
+    "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" > "$response" 2>/dev/null; then
+    echo "::error::rolling release still exists after DELETE" >&2
+    return 1
+  fi
+  if ! response_http="$(awk '/^HTTP\/[0-9.]+ [0-9]+/ {print $2; exit}' "$response")"; then
+    return 1
+  fi
+  if [ "$response_http" != 404 ]; then
+    echo "::error::rolling release DELETE was not verified as HTTP 404" >&2
+    return 1
+  fi
 }
 
 validate_existing_rolling_release() {
   local body="$1"
   local source_dir="$2"
+  local expected_draft="${3:-false}"
   local manifest="$source_dir/release-manifest.json"
   local identity="$source_dir/identity.json"
   local manifest_assets="$transaction_dir/live-manifest-assets"
   local downloaded_assets="$transaction_dir/live-downloaded-assets"
+  local body_assets="$transaction_dir/body-assets"
+  local manifest_names="$transaction_dir/manifest-names"
+  local body_names="$transaction_dir/body-names"
+  local manifest_digests="$transaction_dir/manifest-digests"
+  local api_digests="$transaction_dir/api-digests"
   local name expected_digest actual_digest api_digest
 
-  jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" '
-    (.draft | type == "boolean") and .prerelease == $prerelease and .tag_name == $tag and
+  if ! jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" --argjson draft "$expected_draft" '
+    (.draft == $draft) and .prerelease == $prerelease and .tag_name == $tag and
     (.id | type == "number") and
     (.assets | type == "array" and length > 0) and
     ((.assets | map(.name)) as $names |
       ($names | unique | length) == ($names | length)) and
     (.assets | all(.[];
         type == "object" and
-        (.name | type == "string") and
+        (.id | type == "number" and floor == . and . > 0) and
+        (.name | type == "string" and length > 0 and test("^[-A-Za-z0-9._+~]+$")) and
         (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))))
-  ' <<<"$body" >/dev/null
-  test -s "$manifest"
-  test -s "$identity"
+  ' <<<"$body" >/dev/null; then
+    return 1
+  fi
+  if ! test -s "$manifest" || ! test -s "$identity"; then
+    return 1
+  fi
 
-  jq -e '
+  if ! jq -e '
     keys == ["assets","schema","source_commit","source_ref","source_repository","supporting_assets","version"] and
     (.assets | type == "array" and
       all(.[];
@@ -1023,10 +1399,16 @@ validate_existing_rolling_release() {
         (.sha256 | type == "string" and test("^[0-9a-f]{64}$")))) and
     ((.assets + .supporting_assets | map(.name)) as $names |
       ($names | unique | length) == ($names | length))
-  ' "$manifest" >/dev/null
+  ' "$manifest" >/dev/null; then
+    return 1
+  fi
 
-  old_source_commit="$(jq -er '.source_commit | strings' "$manifest")"
-  old_version="$(jq -er '.version | strings' "$manifest")"
+  if ! old_source_commit="$(jq -er '.source_commit | strings' "$manifest")"; then
+    return 1
+  fi
+  if ! old_version="$(jq -er '.version | strings' "$manifest")"; then
+    return 1
+  fi
   [[ "$old_source_commit" =~ ^[0-9a-f]{40}$ ]] || {
     echo "::error::existing rolling manifest source_commit is not 40 lowercase hex" >&2
     return 1
@@ -1047,30 +1429,48 @@ validate_existing_rolling_release() {
     echo "::error::existing rolling manifest version does not bind to its source" >&2
     return 1
   }
-  jq -e \
+  if ! jq -e \
     --arg schema "$EXPECTED_MANIFEST_SCHEMA" \
     --arg repository "$EXPECTED_SOURCE_REPOSITORY" \
     --arg source_ref "$EXPECTED_SOURCE_REF" \
     --arg commit "$old_source_commit" \
     --slurpfile rolling_manifest "$manifest" \
     '.schema == $schema and .source_repository == $repository and
-     .source_ref == $source_ref and .source_commit == $commit' "$manifest" >/dev/null
-  jq -e \
+     .source_ref == $source_ref and .source_commit == $commit' "$manifest" >/dev/null; then
+    return 1
+  fi
+  if ! jq -e \
     --arg repository "$EXPECTED_SOURCE_REPOSITORY" \
     --arg source_ref "$EXPECTED_SOURCE_REF" \
     --arg commit "$old_source_commit" \
     --slurpfile rolling_manifest "$manifest" \
     'keys == ["manifest","source_digest","source_ref","source_repository"] and
      .source_repository == $repository and .source_ref == $source_ref and
-     .source_digest == $commit and .manifest == $rolling_manifest[0]' "$identity" >/dev/null
-  jq -e --arg name "$RELEASE_TITLE_PREFIX $old_version" '.name == $name' <<<"$body" >/dev/null
+     .source_digest == $commit and .manifest == $rolling_manifest[0]' "$identity" >/dev/null; then
+    return 1
+  fi
+  if ! jq -e --arg name "$RELEASE_TITLE_PREFIX $old_version" '.name == $name' <<<"$body" >/dev/null; then
+    return 1
+  fi
 
-  {
+  if ! jq -r '(.assets[] | .name), (.supporting_assets[] | .name)' "$manifest" > "$manifest_names"; then
+    return 1
+  fi
+  if ! {
     printf '%s\n' "release-manifest.json" "identity.json"
-    jq -r '(.assets[] | .name), (.supporting_assets[] | .name)' "$manifest"
-  } | LC_ALL=C sort > "$manifest_assets"
-  jq -r '.assets[].name' <<<"$body" | LC_ALL=C sort > "$old_assets"
-  find "$source_dir" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$downloaded_assets"
+    cat "$manifest_names"
+  } | LC_ALL=C sort > "$manifest_assets"; then
+    return 1
+  fi
+  if ! jq -r '.assets[].name' <<<"$body" > "$body_names"; then
+    return 1
+  fi
+  if ! LC_ALL=C sort "$body_names" > "$old_assets"; then
+    return 1
+  fi
+  if ! find "$source_dir" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$downloaded_assets"; then
+    return 1
+  fi
   cmp -s "$manifest_assets" "$old_assets" || {
     echo "::error::existing rolling release assets are not exactly covered by its manifest" >&2
     return 1
@@ -1080,21 +1480,47 @@ validate_existing_rolling_release() {
     return 1
   }
 
+  if ! jq -r '(.assets[] | [.name, .sha256] | @tsv), (.supporting_assets[] | [.name, .sha256] | @tsv)' "$manifest" > "$manifest_digests"; then
+    return 1
+  fi
   while IFS=$'\t' read -r name expected_digest; do
-    test -s "$source_dir/$name"
-    actual_digest="$(sha256sum -- "$source_dir/$name" | awk '{print $1}')"
+    if ! test -s "$source_dir/$name"; then
+      return 1
+    fi
+    if ! actual_digest="$(sha256sum -- "$source_dir/$name" | awk '{print $1}')"; then
+      return 1
+    fi
     [ "$actual_digest" = "$expected_digest" ] || {
       echo "::error::existing rolling manifest digest mismatch: $name" >&2
       return 1
     }
-  done < <(jq -r '(.assets[] | [.name, .sha256] | @tsv), (.supporting_assets[] | [.name, .sha256] | @tsv)' "$manifest")
+  done < "$manifest_digests"
+  if ! jq -r '.assets[] | [.name, .digest] | @tsv' <<<"$body" > "$api_digests"; then
+    return 1
+  fi
   while IFS=$'\t' read -r name api_digest; do
-    actual_digest="$(sha256sum -- "$source_dir/$name" | awk '{print $1}')"
+    if ! actual_digest="$(sha256sum -- "$source_dir/$name" | awk '{print $1}')"; then
+      return 1
+    fi
     [ "$api_digest" = "sha256:$actual_digest" ] || {
       echo "::error::existing rolling GitHub asset digest mismatch: $name" >&2
       return 1
     }
-  done < <(jq -r '.assets[] | [.name, .digest] | @tsv' <<<"$body")
+  done < "$api_digests"
+
+  if ! read_rolling_asset_set "$body_assets"; then
+    return 1
+  fi
+  if ! jq -r '.assets[] | [.id, .name, .digest] | @tsv' <<<"$body" | LC_ALL=C sort > "$body_assets.expected"; then
+    return 1
+  fi
+  if ! cmp -s "$body_assets.expected" "$body_assets"; then
+    echo "::error::existing rolling release asset set changed during validation" >&2
+    return 1
+  fi
+  if ! cp -- "$body_assets" "$owner_assets"; then
+    return 1
+  fi
 
   if ! git -C source cat-file -e "${old_source_commit}^{commit}"; then
     echo "::error::existing rolling source commit is not present in the checked-out history" >&2
@@ -1106,25 +1532,43 @@ validate_existing_rolling_release() {
   fi
 }
 
-discard_stale_rolling_draft() {
-  local stale_tag_sha
-  echo "::warning::discarding incomplete rolling draft and retrying publication" >&2
-  gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" >/dev/null
-  stale_tag_sha="$(remote_tag_sha "$rolling_tag")"
-  if [ -n "$stale_tag_sha" ]; then
-    gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null
+assert_rolling_ownership() {
+  local expected_draft="$1"
+  local expected_tag_sha="$2"
+  local expected_name="$3"
+  local expected_body="$4"
+  local expected_source_commit="$5"
+  local current_body current_tag_sha current_assets
+  if ! assert_publication_lock; then
+    echo "::error::Velnor publication lock ownership changed; refusing release mutation" >&2
+    return 1
   fi
-  had_release=0
-  rolling_release_id=""
-  old_tag_sha=""
-  old_name=""
-  old_body=""
-  old_draft=""
-  old_prerelease=""
-  old_source_commit=""
-  old_version=""
-  : > "$old_assets"
-  rm -rf -- "$rollback_dir"
+  if [ -z "$rolling_release_id" ] || [ -z "$expected_tag_sha" ] || [ -z "$expected_source_commit" ] || ! test -f "$owner_assets"; then
+    return 1
+  fi
+  if ! current_body="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id")"; then
+    return 1
+  fi
+  jq -e \
+    --arg id "$rolling_release_id" \
+    --arg tag "$rolling_tag" \
+    --arg name "$expected_name" \
+    --arg body "$expected_body" \
+    --argjson prerelease "$RELEASE_PRERELEASE" \
+    --argjson draft "$expected_draft" \
+    '(.id | tostring) == $id and .draft == $draft and .prerelease == $prerelease and
+     .tag_name == $tag and .name == $name and (.body // "") == $body' <<<"$current_body" >/dev/null || return 1
+  if ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+    return 1
+  fi
+  if [ "$current_tag_sha" != "$expected_tag_sha" ] || [ "$current_tag_sha" != "$expected_source_commit" ]; then
+    return 1
+  fi
+  current_assets="$transaction_dir/current-assets"
+  if ! read_rolling_asset_set "$current_assets"; then
+    return 1
+  fi
+  cmp -s "$owner_assets" "$current_assets"
 }
 
 verify_restored_assets() {
@@ -1186,65 +1630,269 @@ verify_restored_assets() {
   done < "$expected_names"
 }
 
+replace_owned_asset_after_delete() {
+  local asset_id="$1"
+  local asset_name="$2"
+  local expected="$transaction_dir/expected-after-delete"
+  local current="$transaction_dir/current-assets"
+  if ! awk -F '\t' -v id="$asset_id" -v name="$asset_name" '
+    $1 == id && $2 == name { removed++; next }
+    { print }
+    END { if (removed != 1) exit 1 }
+  ' "$owner_assets" | LC_ALL=C sort > "$expected"; then
+    return 1
+  fi
+  if ! read_rolling_asset_set "$current"; then
+    return 1
+  fi
+  if ! cmp -s "$expected" "$current"; then
+    echo "::error::rollback asset set drifted after DELETE" >&2
+    return 1
+  fi
+  if ! mv -- "$current" "$owner_assets"; then
+    return 1
+  fi
+}
+
+replace_owned_asset_after_upload() {
+  local asset_name="$1"
+  local source_file="$2"
+  local expected="$transaction_dir/expected-before-upload"
+  local current="$transaction_dir/current-assets"
+  local source_digest uploaded_digest uploaded_count
+  if ! source_digest="$(sha256sum -- "$source_file" | awk '{print $1}')"; then
+    return 1
+  fi
+  if ! awk -F '\t' -v name="$asset_name" '$2 != name { print }' "$owner_assets" | LC_ALL=C sort > "$expected"; then
+    return 1
+  fi
+  if ! read_rolling_asset_set "$current"; then
+    return 1
+  fi
+  if ! awk -F '\t' -v name="$asset_name" '$2 != name { print }' "$current" | LC_ALL=C sort | cmp -s - "$expected"; then
+    echo "::error::rollback asset set drifted after upload" >&2
+    return 1
+  fi
+  if ! uploaded_count="$(awk -F '\t' -v name="$asset_name" '$2 == name { count++; digest = $3 } END { if (count != 1) exit 1; print digest }' "$current")"; then
+    return 1
+  fi
+  uploaded_digest="$uploaded_count"
+  if [ "$uploaded_digest" != "sha256:$source_digest" ]; then
+    echo "::error::rollback uploaded asset digest differs: $asset_name" >&2
+    return 1
+  fi
+  if ! mv -- "$current" "$owner_assets"; then
+    return 1
+  fi
+}
+
+assert_asset_set_matches_files() {
+  local asset_set="$1"
+  local source_dir="$2"
+  local expected_names="$3"
+  local asset_id asset_name asset_digest expected_digest
+  if ! assert_asset_names "$asset_set" "$expected_names"; then
+    return 1
+  fi
+  while IFS=$'\t' read -r asset_id asset_name asset_digest; do
+    if ! expected_digest="$(sha256sum -- "$source_dir/$asset_name" | awk '{print $1}')"; then
+      return 1
+    fi
+    if [ "$asset_digest" != "sha256:$expected_digest" ]; then
+      echo "::error::owned asset digest differs: $asset_name" >&2
+      return 1
+    fi
+  done < "$asset_set"
+}
+
+adopt_owned_asset_set_from_files() {
+  local source_dir="$1"
+  local expected_names="$2"
+  local refreshed="$transaction_dir/refreshed-assets"
+  if ! read_rolling_asset_set "$refreshed"; then
+    return 1
+  fi
+  if ! assert_asset_set_matches_files "$refreshed" "$source_dir" "$expected_names"; then
+    return 1
+  fi
+  if ! mv -- "$refreshed" "$owner_assets"; then
+    return 1
+  fi
+}
+
+asset_was_in_old_set() (
+  local asset_name="$1"
+  local grep_status
+  set +e
+  grep -Fqx -- "$asset_name" "$old_assets"
+  grep_status="$?"
+  case "$grep_status" in
+    0) exit 0 ;;
+    1) exit 1 ;;
+    *) exit 2 ;;
+  esac
+)
+
 rollback() {
   local status="$1"
+  local current_tag_sha
   trap - ERR
   if [ "$mutated" = 1 ]; then
     set +e
     rollback_status=0
-    if [ "$had_release" = 1 ]; then
+    if [ -z "$rolling_release_id" ] || [ -z "$owner_draft" ] || [ -z "$owner_tag_sha" ]; then
+      rollback_status=1
+    elif ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+      echo "::error::rolling preview ownership changed; refusing rollback mutation" >&2
+      rollback_status=1
+    elif [ "$had_release" = 1 ]; then
       # Keep the rollback release hidden while restoring its complete old set.
-      if gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" -F draft=true >/dev/null; then
-        while IFS=$'\t' read -r asset_id asset_name; do
-          if ! grep -Fqx -- "$asset_name" "$old_assets"; then
-            gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >/dev/null || rollback_status=1
-          fi
-        done < <(gh api --paginate --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id/assets" --jq '.[] | [.id, .name] | @tsv')
-        while IFS= read -r asset_name; do
-          if ! gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber "$rollback_dir/$asset_name"; then
-            rollback_status=1
-          fi
-        done < "$old_assets"
-        restore_dir="$rollback_dir"
-        restore_assets="$old_assets"
-        if ! verify_restored_assets "$restore_dir" "$restore_assets"; then
+      if ! gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" -F draft=true >/dev/null; then
+        rollback_status=1
+      else
+        owner_draft=true
+        if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+          echo "::error::rolling preview ownership changed after hiding release; refusing rollback mutation" >&2
           rollback_status=1
         fi
-        rollback_ready=1
-        if [ "$rollback_status" -ne 0 ]; then
-          rollback_ready=0
+        if [ "$rollback_status" -eq 0 ]; then
+          while IFS=$'\t' read -r asset_id asset_name asset_digest; do
+            if [ -z "$asset_id" ] || [ -z "$asset_name" ] || ! [[ "$asset_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              rollback_status=1
+              break
+            fi
+            asset_status=0
+            asset_was_in_old_set "$asset_name"
+            asset_status="$?"
+            case "$asset_status" in
+              0) continue ;;
+              1) ;;
+              *)
+                rollback_status=1
+                break
+                ;;
+            esac
+            if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit" \
+              || ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >/dev/null \
+              || ! replace_owned_asset_after_delete "$asset_id" "$asset_name"; then
+              rollback_status=1
+              break
+            fi
+          done < "$owner_assets"
         fi
-        if [ -n "$old_tag_sha" ] && ! gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$old_tag_sha" -F force=true >/dev/null; then
-          rollback_ready=0
+        if [ "$rollback_status" -eq 0 ]; then
+          while IFS= read -r asset_name; do
+            if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit" \
+              || ! gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber "$rollback_dir/$asset_name" \
+              || ! replace_owned_asset_after_upload "$asset_name" "$rollback_dir/$asset_name"; then
+              rollback_status=1
+              break
+            fi
+          done < "$old_assets"
         fi
-        if [ "$rollback_ready" = 1 ]; then
-          gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
-            -f "name=$old_name" -f "body=$old_body" -F "draft=$old_draft" -F "prerelease=$old_prerelease" -F make_latest=false >/dev/null || rollback_status=1
-        else
+        if [ "$rollback_status" -eq 0 ] && ! verify_restored_assets "$rollback_dir" "$old_assets"; then
+          rollback_status=1
+        fi
+        if [ "$rollback_status" -eq 0 ] && ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+          echo "::error::rolling preview ownership changed before tag rollback; refusing force-move" >&2
+          rollback_status=1
+        fi
+        if [ "$rollback_status" -eq 0 ]; then
+          if ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+            rollback_status=1
+          elif [ "$current_tag_sha" = "$old_tag_sha" ]; then
+            :
+          elif ! assert_publication_lock; then
+            rollback_status=1
+          elif [ "$current_tag_sha" = "$owner_tag_sha" ] && gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$old_tag_sha" -F force=true >/dev/null; then
+            owner_tag_sha="$old_tag_sha"
+          else
+            echo "::error::rolling preview tag changed before rollback; refusing force-move" >&2
+            rollback_status=1
+          fi
+        fi
+        if [ "$rollback_status" -eq 0 ] && ! assert_rolling_ownership "$owner_draft" "$old_tag_sha" "$owner_name" "$owner_body" "$old_source_commit"; then
+          echo "::error::rolling preview ownership changed before metadata rollback; refusing mutation" >&2
+          rollback_status=1
+        fi
+        if [ "$rollback_status" -eq 0 ] && ! gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
+          -f "name=$old_name" -f "body=$old_body" -F "draft=$old_draft" -F "prerelease=$old_prerelease" -F make_latest=false >/dev/null; then
+          rollback_status=1
+        fi
+        if [ "$rollback_status" -eq 0 ]; then
+          owner_draft="$old_draft"
+          owner_tag_sha="$old_tag_sha"
+          owner_name="$old_name"
+          owner_body="$old_body"
+          owner_source_commit="$old_source_commit"
+          if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+            rollback_status=1
+          fi
+        fi
+      fi
+    else
+      if ! assert_publication_lock; then
+        rollback_status=1
+      elif ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" >/dev/null; then
+        rollback_status=1
+      elif ! assert_release_absent; then
+        rollback_status=1
+      elif ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+        rollback_status=1
+      elif [ -z "$current_tag_sha" ]; then
+        :
+      elif [ "$current_tag_sha" = "$owner_tag_sha" ] && [ "$current_tag_sha" = "$owner_source_commit" ]; then
+        if ! assert_publication_lock; then
+          rollback_status=1
+        elif ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null; then
+          rollback_status=1
+        elif ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+          rollback_status=1
+        elif [ -n "$current_tag_sha" ]; then
           rollback_status=1
         fi
       else
+        echo "::error::new rolling preview tag changed before rollback; refusing delete" >&2
         rollback_status=1
-      fi
-    else
-      if [ -n "$rolling_release_id" ]; then
-        gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" >/dev/null || rollback_status=1
-      fi
-      if [ -n "$(remote_tag_sha "$rolling_tag")" ]; then
-        gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null || rollback_status=1
       fi
     fi
     if [ "$rollback_status" -ne 0 ]; then
       echo "::error::rolling preview publication failed and rollback was incomplete" >&2
+      publication_lock_retain=1
       status=1
     else
       echo "::warning::rolling preview publication failed; previous release restored" >&2
+      clear_publication_lock_retain
     fi
   fi
   exit "$status"
 }
+cleanup_publication() {
+  local status="$1"
+  trap - EXIT
+  if [ "$publication_lock_acquired" = 1 ] && [ "$publication_lock_retain" = 0 ]; then
+    if ! release_publication_lock; then
+      status=1
+    fi
+  fi
+  if ! rm -rf -- "$transaction_dir"; then
+    status=1
+  fi
+  exit "$status"
+}
 trap 'rollback "$?"' ERR
-trap 'rm -rf -- "$transaction_dir"' EXIT
+trap 'cleanup_publication "$?"' EXIT
+
+if [ "$publication_lock_acquired" = 0 ]; then
+  if ! acquire_publication_lock; then
+    echo "::error::Velnor publication lock could not be acquired; refusing release validation and mutation" >&2
+    exit 1
+  fi
+fi
+if ! assert_publication_lock; then
+  echo "::error::Velnor publication lock could not be verified; refusing release validation and mutation" >&2
+  exit 1
+fi
 
 {
 "#,
@@ -1258,10 +1906,19 @@ if ! staged_body="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY
   echo "::error::verified immutable staging release is missing" >&2
   exit 1
 fi
-jq -e --arg tag "$staged_tag" --argjson prerelease "$RELEASE_PRERELEASE" '(.draft | not) and .prerelease == $prerelease and .tag_name == $tag' <<<"$staged_body" >/dev/null
-jq -r '.assets[].name' <<<"$staged_body" | LC_ALL=C sort > "$staged_assets"
+if ! jq -e --arg tag "$staged_tag" --argjson prerelease "$RELEASE_PRERELEASE" '(.draft | not) and .prerelease == $prerelease and .tag_name == $tag' <<<"$staged_body" >/dev/null; then
+  echo "::error::verified immutable staging release identity is invalid" >&2
+  exit 1
+fi
+if ! jq -r '.assets[].name' <<<"$staged_body" | LC_ALL=C sort > "$staged_assets"; then
+  echo "::error::verified immutable staging release assets are invalid" >&2
+  exit 1
+fi
 cmp -s "$expected_assets" "$staged_assets" || { echo "::error::immutable staging release asset set is not exact" >&2; exit 1; }
-staged_tag_sha="$(remote_tag_sha "$staged_tag")"
+if ! staged_tag_sha="$(remote_tag_sha "$staged_tag")"; then
+  echo "::error::immutable staging tag lookup failed" >&2
+  exit 1
+fi
 [ "$staged_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::immutable staging tag does not resolve to the verified source commit" >&2; exit 1; }
 
 if gh api --repo "$GITHUB_REPOSITORY" -i "repos/$GITHUB_REPOSITORY/releases/tags/$rolling_tag" > "$rolling_response" 2>/dev/null; then
@@ -1272,37 +1929,39 @@ case "$rolling_http" in
   200)
     awk 'body {print; next} /^\r?$/ {body = 1}' "$rolling_response" > "$rolling_body"
     had_release=1
-    jq -e --arg tag "$rolling_tag" '(.draft | type == "boolean") and .tag_name == $tag and (.id | type == "number")' "$rolling_body" >/dev/null
+    if ! jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" \
+      '(.draft | type == "boolean") and .prerelease == $prerelease and .tag_name == $tag and (.id | type == "number")' "$rolling_body" >/dev/null; then
+      echo "::error::existing rolling release failed immutable validation; refusing mutation" >&2
+      exit 1
+    fi
     rolling_release_id="$(jq -er '.id' "$rolling_body")"
     old_name="$(jq -er '.name | strings' "$rolling_body")"
     old_body="$(jq -r '.body // ""' "$rolling_body")"
     old_draft="$(jq -er '.draft | tostring' "$rolling_body")"
     old_prerelease="$(jq -er '.prerelease | tostring' "$rolling_body")"
-    old_tag_sha="$(remote_tag_sha "$rolling_tag")"
-    if ! [[ "$old_tag_sha" =~ ^[0-9a-f]{40}$ ]]; then
-      if [ "$old_draft" = true ]; then
-        discard_stale_rolling_draft
-      else
-        echo "::error::rolling release tag is not a commit ref" >&2
-        exit 1
-      fi
-    elif [ "$old_draft" = true ] && [ "$old_prerelease" != "$RELEASE_PRERELEASE" ]; then
-      discard_stale_rolling_draft
-    elif ! mkdir -p "$rollback_dir" || ! gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$rollback_dir" --clobber; then
-      if [ "$old_draft" = true ]; then
-        discard_stale_rolling_draft
-      else
-        echo "::error::existing rolling release could not be downloaded" >&2
-        exit 1
-      fi
-    elif ! validate_existing_rolling_release "$rolling_body" "$rollback_dir"; then
-      if [ "$old_draft" = true ]; then
-        discard_stale_rolling_draft
-      else
-        echo "::error::existing rolling release failed immutable validation" >&2
-        exit 1
-      fi
+    if ! old_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+      echo "::error::existing rolling tag lookup failed; refusing mutation" >&2
+      exit 1
     fi
+    if ! [[ "$old_tag_sha" =~ ^[0-9a-f]{40}$ ]]; then
+      echo "::error::existing public rolling release failed immutable validation; refusing mutation" >&2
+      exit 1
+    elif ! mkdir -p "$rollback_dir" || ! gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$rollback_dir" --clobber; then
+      echo "::error::existing rolling release failed immutable validation; refusing mutation" >&2
+      exit 1
+    fi
+    if ! validate_existing_rolling_release "$rolling_body" "$rollback_dir" "$old_draft"; then
+      echo "::error::existing rolling release failed immutable validation; refusing mutation" >&2
+      exit 1
+    fi
+    # A validated current-contract draft is already a recoverable transaction:
+    # keep its release, tag, metadata, and asset ledger so rollback can restore
+    # the exact bytes. GitHub cannot undelete a release or tag.
+    owner_draft="$old_draft"
+    owner_tag_sha="$old_tag_sha"
+    owner_name="$old_name"
+    owner_body="$old_body"
+    owner_source_commit="$old_source_commit"
     if [ "$had_release" = 1 ]; then
       old_version_order="${old_version%%+*}"
       candidate_version_order="${candidate_version%%+*}"
@@ -1319,7 +1978,11 @@ case "$rolling_http" in
         r#"
     ;;
   404)
-    test -z "$(remote_tag_sha "$rolling_tag")" || { echo "::error::rolling tag exists without a release; refusing to overwrite it" >&2; exit 1; }
+    if ! rolling_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+      echo "::error::rolling tag lookup failed; refusing to overwrite it" >&2
+      exit 1
+    fi
+    test -z "$rolling_tag_sha" || { echo "::error::rolling tag exists without a release; refusing to overwrite it" >&2; exit 1; }
     ;;
   *)
     echo "::error::rolling release preflight failed with HTTP $rolling_http" >&2
@@ -1329,20 +1992,57 @@ esac
 
 if [ "$had_release" = 0 ]; then
   mutated=1
+  mark_publication_lock_retain
   create_json="$(gh api --method POST --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases" \
     -f "tag_name=$rolling_tag" -f "target_commitish=$EXPECTED_SOURCE_COMMIT" \
     -f "name=$RELEASE_TITLE_PREFIX $candidate_version" \
     -f "body=Verified package release from $EXPECTED_SOURCE_COMMIT" \
     -F draft=true -F "prerelease=$RELEASE_PRERELEASE" -F make_latest=false)"
   rolling_release_id="$(jq -er '.id' <<<"$create_json")"
+  owner_draft=true
+  owner_tag_sha="$EXPECTED_SOURCE_COMMIT"
+  owner_name="$RELEASE_TITLE_PREFIX $candidate_version"
+  owner_body="Verified package release from $EXPECTED_SOURCE_COMMIT"
+  owner_source_commit="$EXPECTED_SOURCE_COMMIT"
+  created_assets="$transaction_dir/created-assets"
+  if ! read_rolling_asset_set "$created_assets"; then
+    echo "::error::new rolling preview asset ownership could not be established; refusing mutation" >&2
+    false
+  fi
+  if [ -s "$created_assets" ]; then
+    echo "::error::new rolling preview unexpectedly contains assets; refusing mutation" >&2
+    false
+  fi
+  if ! cp -- "$created_assets" "$owner_assets"; then
+    echo "::error::new rolling preview asset ownership could not be recorded; refusing mutation" >&2
+    false
+  fi
+  if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+    echo "::error::new rolling preview ownership could not be established; refusing mutation" >&2
+    false
+  fi
 else
   mutated=1
+  mark_publication_lock_retain
+  if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+    echo "::error::rolling preview ownership changed before publication; refusing mutation" >&2
+    false
+  fi
   gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" -F draft=true >/dev/null
+  owner_draft=true
+  if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+    echo "::error::rolling preview ownership changed after publication was hidden; refusing mutation" >&2
+    false
+  fi
 fi
 
 # The immutable source-bound release is the candidate staging record.  Copy its
 # already-verified files only while the rolling release remains a draft; draft
 # publication is the visibility boundary, so readers never see mixed assets.
+if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+  echo "::error::rolling preview ownership changed before asset publication; refusing mutation" >&2
+  false
+fi
 gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber \
 "#,
     );
@@ -1351,36 +2051,96 @@ gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber \
         r#"
 
 rolling_stage_json="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id")"
-jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" '.draft == true and .prerelease == $prerelease and .tag_name == $tag' <<<"$rolling_stage_json" >/dev/null
-jq -r '.assets[].name' <<<"$rolling_stage_json" | LC_ALL=C sort > "$rolling_staged_assets"
-cmp -s "$expected_assets" "$rolling_staged_assets" || { echo "::error::staged rolling release asset set is not exact" >&2; exit 1; }
+if ! adopt_owned_asset_set_from_files "$published_dir" "$expected_assets"; then
+  echo "::error::rolling staged asset set is not exactly the verified package" >&2
+  false
+fi
+if ! jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" '.draft == true and .prerelease == $prerelease and .tag_name == $tag' <<<"$rolling_stage_json" >/dev/null; then
+  echo "::error::staged rolling release identity is invalid" >&2
+  false
+fi
+if ! jq -r '.assets[].name' <<<"$rolling_stage_json" | LC_ALL=C sort > "$rolling_staged_assets"; then
+  echo "::error::staged rolling release assets are invalid" >&2
+  false
+fi
+if ! cmp -s "$expected_assets" "$rolling_staged_assets"; then
+  echo "::error::staged rolling release asset set is not exact" >&2
+  false
+fi
 
 if [ "$had_release" = 1 ]; then
+  if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+    echo "::error::rolling preview ownership changed before tag publication; refusing force-move" >&2
+    false
+  fi
   gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$EXPECTED_SOURCE_COMMIT" -F force=true >/dev/null
+  owner_tag_sha="$EXPECTED_SOURCE_COMMIT"
+  owner_source_commit="$EXPECTED_SOURCE_COMMIT"
+  if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+    echo "::error::rolling preview ownership changed after tag publication; refusing mutation" >&2
+    false
+  fi
+fi
+if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+  echo "::error::rolling preview ownership changed before release publication; refusing mutation" >&2
+  false
 fi
 gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
   -f "name=$RELEASE_TITLE_PREFIX $candidate_version" \
   -f "body=Verified package release from $EXPECTED_SOURCE_COMMIT" \
   -F draft=false -F "prerelease=$RELEASE_PRERELEASE" -F make_latest=false >/dev/null
+owner_draft=false
+owner_name="$RELEASE_TITLE_PREFIX $candidate_version"
+owner_body="Verified package release from $EXPECTED_SOURCE_COMMIT"
+owner_source_commit="$EXPECTED_SOURCE_COMMIT"
+if ! assert_rolling_ownership "$owner_draft" "$EXPECTED_SOURCE_COMMIT" "$owner_name" "$owner_body" "$owner_source_commit"; then
+  echo "::error::rolling preview ownership changed after release publication; refusing mutation" >&2
+  false
+fi
 
-new_tag_sha="$(remote_tag_sha "$rolling_tag")"
-[ "$new_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::rolling tag does not resolve to the verified source commit" >&2; exit 1; }
+if ! new_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+  echo "::error::rolling tag lookup failed after publication" >&2
+  false
+fi
+if [ "$new_tag_sha" != "$EXPECTED_SOURCE_COMMIT" ]; then
+  echo "::error::rolling tag does not resolve to the verified source commit" >&2
+  false
+fi
 rolling_post_json="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/tags/$rolling_tag")"
-jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" '(.draft | not) and .prerelease == $prerelease and .tag_name == $tag' <<<"$rolling_post_json" >/dev/null
-jq -r '.assets[].name' <<<"$rolling_post_json" | LC_ALL=C sort > "$rolling_published_assets"
-cmp -s "$expected_assets" "$rolling_published_assets" || { echo "::error::rolling release asset set is not exact after publication" >&2; exit 1; }
+if ! jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" '(.draft | not) and .prerelease == $prerelease and .tag_name == $tag' <<<"$rolling_post_json" >/dev/null; then
+  echo "::error::rolling release identity is not exact after publication" >&2
+  false
+fi
+if ! jq -r '.assets[].name' <<<"$rolling_post_json" | LC_ALL=C sort > "$rolling_published_assets"; then
+  echo "::error::rolling release assets are invalid after publication" >&2
+  false
+fi
+if ! cmp -s "$expected_assets" "$rolling_published_assets"; then
+  echo "::error::rolling release asset set is not exact after publication" >&2
+  false
+fi
 rm -rf -- "$transaction_dir/rolling-published"
 mkdir -p "$transaction_dir/rolling-published"
 gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$transaction_dir/rolling-published" --clobber
 export VELNOR_VERIFIED_PACKAGE_DIR="$transaction_dir/rolling-published"
 "#,
     );
-    script.push_str(verification.script);
+    // Execute the verifier as a foreground Bash child. Its temporary-file
+    // EXIT trap stays in the child, while the parent keeps its rollback and
+    // finalizer traps active. The explicit `if` status boundary preserves
+    // fail-fast behavior and the child's exact exit status on Bash 3.2.
+    script.push_str("\nif bash -euo pipefail -c ");
+    script.push_str(&shell_quote(verification.script));
+    script.push_str(
+        "; then\n  :\nelse\n  verification_status=\"$?\"\n  rollback \"$verification_status\"\nfi\n",
+    );
     script.push_str("\nfor payload in \\\n");
     script.push_str(payload_names);
     script.push_str("do\n  gh attestation verify \"$transaction_dir/rolling-published/$payload\" ");
     script.push_str(verification.attestation_flags);
-    script.push_str("\ndone\ntrap 'rm -rf -- \"$transaction_dir\"' EXIT\n");
+    script.push_str(
+        "\ndone\nif ! assert_rolling_ownership \"$owner_draft\" \"$EXPECTED_SOURCE_COMMIT\" \"$owner_name\" \"$owner_body\" \"$owner_source_commit\"; then\n  echo \"::error::rolling preview ownership changed before lock release; refusing to release the publication lock\" >&2\n  false\nfi\n# Every rolling byte, attestation, and final ownership check is verified. The\n# lock is safe to release; failures before this point retain it for recovery.\nclear_publication_lock_retain\n# cleanup_publication releases the exact lock only after rollback or successful completion.\n",
+    );
     script
 }
 
@@ -1408,10 +2168,23 @@ trap 'rm -rf -- "$transaction_dir"' EXIT
 
 remote_tag_sha() {
   local tag_name="$1"
-  local sha
-  sha="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name^{}" | awk 'NR == 1 {print $1}')"
+  local refs sha
+  if ! refs="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name^{}")"; then
+    return 1
+  fi
+  if ! sha="$(awk 'NR == 1 {print $1}' <<<"$refs")"; then
+    return 1
+  fi
   if [ -z "$sha" ]; then
-    sha="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name" | awk 'NR == 1 {print $1}')"
+    if ! refs="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name")"; then
+      return 1
+    fi
+    if ! sha="$(awk 'NR == 1 {print $1}' <<<"$refs")"; then
+      return 1
+    fi
+  fi
+  if [ -n "$sha" ] && ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+    return 1
   fi
   printf '%s\n' "$sha"
 }
@@ -1444,19 +2217,67 @@ verify_asset_bytes() {
   done < "$names_file"
 }
 
-{
 "#
 }
 
+// Keep the immutable publication transaction in one ordered script so its
+// preflight, upload, and post-publication checks cannot be reordered by
+// splitting the shell state across unrelated renderers.
+#[allow(clippy::too_many_lines)]
 fn render_immutable_publish_script(spec: &PackageReleaseSpec) -> String {
     let mut script = String::from(immutable_publish_script_prelude());
+    script.push_str(&render_publication_lock_script(true));
+    script.push_str(
+        r#"
+immutable_publication_mutated=0
+immutable_publication_handoff=0
+cleanup_immutable_publication() {
+  local status="$1"
+  trap - EXIT
+  if [ "$publication_lock_acquired" = 1 ] && [ "$immutable_publication_mutated" = 0 ] && [ "$immutable_publication_handoff" = 0 ] && [ "$publication_lock_retain" = 0 ]; then
+    if ! release_publication_lock; then
+      status=1
+    fi
+  elif [ "$publication_lock_acquired" = 1 ] && [ "$immutable_publication_handoff" = 0 ]; then
+    echo "::error::immutable publication failed after mutation; retaining publication lock for manual recovery" >&2
+    status=1
+  fi
+  if ! rm -rf -- "$transaction_dir"; then
+    status=1
+  fi
+  exit "$status"
+}
+trap 'cleanup_immutable_publication "$?"' EXIT
+
+if [ "$publication_lock_acquired" = 0 ]; then
+  if ! acquire_publication_lock; then
+    echo "::error::Velnor publication lock could not be acquired; refusing immutable release validation and mutation" >&2
+    exit 1
+  fi
+fi
+if ! assert_publication_lock; then
+  echo "::error::Velnor publication lock could not be verified; refusing immutable release validation and mutation" >&2
+  exit 1
+fi
+if [ -z "${GITHUB_ENV:-}" ]; then
+  echo "::error::GITHUB_ENV is unavailable; refusing to publish without the held lock handoff" >&2
+  exit 1
+fi
+printf 'VELNOR_PUBLICATION_LOCK_SHA=%s\n' "$publication_lock_sha" >> "$GITHUB_ENV"
+
+{
+"#,
+    );
     for name in release_asset_names(spec) {
         let _ = writeln!(script, "  printf '%s\\n' {}", shell_quote(&name));
     }
     script.push_str(
         r#"} | LC_ALL=C sort > "$expected_assets"
 
-tag_sha="$(remote_tag_sha "$tag")"
+if ! tag_sha="$(remote_tag_sha "$tag")"; then
+  echo "::error::immutable release tag lookup failed" >&2
+  exit 1
+fi
 if [ -n "$tag_sha" ] && [ "$tag_sha" != "$EXPECTED_SOURCE_COMMIT" ]; then
   echo "::error::immutable release tag resolves to an unexpected source commit" >&2
   exit 1
@@ -1468,12 +2289,21 @@ fi
 response_http="$(awk 'NR == 1 {print $2; exit}' "$release_json")"
 case "$response_http" in
   404)
+    if ! assert_publication_lock; then
+      echo "::error::Velnor publication lock ownership changed before immutable release creation" >&2
+      exit 1
+    fi
+    immutable_publication_mutated=1
+    mark_publication_lock_retain
     if [ -n "$tag_sha" ]; then
       gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --draft "${release_flags[@]}" --title "$title" --notes "Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT"
     else
       gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$EXPECTED_SOURCE_COMMIT" --draft "${release_flags[@]}" --title "$title" --notes "Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT"
     fi
-    tag_sha="$(remote_tag_sha "$tag")"
+    if ! tag_sha="$(remote_tag_sha "$tag")"; then
+      echo "::error::new immutable release tag lookup failed" >&2
+      exit 1
+    fi
     [ "$tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::new immutable release tag does not resolve to the verified source commit" >&2; exit 1; }
     ;;
   200)
@@ -1513,6 +2343,12 @@ esac
 if [ "$immutable_public" = 0 ]; then
   while IFS= read -r asset_name; do
     if ! grep -Fqx -- "$asset_name" "$existing_assets"; then
+      if ! assert_publication_lock; then
+        echo "::error::Velnor publication lock ownership changed before immutable asset upload" >&2
+        exit 1
+      fi
+      immutable_publication_mutated=1
+      mark_publication_lock_retain
       gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "$PACKAGE_DIR/$asset_name"
     fi
   done < "$expected_assets"
@@ -1527,6 +2363,12 @@ if [ "$immutable_public" = 0 ]; then
     exit 1
   }
   verify_asset_bytes "$tag" "$expected_assets" "$PACKAGE_DIR" "$download_dir"
+  if ! assert_publication_lock; then
+    echo "::error::Velnor publication lock ownership changed before immutable release publication" >&2
+    exit 1
+  fi
+  immutable_publication_mutated=1
+  mark_publication_lock_retain
   gh api --method PATCH --repo "$GITHUB_REPOSITORY" \
     "repos/$GITHUB_REPOSITORY/releases/$(jq -er '.id' <<<"$staged_body")" \
     -F draft=false -F "prerelease=$RELEASE_PRERELEASE" -F make_latest=false >/dev/null
@@ -1541,9 +2383,13 @@ cmp -s "$expected_assets" "$existing_assets" || {
   echo "::error::immutable release asset set is not exact after publication" >&2
   exit 1
 }
-final_tag_sha="$(remote_tag_sha "$tag")"
+if ! final_tag_sha="$(remote_tag_sha "$tag")"; then
+  echo "::error::immutable release tag lookup failed after publication" >&2
+  exit 1
+fi
 [ "$final_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::immutable tag does not resolve to the verified source commit" >&2; exit 1; }
 printf 'immutable_tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+immutable_publication_handoff=1
 "#
     );
     script
@@ -1563,6 +2409,7 @@ fn render_publish_job(
     runtime_setup: &str,
     mise: &str,
     verify_tasks: &[String],
+    pre_publish_tasks: &[String],
     publish_attestation_targets: &str,
     attestation_flags: &str,
     workspace_expr: &str,
@@ -1653,6 +2500,8 @@ fn render_publish_job(
     output.push_str(workspace_expr);
     output.push_str("/package\n      VELNOR_PACKAGE_CHANNEL: ");
     output.push_str(channel_yaml);
+    output.push_str("\n      VELNOR_PUBLICATION_LOCK_BRANCH: ");
+    output.push_str(&crate::s2::yaml_scalar(&spec.publication_lock_branch));
     output.push_str("\n      EXPECTED_SOURCE_REPOSITORY: ");
     output.push_str(source_repository_yaml);
     output.push_str("\n      EXPECTED_SOURCE_REF: ");
@@ -1676,10 +2525,12 @@ fn render_publish_job(
     output.push_str(consumer_branch_yaml);
     output.push_str("\n      UPDATER: ");
     output.push_str(updater_yaml);
-    output.push_str("\n      UPDATER_TOKEN: ");
-    output.push_str(updater_token_expr);
     output.push_str("\n      UPDATE_COMMIT_MESSAGE: ");
     output.push_str(message_yaml);
+    // This is the required repository-wide writer lock for every generated
+    // publication job; all generated publication writers must share its group.
+    // Keep cancellation disabled so a writer can finish rollback and release
+    // the remote publication lease before the next run starts.
     output.push_str("\n    concurrency:\n      group: ");
     output.push_str(concurrency_yaml);
     output.push_str("\n      cancel-in-progress: false\n    steps:\n");
@@ -1720,6 +2571,31 @@ fn render_publish_job(
     output.push_str(attestation_flags);
     output.push_str("\n          done\n");
 
+    output.push_str(
+        "      - name: Acquire package publication lock\n        env:\n          GH_TOKEN: ",
+    );
+    output.push_str(github_token_expr);
+    output.push_str("\n        run: |\n");
+    output.push_str(&indent_script(
+        &render_publication_lock_acquire_script(),
+        10,
+    ));
+
+    if !pre_publish_tasks.is_empty() {
+        output.push_str(
+            "      - name: Run pre-publish migration tasks\n        env:\n          GH_TOKEN: ",
+        );
+        output.push_str(github_token_expr);
+        output.push_str("\n          VELNOR_SOURCE_CHECKOUT_DIR: ");
+        output.push_str(workspace_expr);
+        output.push_str(
+            "/source\n        working-directory: source\n        run: |\n          set -euo pipefail\n",
+        );
+        for task in pre_publish_tasks {
+            let _ = writeln!(output, "          mise run {}", shell_quote(task));
+        }
+    }
+
     output.push_str("      - name: Publish immutable source-bound release\n        id: publish\n        env:\n          GH_TOKEN: ");
     output.push_str(github_token_expr);
     output.push_str("\n        run: |\n");
@@ -1758,6 +2634,15 @@ fn render_publish_job(
     output.push_str(github_token_expr);
     output.push_str("\n        run: |\n");
     output.push_str(&rolling_refresh);
+    output.push_str(
+        "      - name: Finalize package publication lock\n        if: ${{ always() }}\n        env:\n          GH_TOKEN: ",
+    );
+    output.push_str(github_token_expr);
+    output.push_str("\n        run: |\n");
+    output.push_str(&indent_script(
+        &render_publication_lock_finalizer_script(),
+        10,
+    ));
     output.push_str("      - name: Checkout consumer repository\n        uses: ");
     output.push_str(checkout);
     output.push_str("\n        with:\n          repository: ");
@@ -1771,6 +2656,8 @@ fn render_publish_job(
     output.push_str("      - name: Run updater and create or update consumer PR\n        id: consumer-pr\n        env:\n          RELEASE_ASSET_TAG: ");
     output.push_str(&immutable_tag_output);
     output.push_str("\n          GH_TOKEN: ");
+    output.push_str(updater_token_expr);
+    output.push_str("\n          UPDATER_TOKEN: ");
     output.push_str(updater_token_expr);
     output.push_str(
         r#"
@@ -1786,7 +2673,18 @@ fn render_publish_job(
               gh pr close "$stale_pr_url" --repo "$CONSUMER_REPOSITORY" --comment "Superseded by immutable package release $RELEASE_ASSET_TAG"
             fi
           done < <(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$stale_branch" --base "$CONSUMER_BRANCH" --state open --json url --jq '.[].url')
-          remote_branch_sha="$(git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" ls-remote origin "refs/heads/$automation_branch" | awk 'NR == 1 {print $1}')"
+          if ! remote_branch_refs="$(git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" ls-remote origin "refs/heads/$automation_branch")"; then
+            echo "::error::consumer automation branch lookup failed; refusing branch mutation" >&2
+            exit 1
+          fi
+          if ! remote_branch_sha="$(awk 'NF >= 2 {print $1; exit}' <<<"$remote_branch_refs")"; then
+            echo "::error::consumer automation branch response could not be parsed; refusing branch mutation" >&2
+            exit 1
+          fi
+          if [ -n "$remote_branch_sha" ] && ! [[ "$remote_branch_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::consumer automation branch response contained an invalid object ID" >&2
+            exit 1
+          fi
           if [ -n "$remote_branch_sha" ]; then
             git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" fetch origin "refs/heads/$automation_branch:refs/remotes/origin/$automation_branch"
             git switch --detach "origin/$automation_branch"
@@ -1841,6 +2739,7 @@ payloads = ["a.tar.gz", "b.tar.gz", "c.tar.gz", "d.tar.gz", "e.tar.gz", "f.tar.g
 supporting_assets = ["SHA256SUMS", "a.tar.gz.bundle", "capsule-manifest.json"]
 channel = "preview"
 release_tag = "preview"
+publication_lock_branch = "package-release-lock"
 github_release_type = "prerelease"
 publish_environment = "github-preview"
 consumer_repository = "example/tap"
@@ -1881,6 +2780,7 @@ file = "preview.yml"
 [declare.args]
 build_tasks = ["release-preview-package"]
 verify_tasks = ["verify-preview-package"]
+pre_publish_tasks = ["migrate-preview-legacy"]
 package_dir = "dist/package"
 manifest_schema = "example.consumer-manifest-v1"
 source_repository = "example/project"
@@ -1889,6 +2789,7 @@ payloads = ["a.tar.gz", "b.tar.gz", "c.tar.gz", "d.tar.gz", "e.tar.gz", "f.tar.g
 supporting_assets = ["SHA256SUMS", "a.tar.gz.bundle", "capsule-manifest.json"]
 channel = "preview"
 release_tag = "preview"
+publication_lock_branch = "package-release-lock"
 github_release_type = "prerelease"
 publish_environment = "github-preview"
 release_title_prefix = "Preview"
@@ -1909,6 +2810,7 @@ concurrency_group = "package-release-preview"
         assert_eq!(spec.package_dir, "dist/package");
         assert_eq!(spec.payloads.len(), 6);
         assert_eq!(spec.verify_tasks, ["verify-preview-package"]);
+        assert_eq!(spec.pre_publish_tasks, ["migrate-preview-legacy"]);
         assert_eq!(spec.github_release_type, "prerelease");
         assert_eq!(spec.publish_environment, "github-preview");
         assert_eq!(spec.release_title_prefix, "Preview");
@@ -1987,6 +2889,8 @@ concurrency_group = "package-release-preview"
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         assert!(!workflow.contains("LEGACY_ROLLING"));
         assert!(workflow.contains("validate_existing_rolling_release"));
+        assert!(workflow.contains("(.draft == $draft) and .prerelease == $prerelease"));
+        assert!(workflow.contains("(.draft | type == \"boolean\") and .prerelease == $prerelease"));
         assert!(workflow.contains("test -s \"$manifest\""));
         assert!(workflow.contains("test -s \"$identity\""));
         assert!(workflow
@@ -1997,27 +2901,38 @@ concurrency_group = "package-release-preview"
         ));
         assert!(workflow.contains("existing rolling manifest source_commit does not match its tag"));
         assert!(workflow.contains("existing rolling manifest version does not bind to its source"));
+        assert!(workflow.contains(
+            "existing public rolling release failed immutable validation; refusing mutation"
+        ));
+        assert!(workflow.contains("assert_rolling_ownership"));
     }
 
     #[test]
-    fn rendered_workflow_recovers_or_discards_interrupted_rolling_draft() {
+    fn rendered_workflow_refuses_invalid_rolling_release_before_mutation() {
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        assert!(!workflow.contains("discard_current_typed_rolling_draft"));
+        assert!(!workflow.contains("typed rolling draft ownership changed; refusing cleanup"));
         assert!(workflow.contains(
-            "(.draft | type == \"boolean\") and .tag_name == $tag and (.id | type == \"number\")"
+            "existing public rolling release failed immutable validation; refusing mutation"
         ));
-        assert!(workflow.contains(
-            r#"if [ "$old_draft" = true ] && [ "$old_prerelease" != "$RELEASE_PRERELEASE" ]; then"#
-        ));
-        assert!(workflow.contains("elif ! validate_existing_rolling_release"));
-        assert!(workflow.contains("discard_stale_rolling_draft"));
-        assert!(workflow.contains("discarding incomplete rolling draft and retrying publication"));
-        assert!(workflow.contains(
-            "gh api --method DELETE --repo \"$GITHUB_REPOSITORY\" \"repos/$GITHUB_REPOSITORY/releases/$rolling_release_id\""
-        ));
-        assert!(workflow.contains("stale_tag_sha=\"$(remote_tag_sha \"$rolling_tag\")\""));
-        assert!(workflow.contains("git/refs/tags/$rolling_tag\""));
-        assert!(workflow.contains("had_release=0"));
+        assert!(!workflow.contains("discard_stale_rolling_draft"));
+        assert!(!workflow.contains("LEGACY_ROLLING"));
+        let refusal = workflow
+            .find("existing public rolling release failed immutable validation; refusing mutation")
+            .expect("invalid rolling release refusal");
+        let first_mutation = workflow
+            .find("if [ \"$had_release\" = 0 ]; then")
+            .expect("rolling publication mutation boundary");
+        assert!(refusal < first_mutation);
+    }
+
+    #[test]
+    fn package_release_schema_has_no_legacy_compatibility_fields() {
+        assert!(PackageRelease
+            .schema()
+            .iter()
+            .all(|field| !field.starts_with("legacy_")));
     }
 
     fn render_config() -> ProjectConfig {
@@ -2102,6 +3017,51 @@ concurrency_group = "package-release-preview"
     }
 
     #[test]
+    fn package_release_rejects_empty_or_command_pre_publish_tasks() {
+        let mut empty = args();
+        empty.insert(
+            "pre_publish_tasks".to_owned(),
+            toml::Value::Array(Vec::new()),
+        );
+        let error = parse_spec(&Args(&empty)).expect_err("empty pre-publish tasks must fail");
+        assert!(error.to_string().contains("pre_publish_tasks"));
+
+        let mut command = args();
+        command.insert(
+            "pre_publish_tasks".to_owned(),
+            toml::Value::Array(vec![toml::Value::String(
+                "mise run migrate-preview-legacy".to_owned(),
+            )]),
+        );
+        let error = parse_spec(&Args(&command)).expect_err("command arrays must fail");
+        assert!(error.to_string().contains("plain mise task"));
+    }
+
+    #[test]
+    fn package_release_rejects_duplicate_or_overlapping_pre_publish_tasks() {
+        let mut duplicate = args();
+        duplicate.insert(
+            "pre_publish_tasks".to_owned(),
+            toml::Value::Array(vec![
+                toml::Value::String("migrate-preview-legacy".to_owned()),
+                toml::Value::String("migrate-preview-legacy".to_owned()),
+            ]),
+        );
+        let error = parse_spec(&Args(&duplicate)).expect_err("duplicates must fail");
+        assert!(error.to_string().contains("duplicate entry"));
+
+        let mut overlap = args();
+        overlap.insert(
+            "pre_publish_tasks".to_owned(),
+            toml::Value::Array(vec![toml::Value::String(
+                "verify-preview-package".to_owned(),
+            )]),
+        );
+        let error = parse_spec(&Args(&overlap)).expect_err("verification overlap must fail");
+        assert!(error.to_string().contains("overlaps verify_tasks"));
+    }
+
+    #[test]
     fn package_release_verification_tasks_must_exist_in_mise() {
         let root = std::env::temp_dir().join(format!(
             "velnor-package-release-mise-{}",
@@ -2110,7 +3070,7 @@ concurrency_group = "package-release-preview"
         std::fs::create_dir_all(&root).expect("create mise fixture");
         std::fs::write(
             root.join("mise.toml"),
-            "[tasks]\nverify-preview-package = \"echo verify\"\n\n[tasks.header-task]\nrun = \"echo header\"\n",
+            "[tasks]\nverify-preview-package = \"echo verify\"\nmigrate-preview-legacy = \"echo migrate\"\n\n[tasks.header-task]\nrun = \"echo header\"\n",
         )
         .expect("write mise fixture");
         let tasks = vec![
@@ -2118,11 +3078,66 @@ concurrency_group = "package-release-preview"
             "header-task".to_owned(),
         ];
         validate_mise_tasks(&root, "verify_tasks", &tasks).expect("declared task validates");
+        validate_mise_tasks(
+            &root,
+            "pre_publish_tasks",
+            &["migrate-preview-legacy".to_owned()],
+        )
+        .expect("declared pre-publish task validates");
         let missing = vec!["missing-task".to_owned()];
         let error = validate_mise_tasks(&root, "verify_tasks", &missing)
             .expect_err("missing task must fail closed");
         assert!(error.to_string().contains("missing-task"));
+        let missing_pre_publish = vec!["missing-migration".to_owned()];
+        let error = validate_mise_tasks(&root, "pre_publish_tasks", &missing_pre_publish)
+            .expect_err("missing pre-publish task must fail closed");
+        assert!(error.to_string().contains("missing-migration"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn publication_lock_renderer_scopes_retention_helpers_to_mutating_fragments() {
+        let acquire = render_publication_lock_acquire_script();
+        assert!(acquire.contains("mark_publication_lock_released()"));
+        assert!(!acquire.contains("publication_lock_retain="));
+        assert!(!acquire.contains("mark_publication_lock_retain()"));
+        assert!(!acquire.contains("clear_publication_lock_retain()"));
+
+        let finalizer = render_publication_lock_finalizer_script();
+        assert!(finalizer.contains("publication_lock_retain="));
+        assert!(finalizer.contains("mark_publication_lock_retain()"));
+        assert!(finalizer.contains("clear_publication_lock_retain()"));
+    }
+
+    #[test]
+    fn immutable_publication_scopes_asset_group_after_all_helper_definitions() {
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let script = render_immutable_publish_script(&spec);
+        let group_start = script
+            .find("\n{\n  printf '%s\\n' 'release-manifest.json'\n")
+            .expect("expected asset group");
+        let group_end = script
+            .find("\n} | LC_ALL=C sort > \"$expected_assets\"")
+            .expect("expected asset group terminator");
+        let verify_helper = script
+            .find("verify_asset_bytes()")
+            .expect("verify asset helper");
+        let lock_helper = script
+            .find("publication_lock_branch=")
+            .expect("publication lock initialization");
+        let handoff = script
+            .find("printf 'VELNOR_PUBLICATION_LOCK_SHA=")
+            .expect("publication lock handoff");
+        assert!(verify_helper < group_start);
+        assert!(lock_helper < group_start);
+        assert!(handoff < group_start);
+
+        let asset_group = &script[group_start..group_end];
+        assert_eq!(
+            asset_group.matches("printf '%s\\n'").count(),
+            release_asset_names(&spec).len()
+        );
+        assert!(!asset_group.contains("() {"));
     }
 
     #[test]
@@ -2187,6 +3202,121 @@ concurrency_group = "package-release-preview"
         let script = verification_script(&spec);
         assert!(script.contains("verify_sha256_sidecar \"$dir/a.tar.gz.sha256\" \"$dir/a.tar.gz\""));
         assert!(script.contains("checksum sidecar is not one strict digest line"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn publication_lock_finalizer_releases_pre_publish_failure_for_next_run() {
+        use std::process::Command;
+
+        let finalizer = render_publication_lock_finalizer_script();
+        let acquire = render_publication_lock_acquire_script();
+        let lock_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let root = std::env::temp_dir().join(format!(
+            "velnor-publication-lock-finalizer-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create finalizer fixture");
+        std::fs::write(root.join("lock-state"), b"held").expect("seed held lock");
+        let finalizer_script = format!(
+            r#"set -Eeuo pipefail
+gh() {{
+  printf '%s\n' "$*" >> "$TEST_TMPDIR/gh.log"
+  if [[ "$*" == *"contents/.package-release-publication-lock.json?ref=package-release-lock"* ]]; then
+    if [ ! -e "$TEST_TMPDIR/lock-state" ]; then return 1; fi
+    printf '{{"type":"file","path":".package-release-publication-lock.json","sha":"{lock_sha}"}}\n'
+    return 0
+  fi
+  if [[ "$*" == *"--method DELETE"* ]]; then
+    rm -f -- "$TEST_TMPDIR/lock-state"
+    : > "$TEST_TMPDIR/released"
+    return 0
+  fi
+  return 1
+}}
+{finalizer}
+"#,
+        );
+        let env_file = root.join("github-env");
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(&finalizer_script)
+            .env("TEST_TMPDIR", &root)
+            .env("GITHUB_REPOSITORY", "example/project")
+            .env("GITHUB_WORKFLOW", "preview")
+            .env("GITHUB_RUN_ID", "42")
+            .env("GITHUB_RUN_ATTEMPT", "3")
+            .env("VELNOR_PUBLICATION_LOCK_BRANCH", "package-release-lock")
+            .env("VELNOR_PUBLICATION_LOCK_SHA", lock_sha)
+            .env("GITHUB_ENV", &env_file)
+            .env("GH_TOKEN", "test-token")
+            .output()
+            .expect("run publication lock finalizer");
+        assert!(
+            output.status.success(),
+            "finalizer failed:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(root.join("released").exists());
+        assert!(!root.join("lock-state").exists());
+        assert!(std::fs::read_to_string(&env_file)
+            .expect("read finalizer environment")
+            .contains("VELNOR_PUBLICATION_LOCK_RELEASED=1"));
+
+        let next_env = root.join("next-github-env");
+        let acquire_script = format!(
+            r#"set -Eeuo pipefail
+gh() {{
+  printf '%s\n' "$*" >> "$TEST_TMPDIR/next-gh.log"
+  if [[ "$*" == *"git/ref/heads/package-release-lock"* ]]; then
+    printf 'HTTP/2 200 OK\r\n\r\n{{}}\n'
+    return 0
+  fi
+  if [[ "$*" == *"--method PUT"* ]]; then
+    if [ -e "$TEST_TMPDIR/lock-state" ]; then return 1; fi
+    : > "$TEST_TMPDIR/lock-state"
+    printf '{{"content":{{"sha":"{lock_sha}"}}}}\n'
+    return 0
+  fi
+  if [[ "$*" == *"contents/.package-release-publication-lock.json?ref=package-release-lock"* ]]; then
+    printf '{{"type":"file","path":".package-release-publication-lock.json","sha":"{lock_sha}"}}\n'
+    return 0
+  fi
+  return 1
+}}
+{acquire}
+"#,
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(&acquire_script)
+            .env("TEST_TMPDIR", &root)
+            .env("GITHUB_REPOSITORY", "example/project")
+            .env("GITHUB_WORKFLOW", "preview")
+            .env("GITHUB_RUN_ID", "43")
+            .env("GITHUB_RUN_ATTEMPT", "1")
+            .env("VELNOR_PUBLICATION_LOCK_BRANCH", "package-release-lock")
+            .env(
+                "EXPECTED_SOURCE_COMMIT",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )
+            .env("GITHUB_ENV", &next_env)
+            .env("GH_TOKEN", "test-token")
+            .output()
+            .expect("run next publication lock acquisition");
+        assert!(
+            output.status.success(),
+            "next acquisition failed:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(root.join("lock-state").exists());
+        assert!(std::fs::read_to_string(next_env)
+            .expect("read next acquisition environment")
+            .contains("VELNOR_PUBLICATION_LOCK_SHA="));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
@@ -2382,6 +3512,196 @@ concurrency_group = "package-release-preview"
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
+    fn pre_publish_hook_is_locked_and_isolated_from_verification_boundaries() {
+        let mut values = args();
+        values.insert(
+            "pre_publish_tasks".to_owned(),
+            toml::Value::Array(vec![toml::Value::String(
+                "migrate-preview-legacy".to_owned(),
+            )]),
+        );
+        let spec = parse_spec(&Args(&values)).expect("valid pre-publish task");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        let document = serde_yaml::from_str::<serde_yaml::Value>(&workflow)
+            .expect("rendered workflow is YAML");
+        let publish = document
+            .get("jobs")
+            .and_then(serde_yaml::Value::as_mapping)
+            .and_then(|jobs| jobs.get("publish"))
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("publish job");
+        let permissions = publish
+            .get("permissions")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("publish permissions");
+        assert_eq!(
+            permissions
+                .get("contents")
+                .and_then(serde_yaml::Value::as_str),
+            Some("write")
+        );
+        assert_eq!(
+            permissions
+                .get("pull-requests")
+                .and_then(serde_yaml::Value::as_str),
+            Some("write")
+        );
+        assert_eq!(
+            permissions
+                .get("attestations")
+                .and_then(serde_yaml::Value::as_str),
+            Some("read")
+        );
+        let steps = publish
+            .get("steps")
+            .and_then(serde_yaml::Value::as_sequence)
+            .expect("publish steps");
+        let step = |name: &str| {
+            steps
+                .iter()
+                .find(|step| step.get("name").and_then(serde_yaml::Value::as_str) == Some(name))
+                .expect("missing publish step")
+        };
+        let handoff = step("Re-verify downloaded handoff");
+        let attest = step("Verify build attestations");
+        let lock = step("Acquire package publication lock");
+        let migration = step("Run pre-publish migration tasks");
+        let immutable = step("Publish immutable source-bound release");
+        let published = step("Download and re-verify published release");
+        let consumer_checkout = step("Checkout consumer repository");
+        let consumer_update = step("Run updater and create or update consumer PR");
+        let index = |target: &serde_yaml::Value| {
+            steps
+                .iter()
+                .position(|candidate| candidate == target)
+                .expect("publish step index")
+        };
+        assert!(index(handoff) < index(attest));
+        assert!(index(attest) < index(lock));
+        assert!(index(lock) < index(migration));
+        assert!(index(migration) < index(immutable));
+        assert!(index(immutable) < index(published));
+
+        let migration_env = migration
+            .get("env")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("migration environment");
+        assert_eq!(
+            migration_env
+                .get("GH_TOKEN")
+                .and_then(serde_yaml::Value::as_str),
+            Some("${{ github.token }}")
+        );
+        assert_eq!(
+            migration_env
+                .get("VELNOR_SOURCE_CHECKOUT_DIR")
+                .and_then(serde_yaml::Value::as_str),
+            Some("${{ github.workspace }}/source")
+        );
+        assert_eq!(
+            migration
+                .get("working-directory")
+                .and_then(serde_yaml::Value::as_str),
+            Some("source")
+        );
+        let migration_run = migration
+            .get("run")
+            .and_then(serde_yaml::Value::as_str)
+            .expect("migration script");
+        assert!(migration_run.contains("set -euo pipefail"));
+        assert!(migration_run.contains("mise run 'migrate-preview-legacy'"));
+        assert!(!migration_run.contains("TAP_TOKEN"));
+        assert!(!migration_env.contains_key("UPDATER_TOKEN"));
+        let source_publish_env = immutable
+            .get("env")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("immutable environment");
+        assert_eq!(
+            source_publish_env
+                .get("GH_TOKEN")
+                .and_then(serde_yaml::Value::as_str),
+            Some("${{ github.token }}")
+        );
+        let consumer_checkout_with = consumer_checkout
+            .get("with")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("consumer checkout inputs");
+        assert_eq!(
+            consumer_checkout_with
+                .get("token")
+                .and_then(serde_yaml::Value::as_str),
+            Some("${{ secrets.TAP_TOKEN }}")
+        );
+        let consumer_update_env = consumer_update
+            .get("env")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("consumer update environment");
+        assert_eq!(
+            consumer_update_env
+                .get("GH_TOKEN")
+                .and_then(serde_yaml::Value::as_str),
+            Some("${{ secrets.TAP_TOKEN }}")
+        );
+        assert_eq!(
+            consumer_update_env
+                .get("UPDATER_TOKEN")
+                .and_then(serde_yaml::Value::as_str),
+            Some("${{ secrets.TAP_TOKEN }}")
+        );
+        let publish_job_env = publish
+            .get("env")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("publish job environment");
+        assert!(!publish_job_env.contains_key("UPDATER_TOKEN"));
+        assert_eq!(workflow.matches("${{ secrets.TAP_TOKEN }}").count(), 3);
+        assert_eq!(
+            workflow
+                .matches("mise run 'migrate-preview-legacy'")
+                .count(),
+            1
+        );
+        let build_steps = document
+            .get("jobs")
+            .and_then(serde_yaml::Value::as_mapping)
+            .and_then(|jobs| jobs.get("build"))
+            .and_then(serde_yaml::Value::as_mapping)
+            .and_then(|build| build.get("steps"))
+            .and_then(serde_yaml::Value::as_sequence)
+            .expect("build steps");
+        for name in [
+            "Build verified package directory",
+            "Run repository package verification tasks",
+        ] {
+            let script = build_steps
+                .iter()
+                .find(|candidate| {
+                    candidate.get("name").and_then(serde_yaml::Value::as_str) == Some(name)
+                })
+                .and_then(|candidate| candidate.get("run"))
+                .and_then(serde_yaml::Value::as_str)
+                .expect("missing build step");
+            assert!(!script.contains("migrate-preview-legacy"), "{name}");
+        }
+        for name in [
+            "Run handoff package verification tasks",
+            "Run published package verification tasks",
+        ] {
+            let script = step(name)
+                .get("run")
+                .and_then(serde_yaml::Value::as_str)
+                .unwrap_or("");
+            assert!(!script.contains("migrate-preview-legacy"), "{name}");
+        }
+        let lock_run = lock
+            .get("run")
+            .and_then(serde_yaml::Value::as_str)
+            .expect("lock script");
+        assert!(lock_run.contains("acquire_publication_lock"));
+        assert!(lock_run.contains("VELNOR_PUBLICATION_LOCK_SHA"));
+    }
+
+    #[test]
     fn rendered_workflow_has_no_trailing_whitespace() {
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");
@@ -2550,13 +3870,15 @@ concurrency_group = "package-release-preview"
         assert!(workflow.contains("validate_existing_rolling_release"));
         assert!(workflow
             .contains("existing rolling release assets are not exactly covered by its manifest"));
-        assert!(
-            workflow.contains("if ! verify_restored_assets \"$restore_dir\" \"$restore_assets\"")
-        );
+        assert!(workflow.contains(
+            "if [ \"$rollback_status\" -eq 0 ] && ! verify_restored_assets \"$rollback_dir\" \"$old_assets\""
+        ));
+        assert!(workflow.contains("rolling preview ownership changed; refusing rollback mutation"));
+        assert!(workflow.contains("refusing force-move"));
         assert!(workflow.contains("rollback restored bytes differ"));
         assert!(workflow.contains("rollback GitHub digest differs"));
         assert!(workflow.contains(
-            "if ! gh release upload \"$rolling_tag\" --repo \"$GITHUB_REPOSITORY\" --clobber"
+            "gh release upload \"$rolling_tag\" --repo \"$GITHUB_REPOSITORY\" --clobber"
         ));
         assert!(
             workflow.contains("gh release download \"$rolling_tag\" --repo \"$GITHUB_REPOSITORY\"")
@@ -2566,6 +3888,1356 @@ concurrency_group = "package-release-preview"
         assert!(workflow.contains("VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_TAG\""));
         assert!(!workflow.contains("gh release delete"));
         assert!(!workflow.contains("HEAD:$CONSUMER_BRANCH"));
+    }
+
+    #[test]
+    fn generated_publish_job_serializes_and_fences_every_publication_writer() {
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        let document = serde_yaml::from_str::<serde_yaml::Value>(&workflow)
+            .expect("rendered workflow is YAML");
+        let publish = document
+            .get("jobs")
+            .and_then(serde_yaml::Value::as_mapping)
+            .and_then(|jobs| jobs.get("publish"))
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("publish job");
+        let concurrency = publish
+            .get("concurrency")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("publish concurrency");
+        assert_eq!(
+            concurrency.get("group").and_then(serde_yaml::Value::as_str),
+            Some("package-release-preview")
+        );
+        assert_eq!(
+            concurrency
+                .get("cancel-in-progress")
+                .and_then(serde_yaml::Value::as_bool),
+            Some(false)
+        );
+
+        let steps = publish
+            .get("steps")
+            .and_then(serde_yaml::Value::as_sequence)
+            .expect("publish steps");
+        let step_script = |name: &str| {
+            steps
+                .iter()
+                .find(|step| step.get("name").and_then(serde_yaml::Value::as_str) == Some(name))
+                .and_then(|step| step.get("run"))
+                .and_then(serde_yaml::Value::as_str)
+                .expect("missing script")
+        };
+        let immutable = step_script("Publish immutable source-bound release");
+        let rolling = step_script("Refresh rolling preview release");
+        let acquire = immutable
+            .find("if ! acquire_publication_lock; then")
+            .expect("immutable lock acquisition");
+        let first_immutable_mutation = immutable
+            .find("gh release create")
+            .or_else(|| immutable.find("gh release upload"))
+            .or_else(|| immutable.find("gh api --method PATCH"))
+            .expect("immutable release mutation");
+        assert!(acquire < first_immutable_mutation);
+        assert!(immutable.contains(
+            "publication_lock_branch=\"${VELNOR_PUBLICATION_LOCK_BRANCH:?missing VELNOR_PUBLICATION_LOCK_BRANCH}\""
+        ));
+        assert!(
+            immutable.contains("publication_lock_path=\".package-release-publication-lock.json\"")
+        );
+        assert!(immutable.contains("VELNOR_PUBLICATION_LOCK_SHA"));
+        assert!(immutable.contains("assert_publication_lock"));
+        assert!(immutable
+            .contains("-f \"sha=$publication_lock_sha\" -f \"branch=$publication_lock_branch\""));
+        assert!(rolling.contains("cleanup_publication \"$?\""));
+        assert!(rolling.contains("release_publication_lock"));
+        assert!(rolling.contains("assert_publication_lock"));
+        assert!(rolling.contains("trap - ERR"));
+        assert!(rolling.contains("trap - EXIT"));
+        assert!(rolling.contains(
+            "clear_publication_lock_retain\n# cleanup_publication releases the exact lock"
+        ));
+    }
+
+    #[cfg(unix)]
+    fn test_bash_path(root: &std::path::Path, shell: &str) -> std::ffi::OsString {
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).expect("create shell fixture");
+        std::os::unix::fs::symlink(shell, bin.join("bash")).expect("link tested bash");
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        std::env::join_paths(paths).expect("join shell fixture PATH")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rolling_verification_failure_preserves_publication_traps() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: r#"set -euo pipefail
+trap 'rm -f -- "$TEST_TMPDIR/verifier-temp"' EXIT
+: > "$TEST_TMPDIR/verifier-temp"
+: > "$TEST_TMPDIR/verifier-before-failure"
+false
+: > "$TEST_TMPDIR/verifier-after-failure"
+"#,
+            attestation_flags: "",
+        };
+        let rolling = render_rolling_refresh_script("", "", "", &verification);
+        let start = rolling
+            .find("\nif bash -euo pipefail -c ")
+            .expect("verification child");
+        let end = rolling
+            .find("\n\nfor payload")
+            .expect("verification child end");
+        let fragment = &rolling[start..end];
+
+        for shell in ["/bin/bash", "/opt/homebrew/bin/bash"] {
+            if !std::path::Path::new(shell).is_file() {
+                continue;
+            }
+            let root = std::env::temp_dir().join(format!(
+                "velnor-publication-verifier-traps-{}-{}",
+                shell.rsplit('/').next().expect("shell basename"),
+                crate::unique_suffix()
+            ));
+            std::fs::create_dir_all(&root).expect("create verifier trap fixture");
+            let path = test_bash_path(&root, shell);
+            let script = format!(
+                r#"set -Eeuo pipefail
+rollback() {{ : > "$TEST_TMPDIR/rollback"; exit "$1"; }}
+cleanup_publication() {{ : > "$TEST_TMPDIR/cleanup"; }}
+trap 'rollback "$?"' ERR
+trap 'cleanup_publication "$?"' EXIT
+{fragment}
+"#
+            );
+            let output = Command::new(shell)
+                .arg("-c")
+                .arg(script)
+                .env("TEST_TMPDIR", &root)
+                .env("PATH", path)
+                .output()
+                .expect("run verifier trap fixture");
+            assert!(!output.status.success());
+            assert!(root.join("rollback").exists());
+            assert!(root.join("cleanup").exists());
+            assert!(!root.join("verifier-temp").exists());
+            assert!(root.join("verifier-before-failure").exists());
+            assert!(!root.join("verifier-after-failure").exists());
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[cfg(unix)]
+    fn run_rolling_verifier_status_case(name: &str, body: &str, succeeds: bool, shell: &str) {
+        use std::process::Command;
+
+        let verification_script = format!(
+            r#"set -euo pipefail
+trap 'rm -f -- "$TEST_TMPDIR/verifier-temp"' EXIT
+: > "$TEST_TMPDIR/verifier-temp"
+: > "$TEST_TMPDIR/verifier-before"
+{body}
+: > "$TEST_TMPDIR/verifier-after"
+"#
+        );
+        let verification = PublishVerification {
+            script: &verification_script,
+            attestation_flags: "",
+        };
+        let rolling = render_rolling_refresh_script("", "", "", &verification);
+        let start = rolling
+            .find("\nif bash -euo pipefail -c ")
+            .expect("verification child");
+        let end = rolling
+            .find("\n\nfor payload")
+            .expect("verification child end");
+        let fragment = &rolling[start..end];
+        let root = std::env::temp_dir().join(format!(
+            "velnor-publication-verifier-status-{name}-{}-{}",
+            shell.rsplit('/').next().expect("shell basename"),
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create verifier status fixture");
+        let path = test_bash_path(&root, shell);
+        let script = format!(
+            r#"set -Eeuo pipefail
+rollback() {{
+  count=0
+  if [ -f "$TEST_TMPDIR/rollback-count" ]; then count="$(cat "$TEST_TMPDIR/rollback-count")"; fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$TEST_TMPDIR/rollback-count"
+  exit "$1"
+}}
+cleanup_publication() {{
+  count=0
+  if [ -f "$TEST_TMPDIR/cleanup-count" ]; then count="$(cat "$TEST_TMPDIR/cleanup-count")"; fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$TEST_TMPDIR/cleanup-count"
+}}
+trap 'rollback "$?"' ERR
+trap 'cleanup_publication "$?"' EXIT
+{fragment}
+"#
+        );
+        let output = Command::new(shell)
+            .arg("-c")
+            .arg(script)
+            .env("TEST_TMPDIR", &root)
+            .env("PATH", path)
+            .output()
+            .expect("run verifier status fixture");
+        assert_eq!(output.status.success(), succeeds, "{name}: {output:?}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("cleanup-count"))
+                .ok()
+                .as_deref(),
+            Some("1\n"),
+            "{name}: cleanup runs exactly once"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("rollback-count"))
+                .ok()
+                .as_deref(),
+            if succeeds { None } else { Some("1\n") },
+            "{name}: rollback runs exactly once only on failure"
+        );
+        assert!(
+            root.join("verifier-before").exists(),
+            "{name}: verifier starts"
+        );
+        assert_eq!(
+            root.join("verifier-after").exists(),
+            succeeds,
+            "{name}: verifier preserves fail-fast status"
+        );
+        assert!(
+            !root.join("verifier-temp").exists(),
+            "{name}: verifier EXIT trap runs"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rolling_verifier_status_boundary_preserves_failfast_and_single_rollback() {
+        let cases = [
+            ("false", "false", false),
+            ("explicit-exit", "exit 7", false),
+            (
+                "nested-pipeline",
+                "printf '%s\\n' value | grep -F missing",
+                false,
+            ),
+            ("success", ":", true),
+        ];
+        for (name, body, succeeds) in cases {
+            for shell in ["/bin/bash", "/opt/homebrew/bin/bash"] {
+                if std::path::Path::new(shell).is_file() {
+                    run_rolling_verifier_status_case(name, body, succeeds, shell);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn terminate_fixture_group(child: &mut std::process::Child) {
+        let target = format!("-{}", child.id());
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &target])
+            .status();
+        for _ in 0..200 {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(_) => break,
+            }
+        }
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &target])
+            .status();
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    fn wait_for_fixture_pid(
+        root: &std::path::Path,
+        child: &mut std::process::Child,
+    ) -> Result<i32, String> {
+        for _ in 0..200 {
+            if let Some(pid) = std::fs::read_to_string(root.join("verifier-pid"))
+                .ok()
+                .and_then(|pid| pid.trim().parse::<i32>().ok())
+            {
+                return Ok(pid);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        terminate_fixture_group(child);
+        Err(format!("verifier did not start: {}", child.id()))
+    }
+
+    #[cfg(unix)]
+    fn wait_for_fixture_exit(
+        child: &mut std::process::Child,
+    ) -> Result<std::process::ExitStatus, String> {
+        for _ in 0..200 {
+            match child.try_wait() {
+                Ok(Some(status)) => return Ok(status),
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(error) => {
+                    terminate_fixture_group(child);
+                    return Err(format!("fixture wait failed: {error}"));
+                }
+            }
+        }
+        terminate_fixture_group(child);
+        Err("fixture did not exit after cancellation".to_owned())
+    }
+
+    #[cfg(unix)]
+    fn spawn_rolling_cancellation_fixture(
+        shell: &str,
+        fragment: &str,
+        lock_script: &str,
+        cleanup: &str,
+        signal_group: bool,
+    ) -> (std::path::PathBuf, std::process::Child, i32) {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+
+        let version = shell.rsplit('/').next().expect("shell basename");
+        let root = std::env::temp_dir().join(format!(
+            "velnor-publication-verifier-cancel-{version}-{}-{signal_group}",
+            crate::unique_suffix()
+        ));
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).expect("create cancellation fixture");
+        symlink(shell, bin.join("bash")).expect("link tested bash into PATH");
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(&path));
+        let path = std::env::join_paths(paths).expect("join test PATH");
+        let script = format!(
+            r#"set -Eeuo pipefail
+transaction_dir="$TEST_TMPDIR/transaction"
+mkdir -p "$transaction_dir"
+{lock_script}
+release_publication_lock() {{
+  : > "$TEST_TMPDIR/lock-released"
+  return 0
+}}
+mark_publication_lock_retain
+increment() {{
+  local file="$1"
+  local count=0
+  if [ -f "$file" ]; then count="$(cat "$file")"; fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$file"
+}}
+rollback() {{
+  increment "$TEST_TMPDIR/rollback-count"
+  exit "$1"
+}}
+{cleanup}
+trap 'rollback "$?"' ERR
+trap 'cleanup_publication "$?"' EXIT
+{fragment}
+: > "$TEST_TMPDIR/after"
+"#
+        );
+        let mut child = Command::new(shell)
+            .arg("-c")
+            .arg(&script)
+            .env("TEST_TMPDIR", &root)
+            .env("GITHUB_ENV", root.join("github-env"))
+            .env("GITHUB_REPOSITORY", "example/project")
+            .env("VELNOR_PUBLICATION_LOCK_BRANCH", "package-release-lock")
+            .env(
+                "VELNOR_PUBLICATION_LOCK_SHA",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .env("PATH", &path)
+            .process_group(0)
+            .spawn()
+            .expect("start cancellation fixture");
+        let verifier_pid = wait_for_fixture_pid(&root, &mut child).expect("verifier startup");
+        (root, child, verifier_pid)
+    }
+
+    #[cfg(unix)]
+    fn run_rolling_cancellation_case(
+        shell: &str,
+        fragment: &str,
+        lock_script: &str,
+        cleanup: &str,
+        signal_group: bool,
+    ) {
+        use std::fs;
+        use std::process::Command;
+
+        let (root, mut child, verifier_pid) =
+            spawn_rolling_cancellation_fixture(shell, fragment, lock_script, cleanup, signal_group);
+        let target = if signal_group {
+            format!("-{}", child.id())
+        } else {
+            verifier_pid.to_string()
+        };
+        let signal = Command::new("kill")
+            .args(["-TERM", &target])
+            .status()
+            .expect("send cancellation signal");
+        if !signal.success() {
+            terminate_fixture_group(&mut child);
+            assert!(
+                signal.success(),
+                "kill failed for {shell} group={signal_group}"
+            );
+            return;
+        }
+        let status = wait_for_fixture_exit(&mut child).expect("fixture cancellation exit");
+        assert!(
+            !status.success(),
+            "{shell} group={signal_group}: {status:?}"
+        );
+        assert!(
+            root.join("github-env").is_file()
+                && fs::read_to_string(root.join("github-env"))
+                    .unwrap_or_default()
+                    .contains("VELNOR_PUBLICATION_LOCK_RETAIN=1"),
+            "generated retain handoff missing for {shell} group={signal_group}"
+        );
+        assert!(
+            !root.join("lock-released").exists(),
+            "cancellation never releases lock for {shell} group={signal_group}"
+        );
+        assert!(
+            !root.join("transaction").exists(),
+            "generated cleanup removes transaction for {shell} group={signal_group}"
+        );
+        assert!(
+            !root.join("after").exists(),
+            "cancellation stops publication for {shell} group={signal_group}"
+        );
+        if signal_group {
+            assert!(
+                !root.join("rollback-count").exists(),
+                "group TERM reaches finalizer without a second rollback for {shell}"
+            );
+        } else {
+            assert_eq!(
+                fs::read_to_string(root.join("rollback-count"))
+                    .ok()
+                    .as_deref(),
+                Some("1\n"),
+                "child cancellation rolls back exactly once for {shell}"
+            );
+            assert!(
+                root.join("verifier-term").exists(),
+                "child receives TERM for {shell}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rolling_verifier_cancellation_retains_lock_without_release() {
+        let shells = ["/bin/bash", "/opt/homebrew/bin/bash"];
+        for shell in shells {
+            if !std::path::Path::new(shell).is_file() {
+                continue;
+            }
+            let verification = PublishVerification {
+                script: r#"set -euo pipefail
+trap ': > "$TEST_TMPDIR/verifier-term"; exit 143' TERM
+printf '%s\n' "$$" > "$TEST_TMPDIR/verifier-pid"
+while :; do :; done
+"#,
+                attestation_flags: "",
+            };
+            let rolling = render_rolling_refresh_script("", "", "", &verification);
+            let start = rolling
+                .find("\nif bash -euo pipefail -c ")
+                .expect("verification child");
+            let end = rolling
+                .find("\n\nfor payload")
+                .expect("verification child end");
+            let fragment = &rolling[start..end];
+            let lock_script = render_publication_lock_script(true);
+            let cleanup_start = rolling
+                .find("\ncleanup_publication() {")
+                .expect("publication cleanup");
+            let cleanup_end = rolling
+                .find("\ntrap 'rollback")
+                .expect("publication cleanup end");
+            let cleanup = &rolling[cleanup_start + 1..cleanup_end];
+            run_rolling_cancellation_case(shell, fragment, &lock_script, cleanup, false);
+            run_rolling_cancellation_case(shell, fragment, &lock_script, cleanup, true);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::too_many_lines, clippy::uninlined_format_args)]
+    fn publication_lock_lifecycle_expands_owner_and_fails_closed_when_held() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        assert!(!rolling_script.contains(r"\${GITHUB_REPOSITORY}"));
+        assert!(!rolling_script.contains(r"\${GITHUB_RUN_ID:-unknown}"));
+        let lock_start = rolling_script
+            .find("publication_lock_branch=\"")
+            .expect("lock initialization");
+        let lock_end = rolling_script
+            .find("\nremote_tag_sha() {")
+            .expect("lock helper boundary");
+        let lock = &rolling_script[lock_start..lock_end];
+        assert!(rolling_script.contains("\nif bash -euo pipefail -c "));
+        assert!(rolling_script.contains(
+            "clear_publication_lock_retain\n# cleanup_publication releases the exact lock"
+        ));
+        let cleanup_start = rolling_script
+            .find("cleanup_publication() {")
+            .expect("cleanup helper");
+        let cleanup_end = rolling_script
+            .find("\ntrap 'rollback")
+            .expect("rollback trap boundary");
+        let cleanup = &rolling_script[cleanup_start..cleanup_end];
+        let lock_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        for mode in ["success", "retained-success", "held"] {
+            let root = std::env::temp_dir().join(format!(
+                "velnor-publication-lock-{mode}-{}",
+                crate::unique_suffix()
+            ));
+            std::fs::create_dir_all(&root).expect("create lock fixture");
+            let script = format!(
+                r#"set -Eeuo pipefail
+GITHUB_REPOSITORY=example/project
+GITHUB_WORKFLOW=preview
+GITHUB_RUN_ID=42
+GITHUB_RUN_ATTEMPT=3
+VELNOR_PUBLICATION_LOCK_BRANCH=velnor-publication-lock
+EXPECTED_SOURCE_COMMIT=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+transaction_dir="$TEST_TMPDIR/transaction"
+mkdir -p "$transaction_dir"
+gh() {{
+  printf '%s\n' "$*" >> "$TEST_TMPDIR/gh.log"
+  if [[ "$*" == *"git/ref/heads/velnor-publication-lock"* ]]; then
+    printf 'HTTP/2 200 OK\r\n\r\n{{}}\n'
+    return 0
+  fi
+  if [[ "$*" == *"--method PUT"* ]]; then
+    if [ "$TEST_MODE" = held ]; then
+      return 1
+    fi
+    printf '{{"content":{{"sha":"{lock_sha}"}}}}\n'
+    return 0
+  fi
+  if [[ "$*" == *"contents/.package-release-publication-lock.json?ref=velnor-publication-lock"* ]]; then
+    printf '{{"type":"file","path":".package-release-publication-lock.json","sha":"{lock_sha}"}}\n'
+    return 0
+  fi
+  if [[ "$*" == *"--method DELETE"* ]]; then
+    : > "$TEST_TMPDIR/released"
+    return 0
+  fi
+  return 1
+}}
+{lock}
+{cleanup}
+if [ "$TEST_MODE" = held ]; then
+  if acquire_publication_lock; then
+    exit 1
+  fi
+  test "$publication_lock_acquired" -eq 0
+  test ! -e "$TEST_TMPDIR/released"
+  exit 0
+fi
+acquire_publication_lock
+assert_publication_lock
+if [ "$TEST_MODE" = retained-success ]; then
+  mark_publication_lock_retain
+  clear_publication_lock_retain
+fi
+cleanup_publication 0
+"#,
+                lock = lock,
+                cleanup = cleanup,
+                lock_sha = lock_sha,
+            );
+            let output = Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .env("TEST_MODE", mode)
+                .env("TEST_TMPDIR", &root)
+                .output()
+                .expect("run publication lock fixture");
+            assert!(
+                output.status.success(),
+                "publication lock mode {mode} failed:\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let log = std::fs::read_to_string(root.join("gh.log")).expect("lock API log");
+            if mode == "success" || mode == "retained-success" {
+                assert!(
+                    log.contains("Acquire Velnor publication lock example/project:preview:42:3")
+                );
+                assert!(log.contains("--method DELETE"));
+                assert!(log.contains("sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+                assert!(log.contains("branch=velnor-publication-lock"));
+                assert!(root.join("released").exists());
+            } else {
+                assert!(log.contains("--method PUT"));
+                assert!(!log.contains("--method DELETE"));
+                assert!(!root.join("released").exists());
+            }
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::too_many_lines, clippy::uninlined_format_args)]
+    fn immutable_lock_handoff_retains_failed_mutation_and_exports_sha() {
+        use std::process::Command;
+
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let immutable_script = render_immutable_publish_script(&spec);
+        let lock_start = immutable_script
+            .find("publication_lock_branch=\"")
+            .expect("lock initialization");
+        let lock_end = immutable_script
+            .find("\nimmutable_publication_mutated=0")
+            .expect("immutable lock lifecycle boundary");
+        let lock = &immutable_script[lock_start..lock_end];
+        let cleanup_start = immutable_script
+            .find("cleanup_immutable_publication() {")
+            .expect("immutable cleanup helper");
+        let cleanup_end = immutable_script
+            .find("\ntrap 'cleanup_immutable_publication")
+            .expect("immutable cleanup trap");
+        let cleanup = &immutable_script[cleanup_start..cleanup_end];
+        let handoff = immutable_script
+            .lines()
+            .find(|line| line.starts_with("printf 'VELNOR_PUBLICATION_LOCK_SHA="))
+            .expect("lock handoff export");
+        let lock_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        for (mode, expected_status) in [
+            ("failed-mutation", 1),
+            ("prepublish-retain", 1),
+            ("handoff", 0),
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "velnor-immutable-lock-{mode}-{}",
+                crate::unique_suffix()
+            ));
+            std::fs::create_dir_all(&root).expect("create immutable lock fixture");
+            let script = format!(
+                r#"set -Eeuo pipefail
+GITHUB_REPOSITORY=example/project
+GITHUB_WORKFLOW=preview
+GITHUB_RUN_ID=42
+GITHUB_RUN_ATTEMPT=3
+VELNOR_PUBLICATION_LOCK_BRANCH=velnor-publication-lock
+EXPECTED_SOURCE_COMMIT=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+transaction_dir="$TEST_TMPDIR/transaction"
+GITHUB_ENV="$TEST_TMPDIR/github-env"
+mkdir -p "$transaction_dir"
+gh() {{
+  printf '%s\n' "$*" >> "$TEST_TMPDIR/gh.log"
+  if [[ "$*" == *"contents/.package-release-publication-lock.json?ref=velnor-publication-lock"* ]]; then
+    printf '{{"type":"file","path":".package-release-publication-lock.json","sha":"{lock_sha}"}}\n'
+    return 0
+  fi
+  if [[ "$*" == *"--method DELETE"* ]]; then
+    : > "$TEST_TMPDIR/released"
+    return 0
+  fi
+  return 1
+}}
+{lock}
+{cleanup}
+immutable_publication_mutated=0
+immutable_publication_handoff=0
+publication_lock_acquired=1
+publication_lock_sha={lock_sha}
+if [ "$TEST_MODE" = failed-mutation ]; then
+  immutable_publication_mutated=1
+elif [ "$TEST_MODE" = prepublish-retain ]; then
+  mark_publication_lock_retain
+else
+  {handoff}
+  immutable_publication_handoff=1
+fi
+set +e
+(cleanup_immutable_publication {status})
+cleanup_status=$?
+set -e
+test "$cleanup_status" -eq {status}
+test ! -e "$TEST_TMPDIR/released"
+"#,
+                lock = lock,
+                cleanup = cleanup,
+                handoff = handoff,
+                lock_sha = lock_sha,
+                status = expected_status,
+            );
+            let output = Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .env("TEST_MODE", mode)
+                .env("TEST_TMPDIR", &root)
+                .output()
+                .expect("run immutable lock fixture");
+            assert!(
+                output.status.success(),
+                "immutable lock mode {mode} failed:\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if mode == "handoff" {
+                let exported =
+                    std::fs::read_to_string(root.join("github-env")).expect("read lock handoff");
+                assert_eq!(
+                    exported,
+                    format!("VELNOR_PUBLICATION_LOCK_SHA={lock_sha}\n")
+                );
+            }
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn post_mutation_failures_invoke_rollback_and_restore_previous_release() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script(
+            "\"$published_dir/release-manifest.json\"",
+            "  printf '%s\\n' release-manifest.json",
+            "  'payload.tar.gz'",
+            &verification,
+        );
+        let mutation_start = rolling_script
+            .find("if [ \"$had_release\" = 0 ]; then\n  mutated=1")
+            .expect("rolling mutation boundary");
+        let post_mutation = &rolling_script[mutation_start..];
+        let rollback_start = rolling_script
+            .find("rollback() {")
+            .expect("rollback helper");
+        let rollback_end = rolling_script
+            .find("\ntrap 'rollback")
+            .expect("rollback trap");
+        let rollback = &rolling_script[rollback_start..rollback_end];
+        let upload_start = post_mutation
+            .find("gh release upload \"$rolling_tag\"")
+            .expect("upload mutation");
+        let upload_end = post_mutation[upload_start..]
+            .find("\n\nrolling_stage_json")
+            .map(|offset| upload_start + offset)
+            .expect("upload mutation end");
+        let upload = &post_mutation[upload_start..upload_end];
+        let tag_marker = r#"gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag""#;
+        let tag_start = post_mutation.find(tag_marker).expect("tag mutation");
+        let tag_end = post_mutation[tag_start..]
+            .find("\n  owner_tag_sha")
+            .map(|offset| tag_start + offset)
+            .expect("tag mutation end");
+        let tag = &post_mutation[tag_start..tag_end];
+        let release_marker = r#"gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
+  -f "name=$RELEASE_TITLE_PREFIX $candidate_version""#;
+        let release_start = post_mutation
+            .find(release_marker)
+            .expect("release mutation");
+        let release_end = post_mutation[release_start..]
+            .find("\nowner_draft=false")
+            .map(|offset| release_start + offset)
+            .expect("release mutation end");
+        let release = &post_mutation[release_start..release_end];
+
+        for (mode, mutation) in [("upload", upload), ("tag", tag), ("release", release)] {
+            let root = std::env::temp_dir().join(format!(
+                "velnor-package-rollback-failure-{mode}-{}",
+                crate::unique_suffix()
+            ));
+            std::fs::create_dir_all(&root).expect("create shell fixture");
+            let mut harness = String::from("set -Eeuo pipefail\n");
+            harness.push_str(rollback);
+            harness.push_str(
+                r#"
+GITHUB_REPOSITORY=example/project
+GH_TOKEN=test-token
+RELEASE_PRERELEASE=true
+RELEASE_TITLE_PREFIX=Preview
+candidate_version=candidate
+rolling_tag=preview
+rolling_release_id=123
+EXPECTED_SOURCE_COMMIT=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+old_tag_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+old_source_commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+old_name=old-name
+old_body=old-body
+old_draft=false
+old_prerelease=true
+owner_draft=true
+owner_tag_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+owner_name=old-name
+owner_body=old-body
+owner_source_commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+had_release=1
+mutated=1
+transaction_dir="$TEST_TMPDIR/transaction"
+owner_assets="$transaction_dir/owner-assets"
+old_assets="$TEST_TMPDIR/old-assets"
+rollback_dir="$TEST_TMPDIR/rollback"
+mkdir -p "$transaction_dir" "$rollback_dir"
+: > "$owner_assets"
+: > "$old_assets"
+assert_rolling_ownership() { return 0; }
+assert_publication_lock() { return 0; }
+verify_restored_assets() { : > "$TEST_TMPDIR/assets-restored"; return 0; }
+remote_tag_sha() {
+  if [ -e "$TEST_TMPDIR/tag-published" ]; then
+    printf '%s\n' "$EXPECTED_SOURCE_COMMIT"
+  else
+    printf '%s\n' "$old_tag_sha"
+  fi
+}
+gh() {
+  if [[ "$*" == *"git/refs/tags/preview"* ]] && [[ "$*" == *"--method PATCH"* ]]; then
+    if [ "$TEST_MODE" = tag ] && [ ! -e "$TEST_TMPDIR/tag-failure-used" ]; then
+      : > "$TEST_TMPDIR/tag-failure-used"
+      return 1
+    fi
+    if [ -e "$TEST_TMPDIR/tag-published" ]; then
+      rm -f -- "$TEST_TMPDIR/tag-published"
+      : > "$TEST_TMPDIR/tag-restored"
+    else
+      : > "$TEST_TMPDIR/tag-published"
+    fi
+    return 0
+  fi
+  if [[ "$*" == *"releases/123"* ]] && [[ "$*" == *"--method PATCH"* ]]; then
+    if [ "$TEST_MODE" = release ] && [[ "$*" == *"-F draft=false"* ]] && [ ! -e "$TEST_TMPDIR/release-failure-used" ]; then
+      : > "$TEST_TMPDIR/release-failure-used"
+      return 1
+    fi
+    if [[ "$*" == *"name=old-name"* ]]; then
+      : > "$TEST_TMPDIR/release-restored"
+    fi
+    return 0
+  fi
+  if [[ "$*" == "release upload"* ]]; then
+    if [ "$TEST_MODE" = upload ] && [ ! -e "$TEST_TMPDIR/upload-failure-used" ]; then
+      : > "$TEST_TMPDIR/upload-failure-used"
+      return 1
+    fi
+    return 0
+  fi
+  return 0
+}
+"#,
+            );
+            harness.push_str("TEST_MODE=");
+            harness.push_str(mode);
+            harness.push_str(
+                r#"
+published_dir="$TEST_TMPDIR"
+set +e
+(
+  trap 'rollback "$?"' ERR
+"#,
+            );
+            if mode == "release" {
+                harness.push_str("  ");
+                harness.push_str(tag);
+                harness.push_str(
+                    r#"
+  owner_tag_sha="$EXPECTED_SOURCE_COMMIT"
+  owner_source_commit="$EXPECTED_SOURCE_COMMIT"
+"#,
+                );
+            }
+            harness.push_str("  ");
+            harness.push_str(mutation);
+            harness.push_str(
+                r#"
+)
+rollback_status=$?
+set -e
+test "$rollback_status" -eq 1
+test -e "$TEST_TMPDIR/release-restored"
+test -e "$TEST_TMPDIR/assets-restored"
+if [ "$TEST_MODE" = release ]; then
+  test -e "$TEST_TMPDIR/tag-restored"
+else
+  test ! -e "$TEST_TMPDIR/tag-restored"
+fi
+"#,
+            );
+            let output = Command::new("bash")
+                .arg("-c")
+                .arg(harness)
+                .env("TEST_TMPDIR", &root)
+                .output()
+                .expect("run rollback failure harness");
+            let _ = std::fs::remove_dir_all(&root);
+            assert!(
+                output.status.success(),
+                "{mode} failure did not restore the previous release:\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_existing_release_validation_fails_inside_negated_call() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        let helper_start = rolling_script
+            .find("validate_existing_rolling_release() {")
+            .expect("validation helper");
+        let helper_end = rolling_script
+            .find("\nassert_rolling_ownership() {")
+            .expect("ownership helper");
+        let helper = &rolling_script[helper_start..helper_end];
+        let source_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-malformed-release-{}",
+            crate::unique_suffix()
+        ));
+        let source_dir = root.join("rollback");
+        std::fs::create_dir_all(&source_dir).expect("create malformed release fixture");
+        let mut script = String::from("set -Eeuo pipefail\n");
+        script.push_str(helper);
+        write!(
+            &mut script,
+            r#"
+transaction_dir="$TEST_TMPDIR/transaction"
+mkdir -p "$transaction_dir"
+rolling_tag=preview
+RELEASE_PRERELEASE=true
+RELEASE_TITLE_PREFIX=Preview
+EXPECTED_MANIFEST_SCHEMA=example.consumer-manifest-v1
+EXPECTED_SOURCE_REPOSITORY=example/project
+EXPECTED_SOURCE_REF=refs/heads/main
+VELNOR_PACKAGE_CHANNEL=preview
+EXPECTED_SOURCE_COMMIT={source_commit}
+old_tag_sha={source_commit}
+owner_assets="$TEST_TMPDIR/owner-assets"
+: > "$owner_assets"
+source_dir="$TEST_TMPDIR/rollback"
+digest={digest}
+printf '%s\n' payload > "$source_dir/a.tar.gz"
+printf '{{"assets":[{{"name":"a.tar.gz","sha256":"%s"}}],"schema":"example.consumer-manifest-v1","source_commit":"{source_commit}","source_ref":"refs/heads/main","source_repository":"example/project","supporting_assets":[],"version":"1.0.0-preview.1+aaaaaaa"}}\n' "$digest" > "$source_dir/release-manifest.json"
+printf '{{\n' > "$source_dir/identity.json"
+sha256sum() {{ printf '%s  %s\n' "$digest" "$2"; }}
+git() {{ return 0; }}
+read_rolling_asset_set() {{ : > "$1"; }}
+body="$(printf '{{"draft":false,"prerelease":true,"tag_name":"preview","id":123,"name":"Preview 1.0.0-preview.1+aaaaaaa","assets":[{{"id":1,"name":"release-manifest.json","digest":"sha256:%s"}},{{"id":2,"name":"identity.json","digest":"sha256:%s"}},{{"id":3,"name":"a.tar.gz","digest":"sha256:%s"}}]}}' "$digest" "$digest" "$digest")"
+if false; then
+  :
+elif ! validate_existing_rolling_release "$body" "$source_dir" false; then
+  validation_failed=1
+else
+  validation_failed=0
+fi
+test "$validation_failed" -eq 1
+"#,
+        )
+        .expect("render malformed release validation fixture");
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env("TEST_TMPDIR", &root)
+            .output()
+            .expect("run malformed release validation");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            output.status.success(),
+            "malformed release validation was not fail-closed:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn typed_draft_reuses_validated_owner_without_destructive_cleanup() {
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        assert!(!rolling_script.contains("discard_current_typed_rolling_draft"));
+        assert!(!rolling_script.contains("discarding incomplete current-contract rolling draft"));
+        assert!(rolling_script.contains("GitHub cannot undelete a release or tag"));
+        assert!(rolling_script.contains(
+            "owner_draft=\"$old_draft\"\n    owner_tag_sha=\"$old_tag_sha\"\n    owner_name=\"$old_name\""
+        ));
+        let draft_reuse = rolling_script
+            .find("owner_draft=\"$old_draft\"")
+            .expect("validated draft owner initialization");
+        let existing_mutation = rolling_script
+            .find("\nelse\n  mutated=1\n")
+            .expect("existing release mutation boundary");
+        assert!(draft_reuse < existing_mutation);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_refuses_release_or_tag_sha_drift_before_destructive_calls() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        let helper_start = rolling_script
+            .find("read_rolling_asset_set() {")
+            .expect("asset ownership helper");
+        let helper_end = rolling_script
+            .find("\ntrap 'rollback")
+            .expect("rollback trap");
+        let helpers = &rolling_script[helper_start..helper_end];
+        let source_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-rollback-race-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create shell fixture");
+
+        for mode in ["state", "tag"] {
+            let mut script = String::from("set -Eeuo pipefail\n");
+            script.push_str(helpers);
+            write!(
+                &mut script,
+                r#"
+GITHUB_REPOSITORY=example/project
+RELEASE_PRERELEASE=true
+rolling_tag=preview
+rolling_release_id=123
+owner_draft=false
+owner_tag_sha={source_commit}
+owner_name='Preview 1.0.0-preview.1+aaaaaaa'
+owner_body='old-body'
+owner_source_commit={source_commit}
+had_release=1
+mutated=1
+old_tag_sha={source_commit}
+old_source_commit={source_commit}
+old_name="$owner_name"
+old_body="$owner_body"
+old_draft=false
+old_prerelease=true
+old_assets="$TEST_TMPDIR/old-assets"
+rollback_dir="$TEST_TMPDIR/rollback"
+transaction_dir="$TEST_TMPDIR/transaction"
+owner_assets="$TEST_TMPDIR/owner-assets"
+: > "$old_assets"
+: > "$owner_assets"
+mkdir -p "$transaction_dir"
+remote_tag_sha() {{
+  if [ "$TEST_MODE" = tag ]; then
+    printf '%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  else
+    printf '%s\n' {source_commit}
+  fi
+}}
+gh() {{
+  if [[ "$*" == *"releases/123/assets"* ]]; then
+    return 0
+  fi
+  if [[ "$*" == *"releases/123"* ]] && [[ "$*" != *"--method"* ]]; then
+    if [ "$TEST_MODE" = state ]; then
+      printf '%s\n' '{{"id":123,"draft":false,"prerelease":true,"tag_name":"preview","name":"Foreign","body":"old-body"}}'
+    else
+      printf '%s\n' '{{"id":123,"draft":false,"prerelease":true,"tag_name":"preview","name":"Preview 1.0.0-preview.1+aaaaaaa","body":"old-body"}}'
+    fi
+    return 0
+  fi
+  : > "$TEST_TMPDIR/mutation"
+}}
+TEST_MODE={mode}
+set +e
+(rollback 1)
+rollback_status=$?
+set -e
+test "$rollback_status" -eq 1
+test ! -e "$TEST_TMPDIR/mutation"
+"#
+            )
+            .expect("render rollback ownership regression shell");
+            let output = Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .env("TEST_TMPDIR", &root)
+                .output()
+                .expect("run rollback ownership regression");
+            assert!(
+                output.status.success(),
+                "rollback drift mode {mode} was not fail-closed:\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let _ = std::fs::remove_file(root.join("mutation"));
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_refuses_complete_asset_set_drift_before_mutation() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        let helper_start = rolling_script
+            .find("read_rolling_asset_set() {")
+            .expect("asset ownership helper");
+        let helper_end = rolling_script
+            .find("\ntrap 'rollback")
+            .expect("rollback trap");
+        let helpers = &rolling_script[helper_start..helper_end];
+        let source_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-rollback-asset-race-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create shell fixture");
+        let mut script = String::from("set -Eeuo pipefail\n");
+        script.push_str(helpers);
+        write!(
+            &mut script,
+            r#"
+GITHUB_REPOSITORY=example/project
+RELEASE_PRERELEASE=true
+rolling_tag=preview
+rolling_release_id=123
+owner_draft=false
+owner_tag_sha={source_commit}
+owner_name='Preview 1.0.0-preview.1+aaaaaaa'
+owner_body='old-body'
+owner_source_commit={source_commit}
+owner_assets="$TEST_TMPDIR/owner-assets"
+old_assets="$TEST_TMPDIR/old-assets"
+rollback_dir="$TEST_TMPDIR/rollback"
+transaction_dir="$TEST_TMPDIR/transaction"
+mkdir -p "$transaction_dir"
+: > "$old_assets"
+printf '%s\n' '10	candidate.tar.gz	sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > "$owner_assets"
+had_release=1
+mutated=1
+remote_tag_sha() {{ printf '%s\n' {source_commit}; }}
+gh() {{
+  if [[ "$*" == *"releases/123/assets"* ]]; then
+    printf '%s\n' '11	foreign.tar.gz	sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    return 0
+  fi
+  if [[ "$*" == *"releases/123"* ]] && [[ "$*" != *"--method"* ]]; then
+    printf '%s\n' '{{"id":123,"draft":false,"prerelease":true,"tag_name":"preview","name":"Preview 1.0.0-preview.1+aaaaaaa","body":"old-body"}}'
+    return 0
+  fi
+  : > "$TEST_TMPDIR/mutation"
+}}
+set +e
+(rollback 1)
+rollback_status=$?
+set -e
+test "$rollback_status" -eq 1
+test ! -e "$TEST_TMPDIR/mutation"
+"#,
+        )
+        .expect("render asset drift regression shell");
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env("TEST_TMPDIR", &root)
+            .output()
+            .expect("run asset drift regression");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            output.status.success(),
+            "rollback asset drift was not fail-closed:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_deletes_candidate_only_asset_before_restoring_previous_set() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        let helper_start = rolling_script
+            .find("asset_was_in_old_set() (")
+            .expect("asset membership helper");
+        let rollback_end = rolling_script
+            .find("\ntrap 'rollback")
+            .expect("rollback trap");
+        let helpers = &rolling_script[helper_start..rollback_end];
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-rollback-candidate-only-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create shell fixture");
+        let mut script = String::from("set -Eeuo pipefail\n");
+        script.push_str(helpers);
+        script.push_str(
+            r#"
+GITHUB_REPOSITORY=example/project
+RELEASE_PRERELEASE=true
+rolling_tag=preview
+rolling_release_id=123
+owner_draft=false
+owner_tag_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+owner_name='Preview 1.0.0-preview.1+aaaaaaa'
+owner_body='old-body'
+owner_source_commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+owner_assets="$TEST_TMPDIR/owner-assets"
+old_assets="$TEST_TMPDIR/old-assets"
+rollback_dir="$TEST_TMPDIR/rollback"
+transaction_dir="$TEST_TMPDIR/transaction"
+old_tag_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+old_source_commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+old_name="$owner_name"
+old_body="$owner_body"
+old_draft=false
+old_prerelease=true
+had_release=1
+mutated=1
+mkdir -p "$transaction_dir"
+: > "$old_assets"
+printf '%s\n' '7	candidate.tar.gz	sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > "$owner_assets"
+assert_rolling_ownership() { return 0; }
+replace_owned_asset_after_delete() {
+  printf '%s\t%s\n' "$1" "$2" > "$TEST_TMPDIR/observed-asset"
+  test "$1" = 7
+  test "$2" = candidate.tar.gz
+  : > "$owner_assets"
+}
+verify_restored_assets() { return 0; }
+remote_tag_sha() { printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; }
+gh() {
+  if [[ "$*" == *"releases/assets/7"* ]]; then
+    printf '%s\n' deleted >> "$TEST_TMPDIR/deleted"
+  fi
+  return 0
+}
+old_assets="$TEST_TMPDIR/missing-old-assets"
+set +e
+asset_was_in_old_set candidate.tar.gz
+asset_status="$?"
+set -e
+test "$asset_status" -eq 2
+old_assets="$TEST_TMPDIR/old-assets"
+set +e
+(rollback 1)
+rollback_status=$?
+set -e
+test "$rollback_status" -eq 1
+test -s "$TEST_TMPDIR/deleted"
+test "$(wc -l < "$TEST_TMPDIR/deleted")" -eq 1
+printf '%s\t%s\n' 7 candidate.tar.gz > "$TEST_TMPDIR/expected-asset"
+cmp -s "$TEST_TMPDIR/expected-asset" "$TEST_TMPDIR/observed-asset"
+test ! -s "$owner_assets"
+"#,
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env("TEST_TMPDIR", &root)
+            .output()
+            .expect("run candidate-only rollback regression");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            output.status.success(),
+            "candidate-only asset was not deleted during rollback:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_tag_lookup_does_not_mask_ls_remote_failure() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        let helper_start = rolling_script
+            .find("remote_tag_sha() {")
+            .expect("tag helper");
+        let helper_end = rolling_script
+            .find("\nread_rolling_asset_set() {")
+            .expect("asset helper");
+        let helper = &rolling_script[helper_start..helper_end];
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-tag-lookup-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create shell fixture");
+        let script = format!(
+            r"set -Eeuo pipefail
+{helper}
+git() {{ return 42; }}
+if remote_tag_sha preview; then
+  exit 1
+fi
+",
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .current_dir(&root)
+            .output()
+            .expect("run tag lookup regression");
+        let _ = std::fs::remove_dir_all(root);
+        assert!(
+            output.status.success(),
+            "ls-remote failure was masked:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[cfg(unix)]

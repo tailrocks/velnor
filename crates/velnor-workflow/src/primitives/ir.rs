@@ -490,13 +490,23 @@ mod tests {
             ),
             "mixed members gate the sccache environment on the selected member"
         );
+        assert!(
+            kind.contains(
+                "          {\n            echo 'CARGO_INCREMENTAL=0'\n            echo 'RUSTC_WRAPPER=sccache'\n            echo 'SCCACHE_GHA_ENABLED=true'\n          } >> \"$GITHUB_ENV\""
+            ),
+            "sccache exports share one redirect so shellcheck accepts the generated block"
+        );
+        assert!(
+            !kind.contains("echo 'CARGO_INCREMENTAL=0' >> \"$GITHUB_ENV\""),
+            "sccache exports do not use individual redirects"
+        );
         for assignment in [
             "CARGO_INCREMENTAL=0",
             "RUSTC_WRAPPER=sccache",
             "SCCACHE_GHA_ENABLED=true",
         ] {
             assert!(
-                kind.contains(&format!("echo '{assignment}' >> \"$GITHUB_ENV\"")),
+                kind.contains(&format!("echo '{assignment}'")),
                 "mixed sccache members export {assignment}: {kind}"
             );
         }
@@ -1961,7 +1971,7 @@ fn render_collapsed_sccache_env_step(
     if !sccache.any {
         return;
     }
-    let block = "      - name: Configure sccache environment\n        run: |\n          echo 'CARGO_INCREMENTAL=0' >> \"$GITHUB_ENV\"\n          echo 'RUSTC_WRAPPER=sccache' >> \"$GITHUB_ENV\"\n          echo 'SCCACHE_GHA_ENABLED=true' >> \"$GITHUB_ENV\"\n";
+    let block = "      - name: Configure sccache environment\n        run: |\n          {\n            echo 'CARGO_INCREMENTAL=0'\n            echo 'RUSTC_WRAPPER=sccache'\n            echo 'SCCACHE_GHA_ENABLED=true'\n          } >> \"$GITHUB_ENV\"\n";
     output.push_str(&prefix_step_block_with_if(
         block,
         sccache.absent_gate(mbx_input).as_deref(),

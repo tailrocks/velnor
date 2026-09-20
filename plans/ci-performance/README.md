@@ -43,60 +43,45 @@ hypothesis → implementation → focused checks → controlled CI → independe
 results review → commit/push → rerank. Independent research runs concurrently;
 timing experiments must account for shared runner contention.
 
-Current bounded queue (2026-09-20, after `112e6acc`):
+Current bounded queue (2026-09-20, after `56017bac`):
 
-- Parent committed and pushed telemetry schema 2, complete cache-key evidence
-  checks, separate host declarations, regenerated action, and executable
-  regression fixtures as `112e6acc`. Independent source-action matrix: 24/24;
-  isolated generator report/parity tests: 8/8; actionlint passes. The exact
-  committed binary builds and generation check passes with the candidate-render
-  notice. Real CI acceptance remains pending.
-  Exact all-target Clippy found three overlong regression-test functions;
-  assertion-preserving helper extraction landed as `ebc05ab0` (same tree as
-  local signed commit `7397441a`). Independent strict Clippy and the parent's
-  six focused tests passed. Clean binary reports exact revision `ebc05ab0`.
-  Policy
-  run `35503026531` failed after 15 minutes waiting for the candidate product.
-  PR #968's refreshed API response reports `mergeable=false` and
-  `mergeable_state=dirty`; reconcile upstream before expecting a fresh PR run.
-- Velnor agent independently reviews upstream integration, required-gate
-  preservation, and the controlled rerun mechanism. It now owns the collector's
-  reused-result/fresh-attempt distinction. Completed MBX classification and
-  test refactoring are committed; timing-category repair remains separate.
-- Jackin agent owns transitive Mise task/tool resolution, lock/platform identity,
-  structured task execution semantics, and typed installation planning. Prior
-  independent findings must be resolved before this unit lands. Disabling broad
-  task auto-install depends on that model and real tool availability checks.
-  Phase 1 passed 14 focused tests and library Clippy, but runner-name inference
-  still misclassifies Windows ARM/custom runners. Replace guessed architecture
-  with explicit runner identity before acceptance. That agent independently
-  reviews the publication rollback boundary while implementation is paused.
-- Parallax agent owns the upstream Bash 3 publication-rollback repair and then
-  the main policy/candidate dependency cycle. The first rollback candidate was
-  rejected: `if ( verifier )` suppresses `errexit`, allowing an early failing
-  command followed by success to return zero. Keep that negative case.
-  The replacement background verifier preserves failure status in five parent
-  Bash 3 probes and 43 independently executed package tests. Cancellation and
-  Bash 5 execution remain open; a simpler foreground process is under review.
-- Source identity repair has a bounded patch and eight focused fixtures,
-  including staged paths and a 20,000-path pipe test. Parent checks standalone
-  coherence with the local candidate binding before integrating it. A local
-  binding is never CI artifact provenance.
-- Upstream main advanced through `e717de39` to `9307861d` (package publication
-  transactions, cache quota handling and shell-fragment scoping). Parent's
-  detached integration preserves campaign changes and the declared `325719f1`
-  runtime pin. Against `e717de39`, all-target Clippy passed; full nextest found
-  1,937 passes and one Bash 3 rollback failure. The merge remains uncommitted
-  until the regression is corrected and reviewed.
-- Actual `e717de39` main jobs wait on policy; policy waits for a candidate
-  emitted by one of those jobs and searches PR runs only. Runs `35499213737`
-  and `35499885181` failed acquisition; preview `35499213813` failed
-  generated-tree policy. This blocks correct default-branch cache seeding,
-  as well as release verification. Repair the graph and run identity contract.
-- Early candidate production, immutable consumer runtime distribution, typed
-  visible stages, selected-but-unadmitted gate rejection, cache transport/reuse,
-  desktop product reuse, Docker input closure, and dispatcher child-result
-  propagation remain required work. They are dependencies, not waived scope.
+- Telemetry schema 2 and its assertion-preserving test helpers are published
+  (`112e6acc`, `ebc05ab0`). Exact committed generation check passed. Compiler
+  reuse, telemetry phase attribution, and real CI acceptance remain separate.
+- Collector attempt freshness is published as `56017bac`: mixed reused/fresh
+  results withhold full-workflow timing while preserving marked partial
+  observations. Independent raw replay, 48 package tests, and strict Clippy
+  passed. Historical attempt 2 remains a bounded rerun, not a warm benchmark.
+- Parent integrates upstream `9e5c0eb2`, including existing package transaction,
+  MBX quota, and sccache grouping fixes. Independent review approves exact
+  published runtime `4fa7a3a8`; manifest and macOS binary provenance are retained.
+  Generated workflows, actionlint, strict Clippy, formatting, and all 1,942
+  tests pass. Final independent review and exact committed rebuild precede CI.
+- Parallax agent repairs publication verification with a foreground Bash child.
+  Conditional subshell and background alternatives were rejected. Independent
+  review approves process isolation, exit handling, cancellation, and lock
+  fencing. Full checks found fixture lint issues and a forbidden repository
+  literal; repaired helpers retain every assertion and pass the full suite.
+  This agent then resumes the
+  dedicated candidate bootstrap producer and main policy dependency graph.
+- Jackin agent repairs transitive Mise tool closure and installation. Independent
+  review found task-local `key@version` incompatible with Velnor runner's bare
+  lock-key contract, missing single-table task references, and mismatched runner
+  platforms. Generic integration remains held until those contracts are sound.
+- Velnor agent independently investigates actual upstream preview failures:
+  missing ARM cross-linker and dirty source identity. PRs #960/#962 are discovery
+  leads; their actual diffs must be checked before reusing any implementation.
+- Source identity has a bounded candidate patch and focused fixtures, including
+  staged paths and a 20,000-path pipe test. Standalone coherence with local
+  candidate binding remains unverified. Local identity is not CI provenance.
+- PR #968 remains merge-conflicted until this integration lands. Policy runs
+  `35503026531` and `35505010001` failed after waiting fifteen minutes for absent
+  candidate products. No successful full candidate validation is inferred.
+- Immutable consumer runtime distribution, typed visible stages, required-gate
+  admission, cache transport/reuse, desktop products, Docker input closure, and
+  dispatcher child-result propagation remain required work, not waived scope.
+
+See [upstream integration review](reviews/upstream-9e5-integration-review.md).
 
 Latest completed successful PR run `35493166478` (`df9fb272`) had 68 recorded
 jobs: 614 seconds trigger to final completion, 2,813 seconds aggregate execution.
