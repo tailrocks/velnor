@@ -17830,6 +17830,22 @@ lockfile = true
             !step.contains("PROVIDER_CROSS_RUN_BINDING_PROOF") && !step.contains("ADMISSION_MODE:"),
             "generated output cannot override the disabled proof state: {step}"
         );
+        let roles = policy_candidate_role_jobs("ubuntu-24.04", "abc123", "main");
+        for identity in [
+            "PR_MERGE_SHA:",
+            "EVENT_SHA:",
+            "run_api_head_sha=",
+            "workflow_ref=",
+            "workflow_sha=",
+            "workflow_repository=",
+            ".pr_head_sha == .head_sha",
+            ".run_api_head_sha | strings",
+        ] {
+            assert!(
+                roles.contains(identity),
+                "identity field `{identity}` is bound: {roles}"
+            );
+        }
     }
 
     #[test]
