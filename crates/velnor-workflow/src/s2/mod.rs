@@ -5971,10 +5971,7 @@ fn render_actionlint_config(config: &ProjectConfig) -> String {
     let runtime_products_owner = config.repository == workflow_setup_action_repository();
     // The owner-only runtime-products workflow always emits a macOS ARM64
     // matrix lane, even when the scanned project has no Apple unit.
-    let macos = (config
-        .units
-        .iter()
-        .any(|unit| unit.platform.is_macos())
+    let macos = (config.units.iter().any(|unit| unit.platform.is_macos())
         || apple_release
         || runtime_products_owner)
         .then_some(MACOS_HOSTED_RUNS_ON.to_owned());
