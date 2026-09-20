@@ -32,7 +32,7 @@
 //! [wl]: crate::scaleset::converge::WorkerLane
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -69,6 +69,9 @@ pub struct WorkerRow {
     pub dind_digest: String,
     pub worker_state: ScaleSetWorkerState,
     pub generation: u64,
+    pub runner_start_deadline_epoch: Option<u64>,
+    pub dind_restarts_used: u32,
+    pub diagnostics_complete: bool,
 }
 
 /// Parse a stored lifecycle value. Unknown values fail closed: a worker
@@ -116,6 +119,21 @@ impl WorkerRegistry {
         let conn = Connection::open(path).context("open worker registry database")?;
         conn.busy_timeout(Duration::from_secs(5))
             .context("set worker registry busy timeout")?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS scaleset_worker_runtime (
+                 ownership_id TEXT PRIMARY KEY,
+                 runner_start_deadline_epoch INTEGER,
+                 dind_restarts_used INTEGER NOT NULL DEFAULT 0 CHECK (dind_restarts_used >= 0),
+                 diagnostics_complete INTEGER NOT NULL DEFAULT 0
+                     CHECK (diagnostics_complete IN (0, 1))
+             );
+             INSERT OR IGNORE INTO scaleset_worker_runtime
+                 (ownership_id, runner_start_deadline_epoch, dind_restarts_used,
+                  diagnostics_complete)
+             SELECT ownership_id, NULL, 0, 0
+             FROM scaleset_workers;",
+        )
+        .context("create durable scale-set runtime table")?;
         Ok(Self {
             conn,
             generation: 0,
@@ -152,6 +170,11 @@ impl WorkerRegistry {
             dind_digest: row.get(10)?,
             worker_state,
             generation: generation_raw.max(0) as u64,
+            runner_start_deadline_epoch: row
+                .get::<_, Option<i64>>(15)?
+                .map(|seconds| seconds.max(0) as u64),
+            dind_restarts_used: row.get::<_, i64>(16)?.clamp(0, u32::MAX as i64) as u32,
+            diagnostics_complete: row.get::<_, i64>(17)? != 0,
         })
     }
 
@@ -200,6 +223,14 @@ impl WorkerRegistry {
                 ],
             )
             .context("upsert worker registry row")?;
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO scaleset_worker_runtime
+                 (ownership_id, runner_start_deadline_epoch, dind_restarts_used,
+                  diagnostics_complete) VALUES (?1, NULL, 0, 0)",
+                params![ownership_id],
+            )
+            .context("ensure worker runtime row")?;
         self.get(ownership_id)?
             .with_context(|| format!("worker row {ownership_id:?} vanished after upsert"))
     }
@@ -211,8 +242,12 @@ impl WorkerRegistry {
                 "SELECT ownership_id, operation_id, request_id, runner_name,
                         runner_container_id, dind_container_id, network_name, workspace_path,
                         dind_data_path, runner_digest, dind_digest, worker_state,
-                        generation, created_at, updated_at
-                 FROM scaleset_workers WHERE ownership_id = ?1",
+                        generation, created_at, updated_at,
+                        r.runner_start_deadline_epoch, COALESCE(r.dind_restarts_used, 0),
+                        COALESCE(r.diagnostics_complete, 0)
+                 FROM scaleset_workers w
+                 LEFT JOIN scaleset_worker_runtime r USING (ownership_id)
+                 WHERE w.ownership_id = ?1",
                 params![ownership_id],
                 Self::row_to_worker,
             )
@@ -227,8 +262,12 @@ impl WorkerRegistry {
                 "SELECT ownership_id, operation_id, request_id, runner_name,
                         runner_container_id, dind_container_id, network_name, workspace_path,
                         dind_data_path, runner_digest, dind_digest, worker_state,
-                        generation, created_at, updated_at
-                 FROM scaleset_workers WHERE request_id = ?1 LIMIT 1",
+                        generation, created_at, updated_at,
+                        r.runner_start_deadline_epoch, COALESCE(r.dind_restarts_used, 0),
+                        COALESCE(r.diagnostics_complete, 0)
+                 FROM scaleset_workers w
+                 LEFT JOIN scaleset_worker_runtime r USING (ownership_id)
+                 WHERE w.request_id = ?1 LIMIT 1",
                 params![request_id],
                 Self::row_to_worker,
             )
@@ -245,9 +284,12 @@ impl WorkerRegistry {
                 "SELECT ownership_id, operation_id, request_id, runner_name,
                         runner_container_id, dind_container_id, network_name, workspace_path,
                         dind_data_path, runner_digest, dind_digest, worker_state,
-                        generation, created_at, updated_at
-                 FROM scaleset_workers
-                 WHERE worker_state != 'permit_released' ORDER BY created_at ASC",
+                        generation, created_at, updated_at,
+                        r.runner_start_deadline_epoch, COALESCE(r.dind_restarts_used, 0),
+                        COALESCE(r.diagnostics_complete, 0)
+                 FROM scaleset_workers w
+                 LEFT JOIN scaleset_worker_runtime r USING (ownership_id)
+                 WHERE w.worker_state != 'permit_released' ORDER BY w.created_at ASC",
             )
             .context("list live workers")?;
         stmt.query_map([], Self::row_to_worker)
@@ -271,6 +313,77 @@ impl WorkerRegistry {
             .context("record worker edge")?;
         if updated == 0 {
             anyhow::bail!("worker registry holds no row for {ownership_id:?}");
+        }
+        Ok(())
+    }
+
+    fn set_runner_start_deadline_if_none(
+        &mut self,
+        ownership_id: &str,
+        deadline_epoch: u64,
+    ) -> Result<u64> {
+        let deadline = i64::try_from(deadline_epoch).unwrap_or(i64::MAX);
+        self.conn
+            .execute(
+                "UPDATE scaleset_worker_runtime
+             SET runner_start_deadline_epoch = COALESCE(runner_start_deadline_epoch, ?1)
+             WHERE ownership_id = ?2",
+                params![deadline, ownership_id],
+            )
+            .context("persist runner startup deadline")?;
+        let stored: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT runner_start_deadline_epoch FROM scaleset_worker_runtime
+             WHERE ownership_id = ?1",
+                params![ownership_id],
+                |row| row.get(0),
+            )
+            .context("read runner startup deadline")?;
+        stored
+            .map(|seconds| seconds.max(0) as u64)
+            .with_context(|| format!("worker runtime row {ownership_id:?} is missing"))
+    }
+
+    fn clear_runner_start_deadline(&mut self, ownership_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE scaleset_worker_runtime SET runner_start_deadline_epoch = NULL
+             WHERE ownership_id = ?1",
+                params![ownership_id],
+            )
+            .context("clear runner startup deadline")?;
+        Ok(())
+    }
+
+    fn set_dind_restarts_used(&mut self, ownership_id: &str, used: u32) -> Result<()> {
+        let used = i64::from(used);
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE scaleset_worker_runtime
+             SET dind_restarts_used = MAX(dind_restarts_used, ?1)
+             WHERE ownership_id = ?2",
+                params![used, ownership_id],
+            )
+            .context("persist DinD restart budget")?;
+        if updated == 0 {
+            anyhow::bail!("worker runtime holds no row for {ownership_id:?}");
+        }
+        Ok(())
+    }
+
+    fn set_diagnostics_complete(&mut self, ownership_id: &str) -> Result<()> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE scaleset_worker_runtime SET diagnostics_complete = 1
+             WHERE ownership_id = ?1",
+                params![ownership_id],
+            )
+            .context("persist diagnostic export completion")?;
+        if updated == 0 {
+            anyhow::bail!("worker runtime holds no row for {ownership_id:?}");
         }
         Ok(())
     }
@@ -386,8 +499,71 @@ impl DaemonWorkerLane {
         OwnershipId::bind(intent.scale_set_id, &intent.runner_name).as_str()
     }
 
+    fn terminal_key(&self, request_id: i64) -> Result<String, LaneError> {
+        Ok(self
+            .intents
+            .get_by_request(self.config.scale_set_id, request_id)
+            .map_err(|error| LaneError::new("find provision intent", error))?
+            .map(|intent| Self::ownership_key(&intent))
+            .unwrap_or_else(|| {
+                OwnershipId::bind(
+                    self.config.scale_set_id,
+                    &crate::scaleset::runner_name(self.config.scale_set_id, request_id),
+                )
+                .as_str()
+            }))
+    }
+
+    fn note_terminal_request(&mut self, request_id: i64) -> Result<(), LaneError> {
+        self.refresh_generation()?;
+        self.opportunistic_sweep();
+        let key = self.terminal_key(request_id)?;
+        self.drive_terminal(&key)
+            .map_err(|error| LaneError::new("drive worker terminal", error))
+    }
+
     fn worker_state_dir(&self, ownership: &OwnershipId) -> PathBuf {
         self.config.state_root.join(ownership.slug())
+    }
+
+    /// Recover the exact state directory recorded when this worker was
+    /// provisioned. Config changes across restart must not redirect cleanup.
+    fn recorded_state_dir(&self, row: &WorkerRow) -> Result<PathBuf> {
+        let ownership = OwnershipId::bind(self.config.scale_set_id, &row.runner_name);
+        if row.ownership_id != ownership.as_str() {
+            anyhow::bail!("worker ownership id does not match its runner name");
+        }
+        let workspace = PathBuf::from(
+            row.workspace_path
+                .as_deref()
+                .context("worker has no recorded workspace path")?,
+        );
+        if workspace.file_name().is_none_or(|name| name != "workspace")
+            || workspace
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+        {
+            anyhow::bail!("worker has an invalid recorded workspace path");
+        }
+        let state_dir = workspace
+            .parent()
+            .context("recorded workspace path has no state directory")?;
+        let state_dir_slug = ownership.slug();
+        if state_dir
+            .file_name()
+            .is_none_or(|name| name.to_string_lossy() != state_dir_slug)
+        {
+            anyhow::bail!("recorded worker state path does not match its ownership id");
+        }
+        let dind_data = PathBuf::from(
+            row.dind_data_path
+                .as_deref()
+                .context("worker has no recorded DinD data path")?,
+        );
+        if dind_data != state_dir.join("dind-data") {
+            anyhow::bail!("recorded worker DinD data path does not match its state directory");
+        }
+        Ok(state_dir.to_path_buf())
     }
 
     /// Refresh the registry generation from the ledger. Edges stamped with
@@ -444,6 +620,21 @@ impl DaemonWorkerLane {
         anyhow::bail!("ledger epoch moved twice under one lane transition for {holder:?}")
     }
 
+    /// Retain worker occupancy and close its demand atomically after a
+    /// cleanup failure. Retry one generation race; never turn an unknown
+    /// holder into false free capacity.
+    fn retain_uncertain(&mut self, holder: &str) -> Result<()> {
+        for _ in 0..2 {
+            let generation = self.ledger.generation()?;
+            match self.ledger.retain_uncertain(holder, generation) {
+                Ok(()) => return Ok(()),
+                Err(error) if SharedLedger::is_stale_generation(&error) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        anyhow::bail!("ledger epoch moved twice while retaining uncertain holder {holder:?}")
+    }
+
     /// Recorded state of one tracked worker.
     fn worker_state(&self, key: &str) -> Result<ScaleSetWorkerState> {
         self.workers
@@ -473,7 +664,23 @@ impl DaemonWorkerLane {
             .with_context(|| format!("no worker recorded for {key:?}"))?;
         let ownership = OwnershipId::bind(self.config.scale_set_id, &row.runner_name);
         let identity = WorkerIdentity::new(ownership);
-        let state_dir = self.worker_state_dir(identity.ownership());
+        let state_dir = self.recorded_state_dir(&row)?;
+        let deadline = match row.runner_start_deadline_epoch {
+            Some(deadline) => Some(deadline),
+            None if matches!(
+                row.worker_state,
+                ScaleSetWorkerState::ProvisionIntent | ScaleSetWorkerState::DindReady
+            ) =>
+            {
+                Some(self.registry.set_runner_start_deadline_if_none(
+                    key,
+                    crate::scaleset::worker::supervise::epoch_seconds().saturating_add(
+                        crate::scaleset::worker::supervise::RUNNER_START_TIMEOUT.as_secs(),
+                    ),
+                )?)
+            }
+            None => None,
+        };
         let mut worker = ScaleSetWorker::new(identity.clone(), &row.operation_id);
         if let Some(request_id) = row.request_id {
             worker.bind_request(request_id);
@@ -487,7 +694,12 @@ impl DaemonWorkerLane {
             key.to_owned(),
             LiveWorker {
                 worker,
-                supervision: Supervision::new(identity, &state_dir),
+                supervision: Supervision::from_runtime(
+                    identity,
+                    &state_dir,
+                    row.dind_restarts_used,
+                    deadline,
+                ),
             },
         );
         Ok(())
@@ -496,6 +708,15 @@ impl DaemonWorkerLane {
     /// Tick one worker's supervision. `WorkerFailed` drives the terminal
     /// path immediately (explicit fail with diagnostics + cleanup).
     fn tick_worker(&mut self, key: &str) -> Result<SupervisionOutcome, LaneError> {
+        if !self.workers.contains_key(key) {
+            let row = self
+                .registry
+                .get(key)
+                .map_err(|error| LaneError::new("read worker row", error))?;
+            if row.is_some_and(|row| provision_pending(row.worker_state)) {
+                return Ok(SupervisionOutcome::Healthy);
+            }
+        }
         self.ensure_live(key)
             .map_err(|error| LaneError::new("adopt worker", error))?;
         let recorded = self
@@ -505,15 +726,42 @@ impl DaemonWorkerLane {
             return Ok(SupervisionOutcome::Healthy);
         }
         let outcome = {
+            let runner = &mut self.runner;
+            let registry = &mut self.registry;
             let live = self
                 .workers
                 .get_mut(key)
                 .with_context(|| format!("live worker {key:?} vanished"))
                 .map_err(|error| LaneError::new("adopt worker", error))?;
             live.supervision
-                .tick(&mut *self.runner, recorded)
+                .tick_with_runtime(
+                    &mut **runner,
+                    recorded,
+                    crate::scaleset::worker::supervise::epoch_seconds(),
+                    &mut |used| registry.set_dind_restarts_used(key, used),
+                )
                 .map_err(|error| LaneError::new("supervise worker", error))?
         };
+        if outcome == SupervisionOutcome::RunnerConnected {
+            self.registry
+                .clear_runner_start_deadline(key)
+                .map_err(|error| LaneError::new("clear runner startup deadline", error))?;
+            if let Some(live) = self.workers.get_mut(key) {
+                live.supervision.clear_runner_start_deadline();
+            }
+            match recorded {
+                ScaleSetWorkerState::ProvisionIntent => {
+                    self.transition_worker(key, ScaleSetWorkerState::DindReady)
+                        .map_err(|error| LaneError::new("record DinD ready", error))?;
+                    self.transition_worker(key, ScaleSetWorkerState::RunnerConnected)
+                        .map_err(|error| LaneError::new("record runner connected", error))?;
+                }
+                ScaleSetWorkerState::DindReady => self
+                    .transition_worker(key, ScaleSetWorkerState::RunnerConnected)
+                    .map_err(|error| LaneError::new("record runner connected", error))?,
+                _ => {}
+            }
+        }
         if matches!(outcome, SupervisionOutcome::WorkerFailed { .. }) {
             self.drive_terminal(key)
                 .map_err(|error| LaneError::new("fail worker", error))?;
@@ -532,8 +780,36 @@ impl DaemonWorkerLane {
             return;
         }
         self.last_sweep = Some(Instant::now());
+        match self.registry.list_live() {
+            Ok(rows) => {
+                for row in rows {
+                    if terminal_side(row.worker_state)
+                        && let Err(error) = self.drive_terminal(&row.ownership_id)
+                    {
+                        tracing::warn!(
+                            worker = row.ownership_id.as_str(),
+                            error = format!("{error:#}"),
+                            "scale-set terminal cleanup retry failed"
+                        );
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(
+                error = format!("{error:#}"),
+                "scale-set terminal cleanup scan failed"
+            ),
+        }
         let keys: Vec<String> = self.workers.keys().cloned().collect();
         for key in keys {
+            if self
+                .registry
+                .get(&key)
+                .ok()
+                .flatten()
+                .is_some_and(|row| terminal_side(row.worker_state))
+            {
+                continue;
+            }
             if let Err(error) = self.tick_worker(&key) {
                 tracing::warn!(
                     worker = key.as_str(),
@@ -558,8 +834,8 @@ impl DaemonWorkerLane {
                 Ok(())
             }
             TerminalOutcome::CleanupFailed { failures } => {
-                // Stays live at `owned_cleanup`: the redelivered retry
-                // resumes the terminal path from the durable row.
+                // The durable row stays at its current cleanup phase; the
+                // next message or idle sweep resumes that exact phase.
                 anyhow::bail!("owned cleanup failed for {key}: {}", failures.join("; "))
             }
         }
@@ -570,7 +846,7 @@ impl DaemonWorkerLane {
         // needs releasing. The Processor moved it to `cleaning` before
         // calling; the release below finishes it.
         let row = self.registry.get(key)?;
-        let Some(row) = row else {
+        let Some(mut row) = row else {
             if let Some(holder) = holder_for_key(self.config.scale_set_id, key) {
                 self.ledger.release(&holder)?;
             }
@@ -581,10 +857,12 @@ impl DaemonWorkerLane {
             // adoption-time release and the completion observation lets
             // startup reconcile re-attest the permit from the
             // still-active demand row. Converge to the recorded truth.
+            // The exported diagnostics stay on disk for post-mortem,
+            // exactly like a fresh release: deletion ends owned Docker
+            // objects, never the exported logs.
             if let Some(holder) = holder_for_key(self.config.scale_set_id, key) {
                 self.ledger.release(&holder)?;
             }
-            self.workers.remove(key);
             return Ok(TerminalOutcome::AlreadyReleased);
         }
         self.ensure_live(key)?;
@@ -598,31 +876,83 @@ impl DaemonWorkerLane {
             recorded = ScaleSetWorkerState::DiagnosticExport;
         }
         if recorded == ScaleSetWorkerState::DiagnosticExport {
-            self.transition_worker(key, ScaleSetWorkerState::OwnedCleanup)?;
-        }
-        let report = {
-            let live = self
-                .workers
-                .get_mut(key)
-                .with_context(|| format!("live worker {key:?} vanished"))?;
-            live.supervision.cleanup(&mut *self.runner)?
-        };
-        if !report.confirmed() {
-            // Cleanup failed: the permit stays as a visible `uncertain`
-            // reservation (§4.1) and the worker stays at `owned_cleanup`
-            // for the redelivered retry. Never released, never lost.
-            if let Some(request_id) = row.request_id {
-                let holder = permit_holder(self.config.scale_set_id, request_id);
-                self.fenced_transition(&holder, LedgerPermitState::Uncertain)?;
+            let export = (|| {
+                let live = self
+                    .workers
+                    .get_mut(key)
+                    .with_context(|| format!("live worker {key:?} vanished"))?;
+                if !row.diagnostics_complete {
+                    live.supervision.clear_diagnostic_completion_marker()?;
+                }
+                live.supervision.prepare_cleanup(&mut *self.runner)
+            })();
+            let export = match export {
+                Ok(export) => export,
+                Err(error) => {
+                    return self.record_cleanup_failure(
+                        &row,
+                        key,
+                        vec![format!("prepare diagnostics: {error:#}")],
+                    );
+                }
+            };
+            if !export.failures.is_empty() {
+                return self.record_cleanup_failure(&row, key, export.failures);
             }
-            tracing::warn!(
-                worker = key,
-                failures = report.failures.join("; ").as_str(),
-                "scale-set owned cleanup failed; permit retained uncertain"
-            );
-            return Ok(TerminalOutcome::CleanupFailed {
-                failures: report.failures,
-            });
+            self.registry.set_diagnostics_complete(key)?;
+            row.diagnostics_complete = true;
+            self.transition_worker(key, ScaleSetWorkerState::OwnedCleanup)?;
+            recorded = ScaleSetWorkerState::OwnedCleanup;
+        }
+        if recorded == ScaleSetWorkerState::OwnedCleanup {
+            let recovery_export = (|| {
+                let live = self
+                    .workers
+                    .get_mut(key)
+                    .with_context(|| format!("live worker {key:?} vanished"))?;
+                if !live.supervision.state_dir_exists()? {
+                    return Ok(None);
+                }
+                if !row.diagnostics_complete {
+                    live.supervision.clear_diagnostic_completion_marker()?;
+                }
+                if row.diagnostics_complete && live.supervision.diagnostics_complete()? {
+                    return Ok(None);
+                }
+                live.supervision
+                    .prepare_cleanup(&mut *self.runner)
+                    .map(Some)
+            })();
+            let recovery_export = match recovery_export {
+                Ok(export) => export,
+                Err(error) => {
+                    return self.record_cleanup_failure(
+                        &row,
+                        key,
+                        vec![format!("recover diagnostics: {error:#}")],
+                    );
+                }
+            };
+            if let Some(export) = recovery_export {
+                if !export.failures.is_empty() {
+                    return self.record_cleanup_failure(&row, key, export.failures);
+                }
+                self.registry.set_diagnostics_complete(key)?;
+            }
+            let failures = {
+                let live = self
+                    .workers
+                    .get_mut(key)
+                    .with_context(|| format!("live worker {key:?} vanished"))?;
+                live.supervision.teardown_owned_resources(&mut *self.runner)
+            };
+            if !failures.is_empty() {
+                return self.record_cleanup_failure(&row, key, failures);
+            }
+            // The state dir is deliberately NOT deleted here: the exported
+            // diagnostics survive the worker for post-mortem ("diagnostics
+            // exported before deletion" — deletion ends owned Docker
+            // objects, never the exported logs).
         }
         if let Some(request_id) = row.request_id {
             let holder = permit_holder(self.config.scale_set_id, request_id);
@@ -630,6 +960,37 @@ impl DaemonWorkerLane {
         }
         self.transition_worker(key, ScaleSetWorkerState::PermitReleased)?;
         Ok(TerminalOutcome::Released)
+    }
+
+    /// Whether the terminal path already claimed `key`. Only
+    /// `drive_terminal_inner` writes terminal-side states, so a
+    /// terminal-side row after a failed tick proves the worker failed
+    /// explicitly (cleanup unconfirmed, permit retained uncertain) as
+    /// opposed to a tick that never got that far. Unreadable rows answer
+    /// conservatively: keep the worker tracked.
+    fn terminal_cleanup_started(&self, key: &str) -> bool {
+        self.registry
+            .get(key)
+            .map(|row| row.is_some_and(|row| terminal_side(row.worker_state)))
+            .unwrap_or(false)
+    }
+
+    fn record_cleanup_failure(
+        &mut self,
+        row: &WorkerRow,
+        key: &str,
+        failures: Vec<String>,
+    ) -> Result<TerminalOutcome> {
+        if let Some(request_id) = row.request_id {
+            let holder = permit_holder(self.config.scale_set_id, request_id);
+            self.retain_uncertain(&holder)?;
+        }
+        tracing::warn!(
+            worker = key,
+            failures = failures.join("; ").as_str(),
+            "scale-set terminal cleanup failed; permit retained uncertain"
+        );
+        Ok(TerminalOutcome::CleanupFailed { failures })
     }
 
     /// Adopt-or-fail every recorded worker (startup + crash recovery).
@@ -660,6 +1021,10 @@ impl DaemonWorkerLane {
                 report.skipped_released += 1;
                 continue;
             }
+            if provision_pending(row.worker_state) {
+                report.awaiting_provision += 1;
+                continue;
+            }
             if terminal_side(row.worker_state) {
                 // Crash during cleanup: resume the terminal path now. A
                 // still-failing cleanup must not fail adoption (that would
@@ -680,20 +1045,36 @@ impl DaemonWorkerLane {
                 Ok(SupervisionOutcome::Healthy | SupervisionOutcome::DindRestarted { .. }) => {
                     report.adopted += 1;
                 }
+                Ok(SupervisionOutcome::RunnerConnected) => {
+                    report.adopted += 1;
+                }
                 Ok(SupervisionOutcome::WorkerFailed { .. }) => {
                     // `tick_worker` already drove the terminal path.
                     report.failed += 1;
                 }
                 Err(error) => {
-                    // Docker unreachable (daemon restart race): keep the
-                    // worker tracked; the message path retries the tick.
-                    // The permit stays held either way — never freed blind.
-                    tracing::warn!(
-                        worker = key.as_str(),
-                        error = error.to_string(),
-                        "scale-set adoption tick failed; worker stays tracked"
-                    );
-                    report.adopted += 1;
+                    // A tick that reached the terminal path failed the
+                    // worker explicitly (terminal-side row, permit
+                    // retained uncertain): that is a failure, never an
+                    // adoption. Anything earlier (Docker unreachable,
+                    // restart impossible) keeps the worker tracked; the
+                    // message path retries the tick. The permit stays
+                    // held either way — never freed blind.
+                    if self.terminal_cleanup_started(&key) {
+                        tracing::warn!(
+                            worker = key.as_str(),
+                            error = error.to_string(),
+                            "scale-set adoption terminal cleanup failed; the message path will retry"
+                        );
+                        report.failed += 1;
+                    } else {
+                        tracing::warn!(
+                            worker = key.as_str(),
+                            error = error.to_string(),
+                            "scale-set adoption tick failed; worker stays tracked"
+                        );
+                        report.adopted += 1;
+                    }
                 }
             }
         }
@@ -717,12 +1098,24 @@ impl DaemonWorkerLane {
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(
-                        worker = key.as_str(),
-                        error = error.to_string(),
-                        "scale-set shutdown tick failed; worker left for restart adoption"
-                    );
-                    report.adopted_across_restart += 1;
+                    // Same taxonomy as adoption: a tick that reached the
+                    // terminal path failed the worker explicitly, even
+                    // though cleanup stays unconfirmed for the restart.
+                    if self.terminal_cleanup_started(&key) {
+                        tracing::warn!(
+                            worker = key.as_str(),
+                            error = error.to_string(),
+                            "scale-set shutdown terminal cleanup failed; restart adoption resumes it"
+                        );
+                        report.failed += 1;
+                    } else {
+                        tracing::warn!(
+                            worker = key.as_str(),
+                            error = error.to_string(),
+                            "scale-set shutdown tick failed; worker left for restart adoption"
+                        );
+                        report.adopted_across_restart += 1;
+                    }
                 }
             }
         }
@@ -793,6 +1186,19 @@ fn terminal_side(state: ScaleSetWorkerState) -> bool {
         ScaleSetWorkerState::Terminal
             | ScaleSetWorkerState::DiagnosticExport
             | ScaleSetWorkerState::OwnedCleanup
+    )
+}
+
+fn provision_pending(state: ScaleSetWorkerState) -> bool {
+    matches!(
+        state,
+        ScaleSetWorkerState::Observed
+            | ScaleSetWorkerState::Eligible
+            | ScaleSetWorkerState::Reserved
+            | ScaleSetWorkerState::AcquireIntent
+            | ScaleSetWorkerState::Acquired
+            | ScaleSetWorkerState::Uncertain
+            | ScaleSetWorkerState::ProvisionIntent
     )
 }
 
@@ -903,7 +1309,7 @@ impl WorkerLane for DaemonWorkerLane {
 
         let ownership = OwnershipId::bind(intent.scale_set_id, &intent.runner_name);
         let identity = WorkerIdentity::new(ownership.clone());
-        let state_dir = self.worker_state_dir(&ownership);
+        let proposed_state_dir = self.worker_state_dir(&ownership);
         // The registry row precedes the first Docker call: a crash between
         // Docker calls still converges on these exact names.
         let row = self
@@ -914,12 +1320,21 @@ impl WorkerLane for DaemonWorkerLane {
                 intent.request_id,
                 &intent.runner_name,
                 &identity.network(),
-                state_dir.join("workspace").to_string_lossy().as_ref(),
-                state_dir.join("dind-data").to_string_lossy().as_ref(),
+                proposed_state_dir
+                    .join("workspace")
+                    .to_string_lossy()
+                    .as_ref(),
+                proposed_state_dir
+                    .join("dind-data")
+                    .to_string_lossy()
+                    .as_ref(),
                 &intent.runner_digest,
                 &intent.dind_digest,
             )
             .map_err(|error| LaneError::new("record worker", error))?;
+        let state_dir = self
+            .recorded_state_dir(&row)
+            .map_err(|error| LaneError::new("read worker state path", error))?;
 
         let mut worker = ScaleSetWorker::new(identity.clone(), &intent.operation_id);
         worker.bind_request(intent.request_id);
@@ -972,8 +1387,37 @@ impl WorkerLane for DaemonWorkerLane {
             jit_config,
             ready_attempts: self.config.ready_attempts,
         };
-        let outcome = provision_worker(&mut *self.runner, &*self.hook, &plan, &std::thread::sleep)
-            .map_err(|error| LaneError::new("provision worker pair", error))?;
+        let mut runner_start_deadline_epoch = row.runner_start_deadline_epoch;
+        let outcome = {
+            let registry = &mut self.registry;
+            let ownership_key = key.clone();
+            let mut before_runner_start = || {
+                let deadline = registry.set_runner_start_deadline_if_none(
+                    &ownership_key,
+                    crate::scaleset::worker::supervise::epoch_seconds().saturating_add(
+                        crate::scaleset::worker::supervise::RUNNER_START_TIMEOUT.as_secs(),
+                    ),
+                )?;
+                runner_start_deadline_epoch = Some(deadline);
+                Ok(())
+            };
+            let runner = &mut self.runner;
+            let hook = &self.hook;
+            provision_worker(
+                &mut **runner,
+                &**hook,
+                &plan,
+                &std::thread::sleep,
+                &mut before_runner_start,
+            )
+        }
+        .map_err(|error| LaneError::new("provision worker pair", error))?;
+        if outcome.connection == RunnerConnection::Connected {
+            self.registry
+                .clear_runner_start_deadline(&key)
+                .map_err(|error| LaneError::new("clear runner startup deadline", error))?;
+            runner_start_deadline_epoch = None;
+        }
         worker.record_versions(
             &outcome.runner_attestation.content_version,
             &outcome.dind_attestation.content_version,
@@ -996,7 +1440,12 @@ impl WorkerLane for DaemonWorkerLane {
             key,
             LiveWorker {
                 worker,
-                supervision: Supervision::new(identity, &state_dir),
+                supervision: Supervision::from_runtime(
+                    identity,
+                    &state_dir,
+                    row.dind_restarts_used,
+                    runner_start_deadline_epoch,
+                ),
             },
         );
         Ok(())
@@ -1083,26 +1532,27 @@ impl WorkerLane for DaemonWorkerLane {
     }
 
     fn note_terminal(&mut self, completed: &ScaleSetJobCompleted) -> Result<(), Self::Error> {
+        self.note_terminal_request(completed.base.runner_request_id)
+    }
+
+    fn note_canceled(&mut self, request_id: i64) -> Result<(), Self::Error> {
+        self.note_terminal_request(request_id)
+    }
+
+    fn idle_tick(&mut self) -> Result<(), Self::Error> {
         self.refresh_generation()?;
         self.opportunistic_sweep();
-        let request_id = completed.base.runner_request_id;
-        // Resolve the ownership key from the intent when one exists (the
-        // common path), else from the request id directly.
-        let key = self
-            .intents
-            .get_by_request(self.config.scale_set_id, request_id)
-            .map_err(|error| LaneError::new("find provision intent", error))?
-            .map(|intent| Self::ownership_key(&intent))
-            .unwrap_or_else(|| {
-                OwnershipId::bind(
-                    self.config.scale_set_id,
-                    &crate::scaleset::runner_name(self.config.scale_set_id, request_id),
-                )
-                .as_str()
-            });
-        self.drive_terminal(&key)
-            .map_err(|error| LaneError::new("drive worker terminal", error))?;
         Ok(())
+    }
+
+    fn owns_terminal_cleanup(&self, request_id: i64) -> Result<bool, Self::Error> {
+        let key = self.terminal_key(request_id)?;
+        let owned = self
+            .registry
+            .get(&key)
+            .map_err(|error| LaneError::new("read worker row", error))?
+            .is_some();
+        Ok(owned)
     }
 }
 
@@ -1118,6 +1568,123 @@ impl WorkerLane for DaemonWorkerLane {
 )]
 mod tests {
     use super::*;
+
+    struct CleanupRunner {
+        fail_runner_remove: bool,
+        runner_name: String,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl CleanupRunner {
+        fn missing(
+            runner_name: String,
+            seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+        ) -> Self {
+            Self {
+                fail_runner_remove: false,
+                runner_name,
+                seen,
+            }
+        }
+
+        fn fail_runner_remove(
+            runner_name: String,
+            seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+        ) -> Self {
+            Self {
+                fail_runner_remove: true,
+                runner_name,
+                seen,
+            }
+        }
+    }
+
+    impl WorkerRunner for CleanupRunner {
+        fn run(
+            &mut self,
+            program: &str,
+            args: &[String],
+        ) -> anyhow::Result<crate::scaleset::worker::WorkerOutput> {
+            assert_eq!(program, "docker");
+            self.seen.lock().unwrap().push(args.to_vec());
+            if args.first().is_some_and(|arg| arg == "logs") {
+                return Ok(crate::scaleset::worker::WorkerOutput {
+                    code: 0,
+                    stdout: "diagnostic log\n".to_owned(),
+                    stderr: String::new(),
+                });
+            }
+            if args.first().is_some_and(|arg| arg == "inspect") {
+                return Ok(crate::scaleset::worker::WorkerOutput {
+                    code: 0,
+                    stdout: r#"[{"Id":"id","Name":"/worker","State":{"Status":"exited"},"NetworkSettings":{},"Config":{"Env":["JIT_SECRET=sentinel"],"Labels":{"owner":"test"}}}]"#.to_owned(),
+                    stderr: String::new(),
+                });
+            }
+            if self.fail_runner_remove
+                && args.iter().any(|arg| arg == &self.runner_name)
+                && args.iter().any(|arg| arg == "rm")
+            {
+                self.fail_runner_remove = false;
+                return Ok(crate::scaleset::worker::WorkerOutput {
+                    code: 1,
+                    stdout: String::new(),
+                    stderr: "container is busy".to_owned(),
+                });
+            }
+            Ok(crate::scaleset::worker::WorkerOutput {
+                code: 1,
+                stdout: String::new(),
+                stderr: "Error: No such object".to_owned(),
+            })
+        }
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-lane-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn test_lane(
+        db: &Path,
+        ledger: &Path,
+        state_root: &Path,
+        runner: Box<dyn WorkerRunner + Send>,
+    ) -> DaemonWorkerLane {
+        let client = ScaleSetClient::new_with_pat(
+            "http://127.0.0.1/octo-org",
+            "test-token",
+            crate::scaleset::client::SystemInfo::default(),
+            crate::scaleset::backoff::RetryPolicy::default(),
+        )
+        .unwrap();
+        DaemonWorkerLane {
+            client,
+            config: LaneConfig {
+                scale_set_id: 7,
+                profile: HomogeneousProfile::for_arch("x86_64").unwrap(),
+                state_root: state_root.to_path_buf(),
+                ready_attempts: 1,
+                sweep_interval: Duration::ZERO,
+            },
+            runner,
+            hook: Box::new(crate::scaleset::worker::DockerToolContentHook),
+            intents: ProvisionIntentStore::open(db).unwrap(),
+            registry: WorkerRegistry::open(db).unwrap(),
+            ledger: SharedLedger::open(ledger).unwrap(),
+            workers: HashMap::new(),
+            last_sweep: None,
+        }
+    }
 
     #[test]
     fn worker_state_round_trips_and_rejects_unknown() {
@@ -1239,6 +1806,453 @@ mod tests {
             .set_state("7/velnor-7-4244", ScaleSetWorkerState::PermitReleased)
             .unwrap();
         assert!(registry.list_live().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn registry_runtime_budget_and_start_deadline_survive_reopen() {
+        let dir = unique_test_dir("runtime-persist");
+        let db = dir.join("state.db");
+        let key = "7/velnor-7-4244";
+        let mut registry = WorkerRegistry::open(&db).unwrap();
+        registry
+            .upsert(
+                key,
+                "op-1",
+                4244,
+                "velnor-7-4244",
+                "net",
+                "/tmp/workers/worker/workspace",
+                "/tmp/workers/worker/dind-data",
+                "sha256:runner",
+                "sha256:dind",
+            )
+            .unwrap();
+        assert_eq!(
+            registry
+                .set_runner_start_deadline_if_none(key, 1_000)
+                .unwrap(),
+            1_000
+        );
+        assert_eq!(
+            registry
+                .set_runner_start_deadline_if_none(key, 2_000)
+                .unwrap(),
+            1_000
+        );
+        registry.set_dind_restarts_used(key, 2).unwrap();
+        drop(registry);
+
+        let registry = WorkerRegistry::open(&db).unwrap();
+        let row = registry.get(key).unwrap().unwrap();
+        assert_eq!(row.runner_start_deadline_epoch, Some(1_000));
+        assert_eq!(row.dind_restarts_used, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn owned_cleanup_replay_preserves_diagnostics_across_permit_release() {
+        let dir = unique_test_dir("cleanup-replay");
+        let db = dir.join("state.db");
+        let ledger = dir.join("permit-ledger.db");
+        let state_root = dir.join("workers");
+        let ownership = OwnershipId::bind(7, "velnor-7-4244");
+        let identity = WorkerIdentity::new(ownership.clone());
+        let key = ownership.as_str();
+        let state_dir = state_root.join(ownership.slug());
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("raw-job.log"), "secret diagnostic bytes").unwrap();
+        std::fs::create_dir_all(state_dir.join("diagnostics")).unwrap();
+        std::fs::write(
+            state_dir.join("diagnostics/capture.complete"),
+            b"velnor-diagnostics-v1\n",
+        )
+        .unwrap();
+
+        let holder = permit_holder(7, 4244);
+        {
+            let mut global = velnor_control::permit_ledger::PermitLedger::open(&ledger).unwrap();
+            global.set_max_jobs(1).unwrap();
+            let generation = global.begin_epoch().unwrap();
+            let now = velnor_model::Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp()
+                .max(0) as u64;
+            global
+                .observe_demand(
+                    &holder,
+                    velnor_control::permit_ledger::PermitLane::ScaleSet,
+                    "scaleset/7",
+                    now,
+                    now,
+                )
+                .unwrap();
+            assert_eq!(
+                global
+                    .acquire(
+                        &holder,
+                        velnor_control::permit_ledger::PermitLane::ScaleSet,
+                        velnor_control::permit_ledger::PermitState::Provisioning,
+                        generation,
+                        None,
+                    )
+                    .unwrap(),
+                velnor_control::permit_ledger::AcquireOutcome::Acquired
+            );
+        }
+
+        let mut registry = WorkerRegistry::open(&db).unwrap();
+        registry
+            .upsert(
+                &key,
+                "op-1",
+                4244,
+                "velnor-7-4244",
+                &identity.network(),
+                state_dir.join("workspace").to_string_lossy().as_ref(),
+                state_dir.join("dind-data").to_string_lossy().as_ref(),
+                "sha256:runner",
+                "sha256:dind",
+            )
+            .unwrap();
+        registry
+            .set_state(&key, ScaleSetWorkerState::OwnedCleanup)
+            .unwrap();
+        registry.set_diagnostics_complete(&key).unwrap();
+        drop(registry);
+
+        let first_seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let first_runner =
+            CleanupRunner::fail_runner_remove(identity.runner_container(), first_seen.clone());
+        let mut first_lane = test_lane(&db, &ledger, &state_root, Box::new(first_runner));
+        assert!(first_lane.drive_terminal(&key).is_err());
+        let row = first_lane.registry.get(&key).unwrap().unwrap();
+        assert_eq!(row.worker_state, ScaleSetWorkerState::OwnedCleanup);
+        assert!(state_dir.join("raw-job.log").exists());
+        assert_eq!(first_lane.ledger.occupied().unwrap(), 1);
+        assert_eq!(
+            first_lane.ledger.holder_state(&holder).unwrap(),
+            Some(LedgerPermitState::Uncertain)
+        );
+        let global = velnor_control::permit_ledger::PermitLedger::open(&ledger).unwrap();
+        assert_eq!(
+            global.demand(&holder).unwrap().unwrap().state,
+            velnor_control::permit_ledger::DemandState::Terminal
+        );
+        drop(global);
+        assert!(first_seen
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|args| !args.iter().any(|arg| arg == "logs" || arg == "inspect")));
+        drop(first_lane);
+
+        // New process resumes from OwnedCleanup. Missing Docker objects are
+        // accepted; the exported diagnostics survive the released
+        // checkpoint for post-mortem while the permit frees.
+        let replay_seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let replay_runner =
+            CleanupRunner::missing(identity.runner_container(), replay_seen.clone());
+        let mut replay_lane = test_lane(&db, &ledger, &state_root, Box::new(replay_runner));
+        replay_lane.drive_terminal(&key).unwrap();
+        assert!(state_dir.join("raw-job.log").is_file());
+        assert!(
+            state_dir.join("diagnostics/capture.complete").is_file(),
+            "exported diagnostics survive the permit release"
+        );
+        let row = replay_lane.registry.get(&key).unwrap().unwrap();
+        assert_eq!(row.worker_state, ScaleSetWorkerState::PermitReleased);
+        assert_eq!(replay_lane.ledger.occupied().unwrap(), 0);
+        let calls_after_release = replay_seen.lock().unwrap().len();
+        assert_eq!(calls_after_release, 6);
+
+        // A duplicate terminal observation is idempotent and performs no
+        // Docker work after the durable release checkpoint.
+        replay_lane.drive_terminal(&key).unwrap();
+        assert_eq!(replay_seen.lock().unwrap().len(), calls_after_release);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminal_diagnostics_export_is_persisted_once_before_teardown() {
+        let dir = unique_test_dir("terminal-diagnostics-once");
+        let db = dir.join("state.db");
+        let ledger = dir.join("permit-ledger.db");
+        let state_root = dir.join("workers");
+        let identity = WorkerIdentity::new(OwnershipId::bind(7, "velnor-7-4245"));
+        let key = identity.ownership().as_str();
+        let state_dir = state_root.join(identity.ownership().slug());
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let mut registry = WorkerRegistry::open(&db).unwrap();
+        registry
+            .upsert(
+                &key,
+                "op-2",
+                4245,
+                "velnor-7-4245",
+                &identity.network(),
+                state_dir.join("workspace").to_string_lossy().as_ref(),
+                state_dir.join("dind-data").to_string_lossy().as_ref(),
+                "sha256:runner",
+                "sha256:dind",
+            )
+            .unwrap();
+        registry
+            .set_state(&key, ScaleSetWorkerState::RunnerConnected)
+            .unwrap();
+        drop(registry);
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = CleanupRunner::missing(identity.runner_container(), seen.clone());
+        let mut lane = test_lane(&db, &ledger, &state_root, Box::new(runner));
+        lane.drive_terminal(&key).unwrap();
+
+        let calls = seen.lock().unwrap();
+        let diagnostic_calls = calls
+            .iter()
+            .filter(|args| {
+                args.first()
+                    .is_some_and(|arg| arg == "logs" || arg == "inspect")
+            })
+            .count();
+        assert_eq!(diagnostic_calls, 4);
+        assert!(calls
+            .iter()
+            .any(|args| args.first().is_some_and(|arg| arg == "rm")));
+        // The export persists for forensics; teardown removed the objects.
+        assert!(state_dir.join("diagnostics/runner.log").is_file());
+        assert!(state_dir.join("diagnostics/capture.complete").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adoption_counts_terminal_cleanup_failure_as_failed() {
+        let dir = unique_test_dir("adopt-terminal-failure");
+        let db = dir.join("state.db");
+        let ledger = dir.join("permit-ledger.db");
+        let state_root = dir.join("workers");
+        let ownership = OwnershipId::bind(7, "velnor-7-4246");
+        let identity = WorkerIdentity::new(ownership.clone());
+        let key = ownership.as_str();
+        let state_dir = state_root.join(ownership.slug());
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let holder = permit_holder(7, 4246);
+        {
+            let mut global = velnor_control::permit_ledger::PermitLedger::open(&ledger).unwrap();
+            global.set_max_jobs(1).unwrap();
+            let generation = global.begin_epoch().unwrap();
+            let now = velnor_model::Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp()
+                .max(0) as u64;
+            global
+                .observe_demand(
+                    &holder,
+                    velnor_control::permit_ledger::PermitLane::ScaleSet,
+                    "scaleset/7",
+                    now,
+                    now,
+                )
+                .unwrap();
+            assert_eq!(
+                global
+                    .acquire(
+                        &holder,
+                        velnor_control::permit_ledger::PermitLane::ScaleSet,
+                        velnor_control::permit_ledger::PermitState::Provisioning,
+                        generation,
+                        None,
+                    )
+                    .unwrap(),
+                velnor_control::permit_ledger::AcquireOutcome::Acquired
+            );
+        }
+
+        let mut registry = WorkerRegistry::open(&db).unwrap();
+        registry
+            .upsert(
+                &key,
+                "op-3",
+                4246,
+                "velnor-7-4246",
+                &identity.network(),
+                state_dir.join("workspace").to_string_lossy().as_ref(),
+                state_dir.join("dind-data").to_string_lossy().as_ref(),
+                "sha256:runner",
+                "sha256:dind",
+            )
+            .unwrap();
+        registry
+            .set_state(&key, ScaleSetWorkerState::Running)
+            .unwrap();
+        drop(registry);
+
+        let mut intents = ProvisionIntentStore::open(&db).unwrap();
+        intents
+            .record_intent(
+                "op-3",
+                &crate::scaleset::intents::provision_ownership_id(7, "velnor-7-4246"),
+                7,
+                4246,
+                "velnor-7-4246",
+                "sha256:runner",
+                "sha256:dind",
+                1,
+            )
+            .unwrap();
+        drop(intents);
+
+        // Dead pair (nothing answers) + a stuck runner removal: the tick
+        // fails the worker, the terminal path retains the permit
+        // uncertain, and adoption must count the failure — not an adoption.
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = CleanupRunner::fail_runner_remove(identity.runner_container(), seen.clone());
+        let mut lane = test_lane(&db, &ledger, &state_root, Box::new(runner));
+        let report = lane.adopt_live_workers().unwrap();
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.adopted, 0);
+        assert_eq!(report.resumed_cleanup, 0);
+        assert_eq!(report.awaiting_provision, 0);
+        assert_eq!(report.skipped_released, 0);
+        let row = lane.registry.get(&key).unwrap().unwrap();
+        assert_eq!(row.worker_state, ScaleSetWorkerState::OwnedCleanup);
+        assert_eq!(
+            lane.ledger.holder_state(&holder).unwrap(),
+            Some(LedgerPermitState::Uncertain)
+        );
+        assert_eq!(lane.ledger.occupied().unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn released_row_backfill_preserves_diagnostics_without_stranding() {
+        // A worker row recorded as `permit_released` before the runtime
+        // table existed: the backfill adopts it, and both adoption and a
+        // terminal replay treat it exactly like a fresh release — the
+        // permit converges to released, the exported diagnostics stay on
+        // disk for post-mortem, no Docker work runs, nothing strands.
+        let dir = unique_test_dir("released-backfill-diagnostics");
+        let db = dir.join("state.db");
+        let ledger = dir.join("permit-ledger.db");
+        let state_root = dir.join("workers");
+        let ownership = OwnershipId::bind(7, "velnor-7-4247");
+        let identity = WorkerIdentity::new(ownership.clone());
+        let key = ownership.as_str();
+        let state_dir = state_root.join(ownership.slug());
+        std::fs::create_dir_all(state_dir.join("diagnostics")).unwrap();
+        std::fs::write(state_dir.join("raw-job.log"), b"job output\n").unwrap();
+        std::fs::write(
+            state_dir.join("diagnostics/capture.complete"),
+            b"velnor-diagnostics-v1\n",
+        )
+        .unwrap();
+
+        // Seed the holder as held: a restart re-attested the permit from
+        // the still-active demand row, so the replay must converge it.
+        let holder = permit_holder(7, 4247);
+        {
+            let mut global = velnor_control::permit_ledger::PermitLedger::open(&ledger).unwrap();
+            global.set_max_jobs(1).unwrap();
+            let generation = global.begin_epoch().unwrap();
+            let now = velnor_model::Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp()
+                .max(0) as u64;
+            global
+                .observe_demand(
+                    &holder,
+                    velnor_control::permit_ledger::PermitLane::ScaleSet,
+                    "scaleset/7",
+                    now,
+                    now,
+                )
+                .unwrap();
+            assert_eq!(
+                global
+                    .acquire(
+                        &holder,
+                        velnor_control::permit_ledger::PermitLane::ScaleSet,
+                        velnor_control::permit_ledger::PermitState::Provisioning,
+                        generation,
+                        None,
+                    )
+                    .unwrap(),
+                velnor_control::permit_ledger::AcquireOutcome::Acquired
+            );
+        }
+
+        // Legacy row, as the pre-runtime-table implementation left it:
+        // straight into `scaleset_workers`, no runtime row.
+        velnor_control::store::Store::open(&db).unwrap();
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute(
+                "INSERT INTO scaleset_workers
+                 (ownership_id, operation_id, request_id, runner_name, network_name,
+                  workspace_path, dind_data_path, runner_digest, dind_digest,
+                  worker_state, generation, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'permit_released', 0,
+                         '2026-09-18T00:00:00Z', '2026-09-18T00:00:00Z')",
+                params![
+                    key,
+                    "op-legacy",
+                    4247,
+                    "velnor-7-4247",
+                    identity.network(),
+                    state_dir.join("workspace").to_string_lossy(),
+                    state_dir.join("dind-data").to_string_lossy(),
+                    "sha256:runner",
+                    "sha256:dind",
+                ],
+            )
+            .unwrap();
+        }
+        let mut intents = ProvisionIntentStore::open(&db).unwrap();
+        intents
+            .record_intent(
+                "op-legacy",
+                &crate::scaleset::intents::provision_ownership_id(7, "velnor-7-4247"),
+                7,
+                4247,
+                "velnor-7-4247",
+                "sha256:runner",
+                "sha256:dind",
+                1,
+            )
+            .unwrap();
+        drop(intents);
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = CleanupRunner::missing(identity.runner_container(), seen.clone());
+        let mut lane = test_lane(&db, &ledger, &state_root, Box::new(runner));
+
+        // The backfill adopted the legacy row with defaults.
+        let row = lane.registry.get(&key).unwrap().unwrap();
+        assert_eq!(row.worker_state, ScaleSetWorkerState::PermitReleased);
+        assert!(!row.diagnostics_complete);
+
+        // Adoption skips the released row without Docker work.
+        let report = lane.adopt_live_workers().unwrap();
+        assert_eq!(report.skipped_released, 1);
+        assert_eq!(report.resumed_cleanup, 0);
+        assert_eq!(report.failed, 0);
+        assert!(seen.lock().unwrap().is_empty());
+
+        // A terminal replay converges the re-attested permit and keeps
+        // the exported diagnostics; nothing strands.
+        lane.drive_terminal(&key).unwrap();
+        assert!(seen.lock().unwrap().is_empty());
+        assert!(state_dir.join("raw-job.log").is_file());
+        assert!(
+            state_dir.join("diagnostics/capture.complete").is_file(),
+            "backfilled release preserves diagnostics like a fresh release"
+        );
+        let row = lane.registry.get(&key).unwrap().unwrap();
+        assert_eq!(row.worker_state, ScaleSetWorkerState::PermitReleased);
+        assert_eq!(lane.ledger.holder_state(&holder).unwrap(), None);
+        assert_eq!(lane.ledger.occupied().unwrap(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

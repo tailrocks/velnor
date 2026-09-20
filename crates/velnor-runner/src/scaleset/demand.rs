@@ -37,6 +37,16 @@ pub enum DemandState {
     Acquired,
     /// `acquirejobs` transport failed after send; may-or-may-not be ours.
     Uncertain,
+    /// Upstream canceled the assignment while an acquire batch is still
+    /// in flight or has an uncertain result. Keep occupancy until acquire
+    /// reconciliation proves whether the runner took ownership.
+    CanceledPending,
+    /// A pending cancellation was reconciled as successfully acquired;
+    /// terminal cleanup must run before releasing the held permit.
+    CanceledAcquired,
+    /// A canceled attempt was confirmed unacquired. It cannot be offered
+    /// again under this request ID; finish closing its global demand.
+    CanceledDone,
     /// Provision intent persisted; worker lane owns creation.
     ProvisionIntent,
     /// Terminally refused with a reason; never re-offered by us.
@@ -55,6 +65,9 @@ impl DemandState {
             Self::AcquireIntent => "acquire_intent",
             Self::Acquired => "acquired",
             Self::Uncertain => "uncertain",
+            Self::CanceledPending => "canceled_pending",
+            Self::CanceledAcquired => "canceled_acquired",
+            Self::CanceledDone => "canceled_done",
             Self::ProvisionIntent => "provision_intent",
             Self::Declined => "declined",
             Self::Terminal => "terminal",
@@ -69,6 +82,9 @@ impl DemandState {
             "acquire_intent" => Ok(Self::AcquireIntent),
             "acquired" => Ok(Self::Acquired),
             "uncertain" => Ok(Self::Uncertain),
+            "canceled_pending" => Ok(Self::CanceledPending),
+            "canceled_acquired" => Ok(Self::CanceledAcquired),
+            "canceled_done" => Ok(Self::CanceledDone),
             "provision_intent" => Ok(Self::ProvisionIntent),
             "declined" => Ok(Self::Declined),
             "terminal" => Ok(Self::Terminal),
@@ -85,6 +101,8 @@ impl DemandState {
                 | Self::AcquireIntent
                 | Self::Acquired
                 | Self::Uncertain
+                | Self::CanceledPending
+                | Self::CanceledAcquired
                 | Self::ProvisionIntent
         )
     }
