@@ -1,0 +1,23 @@
+[
+  {
+    "number": 1,
+    "seconds": 8.765254833,
+    "exit": 0,
+    "log": "/tmp/velnor-integration/hook-workspace-warm-1.log",
+    "transport": "HTTP(S)/ALL proxy set to closed loopback port; no OS network sandbox"
+  },
+  {
+    "number": 2,
+    "seconds": 8.531134334,
+    "exit": 0,
+    "log": "/tmp/velnor-integration/hook-workspace-warm-2.log",
+    "transport": "HTTP(S)/ALL proxy set to closed loopback port; no OS network sandbox"
+  },
+  {
+    "number": 3,
+    "seconds": 8.528132124999999,
+    "exit": 0,
+    "log": "/tmp/velnor-integration/hook-workspace-warm-3.log",
+    "transport": "HTTP(S)/ALL proxy set to closed loopback port; no OS network sandbox"
+  }
+]

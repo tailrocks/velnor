@@ -1,0 +1,108 @@
+{
+  "typed-stages.patch.gz": {
+    "source": "/tmp/velnor-hooks-performance/typed-stages-frozen.patch",
+    "source_sha256": "ad24ec93a533658d895cec3f279e0cddd091b0ff15e32ba8c6e09d44bf959e25",
+    "sha256": "221aef8887d8b33bea956bf3a21645bd715b8fa804f0ed2266a5611291d8187b",
+    "bytes": 47259
+  },
+  "package-preflight.patch.gz": {
+    "source": "/tmp/velnor-failures/preflight-wip/preflight-incremental.patch",
+    "source_sha256": "fab365c813c3da8408074bdf4be9fa5bb7f6341501b77c8d6398ea73127e5e5b",
+    "sha256": "581e7d3d903707eb9d8e31313b279d223162561faae39e8b361317ece200ac0f",
+    "bytes": 9242
+  },
+  "package-preflight-baseline.json": {
+    "source": "/tmp/velnor-failures/preflight-wip/manifest.json",
+    "source_sha256": "b3c5384ff9f6b4a53601b4b4488c7b30eaf35f9381b3c3d39c4db4be58062d54",
+    "sha256": "b3c5384ff9f6b4a53601b4b4488c7b30eaf35f9381b3c3d39c4db4be58062d54",
+    "bytes": 1651
+  },
+  "package-preflight-status.md": {
+    "source": "/tmp/velnor-failures/preflight-wip/STATUS.md",
+    "source_sha256": "d182980e6463044baeef6fb272ac8aff7ead85fa4b52d41a3d4a67ea4a345606",
+    "sha256": "a742c593b01d3ed1392de7f7cc696f96131498b93cb1ba36330d207c3b6f31a6",
+    "bytes": 2643
+  },
+  "hooks-and-stages-status.md": {
+    "source": "/tmp/velnor-hooks-performance/frozen-delivery-status.md",
+    "source_sha256": "782c69868b4eae3459b16b239d7e72267582b23f456d3270090b13a57ea05607",
+    "sha256": "0e5c7665d42882fd6404b95069f90d3dd7b92cebc5d7fc9f053d6890de00f48a",
+    "bytes": 3201
+  },
+  "bootstrap-handoff.md": {
+    "source": "/tmp/velnor-integration/bootstrap-handoff.md",
+    "source_sha256": "ad58a3bacf580e1a66d37df12f55339377ae3d286bf1a30f03aa73ae15c88784",
+    "sha256": "ad58a3bacf580e1a66d37df12f55339377ae3d286bf1a30f03aa73ae15c88784",
+    "bytes": 6029
+  },
+  "mergequeue-design.md": {
+    "source": "/tmp/velnor-integration/mergequeue-design.md",
+    "source_sha256": "7dfc2c202597f7afbe0c5ace5605acbf1c367070197ecb20db5a848458ac5874",
+    "sha256": "0fd2b29264c1b2b99a0aef993748316fc0ab80a56a2df093aeefebcf210c107c",
+    "bytes": 3820
+  },
+  "mbx-investigation.md": {
+    "source": "/tmp/velnor-integration/mbx-independent-observations.md",
+    "source_sha256": "3532e9bff800d8a173eb0d8b8faabb347b3801ffa40030cfde6c40f8adb3ea7a",
+    "sha256": "3532e9bff800d8a173eb0d8b8faabb347b3801ffa40030cfde6c40f8adb3ea7a",
+    "bytes": 4898
+  },
+  "mbx-cache-seed-metadata.json": {
+    "source": "/tmp/velnor-integration/mbx-cache-seed-metadata.json",
+    "source_sha256": "2c2cfcde31c7cd9e50ff525d004465a18cfd9e73576d9d8c07020bd13a2b1d9f",
+    "sha256": "2c2cfcde31c7cd9e50ff525d004465a18cfd9e73576d9d8c07020bd13a2b1d9f",
+    "bytes": 582
+  },
+  "hook-cold.json": {
+    "source": "/tmp/velnor-integration/hook-workspace-cold-controlled.json",
+    "source_sha256": "a89dd5b80305184158a63e7d4170b4ecc5c7a5d15c0a79a658424579f1075fff",
+    "sha256": "a89dd5b80305184158a63e7d4170b4ecc5c7a5d15c0a79a658424579f1075fff",
+    "bytes": 490
+  },
+  "hook-warm.json": {
+    "source": "/tmp/velnor-integration/hook-workspace-warm.json",
+    "source_sha256": "d73234f1c7bb7a6d4f41c76d1aeeda98c3bbd717a1ae88292586598cfabad7a1",
+    "sha256": "d73234f1c7bb7a6d4f41c76d1aeeda98c3bbd717a1ae88292586598cfabad7a1",
+    "bytes": 671
+  },
+  "hook-workspace-validation.json": {
+    "source": "/tmp/velnor-integration/hook-workspace-validation.json",
+    "source_sha256": "6bdee0158152facd40b94c4860d434e1d778b148bede39a0c3bf80deed4742a4",
+    "sha256": "6bdee0158152facd40b94c4860d434e1d778b148bede39a0c3bf80deed4742a4",
+    "bytes": 1187
+  },
+  "stages-clippy.log.gz": {
+    "source": "/tmp/velnor-stages-clippy-5.log",
+    "source_sha256": "afa20494bf1b8dc0f9795e308116836209d68747674c41c97bb1212fbb27117d",
+    "sha256": "5bf3468656661ed39c306029e7acdc5c2485afeff955ef69477061be91f17ef8",
+    "bytes": 150
+  },
+  "stages-tests.log.gz": {
+    "source": "/tmp/velnor-stages-tests-3.log",
+    "source_sha256": "a2903e00c21f99cd2db2dddead2c77c8a6f874d2262ea5567af35fe8d71bc1ca",
+    "sha256": "217f860603d51f0784d800f27d3437387c8f4f9a8760daf8e633cb289b75365f",
+    "bytes": 39660
+  },
+  "metadata-producer.log.gz": {
+    "source": "/tmp/velnor-integration/metadata-106091539484.log",
+    "source_sha256": "69c4d01e733e045a96ad889aee312214b35e80604a79aee9a7afe739caf4b698",
+    "sha256": "444afb1a66f0ef654af4616c83bb0f22aced395c74041711760637fe6342333b",
+    "bytes": 12471
+  },
+  "runner-successor.log.gz": {
+    "source": "/tmp/velnor-integration/runner-106119499702.log",
+    "source_sha256": "ccb07b9b5ca0544ca991841ed6f2b752f892d96dc0b5e324e1d4c47846d77ffc",
+    "sha256": "e309159fdaffbfd7570409b343e92f8d1fe66977076575d937bad9f72e5b9656",
+    "bytes": 105308
+  },
+  "inventory-snapshot.tar.gz": {
+    "source": "/tmp/velnor-failures/snapshots/20260920T1809Z",
+    "sha256": "3b37fa061e739ad748ad2d54a0ca71681076e0f7ab908c76db23188cb8c296c5",
+    "bytes": 3318423
+  },
+  "collection-checkpoint.tar.gz": {
+    "source": "/tmp/velnor-failures/collection-checkpoint-20260920T1811Z",
+    "sha256": "7c75781925d4bf81340682118dbfe334b74efe4b1c0c19986eab14920dfc11ae",
+    "bytes": 3900299
+  }
+}

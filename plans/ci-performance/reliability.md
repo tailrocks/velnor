@@ -244,3 +244,25 @@ passed (five tests). Regression cases cover both package architectures, both
 valid channels, every cross-channel pairing, and invalid embedded identities.
 These checks establish the emitter repair; native hosted packaging and required
 pre-merge packaging remain separate outstanding verification.
+
+## Immediate commit and push checkpoint
+
+At the user’s request, completed source units were committed separately and
+pushed on the existing integration branch: package channel mapping `0348729f`,
+exact renderer bootstrap `e1c589eb`, protocol request framing `c405d37`, and
+isolated staged hooks `4d3e55d9`. Parent bootstrap integration verification
+passed formatting, strict generator Clippy and 1,966 tests; the generated-file
+comparison awaits the explicit source-pin/regeneration commit.
+
+Unfinished typed-stage and package-preflight patches, their bases, status,
+review evidence, cache-collision diagnosis and the expanded inventory are
+preserved in [the checkpoint](observations/checkpoint-20260920/README.md).
+These patch artifacts are recoverable work in progress, not accepted live
+implementation. Queue implementation had no source edits at this checkpoint.
+The retained target-run job census covers 2,038 of 3,699 runs, with 56,441
+unique jobs and 3,944 logs; 1,661 target runs remain uncollected. Explicit
+404/410 gaps remain unavailable evidence, not classified root causes.
+
+The draft remains unmerged. Source pin/generation, hosted hook and package
+proof, typed CI ordering, feature correspondence, merge queue, cache workload
+identity, and full failure disposition remain active work.

@@ -1,0 +1,12 @@
+{
+  "mode": "cold-hook-cache",
+  "controlled": true,
+  "started": "2026-09-20T17:22:46.379894+00:00",
+  "seconds": 198.00779441699999,
+  "exit": 0,
+  "platform": "macOS-27.0-arm64-arm-64bit",
+  "head": "39b67ecd9ecc47462a32b337c056f8eabe28080e",
+  "index_tree": "cd927990dda6496fb27e87073526b01eb2f2c562",
+  "log": "/tmp/velnor-integration/hook-workspace-cold-controlled.log",
+  "cache_state": "isolated Cargo home+target absent; pinned tool installations pre-cached; OS caches not reset"
+}
