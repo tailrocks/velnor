@@ -4443,7 +4443,11 @@ jobs:
               asset="$(jq -er '.name' <<<"$row")"
               source="native-product/$asset"
               test -f "$source" && test ! -L "$source" || { echo "::error::missing or linked native sibling $asset" >&2; exit 1; }
+              chmod 0755 "$source"
+              test -x "$source" || { echo "::error::native sibling is not executable after download: $asset" >&2; exit 1; }
               cp -- "$source" "product-assets/$asset"
+              chmod 0755 "product-assets/$asset"
+              test -x "product-assets/$asset" || { echo "::error::native product asset is not executable: $asset" >&2; exit 1; }
               [ "$(sha256sum "$source" | awk '{print $1}')" = "$(jq -er '.sha256' <<<"$row")" ] || { echo "::error::native sibling digest mismatch: $asset" >&2; exit 1; }
               printf '%s\n' "$row" >> product-artifact-rows.jsonl
             done < <(jq -c '.' "$artifact_file")
@@ -4453,7 +4457,11 @@ jobs:
             while IFS= read -r component; do
               binary="$(jq -er --arg name "$component" '.components[] | select(.name == $name) | .binary' product-component-contract.json)"
               test -f "product-assets/$binary-$target" && test ! -L "product-assets/$binary-$target" || { echo "::error::missing or linked archive sibling $binary-$target" >&2; exit 1; }
+              chmod 0755 "product-assets/$binary-$target"
+              test -x "product-assets/$binary-$target" || { echo "::error::native product asset is not executable: $binary-$target" >&2; exit 1; }
               cp -- "product-assets/$binary-$target" "$archive_dir/$binary"
+              chmod 0755 "$archive_dir/$binary"
+              test -x "$archive_dir/$binary" || { echo "::error::archive sibling is not executable: $binary" >&2; exit 1; }
             done < <(jq -r '.components[].name' product-component-contract.json)
             jq -S -n --arg schema "$archive_identity_schema" --arg product_id "$product_id" --arg version "$product_version" --arg source_ref "$source_ref" --arg source_commit "$source_commit" --arg release_tag "$release_tag" --arg parent_manifest_id "$PRODUCT_RELEASE_ID" '{schema:$schema,product_id:$product_id,channel:"stable",version:$version,source_repository:$ENV.GITHUB_REPOSITORY,source_ref:$source_ref,source_commit:$source_commit,release_tag:$release_tag,parent_manifest_id:$parent_manifest_id}' > "$archive_dir/identity.json"
             artifact_json="$(jq -s '.' "$artifact_file")"

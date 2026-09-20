@@ -2236,11 +2236,19 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
     );
     output = output.replace(
         "              source=\"$(find native-product -type f -name \"$asset\" -print -quit)\"\n              test -f \"$source\" || { echo \"::error::missing native sibling $asset\" >&2; exit 1; }\n",
-        "              source=\"native-product/$asset\"\n              test -f \"$source\" && test ! -L \"$source\" || { echo \"::error::missing or linked native sibling $asset\" >&2; exit 1; }\n",
+        "              source=\"native-product/$asset\"\n              test -f \"$source\" && test ! -L \"$source\" || { echo \"::error::missing or linked native sibling $asset\" >&2; exit 1; }\n              chmod 0755 \"$source\"\n              test -x \"$source\" || { echo \"::error::native sibling is not executable after download: $asset\" >&2; exit 1; }\n",
+    );
+    output = output.replace(
+        "              cp -- \"$source\" \"product-assets/$asset\"\n",
+        "              cp -- \"$source\" \"product-assets/$asset\"\n              chmod 0755 \"product-assets/$asset\"\n              test -x \"product-assets/$asset\" || { echo \"::error::native product asset is not executable: $asset\" >&2; exit 1; }\n",
     );
     output = output.replace(
         "            while IFS= read -r row; do binary=\"$(jq -er '.binary' <<<\"$row\")\"; cp -- \"product-assets/$binary-$target\" \"$archive_dir/$binary\"; done < <(jq -c '.[]' \"$component_file\")\n",
         "            while IFS= read -r component; do\n              binary=\"$(jq -er --arg name \"$component\" '.components[] | select(.name == $name) | .binary' product-component-contract.json)\"\n              test -f \"product-assets/$binary-$target\" && test ! -L \"product-assets/$binary-$target\" || { echo \"::error::missing or linked archive sibling $binary-$target\" >&2; exit 1; }\n              cp -- \"product-assets/$binary-$target\" \"$archive_dir/$binary\"\n            done < <(jq -r '.components[].name' product-component-contract.json)\n",
+    );
+    output = output.replace(
+        "              cp -- \"product-assets/$binary-$target\" \"$archive_dir/$binary\"\n",
+        "              chmod 0755 \"product-assets/$binary-$target\"\n              test -x \"product-assets/$binary-$target\" || { echo \"::error::native product asset is not executable: $binary-$target\" >&2; exit 1; }\n              cp -- \"product-assets/$binary-$target\" \"$archive_dir/$binary\"\n              chmod 0755 \"$archive_dir/$binary\"\n              test -x \"$archive_dir/$binary\" || { echo \"::error::archive sibling is not executable: $binary\" >&2; exit 1; }\n",
     );
     if let Some(start) =
         output.find("          actual_components=\"$(jq -s 'sort_by(.name,.target)")
@@ -6895,8 +6903,10 @@ mod tests {
                 bytes.extend_from_slice(format!("{binary}-{target}").as_bytes());
                 let asset = format!("{binary}-{target}");
                 let digest = digest_of_bytes(&bytes);
-                fs::write(root.join(format!("native-product/{asset}")), &bytes)
-                    .expect("write native sibling");
+                let sibling = root.join(format!("native-product/{asset}"));
+                fs::write(&sibling, &bytes).expect("write native sibling");
+                fs::set_permissions(&sibling, fs::Permissions::from_mode(0o755))
+                    .expect("make native sibling executable");
                 let row = json!({
                     "name": component["name"],
                     "crate": component["crate"],
@@ -7002,6 +7012,22 @@ mod tests {
         manifest
             .verify_artifacts_with_contract(&payload, Some(&component_contract))
             .expect("runner must verify assembled payload and archives");
+        for artifact in manifest
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.kind == "binary")
+        {
+            let mode = fs::metadata(root.join("product-assets").join(&artifact.name))
+                .expect("read assembled binary mode")
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o111,
+                0o111,
+                "assembled binary lost executable mode: {} ({mode:o})",
+                artifact.name
+            );
+        }
 
         let homebrew_archive =
             root.join("product-assets/velnorctl-1.2.3-aarch64-apple-darwin.tar.gz");
@@ -7024,6 +7050,66 @@ mod tests {
                 "velnor-workflow".to_owned(),
                 "velnorctl".to_owned()
             ]
+        );
+        let binary_names = ["velnor-runner", "velnor-workflow", "velnorctl"];
+        let archive_has_executable_members = |archive: &Path| {
+            let listing = Command::new("tar")
+                .args(["-tvzf", archive.to_str().expect("archive path")])
+                .output()
+                .expect("list archive modes");
+            listing.status.success()
+                && binary_names.iter().all(|binary| {
+                    String::from_utf8_lossy(&listing.stdout)
+                        .lines()
+                        .any(|line| {
+                            line.starts_with('-')
+                                && line.chars().nth(3) == Some('x')
+                                && line.split_whitespace().last() == Some(*binary)
+                        })
+                })
+        };
+        assert!(
+            archive_has_executable_members(&homebrew_archive),
+            "rendered Homebrew archive must preserve executable member modes"
+        );
+        let lost_mode_dir = root.join("lost-mode-archive");
+        fs::create_dir_all(&lost_mode_dir).expect("create lost-mode archive fixture");
+        let extracted = Command::new("tar")
+            .args([
+                "-xzf",
+                homebrew_archive.to_str().expect("archive path"),
+                "-C",
+                lost_mode_dir.to_str().expect("lost-mode directory"),
+            ])
+            .status()
+            .expect("extract archive for lost-mode fixture");
+        assert!(extracted.success(), "extract lost-mode archive fixture");
+        for binary in binary_names {
+            fs::set_permissions(
+                lost_mode_dir.join(binary),
+                fs::Permissions::from_mode(0o644),
+            )
+            .expect("remove executable mode from lost-mode fixture");
+        }
+        let lost_mode_archive = root.join("lost-mode.tar.gz");
+        let mut tar_args = vec![
+            "-czf".to_owned(),
+            lost_mode_archive.to_str().expect("archive path").to_owned(),
+            "--".to_owned(),
+            "identity.json".to_owned(),
+            "manifest.json".to_owned(),
+        ];
+        tar_args.extend(binary_names.iter().map(|binary| (*binary).to_owned()));
+        let lost_mode = Command::new("tar")
+            .current_dir(&lost_mode_dir)
+            .env("COPYFILE_DISABLE", "1")
+            .args(&tar_args)
+            .status()
+            .expect("write lost-mode archive fixture");
+        assert!(lost_mode.success(), "write lost-mode archive fixture");
+        assert!(
+            !archive_has_executable_members(&lost_mode_archive),
+            "consumer admission must reject an archive with lost executable modes"
         );
         let archive_manifest = Command::new("tar")
             .args([

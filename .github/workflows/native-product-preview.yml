@@ -141,6 +141,8 @@ jobs:
           asset="$binary-$TARGET"
           cp "$compiled" "dist/$TARGET/$asset"
           cp "$compiled" "dist/$TARGET/package/$binary"
+          chmod 0755 "dist/$TARGET/$asset" "dist/$TARGET/package/$binary"
+          test -x "dist/$TARGET/$asset" && test -x "dist/$TARGET/package/$binary" || { echo '::error::typed sibling mode was lost before upload' >&2; exit 1; }
           digest="$(sha256sum "dist/$TARGET/$asset" | awk '{print $1}')"
           size="$(stat -c%s "dist/$TARGET/$asset" 2>/dev/null || stat -f%z "dist/$TARGET/$asset")"
           jq -cn --arg name "$asset" --arg target "$TARGET" --arg sha256 "$digest" --argjson size "$size" '{name:$name,target:$target,kind:"binary",sha256:$sha256,size:$size}' >> "dist/$TARGET/artifacts-$TARGET.jsonl"
@@ -179,6 +181,8 @@ jobs:
           asset="$binary-$TARGET"
           cp "$compiled" "dist/$TARGET/$asset"
           cp "$compiled" "dist/$TARGET/package/$binary"
+          chmod 0755 "dist/$TARGET/$asset" "dist/$TARGET/package/$binary"
+          test -x "dist/$TARGET/$asset" && test -x "dist/$TARGET/package/$binary" || { echo '::error::typed sibling mode was lost before upload' >&2; exit 1; }
           digest="$(sha256sum "dist/$TARGET/$asset" | awk '{print $1}')"
           size="$(stat -c%s "dist/$TARGET/$asset" 2>/dev/null || stat -f%z "dist/$TARGET/$asset")"
           jq -cn --arg name "$asset" --arg target "$TARGET" --arg sha256 "$digest" --argjson size "$size" '{name:$name,target:$target,kind:"binary",sha256:$sha256,size:$size}' >> "dist/$TARGET/artifacts-$TARGET.jsonl"
@@ -217,6 +221,8 @@ jobs:
           asset="$binary-$TARGET"
           cp "$compiled" "dist/$TARGET/$asset"
           cp "$compiled" "dist/$TARGET/package/$binary"
+          chmod 0755 "dist/$TARGET/$asset" "dist/$TARGET/package/$binary"
+          test -x "dist/$TARGET/$asset" && test -x "dist/$TARGET/package/$binary" || { echo '::error::typed sibling mode was lost before upload' >&2; exit 1; }
           digest="$(sha256sum "dist/$TARGET/$asset" | awk '{print $1}')"
           size="$(stat -c%s "dist/$TARGET/$asset" 2>/dev/null || stat -f%z "dist/$TARGET/$asset")"
           jq -cn --arg name "$asset" --arg target "$TARGET" --arg sha256 "$digest" --argjson size "$size" '{name:$name,target:$target,kind:"binary",sha256:$sha256,size:$size}' >> "dist/$TARGET/artifacts-$TARGET.jsonl"

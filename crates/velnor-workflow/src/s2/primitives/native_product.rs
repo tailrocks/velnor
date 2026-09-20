@@ -411,6 +411,10 @@ fn render_workflow(
         " 2>&1 || true)\"\n",
         " 2>&1)\" || { echo '::error::component identity command failed' >&2; exit 1; }\n",
     );
+    build_steps = build_steps.replace(
+        "          cp \"$compiled\" \"dist/$TARGET/$asset\"\n          cp \"$compiled\" \"dist/$TARGET/package/$binary\"\n",
+        "          cp \"$compiled\" \"dist/$TARGET/$asset\"\n          cp \"$compiled\" \"dist/$TARGET/package/$binary\"\n          chmod 0755 \"dist/$TARGET/$asset\" \"dist/$TARGET/package/$binary\"\n          test -x \"dist/$TARGET/$asset\" && test -x \"dist/$TARGET/package/$binary\" || { echo '::error::typed sibling mode was lost before upload' >&2; exit 1; }\n",
+    );
 
     let components_json = format!(
         "[{}]",
@@ -669,5 +673,6 @@ mod tests {
         assert!(source.contains("blocked target"));
         assert!(source.contains("architecture does not match"));
         assert!(source.contains("component version differs"));
+        assert!(source.contains("typed sibling mode was lost before upload"));
     }
 }
