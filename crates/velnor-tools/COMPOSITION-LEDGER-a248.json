@@ -1,0 +1,49 @@
+{
+  "artifact": "review-only-g0-checker-composition",
+  "purpose": "Reproducible source composition for adapter review; not authority approval.",
+  "composition_base": {
+    "commit": "b50c50744c747d4e38d5b3a62c8850e4a95ca908",
+    "role": "producer base"
+  },
+  "producer": {
+    "commit": "a248e485842b1df1842205590d664866256b5083",
+    "branch": "codex/g3-checker-adapter-review",
+    "files": {
+      "crates/velnor-tools/src/g0_live_mapping.rs": "de000cb2138d06ca6c09742cf29cedd65bcd8544",
+      "crates/velnor-tools/src/g0_raw_store_adapter.rs": "9cfa7f0ed72402c602f17ea6ee10701819090cda",
+      "crates/velnor-tools/src/github_live_collector.rs": "b5bd2ecfab8830d77533bad44b875743edd5ecc4"
+    }
+  },
+  "checker": {
+    "commit": "101aa26b849d507d6bdc702d55619bb830c65706",
+    "role": "checker source overlay; source-owner review required",
+    "files": {
+      "crates/velnor-tools/src/evidence_check.rs": "a424312599bd96ab6075767970d4156a8a7e7548",
+      "crates/velnor-tools/src/g0_contract.rs": "6a4024723ed32597abc75b97630edbdaacdfe126",
+      "crates/velnor-tools/src/live_authority.rs": "672cc776e977944269f09fffbaa111900c254ac0"
+    }
+  },
+  "raw_store": {
+    "commit": "6dd5cd28ddee3d8d3ecc87678eb421eb9ab2f9f",
+    "role": "reviewed raw-store overlay; separate owner",
+    "file": "crates/velnor-tools/src/github_raw_store.rs",
+    "blob": "039c0112d82d13d46b83ba6ab803d78abdb7d41e"
+  },
+  "testdata": {
+    "source_commit": "101aa26b849d507d6bdc702d55619bb830c65706",
+    "tree": "4de902a5e09d0f85e9f135fdc33b839ea93d2eeb",
+    "path": "crates/velnor-tools/src/testdata",
+    "files": 12,
+    "bytes": 136760
+  },
+  "verification": {
+    "checker_source": "101aa26b849d507d6bdc702d55619bb830c65706",
+    "raw_store_source": "6dd5cd28ddee3d8d3ecc87678eb421eb9ab2f9f",
+    "cargo_check": "pass",
+    "cargo_test_all_targets": "380 passed, 2 ignored",
+    "cargo_clippy_all_targets_d_warnings": "pass",
+    "corrected_corpus_regression": "1 passed",
+    "authority": "disabled",
+    "scope_limit": "No live capture, G0 gate, 32-repository positive, release, install, or publication claim."
+  }
+}

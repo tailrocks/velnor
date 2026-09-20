@@ -1854,6 +1854,15 @@ enum QuarantineDisposition {
     DiscardOnVerifiedSuccess,
 }
 
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct QuarantineExpectation<'a> {
+    identity: FileIdentity,
+    max_bytes: Option<usize>,
+    expected_bytes: Option<&'a [u8]>,
+    expected_links: Option<u64>,
+}
+
 /// Move a candidate into a fresh, private directory before journal retention
 /// or verified-success discard.
 ///
@@ -2004,14 +2013,13 @@ fn quarantine_remove(
     if disposition == QuarantineDisposition::DiscardOnVerifiedSuccess {
         #[cfg(test)]
         invoke_test_successful_cleanup_hook();
-        match quarantine_entry_matches(
-            &quarantine,
-            &entry_name,
-            expected,
+        let expectation = QuarantineExpectation {
+            identity: expected,
             max_bytes,
             expected_bytes,
             expected_links,
-        ) {
+        };
+        match quarantine_entry_matches(&quarantine, &entry_name, expectation) {
             Ok(true) => {}
             Ok(false) => {
                 return retain_quarantine_result(
@@ -2038,10 +2046,7 @@ fn quarantine_remove(
             &quarantine_name,
             &quarantine,
             &entry_name,
-            expected,
-            max_bytes,
-            expected_bytes,
-            expected_links,
+            expectation,
             scope,
             source_namespace,
         );
@@ -2060,10 +2065,7 @@ fn quarantine_remove(
 fn quarantine_entry_matches(
     quarantine: &File,
     entry_name: &CStr,
-    expected: FileIdentity,
-    max_bytes: Option<usize>,
-    expected_bytes: Option<&[u8]>,
-    expected_links: Option<u64>,
+    expectation: QuarantineExpectation<'_>,
 ) -> Result<bool, RawStorageError> {
     let Some(mut file) = (match open_named(quarantine, entry_name) {
         Ok(file) => file,
@@ -2074,23 +2076,30 @@ fn quarantine_entry_matches(
     };
     let identity = stat_fd(&file).map_err(storage_io)?;
     if !identity.is_private_regular()
-        || !identity.same_inode(expected)
-        || expected_links.is_some_and(|links| identity.nlink != links)
+        || !identity.same_inode(expectation.identity)
+        || expectation
+            .expected_links
+            .is_some_and(|links| identity.nlink != links)
     {
         return Ok(false);
     }
-    let bytes = if let Some(max_bytes) = max_bytes {
+    let bytes = if let Some(max_bytes) = expectation.max_bytes {
         Some(read_verified_fd(&mut file, max_bytes)?)
     } else {
         None
     };
-    if expected_bytes.is_some_and(|expected| bytes.as_deref() != Some(expected)) {
+    if expectation
+        .expected_bytes
+        .is_some_and(|expected| bytes.as_deref() != Some(expected))
+    {
         return Ok(false);
     }
     let after = stat_fd(&file).map_err(storage_io)?;
     Ok(after == identity
-        && after.same_inode(expected)
-        && expected_links.is_none_or(|links| after.nlink == links))
+        && after.same_inode(expectation.identity)
+        && expectation
+            .expected_links
+            .is_none_or(|links| after.nlink == links))
 }
 
 #[cfg(unix)]
@@ -2099,23 +2108,13 @@ fn discard_verified_quarantine(
     quarantine_name: &CStr,
     quarantine: &File,
     entry_name: &CStr,
-    expected: FileIdentity,
-    max_bytes: Option<usize>,
-    expected_bytes: Option<&[u8]>,
-    expected_links: Option<u64>,
+    expectation: QuarantineExpectation<'_>,
     scope: &RetentionScope<'_>,
     source_namespace: &str,
 ) -> Result<QuarantineResult, RawStorageError> {
     #[cfg(test)]
     invoke_test_successful_cleanup_before_discard_hook();
-    match quarantine_entry_matches(
-        quarantine,
-        entry_name,
-        expected,
-        max_bytes,
-        expected_bytes,
-        expected_links,
-    ) {
+    match quarantine_entry_matches(quarantine, entry_name, expectation) {
         Ok(true) => {}
         Ok(false) => {
             return retain_quarantine_result(

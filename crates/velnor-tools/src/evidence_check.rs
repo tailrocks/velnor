@@ -936,11 +936,23 @@ pub async fn check_paths_live(input: &EvidenceCheckInput) -> Result<CheckReport>
             input,
         ))
         .await?;
-    let (manifest, snapshot, evidence, release, raw_store) = capture.into_parts();
-    if let Some(inventory) = evidence.g0_inventory.as_ref() {
+    let (manifest, snapshot, mut evidence, release, raw_store) = capture.into_parts();
+    if let Some(inventory) = evidence.g0_inventory.as_mut() {
         raw_store
             .verify_g0(inventory)
             .context("verify producer raw-store binding")?;
+        for raw in &mut inventory.collector_snapshot.raw_objects {
+            let bytes = raw_store
+                .read_g0_raw(raw)
+                .with_context(|| format!("reopen producer raw object {}", raw.raw_id))?;
+            if bytes.len() as u64 != raw.byte_length || digest_bytes(&bytes) != raw.sha256 {
+                bail!(
+                    "producer raw object {} failed reopened-byte digest/length binding",
+                    raw.raw_id
+                );
+            }
+            raw.bytes_base64 = BASE64.encode(bytes);
+        }
     }
     Ok(check_documents(
         stage,
@@ -1920,7 +1932,15 @@ fn check_g0_inventory(
         &collector.raw_objects,
         findings,
     );
-    check_g0_repositories(manifest, snapshot, collector, &raw_ids, findings);
+    check_g0_repositories(
+        manifest,
+        snapshot,
+        collector,
+        &raw_ids,
+        &collector.requests,
+        &collector.raw_objects,
+        findings,
+    );
     check_g0_reconciliation(manifest, snapshot, collector, &raw_ids, findings);
     check_g0_dependency_graph(manifest, collector, &raw_ids, findings);
     check_g0_model_session(collector, &raw_ids, findings);
@@ -2006,6 +2026,36 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
     for request in &collector.requests {
         let query = BASE64.decode(&request.query_base64);
         let variables = BASE64.decode(&request.variables_base64);
+        let response_schema = collector
+            .raw_objects
+            .iter()
+            .find(|raw| raw.raw_id == request.response_raw_ref)
+            .and_then(|raw| {
+                g0_raw_response_schema(&raw.object_kind, &request.endpoint_or_operation)
+            });
+        let unknown_paginated_response = collector
+            .raw_objects
+            .iter()
+            .find(|raw| raw.raw_id == request.response_raw_ref)
+            .is_some_and(|raw| {
+                g0_endpoint_is_paginated(&request.endpoint_or_operation)
+                    && g0_raw_response_schema(&raw.object_kind, &request.endpoint_or_operation)
+                        .is_none()
+            });
+        if unknown_paginated_response {
+            finding(
+                findings,
+                "g0-response-schema",
+                "",
+                "evidence.g0_inventory.collector_snapshot.raw_objects",
+                "every relevant paginated API stream must use a closed typed response schema",
+            );
+        }
+        let query_contract = match (query.as_ref(), response_schema) {
+            (Ok(bytes), Some(schema)) => g0_response_query_contract(request, bytes, schema),
+            (Err(_), Some(_)) => false,
+            (_, None) => true,
+        };
         if request.request_id.trim().is_empty()
             || request.method.trim().is_empty()
             || request.endpoint_or_operation.trim().is_empty()
@@ -2052,6 +2102,7 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
                 query.as_ref().ok().map(Vec::as_slice),
                 variables.as_ref().ok().map(Vec::as_slice),
             )
+            || !query_contract
         {
             finding(
                 findings,
@@ -2059,6 +2110,15 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
                 "",
                 "evidence.g0_inventory.collector_snapshot.requests",
                 "every request must be a complete successful page with query, viewer, rate-limit, and raw-response provenance",
+            );
+        }
+        if !query_contract {
+            finding(
+                findings,
+                "g0-request-query",
+                "",
+                "evidence.g0_inventory.collector_snapshot.requests.query_base64",
+                "request query must exactly bind endpoint pagination and provider filter semantics",
             );
         }
     }
@@ -2134,6 +2194,7 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
             );
         }
     }
+    check_g0_paginated_response_streams(collector, &pages, findings);
     for raw in &collector.raw_objects {
         let decoded = BASE64.decode(&raw.bytes_base64);
         if !raw_ids.insert(raw.raw_id.clone())
@@ -2229,6 +2290,124 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
         &raw_ids,
         findings,
     );
+}
+
+fn g0_page_members(value: &Value, response_schema: G0RawResponseSchema) -> Option<(u64, &[Value])> {
+    let envelope_key = match response_schema {
+        G0RawResponseSchema::CheckRunsPage => "check_runs",
+        G0RawResponseSchema::CheckSuitesPage => "check_suites",
+        G0RawResponseSchema::JobsPage => "jobs",
+        G0RawResponseSchema::ArtifactsPage => "artifacts",
+        G0RawResponseSchema::Singular => return None,
+    };
+    let total_count = value.get("total_count")?.as_u64()?;
+    let members = value.get(envelope_key)?.as_array()?;
+    Some((total_count, members.as_slice()))
+}
+
+fn check_g0_paginated_response_streams(
+    collector: &G0CollectorSnapshot,
+    pages: &BTreeMap<(G0ApiKind, String, String, String), Vec<&G0RequestRecord>>,
+    findings: &mut Vec<Finding>,
+) {
+    for page_set in pages.values() {
+        let mut expected_total = None;
+        let mut observed_items = 0u64;
+        let mut member_ids = BTreeSet::new();
+        let mut list_stream = false;
+        for request in page_set {
+            let Some(raw) = collector.raw_objects.iter().find(|raw| {
+                raw.raw_id == request.response_raw_ref && raw.request_id == request.request_id
+            }) else {
+                continue;
+            };
+            let Some(response_schema) =
+                g0_raw_response_schema(&raw.object_kind, &request.endpoint_or_operation)
+            else {
+                continue;
+            };
+            let is_list = !matches!(response_schema, G0RawResponseSchema::Singular);
+            if !is_list {
+                continue;
+            }
+            list_stream = true;
+            let body_valid = BASE64
+                .decode(&raw.bytes_base64)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|value| {
+                    let (total, members) = g0_page_members(&value, response_schema)?;
+                    Some((total, members.to_vec()))
+                });
+            let Some((total, members)) = body_valid else {
+                finding(
+                    findings,
+                    "g0-response-envelope",
+                    "",
+                    "evidence.g0_inventory.collector_snapshot.raw_objects",
+                    "paginated REST responses must use their exact typed envelope",
+                );
+                continue;
+            };
+            if expected_total.is_some_and(|expected| expected != total) {
+                finding(
+                    findings,
+                    "g0-pagination-total",
+                    "",
+                    "evidence.g0_inventory.collector_snapshot.requests.page",
+                    "every page in one response stream must report the same total_count",
+                );
+            } else {
+                expected_total = Some(total);
+            }
+            if members.len() as u32 != request.page.items_returned {
+                finding(
+                    findings,
+                    "g0-pagination-count",
+                    "",
+                    "evidence.g0_inventory.collector_snapshot.requests.page.items_returned",
+                    "page.items_returned must equal the exact envelope member count",
+                );
+            }
+            observed_items = observed_items.saturating_add(members.len() as u64);
+            for member in members {
+                let Some(id) = g0_json_u64(&member, &["id"]) else {
+                    finding(
+                        findings,
+                        "g0-pagination-member",
+                        "",
+                        "evidence.g0_inventory.collector_snapshot.raw_objects",
+                        "every paginated member must expose a numeric immutable id",
+                    );
+                    continue;
+                };
+                if !member_ids.insert(id) {
+                    finding(
+                        findings,
+                        "g0-pagination-duplicate",
+                        "",
+                        "evidence.g0_inventory.collector_snapshot.raw_objects",
+                        "a paginated response stream cannot repeat a member id",
+                    );
+                }
+            }
+        }
+        if list_stream
+            && let Some(total) = expected_total
+            && page_set
+                .last()
+                .is_some_and(|request| !request.page.has_next_page)
+            && observed_items != total
+        {
+            finding(
+                findings,
+                "g0-pagination-total",
+                "",
+                "evidence.g0_inventory.collector_snapshot.requests.page",
+                "the final captured page must account for total_count items",
+            );
+        }
+    }
 }
 
 fn check_g0_raw_ref(
@@ -2331,6 +2510,74 @@ fn g0_valid_app_id(value: &str) -> bool {
     value.parse::<u64>().is_ok_and(|id| id > 0)
 }
 
+fn g0_endpoint_is_paginated(endpoint: &str) -> bool {
+    let Some(parts) = endpoint
+        .strip_prefix('/')
+        .map(|path| path.split('/').collect::<Vec<_>>())
+    else {
+        return false;
+    };
+    if parts.len() < 2 || parts[0] != "repos" {
+        return false;
+    }
+    matches!(
+        parts.as_slice(),
+        ["repos", _, _, "pulls"]
+            | ["repos", _, _, "actions", "runs"]
+            | ["repos", _, _, "actions", "workflows"]
+            | ["repos", _, _, "actions", "runs", _, "artifacts"]
+            | ["repos", _, _, "actions", "runs", _, "attempts", _, "jobs"]
+            | ["repos", _, _, "commits", _, "check-runs"]
+            | ["repos", _, _, "commits", _, "check-suites"]
+            | ["repos", _, _, "rulesets"]
+    )
+}
+
+fn g0_response_query_contract(
+    request: &G0RequestRecord,
+    query: &[u8],
+    response_schema: G0RawResponseSchema,
+) -> bool {
+    let Some(ordered) = g0_rest_query_pairs_ordered(query) else {
+        return false;
+    };
+    if matches!(response_schema, G0RawResponseSchema::Singular) {
+        return true;
+    }
+
+    let keys = ordered
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<Vec<_>>();
+    let expected_keys = match response_schema {
+        G0RawResponseSchema::CheckRunsPage => vec!["per_page", "filter", "page"],
+        G0RawResponseSchema::CheckSuitesPage
+        | G0RawResponseSchema::JobsPage
+        | G0RawResponseSchema::ArtifactsPage => vec!["per_page", "page"],
+        G0RawResponseSchema::Singular => Vec::new(),
+    };
+    if keys != expected_keys {
+        return false;
+    }
+    let value = |key: &str| {
+        ordered
+            .iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, value)| value.as_str())
+    };
+    let Some(per_page) = value("per_page").and_then(|value| value.parse::<u32>().ok()) else {
+        return false;
+    };
+    let Some(page) = value("page").and_then(|value| value.parse::<u32>().ok()) else {
+        return false;
+    };
+    per_page == request.page.per_page
+        && per_page > 0
+        && per_page <= 100
+        && page == request.page.number
+        && (response_schema != G0RawResponseSchema::CheckRunsPage || value("filter") == Some("all"))
+}
+
 fn g0_request_semantics(
     request: &G0RequestRecord,
     query: Option<&[u8]>,
@@ -2352,6 +2599,7 @@ fn g0_request_semantics(
                 || !(endpoint == "/user"
                     || endpoint == "/rate_limit"
                     || endpoint.starts_with("/repos/")
+                    || endpoint.starts_with("/apps/")
                     || endpoint.starts_with("/orgs/"))
             {
                 return false;
@@ -2418,6 +2666,12 @@ fn g0_request_semantics(
 }
 
 fn g0_rest_query_pairs(query: &[u8]) -> Option<Vec<(String, String)>> {
+    let mut pairs = g0_rest_query_pairs_ordered(query)?;
+    pairs.sort();
+    Some(pairs)
+}
+
+fn g0_rest_query_pairs_ordered(query: &[u8]) -> Option<Vec<(String, String)>> {
     let query = std::str::from_utf8(query).ok()?;
     if query.is_empty() {
         return Some(Vec::new());
@@ -2436,7 +2690,6 @@ fn g0_rest_query_pairs(query: &[u8]) -> Option<Vec<(String, String)>> {
         }
         pairs.push((key.to_owned(), value.to_owned()));
     }
-    pairs.sort();
     Some(pairs)
 }
 
@@ -2524,11 +2777,11 @@ fn g0_next_link_matches(current: &G0RequestRecord, next: &G0RequestRecord) -> bo
         let Some(next_query) = BASE64
             .decode(&next.query_base64)
             .ok()
-            .and_then(|bytes| g0_rest_query_pairs(&bytes))
+            .and_then(|bytes| g0_rest_query_pairs_ordered(&bytes))
         else {
             return false;
         };
-        let link_query = g0_rest_query_pairs(url.query().unwrap_or_default().as_bytes());
+        let link_query = g0_rest_query_pairs_ordered(url.query().unwrap_or_default().as_bytes());
         link_query == Some(next_query)
     } else {
         current.page.cursor_out.is_some() && current.page.cursor_out == next.page.cursor_in
@@ -2567,6 +2820,52 @@ fn run_url_matches_repository(value: &str, repository: &str, run_id: u64) -> boo
         && url.query().is_none()
         && url.fragment().is_none()
         && url.path() == format!("/{repository}/actions/runs/{run_id}")
+}
+
+fn check_run_url_matches_provider(
+    value: &str,
+    repository: &str,
+    provider: &G0CheckProvider,
+    check_run_id: u64,
+) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    let expected_path = match provider {
+        G0CheckProvider::GithubActions {
+            workflow_run_id, ..
+        } => {
+            format!("/{repository}/actions/runs/{workflow_run_id}/job/{check_run_id}")
+        }
+        G0CheckProvider::ExternalApp => format!("/{repository}/runs/{check_run_id}"),
+    };
+    url.scheme() == "https"
+        && url.host_str() == Some("github.com")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path() == expected_path
+}
+
+fn job_url_matches_repository(
+    value: &str,
+    repository: &str,
+    workflow_run_id: u64,
+    job_id: u64,
+) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str() == Some("github.com")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path() == format!("/{repository}/actions/runs/{workflow_run_id}/job/{job_id}")
 }
 
 fn g0_context_pairs(contexts: &[RequiredContext]) -> BTreeSet<(String, String)> {
@@ -2926,6 +3225,8 @@ fn check_g0_repositories(
     snapshot: &SnapshotDocument,
     collector: &G0CollectorSnapshot,
     raw_ids: &BTreeSet<String>,
+    requests: &[G0RequestRecord],
+    raw_objects: &[G0RawObjectRef],
     findings: &mut Vec<Finding>,
 ) {
     let expected = canonical_scope();
@@ -3323,6 +3624,13 @@ fn check_g0_repositories(
             },
             findings,
         );
+        check_g0_check_raw_evidence(
+            &repo.repository,
+            &repo.main_checks,
+            requests,
+            raw_objects,
+            findings,
+        );
 
         let snapshot_prs = snapshot
             .repositories
@@ -3359,6 +3667,13 @@ fn check_g0_repositories(
                 raw_ids,
                 findings,
             );
+            check_g0_check_raw_evidence(
+                &repo.repository,
+                &pr.required_check_producers,
+                requests,
+                raw_objects,
+                findings,
+            );
         }
     }
 }
@@ -3393,10 +3708,17 @@ fn check_g0_artifact_observations(
     let mut artifact_names = BTreeSet::new();
     let mut known_run_bindings = BTreeMap::<u64, BTreeSet<(u32, String)>>::new();
     for check in context.main_checks {
-        known_run_bindings
-            .entry(check.workflow_run_id)
-            .or_default()
-            .insert((check.run_attempt, check.source_sha.clone()));
+        if let G0CheckProvider::GithubActions {
+            workflow_run_id,
+            run_attempt,
+            ..
+        } = &check.provider
+        {
+            known_run_bindings
+                .entry(*workflow_run_id)
+                .or_default()
+                .insert((*run_attempt, check.source_sha.clone()));
+        }
     }
     let mut known_source_shas = BTreeSet::from([context.default_branch_sha.to_owned()]);
     for pr in context.open_prs {
@@ -3407,10 +3729,17 @@ fn check_g0_artifact_observations(
             known_source_shas.insert(merge_group_sha.clone());
         }
         for check in &pr.required_check_producers {
-            known_run_bindings
-                .entry(check.workflow_run_id)
-                .or_default()
-                .insert((check.run_attempt, check.source_sha.clone()));
+            if let G0CheckProvider::GithubActions {
+                workflow_run_id,
+                run_attempt,
+                ..
+            } = &check.provider
+            {
+                known_run_bindings
+                    .entry(*workflow_run_id)
+                    .or_default()
+                    .insert((*run_attempt, check.source_sha.clone()));
+            }
         }
     }
 
@@ -3670,6 +3999,446 @@ struct G0CheckExpectation<'a> {
     raw_ids: &'a BTreeSet<String>,
 }
 
+fn g0_check_provider_valid(check: &G0CheckProducer, repository: &str) -> bool {
+    if check.app_slug.trim().is_empty() {
+        return false;
+    }
+    match &check.provider {
+        G0CheckProvider::ExternalApp => {
+            check.app_slug != "github-actions"
+                && check_run_url_matches_provider(
+                    &check.html_url,
+                    repository,
+                    &check.provider,
+                    check.check_run_id,
+                )
+        }
+        G0CheckProvider::GithubActions {
+            workflow_run_id,
+            run_attempt,
+            job_id,
+            job_run_id,
+            job_run_attempt,
+            job_check_run_id,
+            job_source_sha,
+            job_html_url,
+            actual_checkout_sha,
+        } => {
+            check.app_slug == "github-actions"
+                && *workflow_run_id != 0
+                && *run_attempt != 0
+                && *job_id != 0
+                && *job_run_id == *workflow_run_id
+                && *job_run_attempt == *run_attempt
+                && *job_check_run_id == check.check_run_id
+                && valid_sha(job_source_sha)
+                && *job_source_sha == check.source_sha
+                && valid_sha(actual_checkout_sha)
+                && job_url_matches_repository(job_html_url, repository, *workflow_run_id, *job_id)
+                && check_run_url_matches_provider(
+                    &check.html_url,
+                    repository,
+                    &check.provider,
+                    check.check_run_id,
+                )
+        }
+    }
+}
+
+fn g0_actions_checkout_sha(check: &G0CheckProducer) -> Option<&str> {
+    match &check.provider {
+        G0CheckProvider::GithubActions {
+            actual_checkout_sha,
+            ..
+        } => Some(actual_checkout_sha),
+        G0CheckProvider::ExternalApp => None,
+    }
+}
+
+fn g0_check_job_key(check: &G0CheckProducer) -> Option<(u64, u32, u64)> {
+    match &check.provider {
+        G0CheckProvider::GithubActions {
+            workflow_run_id,
+            run_attempt,
+            job_id,
+            ..
+        } => Some((*workflow_run_id, *run_attempt, *job_id)),
+        G0CheckProvider::ExternalApp => None,
+    }
+}
+
+fn g0_json_u64(value: &Value, path: &[&str]) -> Option<u64> {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
+        .and_then(Value::as_u64)
+}
+
+fn g0_json_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
+        .and_then(Value::as_str)
+}
+
+fn g0_check_run_identity_valid(value: &Value, check: &G0CheckProducer, app_id: u64) -> bool {
+    g0_json_u64(value, &["id"]) == Some(check.check_run_id)
+        && g0_json_string(value, &["name"]) == Some(check.context.as_str())
+        && g0_json_string(value, &["head_sha"]) == Some(check.source_sha.as_str())
+        && g0_json_string(value, &["status"]) == Some(check.status.as_str())
+        && g0_json_string(value, &["conclusion"]) == Some(check.conclusion.as_str())
+        && g0_json_string(value, &["html_url"]) == Some(check.html_url.as_str())
+        && g0_json_u64(value, &["check_suite", "id"]) == Some(check.check_suite_id)
+        && g0_json_u64(value, &["app", "id"]) == Some(app_id)
+        && g0_json_string(value, &["app", "slug"]) == Some(check.app_slug.as_str())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum G0RawResponseSchema {
+    Singular,
+    CheckRunsPage,
+    CheckSuitesPage,
+    JobsPage,
+    ArtifactsPage,
+}
+
+/// Map each retained raw object to the one REST response shape allowed for
+/// its exact endpoint.  A page endpoint never falls back to the singular
+/// object shape: doing so lets a truncated or malformed response masquerade
+/// as a complete relationship.
+fn g0_raw_response_schema(object_kind: &str, endpoint: &str) -> Option<G0RawResponseSchema> {
+    let parts = endpoint.strip_prefix('/')?.split('/').collect::<Vec<_>>();
+    match object_kind {
+        "check_run"
+            if parts.len() == 6
+                && parts[0] == "repos"
+                && !parts[1].is_empty()
+                && !parts[2].is_empty()
+                && parts[3] == "commits"
+                && valid_sha(parts[4])
+                && parts[5] == "check-runs" =>
+        {
+            Some(G0RawResponseSchema::CheckRunsPage)
+        }
+        "check_run"
+            if parts.len() == 5
+                && parts[0] == "repos"
+                && !parts[1].is_empty()
+                && !parts[2].is_empty()
+                && parts[3] == "check-runs"
+                && parts[4].parse::<u64>().is_ok_and(|id| id > 0) =>
+        {
+            Some(G0RawResponseSchema::Singular)
+        }
+        "check_suite"
+            if parts.len() == 6
+                && parts[0] == "repos"
+                && !parts[1].is_empty()
+                && !parts[2].is_empty()
+                && parts[3] == "commits"
+                && valid_sha(parts[4])
+                && parts[5] == "check-suites" =>
+        {
+            Some(G0RawResponseSchema::CheckSuitesPage)
+        }
+        "check_suite"
+            if parts.len() == 5
+                && parts[0] == "repos"
+                && !parts[1].is_empty()
+                && !parts[2].is_empty()
+                && parts[3] == "check-suites"
+                && parts[4].parse::<u64>().is_ok_and(|id| id > 0) =>
+        {
+            Some(G0RawResponseSchema::Singular)
+        }
+        "job"
+            if parts.len() == 9
+                && parts[0] == "repos"
+                && !parts[1].is_empty()
+                && !parts[2].is_empty()
+                && parts[3] == "actions"
+                && parts[4] == "runs"
+                && parts[5].parse::<u64>().is_ok_and(|id| id > 0)
+                && parts[6] == "attempts"
+                && parts[7].parse::<u32>().is_ok_and(|attempt| attempt > 0)
+                && parts[8] == "jobs" =>
+        {
+            Some(G0RawResponseSchema::JobsPage)
+        }
+        "workflow_artifacts"
+            if parts.len() == 7
+                && parts[0] == "repos"
+                && !parts[1].is_empty()
+                && !parts[2].is_empty()
+                && parts[3] == "actions"
+                && parts[4] == "runs"
+                && parts[5].parse::<u64>().is_ok_and(|id| id > 0)
+                && parts[6] == "artifacts" =>
+        {
+            Some(G0RawResponseSchema::ArtifactsPage)
+        }
+        "workflow_run"
+            if parts.len() == 6
+                && parts[0] == "repos"
+                && !parts[1].is_empty()
+                && !parts[2].is_empty()
+                && parts[3] == "actions"
+                && parts[4] == "runs"
+                && parts[5].parse::<u64>().is_ok_and(|id| id > 0) =>
+        {
+            Some(G0RawResponseSchema::Singular)
+        }
+        "app" if parts.len() == 2 && parts[0] == "apps" && !parts[1].is_empty() => {
+            Some(G0RawResponseSchema::Singular)
+        }
+        _ => None,
+    }
+}
+
+fn g0_capture_raw_json(
+    raw_refs: &[String],
+    object_kind: &str,
+    member_id: u64,
+    endpoints: &[String],
+    requests: &[G0RequestRecord],
+    raw_objects: &[G0RawObjectRef],
+) -> Option<Value> {
+    let candidates = raw_objects
+        .iter()
+        .filter(|raw| {
+            raw.object_kind == object_kind && raw_refs.iter().any(|raw_id| raw_id == &raw.raw_id)
+        })
+        .collect::<Vec<_>>();
+    if candidates.len() != 1 {
+        return None;
+    }
+    let raw = candidates[0];
+    let request = requests.iter().find(|request| {
+        request.request_id == raw.request_id && request.response_raw_ref == raw.raw_id
+    })?;
+    if request.api != G0ApiKind::Rest
+        || request.method != "GET"
+        || request.http_status != 200
+        || !request.complete
+        || !matches!(request.state, G0RequestState::Complete)
+        || !endpoints
+            .iter()
+            .any(|endpoint| endpoint == &request.endpoint_or_operation)
+    {
+        return None;
+    }
+    let response_schema = g0_raw_response_schema(object_kind, &request.endpoint_or_operation)?;
+    let query = BASE64.decode(&request.query_base64).ok()?;
+    if !g0_response_query_contract(request, &query, response_schema) {
+        return None;
+    }
+    let bytes = BASE64.decode(&raw.bytes_base64).ok()?;
+    if raw.byte_length != bytes.len() as u64
+        || digest_bytes(&bytes) != raw.sha256
+        || !g0_storage_ref(&raw.storage_ref, &raw.sha256)
+    {
+        return None;
+    }
+    let value = serde_json::from_slice::<Value>(&bytes).ok()?;
+    g0_select_raw_member(value, response_schema, member_id, request)
+}
+
+/// Select one object from the exact GitHub page envelope retained by the
+/// collector.  Check-runs and jobs are paginated envelopes in the REST API;
+/// treating the envelope itself as a singular object silently loses every
+/// relationship except whichever fields a caller invents at the top level.
+/// Singular endpoints remain accepted only when their returned object ID is
+/// the requested ID.  A page declaring its final page must account for every
+/// item in `total_count`; duplicate IDs are rejected.
+fn g0_select_raw_member(
+    value: Value,
+    response_schema: G0RawResponseSchema,
+    member_id: u64,
+    request: &G0RequestRecord,
+) -> Option<Value> {
+    let envelope_key = match response_schema {
+        G0RawResponseSchema::CheckRunsPage => "check_runs",
+        G0RawResponseSchema::CheckSuitesPage => "check_suites",
+        G0RawResponseSchema::JobsPage => "jobs",
+        G0RawResponseSchema::ArtifactsPage => "artifacts",
+        G0RawResponseSchema::Singular => {
+            return (g0_json_u64(&value, &["id"]) == Some(member_id)
+                && request.page.items_returned == 1
+                && !request.page.has_next_page
+                && value.get("check_runs").is_none()
+                && value.get("check_suites").is_none()
+                && value.get("jobs").is_none())
+            .then_some(value);
+        }
+    };
+    {
+        let total_count = value.get("total_count")?.as_u64()?;
+        let members = value.get(envelope_key)?.as_array()?;
+        if members.len() as u32 != request.page.items_returned
+            || (!request.page.has_next_page && total_count != members.len() as u64)
+            || (request.page.has_next_page && total_count < members.len() as u64)
+        {
+            return None;
+        }
+        let matches = members
+            .iter()
+            .filter(|member| g0_json_u64(member, &["id"]) == Some(member_id))
+            .collect::<Vec<_>>();
+        (matches.len() == 1).then(|| matches[0].clone())
+    }
+}
+
+fn g0_api_path_is(value: &Value, path: &str) -> bool {
+    value
+        .as_str()
+        .and_then(g0_api_url)
+        .is_some_and(|url| url.query().is_none() && url.path() == path)
+}
+
+fn g0_check_raw_evidence_valid(
+    repository: &str,
+    check: &G0CheckProducer,
+    requests: &[G0RequestRecord],
+    raw_objects: &[G0RawObjectRef],
+) -> bool {
+    let check_run_endpoints = vec![
+        format!("/repos/{repository}/check-runs/{}", check.check_run_id),
+        format!(
+            "/repos/{repository}/commits/{}/check-runs",
+            check.source_sha
+        ),
+    ];
+    let suite_endpoints = vec![
+        format!("/repos/{repository}/check-suites/{}", check.check_suite_id),
+        format!(
+            "/repos/{repository}/commits/{}/check-suites",
+            check.source_sha
+        ),
+    ];
+    let app_endpoint = format!("/apps/{}", check.app_slug);
+    let app_id = check.app_id.parse::<u64>().ok();
+    let check_run = g0_capture_raw_json(
+        &check.raw_object_refs,
+        "check_run",
+        check.check_run_id,
+        &check_run_endpoints,
+        requests,
+        raw_objects,
+    );
+    let check_suite = g0_capture_raw_json(
+        &check.raw_object_refs,
+        "check_suite",
+        check.check_suite_id,
+        &suite_endpoints,
+        requests,
+        raw_objects,
+    );
+    let app = g0_capture_raw_json(
+        &check.raw_object_refs,
+        "app",
+        app_id.unwrap_or_default(),
+        &[app_endpoint],
+        requests,
+        raw_objects,
+    );
+    let common = app_id.is_some_and(|app_id| {
+        check_run
+            .as_ref()
+            .is_some_and(|value| g0_check_run_identity_valid(value, check, app_id))
+            && check_suite.as_ref().is_some_and(|value| {
+                g0_json_u64(value, &["id"]) == Some(check.check_suite_id)
+                    && g0_json_string(value, &["head_sha"]) == Some(check.source_sha.as_str())
+                    && g0_json_string(value, &["status"]) == Some(check.status.as_str())
+                    && g0_json_string(value, &["conclusion"]) == Some(check.conclusion.as_str())
+                    && g0_json_u64(value, &["app", "id"]) == Some(app_id)
+                    && g0_json_string(value, &["app", "slug"]) == Some(check.app_slug.as_str())
+            })
+            && app.as_ref().is_some_and(|value| {
+                g0_json_u64(value, &["id"]) == Some(app_id)
+                    && g0_json_string(value, &["slug"]) == Some(check.app_slug.as_str())
+            })
+    });
+    if !common {
+        return false;
+    }
+    let has_actions_raw_objects = check.raw_object_refs.iter().any(|raw_id| {
+        raw_objects.iter().any(|raw| {
+            &raw.raw_id == raw_id && matches!(raw.object_kind.as_str(), "workflow_run" | "job")
+        })
+    });
+    match &check.provider {
+        G0CheckProvider::ExternalApp => !has_actions_raw_objects,
+        G0CheckProvider::GithubActions {
+            workflow_run_id,
+            run_attempt,
+            job_id,
+            job_run_id,
+            job_run_attempt,
+            job_check_run_id,
+            job_source_sha,
+            job_html_url,
+            ..
+        } => {
+            let run = g0_capture_raw_json(
+                &check.raw_object_refs,
+                "workflow_run",
+                *workflow_run_id,
+                &[format!(
+                    "/repos/{repository}/actions/runs/{workflow_run_id}"
+                )],
+                requests,
+                raw_objects,
+            );
+            let job = g0_capture_raw_json(
+                &check.raw_object_refs,
+                "job",
+                *job_id,
+                &[format!(
+                    "/repos/{repository}/actions/runs/{workflow_run_id}/attempts/{run_attempt}/jobs"
+                )],
+                requests,
+                raw_objects,
+            );
+            run.as_ref().is_some_and(|value| {
+                g0_json_u64(value, &["id"]) == Some(*workflow_run_id)
+                    && g0_json_u64(value, &["run_attempt"]) == Some(u64::from(*run_attempt))
+                    && g0_json_string(value, &["head_sha"]) == Some(job_source_sha.as_str())
+                    && g0_json_string(value, &["event"]) == Some(check.event.as_str())
+                    && g0_json_string(value, &["status"]) == Some(check.status.as_str())
+                    && g0_json_string(value, &["conclusion"]) == Some(check.conclusion.as_str())
+            }) && job.as_ref().is_some_and(|value| {
+                g0_json_u64(value, &["id"]) == Some(*job_id)
+                    && g0_json_u64(value, &["run_id"]) == Some(*job_run_id)
+                    && g0_json_u64(value, &["run_attempt"]) == Some(u64::from(*job_run_attempt))
+                    && g0_json_string(value, &["head_sha"]) == Some(job_source_sha.as_str())
+                    && g0_json_string(value, &["html_url"]) == Some(job_html_url.as_str())
+                    && g0_api_path_is(
+                        &value["check_run_url"],
+                        &format!("/repos/{repository}/check-runs/{job_check_run_id}"),
+                    )
+            })
+        }
+    }
+}
+
+fn check_g0_check_raw_evidence(
+    repository: &str,
+    checks: &[G0CheckProducer],
+    requests: &[G0RequestRecord],
+    raw_objects: &[G0RawObjectRef],
+    findings: &mut Vec<Finding>,
+) {
+    for check in checks {
+        if !g0_check_raw_evidence_valid(repository, check, requests, raw_objects) {
+            finding(
+                findings,
+                "g0-check-raw-evidence",
+                repository,
+                "check_producers.raw_object_refs",
+                "check producer must bind independently captured check-run, check-suite, App, source, status, conclusion, html_url, and provider-specific run/job objects",
+            );
+        }
+    }
+}
+
 fn check_g0_check_producers(
     repository: &str,
     checks: &[G0CheckProducer],
@@ -3681,9 +4450,10 @@ fn check_g0_check_producers(
     let mut producer_jobs = BTreeSet::new();
     for check in checks {
         let key = (check.context.clone(), check.app_id.clone());
+        let job_key = g0_check_job_key(check);
         if !seen.insert(key.clone())
             || !check_run_ids.insert(check.check_run_id)
-            || !producer_jobs.insert((check.workflow_run_id, check.run_attempt, check.job_id))
+            || job_key.is_some_and(|key| !producer_jobs.insert(key))
         {
             finding(
                 findings,
@@ -3696,27 +4466,26 @@ fn check_g0_check_producers(
         if check.context.trim().is_empty()
             || check.app_id.trim().is_empty()
             || !g0_valid_app_id(&check.app_id)
+            || check.api != G0ApiKind::Rest
             || check.check_suite_id == 0
             || check.check_run_id == 0
-            || check.workflow_run_id == 0
-            || check.run_attempt == 0
-            || check.job_id == 0
             || !valid_sha(&check.source_sha)
             || check.source_sha != expectation.source_sha
-            || !valid_sha(&check.actual_checkout_sha)
-            || check.actual_checkout_sha != expectation.checkout_sha
+            || g0_actions_checkout_sha(check).is_some_and(|checkout_sha| {
+                !valid_sha(checkout_sha) || checkout_sha != expectation.checkout_sha
+            })
             || check.event != expectation.event
             || check.status != "completed"
             || check.conclusion != "success"
-            || !g0_repo_source_url(repository, &check.source_url)
+            || !g0_check_provider_valid(check, repository)
         {
             finding(
                 findings,
                 "g0-check-producer",
                 repository,
                 "check_producers",
-                "check producer must bind positive API identities, current source SHA, event, successful status/conclusion, and repository URL",
-            );
+            "check producer must bind captured App/provider, provider-specific identities, current source SHA, event, successful status/conclusion, and provider html_url",
+        );
         }
         if !expectation.contexts.contains(&key) {
             finding(
@@ -3760,30 +4529,50 @@ fn check_g0_main_checks_against_snapshot(
     findings: &mut Vec<Finding>,
 ) {
     for check in checks {
-        let matched = snapshot.main_executions.iter().any(|execution| {
-            execution.run_id == check.workflow_run_id
-                && execution.run_attempt == check.run_attempt
-                && execution.trigger_source_sha == check.source_sha
-                && execution.actual_checkout_sha == check.actual_checkout_sha
-                && execution.event == check.event
-                && execution.required_checks.iter().any(|observed| {
-                    observed.context == check.context
-                        && observed.app_id == check.app_id
-                        && observed.run_id == check.workflow_run_id
-                        && observed.job_id == check.job_id.to_string()
-                        && observed.event == check.event
-                        && observed.status == check.status
-                        && observed.conclusion == check.conclusion
-                        && observed.source_url == check.source_url
-                })
-        });
+        let matched = match &check.provider {
+            G0CheckProvider::GithubActions {
+                workflow_run_id,
+                run_attempt,
+                job_id,
+                actual_checkout_sha,
+                ..
+            } => snapshot.main_executions.iter().any(|execution| {
+                execution.run_id == *workflow_run_id
+                    && execution.run_attempt == *run_attempt
+                    && execution.trigger_source_sha == check.source_sha
+                    && execution.actual_checkout_sha == *actual_checkout_sha
+                    && execution.event == check.event
+                    && execution.required_checks.iter().any(|observed| {
+                        observed.context == check.context
+                            && observed.app_id == check.app_id
+                            && observed.run_id == *workflow_run_id
+                            && observed.job_id == job_id.to_string()
+                            && observed.event == check.event
+                            && observed.status == check.status
+                            && observed.conclusion == check.conclusion
+                            && observed.source_url == check.html_url
+                    })
+            }),
+            G0CheckProvider::ExternalApp => snapshot.main_executions.iter().any(|execution| {
+                execution.trigger_source_sha == check.source_sha
+                    && execution.event == check.event
+                    && execution.required_checks.iter().any(|observed| {
+                        observed.context == check.context
+                            && observed.app_id == check.app_id
+                            && observed.event == check.event
+                            && observed.status == check.status
+                            && observed.conclusion == check.conclusion
+                            && observed.source_url == check.html_url
+                    })
+            }),
+        };
         if !matched {
             finding(
                 findings,
                 "g0-check-snapshot-mismatch",
                 repository,
                 "repositories.main_checks",
-                "collector check producer does not match an independently observed main check/run/job tuple",
+                "collector check producer does not match an independently observed main check tuple",
             );
         }
     }
@@ -3849,7 +4638,11 @@ fn check_g0_pull_request(
         findings,
     );
     let mut binding_run_ids = BTreeSet::new();
-    if pr.workflow_bindings.is_empty() {
+    let requires_workflow_binding = pr
+        .required_check_producers
+        .iter()
+        .any(|check| matches!(&check.provider, G0CheckProvider::GithubActions { .. }));
+    if requires_workflow_binding && pr.workflow_bindings.is_empty() {
         finding(
             findings,
             "g0-pr-workflow-binding",
@@ -3908,9 +4701,10 @@ fn check_g0_pull_request(
     let mut producer_jobs = BTreeSet::new();
     for check in &pr.required_check_producers {
         let key = (check.context.clone(), check.app_id.clone());
+        let job_key = g0_check_job_key(check);
         if !seen_checks.insert(key.clone())
             || !check_run_ids.insert(check.check_run_id)
-            || !producer_jobs.insert((check.workflow_run_id, check.run_attempt, check.job_id))
+            || job_key.is_some_and(|key| !producer_jobs.insert(key))
             || !expected_contexts.contains(&key)
         {
             finding(
@@ -3923,31 +4717,37 @@ fn check_g0_pull_request(
         }
         if check.check_suite_id == 0
             || check.check_run_id == 0
-            || check.workflow_run_id == 0
-            || check.run_attempt == 0
-            || check.job_id == 0
+            || check.api != G0ApiKind::Rest
             || !g0_valid_app_id(&check.app_id)
             || !valid_sha(&check.source_sha)
             || check.source_sha != pr.head_sha
-            || !valid_sha(&check.actual_checkout_sha)
-            || check.actual_checkout_sha != pr.tested_merge_sha
+            || g0_actions_checkout_sha(check).is_some_and(|checkout_sha| {
+                !valid_sha(checkout_sha) || checkout_sha != pr.tested_merge_sha
+            })
             || check.event != "pull_request"
             || check.status != "completed"
             || check.conclusion != "success"
-            || !g0_repo_source_url(repository, &check.source_url)
-            || !pr.workflow_bindings.iter().any(|binding| {
-                binding.run_ids.contains(&check.workflow_run_id)
-                    && binding.event == check.event
-                    && binding.source_sha == check.source_sha
-            })
+            || !g0_check_provider_valid(check, repository)
+            || !match &check.provider {
+                G0CheckProvider::GithubActions {
+                    workflow_run_id, ..
+                } => pr.workflow_bindings.iter().any(|binding| {
+                    binding.run_ids.contains(workflow_run_id)
+                        && binding.event == check.event
+                        && binding.source_sha == check.source_sha
+                        && g0_actions_checkout_sha(check)
+                            .is_some_and(|checkout_sha| binding.actual_checkout_sha == checkout_sha)
+                }),
+                G0CheckProvider::ExternalApp => true,
+            }
         {
             finding(
                 findings,
                 "g0-pr-check-producer",
                 repository,
                 "open_prs.required_check_producers",
-                "PR check producer must bind successful API status, source/event, workflow run, and repository URL",
-            );
+            "PR check producer must bind successful API status, source/event, provider-specific identities, html_url, and App identity",
+        );
         }
         check_g0_raw_refs(
             "evidence.g0_inventory.collector_snapshot.pr_check.raw_object_refs",
@@ -4038,30 +4838,52 @@ fn check_g0_pull_request(
                 );
             }
             for check in &pr.required_check_producers {
-                let matched = snapshot_pr.executions.iter().any(|execution| {
-                    execution.run_id == check.workflow_run_id
-                        && execution.run_attempt == check.run_attempt
-                        && execution.event == check.event
-                        && execution.trigger_source_sha == check.source_sha
-                        && execution.actual_checkout_sha == check.actual_checkout_sha
-                        && execution.required_checks.iter().any(|observed| {
-                            observed.context == check.context
-                                && observed.app_id == check.app_id
-                                && observed.job_id == check.job_id.to_string()
-                                && observed.run_id == check.workflow_run_id
-                                && observed.status == check.status
-                                && observed.conclusion == check.conclusion
-                                && observed.source_url == check.source_url
-                                && observed.event == check.event
+                let matched = match &check.provider {
+                    G0CheckProvider::GithubActions {
+                        workflow_run_id,
+                        run_attempt,
+                        job_id,
+                        actual_checkout_sha,
+                        ..
+                    } => snapshot_pr.executions.iter().any(|execution| {
+                        execution.run_id == *workflow_run_id
+                            && execution.run_attempt == *run_attempt
+                            && execution.event == check.event
+                            && execution.trigger_source_sha == check.source_sha
+                            && execution.actual_checkout_sha == *actual_checkout_sha
+                            && execution.required_checks.iter().any(|observed| {
+                                observed.context == check.context
+                                    && observed.app_id == check.app_id
+                                    && observed.job_id == job_id.to_string()
+                                    && observed.run_id == *workflow_run_id
+                                    && observed.status == check.status
+                                    && observed.conclusion == check.conclusion
+                                    && observed.source_url == check.html_url
+                                    && observed.event == check.event
+                            })
+                    }),
+                    G0CheckProvider::ExternalApp => {
+                        snapshot_pr.executions.iter().any(|execution| {
+                            execution.trigger_source_sha == check.source_sha
+                                && execution.event == check.event
+                                && execution.required_checks.iter().any(|observed| {
+                                    observed.context == check.context
+                                        && observed.app_id == check.app_id
+                                        && observed.status == check.status
+                                        && observed.conclusion == check.conclusion
+                                        && observed.source_url == check.html_url
+                                        && observed.event == check.event
+                                })
                         })
-                });
+                    }
+                };
                 if !matched {
                     finding(
                         findings,
                         "g0-pr-check-snapshot-mismatch",
                         repository,
                         "open_prs.required_check_producers",
-                        "PR check producer does not match an independently observed run/check/job tuple",
+                        "PR check producer does not match an independently observed provider check tuple",
                     );
                 }
             }
@@ -7494,6 +8316,84 @@ fn sort_findings(findings: &mut [Finding]) {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::{Cursor, Read};
+
+    fn real_api_fixture_entry(path: &str) -> Vec<u8> {
+        let encoded =
+            include_str!("testdata/g0/real-api-fixture-corpus-20260920-080318/corpus.zip.base64")
+                .trim();
+        let archive_bytes = BASE64.decode(encoded).expect("real fixture archive base64");
+        let mut archive = zip::ZipArchive::new(Cursor::new(archive_bytes))
+            .expect("real fixture archive is a zip");
+        let mut entry = archive.by_name(path).expect("real fixture entry exists");
+        let mut bytes = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .expect("read real fixture entry");
+        bytes
+    }
+
+    fn captured_page_request(endpoint: &str, query: &str, items: u32) -> G0RequestRecord {
+        G0RequestRecord {
+            request_id: format!("fixture:{endpoint}"),
+            api: G0ApiKind::Rest,
+            method: "GET".to_owned(),
+            endpoint_or_operation: endpoint.to_owned(),
+            query_base64: BASE64.encode(query.as_bytes()),
+            variables_base64: BASE64.encode(b"{}"),
+            query_sha256: digest_bytes(query.as_bytes()),
+            variables_sha256: digest_bytes(b"{}"),
+            auth_identity_ref: "collector.auth".to_owned(),
+            started_at_utc: "2026-09-20T07:53:35Z".to_owned(),
+            completed_at_utc: "2026-09-20T07:53:36Z".to_owned(),
+            http_status: 200,
+            api_request_id: "fixture-api-request".to_owned(),
+            rate_limit_ref: "collector.rate_limit".to_owned(),
+            page: G0Page {
+                number: 1,
+                per_page: 100,
+                link_next: None,
+                cursor_in: None,
+                cursor_out: None,
+                has_next_page: false,
+                items_returned: items,
+            },
+            response_raw_ref: "fixture-raw".to_owned(),
+            error_raw_ref: None,
+            state: G0RequestState::Complete,
+            complete: true,
+            truncation_reason: None,
+        }
+    }
+
+    fn captured_raw_reference(
+        raw_id: &str,
+        request_id: &str,
+        object_kind: &str,
+        bytes: &[u8],
+    ) -> G0RawObjectRef {
+        let digest = digest_bytes(bytes);
+        let storage_ref = format!(
+            "sha256://{}",
+            digest
+                .strip_prefix("sha256:")
+                .expect("fixture digest prefix")
+        );
+        G0RawObjectRef {
+            raw_id: raw_id.to_owned(),
+            request_id: request_id.to_owned(),
+            object_kind: object_kind.to_owned(),
+            canonicalization: "raw-json".to_owned(),
+            sha256: digest.clone(),
+            byte_length: bytes.len() as u64,
+            bytes_base64: BASE64.encode(bytes),
+            media_type: "application/json".to_owned(),
+            storage_ref: storage_ref.clone(),
+            original_sha256: digest,
+            original_byte_length: bytes.len() as u64,
+            original_storage_ref: storage_ref,
+        }
+    }
 
     fn sha(seed: char) -> String {
         std::iter::repeat_n(seed, SHA_LENGTH).collect()
@@ -7595,6 +8495,159 @@ mod tests {
         }
     }
 
+    fn push_provider_raw_fixture(
+        requests: &mut Vec<G0RequestRecord>,
+        raw_objects: &mut Vec<G0RawObjectRef>,
+        repository: &str,
+        prefix: &str,
+        check: &G0CheckProducer,
+    ) -> Vec<String> {
+        let app_id = check.app_id.parse::<u64>().unwrap();
+        let mut raw_refs = Vec::new();
+        let mut push = |kind: &str, endpoint: String, body: Value| {
+            let raw_id = if kind == "app" {
+                format!("raw-app-{}", check.app_slug)
+            } else {
+                format!("raw-{prefix}-{kind}")
+            };
+            if raw_objects.iter().any(|raw| raw.raw_id == raw_id) {
+                raw_refs.push(raw_id);
+                return;
+            }
+            let request_id = if kind == "app" {
+                format!("request-app-{}", check.app_slug)
+            } else {
+                format!("request-{prefix}-{kind}")
+            };
+            let body = if kind == "job" {
+                json!({"total_count": 1, "jobs": [body]})
+            } else {
+                body
+            };
+            let bytes = canonical_json(&body).into_bytes();
+            let digest = digest_bytes(&bytes);
+            let storage_ref = format!("sha256://{}", digest.strip_prefix("sha256:").unwrap());
+            raw_objects.push(G0RawObjectRef {
+                raw_id: raw_id.clone(),
+                request_id: request_id.clone(),
+                object_kind: kind.to_owned(),
+                canonicalization: "jcs".to_owned(),
+                sha256: digest.clone(),
+                byte_length: bytes.len() as u64,
+                bytes_base64: BASE64.encode(&bytes),
+                media_type: "application/json".to_owned(),
+                storage_ref: storage_ref.clone(),
+                original_sha256: digest.clone(),
+                original_byte_length: bytes.len() as u64,
+                original_storage_ref: storage_ref,
+            });
+            requests.push(G0RequestRecord {
+                request_id,
+                api: G0ApiKind::Rest,
+                method: "GET".to_owned(),
+                endpoint_or_operation: endpoint,
+                query_base64: BASE64.encode(b"per_page=100&page=1"),
+                variables_base64: BASE64.encode(b"{}"),
+                query_sha256: digest_bytes(b"per_page=100&page=1"),
+                variables_sha256: digest_bytes(b"{}"),
+                auth_identity_ref: "collector.auth".to_owned(),
+                started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+                completed_at_utc: "2026-09-20T00:00:01Z".to_owned(),
+                http_status: 200,
+                api_request_id: format!("api-{prefix}-{kind}"),
+                rate_limit_ref: "collector.rate_limit".to_owned(),
+                page: G0Page {
+                    number: 1,
+                    per_page: 100,
+                    link_next: None,
+                    cursor_in: None,
+                    cursor_out: None,
+                    has_next_page: false,
+                    items_returned: 1,
+                },
+                response_raw_ref: raw_id.clone(),
+                error_raw_ref: None,
+                state: G0RequestState::Complete,
+                complete: true,
+                truncation_reason: None,
+            });
+            raw_refs.push(raw_id);
+        };
+
+        push(
+            "check_run",
+            format!("/repos/{repository}/check-runs/{}", check.check_run_id),
+            json!({
+                "id": check.check_run_id,
+                "name": check.context,
+                "head_sha": check.source_sha,
+                "status": check.status,
+                "conclusion": check.conclusion,
+                "html_url": check.html_url,
+                "check_suite": {"id": check.check_suite_id},
+                "app": {"id": app_id, "slug": check.app_slug}
+            }),
+        );
+        push(
+            "check_suite",
+            format!("/repos/{repository}/check-suites/{}", check.check_suite_id),
+            json!({
+                "id": check.check_suite_id,
+                "head_sha": check.source_sha,
+                "status": check.status,
+                "conclusion": check.conclusion,
+                "app": {"id": app_id, "slug": check.app_slug}
+            }),
+        );
+        push(
+            "app",
+            format!("/apps/{}", check.app_slug),
+            json!({"id": app_id, "slug": check.app_slug}),
+        );
+        if let G0CheckProvider::GithubActions {
+            workflow_run_id,
+            run_attempt,
+            job_id,
+            job_run_id,
+            job_run_attempt,
+            job_check_run_id,
+            job_source_sha,
+            job_html_url,
+            ..
+        } = &check.provider
+        {
+            push(
+                "workflow_run",
+                format!("/repos/{repository}/actions/runs/{workflow_run_id}"),
+                json!({
+                    "id": workflow_run_id,
+                    "run_attempt": run_attempt,
+                    "head_sha": job_source_sha,
+                    "event": check.event,
+                    "status": check.status,
+                    "conclusion": check.conclusion
+                }),
+            );
+            push(
+                "job",
+                format!(
+                    "/repos/{repository}/actions/runs/{workflow_run_id}/attempts/{run_attempt}/jobs"
+                ),
+                json!({
+                    "id": job_id,
+                    "run_id": job_run_id,
+                    "run_attempt": job_run_attempt,
+                    "head_sha": job_source_sha,
+                    "html_url": job_html_url,
+                    "check_run_url": format!(
+                        "https://api.github.com/repos/{repository}/check-runs/{job_check_run_id}"
+                    )
+                }),
+            );
+        }
+        raw_refs
+    }
+
     /// Complete typed collector fixture.  It is intentionally generated from
     /// the checker-owned canonical scope, with every repository, current PR,
     /// workflow, required check, raw object, reconciliation row, graph edge,
@@ -7660,8 +8713,10 @@ mod tests {
                         .expect("digest has prefix")
                 ),
             });
-            let artifact_bytes =
-                format!("{{\"artifact_id\":{artifact_id},\"run_id\":{main_run_id}}}").into_bytes();
+            let artifact_bytes = format!(
+                "{{\"total_count\":1,\"artifacts\":[{{\"id\":{artifact_id},\"workflow_run\":{{\"id\":{main_run_id},\"run_attempt\":1}}}}]}}"
+            )
+            .into_bytes();
             let artifact_digest = digest_bytes(&artifact_bytes);
             raw_objects.push(G0RawObjectRef {
                 raw_id: artifact_raw_id.clone(),
@@ -7750,9 +8805,9 @@ mod tests {
                 endpoint_or_operation: format!(
                     "/repos/{repository}/actions/runs/{main_run_id}/artifacts"
                 ),
-                query_base64: BASE64.encode(b"page=1"),
+                query_base64: BASE64.encode(b"per_page=100&page=1"),
                 variables_base64: BASE64.encode(b"{}"),
-                query_sha256: digest_bytes(b"page=1"),
+                query_sha256: digest_bytes(b"per_page=100&page=1"),
                 variables_sha256: digest_bytes(b"{}"),
                 auth_identity_ref: "collector.auth".to_owned(),
                 started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
@@ -7780,8 +8835,52 @@ mod tests {
             let repository_url = format!("https://github.com/{repository}");
             let rules_url = format!("{repository_url}/settings/rules");
             let workflow_url = format!("{repository_url}/{workflow_url_suffix}");
-            let main_check_url = format!("{repository_url}/runs/{main_check_run_id}");
-            let pr_check_url = format!("{repository_url}/runs/{pr_check_run_id}");
+            // Keep one captured external-App shape in the PR fixture while
+            // exercising the captured GitHub Actions shape for main and the
+            // remaining PRs.
+            let main_provider = G0CheckProvider::GithubActions {
+                workflow_run_id: main_run_id,
+                run_attempt: 1,
+                job_id: main_job_id,
+                job_run_id: main_run_id,
+                job_run_attempt: 1,
+                job_check_run_id: main_check_run_id,
+                job_source_sha: source_sha.clone(),
+                job_html_url: format!(
+                    "{repository_url}/actions/runs/{main_run_id}/job/{main_job_id}"
+                ),
+                actual_checkout_sha: source_sha.clone(),
+            };
+            let pr_provider = if index < 2 {
+                G0CheckProvider::ExternalApp
+            } else {
+                G0CheckProvider::GithubActions {
+                    workflow_run_id: pr_run_id,
+                    run_attempt: 1,
+                    job_id: pr_job_id,
+                    job_run_id: pr_run_id,
+                    job_run_attempt: 1,
+                    job_check_run_id: pr_check_run_id,
+                    job_source_sha: head_sha.clone(),
+                    job_html_url: format!(
+                        "{repository_url}/actions/runs/{pr_run_id}/job/{pr_job_id}"
+                    ),
+                    actual_checkout_sha: merge_sha.clone(),
+                }
+            };
+            let main_app_slug = "github-actions";
+            let pr_app_slug = match index {
+                0 => "dco-2",
+                1 => "sonarcloud",
+                _ => "github-actions",
+            };
+            let main_check_url =
+                format!("{repository_url}/actions/runs/{main_run_id}/job/{main_check_run_id}");
+            let pr_check_url = if index < 2 {
+                format!("{repository_url}/runs/{pr_check_run_id}")
+            } else {
+                format!("{repository_url}/actions/runs/{pr_run_id}/job/{pr_check_run_id}")
+            };
             let main_job_id_string = main_job_id.to_string();
             let pr_job_id_string = pr_job_id.to_string();
             let required_context = RequiredContext {
@@ -7993,38 +9092,54 @@ mod tests {
                 bytes_base64: BASE64.encode(workflow_bytes),
                 raw_object_refs: vec![workflow_raw_id.clone()],
             };
-            let main_check_producer = G0CheckProducer {
+            let mut main_check_producer = G0CheckProducer {
                 context: "ci".to_owned(),
                 app_id: "123".to_owned(),
+                app_slug: main_app_slug.to_owned(),
+                provider: main_provider,
+                api: G0ApiKind::Rest,
                 check_suite_id: main_check_suite_id,
                 check_run_id: main_check_run_id,
-                workflow_run_id: main_run_id,
-                run_attempt: 1,
-                job_id: main_job_id,
                 source_sha: source_sha.clone(),
-                actual_checkout_sha: source_sha.clone(),
                 event: "push".to_owned(),
                 status: "completed".to_owned(),
                 conclusion: "success".to_owned(),
-                source_url: main_check_url,
+                html_url: main_check_url,
                 raw_object_refs: vec![raw_id.clone()],
             };
-            let pr_check_producer = G0CheckProducer {
+            let mut pr_check_producer = G0CheckProducer {
                 context: "ci".to_owned(),
                 app_id: "123".to_owned(),
+                app_slug: pr_app_slug.to_owned(),
+                provider: pr_provider,
+                api: G0ApiKind::Rest,
                 check_suite_id: pr_check_suite_id,
                 check_run_id: pr_check_run_id,
-                workflow_run_id: pr_run_id,
-                run_attempt: 1,
-                job_id: pr_job_id,
                 source_sha: head_sha.clone(),
-                actual_checkout_sha: merge_sha.clone(),
                 event: "pull_request".to_owned(),
                 status: "completed".to_owned(),
                 conclusion: "success".to_owned(),
-                source_url: pr_check_url,
+                html_url: pr_check_url,
                 raw_object_refs: vec![raw_id.clone()],
             };
+            main_check_producer
+                .raw_object_refs
+                .extend(push_provider_raw_fixture(
+                    &mut requests,
+                    &mut raw_objects,
+                    &repository,
+                    &format!("{repository_id}-main"),
+                    &main_check_producer,
+                ));
+            pr_check_producer
+                .raw_object_refs
+                .extend(push_provider_raw_fixture(
+                    &mut requests,
+                    &mut raw_objects,
+                    &repository,
+                    &format!("{repository_id}-pr"),
+                    &pr_check_producer,
+                ));
             collector_repositories.push(G0RepositoryInventory {
                 repository: repository.clone(),
                 repository_id,
@@ -8317,6 +9432,24 @@ mod tests {
         check_g0_inventory(&manifest, &snapshot, Some(&inventory), &mut findings);
         assert!(findings.is_empty(), "unexpected findings: {findings:?}");
 
+        let mut unknown_paginated = inventory.clone();
+        unknown_paginated
+            .collector_snapshot
+            .raw_objects
+            .iter_mut()
+            .find(|raw| raw.object_kind == "workflow_artifacts")
+            .expect("complete fixture artifact page")
+            .object_kind = "github-response".to_owned();
+        refresh_typed_inventory_bytes(&mut unknown_paginated);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&unknown_paginated),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-response-schema"));
+
         let mut missing_artifacts = inventory.clone();
         missing_artifacts.collector_snapshot.repositories[0]
             .artifacts
@@ -8343,6 +9476,136 @@ mod tests {
         findings.clear();
         check_g0_inventory(&manifest, &snapshot, Some(&wrong_artifact), &mut findings);
         assert!(g0_codes(&findings).contains("g0-artifact-identity"));
+
+        let mut wrong_check_url = complete_g0_fixture().2;
+        let check = &mut wrong_check_url.collector_snapshot.repositories[0].main_checks[0];
+        let workflow_run_id = match &check.provider {
+            G0CheckProvider::GithubActions {
+                workflow_run_id, ..
+            } => *workflow_run_id,
+            G0CheckProvider::ExternalApp => panic!("fixture main check must be Actions"),
+        };
+        check.html_url = format!(
+            "https://github.com/{}/actions/runs/{}/job/{}",
+            CANONICAL_REPOSITORIES[0],
+            workflow_run_id,
+            check.check_run_id + 1
+        );
+        refresh_typed_inventory_bytes(&mut wrong_check_url);
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&wrong_check_url), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-check-producer"));
+
+        macro_rules! assert_check_url_rejected {
+            ($candidate:expr) => {{
+                let mut candidate = $candidate;
+                refresh_typed_inventory_bytes(&mut candidate);
+                findings.clear();
+                check_g0_inventory(&manifest, &snapshot, Some(&candidate), &mut findings);
+                assert!(
+                    g0_codes(&findings).contains("g0-check-producer")
+                        || g0_codes(&findings).contains("g0-pr-check-producer"),
+                    "mutated provider URL unexpectedly passed: {findings:?}"
+                );
+            }};
+        }
+
+        let mut wrong_actions_run = inventory.clone();
+        let action_check = &mut wrong_actions_run.collector_snapshot.repositories[1].main_checks[0];
+        let action_run_id = match &action_check.provider {
+            G0CheckProvider::GithubActions {
+                workflow_run_id, ..
+            } => *workflow_run_id,
+            G0CheckProvider::ExternalApp => panic!("fixture check must be Actions"),
+        };
+        action_check.html_url = format!(
+            "https://github.com/{}/actions/runs/{}/job/{}",
+            CANONICAL_REPOSITORIES[1],
+            action_run_id + 1,
+            action_check.check_run_id
+        );
+        assert_check_url_rejected!(wrong_actions_run);
+
+        let mut wrong_actions_check = inventory.clone();
+        let action_check =
+            &mut wrong_actions_check.collector_snapshot.repositories[1].main_checks[0];
+        let action_run_id = match &action_check.provider {
+            G0CheckProvider::GithubActions {
+                workflow_run_id, ..
+            } => *workflow_run_id,
+            G0CheckProvider::ExternalApp => panic!("fixture check must be Actions"),
+        };
+        action_check.html_url = format!(
+            "https://github.com/{}/actions/runs/{}/job/{}",
+            CANONICAL_REPOSITORIES[1],
+            action_run_id,
+            action_check.check_run_id + 1
+        );
+        assert_check_url_rejected!(wrong_actions_check);
+
+        let mut wrong_actions_job = inventory.clone();
+        let action_check = &mut wrong_actions_job.collector_snapshot.repositories[1].main_checks[0];
+        if let G0CheckProvider::GithubActions {
+            workflow_run_id,
+            job_id,
+            job_html_url,
+            ..
+        } = &mut action_check.provider
+        {
+            *job_html_url = format!(
+                "https://github.com/{}/actions/runs/{}/job/{}",
+                CANONICAL_REPOSITORIES[1],
+                *workflow_run_id,
+                *job_id + 1
+            );
+        } else {
+            panic!("fixture check must be Actions");
+        }
+        assert_check_url_rejected!(wrong_actions_job);
+
+        let mut foreign_check_host = inventory.clone();
+        let action_check =
+            &mut foreign_check_host.collector_snapshot.repositories[1].main_checks[0];
+        action_check.html_url =
+            action_check
+                .html_url
+                .replacen("https://github.com", "https://evil.example", 1);
+        assert_check_url_rejected!(foreign_check_host);
+
+        let mut check_query = inventory.clone();
+        let action_check = &mut check_query.collector_snapshot.repositories[1].main_checks[0];
+        action_check.html_url.push_str("?source=details");
+        assert_check_url_rejected!(check_query);
+
+        let mut details_url = inventory.clone();
+        let external_check = &mut details_url.collector_snapshot.repositories[0].main_checks[0];
+        external_check.html_url = "https://cncf.github.io/dco2".to_owned();
+        assert_check_url_rejected!(details_url);
+
+        let mut external_missing_app = inventory.clone();
+        external_missing_app.collector_snapshot.repositories[0].open_prs[0]
+            .required_check_producers[0]
+            .app_slug
+            .clear();
+        assert_check_url_rejected!(external_missing_app);
+
+        let mut external_wrong_app = inventory.clone();
+        external_wrong_app.collector_snapshot.repositories[0].open_prs[0]
+            .required_check_producers[0]
+            .app_slug = "github-actions".to_owned();
+        assert_check_url_rejected!(external_wrong_app);
+
+        let mut external_wrong_source = inventory.clone();
+        external_wrong_source.collector_snapshot.repositories[0].open_prs[0]
+            .required_check_producers[0]
+            .source_sha = sha('d');
+        assert_check_url_rejected!(external_wrong_source);
+
+        let mut external_wrong_api = inventory.clone();
+        external_wrong_api.collector_snapshot.repositories[0].open_prs[0]
+            .required_check_producers[0]
+            .api = G0ApiKind::Graphql;
+        assert_check_url_rejected!(external_wrong_api);
 
         let mut wrong_artifact_attempt = inventory.clone();
         wrong_artifact_attempt.collector_snapshot.repositories[0].artifacts[0].run_attempt = 2;
@@ -9473,6 +10736,1001 @@ mod tests {
         assert!(serde_json::from_value::<G0RequestRecord>(request.clone()).is_ok());
         request["caller_claimed_success"] = json!(true);
         assert!(serde_json::from_value::<G0RequestRecord>(request).is_err());
+    }
+
+    #[test]
+    fn g0_provider_variant_rejects_unknown_fields() {
+        let (_, _, inventory) = complete_g0_fixture();
+        let mut value = serde_json::to_value(&inventory).unwrap();
+        value["collector_snapshot"]["repositories"][1]["main_checks"][0]["provider"]
+            ["github_actions"]["details_url"] = json!("https://example.invalid");
+        assert!(serde_json::from_value::<G0InventoryEvidence>(value).is_err());
+    }
+
+    #[test]
+    fn actual_captured_check_runs_page_exposes_envelope_parser_gap() {
+        let body_base64 = include_str!(
+            "testdata/g0/raw-capture-20260920-065449/checks/jackin-project_jackin-agent-smith/pr-head-206-b9db5b149cc46baba9c49549432307c29e3972b0/check-runs/page-0001.body.base64"
+        )
+        .trim();
+        let bytes = BASE64.decode(body_base64).expect("captured body base64");
+        assert_eq!(bytes.len(), 29_175);
+        assert_eq!(
+            digest_bytes(&bytes),
+            "sha256:bcc6670efbb51a1457eda1da19e473921b8b0ef51feba016e761b3ccf3d67210"
+        );
+        let raw_id = "captured-check-runs-page-0001".to_owned();
+        let request_id = "checks-fresh-jackin-project_jackin-agent-smith-check-runs-pr-head-206-b9db5b149cc46baba9c49549432307c29e3972b0-1".to_owned();
+        let raw = G0RawObjectRef {
+            raw_id: raw_id.clone(),
+            request_id: request_id.clone(),
+            object_kind: "check_run".to_owned(),
+            canonicalization: "raw-json".to_owned(),
+            sha256: "sha256:bcc6670efbb51a1457eda1da19e473921b8b0ef51feba016e761b3ccf3d67210"
+                .to_owned(),
+            byte_length: bytes.len() as u64,
+            bytes_base64: body_base64.to_owned(),
+            media_type: "application/json".to_owned(),
+            storage_ref:
+                "sha256://bcc6670efbb51a1457eda1da19e473921b8b0ef51feba016e761b3ccf3d67210"
+                    .to_owned(),
+            original_sha256:
+                "sha256:bcc6670efbb51a1457eda1da19e473921b8b0ef51feba016e761b3ccf3d67210".to_owned(),
+            original_byte_length: bytes.len() as u64,
+            original_storage_ref:
+                "sha256://bcc6670efbb51a1457eda1da19e473921b8b0ef51feba016e761b3ccf3d67210"
+                    .to_owned(),
+        };
+        let request = G0RequestRecord {
+            request_id,
+            api: G0ApiKind::Rest,
+            method: "GET".to_owned(),
+            endpoint_or_operation: "/repos/jackin-project/jackin-agent-smith/commits/b9db5b149cc46baba9c49549432307c29e3972b0/check-runs".to_owned(),
+            query_base64: BASE64.encode(b"per_page=100&filter=all&page=1"),
+            variables_base64: BASE64.encode(b"{}"),
+            query_sha256: digest_bytes(b"per_page=100&filter=all&page=1"),
+            variables_sha256: digest_bytes(b"{}"),
+            auth_identity_ref: "collector.auth".to_owned(),
+            started_at_utc: "2026-09-20T07:02:33Z".to_owned(),
+            completed_at_utc: "2026-09-20T07:02:34Z".to_owned(),
+            http_status: 200,
+            api_request_id: "api-request-check-runs-page-0001".to_owned(),
+            rate_limit_ref: "collector.rate_limit".to_owned(),
+            page: G0Page {
+                number: 1,
+                per_page: 100,
+                link_next: None,
+                cursor_in: None,
+                cursor_out: None,
+                has_next_page: false,
+                items_returned: 7,
+            },
+            response_raw_ref: raw_id,
+            error_raw_ref: None,
+            state: G0RequestState::Complete,
+            complete: true,
+            truncation_reason: None,
+        };
+        let check = G0CheckProducer {
+            context: "DCO".to_owned(),
+            app_id: "974774".to_owned(),
+            app_slug: "dco-2".to_owned(),
+            provider: G0CheckProvider::ExternalApp,
+            api: G0ApiKind::Rest,
+            check_suite_id: 95096323548,
+            check_run_id: 104858522157,
+            source_sha: "b9db5b149cc46baba9c49549432307c29e3972b0".to_owned(),
+            event: "pull_request".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: "success".to_owned(),
+            html_url: "https://github.com/jackin-project/jackin-agent-smith/runs/104858522157"
+                .to_owned(),
+            raw_object_refs: vec!["captured-check-runs-page-0001".to_owned()],
+        };
+        let selected_check = g0_capture_raw_json(
+            &check.raw_object_refs,
+            "check_run",
+            check.check_run_id,
+            &["/repos/jackin-project/jackin-agent-smith/commits/b9db5b149cc46baba9c49549432307c29e3972b0/check-runs".to_owned()],
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&raw),
+        )
+        .expect("DCO member must be selected from the complete check-runs page");
+        assert_eq!(
+            g0_json_u64(&selected_check, &["id"]),
+            Some(check.check_run_id)
+        );
+        assert_eq!(
+            g0_json_string(&selected_check, &["app", "slug"]),
+            Some(check.app_slug.as_str())
+        );
+
+        // This body is only the independently captured check-runs page.  The
+        // full provider proof remains closed until separately captured suite
+        // and App objects are linked by the collector.
+        assert!(!g0_check_raw_evidence_valid(
+            "jackin-project/jackin-agent-smith",
+            &check,
+            &[request],
+            &[raw]
+        ));
+    }
+
+    #[test]
+    fn paginated_selector_rejects_bare_objects_and_requires_check_suites_envelope() {
+        let endpoint = format!("/repos/tailrocks/velnor/commits/{}/check-suites", sha('a'));
+        let request = captured_page_request(&endpoint, "page=1", 1);
+        let bare = json!({"id": 42});
+        assert!(
+            g0_select_raw_member(bare, G0RawResponseSchema::CheckSuitesPage, 42, &request)
+                .is_none()
+        );
+
+        let envelope = json!({
+            "total_count": 1,
+            "check_suites": [{"id": 42}]
+        });
+        let selected =
+            g0_select_raw_member(envelope, G0RawResponseSchema::CheckSuitesPage, 42, &request)
+                .expect("check-suites member must come from its exact envelope");
+        assert_eq!(g0_json_u64(&selected, &["id"]), Some(42));
+
+        let wrong_envelope = json!({
+            "total_count": 1,
+            "check_runs": [{"id": 42}]
+        });
+        assert!(g0_select_raw_member(
+            wrong_envelope,
+            G0RawResponseSchema::CheckSuitesPage,
+            42,
+            &request
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn paginated_stream_rejects_omitted_duplicate_and_cross_scope_pages() {
+        let mut collector = minimal_g0_collector();
+        let endpoint = format!("/repos/tailrocks/velnor/commits/{}/check-runs", sha('a'));
+        let mut first = captured_page_request(&endpoint, "per_page=100&filter=all&page=1", 1);
+        first.request_id = "checks-page-1".to_owned();
+        first.response_raw_ref = "checks-raw-1".to_owned();
+        first.page.has_next_page = true;
+        first.page.link_next = Some(format!(
+            "https://api.github.com{endpoint}?per_page=100&filter=all&page=2"
+        ));
+        let mut second = captured_page_request(&endpoint, "per_page=100&filter=all&page=2", 1);
+        second.request_id = "checks-page-2".to_owned();
+        second.response_raw_ref = "checks-raw-2".to_owned();
+        second.page.number = 2;
+        let first_bytes = br#"{"total_count":2,"check_runs":[{"id":1}]}"#;
+        let second_bytes = br#"{"total_count":2,"check_runs":[{"id":2}]}"#;
+        collector.requests.extend([first.clone(), second.clone()]);
+        collector.raw_objects.extend([
+            captured_raw_reference("checks-raw-1", "checks-page-1", "check_run", first_bytes),
+            captured_raw_reference("checks-raw-2", "checks-page-2", "check_run", second_bytes),
+        ]);
+        let mut findings = Vec::new();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(!findings.iter().any(|finding| {
+            matches!(
+                finding.code.as_str(),
+                "g0-response-envelope"
+                    | "g0-pagination-count"
+                    | "g0-pagination-total"
+                    | "g0-pagination-duplicate"
+            )
+        }));
+
+        collector.requests[0].query_base64 = BASE64.encode(b"per_page=50&filter=all&page=1");
+        collector.requests[0].query_sha256 = digest_bytes(b"per_page=50&filter=all&page=1");
+        findings.clear();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-request-query"));
+
+        collector.requests[0].query_base64 = BASE64.encode(b"filter=all&per_page=100&page=1");
+        collector.requests[0].query_sha256 = digest_bytes(b"filter=all&per_page=100&page=1");
+        findings.clear();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-request-query"));
+
+        collector.requests[0].query_base64 =
+            BASE64.encode(b"per_page=100&per_page=100&filter=all&page=1");
+        collector.requests[0].query_sha256 =
+            digest_bytes(b"per_page=100&per_page=100&filter=all&page=1");
+        findings.clear();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-request-incomplete"));
+
+        collector.requests[0].query_base64 = BASE64.encode(b"per_page=100&filter=all&page=1");
+        collector.requests[0].query_sha256 = digest_bytes(b"per_page=100&filter=all&page=1");
+
+        let duplicate_bytes = br#"{"total_count":2,"check_runs":[{"id":1}]}"#;
+        collector.raw_objects[1] = captured_raw_reference(
+            "checks-raw-2",
+            "checks-page-2",
+            "check_run",
+            duplicate_bytes,
+        );
+        findings.clear();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-pagination-duplicate"));
+
+        collector.raw_objects[1] =
+            captured_raw_reference("checks-raw-2", "checks-page-2", "check_run", second_bytes);
+        collector.requests[0].page.link_next = Some(
+            "https://api.github.com/repos/other/repo/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?per_page=100&filter=all&page=2"
+                .to_owned(),
+        );
+        findings.clear();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-pagination"));
+
+        collector.requests[0].page.link_next = Some(format!(
+            "https://api.github.com{endpoint}?per_page=100&filter=all&page=2"
+        ));
+        collector.requests.pop();
+        collector.raw_objects.pop();
+        findings.clear();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-pagination"));
+    }
+
+    #[test]
+    fn actual_captured_jobs_page_binds_job_to_attempt_and_check_url() {
+        let body_base64 = include_str!(
+            "testdata/g0/raw-capture-20260920-065449/runs/tailrocks_holla-apt/run-35079189599/attempt-1/jobs/page-0001.body.base64"
+        )
+        .trim();
+        let bytes = BASE64
+            .decode(body_base64)
+            .expect("captured jobs body base64");
+        assert_eq!(bytes.len(), 8_017);
+        assert_eq!(
+            digest_bytes(&bytes),
+            "sha256:e6f19864a4ef1a7c45f7f467a0409d20b1ede477e4f913722fc4b54bf083d2ad"
+        );
+        let raw_id = "captured-jobs-page-0001".to_owned();
+        let request_id = "jobs-tailrocks_holla-apt-run-35079189599-attempt-1-jobs-1".to_owned();
+        let raw = G0RawObjectRef {
+            raw_id: raw_id.clone(),
+            request_id: request_id.clone(),
+            object_kind: "job".to_owned(),
+            canonicalization: "raw-json".to_owned(),
+            sha256: "sha256:e6f19864a4ef1a7c45f7f467a0409d20b1ede477e4f913722fc4b54bf083d2ad"
+                .to_owned(),
+            byte_length: bytes.len() as u64,
+            bytes_base64: body_base64.to_owned(),
+            media_type: "application/json".to_owned(),
+            storage_ref:
+                "sha256://e6f19864a4ef1a7c45f7f467a0409d20b1ede477e4f913722fc4b54bf083d2ad"
+                    .to_owned(),
+            original_sha256:
+                "sha256:e6f19864a4ef1a7c45f7f467a0409d20b1ede477e4f913722fc4b54bf083d2ad".to_owned(),
+            original_byte_length: bytes.len() as u64,
+            original_storage_ref:
+                "sha256://e6f19864a4ef1a7c45f7f467a0409d20b1ede477e4f913722fc4b54bf083d2ad"
+                    .to_owned(),
+        };
+        let request = G0RequestRecord {
+            request_id,
+            api: G0ApiKind::Rest,
+            method: "GET".to_owned(),
+            endpoint_or_operation:
+                "/repos/tailrocks/holla-apt/actions/runs/35079189599/attempts/1/jobs".to_owned(),
+            query_base64: BASE64.encode(b"per_page=100&page=1"),
+            variables_base64: BASE64.encode(b"{}"),
+            query_sha256: digest_bytes(b"per_page=100&page=1"),
+            variables_sha256: digest_bytes(b"{}"),
+            auth_identity_ref: "collector.auth".to_owned(),
+            started_at_utc: "2026-09-20T07:36:18Z".to_owned(),
+            completed_at_utc: "2026-09-20T07:36:19Z".to_owned(),
+            http_status: 200,
+            api_request_id: "api-request-jobs-page-0001".to_owned(),
+            rate_limit_ref: "collector.rate_limit".to_owned(),
+            page: G0Page {
+                number: 1,
+                per_page: 100,
+                link_next: None,
+                cursor_in: None,
+                cursor_out: None,
+                has_next_page: false,
+                items_returned: 6,
+            },
+            response_raw_ref: raw_id,
+            error_raw_ref: None,
+            state: G0RequestState::Complete,
+            complete: true,
+            truncation_reason: None,
+        };
+        let selected_job = g0_capture_raw_json(
+            &["captured-jobs-page-0001".to_owned()],
+            "job",
+            104741135689,
+            &["/repos/tailrocks/holla-apt/actions/runs/35079189599/attempts/1/jobs".to_owned()],
+            &[request],
+            &[raw],
+        )
+        .expect("job must be selected from the complete attempt jobs page");
+        assert_eq!(g0_json_u64(&selected_job, &["id"]), Some(104741135689));
+        assert_eq!(g0_json_u64(&selected_job, &["run_id"]), Some(35079189599));
+        assert_eq!(g0_json_u64(&selected_job, &["run_attempt"]), Some(1));
+        assert_eq!(
+            g0_json_string(&selected_job, &["check_run_url"]),
+            Some("https://api.github.com/repos/tailrocks/holla-apt/check-runs/104741135689")
+        );
+    }
+
+    #[test]
+    fn frozen_real_api_corpus_preserves_run_graph_and_provider_relationships() {
+        let run_bytes = real_api_fixture_entry("raw/velnor/run-35493166478/run.body");
+        let attempt_bytes =
+            real_api_fixture_entry("raw/velnor/run-35493166478/attempt-1/attempt.body");
+        let jobs_bytes =
+            real_api_fixture_entry("raw/velnor/run-35493166478/attempt-1/jobs/page-0001.body");
+        let artifacts_bytes =
+            real_api_fixture_entry("raw/velnor/run-35493166478/artifacts/page-0001.body");
+        let checks_bytes = real_api_fixture_entry(
+            "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs/page-0001.body",
+        );
+        let sonar_bytes = real_api_fixture_entry(
+            "raw/homebrew-tap/commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-runs/page-0001.body",
+        );
+        assert_eq!(
+            digest_bytes(&run_bytes),
+            "sha256:40bf9508b2a024d6813c498b225caf255f02390d27d00dcf390bbee19294aa10"
+        );
+        assert_eq!(
+            digest_bytes(&attempt_bytes),
+            "sha256:9837c6d5b687cfb1979b7bd9f547e1eec69536bdfb08bcf435dcd6444f820405"
+        );
+        assert_eq!(
+            digest_bytes(&jobs_bytes),
+            "sha256:b9937bad52729f233fed821f81ed5d2e8526eefdc049f462dea5d20aefcfdec9"
+        );
+        assert_eq!(
+            digest_bytes(&artifacts_bytes),
+            "sha256:7abeb5ab6ba79e4d085d70bacb67bd1357adb7fb0ab9811933bdf2a6f0a5c171"
+        );
+        assert_eq!(
+            digest_bytes(&checks_bytes),
+            "sha256:2f30395551e7bfad2f0271dfeaa09bd4768da3905dfa1a42785aa12d6388bf57"
+        );
+        assert_eq!(
+            digest_bytes(&sonar_bytes),
+            "sha256:c241e54220d3a3c04d5761e100be507b9c2dfec15772414b898a90957b7551b5"
+        );
+
+        let run: Value = serde_json::from_slice(&run_bytes).expect("run body JSON");
+        let attempt: Value = serde_json::from_slice(&attempt_bytes).expect("attempt body JSON");
+        assert_eq!(g0_json_u64(&run, &["id"]), Some(35_493_166_478));
+        assert_eq!(g0_json_u64(&run, &["run_attempt"]), Some(1));
+        assert_eq!(
+            g0_json_string(&run, &["head_sha"]),
+            Some("df9fb272c025f76cc8711560209afcdfd6cc4e00")
+        );
+        assert_eq!(g0_json_string(&run, &["event"]), Some("pull_request"));
+        assert_eq!(g0_json_u64(&attempt, &["id"]), Some(35_493_166_478));
+        assert_eq!(g0_json_u64(&attempt, &["run_attempt"]), Some(1));
+        assert_eq!(
+            g0_json_string(&attempt, &["head_sha"]),
+            Some("df9fb272c025f76cc8711560209afcdfd6cc4e00")
+        );
+
+        let jobs: Value = serde_json::from_slice(&jobs_bytes).expect("jobs page JSON");
+        let jobs_array = jobs["jobs"].as_array().expect("jobs envelope");
+        assert_eq!(jobs["total_count"].as_u64(), Some(68));
+        assert_eq!(jobs_array.len(), 68);
+        let job_ids = jobs_array
+            .iter()
+            .map(|job| g0_json_u64(job, &["id"]).expect("job id"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(job_ids.len(), 68);
+        assert!(jobs_array.iter().all(|job| {
+            g0_json_u64(job, &["run_id"]) == Some(35_493_166_478)
+                && g0_json_u64(job, &["run_attempt"]) == Some(1)
+                && g0_json_string(job, &["html_url"]).is_some_and(|url| {
+                    url.starts_with(
+                        "https://github.com/tailrocks/velnor/actions/runs/35493166478/job/",
+                    )
+                })
+        }));
+        let job_request = captured_page_request(
+            "/repos/tailrocks/velnor/actions/runs/35493166478/attempts/1/jobs",
+            "per_page=100&page=1",
+            68,
+        );
+        let selected_job = g0_select_raw_member(
+            jobs,
+            G0RawResponseSchema::JobsPage,
+            job_ids.iter().next().copied().expect("first job id"),
+            &job_request,
+        )
+        .expect("first job must be selected from the complete page");
+        assert_eq!(
+            g0_json_u64(&selected_job, &["run_id"]),
+            Some(35_493_166_478)
+        );
+
+        let artifacts: Value =
+            serde_json::from_slice(&artifacts_bytes).expect("artifacts page JSON");
+        let artifacts_array = artifacts["artifacts"]
+            .as_array()
+            .expect("artifacts envelope");
+        assert_eq!(artifacts["total_count"].as_u64(), Some(2));
+        assert_eq!(artifacts_array.len(), 2);
+        assert!(artifacts_array.iter().all(|artifact| {
+            g0_json_u64(artifact, &["workflow_run", "id"]) == Some(35_493_166_478)
+                && artifact
+                    .get("workflow_run")
+                    .and_then(|run| run.get("run_attempt"))
+                    .is_none()
+                && artifact.get("workflow_run_id").is_none()
+        }));
+
+        let checks: Value = serde_json::from_slice(&checks_bytes).expect("checks page JSON");
+        let checks_array = checks["check_runs"].as_array().expect("checks envelope");
+        assert_eq!(checks["total_count"].as_u64(), Some(70));
+        assert_eq!(checks_array.len(), 70);
+        let check_ids = checks_array
+            .iter()
+            .map(|check| g0_json_u64(check, &["id"]).expect("check id"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(check_ids.len(), 70);
+        let dco = checks_array
+            .iter()
+            .find(|check| g0_json_u64(check, &["app", "id"]) == Some(974_774))
+            .expect("captured DCO check");
+        assert_eq!(g0_json_u64(dco, &["id"]), Some(106_031_458_188));
+        assert_eq!(g0_json_string(dco, &["name"]), Some("DCO"));
+        assert_eq!(
+            g0_json_u64(dco, &["check_suite", "id"]),
+            Some(96_108_219_979)
+        );
+        assert_eq!(g0_json_string(dco, &["app", "slug"]), Some("dco-2"));
+        assert_eq!(
+            g0_json_string(dco, &["head_sha"]),
+            Some("df9fb272c025f76cc8711560209afcdfd6cc4e00")
+        );
+        let checks_request = captured_page_request(
+            "/repos/tailrocks/velnor/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs",
+            "per_page=100&filter=all&page=1",
+            70,
+        );
+        let selected_dco = g0_select_raw_member(
+            checks.clone(),
+            G0RawResponseSchema::CheckRunsPage,
+            106_031_458_188,
+            &checks_request,
+        )
+        .expect("DCO must be selected from the complete checks page");
+        assert_eq!(g0_json_u64(&selected_dco, &["app", "id"]), Some(974_774));
+
+        let dco_check = G0CheckProducer {
+            context: "DCO".to_owned(),
+            app_id: "974774".to_owned(),
+            app_slug: "dco-2".to_owned(),
+            provider: G0CheckProvider::ExternalApp,
+            api: G0ApiKind::Rest,
+            check_suite_id: 96_108_219_979,
+            check_run_id: 106_031_458_188,
+            source_sha: "df9fb272c025f76cc8711560209afcdfd6cc4e00".to_owned(),
+            event: "pull_request".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: "success".to_owned(),
+            html_url: "https://github.com/tailrocks/velnor/runs/106031458188".to_owned(),
+            raw_object_refs: Vec::new(),
+        };
+        assert!(g0_check_run_identity_valid(
+            &selected_dco,
+            &dco_check,
+            974_774
+        ));
+        let mut wrong_app = dco_check.clone();
+        wrong_app.app_id = "12526".to_owned();
+        wrong_app.app_slug = "sonarqubecloud".to_owned();
+        assert!(!g0_check_run_identity_valid(
+            &selected_dco,
+            &wrong_app,
+            12_526
+        ));
+        let mut wrong_suite = dco_check.clone();
+        wrong_suite.check_suite_id = 96_108_224_766;
+        assert!(!g0_check_run_identity_valid(
+            &selected_dco,
+            &wrong_suite,
+            974_774
+        ));
+
+        let mut valid_request = checks_request.clone();
+        valid_request.request_id = "real-checks-request".to_owned();
+        valid_request.response_raw_ref = "real-checks-raw".to_owned();
+        let valid_raw = captured_raw_reference(
+            "real-checks-raw",
+            "real-checks-request",
+            "check_run",
+            &checks_bytes,
+        );
+        let mut wrong_app_page = checks.clone();
+        let wrong_app_member = wrong_app_page["check_runs"]
+            .as_array_mut()
+            .expect("captured check-runs array")
+            .iter_mut()
+            .find(|value| g0_json_u64(value, &["id"]) == Some(dco_check.check_run_id))
+            .expect("captured DCO member");
+        wrong_app_member["app"]["id"] = json!(12_526);
+        wrong_app_member["app"]["slug"] = json!("sonarqubecloud");
+        let wrong_app_bytes = canonical_json(&wrong_app_page).into_bytes();
+        let wrong_app_raw = captured_raw_reference(
+            "real-checks-raw",
+            "real-checks-request",
+            "check_run",
+            &wrong_app_bytes,
+        );
+        let wrong_app_selected = g0_capture_raw_json(
+            &["real-checks-raw".to_owned()],
+            "check_run",
+            dco_check.check_run_id,
+            std::slice::from_ref(&checks_request.endpoint_or_operation),
+            std::slice::from_ref(&valid_request),
+            std::slice::from_ref(&wrong_app_raw),
+        )
+        .expect("rehashed wrong-app page still has a typed member");
+        assert!(!g0_check_run_identity_valid(
+            &wrong_app_selected,
+            &dco_check,
+            974_774
+        ));
+
+        let mut wrong_suite_page = checks.clone();
+        let wrong_suite_member = wrong_suite_page["check_runs"]
+            .as_array_mut()
+            .expect("captured check-runs array")
+            .iter_mut()
+            .find(|value| g0_json_u64(value, &["id"]) == Some(dco_check.check_run_id))
+            .expect("captured DCO member");
+        wrong_suite_member["check_suite"]["id"] = json!(96_108_224_766u64);
+        let wrong_suite_bytes = canonical_json(&wrong_suite_page).into_bytes();
+        let wrong_suite_raw = captured_raw_reference(
+            "real-checks-raw",
+            "real-checks-request",
+            "check_run",
+            &wrong_suite_bytes,
+        );
+        let wrong_suite_selected = g0_capture_raw_json(
+            &["real-checks-raw".to_owned()],
+            "check_run",
+            dco_check.check_run_id,
+            std::slice::from_ref(&checks_request.endpoint_or_operation),
+            std::slice::from_ref(&valid_request),
+            std::slice::from_ref(&wrong_suite_raw),
+        )
+        .expect("rehashed wrong-suite page still has a typed member");
+        assert!(!g0_check_run_identity_valid(
+            &wrong_suite_selected,
+            &dco_check,
+            974_774
+        ));
+        assert!(g0_capture_raw_json(
+            &["real-checks-raw".to_owned()],
+            "check_run",
+            dco_check.check_run_id,
+            std::slice::from_ref(&checks_request.endpoint_or_operation),
+            std::slice::from_ref(&valid_request),
+            std::slice::from_ref(&valid_raw),
+        )
+        .is_some());
+        let mut wrong_endpoint = valid_request.clone();
+        wrong_endpoint.endpoint_or_operation =
+            "/repos/tailrocks/velnor/check-runs/106031458188".to_owned();
+        assert!(g0_capture_raw_json(
+            &["real-checks-raw".to_owned()],
+            "check_run",
+            dco_check.check_run_id,
+            std::slice::from_ref(&checks_request.endpoint_or_operation),
+            &[wrong_endpoint],
+            std::slice::from_ref(&valid_raw),
+        )
+        .is_none());
+        assert!(g0_capture_raw_json(
+            &["real-checks-raw".to_owned()],
+            "check_run",
+            dco_check.check_run_id + 1,
+            std::slice::from_ref(&checks_request.endpoint_or_operation),
+            std::slice::from_ref(&valid_request),
+            std::slice::from_ref(&valid_raw),
+        )
+        .is_none());
+        let mut rehashed_page = checks_bytes.clone();
+        let old_count = b"\"total_count\":70";
+        let new_count = b"\"total_count\":69";
+        let count_offset = rehashed_page
+            .windows(old_count.len())
+            .position(|window| window == old_count)
+            .expect("captured checks count");
+        rehashed_page.splice(
+            count_offset..count_offset + old_count.len(),
+            new_count.iter().copied(),
+        );
+        let rehashed_raw = captured_raw_reference(
+            "real-checks-raw",
+            "real-checks-request",
+            "check_run",
+            &rehashed_page,
+        );
+        assert!(g0_capture_raw_json(
+            &["real-checks-raw".to_owned()],
+            "check_run",
+            dco_check.check_run_id,
+            &[checks_request.endpoint_or_operation],
+            &[valid_request],
+            &[rehashed_raw],
+        )
+        .is_none());
+
+        let sonar: Value = serde_json::from_slice(&sonar_bytes).expect("Sonar checks page JSON");
+        let sonar_check = sonar["check_runs"]
+            .as_array()
+            .expect("Sonar checks envelope")
+            .iter()
+            .find(|check| g0_json_u64(check, &["app", "id"]) == Some(12_526))
+            .expect("captured Sonar check");
+        assert_eq!(g0_json_u64(sonar_check, &["id"]), Some(105_978_471_119));
+        assert_eq!(
+            g0_json_string(sonar_check, &["conclusion"]),
+            Some("failure")
+        );
+        assert_eq!(
+            g0_json_string(sonar_check, &["app", "slug"]),
+            Some("sonarqubecloud")
+        );
+        assert_eq!(
+            g0_json_string(sonar_check, &["head_sha"]),
+            Some("c501e90d014c207234ed94ea41f7a1c9b6ea0c7c")
+        );
+    }
+
+    #[test]
+    fn authenticated_supplement_binds_real_apps_and_suites() {
+        // Exact body bytes from
+        // G0/real-api-fixture-supplement-20260920T085311Z-corrected-20260920T090934Z,
+        // manifest fea65b61ff1668ff58762066b207ac1c9534452d328080f1f0680e7cb571447e.
+        let supplement = |name: &str| -> Vec<u8> {
+            let encoded = match name {
+                "app-dco" => include_str!(
+                    "testdata/g0/real-api-fixture-supplement-20260920-085311/apps/dco-2.body.base64"
+                ),
+                "app-actions" => include_str!(
+                    "testdata/g0/real-api-fixture-supplement-20260920-085311/apps/github-actions.body.base64"
+                ),
+                "app-sonar" => include_str!(
+                    "testdata/g0/real-api-fixture-supplement-20260920-085311/apps/sonarqubecloud.body.base64"
+                ),
+                "suite-dco" => include_str!(
+                    "testdata/g0/real-api-fixture-supplement-20260920-085311/suites/velnor-96108219979.body.base64"
+                ),
+                "suite-actions" => include_str!(
+                    "testdata/g0/real-api-fixture-supplement-20260920-085311/suites/velnor-96108227551.body.base64"
+                ),
+                "suite-sonar" => include_str!(
+                    "testdata/g0/real-api-fixture-supplement-20260920-085311/suites/homebrew-96059348318.body.base64"
+                ),
+                _ => panic!("unknown supplement body {name}"),
+            };
+            BASE64
+                .decode(encoded.trim())
+                .expect("supplement body base64")
+        };
+        let mut requests = Vec::new();
+        let mut raw_objects = Vec::new();
+        #[allow(
+            clippy::too_many_arguments,
+            reason = "fixture helper mirrors one captured request/raw provenance tuple"
+        )]
+        fn add_capture(
+            requests: &mut Vec<G0RequestRecord>,
+            raw_objects: &mut Vec<G0RawObjectRef>,
+            raw_id: &str,
+            request_id: &str,
+            object_kind: &str,
+            endpoint: String,
+            query: &str,
+            items: u32,
+            bytes: &[u8],
+        ) {
+            let mut request = captured_page_request(&endpoint, query, items);
+            request.request_id = request_id.to_owned();
+            request.response_raw_ref = raw_id.to_owned();
+            requests.push(request);
+            raw_objects.push(captured_raw_reference(
+                raw_id,
+                request_id,
+                object_kind,
+                bytes,
+            ));
+        }
+
+        let check_bytes = real_api_fixture_entry(
+            "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs/page-0001.body",
+        );
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-velnor-checks",
+            "real-velnor-checks-request",
+            "check_run",
+            "/repos/tailrocks/velnor/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs"
+                .to_owned(),
+            "per_page=100&filter=all&page=1",
+            70,
+            &check_bytes,
+        );
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-suite-dco",
+            "real-suite-dco-request",
+            "check_suite",
+            "/repos/tailrocks/velnor/check-suites/96108219979".to_owned(),
+            "",
+            1,
+            &supplement("suite-dco"),
+        );
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-app-dco",
+            "real-app-dco-request",
+            "app",
+            "/apps/dco-2".to_owned(),
+            "",
+            1,
+            &supplement("app-dco"),
+        );
+
+        let dco = G0CheckProducer {
+            context: "DCO".to_owned(),
+            app_id: "974774".to_owned(),
+            app_slug: "dco-2".to_owned(),
+            provider: G0CheckProvider::ExternalApp,
+            api: G0ApiKind::Rest,
+            check_suite_id: 96108219979,
+            check_run_id: 106031458188,
+            source_sha: "df9fb272c025f76cc8711560209afcdfd6cc4e00".to_owned(),
+            event: "pull_request".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: "success".to_owned(),
+            html_url: "https://github.com/tailrocks/velnor/runs/106031458188".to_owned(),
+            raw_object_refs: vec![
+                "real-velnor-checks".to_owned(),
+                "real-suite-dco".to_owned(),
+                "real-app-dco".to_owned(),
+            ],
+        };
+        assert!(g0_check_raw_evidence_valid(
+            "tailrocks/velnor",
+            &dco,
+            &requests,
+            &raw_objects
+        ));
+
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-suite-actions",
+            "real-suite-actions-request",
+            "check_suite",
+            "/repos/tailrocks/velnor/check-suites/96108227551".to_owned(),
+            "",
+            1,
+            &supplement("suite-actions"),
+        );
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-app-actions",
+            "real-app-actions-request",
+            "app",
+            "/apps/github-actions".to_owned(),
+            "",
+            1,
+            &supplement("app-actions"),
+        );
+        let run_bytes = real_api_fixture_entry("raw/velnor/run-35493166478/run.body");
+        let jobs_bytes =
+            real_api_fixture_entry("raw/velnor/run-35493166478/attempt-1/jobs/page-0001.body");
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-velnor-run",
+            "real-velnor-run-request",
+            "workflow_run",
+            "/repos/tailrocks/velnor/actions/runs/35493166478".to_owned(),
+            "",
+            1,
+            &run_bytes,
+        );
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-velnor-jobs",
+            "real-velnor-jobs-request",
+            "job",
+            "/repos/tailrocks/velnor/actions/runs/35493166478/attempts/1/jobs".to_owned(),
+            "per_page=100&page=1",
+            68,
+            &jobs_bytes,
+        );
+        let actions = G0CheckProducer {
+            context: "Control / Planning".to_owned(),
+            app_id: "15368".to_owned(),
+            app_slug: "github-actions".to_owned(),
+            provider: G0CheckProvider::GithubActions {
+                workflow_run_id: 35493166478,
+                run_attempt: 1,
+                job_id: 106031464296,
+                job_run_id: 35493166478,
+                job_run_attempt: 1,
+                job_check_run_id: 106031464296,
+                job_source_sha: "df9fb272c025f76cc8711560209afcdfd6cc4e00".to_owned(),
+                job_html_url:
+                    "https://github.com/tailrocks/velnor/actions/runs/35493166478/job/106031464296"
+                        .to_owned(),
+                actual_checkout_sha: "df9fb272c025f76cc8711560209afcdfd6cc4e00".to_owned(),
+            },
+            api: G0ApiKind::Rest,
+            check_suite_id: 96108227551,
+            check_run_id: 106031464296,
+            source_sha: "df9fb272c025f76cc8711560209afcdfd6cc4e00".to_owned(),
+            event: "pull_request".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: "success".to_owned(),
+            html_url:
+                "https://github.com/tailrocks/velnor/actions/runs/35493166478/job/106031464296"
+                    .to_owned(),
+            raw_object_refs: vec![
+                "real-velnor-checks".to_owned(),
+                "real-suite-actions".to_owned(),
+                "real-app-actions".to_owned(),
+                "real-velnor-run".to_owned(),
+                "real-velnor-jobs".to_owned(),
+            ],
+        };
+        assert!(g0_check_raw_evidence_valid(
+            "tailrocks/velnor",
+            &actions,
+            &requests,
+            &raw_objects
+        ));
+
+        let homebrew_checks = real_api_fixture_entry(
+            "raw/homebrew-tap/commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-runs/page-0001.body",
+        );
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-homebrew-checks",
+            "real-homebrew-checks-request",
+            "check_run",
+            "/repos/jackin-project/homebrew-tap/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-runs"
+                .to_owned(),
+            "per_page=100&filter=all&page=1",
+            6,
+            &homebrew_checks,
+        );
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-suite-sonar",
+            "real-suite-sonar-request",
+            "check_suite",
+            "/repos/jackin-project/homebrew-tap/check-suites/96059348318".to_owned(),
+            "",
+            1,
+            &supplement("suite-sonar"),
+        );
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-app-sonar",
+            "real-app-sonar-request",
+            "app",
+            "/apps/sonarqubecloud".to_owned(),
+            "",
+            1,
+            &supplement("app-sonar"),
+        );
+        let sonar = G0CheckProducer {
+            context: "SonarCloud Code Analysis".to_owned(),
+            app_id: "12526".to_owned(),
+            app_slug: "sonarqubecloud".to_owned(),
+            provider: G0CheckProvider::ExternalApp,
+            api: G0ApiKind::Rest,
+            check_suite_id: 96059348318,
+            check_run_id: 105978471119,
+            source_sha: "c501e90d014c207234ed94ea41f7a1c9b6ea0c7c".to_owned(),
+            event: "push".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: "failure".to_owned(),
+            html_url: "https://github.com/jackin-project/homebrew-tap/runs/105978471119".to_owned(),
+            raw_object_refs: vec![
+                "real-homebrew-checks".to_owned(),
+                "real-suite-sonar".to_owned(),
+                "real-app-sonar".to_owned(),
+            ],
+        };
+        assert!(g0_check_raw_evidence_valid(
+            "jackin-project/homebrew-tap",
+            &sonar,
+            &requests,
+            &raw_objects
+        ));
+
+        let app_index = raw_objects
+            .iter()
+            .position(|raw| raw.raw_id == "real-app-dco")
+            .expect("DCO App capture");
+        let app_body = serde_json::from_slice::<Value>(
+            &BASE64
+                .decode(&raw_objects[app_index].bytes_base64)
+                .expect("DCO App bytes"),
+        )
+        .expect("DCO App JSON");
+        let mut wrong_app_body = app_body;
+        wrong_app_body["id"] = json!(12_526);
+        wrong_app_body["slug"] = json!("sonarqubecloud");
+        let wrong_app_bytes = canonical_json(&wrong_app_body).into_bytes();
+        raw_objects[app_index] = captured_raw_reference(
+            "real-app-dco",
+            "real-app-dco-request",
+            "app",
+            &wrong_app_bytes,
+        );
+        assert!(!g0_check_raw_evidence_valid(
+            "tailrocks/velnor",
+            &dco,
+            &requests,
+            &raw_objects
+        ));
+
+        let suite_index = raw_objects
+            .iter()
+            .position(|raw| raw.raw_id == "real-suite-dco")
+            .expect("DCO suite capture");
+        let suite_body = serde_json::from_slice::<Value>(
+            &BASE64
+                .decode(&raw_objects[suite_index].bytes_base64)
+                .expect("DCO suite bytes"),
+        )
+        .expect("DCO suite JSON");
+        let mut wrong_suite_body = suite_body;
+        wrong_suite_body["app"]["id"] = json!(15_368u64);
+        wrong_suite_body["app"]["slug"] = json!("github-actions");
+        let wrong_suite_bytes = canonical_json(&wrong_suite_body).into_bytes();
+        raw_objects[suite_index] = captured_raw_reference(
+            "real-suite-dco",
+            "real-suite-dco-request",
+            "check_suite",
+            &wrong_suite_bytes,
+        );
+        assert!(!g0_check_raw_evidence_valid(
+            "tailrocks/velnor",
+            &dco,
+            &requests,
+            &raw_objects
+        ));
     }
 
     #[test]

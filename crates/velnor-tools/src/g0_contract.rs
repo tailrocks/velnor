@@ -331,18 +331,40 @@ pub(crate) struct G0WorkflowBinding {
 pub(crate) struct G0CheckProducer {
     pub context: String,
     pub app_id: String,
+    pub app_slug: String,
+    /// Tagged evidence shape derived from captured provider API objects. The
+    /// checker never invents Actions run/job identities for an external app.
+    pub provider: G0CheckProvider,
+    pub api: G0ApiKind,
     pub check_suite_id: u64,
     pub check_run_id: u64,
-    pub workflow_run_id: u64,
-    pub run_attempt: u32,
-    pub job_id: u64,
     pub source_sha: String,
-    pub actual_checkout_sha: String,
     pub event: String,
     pub status: String,
     pub conclusion: String,
-    pub source_url: String,
+    /// The exact provider `html_url` returned by the captured check-run API
+    /// object. `details_url` is a different field and is never accepted here.
+    pub html_url: String,
     pub raw_object_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum G0CheckProvider {
+    GithubActions {
+        workflow_run_id: u64,
+        run_attempt: u32,
+        job_id: u64,
+        job_run_id: u64,
+        job_run_attempt: u32,
+        job_check_run_id: u64,
+        job_source_sha: String,
+        job_html_url: String,
+        /// Checkout identity comes from the independently captured Actions
+        /// execution, not from an external App check.
+        actual_checkout_sha: String,
+    },
+    ExternalApp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

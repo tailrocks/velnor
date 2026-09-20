@@ -11,7 +11,7 @@ use crate::evidence_check::{
     CanonicalReleaseDocument, EvidenceCheckInput, EvidenceDocument, ManifestDocument,
     SnapshotDocument,
 };
-use crate::g0_contract::G0InventoryEvidence;
+use crate::g0_contract::{G0InventoryEvidence, G0RawObjectRef};
 use anyhow::{bail, Result};
 use std::future::Future;
 use std::path::PathBuf;
@@ -43,6 +43,13 @@ impl ClosingCaptureRequest {
 /// URI shape alone are not an implementation.
 pub(crate) trait VerifiedRawStore: Send + Sync {
     fn verify_g0(&self, inventory: &G0InventoryEvidence) -> Result<()>;
+
+    /// Reopen the exact safe response bytes from the producer-owned immutable
+    /// store.  The checker must parse these bytes, not a base64 payload
+    /// supplied by the capture caller.  Implementations must bind `raw` to
+    /// the store's authenticated sidecar and recompute the measured digest
+    /// and length from the reopened descriptor.
+    fn read_g0_raw(&self, raw: &G0RawObjectRef) -> Result<Vec<u8>>;
 }
 
 pub(crate) struct VerifiedRawStoreHandle {
@@ -59,6 +66,10 @@ impl VerifiedRawStoreHandle {
 
     pub(crate) fn verify_g0(&self, inventory: &G0InventoryEvidence) -> Result<()> {
         self.verifier.verify_g0(inventory)
+    }
+
+    pub(crate) fn read_g0_raw(&self, raw: &G0RawObjectRef) -> Result<Vec<u8>> {
+        self.verifier.read_g0_raw(raw)
     }
 }
 
