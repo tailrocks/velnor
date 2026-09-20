@@ -4894,10 +4894,16 @@ fn policy_candidate_step(revision: &str) -> String {
           job="$(jq -c '.[0]' <<<"$jobs")"
           job_id="$(jq -er '.id | numbers' <<<"$job")"
           job_name="$(jq -er '.name | strings' <<<"$job")"
+          job_started_at="$(jq -er '.started_at | strings' <<<"$job")"
+          job_completed_at="$(jq -er '.completed_at | strings' <<<"$job")"
+          job_started_epoch="$(jq -er '.started_at | fromdateiso8601' <<<"$job")"
+          job_completed_epoch="$(jq -er '.completed_at | fromdateiso8601' <<<"$job")"
+          test "$job_completed_epoch" -ge "$job_started_epoch"
 
           artifacts="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
             | jq -c --arg name "{artifact}" --argjson run_id "$run_id" --argjson run_created "$run_created_epoch" \
-                '[.[][] | select(.name == $name and .expired == false and (.workflow_run.id | tonumber) == $run_id and (.size_in_bytes | numbers) <= 268435456 and (.created_at | strings | fromdateiso8601) >= $run_created and (.updated_at | strings | fromdateiso8601) >= (.created_at | strings | fromdateiso8601))]')"
+                --argjson job_started "$job_started_epoch" --argjson job_completed "$job_completed_epoch" \
+                '[.[][] | select(.name == $name and .expired == false and (.workflow_run.id | tonumber) == $run_id and (.size_in_bytes | numbers) <= 268435456 and (.created_at | strings | fromdateiso8601) >= $run_created and (.created_at | strings | fromdateiso8601) >= $job_started and (.updated_at | strings | fromdateiso8601) <= $job_completed and (.updated_at | strings | fromdateiso8601) >= (.created_at | strings | fromdateiso8601))]')"
           test "$(jq -r 'length' <<<"$artifacts")" = 1
           artifact="$(jq -c '.[0]' <<<"$artifacts")"
           artifact_id="$(jq -er '.id | numbers' <<<"$artifact")"
@@ -4992,6 +4998,8 @@ fn policy_candidate_step(revision: &str) -> String {
             --arg producer_run_created_at "$run_created_at" \
             --argjson job_id "$job_id" \
             --arg job_name "$job_name" \
+            --arg job_started_at "$job_started_at" \
+            --arg job_completed_at "$job_completed_at" \
             --arg event pull_request \
             --argjson pr_number "$PR_NUMBER" \
             --arg target_repository "$GITHUB_REPOSITORY" \
@@ -5025,7 +5033,7 @@ fn policy_candidate_step(revision: &str) -> String {
             --arg source_archive_sha256 "$source_archive_sha256" \
             --arg candidate_closure "$candidate_closure" \
             --arg contract_sha256 "$contract_sha256" \
-            '{{role: $role, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, producer_run_created_at: $producer_run_created_at, job_id: $job_id, job_name: $job_name, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, checkout_action_archive_sha256: $checkout_action_archive_sha256, download_action_archive_sha256: $download_action_archive_sha256, upload_action_archive_sha256: $upload_action_archive_sha256, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_created_at: $artifact_created_at, artifact_updated_at: $artifact_updated_at, artifact_expires_at: $artifact_expires_at, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, contract_sha256: $contract_sha256}}' > "$handoff/handoff.json"
+            '{{role: $role, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, producer_run_created_at: $producer_run_created_at, job_id: $job_id, job_name: $job_name, job_started_at: $job_started_at, job_completed_at: $job_completed_at, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, checkout_action_archive_sha256: $checkout_action_archive_sha256, download_action_archive_sha256: $download_action_archive_sha256, upload_action_archive_sha256: $upload_action_archive_sha256, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_created_at: $artifact_created_at, artifact_updated_at: $artifact_updated_at, artifact_expires_at: $artifact_expires_at, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, contract_sha256: $contract_sha256}}' > "$handoff/handoff.json"
       - name: Upload candidate handoff
         id: handoff_upload
         uses: {upload}
@@ -5130,6 +5138,8 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
             (.run_attempt | numbers and . >= 1) and
             (.producer_run_created_at | strings | fromdateiso8601) and
             (.job_id | numbers) and (.job_name == "candidate_producer") and
+            (.job_started_at | strings | fromdateiso8601) and (.job_completed_at | strings | fromdateiso8601) and
+            ((.job_completed_at | fromdateiso8601) >= (.job_started_at | fromdateiso8601)) and
             (.event == "pull_request") and
             (.pr_number == $expected_pr) and
             (.target_repository | strings) and (.target_repository_id | numbers) and
@@ -5304,6 +5314,8 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
             --arg producer_run_created_at "$(jq -er .producer_run_created_at "$handoff_json")" \
             --argjson job_id "$(jq -er .job_id "$handoff_json")" \
             --arg job_name "$(jq -er .job_name "$handoff_json")" \
+            --arg job_started_at "$(jq -er .job_started_at "$handoff_json")" \
+            --arg job_completed_at "$(jq -er .job_completed_at "$handoff_json")" \
             --arg event "$(jq -er .event "$handoff_json")" \
             --argjson pr_number "$(jq -er .pr_number "$handoff_json")" \
             --arg target_repository "$(jq -er .target_repository "$handoff_json")" \
@@ -5342,7 +5354,7 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
             --arg sandbox_index_digest "$SANDBOX_IMAGE_DIGEST" \
             --arg sandbox_platform_digest "$platform_digest" \
             --arg sandbox_config_digest "$config_digest" \
-            '{{role: $role, render_sha256: $render_sha256, handoff_id: $handoff_id, handoff_digest: $handoff_digest, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, producer_run_created_at: $producer_run_created_at, job_id: $job_id, job_name: $job_name, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, checkout_action_archive_sha256: $checkout_action_archive_sha256, download_action_archive_sha256: $download_action_archive_sha256, upload_action_archive_sha256: $upload_action_archive_sha256, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_created_at: $artifact_created_at, artifact_updated_at: $artifact_updated_at, artifact_expires_at: $artifact_expires_at, execution_run_id: $execution_run_id, execution_run_attempt: $execution_run_attempt, execution_job: $execution_job, sandbox_index_digest: $sandbox_index_digest, sandbox_platform_digest: $sandbox_platform_digest, sandbox_config_digest: $sandbox_config_digest}}' > "$result/result.json"
+            '{{role: $role, render_sha256: $render_sha256, handoff_id: $handoff_id, handoff_digest: $handoff_digest, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, producer_run_created_at: $producer_run_created_at, job_id: $job_id, job_name: $job_name, job_started_at: $job_started_at, job_completed_at: $job_completed_at, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, checkout_action_archive_sha256: $checkout_action_archive_sha256, download_action_archive_sha256: $download_action_archive_sha256, upload_action_archive_sha256: $upload_action_archive_sha256, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_created_at: $artifact_created_at, artifact_updated_at: $artifact_updated_at, artifact_expires_at: $artifact_expires_at, execution_run_id: $execution_run_id, execution_run_attempt: $execution_run_attempt, execution_job: $execution_job, sandbox_index_digest: $sandbox_index_digest, sandbox_platform_digest: $sandbox_platform_digest, sandbox_config_digest: $sandbox_config_digest}}' > "$result/result.json"
       - name: Upload candidate verification result
         id: result_upload
         uses: {upload}
@@ -5520,6 +5532,8 @@ fn policy_candidate_result_verification_step() -> String {
             (.run_id | numbers) and (.run_attempt | numbers and . >= 1) and
             (.producer_run_created_at | strings | fromdateiso8601) and (.job_id | numbers) and
             (.job_name == "candidate_producer") and (.event == "pull_request") and
+            (.job_started_at | strings | fromdateiso8601) and (.job_completed_at | strings | fromdateiso8601) and
+            ((.job_completed_at | fromdateiso8601) >= (.job_started_at | fromdateiso8601)) and
             (.pr_number == $pr) and
             (.target_repository == $repo) and (.target_repository_id == $target_repo_id) and
             (.head_repository == $head_repo) and (.head_repository_id == $head_repo_id) and
@@ -5593,7 +5607,9 @@ fn policy_candidate_result_verification_step() -> String {
             $h.role == "handoff" and $r.handoff_id == ($handoff_id|tostring) and
             $h.workflow_path == $r.workflow_path and $h.workflow_id == $r.workflow_id and $h.run_id == $r.run_id and $h.run_attempt == $r.run_attempt and
             $h.producer_run_created_at == $r.producer_run_created_at and
-            $h.job_id == $r.job_id and $h.job_name == $r.job_name and $h.event == $r.event and
+            $h.job_id == $r.job_id and $h.job_name == $r.job_name and
+            $h.job_started_at == $r.job_started_at and $h.job_completed_at == $r.job_completed_at and
+            $h.event == $r.event and
             $h.pr_number == $r.pr_number and
             $h.target_repository == $repo and $h.target_repository_id == $target_repo_id and
             $h.head_repository == $head_repo and $h.head_repository_id == $head_repo_id and
@@ -5730,10 +5746,18 @@ fn policy_candidate_result_verification_step() -> String {
           ' <<<"$run_api" >/dev/null
           job_id="$(jq -er .job_id "$handoff_json")"
           job_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id")"
-          jq -e --argjson id "$job_id" --argjson run_id "$run_id" --argjson run_attempt "$run_attempt" --arg head "$HEAD_SHA" '
+          jq -e --argjson id "$job_id" --argjson run_id "$run_id" --argjson run_attempt "$run_attempt" --arg head "$HEAD_SHA" \
+            --arg started_at "$(jq -er .job_started_at "$handoff_json")" --arg completed_at "$(jq -er .job_completed_at "$handoff_json")" '
             .id == $id and .run_id == $run_id and (.run_attempt | tonumber) == $run_attempt and .name == "candidate_producer" and .head_sha == $head and
-            .status == "completed" and .conclusion == "success"
+            .status == "completed" and .conclusion == "success" and .started_at == $started_at and .completed_at == $completed_at and
+            ((.completed_at | fromdateiso8601) >= (.started_at | fromdateiso8601))
           ' <<<"$job_api" >/dev/null
+          job_started_epoch="$(jq -er '.started_at | fromdateiso8601' <<<"$job_api")"
+          job_completed_epoch="$(jq -er '.completed_at | fromdateiso8601' <<<"$job_api")"
+          artifact_created_epoch="$(jq -er '.created_at | fromdateiso8601' <<<"$producer_api")"
+          artifact_updated_epoch="$(jq -er '.updated_at | fromdateiso8601' <<<"$producer_api")"
+          test "$artifact_created_epoch" -ge "$job_started_epoch"
+          test "$artifact_updated_epoch" -le "$job_completed_epoch"
           test "$head_tree_sha" = "$(jq -er .head_tree_sha "$handoff_json")"
           test "$base_tree_sha" = "$(jq -er .base_tree_sha "$handoff_json")"
           test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" show "$BASE_SHA:.github/workflows/ci-pr.yml" | sha256sum | awk '{{print $1}}')" = "$(jq -er .contract_sha256 "$handoff_json")"

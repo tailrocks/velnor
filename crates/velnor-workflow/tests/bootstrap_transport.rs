@@ -5,6 +5,7 @@
 //! artifact endpoints are never invoked.
 
 #![cfg(unix)]
+#![recursion_limit = "256"]
 #![expect(
     clippy::expect_used,
     reason = "fixture setup failures should abort loudly"
@@ -57,6 +58,7 @@ enum FailureCase {
     WrongArtifactRun,
     RunAttemptMismatch,
     StaleArtifact,
+    ArtifactOutsideJobWindow,
     DuplicateRun,
     DuplicateJob,
     DuplicateArtifact,
@@ -271,6 +273,9 @@ impl TransportFixture {
             Some(FailureCase::StaleArtifact) => {
                 scenario["artifacts"][0]["expires_at"] = json!("2000-01-01T00:00:00Z");
             }
+            Some(FailureCase::ArtifactOutsideJobWindow) => {
+                scenario["artifacts"][0]["created_at"] = json!("2026-09-20T00:00:30Z");
+            }
             Some(FailureCase::DuplicateRun) => {
                 let run = scenario["runs"][0].clone();
                 scenario["runs"] = json!([run.clone(), run]);
@@ -395,6 +400,8 @@ impl TransportFixture {
             "head_tree_sha": HEAD_TREE_SHA, "base_tree_sha": BASE_TREE_SHA,
             "pr_number": PR_NUMBER,
             "producer_run_created_at": "2026-09-20T00:00:00Z",
+            "job_started_at": "2026-09-20T00:01:00Z",
+            "job_completed_at": "2026-09-20T00:10:00Z",
             "head_tree_api_digest": "a".repeat(64),
             "base_tree_api_digest": "b".repeat(64),
             "profile": "debug", "platform": "linux-amd64", "features": [],
@@ -406,8 +413,8 @@ impl TransportFixture {
             "artifact_name": self.generated.artifact_name, "artifact_id": ARTIFACT_ID,
             "artifact_size": 128, "artifact_service_digest": format!("sha256:{}", "d".repeat(64)),
             "artifact_raw_zip_sha256": "e".repeat(64),
-            "artifact_created_at": "2026-09-20T00:00:00Z",
-            "artifact_updated_at": "2026-09-20T00:00:00Z",
+            "artifact_created_at": "2026-09-20T00:02:00Z",
+            "artifact_updated_at": "2026-09-20T00:03:00Z",
             "artifact_expires_at": "2099-01-01T00:00:00Z", "source_archive_sha256": source_sha,
             "candidate_closure": fixture_closure(), "contract_sha256": "f".repeat(64),
             "manifest_sha256": "1".repeat(64)
@@ -509,6 +516,7 @@ fn generated_acquire_rejects_transport_and_identity_faults() {
         FailureCase::WrongArtifactRun,
         FailureCase::RunAttemptMismatch,
         FailureCase::StaleArtifact,
+        FailureCase::ArtifactOutsideJobWindow,
         FailureCase::DuplicateRun,
         FailureCase::DuplicateJob,
         FailureCase::DuplicateArtifact,
@@ -724,13 +732,14 @@ fn valid_scenario(
         "jobs": [{
             "id": JOB_ID, "name": "candidate_producer", "run_id": RUN_ID,
             "head_sha": HEAD_SHA, "status": "completed", "conclusion": "success",
-            "run_attempt": RUN_ATTEMPT
+            "run_attempt": RUN_ATTEMPT, "started_at": "2026-09-20T00:01:00Z",
+            "completed_at": "2026-09-20T00:10:00Z"
         }],
         "artifacts": [{
             "id": ARTIFACT_ID, "name": artifact_name, "expired": false,
             "size_in_bytes": 1024, "digest": service_digest,
             "expires_at": "2099-01-01T00:00:00Z",
-            "created_at": "2026-09-20T00:00:00Z", "updated_at": "2026-09-20T00:00:00Z",
+            "created_at": "2026-09-20T00:02:00Z", "updated_at": "2026-09-20T00:03:00Z",
             "workflow_run": {"id": RUN_ID}
         }],
         "build_image_repository": build_image_repository,
@@ -855,6 +864,12 @@ elif "/git/trees/" in url:
     print(json.dumps({"sha": tree, "truncated": False, "tree": entries}))
 elif url.rstrip("/") == "repos/" + os.environ["GITHUB_REPOSITORY"]:
     print(json.dumps({"id": 42, "full_name": os.environ["GITHUB_REPOSITORY"]}))
+elif "/actions/runs/" in url and "/jobs" not in url and "/artifacts" not in url:
+    print(json.dumps(scenario["runs"][0]))
+elif "/actions/jobs/" in url:
+    print(json.dumps(scenario["jobs"][0]))
+elif "/actions/artifacts/" in url and "/zip" not in url:
+    print(json.dumps(scenario["artifacts"][0]))
 elif "/runs/" in url and "/jobs" in url:
     print(json.dumps([scenario["jobs"]]))
 elif "/runs/" in url and "/artifacts" in url:
