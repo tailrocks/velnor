@@ -8335,6 +8335,51 @@ mod tests {
     }
 
     #[test]
+    fn schema_two_dispatch_probe_routes_only_schema_two_targets() {
+        let schema_two = temporary_directory("schema-two-dispatch-probe");
+        must(
+            fs::create_dir_all(schema_two.join(".github-gen")),
+            "create schema two config directory",
+        );
+        must(
+            fs::write(
+                schema_two.join(".github-gen/velnor-workflow.toml"),
+                "schema = 2\n",
+            ),
+            "write schema two config",
+        );
+        let schema_two_arg = schema_two.as_os_str().to_os_string();
+        assert!(wants_s2_invocation(&[
+            schema_two_arg.clone(),
+            OsString::from("--plain"),
+        ]));
+
+        must(
+            fs::write(
+                schema_two.join(".github-gen/velnor-workflow.toml"),
+                "schema = 1\n",
+            ),
+            "rewrite schema one config",
+        );
+        assert!(!wants_s2_invocation(&[
+            schema_two_arg,
+            OsString::from("--plain"),
+        ]));
+        let _ = fs::remove_dir_all(schema_two);
+    }
+
+    #[test]
+    fn schema_two_dispatch_probe_accepts_provider_flag_without_target() {
+        assert!(wants_s2_invocation(&[
+            OsString::from("--providers"),
+            OsString::from("github-hosted"),
+        ]));
+        assert!(wants_s2_invocation(&[OsString::from(
+            "--providers=github-hosted",
+        )]));
+    }
+
+    #[test]
     fn plain_mode_never_selects_the_tui() {
         let plain = must(
             Cli::parse_args([OsString::from("--plain")]),
