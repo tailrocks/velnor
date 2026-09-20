@@ -1954,11 +1954,11 @@ mod tests {
     }
 
     #[test]
-    fn compiled_manifest_is_version_fourteen_and_structurally_immutable() {
+    fn compiled_manifest_is_version_fifteen_and_structurally_immutable() {
         // Removing a provider changes the exported capability surface and
         // requires a new version so stale consumers fail closed.
-        assert_eq!(MANIFEST_VERSION, 14);
-        assert_eq!(MANIFEST.version, 14);
+        assert_eq!(MANIFEST_VERSION, 15);
+        assert_eq!(MANIFEST.version, 15);
         assert_manifest_integrity().expect("compiled manifest must pass integrity");
     }
 
