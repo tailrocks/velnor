@@ -24,6 +24,7 @@ mod regen;
 pub(crate) mod release;
 pub(crate) mod renovate;
 pub(crate) mod runtime_products;
+pub(crate) mod signer_contract;
 pub(crate) mod snapshot;
 pub(crate) mod watch;
 
