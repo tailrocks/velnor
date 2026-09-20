@@ -4253,7 +4253,7 @@ fn render_apt_discovery_feed(config: &ProjectConfig, contract: &crate::apt::AptC
     let identity = shell_quote(&contract.identity_dir);
     let feed = shell_quote(&contract.feed_url);
     let description = shell_quote(&contract.description);
-    let arches = contract.arches.join(",");
+    let arches = shell_quote(&contract.arches.join(","));
     let secret = &contract.passphrase_secret;
     let key_secret = &contract.signing_key_secret;
     let checkout = ActionPin::Checkout.reference();
@@ -4444,7 +4444,7 @@ fn render_apt_discovery_feed(config: &ProjectConfig, contract: &crate::apt::AptC
     output.push_str("      - name: Download staged feed tree\n        uses: ");
     output.push_str(download);
     output.push_str(
-        "\n        with:\n          name: apt-staging\n          path: public\n      - name: Guard against a rollback deploy\n        env:\n          CHANNEL: ${{ needs.publish.outputs.channel }}\n        run: |\n          set -euo pipefail\n          if [ \"$CHANNEL\" = stable ]; then last=last-publish; else last=last-publish-preview; fi\n          live=unknown\n          if curl --fail --show-error --silent --location -o live-last-publish ",
+        "\n        with:\n          name: apt-staging\n          path: public\n      - name: Guard against a rollback deploy\n        env:\n          CHANNEL: ${{ needs.publish.outputs.channel }}\n        run: |\n          set -euo pipefail\n          if [ \"$CHANNEL\" = stable ]; then last='last-publish'; else last='last-publish-preview'; fi\n          live=unknown\n          if curl --fail --show-error --silent --location -o live-last-publish ",
     );
     output.push_str(&feed);
     output.push_str(

@@ -30,6 +30,8 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
+use std::os::fd::AsFd as _;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStringExt as _;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
@@ -952,7 +954,11 @@ fn positive_field(document: &serde_json::Value, name: &str) -> Result<u64, Gener
 /// field, which must be 64 lowercase hex.
 fn sidecar_digest(path: &Path) -> Result<String, GeneratorError> {
     let bytes = read_regular_file(path)?;
-    let text = String::from_utf8(bytes)
+    sidecar_digest_bytes(&bytes, path)
+}
+
+fn sidecar_digest_bytes(bytes: &[u8], path: &Path) -> Result<String, GeneratorError> {
+    let text = String::from_utf8(bytes.to_owned())
         .map_err(|_| GeneratorError::usage(format!("{} is not UTF-8", path.display())))?;
     let digest = text
         .split_whitespace()
@@ -1142,6 +1148,54 @@ fn read_regular_file(path: &Path) -> Result<Vec<u8>, GeneratorError> {
     Ok(bytes)
 }
 
+/// Read one regular input relative to an already-open directory. The parent
+/// descriptor is the capability boundary: replacing the incoming pathname or
+/// one of its ancestors cannot redirect this open.
+#[cfg(unix)]
+fn read_regular_file_at(
+    directory: &File,
+    name: &str,
+    display: &Path,
+) -> Result<Vec<u8>, GeneratorError> {
+    let file = rustix::fs::openat(
+        directory,
+        name,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|error| {
+        let error = std::io::Error::from(error);
+        if error.kind() == std::io::ErrorKind::NotFound {
+            GeneratorError::usage(format!("required file missing: {}", display.display()))
+        } else if error.kind() == std::io::ErrorKind::InvalidInput {
+            GeneratorError::usage(format!("required file is not safe: {}", display.display()))
+        } else {
+            GeneratorError::io("open required file", display, &error)
+        }
+    })?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| GeneratorError::io("stat required file", display, &error))?;
+    if !metadata.is_file() {
+        return Err(GeneratorError::usage(format!(
+            "required path is not a regular file: {}",
+            display.display()
+        )));
+    }
+    if metadata.nlink() != 1 {
+        return Err(GeneratorError::usage(format!(
+            "required file has multiple links: {}",
+            display.display()
+        )));
+    }
+    let mut bytes = Vec::new();
+    (&file)
+        .read_to_end(&mut bytes)
+        .map_err(|error| GeneratorError::io("read required file", display, &error))?;
+    Ok(bytes)
+}
+
 /// The sentinel is a fresh proof for one incoming handoff. Schema-2 binds it
 /// to the exact persisted selection bytes and every selected asset's bytes;
 /// legacy APT verification has no selection and uses the fixed marker. A
@@ -1259,6 +1313,119 @@ fn create_new_regular_file(
     Ok(())
 }
 
+/// Open an incoming directory, creating only its final component relative to
+/// an already-open parent. `create_dir_all` and pathname `mkdir` leave a
+/// parent replacement race between checking and creation.
+#[cfg(unix)]
+fn open_or_create_directory(path: &Path) -> Result<File, GeneratorError> {
+    match open_directory_nofollow(path) {
+        Ok(directory) => return Ok(directory),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(GeneratorError::io("open directory", path, &error));
+        }
+        Err(_) => {}
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| GeneratorError::usage("directory path has no parent"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| GeneratorError::usage("directory path has no name"))?;
+    let parent_file = open_directory_nofollow(parent)
+        .map_err(|error| GeneratorError::io("open directory parent", parent, &error))?;
+    match rustix::fs::mkdirat(&parent_file, name, rustix::fs::Mode::from_raw_mode(0o700)) {
+        Ok(()) => {}
+        Err(error) => {
+            let error = std::io::Error::from(error);
+            if error.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(GeneratorError::io("create directory", path, &error));
+            }
+        }
+    }
+    let directory = File::from(
+        rustix::fs::openat(
+            &parent_file,
+            name,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|error| {
+            let error = std::io::Error::from(error);
+            GeneratorError::io("open created directory", path, &error)
+        })?,
+    );
+    let metadata = directory
+        .metadata()
+        .map_err(|error| GeneratorError::io("stat created directory", path, &error))?;
+    if !metadata.is_dir() {
+        return Err(GeneratorError::usage(format!(
+            "created path is not a directory: {}",
+            path.display()
+        )));
+    }
+    Ok(directory)
+}
+
+/// Create one regular file relative to a held directory descriptor.
+#[cfg(unix)]
+fn create_new_regular_file_at(
+    directory: &File,
+    name: &str,
+    bytes: &[u8],
+    operation: &'static str,
+    display: &Path,
+) -> Result<(), GeneratorError> {
+    let mut file = File::from(
+        rustix::fs::openat(
+            directory,
+            name,
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::EXCL
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::from_raw_mode(0o644),
+        )
+        .map_err(|error| {
+            let error = std::io::Error::from(error);
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                GeneratorError::usage(format!("{operation} destination already exists"))
+            } else {
+                GeneratorError::io(operation, display, &error)
+            }
+        })?,
+    );
+    file.write_all(bytes)
+        .map_err(|error| GeneratorError::io(operation, display, &error))?;
+    file.sync_all()
+        .map_err(|error| GeneratorError::io("sync file", display, &error))?;
+    if file.metadata().map_or(0, |metadata| metadata.nlink()) != 1 {
+        return Err(GeneratorError::usage(format!(
+            "{operation} destination has multiple links"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn rename_at(
+    directory: &File,
+    old_name: &str,
+    new_name: &str,
+    display: &Path,
+) -> Result<(), GeneratorError> {
+    rustix::fs::renameat(directory, old_name, directory, new_name).map_err(|error| {
+        GeneratorError::io(
+            "install downloaded asset",
+            display,
+            &std::io::Error::from(error),
+        )
+    })
+}
+
 /// Install bytes without following a pre-existing destination link. A staged
 /// immutable asset may already be present only when its bytes are identical;
 /// every other existing destination is a collision or an unsafe path.
@@ -1290,9 +1457,13 @@ fn install_regular_file(
 /// cannot reopen the caller's mutable incoming path.
 fn materialize_verified_file(path: &Path) -> Result<(PathBuf, PathBuf), GeneratorError> {
     let bytes = read_regular_file(path)?;
+    materialize_verified_bytes(&bytes)
+}
+
+fn materialize_verified_bytes(bytes: &[u8]) -> Result<(PathBuf, PathBuf), GeneratorError> {
     let scratch = scratch_dir("verified-input")?;
     let materialized = scratch.join("input");
-    if let Err(error) = create_new_regular_file(&materialized, &bytes, "materialize verified input")
+    if let Err(error) = create_new_regular_file(&materialized, bytes, "materialize verified input")
     {
         let _ = std::fs::remove_dir_all(&scratch);
         return Err(error);
@@ -1321,27 +1492,36 @@ fn directory_entry_name(raw_name: &[u8], dir: &Path) -> Result<String, Generator
         })
 }
 
-fn dir_names(dir: &Path) -> Result<Vec<String>, GeneratorError> {
+#[cfg(unix)]
+fn dir_names_from_file(directory: &File, dir: &Path) -> Result<Vec<String>, GeneratorError> {
     let mut names = Vec::new();
+    let mut entries = rustix::fs::Dir::read_from(directory)
+        .map_err(|error| GeneratorError::io("list", dir, &std::io::Error::from(error)))?;
+    while let Some(entry) = entries.read() {
+        let entry =
+            entry.map_err(|error| GeneratorError::io("list", dir, &std::io::Error::from(error)))?;
+        let raw_name = entry.file_name().to_bytes();
+        if raw_name == b"." || raw_name == b".." {
+            continue;
+        }
+        let name = directory_entry_name(raw_name, dir)?;
+        names.push(name);
+    }
+    names.sort();
+    Ok(names)
+}
+
+#[allow(clippy::needless_return)]
+fn dir_names(dir: &Path) -> Result<Vec<String>, GeneratorError> {
     #[cfg(unix)]
     {
         let directory = open_directory_nofollow(dir)
             .map_err(|error| GeneratorError::io("open directory for listing", dir, &error))?;
-        let mut entries = rustix::fs::Dir::read_from(&directory)
-            .map_err(|error| GeneratorError::io("list", dir, &std::io::Error::from(error)))?;
-        while let Some(entry) = entries.read() {
-            let entry = entry
-                .map_err(|error| GeneratorError::io("list", dir, &std::io::Error::from(error)))?;
-            let raw_name = entry.file_name().to_bytes();
-            if raw_name == b"." || raw_name == b".." {
-                continue;
-            }
-            let name = directory_entry_name(raw_name, dir)?;
-            names.push(name);
-        }
+        return dir_names_from_file(&directory, dir);
     }
     #[cfg(not(unix))]
     {
+        let mut names = Vec::new();
         require_directory(dir)?;
         let entries =
             std::fs::read_dir(dir).map_err(|error| GeneratorError::io("list", dir, &error))?;
@@ -1355,9 +1535,9 @@ fn dir_names(dir: &Path) -> Result<Vec<String>, GeneratorError> {
             })?;
             names.push(name);
         }
+        names.sort();
+        return Ok(names);
     }
-    names.sort();
-    Ok(names)
 }
 
 /// Run a fixed tool with fixed arguments: no shell, no config-derived program.
@@ -2422,6 +2602,7 @@ fn verify_discovery_subordinates(
 /// Download precisely the assets named by a validated discovery result. The
 /// old tag/pointer download selector is intentionally not reachable here:
 /// every request is keyed by the immutable provider asset ID.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn run_fetch_selection(
     selection_path: &Path,
     dir: &Path,
@@ -2429,9 +2610,11 @@ pub(crate) fn run_fetch_selection(
 ) -> Result<DiscoverySelection, GeneratorError> {
     let selected_document = read_json(selection_path)?;
     let selection = parse_discovery_selection(&selected_document)?;
-    if dir.exists() {
-        require_directory(dir)?;
-        let existing = dir_names(dir)?;
+    #[cfg(unix)]
+    let directory = open_or_create_directory(dir)?;
+    #[cfg(unix)]
+    {
+        let existing = dir_names_from_file(&directory, dir)?;
         if existing.iter().any(|name| name == SENTINEL_FILE) {
             return Err(GeneratorError::usage(
                 "selection fetch refuses a pre-existing verification sentinel",
@@ -2442,16 +2625,47 @@ pub(crate) fn run_fetch_selection(
                 "selection fetch requires an empty incoming directory",
             ));
         }
-        if dir.join(DISCOVERY_SELECTION_FILE).exists()
-            && read_json(&dir.join(DISCOVERY_SELECTION_FILE))? != selected_document
-        {
-            return Err(GeneratorError::usage(
-                "incoming discovery.json differs from the selected release",
-            ));
+        if existing.iter().any(|name| name == DISCOVERY_SELECTION_FILE) {
+            let persisted = read_regular_file_at(
+                &directory,
+                DISCOVERY_SELECTION_FILE,
+                &dir.join(DISCOVERY_SELECTION_FILE),
+            )?;
+            let persisted = serde_json::from_slice::<serde_json::Value>(&persisted)
+                .map_err(|_| GeneratorError::usage("incoming discovery.json is not valid JSON"))?;
+            if persisted != selected_document {
+                return Err(GeneratorError::usage(
+                    "incoming discovery.json differs from the selected release",
+                ));
+            }
         }
-    } else {
-        std::fs::create_dir_all(dir)
-            .map_err(|error| GeneratorError::io("create incoming directory", dir, &error))?;
+    }
+    #[cfg(not(unix))]
+    {
+        if dir.exists() {
+            require_directory(dir)?;
+            let existing = dir_names(dir)?;
+            if existing.iter().any(|name| name == SENTINEL_FILE) {
+                return Err(GeneratorError::usage(
+                    "selection fetch refuses a pre-existing verification sentinel",
+                ));
+            }
+            if existing.iter().any(|name| name != DISCOVERY_SELECTION_FILE) {
+                return Err(GeneratorError::usage(
+                    "selection fetch requires an empty incoming directory",
+                ));
+            }
+            if dir.join(DISCOVERY_SELECTION_FILE).exists()
+                && read_json(&dir.join(DISCOVERY_SELECTION_FILE))? != selected_document
+            {
+                return Err(GeneratorError::usage(
+                    "incoming discovery.json differs from the selected release",
+                ));
+            }
+        } else {
+            std::fs::create_dir(dir)
+                .map_err(|error| GeneratorError::io("create incoming directory", dir, &error))?;
+        }
     }
     for asset in &selection.release_assets {
         let endpoint = format!(
@@ -2475,22 +2689,53 @@ pub(crate) fn run_fetch_selection(
                 asset.name
             )));
         }
-        let temporary = dir.join(format!(".{}.part", asset.id));
-        create_new_regular_file(&temporary, &bytes, "write downloaded asset")?;
-        std::fs::rename(&temporary, dir.join(&asset.name)).map_err(|error| {
-            GeneratorError::io("install downloaded asset", &dir.join(&asset.name), &error)
-        })?;
+        #[cfg(unix)]
+        {
+            let temporary = format!(".{}.part", asset.id);
+            create_new_regular_file_at(
+                &directory,
+                &temporary,
+                &bytes,
+                "write downloaded asset",
+                &dir.join(&temporary),
+            )?;
+            rename_at(&directory, &temporary, &asset.name, &dir.join(&asset.name))?;
+        }
+        #[cfg(not(unix))]
+        {
+            let temporary = dir.join(format!(".{}.part", asset.id));
+            create_new_regular_file(&temporary, &bytes, "write downloaded asset")?;
+            std::fs::rename(&temporary, dir.join(&asset.name)).map_err(|error| {
+                GeneratorError::io("install downloaded asset", &dir.join(&asset.name), &error)
+            })?;
+        }
     }
     let persisted = serde_json::to_vec(&selected_document).map_err(|error| {
         GeneratorError::usage(format!("serialize discovery selection: {error}"))
     })?;
-    let selection_destination = dir.join(DISCOVERY_SELECTION_FILE);
-    if !selection_destination.exists() {
-        create_new_regular_file(
-            &selection_destination,
+    #[cfg(unix)]
+    if !dir_names_from_file(&directory, dir)?
+        .iter()
+        .any(|name| name == DISCOVERY_SELECTION_FILE)
+    {
+        create_new_regular_file_at(
+            &directory,
+            DISCOVERY_SELECTION_FILE,
             &persisted,
             "persist discovery selection",
+            &dir.join(DISCOVERY_SELECTION_FILE),
         )?;
+    }
+    #[cfg(not(unix))]
+    {
+        let selection_destination = dir.join(DISCOVERY_SELECTION_FILE);
+        if !selection_destination.exists() {
+            create_new_regular_file(
+                &selection_destination,
+                &persisted,
+                "persist discovery selection",
+            )?;
+        }
     }
     Ok(selection)
 }
@@ -2644,7 +2889,36 @@ pub(crate) fn deb_control_field(
         // control members name their file `control` with or without a `./`
         // prefix depending on the producer, and name matching would guess.
         let scratch = scratch_dir("deb-control")?;
+        #[cfg(unix)]
+        let scratch_directory = open_directory_nofollow(&scratch).map_err(|error| {
+            GeneratorError::io("open control extraction directory", &scratch, &error)
+        })?;
         validate_tar_payload(&payload, path_overlay)?;
+        #[cfg(unix)]
+        let result =
+            extract_tar_payload_in_directory(&payload, &scratch_directory, path_overlay, &scratch)
+                .and_then(|()| {
+                    let control_path = scratch.join("control");
+                    let text = String::from_utf8(read_regular_file_at(
+                        &scratch_directory,
+                        "control",
+                        &control_path,
+                    )?)
+                    .map_err(|_| {
+                        GeneratorError::usage(format!("{} is not UTF-8", control_path.display()))
+                    })?;
+                    let prefix = format!("{field_name}:");
+                    text.lines()
+                        .find_map(|line| line.strip_prefix(prefix.as_str()).map(str::to_owned))
+                        .map(|value| value.trim().to_owned())
+                        .ok_or_else(|| {
+                            GeneratorError::usage(format!(
+                                "deb {} has no {field_name} control field",
+                                deb.display()
+                            ))
+                        })
+                });
+        #[cfg(not(unix))]
         let result = run_tar_stdin(
             &["-x", "-C", scratch.to_str().unwrap_or("."), "-f", "-"],
             &payload,
@@ -2682,7 +2956,30 @@ fn scratch_dir(kind: &str) -> Result<PathBuf, GeneratorError> {
         std::process::id(),
         SEQ.fetch_add(1, Ordering::SeqCst)
     ));
-    std::fs::create_dir_all(&dir).map_err(|error| GeneratorError::io("create", &dir, &error))?;
+    #[cfg(unix)]
+    {
+        let parent = dir
+            .parent()
+            .ok_or_else(|| GeneratorError::usage("scratch directory has no parent"))?;
+        let parent_file = open_directory_nofollow(parent)
+            .map_err(|error| GeneratorError::io("open scratch parent", parent, &error))?;
+        rustix::fs::mkdirat(
+            &parent_file,
+            dir.file_name()
+                .ok_or_else(|| GeneratorError::usage("scratch directory has no name"))?,
+            rustix::fs::Mode::from_raw_mode(0o700),
+        )
+        .map_err(|error| {
+            GeneratorError::io(
+                "create scratch directory",
+                &dir,
+                &std::io::Error::from(error),
+            )
+        })?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir(&dir)
+        .map_err(|error| GeneratorError::io("create scratch directory", &dir, &error))?;
     Ok(dir)
 }
 
@@ -2705,6 +3002,205 @@ fn tar_decompress_flag(payload: &[u8]) -> Option<&'static str> {
     } else {
         None // uncompressed tar
     }
+}
+
+/// Decode a package archive stream before the descriptor-bound Rust extractor
+/// consumes it. Compression tools only transform bytes; they never receive a
+/// destination path or permission to create files.
+fn tar_uncompressed_payload(
+    payload: &[u8],
+    path_overlay: Option<&Path>,
+) -> Result<Vec<u8>, GeneratorError> {
+    let Some(flag) = tar_decompress_flag(payload) else {
+        return Ok(payload.to_owned());
+    };
+    let (program, args): (&str, &[&str]) = match flag {
+        "-z" => ("gzip", &["-d", "-c"]),
+        "-j" => ("bzip2", &["-d", "-c"]),
+        "-J" => ("xz", &["-d", "-c"]),
+        "--zstd" => ("zstd", &["-d", "-c"]),
+        _ => return Err(GeneratorError::usage("unsupported archive compression")),
+    };
+    run_fixed(
+        program,
+        &args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+        Some(payload),
+        path_overlay,
+    )
+}
+
+#[cfg(unix)]
+fn open_archive_child_directory(
+    parent: &File,
+    name: &str,
+    display: &Path,
+) -> Result<File, GeneratorError> {
+    let flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::DIRECTORY
+        | rustix::fs::OFlags::CLOEXEC
+        | rustix::fs::OFlags::NOFOLLOW;
+    match rustix::fs::openat(parent, name, flags, rustix::fs::Mode::empty()) {
+        Ok(file) => Ok(File::from(file)),
+        Err(error) => {
+            let error = std::io::Error::from(error);
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(GeneratorError::io(
+                    "open archive directory",
+                    display,
+                    &error,
+                ));
+            }
+            rustix::fs::mkdirat(parent, name, rustix::fs::Mode::from_raw_mode(0o755)).map_err(
+                |error| {
+                    GeneratorError::io(
+                        "create archive directory",
+                        display,
+                        &std::io::Error::from(error),
+                    )
+                },
+            )?;
+            File::from(
+                rustix::fs::openat(parent, name, flags, rustix::fs::Mode::empty()).map_err(
+                    |error| {
+                        GeneratorError::io(
+                            "open archive directory",
+                            display,
+                            &std::io::Error::from(error),
+                        )
+                    },
+                )?,
+            )
+            .metadata()
+            .map_err(|error| GeneratorError::io("stat archive directory", display, &error))
+            .and_then(|metadata| {
+                if metadata.is_dir() {
+                    Ok(())
+                } else {
+                    Err(GeneratorError::usage(format!(
+                        "archive parent is not a directory: {}",
+                        display.display()
+                    )))
+                }
+            })
+            .and_then(|()| {
+                // The parent descriptor is the stable capability; reopen via
+                // it, never through the mutable destination pathname.
+                rustix::fs::openat(parent, name, flags, rustix::fs::Mode::empty())
+                    .map(File::from)
+                    .map_err(|error| {
+                        GeneratorError::io(
+                            "reopen archive directory",
+                            display,
+                            &std::io::Error::from(error),
+                        )
+                    })
+            })
+        }
+    }
+}
+
+#[cfg(unix)]
+fn archive_parent_directory(
+    destination: &File,
+    components: &[&str],
+    display: &Path,
+) -> Result<File, GeneratorError> {
+    let mut parent = File::from(rustix::io::dup(destination.as_fd()).map_err(|error| {
+        GeneratorError::io(
+            "duplicate archive destination",
+            display,
+            &std::io::Error::from(error),
+        )
+    })?);
+    for component in components {
+        parent = open_archive_child_directory(&parent, component, display)?;
+    }
+    Ok(parent)
+}
+
+#[cfg(unix)]
+fn archive_path_components<'a>(
+    path: &'a Path,
+    display: &Path,
+) -> Result<Vec<&'a str>, GeneratorError> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| GeneratorError::usage("archive member path is not UTF-8"))?;
+    let dot_root = text == "./";
+    let text = text
+        .strip_prefix("./")
+        .unwrap_or(text)
+        .trim_end_matches('/');
+    if dot_root || text == "." {
+        return Ok(Vec::new());
+    }
+    if text.is_empty() || text.starts_with('/') {
+        return Err(GeneratorError::usage(format!(
+            "archive member path is not confined: {text}"
+        )));
+    }
+    let components = text
+        .split('/')
+        .filter(|component| *component != ".")
+        .collect::<Vec<_>>();
+    if components
+        .iter()
+        .any(|component| component.is_empty() || *component == "..")
+    {
+        return Err(GeneratorError::usage(format!(
+            "archive member path is not confined: {text} ({})",
+            display.display()
+        )));
+    }
+    Ok(components)
+}
+
+/// Extract a validated tar stream relative to a held directory descriptor.
+/// No archive member is ever handed to a pathname-based unpacker.
+#[cfg(unix)]
+fn extract_tar_payload_in_directory(
+    payload: &[u8],
+    destination: &File,
+    path_overlay: Option<&Path>,
+    display: &Path,
+) -> Result<(), GeneratorError> {
+    let payload = tar_uncompressed_payload(payload, path_overlay)?;
+    let mut archive = tar::Archive::new(std::io::Cursor::new(payload));
+    let entries = archive.entries().map_err(|error| {
+        GeneratorError::usage(format!("could not read archive entries: {error}"))
+    })?;
+    for entry in entries {
+        let mut entry = entry.map_err(|error| {
+            GeneratorError::usage(format!("could not read archive entry: {error}"))
+        })?;
+        let path = entry
+            .path()
+            .map_err(|error| {
+                GeneratorError::usage(format!("could not read archive path: {error}"))
+            })?
+            .into_owned();
+        let components = archive_path_components(&path, display)?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
+            let _ = archive_parent_directory(destination, &components, display)?;
+            continue;
+        }
+        if !entry_type.is_file() {
+            return Err(GeneratorError::usage(
+                "archive member type is not a regular file or directory",
+            ));
+        }
+        let (name, parents) = components
+            .split_last()
+            .ok_or_else(|| GeneratorError::usage("archive member has no name"))?;
+        let parent = archive_parent_directory(destination, parents, display)?;
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).map_err(|error| {
+            GeneratorError::usage(format!("could not read archive member: {error}"))
+        })?;
+        create_new_regular_file_at(&parent, name, &bytes, "extract archive member", display)?;
+    }
+    Ok(())
 }
 
 /// Run `tar` with fixed arguments and a piped archive payload.
@@ -2760,6 +3256,7 @@ fn run_tar_stdin_output(
     Ok(output.stdout)
 }
 
+#[cfg(not(unix))]
 fn run_tar_stdin(
     args: &[&str],
     payload: &[u8],
@@ -2807,7 +3304,8 @@ fn validate_tar_payload(payload: &[u8], path_overlay: Option<&Path>) -> Result<(
 /// Create a fresh extraction destination while rejecting a symlink or hard
 /// link at every parent boundary. Unix creation is relative to an opened
 /// parent descriptor, so a concurrent replacement cannot redirect mkdir.
-fn prepare_extraction_destination(dest: &Path) -> Result<(), GeneratorError> {
+#[allow(clippy::needless_return)]
+fn prepare_extraction_destination(dest: &Path) -> Result<File, GeneratorError> {
     if std::fs::symlink_metadata(dest).is_ok() {
         return Err(GeneratorError::usage(
             "archive extraction destination already exists",
@@ -2833,13 +3331,33 @@ fn prepare_extraction_destination(dest: &Path) -> Result<(), GeneratorError> {
                 }
             },
         )?;
-        let _directory = open_directory_nofollow(dest)
-            .map_err(|error| GeneratorError::io("open extraction destination", dest, &error))?;
+        let directory = File::from(
+            rustix::fs::openat(
+                &parent_file,
+                name,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::CLOEXEC
+                    | rustix::fs::OFlags::NOFOLLOW,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(|error| {
+                GeneratorError::io(
+                    "open extraction destination",
+                    dest,
+                    &std::io::Error::from(error),
+                )
+            })?,
+        );
+        return Ok(directory);
     }
     #[cfg(not(unix))]
-    std::fs::create_dir(dest)
-        .map_err(|error| GeneratorError::io("create extraction destination", dest, &error))?;
-    Ok(())
+    {
+        std::fs::create_dir(dest)
+            .map_err(|error| GeneratorError::io("create extraction destination", dest, &error))?;
+        return File::open(dest)
+            .map_err(|error| GeneratorError::io("open extraction destination", dest, &error));
+    }
 }
 
 /// Extract a `.deb` data tree into `dest`.
@@ -2884,7 +3402,13 @@ pub(crate) fn deb_extract_data(
             )?
         };
         validate_tar_payload(&payload, path_overlay)?;
-        prepare_extraction_destination(dest)?;
+        let destination = prepare_extraction_destination(dest)?;
+        #[cfg(unix)]
+        {
+            let _ = dest_name;
+            extract_tar_payload_in_directory(&payload, &destination, path_overlay, dest)
+        }
+        #[cfg(not(unix))]
         run_tar_stdin(&["-x", "-C", dest_name, "-f", "-"], &payload, path_overlay)
     })();
     let _ = std::fs::remove_dir_all(&verified_root);
@@ -3700,6 +4224,298 @@ fn verify_preview_extracted(
     Ok(())
 }
 
+fn verify_snapshot_subordinate(
+    files: &BTreeMap<String, Vec<u8>>,
+    payload_name: &str,
+    sidecar_name: &str,
+    expected_parent: &str,
+) -> Result<(), GeneratorError> {
+    let payload = files.get(payload_name).ok_or_else(|| {
+        GeneratorError::usage(format!("publication incoming is missing {payload_name}"))
+    })?;
+    let sidecar = sidecar_digest_bytes(
+        files.get(sidecar_name).ok_or_else(|| {
+            GeneratorError::usage(format!("publication incoming is missing {sidecar_name}"))
+        })?,
+        Path::new(sidecar_name),
+    )?;
+    if sidecar != sha256_hex(payload) {
+        return Err(GeneratorError::usage(format!(
+            "publication subordinate {payload_name} checksum differs from its sidecar"
+        )));
+    }
+    let document = serde_json::from_slice::<serde_json::Value>(payload).map_err(|error| {
+        GeneratorError::usage(format!(
+            "publication subordinate {payload_name} is not valid JSON: {error}"
+        ))
+    })?;
+    if field(&document, "parent_manifest_sha256")? != expected_parent {
+        return Err(GeneratorError::usage(format!(
+            "publication subordinate {payload_name} does not bind the canonical product manifest"
+        )));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_snapshot_selection(
+    selection: &DiscoverySelection,
+    files: &BTreeMap<String, Vec<u8>>,
+) -> Result<(), GeneratorError> {
+    let manifest_bytes = files.get(&selection.manifest_asset).ok_or_else(|| {
+        GeneratorError::usage("publication incoming is missing canonical manifest")
+    })?;
+    if sha256_hex(manifest_bytes) != selection.manifest_sha256 {
+        return Err(GeneratorError::usage(
+            "publication canonical product manifest digest differs from discovery",
+        ));
+    }
+    let manifest =
+        serde_json::from_slice::<serde_json::Value>(manifest_bytes).map_err(|error| {
+            GeneratorError::usage(format!(
+                "publication canonical manifest is not valid JSON: {error}"
+            ))
+        })?;
+    if manifest != selection.manifest {
+        return Err(GeneratorError::usage(
+            "publication canonical product manifest differs from discovery",
+        ));
+    }
+    let manifest_sidecar = format!("{}.sha256", selection.manifest_asset);
+    if sidecar_digest_bytes(
+        files.get(&manifest_sidecar).ok_or_else(|| {
+            GeneratorError::usage("publication incoming is missing manifest sidecar")
+        })?,
+        Path::new(&manifest_sidecar),
+    )? != selection.manifest_sha256
+    {
+        return Err(GeneratorError::usage(
+            "publication canonical manifest sidecar differs from discovery",
+        ));
+    }
+    let artifacts = selection
+        .manifest
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            GeneratorError::usage("publication product artifact inventory is missing")
+        })?;
+    for artifact in artifacts {
+        let name = field(artifact, "name")?;
+        let bytes = files.get(name).ok_or_else(|| {
+            GeneratorError::usage(format!("publication incoming is missing artifact {name}"))
+        })?;
+        if bytes.len() as u64 != positive_field(artifact, "size")?
+            || sha256_hex(bytes) != field(artifact, "sha256")?
+        {
+            return Err(GeneratorError::usage(format!(
+                "publication product artifact {name} differs from canonical inventory"
+            )));
+        }
+    }
+    verify_snapshot_subordinate(
+        files,
+        RECORD_FILE,
+        RECORD_SIDECAR,
+        &selection.manifest_sha256,
+    )?;
+    verify_snapshot_subordinate(
+        files,
+        MANIFEST_FILE,
+        MANIFEST_SIDECAR,
+        &selection.manifest_sha256,
+    )?;
+    let release_manifest = files
+        .get(PREVIEW_MANIFEST_FILE)
+        .ok_or_else(|| GeneratorError::usage("publication incoming is missing release manifest"))?;
+    let release_manifest =
+        serde_json::from_slice::<serde_json::Value>(release_manifest).map_err(|error| {
+            GeneratorError::usage(format!(
+                "publication release manifest is not valid JSON: {error}"
+            ))
+        })?;
+    if field(&release_manifest, "parent_manifest_sha256")? != selection.manifest_sha256 {
+        return Err(GeneratorError::usage(
+            "publication release manifest does not bind the canonical product manifest",
+        ));
+    }
+    let sums = files
+        .get(SHA256SUMS_FILE)
+        .ok_or_else(|| GeneratorError::usage("publication incoming is missing SHA256SUMS"))?;
+    let sums = String::from_utf8(sums.clone())
+        .map_err(|_| GeneratorError::usage("publication SHA256SUMS is not UTF-8"))?;
+    let mut sums_by_name = BTreeMap::new();
+    for line in sums.lines().filter(|line| !line.trim().is_empty()) {
+        let mut fields = line.split_whitespace();
+        let digest = fields
+            .next()
+            .ok_or_else(|| GeneratorError::usage("publication SHA256SUMS has no digest"))?;
+        let name = fields
+            .next()
+            .ok_or_else(|| GeneratorError::usage("publication SHA256SUMS has no asset name"))?;
+        if fields.next().is_some() || !valid_digest(digest) || !valid_discovery_asset_name(name) {
+            return Err(GeneratorError::usage(
+                "publication SHA256SUMS has an invalid row",
+            ));
+        }
+        if sums_by_name
+            .insert(name.to_owned(), digest.to_owned())
+            .is_some()
+        {
+            return Err(GeneratorError::usage(
+                "publication SHA256SUMS names an asset more than once",
+            ));
+        }
+    }
+    let apt_artifacts = artifacts
+        .iter()
+        .filter(|artifact| field(artifact, "kind").ok() == Some("apt-package"))
+        .collect::<Vec<_>>();
+    if apt_artifacts.len() != 2 || sums_by_name.len() != apt_artifacts.len() {
+        return Err(GeneratorError::usage(
+            "publication SHA256SUMS is not the exact two-package census",
+        ));
+    }
+    for artifact in apt_artifacts {
+        let name = field(artifact, "name")?;
+        let expected = field(artifact, "sha256")?;
+        if sums_by_name.get(name).map(String::as_str) != Some(expected) {
+            return Err(GeneratorError::usage(format!(
+                "publication SHA256SUMS does not bind {name}"
+            )));
+        }
+        let sidecar_name = format!("{name}.sha256");
+        if sidecar_digest_bytes(
+            files.get(&sidecar_name).ok_or_else(|| {
+                GeneratorError::usage(format!("publication incoming is missing {sidecar_name}"))
+            })?,
+            Path::new(&sidecar_name),
+        )? != expected
+        {
+            return Err(GeneratorError::usage(format!(
+                "publication package sidecar does not bind {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A private publication snapshot. Every source byte consumed after the
+/// verify-to-publish boundary is copied through one held incoming-directory
+/// descriptor, then read from this owned map; later pathname replacement is
+/// outside the publisher's capability set.
+struct IncomingSnapshot {
+    files: BTreeMap<String, Vec<u8>>,
+    selection: Option<DiscoverySelection>,
+}
+
+impl IncomingSnapshot {
+    fn capture(incoming: &Path) -> Result<Self, GeneratorError> {
+        #[cfg(unix)]
+        let directory = open_directory_nofollow(incoming)
+            .map_err(|error| GeneratorError::io("open publication incoming", incoming, &error))?;
+        #[cfg(unix)]
+        let names = dir_names_from_file(&directory, incoming)?;
+        #[cfg(not(unix))]
+        let names = dir_names(incoming)?;
+        let mut files = BTreeMap::new();
+        for name in names {
+            #[cfg(unix)]
+            let bytes = read_regular_file_at(&directory, &name, &incoming.join(&name))?;
+            #[cfg(not(unix))]
+            let bytes = read_regular_file(&incoming.join(&name))?;
+            if files.insert(name.clone(), bytes).is_some() {
+                return Err(GeneratorError::usage(format!(
+                    "publication incoming contains duplicate entry: {name}"
+                )));
+            }
+        }
+        let selection = match files.get(DISCOVERY_SELECTION_FILE) {
+            Some(bytes) => {
+                let document =
+                    serde_json::from_slice::<serde_json::Value>(bytes).map_err(|error| {
+                        GeneratorError::usage(format!(
+                            "{} is not valid JSON: {error}",
+                            incoming.join(DISCOVERY_SELECTION_FILE).display()
+                        ))
+                    })?;
+                Some(parse_discovery_selection(&document)?)
+            }
+            None => None,
+        };
+        let sentinel = files.get(SENTINEL_FILE).ok_or_else(|| {
+            GeneratorError::usage("publication incoming has no verification sentinel")
+        })?;
+        let expected = expected_sentinel_from_files(&files, selection.as_ref())?;
+        if sentinel != &expected {
+            return Err(GeneratorError::usage(
+                "publication incoming sentinel does not bind its captured bytes",
+            ));
+        }
+        if let Some(selection) = &selection {
+            verify_snapshot_selection(selection, &files)?;
+            let mut expected_names = selection
+                .release_assets
+                .iter()
+                .map(|asset| asset.name.clone())
+                .collect::<BTreeSet<_>>();
+            expected_names.insert(DISCOVERY_SELECTION_FILE.to_owned());
+            expected_names.insert(SENTINEL_FILE.to_owned());
+            if files.keys().any(|name| !expected_names.contains(name)) {
+                return Err(GeneratorError::usage(
+                    "publication incoming contains an asset absent from discovery",
+                ));
+            }
+            for asset in &selection.release_assets {
+                let bytes = files.get(&asset.name).ok_or_else(|| {
+                    GeneratorError::usage(format!(
+                        "publication incoming is missing selected asset {}",
+                        asset.name
+                    ))
+                })?;
+                if bytes.len() as u64 != asset.size {
+                    return Err(GeneratorError::usage(format!(
+                        "publication asset {} size differs from discovery",
+                        asset.name
+                    )));
+                }
+            }
+        }
+        Ok(Self { files, selection })
+    }
+
+    fn bytes(&self, name: &str) -> Result<&[u8], GeneratorError> {
+        self.files
+            .get(name)
+            .map(Vec::as_slice)
+            .ok_or_else(|| GeneratorError::usage(format!("publication incoming is missing {name}")))
+    }
+}
+
+fn expected_sentinel_from_files(
+    files: &BTreeMap<String, Vec<u8>>,
+    selection: Option<&DiscoverySelection>,
+) -> Result<Vec<u8>, GeneratorError> {
+    let Some(selection) = selection else {
+        return Ok(b"verified\n".to_vec());
+    };
+    let selection_bytes = files
+        .get(DISCOVERY_SELECTION_FILE)
+        .ok_or_else(|| GeneratorError::usage("publication incoming has no discovery selection"))?;
+    let mut proof = format!("selection:{}\n", sha256_hex(selection_bytes));
+    for asset in &selection.release_assets {
+        let bytes = files.get(&asset.name).ok_or_else(|| {
+            GeneratorError::usage(format!("publication incoming is missing {}", asset.name))
+        })?;
+        proof.push_str("asset:");
+        proof.push_str(&asset.name);
+        proof.push(':');
+        proof.push_str(&sha256_hex(bytes));
+        proof.push('\n');
+    }
+    Ok(proof.into_bytes())
+}
+
 /// Inputs to suite publication. Publication writes only into `staging`; the
 /// live tree is untouched until the single-writer deploy job uploads it.
 pub(crate) struct PublishInputs<'a> {
@@ -3749,6 +4565,7 @@ pub(crate) struct PublishInputs<'a> {
 /// Publish a suite into the staging tree: deterministic pool, per-arch
 /// indexes, signed metadata, publication record. Every refusal below lands
 /// before signing, and stable wipes only the validated staging directory.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorError> {
     if inputs.bootstrap {
         if inputs.suite != Suite::Preview {
@@ -3778,6 +4595,19 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
     } else if inputs.selection_path.is_some() || inputs.selection.is_some() {
         return Err(GeneratorError::usage(
             "publish: selection and selection path must be supplied together",
+        ));
+    }
+    let snapshot = IncomingSnapshot::capture(inputs.incoming)?;
+    if let (Some(expected), Some(actual)) = (inputs.selection, &snapshot.selection)
+        && expected != actual
+    {
+        return Err(GeneratorError::usage(
+            "publish: captured incoming selection differs from verification",
+        ));
+    }
+    if inputs.selection.is_some() != snapshot.selection.is_some() {
+        return Err(GeneratorError::usage(
+            "publish: captured incoming selection is not the requested mode",
         ));
     }
     for tool in ["apt-ftparchive", "gpg"] {
@@ -3841,8 +4671,8 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
         ));
     };
     let outcome = match inputs.suite {
-        Suite::Stable => publish_stable(inputs, passphrase, homedir_name),
-        Suite::Preview => publish_preview(inputs, passphrase, homedir_name),
+        Suite::Stable => publish_stable(inputs, passphrase, homedir_name, &snapshot),
+        Suite::Preview => publish_preview(inputs, passphrase, homedir_name, &snapshot),
     };
     // The isolated keyring leaves with the run, success or failure.
     teardown_signing_homedir(&homedir, inputs.path_overlay);
@@ -3965,13 +4795,35 @@ fn stage_package(
     Ok((version, arch))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn stage_package_bytes(
+    deb_bytes: &[u8],
+    destination: &Path,
+    contract: &AptContract,
+    backend: DebBackend,
+    path_overlay: Option<&Path>,
+    expected_sha256: Option<&str>,
+) -> Result<(String, String), GeneratorError> {
+    let (scratch, deb) = materialize_verified_bytes(deb_bytes)?;
+    let result = stage_package(
+        &deb,
+        destination,
+        contract,
+        backend,
+        path_overlay,
+        expected_sha256,
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+    result
+}
+
 /// Stage every `*.deb` directly inside `dir` whose name starts with the
 /// package prefix, skipping names the candidate already carries (after a
 /// byte-equality check).
 fn stage_dir_debs(
     dir: &Path,
     pool: &Path,
-    incoming: &Path,
+    snapshot: &IncomingSnapshot,
     contract: &AptContract,
     backend: DebBackend,
     path_overlay: Option<&Path>,
@@ -3984,9 +4836,8 @@ fn stage_dir_debs(
         if read_regular_file(&deb).is_err() {
             continue;
         }
-        let candidate = incoming.join(&name);
-        if std::fs::symlink_metadata(&candidate).is_ok() {
-            if sha256_file(&candidate)? != sha256_file(&deb)? {
+        if let Some(candidate) = snapshot.files.get(&name) {
+            if sha256_hex(candidate) != sha256_file(&deb)? {
                 return Err(GeneratorError::usage(format!(
                     "published package name collides with different candidate bytes: {name}"
                 )));
@@ -4464,6 +5315,7 @@ fn publish_stable(
     inputs: &PublishInputs<'_>,
     passphrase: &str,
     homedir: &str,
+    snapshot: &IncomingSnapshot,
 ) -> Result<(), GeneratorError> {
     let contract = &inputs.contract;
     let tag = parse_stable_tag(&inputs.version)?;
@@ -4489,7 +5341,7 @@ fn publish_stable(
         stage_dir_debs(
             prev_dir,
             &pool,
-            inputs.incoming,
+            snapshot,
             contract,
             inputs.backend,
             inputs.path_overlay,
@@ -4499,14 +5351,13 @@ fn publish_stable(
     // the incoming directory holds exactly this pair.
     for arch in REQUIRED_ARCHES {
         let name = format!("{}-{}-{arch}.deb", contract.package, tag.version);
-        let deb = inputs.incoming.join(&name);
-        if deb.is_file() {
+        if snapshot.files.contains_key(&name) {
             let expected_sha256 = inputs
                 .selection
                 .map(|selection| selection_artifact_digest(selection, &name))
                 .transpose()?;
-            stage_package(
-                &deb,
+            stage_package_bytes(
+                snapshot.bytes(&name)?,
                 &pool.join(&name),
                 contract,
                 inputs.backend,
@@ -4538,7 +5389,10 @@ fn publish_stable(
         homedir,
         inputs.path_overlay,
     )?;
-    let source_record = sidecar_digest(&inputs.incoming.join(RECORD_SIDECAR))?;
+    let source_record = sidecar_digest_bytes(
+        snapshot.bytes(RECORD_SIDECAR)?,
+        &inputs.incoming.join(RECORD_SIDECAR),
+    )?;
     emit_publication_record(
         inputs.staging,
         Suite::Stable,
@@ -4566,6 +5420,7 @@ fn publish_preview(
     inputs: &PublishInputs<'_>,
     passphrase: &str,
     homedir: &str,
+    snapshot: &IncomingSnapshot,
 ) -> Result<(), GeneratorError> {
     let contract = &inputs.contract;
     let parsed = parse_preview_version(&inputs.version)?;
@@ -4583,7 +5438,7 @@ fn publish_preview(
     ensure_preview_stanza(inputs.staging, contract)?;
     stage_keyring(inputs.staging, contract)?;
     if inputs.bootstrap {
-        stage_preview_candidates(inputs, &parsed, &pool)?;
+        stage_preview_candidates(inputs, &parsed, &pool, snapshot)?;
         check_bootstrap_pool(&pool, contract, &parsed.version)?;
         build_bootstrap_indexes(
             inputs.staging,
@@ -4598,12 +5453,12 @@ fn publish_preview(
         stage_dir_debs(
             prev_dir,
             &pool,
-            inputs.incoming,
+            snapshot,
             contract,
             inputs.backend,
             inputs.path_overlay,
         )?;
-        stage_preview_candidates(inputs, &parsed, &pool)?;
+        stage_preview_candidates(inputs, &parsed, &pool, snapshot)?;
         if pool_deb_count(&pool)? != contract.retention.pool_debs() {
             return Err(GeneratorError::usage(
                 "publish: deterministic preview pool must contain exactly four package files",
@@ -4633,7 +5488,7 @@ fn publish_preview(
         homedir,
         inputs.path_overlay,
     )?;
-    let source_manifest = sha256_file(&inputs.incoming.join(PREVIEW_MANIFEST_FILE))?;
+    let source_manifest = sha256_hex(snapshot.bytes(PREVIEW_MANIFEST_FILE)?);
     emit_publication_record(
         inputs.staging,
         Suite::Preview,
@@ -4661,23 +5516,25 @@ fn stage_preview_candidates(
     inputs: &PublishInputs<'_>,
     parsed: &PreviewVersion,
     pool: &Path,
+    snapshot: &IncomingSnapshot,
 ) -> Result<(), GeneratorError> {
     let contract = &inputs.contract;
     for arch in REQUIRED_ARCHES {
         let dotted = dotted_asset_version(&parsed.version);
         let name = format!("{}-preview-{dotted}-{arch}.deb", contract.package);
-        let deb = inputs.incoming.join(&name);
-        require_file(&deb)?;
-        if deb_control_field(&deb, "Version", inputs.backend, inputs.path_overlay)?
-            != parsed.version
-        {
+        let deb = snapshot.bytes(&name)?;
+        let (scratch, deb_path) = materialize_verified_bytes(deb)?;
+        let version_result =
+            deb_control_field(&deb_path, "Version", inputs.backend, inputs.path_overlay);
+        let _ = std::fs::remove_dir_all(&scratch);
+        if version_result? != parsed.version {
             return Err(GeneratorError::usage(format!(
                 "publish: candidate deb Version != preview candidate version {}",
                 parsed.version
             )));
         }
-        stage_package(
-            &deb,
+        stage_package_bytes(
+            deb,
             &pool.join(&name),
             contract,
             inputs.backend,
