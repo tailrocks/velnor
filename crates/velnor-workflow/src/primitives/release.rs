@@ -5794,7 +5794,7 @@ mod tests {
             ),
             (
                 "ci-release-package-signer.yml",
-                "63e76d5e5615192d52e34bba0b8bd51ddcec3b610e934633dd282c585d9721f1",
+                "6b8532b90264f60a464f05462ea426c271e24507c1b732176b3b3bca0912daff",
             ),
         ];
         let root = scanned_root("default");
@@ -5909,7 +5909,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "cdae2349e9e87e4ae2dc10c94ec2686559cd81a4b40670af6842016327ee6d7d",
+                "5c293aecb69f619a916a9ae14b3b80425db2f395dc043aa6c0dbd6866d181271",
             ),
             (
                 "preview.yml",
