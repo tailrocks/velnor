@@ -890,6 +890,10 @@ pub(crate) struct ReleaseSpec {
     /// The publisher this contract renders, as the config declares it. The
     /// renderer implements a fixed set; anything else renders nothing.
     pub(crate) kind: String,
+    /// Explicit release verification lanes. `None` preserves the historical
+    /// provider-universe fanout for configs that have not adopted the typed
+    /// release contract; it is never inferred from event routing.
+    pub(crate) verification_providers: Option<provider::ProviderSet>,
     pub(crate) package: String,
     pub(crate) packages: Vec<String>,
     pub(crate) binary: String,
@@ -2251,6 +2255,7 @@ fn apply_release(
         reason.clone_into(&mut config.release_reason);
     }
     let declared = release.kind().is_some()
+        || release.verification_providers().is_some()
         || !release.packages().is_empty()
         || release.package().is_some()
         || release.binary().is_some()
@@ -2282,6 +2287,12 @@ fn apply_release(
     let mut spec = config.release.clone().unwrap_or_default();
     if let Some(kind) = release.kind() {
         kind.clone_into(&mut spec.kind);
+    }
+    if let Some(providers) = release.verification_providers() {
+        spec.verification_providers = Some(provider::parse_provider_set(
+            providers,
+            "[release] verification_providers",
+        )?);
     }
     if let Some(package) = release.package() {
         package.clone_into(&mut spec.package);
@@ -15068,6 +15079,7 @@ lockfile = true
         );
         config.release = Some(ReleaseSpec {
             kind: "rust-binary".to_owned(),
+            verification_providers: None,
             package: "example".to_owned(),
             binary: "example".to_owned(),
             targets: vec![
