@@ -84,16 +84,36 @@ pub struct LiveSourceJob {
 /// the runner actually checked out.  The collector therefore retains the API
 /// observation and raw refs while leaving `proof` absent until a separately
 /// captured, run/job/attempt-bound attestation is available.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LiveCheckoutObservation {
     pub api_head_sha: String,
     pub api_raw_object_refs: Vec<String>,
     pub(crate) proof: Option<LiveCheckoutProof>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Untrusted observation input.  The proof is deliberately not a DTO field:
+/// serde must reject a supplied proof instead of constructing one.
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct UntrustedCheckoutObservation {
+    api_head_sha: String,
+    api_raw_object_refs: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for LiveCheckoutObservation {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let observation = UntrustedCheckoutObservation::deserialize(deserializer)?;
+        Ok(Self::api_head_only(
+            observation.api_head_sha,
+            observation.api_raw_object_refs,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct LiveCheckoutProof {
     checkout_sha: String,
     source_kind: String,
@@ -101,6 +121,29 @@ pub(crate) struct LiveCheckoutProof {
 }
 
 impl LiveCheckoutProof {
+    /// Only a verified producer may create a checkout proof.  Untrusted
+    /// observation JSON has no deserialization route to this type.
+    fn from_verified_producer(
+        checkout_sha: String,
+        source_kind: String,
+        raw_object_refs: Vec<String>,
+    ) -> Result<Self> {
+        if !is_hex_revision(&checkout_sha, 40) {
+            bail!("verified checkout proof has invalid checkout SHA");
+        }
+        if source_kind.trim().is_empty() {
+            bail!("verified checkout proof has empty source kind");
+        }
+        if raw_object_refs.is_empty() || raw_object_refs.iter().any(|raw| raw.trim().is_empty()) {
+            bail!("verified checkout proof has no valid raw object references");
+        }
+        Ok(Self {
+            checkout_sha,
+            source_kind,
+            raw_object_refs,
+        })
+    }
+
     pub(crate) fn raw_object_refs(&self) -> &[String] {
         &self.raw_object_refs
     }
@@ -3682,6 +3725,28 @@ jobs:
     }
 
     #[test]
+    fn untrusted_checkout_observation_rejects_injected_proof() {
+        let mut input = serde_json::json!({
+            "api_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "api_raw_object_refs": ["api"]
+        });
+        for injected in [
+            serde_json::json!({
+                "checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_kind": "attacker",
+                "raw_object_refs": ["attacker"]
+            }),
+            serde_json::Value::Null,
+        ] {
+            input["proof"] = injected;
+            assert!(
+                serde_json::from_value::<LiveCheckoutObservation>(input.clone()).is_err(),
+                "untrusted proof payload must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn workflow_binding_rejects_conflicting_checkout_proofs() {
         let source_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let execution = |checkout_sha: &str| LiveExecution {
@@ -3694,11 +3759,14 @@ jobs:
             checkout: LiveCheckoutObservation {
                 api_head_sha: source_sha.to_owned(),
                 api_raw_object_refs: vec!["api".to_owned()],
-                proof: Some(LiveCheckoutProof {
-                    checkout_sha: checkout_sha.to_owned(),
-                    source_kind: "runner-attestation".to_owned(),
-                    raw_object_refs: vec!["proof".to_owned()],
-                }),
+                proof: Some(
+                    LiveCheckoutProof::from_verified_producer(
+                        checkout_sha.to_owned(),
+                        "runner-attestation".to_owned(),
+                        vec!["proof".to_owned()],
+                    )
+                    .expect("validated proof fixture"),
+                ),
             },
             status: "completed".to_owned(),
             conclusion: Some("success".to_owned()),
