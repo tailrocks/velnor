@@ -133,7 +133,7 @@ fn occupancy_never_exceeds_n_under_churn() {
                             violations.fetch_add(1, Ordering::SeqCst);
                         }
                         guard.transition_running();
-                        drop(guard);
+                        guard.release();
                     }
                 } else {
                     let holder = native_permit_holder(&format!("churn-{lane}-{round}"));

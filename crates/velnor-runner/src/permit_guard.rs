@@ -213,7 +213,7 @@ impl NativePermitGuard {
             .observe_demand(&holder, PermitLane::Native, scope, observed, observed)
             .map_err(GuardError::Storage)?;
         let pid = std::process::id();
-        for _ in 0..3 {
+        for _ in 0..32 {
             let generation = ledger.generation().map_err(GuardError::Storage)?;
             match ledger
                 .acquire(
@@ -247,16 +247,14 @@ impl NativePermitGuard {
                         AdoptOutcome::Missing | AdoptOutcome::StaleGeneration => continue,
                     }
                 }
-                AcquireOutcome::Full | AcquireOutcome::Deferred | AcquireOutcome::Closed => {
-                    return Ok(None)
-                }
-                AcquireOutcome::StaleGeneration => continue,
+                AcquireOutcome::Full | AcquireOutcome::Closed => return Ok(None),
+                AcquireOutcome::Deferred | AcquireOutcome::StaleGeneration => continue,
                 AcquireOutcome::NotConfigured => {
                     return Err(GuardError::NotConfigured);
                 }
             }
         }
-        Err(GuardError::Contended)
+        Ok(None)
     }
 
     fn owned(ledger_path: &Path, holder: String) -> Self {

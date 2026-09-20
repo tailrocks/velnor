@@ -74,7 +74,7 @@ impl ScaleSetAllocator {
         ledger
             .observe_demand(holder, PermitLane::ScaleSet, "", observed, observed)
             .map_err(AllocatorError::Storage)?;
-        for _ in 0..3 {
+        for _ in 0..32 {
             let generation = ledger.generation().map_err(AllocatorError::Storage)?;
             match ledger
                 .acquire(
@@ -99,14 +99,12 @@ impl ScaleSetAllocator {
                         holder,
                     )));
                 }
-                AcquireOutcome::Full | AcquireOutcome::Deferred | AcquireOutcome::Closed => {
-                    return Ok(None)
-                }
-                AcquireOutcome::StaleGeneration => continue,
+                AcquireOutcome::Full | AcquireOutcome::Closed => return Ok(None),
+                AcquireOutcome::Deferred | AcquireOutcome::StaleGeneration => continue,
                 AcquireOutcome::NotConfigured => return Err(AllocatorError::NotConfigured),
             }
         }
-        Err(AllocatorError::Contended)
+        Ok(None)
     }
 
     /// Free capacity (`N − occupied`) across BOTH lanes — but only after
