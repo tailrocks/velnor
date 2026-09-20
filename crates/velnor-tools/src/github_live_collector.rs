@@ -2880,6 +2880,7 @@ mod tests {
     impl RawObjectStore for FixtureStore {
         fn store(&mut self, object: RawObject) -> Result<RawObjectRef, RawStorageError> {
             let digest = sha256_digest(&object.bytes);
+            let original_digest = sha256_digest(&object.original_bytes);
             let storage_digest = digest
                 .strip_prefix("sha256:")
                 .expect("sha256 digest prefix");
@@ -2890,11 +2891,17 @@ mod tests {
                 canonicalization: object.canonicalization.clone(),
                 sha256: digest.clone(),
                 byte_length: object.bytes.len() as u64,
-                original_sha256: object.original_sha256.clone(),
-                original_byte_length: object.original_byte_length,
+                original_sha256: original_digest.clone(),
+                original_byte_length: object.original_bytes.len() as u64,
                 bytes_base64: BASE64.encode(&object.bytes),
                 media_type: object.media_type.clone(),
                 storage_ref: format!("sha256://{storage_digest}"),
+                original_storage_ref: format!(
+                    "sha256://{}",
+                    original_digest
+                        .strip_prefix("sha256:")
+                        .expect("original sha256 digest prefix")
+                ),
             };
             self.bytes.insert(storage_digest.to_owned(), object.bytes);
             self.refs.push(reference.clone());

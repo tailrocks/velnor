@@ -353,12 +353,13 @@ pub struct RawObject {
     pub object_kind: String,
     pub canonicalization: String,
     pub media_type: String,
+    /// Exact bytes returned by the provider before masking/canonicalization.
+    /// The storage boundary computes their digest and length; callers cannot
+    /// supply either provenance claim separately.
+    pub original_bytes: Vec<u8>,
+    /// Safe bytes retained after credential masking. The store computes the
+    /// safe digest and length from these bytes as well.
     pub bytes: Vec<u8>,
-    /// Digest and length of the exact response bytes before any credential
-    /// masking or JSON canonicalization.  `retain_raw` recomputes these from
-    /// `bytes`; callers cannot assert them as authoritative metadata.
-    pub original_sha256: String,
-    pub original_byte_length: u64,
 }
 
 impl fmt::Debug for RawObject {
@@ -386,7 +387,7 @@ pub struct RawObjectRef {
     pub canonicalization: String,
     pub sha256: String,
     pub byte_length: u64,
-    /// Source-response digest pair.  `sha256`/`byte_length` describe the
+    /// Source-response digest pair. `sha256`/`byte_length` describe the
     /// immutable safe object in `storage_ref`; these fields describe the
     /// exact network response captured before redaction.
     pub original_sha256: String,
@@ -396,6 +397,7 @@ pub struct RawObjectRef {
     pub bytes_base64: String,
     pub media_type: String,
     pub storage_ref: String,
+    pub original_storage_ref: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -911,9 +913,8 @@ where
                 },
                 canonicalization: "raw-bytes-v1".to_owned(),
                 media_type,
+                original_bytes: response.body.clone(),
                 bytes: response.body.clone(),
-                original_sha256: String::new(),
-                original_byte_length: 0,
             },
         )?;
         let raw_id = raw.raw_id.clone();
@@ -1320,9 +1321,8 @@ where
             },
             canonicalization: "raw-bytes-v1".to_owned(),
             media_type,
+            original_bytes: response.body.clone(),
             bytes: response.body,
-            original_sha256: String::new(),
-            original_byte_length: 0,
         },
     )?;
     let raw_id = raw.raw_id.clone();
@@ -1467,9 +1467,8 @@ where
                 },
                 canonicalization: "raw-bytes-v1".to_owned(),
                 media_type,
+                original_bytes: response.body.clone(),
                 bytes: response.body.clone(),
-                original_sha256: String::new(),
-                original_byte_length: 0,
             },
         )?;
         let raw_id = raw.raw_id.clone();
@@ -2232,15 +2231,13 @@ fn retain_raw<S: RawObjectStore>(
     credentials: &CredentialRegistry,
     mut object: RawObject,
 ) -> Result<RawObjectRef, AcquisitionError> {
-    let original_sha256 = sha256_digest(&object.bytes);
-    let original_byte_length = object.bytes.len() as u64;
-    object.original_sha256 = original_sha256.clone();
-    object.original_byte_length = original_byte_length;
     let masked = mask_response_bytes(credentials, &object.bytes)?;
     object.bytes = masked.bytes;
     if masked.changed {
         object.canonicalization = "redacted-raw-bytes-v1".to_owned();
     }
+    let expected_original_sha256 = sha256_digest(&object.original_bytes);
+    let expected_original_length = object.original_bytes.len() as u64;
     let expected_sha256 = sha256_digest(&object.bytes);
     let expected_length = object.bytes.len() as u64;
     let expected_id = object.raw_id.clone();
@@ -2248,8 +2245,6 @@ fn retain_raw<S: RawObjectStore>(
     let expected_kind = object.object_kind.clone();
     let expected_canonicalization = object.canonicalization.clone();
     let expected_media_type = object.media_type.clone();
-    let expected_original_sha256 = object.original_sha256.clone();
-    let expected_original_byte_length = object.original_byte_length;
     let expected_bytes_base64 = BASE64.encode(&object.bytes);
     let reference = store.store(object).map_err(|error| match error {
         RawStorageError::Unavailable => AcquisitionError::StorageUnavailable,
@@ -2263,7 +2258,7 @@ fn retain_raw<S: RawObjectStore>(
         || reference.media_type != expected_media_type
         || reference.byte_length != expected_length
         || reference.original_sha256 != expected_original_sha256
-        || reference.original_byte_length != expected_original_byte_length
+        || reference.original_byte_length != expected_original_length
         || reference.bytes_base64 != expected_bytes_base64
     {
         return Err(AcquisitionError::RawReferenceMismatch);
@@ -2272,6 +2267,11 @@ fn retain_raw<S: RawObjectStore>(
         return Err(AcquisitionError::RawDigestMismatch);
     }
     if reference.storage_ref != content_addressed_storage_ref(&expected_sha256) {
+        return Err(AcquisitionError::StorageUnbound);
+    }
+    if reference.original_storage_ref != content_addressed_storage_ref(&reference.original_sha256)
+        || !reference.original_sha256.starts_with("sha256:")
+    {
         return Err(AcquisitionError::StorageUnbound);
     }
     store.verify(&reference).map_err(|error| match error {
@@ -2734,6 +2734,7 @@ mod tests {
     impl RawObjectStore for MemoryStore {
         fn store(&mut self, object: RawObject) -> Result<RawObjectRef, RawStorageError> {
             let bytes = object.bytes.clone();
+            let original_digest = sha256_digest(&object.original_bytes);
             let reference = RawObjectRef {
                 raw_id: object.raw_id,
                 request_id: object.request_id,
@@ -2741,11 +2742,12 @@ mod tests {
                 canonicalization: object.canonicalization,
                 sha256: sha256_digest(&bytes),
                 byte_length: bytes.len() as u64,
-                original_sha256: object.original_sha256,
-                original_byte_length: object.original_byte_length,
+                original_sha256: original_digest.clone(),
+                original_byte_length: object.original_bytes.len() as u64,
                 bytes_base64: BASE64.encode(&bytes),
                 media_type: object.media_type,
                 storage_ref: content_addressed_storage_ref(&sha256_digest(&bytes)),
+                original_storage_ref: content_addressed_storage_ref(&original_digest),
             };
             self.bytes.push(bytes);
             self.refs.push(reference.clone());
@@ -2765,6 +2767,7 @@ mod tests {
 
     impl RawObjectStore for TamperStore {
         fn store(&mut self, object: RawObject) -> Result<RawObjectRef, RawStorageError> {
+            let original_digest = sha256_digest(&object.original_bytes);
             Ok(RawObjectRef {
                 raw_id: object.raw_id,
                 request_id: object.request_id,
@@ -2772,11 +2775,12 @@ mod tests {
                 canonicalization: object.canonicalization,
                 sha256: "sha256:tampered".to_owned(),
                 byte_length: object.bytes.len() as u64,
-                original_sha256: object.original_sha256,
-                original_byte_length: object.original_byte_length,
+                original_sha256: original_digest.clone(),
+                original_byte_length: object.original_bytes.len() as u64,
                 bytes_base64: BASE64.encode(&object.bytes),
                 media_type: object.media_type,
                 storage_ref: "sha256://tampered".to_owned(),
+                original_storage_ref: content_addressed_storage_ref(&original_digest),
             })
         }
 
@@ -2790,6 +2794,7 @@ mod tests {
     impl RawObjectStore for UnboundStore {
         fn store(&mut self, object: RawObject) -> Result<RawObjectRef, RawStorageError> {
             let digest = sha256_digest(&object.bytes);
+            let original_digest = sha256_digest(&object.original_bytes);
             Ok(RawObjectRef {
                 raw_id: object.raw_id,
                 request_id: object.request_id,
@@ -2797,11 +2802,12 @@ mod tests {
                 canonicalization: object.canonicalization,
                 sha256: digest,
                 byte_length: object.bytes.len() as u64,
-                original_sha256: object.original_sha256,
-                original_byte_length: object.original_byte_length,
+                original_sha256: original_digest.clone(),
+                original_byte_length: object.original_bytes.len() as u64,
                 bytes_base64: BASE64.encode(&object.bytes),
                 media_type: object.media_type,
                 storage_ref: "store://unbound/caller-asserted".to_owned(),
+                original_storage_ref: content_addressed_storage_ref(&original_digest),
             })
         }
 

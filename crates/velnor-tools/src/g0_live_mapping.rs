@@ -72,6 +72,7 @@ pub struct G0RawObjectSupplement {
     pub raw_id: String,
     pub original_sha256: String,
     pub original_byte_length: u64,
+    pub original_storage_ref: String,
     pub safe_sha256: String,
     pub safe_byte_length: u64,
     pub safe_bytes_base64: String,
@@ -398,6 +399,7 @@ fn map_raw_object(raw: &RawObjectRef) -> Result<G0RawObjectRef> {
     if !is_sha256_digest(&raw.sha256)
         || !is_sha256_digest(&raw.original_sha256)
         || raw.storage_ref != canonical_storage_ref(&raw.sha256)
+        || raw.original_storage_ref != canonical_storage_ref(&raw.original_sha256)
     {
         bail!(
             "raw object {} has a non-canonical storage binding",
@@ -511,6 +513,7 @@ fn map_supplement(live: &LiveCollection, canonical: &[u8]) -> G0MappingSupplemen
             raw_id: raw.raw_id.clone(),
             original_sha256: raw.original_sha256.clone(),
             original_byte_length: raw.original_byte_length,
+            original_storage_ref: raw.original_storage_ref.clone(),
             safe_sha256: raw.sha256.clone(),
             safe_byte_length: raw.byte_length,
             safe_bytes_base64: raw.bytes_base64.clone(),
