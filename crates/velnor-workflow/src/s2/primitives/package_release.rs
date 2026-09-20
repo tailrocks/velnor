@@ -1272,56 +1272,6 @@ assert_rolling_ownership() {
   cmp -s "$owner_assets" "$current_assets"
 }
 
-discard_current_typed_rolling_draft() {
-  if ! assert_rolling_ownership true "$old_tag_sha" "$old_name" "$old_body" "$old_source_commit"; then
-    echo "::error::typed rolling draft ownership changed; refusing cleanup" >&2
-    return 1
-  fi
-  echo "::warning::discarding incomplete current-contract rolling draft and retrying publication" >&2
-  if ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" >/dev/null; then
-    return 1
-  fi
-  if ! assert_release_absent; then
-    echo "::error::typed rolling draft release deletion could not be verified; refusing tag cleanup" >&2
-    return 1
-  fi
-  local current_tag_sha
-  if ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
-    echo "::error::typed rolling draft tag lookup failed; refusing tag cleanup" >&2
-    return 1
-  fi
-  if [ -n "$current_tag_sha" ]; then
-    if [ "$current_tag_sha" != "$old_tag_sha" ] || [ "$current_tag_sha" != "$old_source_commit" ]; then
-      echo "::error::typed rolling draft tag ownership changed; refusing cleanup" >&2
-      return 1
-    fi
-    if ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null; then
-      echo "::error::typed rolling draft tag deletion failed; preserving cleanup state" >&2
-      return 1
-    fi
-    if ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
-      echo "::error::typed rolling draft tag deletion could not be verified" >&2
-      return 1
-    fi
-    if [ -n "$current_tag_sha" ]; then
-      echo "::error::typed rolling draft tag still exists after DELETE" >&2
-      return 1
-    fi
-  fi
-  had_release=0
-  rolling_release_id=""
-  old_tag_sha=""
-  old_name=""
-  old_body=""
-  old_draft=""
-  old_prerelease=""
-  old_source_commit=""
-  old_version=""
-  : > "$old_assets"
-  : > "$owner_assets"
-  rm -rf -- "$rollback_dir"
-}
-
 verify_restored_assets() {
   local source_dir="$1"
   local expected_names="$2"
@@ -1673,18 +1623,14 @@ case "$rolling_http" in
       echo "::error::existing rolling release failed immutable validation; refusing mutation" >&2
       exit 1
     fi
-    if [ "$old_draft" = true ]; then
-      if ! discard_current_typed_rolling_draft; then
-        echo "::error::existing rolling draft ownership changed; refusing mutation" >&2
-        exit 1
-      fi
-    else
-      owner_draft="$old_draft"
-      owner_tag_sha="$old_tag_sha"
-      owner_name="$old_name"
-      owner_body="$old_body"
-      owner_source_commit="$old_source_commit"
-    fi
+    # A validated current-contract draft is already a recoverable transaction:
+    # keep its release, tag, metadata, and asset ledger so rollback can restore
+    # the exact bytes. GitHub cannot undelete a release or tag.
+    owner_draft="$old_draft"
+    owner_tag_sha="$old_tag_sha"
+    owner_name="$old_name"
+    owner_body="$old_body"
+    owner_source_commit="$old_source_commit"
     if [ "$had_release" = 1 ]; then
       old_version_order="${old_version%%+*}"
       candidate_version_order="${candidate_version%%+*}"
@@ -2502,8 +2448,8 @@ concurrency_group = "package-release-preview"
     fn rendered_workflow_refuses_invalid_rolling_release_before_mutation() {
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");
-        assert!(workflow.contains("discard_current_typed_rolling_draft"));
-        assert!(workflow.contains("typed rolling draft ownership changed; refusing cleanup"));
+        assert!(!workflow.contains("discard_current_typed_rolling_draft"));
+        assert!(!workflow.contains("typed rolling draft ownership changed; refusing cleanup"));
         assert!(workflow.contains(
             "existing public rolling release failed immutable validation; refusing mutation"
         ));
@@ -3154,145 +3100,26 @@ test "$validation_failed" -eq 1
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    #[allow(clippy::too_many_lines)]
-    fn typed_draft_cleanup_refuses_release_state_and_tag_drift() {
-        use std::process::Command;
-
+    fn typed_draft_reuses_validated_owner_without_destructive_cleanup() {
         let verification = PublishVerification {
             script: "",
             attestation_flags: "",
         };
         let rolling_script = render_rolling_refresh_script("", "", "", &verification);
-        let helper_start = rolling_script
-            .find("read_rolling_asset_set() {")
-            .expect("asset ownership helper");
-        let helper_end = rolling_script
-            .find("\nverify_restored_assets() {")
-            .expect("verification helper");
-        let helpers = &rolling_script[helper_start..helper_end];
-        let source_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let root = std::env::temp_dir().join(format!(
-            "velnor-package-draft-race-{}",
-            crate::unique_suffix()
+        assert!(!rolling_script.contains("discard_current_typed_rolling_draft"));
+        assert!(!rolling_script.contains("discarding incomplete current-contract rolling draft"));
+        assert!(rolling_script.contains("GitHub cannot undelete a release or tag"));
+        assert!(rolling_script.contains(
+            "owner_draft=\"$old_draft\"\n    owner_tag_sha=\"$old_tag_sha\"\n    owner_name=\"$old_name\""
         ));
-        std::fs::create_dir_all(&root).expect("create shell fixture");
-
-        for mode in ["state", "tag", "release-present", "tag-delete"] {
-            let mut script = String::from("set -Eeuo pipefail\n");
-            script.push_str(helpers);
-            write!(
-                &mut script,
-                r#"
-GITHUB_REPOSITORY=example/project
-RELEASE_PRERELEASE=true
-rolling_tag=preview
-rolling_release_id=123
-old_tag_sha={source_commit}
-old_source_commit={source_commit}
-old_name='Preview 1.0.0-preview.1+aaaaaaa'
-old_body='old-body'
-old_draft=true
-old_prerelease=true
-rollback_dir="$TEST_TMPDIR/rollback"
-old_assets="$TEST_TMPDIR/old-assets"
-transaction_dir="$TEST_TMPDIR/transaction"
-owner_assets="$transaction_dir/owner-assets"
-had_release=1
-: > "$old_assets"
-mkdir -p "$transaction_dir"
-printf '%s\t%s\t%s\n' 7 package.tar.gz sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > "$owner_assets"
-remote_tag_reads_file="$TEST_TMPDIR/tag-reads"
-remote_tag_sha() {{
-  remote_tag_reads=0
-  if [ -f "$remote_tag_reads_file" ]; then
-    remote_tag_reads="$(cat "$remote_tag_reads_file")"
-  fi
-  remote_tag_reads=$((remote_tag_reads + 1))
-  printf '%s\n' "$remote_tag_reads" > "$remote_tag_reads_file"
-  if [ "$TEST_MODE" = tag ] && [ "$remote_tag_reads" -gt 1 ]; then
-    printf '%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-  elif [ "$TEST_MODE" = tag-delete ] || [ "$TEST_MODE" = release-present ]; then
-    printf '%s\n' {source_commit}
-  else
-    printf '%s\n' {source_commit}
-  fi
-}}
-gh() {{
-  if [[ "$*" == *"releases/123/assets"* ]]; then
-    printf '%s\t%s\t%s\n' 7 package.tar.gz sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-    return 0
-  fi
-  if [[ "$*" == *"releases/123"* ]] && [[ "$*" == *"--method DELETE"* ]]; then
-    : > "$TEST_TMPDIR/release-delete"
-    return 0
-  fi
-  if [[ "$*" == *"releases/123"* ]] && [ -f "$TEST_TMPDIR/release-delete" ]; then
-    if [ "$TEST_MODE" = release-present ]; then
-      printf '%s\n' '{{"id":123}}'
-      return 0
-    fi
-    printf '%s\n' 'HTTP/2 404 Not Found'
-    return 1
-  fi
-  if [[ "$*" == *"releases/123"* ]] && [[ "$*" != *"--method"* ]]; then
-    if [ "$TEST_MODE" = state ]; then
-      printf '%s\n' '{{"id":123,"draft":true,"prerelease":true,"tag_name":"preview","name":"Foreign","body":"old-body"}}'
-    else
-      printf '%s\n' '{{"id":123,"draft":true,"prerelease":true,"tag_name":"preview","name":"Preview 1.0.0-preview.1+aaaaaaa","body":"old-body"}}'
-    fi
-    return 0
-  fi
-  if [[ "$*" == *"git/refs/tags/preview"* ]]; then
-    : > "$TEST_TMPDIR/tag-delete"
-    if [ "$TEST_MODE" = tag-delete ]; then
-      return 1
-    fi
-  else
-    return 1
-  fi
-}}
-TEST_MODE={mode}
-if discard_current_typed_rolling_draft; then
-  exit 1
-fi
-if [ "$TEST_MODE" = tag-delete ]; then
-  test -e "$TEST_TMPDIR/tag-delete"
-else
-  test ! -e "$TEST_TMPDIR/tag-delete"
-fi
-    if [ "$TEST_MODE" = state ]; then
-      test ! -e "$TEST_TMPDIR/release-delete"
-    elif [ "$TEST_MODE" = tag ] || [ "$TEST_MODE" = release-present ] || [ "$TEST_MODE" = tag-delete ]; then
-      test -e "$TEST_TMPDIR/release-delete"
-    fi
-    if [ "$TEST_MODE" = tag ]; then
-      test "$(cat "$remote_tag_reads_file")" -eq 2
-    fi
-    if [ "$TEST_MODE" = release-present ] || [ "$TEST_MODE" = tag-delete ]; then
-      test "$had_release" -eq 1
-      test "$rolling_release_id" = 123
-    fi
-"#
-            )
-            .expect("render draft ownership regression shell");
-            let output = Command::new("bash")
-                .arg("-c")
-                .arg(script)
-                .env("TEST_TMPDIR", &root)
-                .output()
-                .expect("run draft ownership regression");
-            assert!(
-                output.status.success(),
-                "draft drift mode {mode} was not fail-closed:\n{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let _ = std::fs::remove_file(root.join("release-delete"));
-            let _ = std::fs::remove_file(root.join("tag-delete"));
-        }
-        let _ = std::fs::remove_dir_all(root);
+        let draft_reuse = rolling_script
+            .find("owner_draft=\"$old_draft\"")
+            .expect("validated draft owner initialization");
+        let existing_mutation = rolling_script
+            .find("\nelse\n  mutated=1\n")
+            .expect("existing release mutation boundary");
+        assert!(draft_reuse < existing_mutation);
     }
 
     #[cfg(unix)]

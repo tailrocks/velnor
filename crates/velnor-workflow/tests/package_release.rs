@@ -135,7 +135,8 @@ fn package_release_hook_renders_and_passes_policy() {
     assert!(workflow.contains(
         "existing public rolling release failed immutable validation; refusing mutation"
     ));
-    assert!(workflow.contains("discard_current_typed_rolling_draft"));
+    assert!(!workflow.contains("discard_current_typed_rolling_draft"));
+    assert!(workflow.contains("GitHub cannot undelete a release or tag"));
     assert!(workflow.contains("rolling preview ownership changed; refusing rollback mutation"));
     assert!(!workflow.contains("discard_stale_rolling_draft"));
 
