@@ -2133,6 +2133,8 @@ fn render_native_product_preview_publish_job(
             release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases" -f tag_name="$tag" -f target_commitish="$COMMIT" -f name="Preview $PRODUCT_VERSION" -F draft=true -F prerelease=true)"
           fi
           jq -e --arg tag "$tag" --arg commit "$COMMIT" --arg name "Preview $PRODUCT_VERSION" '.tag_name == $tag and .target_commitish == $commit and .name == $name and .prerelease == true' <<<"$release_json" >/dev/null || { echo '::error::provider preview release identity is not exact' >&2; exit 1; }
+          tag_ref="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag")"
+          jq -e --arg commit "$COMMIT" '.object.sha == $commit' <<<"$tag_ref" >/dev/null || { echo '::error::preview release tag does not resolve to the source commit' >&2; exit 1; }
           release_id="$(jq -er '.id | numbers | tostring' <<<"$release_json")"
           [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || { echo '::error::provider release id is not a positive decimal number' >&2; exit 1; }
           upload_url="$(jq -er '.upload_url | strings' <<<"$release_json" | sed 's/{?name,label}//')"
@@ -2240,7 +2242,7 @@ fn render_native_product_preview_publish_job(
         run: |
           set -euo pipefail
           for subject in product-assets/*; do
-            gh attestation verify "$subject" --owner "$GITHUB_REPOSITORY_OWNER" --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/__NATIVE_WORKFLOW__" --source-ref "$PRODUCT_SOURCE_REF" --source-digest "$COMMIT"
+            gh attestation verify "$subject" --owner "$GITHUB_REPOSITORY_OWNER" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/__NATIVE_WORKFLOW__" --source-ref "$PRODUCT_SOURCE_REF" --source-digest "$COMMIT"
           done
       - name: Reconcile immutable preview release assets
         env:
