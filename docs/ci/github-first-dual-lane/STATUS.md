@@ -83,6 +83,26 @@ or any later gate.
 | Post-census packaging review `294de951` | Independent packaging review passed at cutoff `2026-09-20T01:28:49Z`: exact remote/ancestry, 66 checksums, 63 inventory entries, and no source paths | Packaging-only pass; later review observed `distribution/schema2-handoff-0712.md` changed at `01:34:02Z` and `skills-adapter/integration-map.md` at `01:31:01Z`; those observations are separate from the `01:28:35Z` census, with no attestation/current-equality/gate approval |
 | Scan / checker | Scan `820f6509` is rejected despite 1,760 tests/clippy/fmt/diff; checker `ca18d011` closes the reusable child-matrix blocker with 258 tests/build/fmt/clippy | Scan residuals and live collector/API wiring remain; no G1/G0 proof |
 
+## Latest paginated live census and dependency ledger — 2026-09-20T02:54:52Z
+
+External `G0/fleet/push-checkpoint-current.json` (SHA-256
+`5326b47a65d35196816a62783dba60cf0afc58f6d258aae5a90688ca7fd865a0`) records
+a fresh paginated read-only census. It binds exact main/PR/run/check pages and
+does not use a newest-green shortcut. It is timestamped evidence only; no gate
+passed.
+
+| Item | Exact observation | Boundary/status |
+| --- | --- | --- |
+| Main / PR identities | Main `89f82dd8b287f46a3cf4c0920f341f6ca6c736db`, parent `325719f1e05d3d46322c9fd3eeb9ad545e175638`; PR957 `92387e88c32f933a9061b819256e535662655cb2`/base `b5a4b4af`; PR960 `c8f7a2b353f9d2d6a60d3ad8bb2dc6299a108ceb`/base `1048337062`; PR962 `ea9686f0eb522e402441ecd461bd1f458b731d06`/same; PR963 `f46fe7c2c3ca7635c44eab21cc6bf616709c7a50`/base `325719f1` | Snapshot identity only. PR963 open, mergeable `true`, state `blocked`; no review/merge/gate approval transfer |
+| Main execution | Runtime `35484968618` success with 5/5 child jobs; macOS job `106009574341` used forbidden `macos-26`. Preview `35484968732` failed identity job `106009550596`, remaining children skipped. CI `35484968706` remained in progress with Policy in progress | Negative/incomplete; no G1/G0 result |
+| Records docs | `06edf31faa2c855a7eff4d7821903f296b8adef1` | Focused docs checkpoint accepted; docs-only, no implementation/gate approval |
+| Scan review | `29d6a9caf64d625799efa1ad52c3bba0e4f52db2`; `G1/scan-integrity/source-review-29d6a9.md`, SHA-256 `0bb1e2ba64dc8c452f76161fbba6ea4a0d4376caefbc0fe63395f97a1fbdd732` | Conditional source-level pass for injected journal regression; no G1 approval; D19/generated/authority/recovery gaps remain |
+| Bootstrap review | Frozen `7d409afdd61a87080be4439d29563313169537`; report SHA-256 `180fb0e150f2bffabe162fbc115a5ca1b425ccdc316e47da96e9349bc62eaa0c`; owner later moved to `07c35f83d1a7353331c910d1d3b728aba1dc7add` | Changes required on frozen review; `07c35f83` is unreviewed and receives no disposition transfer |
+| Homebrew / native | Consumer `6520aad7bd66d53349e040508146956e9c4f0c1e`, producer/native `2f7d5fbae420d00d8105d4e8cbe0fed78d761b98`; report hashes `dfd870b2188fd64ca1c39386c478f645cf101f1f0d6321e01c2763d8e009a547` / `cb27b9b38eed2c94f7091e606b5271e43f132f98dc17022ad132f3845afe7a20` | Both rejected/changes required: sidecar and canonical schema/parent/preview/generated wiring blockers; no G2 approval/publication |
+| Checker / collector / store | Checker `2d436be96b24a6a02cc047604c7899eaea4a16f9`, report SHA-256 `089b0d9155dd4c3e244684ef6576b55ba6022b84e8c773014729c044aed2b241`; collector `0882aac85b62d3962049a8dc5094f25ca5187c20`, report SHA-256 `91cc5333b392c8838f51d94b7b49dd84a6f933c22c147cd3bcc4083fa8736e1a`; store `0d7713cd15cefb554fda5954e2d3320968aa31e7`, report SHA-256 `bc6114c279882c5e7675e0116781618e4807d873639c3a22b4ccc6af69f01282` | Checker parser migration bounded-pass only; collector rejected for authoritative live G0; store rejected for bounded retention; producer/live wiring absent |
+| Authority | v7 Markdown SHA-256 `7339996f7c3d76fe4e750cb9036b474beb7e0d20ae7b2b7e7a9f0787cd81b72e`, JSON SHA-256 `1a1cc175b36611f6ce175f4c82b6f6ce51f36f74bfb22a5d8e1abb9cc5647826` | Frozen proposal, approval required, no mutation, no authority approval |
+| Freeze choice | Feasibility observed `2026-09-20T02:36:32Z`; report hashes `9735c1b2184f32f3b6b1cd1fefe98045dbb23403f937cd65692d2bcf54b06725` / `29fa711c78ffd8c323acaf6e19653e4adbad87d1658b4d27c9116d669bab36b9` | No provider-only admin freeze. User must explicitly choose/authorize a freeze path; none selected or executed |
+
 ## User native-version amendment
 
 The amended policy is explicit: every Velnor workload on a GitHub-hosted macOS
@@ -226,24 +246,24 @@ package delivery, fleet migration, Mac operation, or any gate exit.
 | PR952 source/integration chronology | Exact PR head `a5c1c0bd5c92c4c52d58ccb21042b1b2c0b08637` had 1858 tests before regeneration; integrated source `12cc87b629802c294da9840325cb21087c020df` has 1736 tests, fmt, and clippy pass; generated snapshot failure remains until regeneration | Separate observations; not a gate pass |
 | PR954 current head | `f16592ea165ced141bf0bb1c43466a95d7df8b2e` | Observed; current run still pending/partial |
 | PR953 cache result | Run `35453601367` failed cache contract | Observed; cache diagnosis reopened |
-| G0-runtime | Read-only report persisted at external `G0/runtime/report.md`; actual Mac not operated before G3 | Completed investigation; G4/G5 pending |
+| G0-runtime | Collector `0882aac85b62d3962049a8dc5094f25ca5187c20` and raw-store `0d7713cd15cefb554fda5954e2d3320968aa31e7` independently reviewed | Collector is rejected for authoritative live G0; store is rejected for bounded retention and is not production-wired; actual Mac remains deferred until G3 |
 | Native macOS version policy | GitHub-hosted Velnor macOS workloads must use the newest actual major/architecture; current verified macOS 27 arm64 label is exact `xcode-27`; macOS 27 Intel has no supported label and cannot fall back to `macos-26`/`macos-26-intel`/older/alias/skip | Amendment recorded; official-label research/PR and exact runner/image/SDK evidence pending; immutable action/image pins remain required |
 | Runner protocol source | `actions/runner` revision `80bb1fb827fa44d489263061e71ef4adba7ad8cd` pinned for later work | Observed; no implementation here |
 | G2 native package compile | Three required ARM64 macOS binaries compile/smoke at `abe9ad82`; nothing installed or published | Preliminary only; G2 remains pending |
-| G2 product identity | Application/native asset/component identity contract is missing | Blocker for package acceptance; owned by G2-native-product |
-| G1 scan integrity | Rejected `6409a086`/`7e9a2b5f`; corrected `3c46b9e83c9a0ca57be88743e49ecae27f731685` rejected for forged-sidecar deletion and `./.github` self-source bypass; current `0a15fd06e002f57dca546d5c041754f1ec433508` reports 1,756 tests but fails exact D19 closure and retains authority/detector/rollback/fixture gaps | External `G1/scan-integrity/{REPORT.md,corrected-independent-review.md,source-review-0a15fd06.md}`; no G1 approval |
+| G2 product identity | Typed native-product contract exists at `2f7d5fbae420d00d8105d4e8cbe0fed78d761b98`, but independent review rejects its sidecar, canonical schema, APT parent binding, preview, idempotency, duplicate-component, and generated-wiring behavior | G2-native-product remains blocked; no package acceptance |
+| G1 scan integrity | `29d6a9caf64d625799efa1ad52c3bba0e4f52db2` conditionally passes injected journal regression only; `820f6509` and earlier candidates remain rejected | External `G1/scan-integrity/source-review-29d6a9.md` and exact prior reports; D19/generated-state, real filesystem-fault mapping, authority, and recovery-entrypoint gaps remain; no G1 approval |
 | Early category audits | Skills, action/roles, Rust consumers, distribution consumers, and independent distribution review reports | Read-only evidence written; scanner/publication/native proof gaps remain |
 | G1 runtime-product audit | Old pin/release, current-main distinction, and candidate closure/promotion sequence | External evidence written; no candidate publication or pin adoption |
 | G0 workload matrix | 32 unique rows aligned to current main revisions; observed duties, native/unsupported/trust obligations, and missing execution retained | External `G0/workload-matrix.json`; inventory projection only |
 | G0 dependency/access artifact | `G0/fleet/dependencies-and-access.json` observed `2026-09-19T19:21:38Z`; 32/32 scope, 22 workflow-bearing rows, 15 source-bound edges; source coverage 26 exact local, 1 wrong-pin Velnor, 4 report-only, 1 inventory-only | SHA-256 `f58da9d4ea2bc32ba8867cbb4897997bc48c6e4228a14ed4ec0710c056f67f60`; graph coverage partial/explicitly gapped; not full validation |
-| G0 checker review | Initial b3b6 unit hygiene passed, but semantic and G2 hostile reviews rejected false-green paths | v2 architecture required; no checker completion or gate proof |
+| G0 checker review | `2d436be96b24a6a02cc047604c7899eaea4a16f9` boundedly removes local CAS/evidence-root and preserves parser/live fail-closed behavior | Producer adapter/live `verify_g0` remains unwired; no checker completion or gate proof |
 | G0 acceptance matrix | Exact 32/no-extras scope, live default/PR/workflow/run/provider/workload/dependency/source/digest/child evidence, and fail-closed stale/missing/manual-only rules | Canonical [`SPEC.md` matrix](./SPEC.md#exact-g0-acceptance-matrix), external `session.json`, checker and independent-review reports; unknown/incomplete |
 | G0 dependency graph schema | Typed workload→child, required-check, release, and package edges with relation/stage/applicability/provenance/status; G0 inventories, G2+ proves applicable execution | SPEC neutral example and external checker handoff; checker schema migration unimplemented/unknown |
 | G0 manifest identity | Static `fleet.json` `default_branch`/SHA is a seed claim only; each row must reconcile to independent live/default snapshot and UTC | Mismatch, missing snapshot, or stale SHA fails closed; no current reconciliation claim added here |
 | G0 input conversion boundary | `fleet.json` is flat nullable scope inventory only; checker expects enriched `config/.../manifest.json`, independent `evidence/current-snapshot.json`, and bound `evidence/records.json` | Paths/schema/producer and exact invocation remain pending in `/root/g0_checker`; count validation and `pending` statuses are not G0 success |
 | G0 baseline-versus-current | Independent findings baseline is `abe9ad82`; integration `12cc87b6` and later candidate SHAs remain separate | External `session.json`; no baseline result promoted to current or gate evidence |
 | G0 helper boundary | `audit_ci` is auxiliary; `lane_compare` pair/census/step/artifact-log behavior is diagnostic and has recorded false-green paths | External checker review and lane assignment; complete paginated artifact/log proof pending |
-| G0 review checkpoint | Scan `3c46b9e`, checker `017c92e`, preview `5f2b0d3`, and APT `8c19fab` reviews remain rejected/blocked; Homebrew `c772971` is conditional source-contract only | External exact reports; no approval, publication, or gate claim |
+| G0/G2 review checkpoint | Scan `29d6a9` is conditional source-only; checker `2d436be` parser-only; collector `0882aac` and store `0d7713` rejected; Homebrew `6520aad` and native product `2f7d5f` rejected | External exact reports; no approval, publication, or gate claim |
 | Baseline test chronology | Clean `abe9ad82` `velnor-tools` test reported 207 passed in 11.42s; later 206-pass/one-failure output was contaminated by concurrent parent edits | External `session.json`; preserve both observations, do not call the full baseline green or assume flakiness |
 
 ## Model and runtime evidence
@@ -264,23 +284,23 @@ unknown.
 | Task | State | Next action |
 | --- | --- | --- |
 | G0-inventory | Inventory checkpoint complete; follow-up checks pending | Refresh all 32 repos, branches, SHAs, PRs, checks, workflows, access |
-| G0-bootstrap | Owner checkpoint `b981f43e8dfd70b4c628d29b0e7e9dce679ce537`; generated workflows/state regenerated; 1,727/1,727 library plus actionlint/fmt reported | Exact independent review `G1/reviews/bootstrap-b981f43e-independent.md` rejects the G1 source checkpoint; archive/API-tree, freshness, provenance, legacy, fixture, and image-digest gaps remain |
+| G0-bootstrap | Owner checkpoint `b981f43e8dfd70b4c628d29b0e7e9dce679ce537` rejected; frozen follow-up `7d409afdd61a87080be4439d29563313169537` changes-required; owner-advanced `07c35f83d1a7353331c910d1d3b728aba1dc7add` unreviewed | Schema-1/legacy transport, uploader census, clippy, hosted-proof, archive/API-tree, freshness, provenance, fixture, and image-digest gaps remain; no G1 approval transfers |
 | G0-distribution | Assigned; result pending | Revalidate product/runtime discovery and both channels |
 | G0-fleet | 32-row inventory complete; workload matrix/review pending | Build workload/platform/category matrix |
-| G0-runtime | Read-only report complete; actual Mac deferred until G3 | Reuse report for G4/G5 design |
+| G0-runtime | Collector `0882aac85b62d3962049a8dc5094f25ca5187c20` rejected for authoritative live G0; raw-store `0d7713cd15cefb554fda5954e2d3320968aa31e7` rejected for bounded retention/production wiring | Keep actual Mac deferred until G3; no authenticated collector or authoritative raw capture |
 | G0-records | Docs commit complete; external registry amended | Preserve unknowns; await independent review |
-| G0-checker | Bounded exact source `ca18d01166681269b6eb5fce8d0f6175fc17aad4` closes the reusable child-matrix blocker; source checks report 258 tests/build/fmt/clippy/diff pass | Wire authenticated collector/current API and bind exact artifact/run tuples; offline fixtures cannot close G0 |
+| G0-checker | Bounded `ca18d01166681269b6eb5fce8d0f6175fc17aad4` closes the reusable child-matrix blocker; `2d436be96b24a6a02cc047604c7899eaea4a16f9` removes local CAS/evidence-root and remains parser-only | Wire producer adapter/live `verify_g0`, authenticated collector/current API, and exact artifact/run bindings; offline fixtures cannot close G0 |
 | G0-reviewer | Independent review rejected initial checker/docs state | Review exact v2 commit and refreshed external evidence |
 | G1-cache-semantics | Jobs/provider adversarial review rejected initial checker paths | Retain external findings; review v2 candidate without rewriting old evidence |
 | G1-hosted-config | In progress; candidate remains unverified | Thread `01a0ba77-5222-7e63-97fa-553849b96d7b`; recheck clean exact commit/output |
-| G1-review952 | Scan candidates `6409a086`, `7e9a2b5f`, corrected `3c46b9e`, `0a15fd06`, and current `820f6509` rejected/blocked by exact external reviews | Thread `01a0ba77-dd88-7ac2-9fb7-118f3c09d1af`; do not combine historical test counts or transfer review across heads |
+| G1-review952 | `29d6a9caf64d625799efa1ad52c3bba0e4f52db2` is a conditional source-level pass only; `820f6509` and prior scan candidates remain rejected/blocked | Thread `01a0ba77-dd88-7ac2-9fb7-118f3c09d1af`; do not combine historical test counts or transfer review across heads |
 | G1-run-operations | In progress; stale-runs evidence updated | Thread `01a0ba7a-9d5d-7291-a2f5-357ff78dba5e`; trace child outcomes |
 | G1-runtime-product-audit | Evidence written; next publish verification pending | Same operations thread; old pin verified, candidate remains unpublished |
 | G1-seed-pin | Source review written; pin adoption pending | Thread `01a0ba72-3925-7141-b1f7-5529a5cf6c98`; clean regeneration remains required |
-| G1-scan-integrity | Rejected exact candidates `6409a086`, `7e9a2b5f`, `3c46b9e`, `0a15fd06`, and `820f6509`; 820 reports 1,760 tests/clippy/fmt/diff but residual detector TOCTOU, SI-B3, journal/recovery, generated-state/D19, and authority gaps | Owner reactivated fixes; do not treat the test count as G1 evidence or transfer review across heads |
+| G1-scan-integrity | `29d6a9caf64d625799efa1ad52c3bba0e4f52db2` conditionally passes injected journal regression only; `820f6509` and prior exact candidates remain rejected | D19/generated-state, real filesystem-fault mapping, authority, and recovery-entrypoint gaps remain; no G1 approval |
 | G2-native-packages | Compile/smoke observed; now owns product/manifest contract | Thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`; no install/publication claim |
-| G2-homebrew-contract | Assigned; producer contract coordination pending | Thread `01a0ba80-8408-7380-8ac2-b743eb4494a5`; coordinate with native packages |
-| G2-native-product | Source implementation assigned to native-packages worker | `/root/g2_native_packages`, thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`, worktree `dual-lane-native-product`; define application/runtime component identity and authoritative package manifest |
+| G2-homebrew-contract | Consumer `6520aad7bd66d53349e040508146956e9c4f0c1e` rejects producer/consumer handoff against `2f7d5fbae420d00d8105d4e8cbe0fed78d761b98` | Thread `01a0ba80-8408-7380-8ac2-b743eb4494a5`; fix shared checksum/schema contract before provider/client proof; no G2 approval |
+| G2-native-product | Exact `2f7d5fbae420d00d8105d4e8cbe0fed78d761b98` rejected by independent rereview | `/root/g2_native_packages`; fix sidecar, canonical schema, APT parent binding, preview assets, idempotency, duplicate components, and generated wiring |
 | G2-preview-publication | Planned; blocked until G1 | `/root/g1_run_operations`, thread `01a0ba7a-9d5d-7291-a2f5-357ff78dba5e`, worktree `dual-lane-preview-publication`; reviewer `/root/g2_distribution_review` |
 | G2-distribution-review | Typed review pending; initial checker hostile G2 suite failed all nine mutations on old b3b6 | Thread `01a0ba81-1af6-7f11-9f24-3ff115b8f314`; no publication approval |
 | latest_macos_policy | Amendment assigned; exact official label research/PR pending | Isolated AGENTS-rule/research task; exact current arm64 label `xcode-27`, future newest labels supersede; macOS 27 Intel has no fallback; reviewer `/root/g2_homebrew_contract` |
@@ -311,6 +331,10 @@ inferred from assignment.
 6. Native macOS policy still lacks official-label research/PR and exact
    runner/image/SDK evidence. Any incompatible native constraint must fail
    explicitly; no older macOS fallback, skip, or silent reroute is allowed.
+7. Authority v7 remains frozen and unapproved. The provider-feasibility result
+   shows no provider-only freeze against the current admin; an explicit user
+   choice and authority for a consent-only, provider-gated, existing-updater,
+   or external-root path is required before any transition operation.
 
 Read-only early audits may continue before G2, but no `g3-*` task can claim a
 G3 migration or authorize operational rollout. The current runtime audit also
