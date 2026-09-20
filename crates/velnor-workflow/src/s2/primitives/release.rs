@@ -5287,6 +5287,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     use sha2::{Digest as _, Sha256};
 
@@ -6650,6 +6651,57 @@ mod tests {
             ),
             "{publish}"
         );
+    }
+
+    #[test]
+    fn rendered_native_product_serializer_emits_runner_compatible_sidecar() {
+        let config = native_identity_config(&["release.yml", "preview.yml", "native-product.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let lines = workflow.lines().collect::<Vec<_>>();
+        let start = lines
+            .iter()
+            .position(|line| line.contains("manifest_sha256=\"$(cd product-assets"))
+            .expect("rendered product publisher must hash from the asset directory");
+        let serializer = lines[start..=start + 1]
+            .iter()
+            .map(|line| line.trim_start())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(serializer.contains("printf '%s  product-manifest.json\\n'"));
+        assert!(!serializer.contains("product-assets/product-manifest.json >"));
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-native-product-sidecar-{}",
+            crate::s2::unique_suffix()
+        ));
+        fs::create_dir_all(root.join("product-assets")).expect("create sidecar fixture");
+        let manifest = b"{\"schema\":\"velnor.product-manifest/v1\"}\n";
+        fs::write(root.join("product-assets/product-manifest.json"), manifest)
+            .expect("write sidecar fixture manifest");
+        let result = Command::new("sh")
+            .current_dir(&root)
+            .args(["-eu", "-c", serializer.as_str()])
+            .output()
+            .expect("run rendered sidecar serializer");
+        assert!(
+            result.status.success(),
+            "serializer failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let actual = fs::read_to_string(root.join("product-assets/product-manifest.json.sha256"))
+            .expect("read rendered sidecar");
+        let expected_digest = Sha256::digest(manifest)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            actual,
+            format!("{expected_digest}  product-manifest.json\n")
+        );
+        fs::remove_dir_all(root).expect("remove sidecar fixture");
     }
 
     #[test]
