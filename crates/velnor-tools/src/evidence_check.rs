@@ -3838,6 +3838,7 @@ fn g0_json_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
 fn g0_capture_raw_json(
     raw_refs: &[String],
     object_kind: &str,
+    member_id: u64,
     endpoints: &[String],
     requests: &[G0RequestRecord],
     raw_objects: &[G0RawObjectRef],
@@ -3874,7 +3875,44 @@ fn g0_capture_raw_json(
         return None;
     }
     let value = serde_json::from_slice::<Value>(&bytes).ok()?;
-    value.is_object().then_some(value)
+    g0_select_raw_member(value, object_kind, member_id, request)
+}
+
+/// Select one object from the exact GitHub page envelope retained by the
+/// collector.  Check-runs and jobs are paginated envelopes in the REST API;
+/// treating the envelope itself as a singular object silently loses every
+/// relationship except whichever fields a caller invents at the top level.
+/// Singular endpoints remain accepted only when their returned object ID is
+/// the requested ID.  A page declaring its final page must account for every
+/// item in `total_count`; duplicate IDs are rejected.
+fn g0_select_raw_member(
+    value: Value,
+    object_kind: &str,
+    member_id: u64,
+    request: &G0RequestRecord,
+) -> Option<Value> {
+    let envelope_key = match object_kind {
+        "check_run" => Some("check_runs"),
+        "job" => Some("jobs"),
+        _ => None,
+    };
+    if let Some(envelope_key) = envelope_key {
+        let total_count = value.get("total_count")?.as_u64()?;
+        let members = value.get(envelope_key)?.as_array()?;
+        if members.len() as u32 != request.page.items_returned
+            || members.is_empty()
+            || (!request.page.has_next_page && total_count != members.len() as u64)
+            || (request.page.has_next_page && total_count < members.len() as u64)
+        {
+            return None;
+        }
+        let matches = members
+            .iter()
+            .filter(|member| g0_json_u64(member, &["id"]) == Some(member_id))
+            .collect::<Vec<_>>();
+        return (matches.len() == 1).then(|| matches[0].clone());
+    }
+    (g0_json_u64(&value, &["id"]) == Some(member_id)).then_some(value)
 }
 
 fn g0_api_path_is(value: &Value, path: &str) -> bool {
@@ -3905,9 +3943,11 @@ fn g0_check_raw_evidence_valid(
         ),
     ];
     let app_endpoint = format!("/apps/{}", check.app_slug);
+    let app_id = check.app_id.parse::<u64>().ok();
     let check_run = g0_capture_raw_json(
         &check.raw_object_refs,
         "check_run",
+        check.check_run_id,
         &check_run_endpoints,
         requests,
         raw_objects,
@@ -3915,6 +3955,7 @@ fn g0_check_raw_evidence_valid(
     let check_suite = g0_capture_raw_json(
         &check.raw_object_refs,
         "check_suite",
+        check.check_suite_id,
         &suite_endpoints,
         requests,
         raw_objects,
@@ -3922,11 +3963,11 @@ fn g0_check_raw_evidence_valid(
     let app = g0_capture_raw_json(
         &check.raw_object_refs,
         "app",
+        app_id.unwrap_or_default(),
         &[app_endpoint],
         requests,
         raw_objects,
     );
-    let app_id = check.app_id.parse::<u64>().ok();
     let common = app_id.is_some_and(|app_id| {
         check_run.as_ref().is_some_and(|value| {
             g0_json_u64(value, &["id"]) == Some(check.check_run_id)
@@ -3974,6 +4015,7 @@ fn g0_check_raw_evidence_valid(
             let run = g0_capture_raw_json(
                 &check.raw_object_refs,
                 "workflow_run",
+                *workflow_run_id,
                 &[format!(
                     "/repos/{repository}/actions/runs/{workflow_run_id}"
                 )],
@@ -3983,8 +4025,9 @@ fn g0_check_raw_evidence_valid(
             let job = g0_capture_raw_json(
                 &check.raw_object_refs,
                 "job",
+                *job_id,
                 &[format!(
-                    "/repos/{repository}/actions/runs/{workflow_run_id}/jobs/{job_id}"
+                    "/repos/{repository}/actions/runs/{workflow_run_id}/attempts/{run_attempt}/jobs"
                 )],
                 requests,
                 raw_objects,
@@ -10314,24 +10357,118 @@ mod tests {
                 .to_owned(),
             raw_object_refs: vec!["captured-check-runs-page-0001".to_owned()],
         };
-        assert!(g0_capture_raw_json(
+        let selected_check = g0_capture_raw_json(
             &check.raw_object_refs,
             "check_run",
+            check.check_run_id,
             &["/repos/jackin-project/jackin-agent-smith/commits/b9db5b149cc46baba9c49549432307c29e3972b0/check-runs".to_owned()],
             &[request.clone()],
             &[raw.clone()],
         )
-        .is_some());
+        .expect("DCO member must be selected from the complete check-runs page");
+        assert_eq!(
+            g0_json_u64(&selected_check, &["id"]),
+            Some(check.check_run_id)
+        );
+        assert_eq!(
+            g0_json_string(&selected_check, &["app", "slug"]),
+            Some(check.app_slug.as_str())
+        );
 
-        // This is intentionally red in the first capture checkpoint: the
-        // current selector expects a singular object and cannot yet select
-        // the DCO member from GitHub's complete `check_runs` page envelope.
-        assert!(g0_check_raw_evidence_valid(
+        // This body is only the independently captured check-runs page.  The
+        // full provider proof remains closed until separately captured suite
+        // and App objects are linked by the collector.
+        assert!(!g0_check_raw_evidence_valid(
             "jackin-project/jackin-agent-smith",
             &check,
             &[request],
             &[raw]
         ));
+    }
+
+    #[test]
+    fn actual_captured_jobs_page_binds_job_to_attempt_and_check_url() {
+        let body_base64 = include_str!(
+            "testdata/g0/raw-capture-20260920-065449/runs/tailrocks_holla-apt/run-35079189599/attempt-1/jobs/page-0001.body.base64"
+        )
+        .trim();
+        let bytes = BASE64
+            .decode(body_base64)
+            .expect("captured jobs body base64");
+        assert_eq!(bytes.len(), 8_017);
+        assert_eq!(
+            digest_bytes(&bytes),
+            "sha256:e6f19864a4ef1a7c45f7f467a0409d20b1ede477e4f913722fc4b54bf083d2ad"
+        );
+        let raw_id = "captured-jobs-page-0001".to_owned();
+        let request_id = "jobs-tailrocks_holla-apt-run-35079189599-attempt-1-jobs-1".to_owned();
+        let raw = G0RawObjectRef {
+            raw_id: raw_id.clone(),
+            request_id: request_id.clone(),
+            object_kind: "job".to_owned(),
+            canonicalization: "raw-json".to_owned(),
+            sha256: "sha256:e6f19864a4ef1a7c45f7f467a0409d20b1ede477e4f913722fc4b54bf083d2ad"
+                .to_owned(),
+            byte_length: bytes.len() as u64,
+            bytes_base64: body_base64.to_owned(),
+            media_type: "application/json".to_owned(),
+            storage_ref:
+                "sha256://e6f19864a4ef1a7c45f7f467a0409d20b1ede477e4f913722fc4b54bf083d2ad"
+                    .to_owned(),
+            original_sha256:
+                "sha256:e6f19864a4ef1a7c45f7f467a0409d20b1ede477e4f913722fc4b54bf083d2ad".to_owned(),
+            original_byte_length: bytes.len() as u64,
+            original_storage_ref:
+                "sha256://e6f19864a4ef1a7c45f7f467a0409d20b1ede477e4f913722fc4b54bf083d2ad"
+                    .to_owned(),
+        };
+        let request = G0RequestRecord {
+            request_id,
+            api: G0ApiKind::Rest,
+            method: "GET".to_owned(),
+            endpoint_or_operation:
+                "/repos/tailrocks/holla-apt/actions/runs/35079189599/attempts/1/jobs".to_owned(),
+            query_base64: BASE64.encode(b"per_page=100&page=1"),
+            variables_base64: BASE64.encode(b"{}"),
+            query_sha256: digest_bytes(b"per_page=100&page=1"),
+            variables_sha256: digest_bytes(b"{}"),
+            auth_identity_ref: "collector.auth".to_owned(),
+            started_at_utc: "2026-09-20T07:36:18Z".to_owned(),
+            completed_at_utc: "2026-09-20T07:36:19Z".to_owned(),
+            http_status: 200,
+            api_request_id: "api-request-jobs-page-0001".to_owned(),
+            rate_limit_ref: "collector.rate_limit".to_owned(),
+            page: G0Page {
+                number: 1,
+                per_page: 100,
+                link_next: None,
+                cursor_in: None,
+                cursor_out: None,
+                has_next_page: false,
+                items_returned: 6,
+            },
+            response_raw_ref: raw_id,
+            error_raw_ref: None,
+            state: G0RequestState::Complete,
+            complete: true,
+            truncation_reason: None,
+        };
+        let selected_job = g0_capture_raw_json(
+            &["captured-jobs-page-0001".to_owned()],
+            "job",
+            104741135689,
+            &["/repos/tailrocks/holla-apt/actions/runs/35079189599/attempts/1/jobs".to_owned()],
+            &[request],
+            &[raw],
+        )
+        .expect("job must be selected from the complete attempt jobs page");
+        assert_eq!(g0_json_u64(&selected_job, &["id"]), Some(104741135689));
+        assert_eq!(g0_json_u64(&selected_job, &["run_id"]), Some(35079189599));
+        assert_eq!(g0_json_u64(&selected_job, &["run_attempt"]), Some(1));
+        assert_eq!(
+            g0_json_string(&selected_job, &["check_run_url"]),
+            Some("https://api.github.com/repos/tailrocks/holla-apt/check-runs/104741135689")
+        );
     }
 
     #[test]
