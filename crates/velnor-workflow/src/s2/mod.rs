@@ -119,6 +119,18 @@ pub(crate) const CANDIDATE_ARTIFACT_NAME: &str = "velnor-workflow-candidate-linu
 pub(crate) const CANDIDATE_HANDOFF_ARTIFACT_NAME: &str = "velnor-workflow-candidate-handoff";
 pub(crate) const CANDIDATE_RESULT_ARTIFACT_NAME: &str = "velnor-workflow-candidate-result";
 pub(crate) const CANDIDATE_MANIFEST_SCHEMA: &str = "velnor.bootstrap-producer-manifest.v1";
+pub(crate) const CANDIDATE_CHECKOUT_ACTION_REVISION: &str =
+    "3d3c42e5aac5ba805825da76410c181273ba90b1";
+pub(crate) const CANDIDATE_CHECKOUT_ACTION_ARCHIVE_SHA256: &str =
+    "cebb825b471e77ce4dd7f1f37ccdfb3ae5b68e78f6f6d2f6e2521c3cfce27e72";
+pub(crate) const CANDIDATE_UPLOAD_ACTION_REVISION: &str =
+    "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a";
+pub(crate) const CANDIDATE_UPLOAD_ACTION_ARCHIVE_SHA256: &str =
+    "69baddda1bd8d80441109e489128f1b6944fddd92586ad1855275121beeae897";
+pub(crate) const CANDIDATE_DOWNLOAD_ACTION_REVISION: &str =
+    "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c";
+pub(crate) const CANDIDATE_DOWNLOAD_ACTION_ARCHIVE_SHA256: &str =
+    "498e5a207a6e181257cfe7bb4d8e273e758ea729ad10f0eff617505006bd1d77";
 /// The execute image is intentionally empty until the base-owned final image
 /// is published and its manifest/config digest is reviewed. The generated
 /// wrapper fails closed rather than falling back to the hosted runner.
@@ -4607,6 +4619,23 @@ fn policy_candidate_step(revision: &str) -> String {
           if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
           if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
           case "$PR_NUMBER" in ''|*[!0-9]*) exit 1 ;; esac
+          verify_action_archive() {{
+            local repository="$1"
+            local revision="$2"
+            local expected="$3"
+            local label="$4"
+            if [[ ! "$revision" =~ ^[0-9a-f]{{40}}$ || ! "$expected" =~ ^[0-9a-f]{{64}}$ ]]; then exit 1; fi
+            local archive="$RUNNER_TEMP/action-$label.tar.gz"
+            curl --fail --location --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$GITHUB_API_URL/repos/$repository/tarball/$revision" --output "$archive"
+            test "$(sha256sum "$archive" | awk '{{print $1}}')" = "$expected"
+          }}
+          verify_action_archive actions/checkout "{checkout_action_revision}" "{checkout_action_archive_sha256}" checkout
+          verify_action_archive actions/upload-artifact "{upload_action_revision}" "{upload_action_archive_sha256}" upload
+          verify_action_archive actions/download-artifact "{download_action_revision}" "{download_action_archive_sha256}" download
           repository_api="$(gh api "repos/$GITHUB_REPOSITORY")"
           jq -e --arg repo "$GITHUB_REPOSITORY" --argjson id "$TARGET_REPOSITORY_ID" '.id == $id and .full_name == $repo' <<<"$repository_api" >/dev/null
           head_commit_api="$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA")"
@@ -4801,13 +4830,16 @@ fn policy_candidate_step(revision: &str) -> String {
             --arg profile debug \
             --arg platform linux-amd64 \
             --argjson features '[]' \
+            --arg checkout_action_archive_sha256 "{checkout_action_archive_sha256}" \
+            --arg download_action_archive_sha256 "{download_action_archive_sha256}" \
+            --arg upload_action_archive_sha256 "{upload_action_archive_sha256}" \
             --arg manifest_member candidate-manifest.json \
             --arg manifest_sha256 "$manifest_sha256" \
             --arg manifest_schema_sha256 "$manifest_schema_sha256" \
             --arg source_archive_sha256 "$source_archive_sha256" \
             --arg candidate_closure "$candidate_closure" \
             --arg contract_sha256 "$contract_sha256" \
-            '{{role: $role, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, job_id: $job_id, job_name: $job_name, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_expires_at: $artifact_expires_at, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, contract_sha256: $contract_sha256}}' > "$handoff/handoff.json"
+            '{{role: $role, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, job_id: $job_id, job_name: $job_name, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, checkout_action_archive_sha256: $checkout_action_archive_sha256, download_action_archive_sha256: $download_action_archive_sha256, upload_action_archive_sha256: $upload_action_archive_sha256, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_expires_at: $artifact_expires_at, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, contract_sha256: $contract_sha256}}' > "$handoff/handoff.json"
       - name: Upload candidate handoff
         id: handoff_upload
         uses: {upload}
@@ -4819,8 +4851,14 @@ fn policy_candidate_step(revision: &str) -> String {
 "#,
         artifact = crate::s2::CANDIDATE_ARTIFACT_NAME,
         checkout = ActionPin::Checkout.reference(),
+        checkout_action_archive_sha256 = crate::s2::CANDIDATE_CHECKOUT_ACTION_ARCHIVE_SHA256,
+        checkout_action_revision = crate::s2::CANDIDATE_CHECKOUT_ACTION_REVISION,
+        download_action_archive_sha256 = crate::s2::CANDIDATE_DOWNLOAD_ACTION_ARCHIVE_SHA256,
+        download_action_revision = crate::s2::CANDIDATE_DOWNLOAD_ACTION_REVISION,
         handoff = crate::s2::CANDIDATE_HANDOFF_ARTIFACT_NAME,
         manifest_schema = crate::s2::CANDIDATE_MANIFEST_SCHEMA,
+        upload_action_archive_sha256 = crate::s2::CANDIDATE_UPLOAD_ACTION_ARCHIVE_SHA256,
+        upload_action_revision = crate::s2::CANDIDATE_UPLOAD_ACTION_REVISION,
         upload = ActionPin::UploadArtifact.reference(),
     )
 }
@@ -4915,6 +4953,9 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
             (.head_tree_api_digest | strings | test("^[0-9a-f]{{64}}$")) and
             (.base_tree_api_digest | strings | test("^[0-9a-f]{{64}}$")) and
             (.profile == "debug") and (.platform == "linux-amd64") and (.features == []) and
+            (.checkout_action_archive_sha256 == "{checkout_action_archive_sha256}") and
+            (.download_action_archive_sha256 == "{download_action_archive_sha256}") and
+            (.upload_action_archive_sha256 == "{upload_action_archive_sha256}") and
             (.manifest_member == "candidate-manifest.json") and (.manifest_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
             (.manifest_schema_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
             (.artifact_name == "{artifact}") and (.artifact_id | numbers) and (.artifact_size | numbers | . <= 268435456) and
@@ -5086,6 +5127,9 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
             --arg profile "$(jq -er .profile "$handoff_json")" \
             --arg platform "$(jq -er .platform "$handoff_json")" \
             --argjson features "$(jq -c .features "$handoff_json")" \
+            --arg checkout_action_archive_sha256 "$(jq -er .checkout_action_archive_sha256 "$handoff_json")" \
+            --arg download_action_archive_sha256 "$(jq -er .download_action_archive_sha256 "$handoff_json")" \
+            --arg upload_action_archive_sha256 "$(jq -er .upload_action_archive_sha256 "$handoff_json")" \
             --arg manifest_member "$(jq -er .manifest_member "$handoff_json")" \
             --arg manifest_sha256 "$(jq -er .manifest_sha256 "$handoff_json")" \
             --arg manifest_schema_sha256 "$(jq -er .manifest_schema_sha256 "$handoff_json")" \
@@ -5103,7 +5147,7 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
             --arg sandbox_index_digest "$SANDBOX_IMAGE_DIGEST" \
             --arg sandbox_platform_digest "$platform_digest" \
             --arg sandbox_config_digest "$config_digest" \
-            '{{role: $role, render_sha256: $render_sha256, handoff_id: $handoff_id, handoff_digest: $handoff_digest, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, job_id: $job_id, job_name: $job_name, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_expires_at: $artifact_expires_at, execution_run_id: $execution_run_id, execution_run_attempt: $execution_run_attempt, execution_job: $execution_job, sandbox_index_digest: $sandbox_index_digest, sandbox_platform_digest: $sandbox_platform_digest, sandbox_config_digest: $sandbox_config_digest}}' > "$result/result.json"
+            '{{role: $role, render_sha256: $render_sha256, handoff_id: $handoff_id, handoff_digest: $handoff_digest, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, job_id: $job_id, job_name: $job_name, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, checkout_action_archive_sha256: $checkout_action_archive_sha256, download_action_archive_sha256: $download_action_archive_sha256, upload_action_archive_sha256: $upload_action_archive_sha256, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_expires_at: $artifact_expires_at, execution_run_id: $execution_run_id, execution_run_attempt: $execution_run_attempt, execution_job: $execution_job, sandbox_index_digest: $sandbox_index_digest, sandbox_platform_digest: $sandbox_platform_digest, sandbox_config_digest: $sandbox_config_digest}}' > "$result/result.json"
       - name: Upload candidate verification result
         id: result_upload
         uses: {upload}
@@ -5116,6 +5160,9 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
         acquire = acquire,
         artifact = CANDIDATE_ARTIFACT_NAME,
         checkout = ActionPin::Checkout.reference(),
+        checkout_action_archive_sha256 = CANDIDATE_CHECKOUT_ACTION_ARCHIVE_SHA256,
+        download_action_archive_sha256 = CANDIDATE_DOWNLOAD_ACTION_ARCHIVE_SHA256,
+        upload_action_archive_sha256 = CANDIDATE_UPLOAD_ACTION_ARCHIVE_SHA256,
         default_branch = default_branch,
         download = ActionPin::DownloadArtifact.reference(),
         handoff = CANDIDATE_HANDOFF_ARTIFACT_NAME,
@@ -5189,6 +5236,23 @@ fn policy_candidate_result_verification_step() -> String {
           case "$PR_NUMBER" in ''|*[!0-9]*) exit 1 ;; esac
           test "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY"
           test "$HEAD_REPOSITORY_ID" = "$TARGET_REPOSITORY_ID"
+          verify_action_archive() {{
+            local repository="$1"
+            local revision="$2"
+            local expected="$3"
+            local label="$4"
+            if [[ ! "$revision" =~ ^[0-9a-f]{{40}}$ || ! "$expected" =~ ^[0-9a-f]{{64}}$ ]]; then exit 1; fi
+            local archive="$RUNNER_TEMP/verify-action-$label.tar.gz"
+            curl --fail --location --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$GITHUB_API_URL/repos/$repository/tarball/$revision" --output "$archive"
+            test "$(sha256sum "$archive" | awk '{{print $1}}')" = "$expected"
+          }}
+          verify_action_archive actions/checkout "{checkout_action_revision}" "{checkout_action_archive_sha256}" checkout
+          verify_action_archive actions/upload-artifact "{upload_action_revision}" "{upload_action_archive_sha256}" upload
+          verify_action_archive actions/download-artifact "{download_action_revision}" "{download_action_archive_sha256}" download
           result_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RESULT_ID")"
           jq -e --argjson id "$RESULT_ID" --arg digest "$RESULT_DIGEST" --arg name "{result}" --argjson run_id "$GITHUB_RUN_ID" '
             .id == $id and .name == $name and .expired == false and (.expires_at | strings | fromdateiso8601 > now) and .digest == $digest and
@@ -5262,6 +5326,9 @@ fn policy_candidate_result_verification_step() -> String {
             (.head_tree_sha | strings | test("^[0-9a-f]{{40}}$")) and (.base_tree_sha | strings | test("^[0-9a-f]{{40}}$")) and
             (.head_tree_api_digest | strings | test("^[0-9a-f]{{64}}$")) and (.base_tree_api_digest | strings | test("^[0-9a-f]{{64}}$")) and
             (.profile == "debug") and (.platform == "linux-amd64") and (.features == []) and
+            (.checkout_action_archive_sha256 == "{checkout_action_archive_sha256}") and
+            (.download_action_archive_sha256 == "{download_action_archive_sha256}") and
+            (.upload_action_archive_sha256 == "{upload_action_archive_sha256}") and
             (.manifest_member == "candidate-manifest.json") and (.manifest_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
             (.manifest_schema_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
             (.source_archive_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
@@ -5327,6 +5394,9 @@ fn policy_candidate_result_verification_step() -> String {
             $h.head_tree_sha == $r.head_tree_sha and $h.base_tree_sha == $r.base_tree_sha and
             $h.head_tree_api_digest == $r.head_tree_api_digest and $h.base_tree_api_digest == $r.base_tree_api_digest and
             $h.profile == $r.profile and $h.platform == $r.platform and $h.features == $r.features and
+            $h.checkout_action_archive_sha256 == $r.checkout_action_archive_sha256 and
+            $h.download_action_archive_sha256 == $r.download_action_archive_sha256 and
+            $h.upload_action_archive_sha256 == $r.upload_action_archive_sha256 and
             $h.manifest_member == $r.manifest_member and $h.manifest_sha256 == $r.manifest_sha256 and
             $h.manifest_schema_sha256 == $r.manifest_schema_sha256 and
             $h.source_archive_sha256 == $r.source_archive_sha256 and $h.candidate_closure == $r.candidate_closure and
@@ -5458,9 +5528,15 @@ fn policy_candidate_result_verification_step() -> String {
           echo "handoff_raw_zip_sha256=$handoff_raw_zip_sha256" >> "$GITHUB_OUTPUT"
 "#,
         artifact = crate::s2::CANDIDATE_ARTIFACT_NAME,
+        checkout_action_archive_sha256 = crate::s2::CANDIDATE_CHECKOUT_ACTION_ARCHIVE_SHA256,
+        checkout_action_revision = crate::s2::CANDIDATE_CHECKOUT_ACTION_REVISION,
+        download_action_archive_sha256 = crate::s2::CANDIDATE_DOWNLOAD_ACTION_ARCHIVE_SHA256,
+        download_action_revision = crate::s2::CANDIDATE_DOWNLOAD_ACTION_REVISION,
         handoff = crate::s2::CANDIDATE_HANDOFF_ARTIFACT_NAME,
         manifest_schema = crate::s2::CANDIDATE_MANIFEST_SCHEMA,
         result = crate::s2::CANDIDATE_RESULT_ARTIFACT_NAME,
+        upload_action_archive_sha256 = crate::s2::CANDIDATE_UPLOAD_ACTION_ARCHIVE_SHA256,
+        upload_action_revision = crate::s2::CANDIDATE_UPLOAD_ACTION_REVISION,
     )
 }
 
