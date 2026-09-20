@@ -1,0 +1,59 @@
+{
+  "archive_component": "velnorctl",
+  "archive_identity_schema": "velnor.homebrew-install-identity/v1",
+  "archive_manifest_schema": "velnor.homebrew-install/v1",
+  "blocked_targets": [
+    "x86_64-apple-darwin"
+  ],
+  "channel": "stable",
+  "components": [
+    {
+      "binary": "velnor-runner",
+      "crate": "velnor-runner",
+      "feature": "release-build",
+      "identity": "version",
+      "name": "velnor-runner",
+      "targets": [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin"
+      ]
+    },
+    {
+      "binary": "velnor-workflow",
+      "crate": "velnor-workflow",
+      "feature": null,
+      "identity": "revision",
+      "name": "velnor-workflow",
+      "targets": [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin"
+      ]
+    },
+    {
+      "binary": "velnorctl",
+      "crate": "velnorctl",
+      "feature": "release-build",
+      "identity": "version",
+      "name": "velnorctl",
+      "targets": [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin"
+      ]
+    }
+  ],
+  "manifest_schema": "velnor.product-manifest/v1",
+  "product_id": "velnor",
+  "schema": "velnor.native-product-contract/v1",
+  "targets": [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin"
+  ]
+}

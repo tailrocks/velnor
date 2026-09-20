@@ -1542,7 +1542,7 @@ jobs:
           backend: github
           github-cache-mode: objects
           version: 1.11.1
-          cache-key: velnor-mbx-v3-a1e6d261b1d9-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-workflow-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('Dockerfile', 'config/fleet/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'crates/velnor-workflow/**/*.rs', 'crates/velnor-workflow/README.md', 'crates/velnor-workflow/benches/**', 'crates/velnor-workflow/build.rs', 'crates/velnor-workflow/examples/**', 'crates/velnor-workflow/src/**', 'crates/velnor-workflow/src/runtime.rs', 'crates/velnor-workflow/templates/**', 'crates/velnor-workflow/templates/release-package-signer.yml', 'crates/velnor-workflow/tests/**', 'crates/velnor-workflow/tests/generic_surface_literals.rs', 'docker/build-mise.*', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          cache-key: velnor-mbx-v3-a1e6d261b1d9-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-workflow-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('Dockerfile', 'config/fleet/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'crates/velnor-workflow/**/*.rs', 'crates/velnor-workflow/README.md', 'crates/velnor-workflow/benches/**', 'crates/velnor-workflow/build.rs', 'crates/velnor-workflow/examples/**', 'crates/velnor-workflow/src/**', 'crates/velnor-workflow/src/runtime.rs', 'crates/velnor-workflow/src/s2/primitives/native_product.rs', 'crates/velnor-workflow/templates/**', 'crates/velnor-workflow/templates/release-package-signer.yml', 'crates/velnor-workflow/tests/**', 'crates/velnor-workflow/tests/generic_surface_literals.rs', 'docker/build-mise.*', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
             velnor-mbx-v3-a1e6d261b1d9-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-workflow-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
             velnor-mbx-v3-a1e6d261b1d9-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-velnor-workflow-
@@ -3015,6 +3015,13 @@ jobs:
           if-no-files-found: error
           retention-days: 2
 
+  native-product-build:
+    name: Build source-bound native product
+    needs: [admit-provider, verify, build]
+    uses: ./.github/workflows/native-product.yml
+    permissions:
+      contents: read
+
   image-admission:
     needs: [admit-provider, verify]
     name: Admit immutable image tag
@@ -4028,13 +4035,15 @@ jobs:
 
   publish:
     name: Control / Publish
-    needs: [admit-provider, verify, build, image, metadata, guest-payload, debian, sign-deb]
+    needs: [admit-provider, verify, build, native-product-build, image, metadata, guest-payload, debian, sign-deb]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: github-release
     permissions:
       contents: write
       packages: read
+      id-token: write
+      attestations: write
     env:
       VERSION: ${{ needs.verify.outputs.version }}
       SOURCE_REF: ${{ github.ref }}
@@ -4259,6 +4268,272 @@ jobs:
             echo "::error::release tag $EXPECTED_TAG_REF moved from $EXPECTED_TAG_COMMIT to $remote_tag_commit" >&2
             exit 1
           }
+      - name: Download source-bound native product builds
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: native-product-*
+          path: native-product
+          merge-multiple: true
+      - name: Verify native product census and resolve provider release id
+        id: product-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          contracts=(native-product/product-contract-*.json)
+          for candidate in "${contracts[@]}"; do
+            test -f "$candidate" && test ! -L "$candidate" || { echo "::error::native product contract is missing or linked: $candidate" >&2; exit 1; }
+            case "$candidate" in native-product/product-contract-*.json) ;; *) echo "::error::native product contract name is unsafe: $candidate" >&2; exit 1 ;; esac
+          done
+          test "${#contracts[@]}" -eq 4 || { echo '::error::native product requires four target contracts' >&2; exit 1; }
+          contract="${contracts[0]}"
+          for candidate in "${contracts[@]}"; do cmp -- "$contract" "$candidate" || { echo '::error::native product contracts disagree' >&2; exit 1; }; done
+          blocked_targets="$(jq -c '.blocked_targets // []' "$contract")"
+          [ "$blocked_targets" = '[]' ] || { echo '::error::native product has blocked targets; publication is blocked until every required target is buildable' >&2; exit 1; }
+          source_component_contract=".github/ci/native-product-contract.json"
+          test -s "$source_component_contract" || { echo '::error::source native product component contract is missing' >&2; exit 1; }
+          cargo metadata --locked --no-deps --format-version 1 > product-cargo-metadata.json
+          jq -S --slurpfile metadata product-cargo-metadata.json '
+            . as $source
+            | [
+                $source.components[] as $component
+                | ($metadata[0].packages | map(select(.name == $component.crate))) as $packages
+                | if ($packages | length) != 1 then error("native product component crate is not unique") else
+                    $component + {version:$packages[0].version,targets:$source.targets}
+                  end
+              ] as $components
+            | $source + {components:$components}
+          ' "$source_component_contract" > product-component-contract.json
+          jq -e --slurpfile source "$source_component_contract" '
+            .schema == $source[0].schema and
+            .product_id == $source[0].product_id and
+            .channel == $source[0].channel and
+            .manifest_schema == $source[0].manifest_schema and
+            .archive_component == $source[0].archive_component and
+            .archive_identity_schema == $source[0].archive_identity_schema and
+            .archive_manifest_schema == $source[0].archive_manifest_schema and
+            .targets == $source[0].targets and
+            .blocked_targets == $source[0].blocked_targets and
+            (.components | map({name,crate,binary,feature,identity,targets}) | sort_by(.name)) ==
+            ($source[0].components | map({name,crate,binary,feature,identity,targets}) | sort_by(.name))
+          ' "$contract" >/dev/null || { echo '::error::downloaded native product contract differs from source contract' >&2; exit 1; }
+          product_version="$(jq -er '.version' "$contract")"
+          source_commit="$(jq -er '.source_commit' "$contract")"
+          release_tag="$(jq -er '.release_tag' "$contract")"
+          source_repository="$(jq -er '.source_repository' "$contract")"
+          [ "$product_version" = "$VERSION" ] || { echo '::error::product version differs from runtime release' >&2; exit 1; }
+          [ "$source_commit" = "$COMMIT" ] || { echo '::error::product source commit differs from publisher commit' >&2; exit 1; }
+          [ "$source_repository" = "$GITHUB_REPOSITORY" ] || { echo '::error::product source repository differs from publisher repository' >&2; exit 1; }
+          [ "$release_tag" = "$GITHUB_REF_NAME" ] || { echo '::error::product release tag differs from source tag' >&2; exit 1; }
+          expected_targets="$(jq -c '.targets | sort' "$contract")"
+          : > native-product-target-census.txt
+          while IFS= read -r target; do
+            case "$target" in
+              ''|*[!a-z0-9._-]*) echo "::error::unsafe native product target name: $target" >&2; exit 1 ;;
+            esac
+            test -f "native-product/components-$target.jsonl" && test ! -L "native-product/components-$target.jsonl" || { echo "::error::missing or linked native product component rows: $target" >&2; exit 1; }
+            test -f "native-product/artifacts-$target.jsonl" && test ! -L "native-product/artifacts-$target.jsonl" || { echo "::error::missing or linked native product artifact rows: $target" >&2; exit 1; }
+            printf '%s\n' "$target" >> native-product-target-census.txt
+          done < <(jq -r '.[]' <<<"$expected_targets")
+          actual_targets="$(jq -Rsc 'split("\n") | map(select(length > 0)) | sort' native-product-target-census.txt)"
+          [ "$actual_targets" = "$expected_targets" ] || { echo '::error::native product target census differs from contract' >&2; exit 1; }
+          expected_components="$(jq -c '[.components[].name] | sort' "$contract")"
+          : > native-product-component-census.jsonl
+          while IFS= read -r target; do cat "native-product/components-$target.jsonl" >> native-product-component-census.jsonl; done < <(jq -r '.[]' <<<"$expected_targets")
+          actual_components="$(jq -s '[.[] | .name] | unique | sort' native-product-component-census.jsonl)"
+          [ "$actual_components" = "$expected_components" ] || { echo '::error::native product component census differs from contract' >&2; exit 1; }
+          tag="v$VERSION"
+          release_response="$(mktemp)"
+          release_error="$release_response.error"
+          release_status=0
+          gh api -i "repos/$GITHUB_REPOSITORY/releases/tags/$tag" >"$release_response" 2>"$release_error" || release_status=$?
+          release_http="$(awk 'toupper($1) ~ /^HTTP\// { code=$2 } END { gsub(/\r/, "", code); print code }' "$release_response")"
+          if [ "$release_status" -eq 0 ]; then
+            release_json="$(awk 'body { print; next } /^\r?$/ { body=1 }' "$release_response")"
+          elif [ "$release_http" = 404 ]; then
+            release_json=""
+          else
+            cat "$release_error" >&2
+            echo "::error::provider release lookup failed (HTTP ${release_http:-unknown}); refusing to create or publish" >&2
+            exit 1
+          fi
+          if [ -z "$release_json" ]; then
+            release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases" -f tag_name="$tag" -f target_commitish="$COMMIT" -f name="$tag" -F draft=true -F prerelease=false)"
+          fi
+          jq -e --arg tag "$tag" --arg commit "$COMMIT" '.tag_name == $tag and .target_commitish == $commit and ((.draft == true and .prerelease == false) or (.draft == false and .prerelease == false))' <<<"$release_json" >/dev/null || { echo '::error::provider release does not bind this tag/commit' >&2; exit 1; }
+          release_id="$(jq -er '.id | numbers | tostring' <<<"$release_json")"
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || { echo '::error::provider release id is not a positive decimal number' >&2; exit 1; }
+          printf 'release_id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
+          printf 'contract=%s\n' "$contract" >> "$GITHUB_OUTPUT"
+      - name: Assemble canonical native product inventory
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCT_RELEASE_ID: ${{ steps.product-release.outputs.release_id }}
+          PRODUCT_CONTRACT: ${{ steps.product-release.outputs.contract }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          contract="$PRODUCT_CONTRACT"
+          source_component_contract=".github/ci/native-product-contract.json"
+          test -s "$source_component_contract" || { echo '::error::source native product component contract is missing' >&2; exit 1; }
+          cargo metadata --locked --no-deps --format-version 1 > product-cargo-metadata.json
+          jq -S --slurpfile metadata product-cargo-metadata.json '
+            . as $source
+            | [
+                $source.components[] as $component
+                | ($metadata[0].packages | map(select(.name == $component.crate))) as $packages
+                | if ($packages | length) != 1 then error("native product component crate is not unique") else
+                    $component + {version:$packages[0].version,targets:$source.targets}
+                  end
+              ] as $components
+            | $source + {components:$components}
+          ' "$source_component_contract" > product-component-contract.json
+          jq -e --slurpfile source "$source_component_contract" '
+            .schema == $source[0].schema and
+            .product_id == $source[0].product_id and
+            .channel == $source[0].channel and
+            .manifest_schema == $source[0].manifest_schema and
+            .archive_component == $source[0].archive_component and
+            .archive_identity_schema == $source[0].archive_identity_schema and
+            .archive_manifest_schema == $source[0].archive_manifest_schema and
+            .targets == $source[0].targets and
+            .blocked_targets == $source[0].blocked_targets and
+            (.components | map({name,crate,binary,feature,identity,targets}) | sort_by(.name)) ==
+            ($source[0].components | map({name,crate,binary,feature,identity,targets}) | sort_by(.name))
+          ' "$contract" >/dev/null || { echo '::error::downloaded native product contract differs from source contract' >&2; exit 1; }
+          product_version="$(jq -er '.version' "$contract")"
+          product_id="$(jq -er '.product_id' "$contract")"
+          manifest_schema="$(jq -er '.schema' "$contract")"
+          source_ref="$(jq -er '.source_ref' "$contract")"
+          source_commit="$(jq -er '.source_commit' "$contract")"
+          release_tag="$(jq -er '.release_tag' "$contract")"
+          archive_component="$(jq -er '.archive_component' "$contract")"
+          archive_prefix="$(jq -er --arg name "$archive_component" '.components[] | select(.name == $name) | .binary' product-component-contract.json)"
+          archive_identity_schema="$(jq -er '.archive_identity_schema' "$contract")"
+          archive_manifest_schema="$(jq -er '.archive_manifest_schema' "$contract")"
+          expected_targets="$(jq -c '.targets | sort' product-component-contract.json)"
+          expected_components="$(jq -c '[.components[].name] | sort' product-component-contract.json)"
+          jq -e '(.targets | type == "array" and all(.[]; type == "string" and test("^[a-z0-9][a-z0-9._-]*$"))) and (.components | type == "array" and all(.[]; (.name | test("^[a-z0-9][a-z0-9._-]*$")) and (.crate | test("^[a-z0-9][a-z0-9._-]*$")) and (.binary | test("^[a-z0-9][a-z0-9._-]*$")))) and ((.components | map(.binary) | length) == (.components | map(.binary) | unique | length))' product-component-contract.json >/dev/null || { echo '::error::native product contract contains unsafe or duplicate names' >&2; exit 1; }
+          rm -rf -- product-assets
+          mkdir -p product-assets
+          : > product-component-rows.jsonl
+          : > product-artifact-rows.jsonl
+          while IFS= read -r target; do
+            component_file="native-product/components-$target.jsonl"
+            artifact_file="native-product/artifacts-$target.jsonl"
+            test -s "$component_file" && test -s "$artifact_file" || { echo "::error::missing rows for $target" >&2; exit 1; }
+            jq -e --arg target "$target" --slurpfile expected product-component-contract.json '
+              (map({name,crate,binary,version,feature,identity,target}) | sort_by(.name)) ==
+              ($expected[0].components | map(. + {target:$target}) | map({name,crate,binary,version,feature,identity,target}) | sort_by(.name))
+              and all(.[]; (keys | sort) == ["binary","crate","feature","identity","name","target","version"])
+            ' "$component_file" >/dev/null || { echo "::error::native product component rows differ from source contract for $target" >&2; exit 1; }
+            jq -e --arg target "$target" --slurpfile expected product-component-contract.json '
+              (map(.name) | sort) == ($expected[0].components | map(.binary + "-" + $target) | sort)
+              and all(.[]; .name as $name |
+                (keys | sort) == ["kind","name","sha256","size","target"] and
+                .target == $target and .kind == "binary" and
+                (.sha256 | test("^[0-9a-f]{64}$")) and
+                (.size | numbers and . > 0) and
+                any($expected[0].components[]; (.binary + "-" + $target) == $name)
+              )
+            ' "$artifact_file" >/dev/null || { echo "::error::native product artifact rows differ from source contract for $target" >&2; exit 1; }
+            cat "$component_file" >> product-component-rows.jsonl
+            while IFS= read -r row; do
+              asset="$(jq -er '.name' <<<"$row")"
+              source="native-product/$asset"
+              test -f "$source" && test ! -L "$source" || { echo "::error::missing or linked native sibling $asset" >&2; exit 1; }
+              cp -- "$source" "product-assets/$asset"
+              [ "$(sha256sum "$source" | awk '{print $1}')" = "$(jq -er '.sha256' <<<"$row")" ] || { echo "::error::native sibling digest mismatch: $asset" >&2; exit 1; }
+              printf '%s\n' "$row" >> product-artifact-rows.jsonl
+            done < <(jq -c '.[]' "$artifact_file")
+            archive="$archive_prefix-$product_version-$target.tar.gz"
+            archive_kind=archive; case "$target" in *-apple-darwin) archive_kind=homebrew-archive ;; esac
+            archive_dir="$(mktemp -d)"
+            while IFS= read -r component; do
+              binary="$(jq -er --arg name "$component" '.components[] | select(.name == $name) | .binary' product-component-contract.json)"
+              test -f "product-assets/$binary-$target" && test ! -L "product-assets/$binary-$target" || { echo "::error::missing or linked archive sibling $binary-$target" >&2; exit 1; }
+              cp -- "product-assets/$binary-$target" "$archive_dir/$binary"
+            done < <(jq -r '.components[].name' product-component-contract.json)
+            jq -S -n --arg schema "$archive_identity_schema" --arg product_id "$product_id" --arg version "$product_version" --arg source_ref "$source_ref" --arg source_commit "$source_commit" --arg release_tag "$release_tag" --arg parent_manifest_id "$PRODUCT_RELEASE_ID" '{schema:$schema,product_id:$product_id,channel:"stable",version:$version,source_repository:$ENV.GITHUB_REPOSITORY,source_ref:$source_ref,source_commit:$source_commit,release_tag:$release_tag,parent_manifest_id:$parent_manifest_id}' > "$archive_dir/identity.json"
+            artifact_json="$(jq -s '.' "$artifact_file")"
+            archive_components="$(jq -S --arg target "$target" --arg release_version "$product_version" --arg source_commit "$source_commit" --argjson artifacts "$artifact_json" '[.components[] | select((.targets | index($target)) != null) | . as $component | ($artifacts[] | select(.target == $target and .kind == "binary" and .name == ($component.binary + "-" + $target))) as $artifact | {name:$component.name,crate:$component.crate,crate_version:$component.version,release_version:$release_version,source_commit:$source_commit,binary_sha256:$artifact.sha256}] | sort_by(.name)' product-component-contract.json)"
+            jq -S -n --arg schema "$archive_manifest_schema" --argjson components "$archive_components" --arg product_id "$product_id" --arg version "$product_version" --arg source_ref "$source_ref" --arg source_commit "$source_commit" --arg release_tag "$release_tag" --arg parent_manifest_id "$PRODUCT_RELEASE_ID" '{schema:$schema,product_id:$product_id,channel:"stable",version:$version,source_repository:$ENV.GITHUB_REPOSITORY,source_ref:$source_ref,source_commit:$source_commit,release_tag:$release_tag,parent_manifest_id:$parent_manifest_id,components:$components}' > "$archive_dir/manifest.json"
+            archive_path="$PWD/product-assets/$archive"
+            (cd "$archive_dir" && tar -czf "$archive_path" -- *)
+            digest="$(sha256sum "product-assets/$archive" | awk '{print $1}')"; size="$(wc -c <"product-assets/$archive" | tr -d '[:space:]')"
+            jq -cn --arg name "$archive" --arg target "$target" --arg kind "$archive_kind" --arg sha256 "$digest" --argjson size "$size" '{name:$name,target:$target,kind:$kind,sha256:$sha256,size:$size}' >> product-artifact-rows.jsonl
+          done < <(jq -r '.[]' <<<"$expected_targets")
+          for tuple in 'x86_64-unknown-linux-gnu amd64' 'aarch64-unknown-linux-gnu arm64'; do read -r target arch <<<"$tuple"; deb="artifacts/velnor-runner-${VERSION}-$arch.deb"; test -s "$deb" || { echo "::error::missing Linux package for $target" >&2; exit 1; }; name="$(basename "$deb")"; cp -- "$deb" "product-assets/$name"; digest="$(sha256sum "$deb" | awk '{print $1}')"; size="$(wc -c <"$deb" | tr -d '[:space:]')"; jq -cn --arg name "$name" --arg target "$target" --arg sha256 "$digest" --argjson size "$size" '{name:$name,target:$target,kind:"apt-package",sha256:$sha256,size:$size}' >> product-artifact-rows.jsonl; done
+          actual_components="$(jq -s 'sort_by(.name,.target) | group_by(.name) | map(if (map({crate,version,binary}) | unique | length) != 1 then error("component identity differs across targets") else {name:.[0].name,crate:.[0].crate,version:.[0].version,binary:.[0].binary,targets:(map(.target) | sort)} end) | sort_by(.name)' product-component-rows.jsonl)"
+          jq -e --argjson actual "$actual_components" '($actual | map({name,crate,binary,version,targets}) | sort_by(.name)) == (.components | map({name,crate,binary,version,targets}) | sort_by(.name))' product-component-contract.json >/dev/null || { echo '::error::grouped component identity differs from source contract' >&2; exit 1; }
+          [ "$(jq -c '[.[].name] | sort' <<<"$actual_components")" = "$expected_components" ] || { echo '::error::grouped component identity differs from contract' >&2; exit 1; }
+          jq -s 'sort_by([.target,.kind,.name])' product-artifact-rows.jsonl > product-artifacts.json
+          jq -S -n --arg schema "$manifest_schema" --arg product_id "$product_id" --arg version "$product_version" --arg source_ref "$source_ref" --arg source_commit "$source_commit" --arg release_tag "$release_tag" --arg release_id "$PRODUCT_RELEASE_ID" --slurpfile artifacts product-artifacts.json --argjson components "$actual_components" '{schema:$schema,product_id:$product_id,channel:"stable",version:$version,source_repository:$ENV.GITHUB_REPOSITORY,source_ref:$source_ref,source_commit:$source_commit,release_tag:$release_tag,release_id:$release_id,artifacts:$artifacts[0],components:$components}' > product-assets/product-manifest.json
+          jq -e --arg release_id "$PRODUCT_RELEASE_ID" --arg commit "$source_commit" --arg tag "$release_tag" --arg version "$product_version" '.release_id == $release_id and (.release_id | test("^[1-9][0-9]*$")) and .source_commit == $commit and .release_tag == $tag and .version == $version and ([.artifacts[].name] | index("product-manifest.json") | not)' product-assets/product-manifest.json >/dev/null
+          manifest_sha256="$(cd product-assets && sha256sum -- product-manifest.json | awk '{print $1}')"
+          printf '%s  product-manifest.json\n' "$manifest_sha256" > product-assets/product-manifest.json.sha256
+          provider_release="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$release_tag")"
+          provider_release_id="$(jq -er '.id | numbers | tostring' <<<"$provider_release")"
+          [ "$provider_release_id" = "$PRODUCT_RELEASE_ID" ] || { echo '::error::provider release id changed while assembling product' >&2; exit 1; }
+          provider_release_url="$(jq -er '.html_url | strings' <<<"$provider_release")"
+          expected_release_url="https://github.com/$GITHUB_REPOSITORY/releases/tag/$release_tag"
+          [ "$provider_release_url" = "$expected_release_url" ] || { echo '::error::provider release URL is not canonical' >&2; exit 1; }
+          provider_target_commitish="$(jq -er '.target_commitish | strings' <<<"$provider_release")"
+          manifest_sha256="$(sha256sum product-assets/product-manifest.json | awk '{print $1}')"
+          jq -S -n \
+                      --arg schema "velnor.github-release-attestation/v1" \
+                      --arg provider github \
+                      --arg source_repository "$GITHUB_REPOSITORY" \
+                      --arg source_ref "$source_ref" \
+                      --arg source_commit "$source_commit" \
+                      --arg resolved_source_ref "$source_ref" \
+                      --arg resolved_source_commit "$source_commit" \
+                      --arg release_tag "$release_tag" \
+                      --arg release_id "$provider_release_id" \
+                      --arg target_commitish "$provider_target_commitish" \
+                      --arg release_url "$provider_release_url" \
+                      --arg manifest_sha256 "$manifest_sha256" \
+                      --slurpfile assets product-assets/product-manifest.json \
+                      '{schema:$schema,provider:$provider,source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit,resolved_source_ref:$resolved_source_ref,resolved_source_commit:$resolved_source_commit,release_tag:$release_tag,release_id:$release_id,target_commitish:$target_commitish,release_url:$release_url,manifest_sha256:$manifest_sha256,assets:$assets[0].artifacts}' \
+                      > product-assets/release-attestation.json
+          rm -rf -- product-payload
+          mkdir product-payload
+          while IFS= read -r name; do
+          cp -- "product-assets/$name" "product-payload/$name"
+          done < <(jq -r '.artifacts[].name' product-assets/product-manifest.json)
+          product_schema="$(jq -er '.schema' product-assets/product-manifest.json)"
+          product_id="$(jq -er '.product_id' product-assets/product-manifest.json)"
+          product_channel="$(jq -er '.channel' product-assets/product-manifest.json)"
+          verify_args=(
+          --manifest product-assets/product-manifest.json
+          --checksum product-assets/product-manifest.json.sha256
+          --artifacts product-payload
+          --schema "$product_schema"
+          --product-id "$product_id"
+          --channel "$product_channel"
+          --version "$product_version"
+          --source-repository "$GITHUB_REPOSITORY"
+          --source-ref "$source_ref"
+          --source-commit "$source_commit"
+          --release-tag "$release_tag"
+          --release-id "$PRODUCT_RELEASE_ID"
+          )
+          while IFS= read -r target; do verify_args+=(--target "$target"); done < <(jq -r '.targets[]' product-component-contract.json)
+          while IFS= read -r component; do verify_args+=(--component "$component"); done < <(jq -r '.components[].name' product-component-contract.json)
+          artifacts/velnor-runner-release-tool release verify-product "${verify_args[@]}"
+      - name: Attest canonical native product assets
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: product-assets/*
+      - name: Verify native product attestations before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for subject in product-assets/*; do
+            gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY"
+          done
       - name: Create release once — no clobber, record-verified idempotency
         env:
           GH_TOKEN: ${{ github.token }}
@@ -4268,6 +4543,27 @@ jobs:
           # Fail (never mint at main HEAD) if there is nothing to publish.
           [ -f release-record.json ] || { echo "::error::no assembled record" >&2; exit 1; }
           if gh release view "$tag" >/dev/null 2>&1; then
+          if [ "$(gh release view "$tag" --json isDraft --jq '.isDraft')" = true ]; then
+            PRODUCT_RELEASE_ID="${{ steps.product-release.outputs.release_id }}"
+            test -n "${PRODUCT_RELEASE_ID:-}" || { echo '::error::product draft id was not resolved' >&2; exit 1; }
+            gh release upload "$tag" release-record.json \
+              release-record.json.sha256 \
+              manifest.json \
+              manifest.json.sha256 \
+              release-manifest.json \
+              SHA256SUMS \
+              artifacts/velnor-runner-${{ needs.verify.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz \
+              artifacts/velnor-runner-${{ needs.verify.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+              artifacts/velnor-runner-${{ needs.verify.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz \
+              artifacts/velnor-runner-${{ needs.verify.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz.sha256 \
+              artifacts/velnor-runner-${{ needs.verify.outputs.version }}-amd64.deb \
+              artifacts/velnor-runner-${{ needs.verify.outputs.version }}-amd64.deb.sha256 \
+              artifacts/velnor-runner-${{ needs.verify.outputs.version }}-arm64.deb \
+              artifacts/velnor-runner-${{ needs.verify.outputs.version }}-arm64.deb.sha256 product-assets/*
+            gh release edit "$tag" --draft=false
+            echo "Release $tag published with canonical native product assets."
+            exit 0
+          fi
             # Existing release: rebuilds are NOT bit-reproducible (tar/deb/OCI
             # payloads embed build metadata), so byte-equality against a fresh
             # build can never hold and re-runs would fail forever. Instead
@@ -4288,7 +4584,10 @@ jobs:
                         "velnor-runner-${VERSION}-amd64.deb" \
                         "velnor-runner-${VERSION}-amd64.deb.sha256" \
                         "velnor-runner-${VERSION}-arm64.deb" \
-                        "velnor-runner-${VERSION}-arm64.deb.sha256"; do
+                        "velnor-runner-${VERSION}-arm64.deb.sha256" \
+                        "product-manifest.json" \
+                        "product-manifest.json.sha256" \
+                        "release-attestation.json"; do
               gh release download "$tag" --pattern "$name" --dir "$tmp" --clobber >/dev/null 2>&1 \
                 || { echo "::error::release $tag exists but is missing $name — refusing partial overwrite" >&2; exit 1; }
             done
@@ -4320,6 +4619,103 @@ jobs:
               || { echo "::error::published release-record.json fails its sidecar checksum" >&2; exit 1; }
             [ "$(read_sha "$tmp/manifest.json.sha256")" = "$(sha256sum "$tmp/manifest.json" | awk '{print $1}')" ] \
               || { echo "::error::published manifest.json fails its sidecar checksum" >&2; exit 1; }
+            # Reconcile every immutable product asset, not only the manifest sidecar.
+            product_dir="$tmp/product-assets"
+            mkdir -p "$product_dir"
+            provider_release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+            jq -e --arg tag "$tag" --arg commit "$COMMIT" '(.id | numbers) and (.tag_name == $tag) and (.target_commitish == $commit) and (.draft == false) and (.prerelease == false)' <<<"$provider_release_json" >/dev/null
+            provider_release_id="$(jq -er '.id | numbers | tostring' <<<"$provider_release_json")"
+            product_release_id="$(jq -er '.release_id | numbers | tostring' "$tmp/product-manifest.json")"
+            [ "$provider_release_id" = "$product_release_id" ] || { echo '::error::published product manifest release id differs from provider release' >&2; exit 1; }
+            jq -e --arg version "$VERSION" --arg commit "$COMMIT" --arg tag "$tag" --arg repository "$GITHUB_REPOSITORY" '
+              .schema == "velnor.product-manifest/v1" and
+              .version == $version and .source_commit == $commit and
+              .release_tag == $tag and .source_repository == $repository and
+              ([.artifacts[].name] | index("product-manifest.json") | not) and
+              ([.artifacts[].name] | index("product-manifest.json.sha256") | not)
+            ' "$tmp/product-manifest.json" >/dev/null
+            product_contract="product-component-contract.json"
+            product_payload="$tmp/product-payload"
+            mkdir -p "$product_payload"
+            gh attestation verify "$tmp/product-manifest.json" --repo "$GITHUB_REPOSITORY"
+            gh attestation verify "$tmp/product-manifest.json.sha256" --repo "$GITHUB_REPOSITORY"
+            gh attestation verify "$tmp/release-attestation.json" --repo "$GITHUB_REPOSITORY"
+            jq -e --arg schema "velnor.github-release-attestation/v1" \
+              --arg repository "$GITHUB_REPOSITORY" --arg source_ref "refs/tags/$tag" \
+              --arg source_commit "$COMMIT" --arg release_tag "$tag" \
+              --arg release_id "$provider_release_id" --arg release_url "https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag" \
+              --arg manifest_sha256 "$(sha256sum "$tmp/product-manifest.json" | awk '{print $1}')" \
+              --slurpfile manifest "$tmp/product-manifest.json" '
+                ((keys | sort) == ["assets","manifest_sha256","provider","release_id","release_tag","release_url","resolved_source_commit","resolved_source_ref","schema","source_commit","source_ref","source_repository","target_commitish"])
+                and .schema == $schema and .provider == "github"
+                and .source_repository == $repository and .source_ref == $source_ref
+                and .source_commit == $source_commit and .resolved_source_ref == $source_ref
+                and .resolved_source_commit == $source_commit and .release_tag == $release_tag
+                and .release_id == $release_id and .release_url == $release_url
+                and .manifest_sha256 == $manifest_sha256
+                and (.target_commitish | type == "string" and length > 0)
+                and (.assets == $manifest[0].artifacts)
+              ' "$tmp/release-attestation.json" >/dev/null
+            while IFS= read -r name; do
+              test -n "$name"
+              case "$name" in
+                ''|*[!a-zA-Z0-9._-]*|/*|../*|*/../*|*/..) echo "::error::published product asset name is unsafe: $name" >&2; exit 1 ;;
+              esac
+              gh release download "$tag" --pattern "$name" --dir "$product_dir" --clobber >/dev/null 2>&1 \
+                || { echo "::error::published product is missing $name" >&2; exit 1; }
+              gh attestation verify "$product_dir/$name" --repo "$GITHUB_REPOSITORY"
+              cp -- "$product_dir/$name" "$product_payload/$name"
+            done < <(jq -r '.artifacts[].name' "$tmp/product-manifest.json")
+            product_verify_args=(
+              --manifest "$tmp/product-manifest.json"
+              --checksum "$tmp/product-manifest.json.sha256"
+              --artifacts "$product_payload"
+              --component-contract product-component-contract.json
+              --schema "$(jq -er '.schema' "$tmp/product-manifest.json")"
+              --product-id "$(jq -er '.product_id' "$tmp/product-manifest.json")"
+              --channel stable
+              --version "$VERSION"
+              --source-repository "$GITHUB_REPOSITORY"
+              --source-ref "refs/tags/$tag"
+              --source-commit "$COMMIT"
+              --release-tag "$tag"
+              --release-id "$product_release_id"
+            )
+            while IFS= read -r target; do product_verify_args+=(--target "$target"); done < <(jq -r '.targets[]' "$product_contract")
+            while IFS= read -r component; do product_verify_args+=(--component "$component"); done < <(jq -r '.components[].name' "$product_contract")
+            artifacts/velnor-runner-release-tool release verify-product "${product_verify_args[@]}"
+            verify_product_archive() {
+              local archive="$1" member duplicate members
+              members="$(tar -tzf "$archive")" || return 1
+              [ -n "$members" ] || return 1
+              duplicate="$(printf '%s\n' "$members" | sort | uniq -d)"
+              [ -z "$duplicate" ] || { echo "::error::archive has duplicate members: $archive" >&2; return 1; }
+              while IFS= read -r member; do
+                case "$member" in
+                  ''|/*|../*|*/../*|*/..|*/*) echo "::error::archive has unsafe member $member: $archive" >&2; return 1 ;;
+                esac
+              done <<<"$members"
+              tar -tvzf "$archive" | awk 'substr($0, 1, 1) != "-" { exit 1 }' \
+                || { echo "::error::archive contains a non-regular member: $archive" >&2; return 1; }
+            }
+            while IFS= read -r row; do
+              name="$(jq -er '.name' <<<"$row")"
+              expected_sha="$(jq -er '.sha256' <<<"$row")"
+              expected_size="$(jq -er '.size' <<<"$row")"
+              actual_sha="$(sha256sum "$product_dir/$name" | awk '{print $1}')"
+              actual_size="$(stat -c%s "$product_dir/$name" 2>/dev/null || stat -f%z "$product_dir/$name")"
+              [ "$actual_sha" = "$expected_sha" ] && [ "$actual_size" = "$expected_size" ] \
+                || { echo "::error::published product digest/size mismatch: $name" >&2; exit 1; }
+              kind="$(jq -er '.kind' <<<"$row")"
+              case "$kind" in
+                archive|homebrew-archive)
+                  verify_product_archive "$product_dir/$name"
+                  jq -e --arg parent "$product_release_id" '.parent_manifest_id == $parent' \
+                    <(tar -xOzf "$product_dir/$name" identity.json) >/dev/null \
+                    || { echo "::error::published archive identity is not bound to its parent release: $name" >&2; exit 1; }
+                  ;;
+              esac
+            done < <(jq -c '.artifacts[]' "$tmp/product-manifest.json")
             # The record must name this exact tag, source commit, crate version
             # and the manifest this source tree compiles to (the compiled
             # manifest is byte-reproducible; binaries are not).
@@ -4362,21 +4758,9 @@ jobs:
             # subjects staged above, never post-publish here.
             echo "Release $tag already published; record + assets verified coherent. Nothing to upload."
           else
-            gh release create "$tag" --verify-tag --target "$COMMIT" --title "$tag" --generate-notes \
-              release-record.json \
-              release-record.json.sha256 \
-              manifest.json \
-              manifest.json.sha256 \
-              release-manifest.json \
-              SHA256SUMS \
-              artifacts/velnor-runner-${{ needs.verify.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz \
-              artifacts/velnor-runner-${{ needs.verify.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz.sha256 \
-              artifacts/velnor-runner-${{ needs.verify.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz \
-              artifacts/velnor-runner-${{ needs.verify.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz.sha256 \
-              artifacts/velnor-runner-${{ needs.verify.outputs.version }}-amd64.deb \
-              artifacts/velnor-runner-${{ needs.verify.outputs.version }}-amd64.deb.sha256 \
-              artifacts/velnor-runner-${{ needs.verify.outputs.version }}-arm64.deb \
-              artifacts/velnor-runner-${{ needs.verify.outputs.version }}-arm64.deb.sha256
+            echo '::error::product publisher prepared no provider draft; refusing an unbound release' >&2
+            exit 1
+
           fi
           # NOTE (N6): this workflow deliberately does NOT push to tailrocks/velnor-apt or
           # dispatch its publish. tailrocks/velnor-apt pulls this record itself

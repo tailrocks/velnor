@@ -16,6 +16,8 @@ on:
       - ".dockerignore"
       - ".github-gen/velnor-workflow.toml"
       - ".github/ci/**"
+      - ".github/workflows/native-product-preview.yml"
+      - ".github/workflows/native-product.yml"
       - ".github/workflows/preview.yml"
       - Cargo.lock
       - Cargo.toml
@@ -123,6 +125,7 @@ on:
       - "crates/velnor-workflow/examples/**"
       - "crates/velnor-workflow/src/**"
       - "crates/velnor-workflow/src/runtime.rs"
+      - "crates/velnor-workflow/src/s2/primitives/native_product.rs"
       - "crates/velnor-workflow/templates/**"
       - "crates/velnor-workflow/templates/release-package-signer.yml"
       - "crates/velnor-workflow/tests/**"
@@ -245,6 +248,13 @@ jobs:
             echo "commit=$commit"
             echo "short_commit=$short_commit"
           } >> "$GITHUB_OUTPUT"
+
+  native-product-build:
+    name: Build source-bound native preview product
+    needs: [identity]
+    uses: ./.github/workflows/native-product-preview.yml
+    permissions:
+      contents: read
 
   guest-payload:
     name: Guest payload ${{ matrix.arch }}
@@ -914,7 +924,7 @@ jobs:
       source-ref: refs/heads/main
 
   publish:
-    needs: [identity, debian, sign-deb]
+    needs: [identity, debian, sign-deb, native-product-build]
     name: Replace the rolling preview release
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     timeout-minutes: 20
@@ -937,6 +947,68 @@ jobs:
         with:
           name: preview-metadata
           path: preview-metadata
+      - name: Checkout source-bound native product contract
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Download source-bound native product preview builds
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: native-product-*
+          path: native-product
+          merge-multiple: true
+      - name: Verify source-bound native product preview handoff
+        run: |
+          set -euo pipefail
+          source_contract=".github/ci/native-product-preview-contract.json"
+          test -f "$source_contract" && test ! -L "$source_contract" || { echo '::error::source native product preview contract is missing or linked' >&2; exit 1; }
+          shopt -s nullglob
+          contracts=(native-product/product-contract-*.json)
+          test "${#contracts[@]}" -eq 4 || { echo '::error::native product preview requires four target contracts' >&2; exit 1; }
+          for candidate in "${contracts[@]}"; do
+            test -f "$candidate" && test ! -L "$candidate" || { echo "::error::native product preview contract is missing or linked: $candidate" >&2; exit 1; }
+            case "${candidate#native-product/}" in product-contract-*.json) ;; *) echo "::error::native product preview contract name is unsafe: $candidate" >&2; exit 1 ;; esac
+          done
+          contract="${contracts[0]}"
+          for candidate in "${contracts[@]}"; do cmp -- "$contract" "$candidate" || { echo '::error::native product preview contracts disagree' >&2; exit 1; }; done
+          jq -e --slurpfile source "$source_contract" '
+            .schema == $source[0].schema and
+            .product_id == $source[0].product_id and
+            .channel == $source[0].channel and
+            .manifest_schema == $source[0].manifest_schema and
+            .archive_component == $source[0].archive_component and
+            .archive_identity_schema == $source[0].archive_identity_schema and
+            .archive_manifest_schema == $source[0].archive_manifest_schema and
+            .targets == $source[0].targets and
+            .blocked_targets == $source[0].blocked_targets and
+            (.components | map({name,crate,binary,feature,identity,targets}) | sort_by(.name)) ==
+            ($source[0].components | map({name,crate,binary,feature,identity,targets}) | sort_by(.name))
+          ' "$contract" >/dev/null || { echo '::error::native product preview contract differs from source configuration' >&2; exit 1; }
+          blocked_targets="$(jq -c '.blocked_targets // []' "$contract")"
+          [ "$blocked_targets" = '[]' ] || { echo '::error::native product preview has blocked targets; publication is blocked' >&2; exit 1; }
+          expected_targets="$(jq -c '.targets | sort' "$contract")"
+          : > native-product-preview-targets.txt
+          while IFS= read -r target; do
+            case "$target" in ''|*[!a-z0-9._-]*) echo "::error::unsafe native product preview target: $target" >&2; exit 1 ;; esac
+            component_file="native-product/components-$target.jsonl"
+            artifact_file="native-product/artifacts-$target.jsonl"
+            test -f "$component_file" && test ! -L "$component_file" || { echo "::error::missing native product preview components: $target" >&2; exit 1; }
+            test -f "$artifact_file" && test ! -L "$artifact_file" || { echo "::error::missing native product preview artifacts: $target" >&2; exit 1; }
+            jq -e -s --arg target "$target" --slurpfile expected "$contract" '
+              (map({name,crate,binary,version,feature,identity,target}) | sort_by(.name)) ==
+              ($expected[0].components | map(. + {target:$target}) | map({name,crate,binary,version,feature,identity,target}) | sort_by(.name)) and
+              all(.[]; (keys | sort) == ["binary","crate","feature","identity","name","target","version"])
+            ' "$component_file" >/dev/null || { echo "::error::native product preview component rows differ for $target" >&2; exit 1; }
+            jq -e -s --arg target "$target" --slurpfile expected "$contract" '
+              (map(.name) | sort) == ($expected[0].components | map(.binary + "-" + $target) | sort) and
+              all(.[]; (keys | sort) == ["kind","name","sha256","size","target"] and .target == $target and .kind == "binary" and (.sha256 | test("^[0-9a-f]{64}$")) and (.size | numbers and . > 0))
+            ' "$artifact_file" >/dev/null || { echo "::error::native product preview artifact rows differ for $target" >&2; exit 1; }
+            printf '%s\n' "$target" >> native-product-preview-targets.txt
+          done < <(jq -r '.[]' <<<"$expected_targets")
+          actual_targets="$(jq -Rsc 'split("\n") | map(select(length > 0)) | sort' native-product-preview-targets.txt)"
+          [ "$actual_targets" = "$expected_targets" ] || { echo '::error::native product preview target handoff is incomplete' >&2; exit 1; }
       - name: Assemble independent checksums
         run: |
           set -euo pipefail
