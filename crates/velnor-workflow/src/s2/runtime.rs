@@ -4280,7 +4280,7 @@ pub(crate) fn valid_registry_host(value: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::error::Error;
 
     use super::*;
@@ -4321,7 +4321,7 @@ mod tests {
 
     /// A throwaway digest directory: the only way to feed `verify-digests`
     /// a real artifact set.
-    fn digest_fixture(name: &str) -> PathBuf {
+    pub(crate) fn digest_fixture(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-digests-{name}-{}",
             crate::unique_suffix()

@@ -8084,11 +8084,13 @@ mod tests {
     }
 
     #[test]
-    fn root_and_s2_unique_suffix_calls_are_distinct() {
-        let root_suffix = crate::unique_suffix();
-        let s2_suffix = crate::unique_suffix();
+    fn legacy_and_schema_two_fixture_paths_are_distinct() {
+        let legacy = crate::runtime::tests::digest_fixture("cross-module");
+        let schema_two = crate::s2::runtime::tests::digest_fixture("cross-module");
 
-        assert_ne!(root_suffix, s2_suffix);
+        assert_ne!(legacy, schema_two);
+        let _ = fs::remove_dir_all(legacy);
+        let _ = fs::remove_dir_all(schema_two);
     }
 
     #[expect(
