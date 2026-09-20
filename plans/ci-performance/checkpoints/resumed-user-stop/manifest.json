@@ -1,0 +1,18 @@
+[
+  {
+    "file": "velnor-parser-8202-ajyeqX.tar.gz",
+    "source": "/tmp/velnor-parser-8202-ajyeqX",
+    "sha256": "14b4b9dd3a9ceb3a9d1cc49ef6abf8b95f4dee507b5c3df2f6d3152cc4255535",
+    "status": "interrupted; unvalidated"
+  },
+  {
+    "file": "velnor-parser-8202-jbz9Lk.tar.gz",
+    "source": "/tmp/velnor-parser-8202-jbz9Lk",
+    "sha256": "67d593853be6561c9ced7380339975cfc7d861b6b6e6db72d052d9cb831e2496",
+    "status": "interrupted; unvalidated"
+  },
+  {
+    "file": "reports-and-probes.tar.gz",
+    "sha256": "c361545e2b91ab8dbd17bfb64137784b7291f8b7f9e0d9e1b9757c9de3418f5a"
+  }
+]
