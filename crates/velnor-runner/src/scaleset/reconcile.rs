@@ -867,7 +867,13 @@ mod tests {
             )
             .unwrap();
         batches
-            .record_intended("acq-owned", 7, &[43], &[holder.clone()], generation)
+            .record_intended(
+                "acq-owned",
+                7,
+                &[43],
+                std::slice::from_ref(&holder),
+                generation,
+            )
             .unwrap();
         batches.resolve("acq-owned", true).unwrap();
 
