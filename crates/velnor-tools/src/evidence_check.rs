@@ -2573,14 +2573,15 @@ fn check_run_url_matches_provider(
     value: &str,
     repository: &str,
     provider: &G0CheckProvider,
-    workflow_run_id: u64,
     check_run_id: u64,
 ) -> bool {
     let Ok(url) = Url::parse(value) else {
         return false;
     };
     let expected_path = match provider {
-        G0CheckProvider::GithubActions => {
+        G0CheckProvider::GithubActions {
+            workflow_run_id, ..
+        } => {
             format!("/{repository}/actions/runs/{workflow_run_id}/job/{check_run_id}")
         }
         G0CheckProvider::ExternalApp => format!("/{repository}/runs/{check_run_id}"),
@@ -3438,10 +3439,17 @@ fn check_g0_artifact_observations(
     let mut artifact_names = BTreeSet::new();
     let mut known_run_bindings = BTreeMap::<u64, BTreeSet<(u32, String)>>::new();
     for check in context.main_checks {
-        known_run_bindings
-            .entry(check.workflow_run_id)
-            .or_default()
-            .insert((check.run_attempt, check.source_sha.clone()));
+        if let G0CheckProvider::GithubActions {
+            workflow_run_id,
+            run_attempt,
+            ..
+        } = &check.provider
+        {
+            known_run_bindings
+                .entry(*workflow_run_id)
+                .or_default()
+                .insert((*run_attempt, check.source_sha.clone()));
+        }
     }
     let mut known_source_shas = BTreeSet::from([context.default_branch_sha.to_owned()]);
     for pr in context.open_prs {
@@ -3452,10 +3460,17 @@ fn check_g0_artifact_observations(
             known_source_shas.insert(merge_group_sha.clone());
         }
         for check in &pr.required_check_producers {
-            known_run_bindings
-                .entry(check.workflow_run_id)
-                .or_default()
-                .insert((check.run_attempt, check.source_sha.clone()));
+            if let G0CheckProvider::GithubActions {
+                workflow_run_id,
+                run_attempt,
+                ..
+            } = &check.provider
+            {
+                known_run_bindings
+                    .entry(*workflow_run_id)
+                    .or_default()
+                    .insert((*run_attempt, check.source_sha.clone()));
+            }
         }
     }
 
@@ -3715,6 +3730,62 @@ struct G0CheckExpectation<'a> {
     raw_ids: &'a BTreeSet<String>,
 }
 
+fn g0_check_provider_valid(check: &G0CheckProducer, repository: &str) -> bool {
+    if check.app_slug.trim().is_empty() {
+        return false;
+    }
+    match &check.provider {
+        G0CheckProvider::ExternalApp => {
+            check.app_slug != "github-actions"
+                && check_run_url_matches_provider(
+                    &check.html_url,
+                    repository,
+                    &check.provider,
+                    check.check_run_id,
+                )
+        }
+        G0CheckProvider::GithubActions {
+            workflow_run_id,
+            run_attempt,
+            job_id,
+            job_run_id,
+            job_run_attempt,
+            job_check_run_id,
+            job_source_sha,
+            job_html_url,
+        } => {
+            check.app_slug == "github-actions"
+                && *workflow_run_id != 0
+                && *run_attempt != 0
+                && *job_id != 0
+                && *job_run_id == *workflow_run_id
+                && *job_run_attempt == *run_attempt
+                && *job_check_run_id == check.check_run_id
+                && valid_sha(job_source_sha)
+                && *job_source_sha == check.source_sha
+                && job_url_matches_repository(job_html_url, repository, *workflow_run_id, *job_id)
+                && check_run_url_matches_provider(
+                    &check.html_url,
+                    repository,
+                    &check.provider,
+                    check.check_run_id,
+                )
+        }
+    }
+}
+
+fn g0_check_job_key(check: &G0CheckProducer) -> Option<(u64, u32, u64)> {
+    match &check.provider {
+        G0CheckProvider::GithubActions {
+            workflow_run_id,
+            run_attempt,
+            job_id,
+            ..
+        } => Some((*workflow_run_id, *run_attempt, *job_id)),
+        G0CheckProvider::ExternalApp => None,
+    }
+}
+
 fn check_g0_check_producers(
     repository: &str,
     checks: &[G0CheckProducer],
@@ -3726,9 +3797,10 @@ fn check_g0_check_producers(
     let mut producer_jobs = BTreeSet::new();
     for check in checks {
         let key = (check.context.clone(), check.app_id.clone());
+        let job_key = g0_check_job_key(check);
         if !seen.insert(key.clone())
             || !check_run_ids.insert(check.check_run_id)
-            || !producer_jobs.insert((check.workflow_run_id, check.run_attempt, check.job_id))
+            || job_key.is_some_and(|key| !producer_jobs.insert(key))
         {
             finding(
                 findings,
@@ -3741,17 +3813,9 @@ fn check_g0_check_producers(
         if check.context.trim().is_empty()
             || check.app_id.trim().is_empty()
             || !g0_valid_app_id(&check.app_id)
-            || check.app_slug.trim().is_empty()
+            || check.api != G0ApiKind::Rest
             || check.check_suite_id == 0
             || check.check_run_id == 0
-            || check.workflow_run_id == 0
-            || check.run_attempt == 0
-            || check.job_id == 0
-            || check.job_run_id != check.workflow_run_id
-            || check.job_run_attempt != check.run_attempt
-            || check.job_check_run_id != check.check_run_id
-            || !valid_sha(&check.job_source_sha)
-            || check.job_source_sha != check.source_sha
             || !valid_sha(&check.source_sha)
             || check.source_sha != expectation.source_sha
             || !valid_sha(&check.actual_checkout_sha)
@@ -3759,30 +3823,14 @@ fn check_g0_check_producers(
             || check.event != expectation.event
             || check.status != "completed"
             || check.conclusion != "success"
-            || !job_url_matches_repository(
-                &check.job_html_url,
-                repository,
-                check.workflow_run_id,
-                check.job_id,
-            )
-            || !check_run_url_matches_provider(
-                &check.html_url,
-                repository,
-                &check.provider,
-                check.workflow_run_id,
-                check.check_run_id,
-            )
-            || match check.provider {
-                G0CheckProvider::GithubActions => check.app_slug != "github-actions",
-                G0CheckProvider::ExternalApp => check.app_slug == "github-actions",
-            }
+            || !g0_check_provider_valid(check, repository)
         {
             finding(
                 findings,
                 "g0-check-producer",
                 repository,
                 "check_producers",
-            "check producer must bind captured App/provider, check/run/job identities, current source SHA, event, successful status/conclusion, and provider html_url",
+            "check producer must bind captured App/provider, provider-specific identities, current source SHA, event, successful status/conclusion, and provider html_url",
         );
         }
         if !expectation.contexts.contains(&key) {
@@ -3827,30 +3875,50 @@ fn check_g0_main_checks_against_snapshot(
     findings: &mut Vec<Finding>,
 ) {
     for check in checks {
-        let matched = snapshot.main_executions.iter().any(|execution| {
-            execution.run_id == check.workflow_run_id
-                && execution.run_attempt == check.run_attempt
-                && execution.trigger_source_sha == check.source_sha
-                && execution.actual_checkout_sha == check.actual_checkout_sha
-                && execution.event == check.event
-                && execution.required_checks.iter().any(|observed| {
-                    observed.context == check.context
-                        && observed.app_id == check.app_id
-                        && observed.run_id == check.workflow_run_id
-                        && observed.job_id == check.job_id.to_string()
-                        && observed.event == check.event
-                        && observed.status == check.status
-                        && observed.conclusion == check.conclusion
-                        && observed.source_url == check.html_url
-                })
-        });
+        let matched = match &check.provider {
+            G0CheckProvider::GithubActions {
+                workflow_run_id,
+                run_attempt,
+                job_id,
+                ..
+            } => snapshot.main_executions.iter().any(|execution| {
+                execution.run_id == *workflow_run_id
+                    && execution.run_attempt == *run_attempt
+                    && execution.trigger_source_sha == check.source_sha
+                    && execution.actual_checkout_sha == check.actual_checkout_sha
+                    && execution.event == check.event
+                    && execution.required_checks.iter().any(|observed| {
+                        observed.context == check.context
+                            && observed.app_id == check.app_id
+                            && observed.run_id == *workflow_run_id
+                            && observed.job_id == job_id.to_string()
+                            && observed.event == check.event
+                            && observed.status == check.status
+                            && observed.conclusion == check.conclusion
+                            && observed.source_url == check.html_url
+                    })
+            }),
+            G0CheckProvider::ExternalApp => snapshot.main_executions.iter().any(|execution| {
+                execution.trigger_source_sha == check.source_sha
+                    && execution.actual_checkout_sha == check.actual_checkout_sha
+                    && execution.event == check.event
+                    && execution.required_checks.iter().any(|observed| {
+                        observed.context == check.context
+                            && observed.app_id == check.app_id
+                            && observed.event == check.event
+                            && observed.status == check.status
+                            && observed.conclusion == check.conclusion
+                            && observed.source_url == check.html_url
+                    })
+            }),
+        };
         if !matched {
             finding(
                 findings,
                 "g0-check-snapshot-mismatch",
                 repository,
                 "repositories.main_checks",
-                "collector check producer does not match an independently observed main check/run/job tuple",
+                "collector check producer does not match an independently observed main check tuple",
             );
         }
     }
@@ -3916,7 +3984,11 @@ fn check_g0_pull_request(
         findings,
     );
     let mut binding_run_ids = BTreeSet::new();
-    if pr.workflow_bindings.is_empty() {
+    let requires_workflow_binding = pr
+        .required_check_producers
+        .iter()
+        .any(|check| matches!(&check.provider, G0CheckProvider::GithubActions { .. }));
+    if requires_workflow_binding && pr.workflow_bindings.is_empty() {
         finding(
             findings,
             "g0-pr-workflow-binding",
@@ -3975,9 +4047,10 @@ fn check_g0_pull_request(
     let mut producer_jobs = BTreeSet::new();
     for check in &pr.required_check_producers {
         let key = (check.context.clone(), check.app_id.clone());
+        let job_key = g0_check_job_key(check);
         if !seen_checks.insert(key.clone())
             || !check_run_ids.insert(check.check_run_id)
-            || !producer_jobs.insert((check.workflow_run_id, check.run_attempt, check.job_id))
+            || job_key.is_some_and(|key| !producer_jobs.insert(key))
             || !expected_contexts.contains(&key)
         {
             finding(
@@ -3990,15 +4063,7 @@ fn check_g0_pull_request(
         }
         if check.check_suite_id == 0
             || check.check_run_id == 0
-            || check.workflow_run_id == 0
-            || check.run_attempt == 0
-            || check.job_id == 0
-            || check.job_run_id != check.workflow_run_id
-            || check.job_run_attempt != check.run_attempt
-            || check.job_check_run_id != check.check_run_id
-            || !valid_sha(&check.job_source_sha)
-            || check.job_source_sha != check.source_sha
-            || check.app_slug.trim().is_empty()
+            || check.api != G0ApiKind::Rest
             || !g0_valid_app_id(&check.app_id)
             || !valid_sha(&check.source_sha)
             || check.source_sha != pr.head_sha
@@ -4007,35 +4072,24 @@ fn check_g0_pull_request(
             || check.event != "pull_request"
             || check.status != "completed"
             || check.conclusion != "success"
-            || !job_url_matches_repository(
-                &check.job_html_url,
-                repository,
-                check.workflow_run_id,
-                check.job_id,
-            )
-            || !check_run_url_matches_provider(
-                &check.html_url,
-                repository,
-                &check.provider,
-                check.workflow_run_id,
-                check.check_run_id,
-            )
-            || match check.provider {
-                G0CheckProvider::GithubActions => check.app_slug != "github-actions",
-                G0CheckProvider::ExternalApp => check.app_slug == "github-actions",
+            || !g0_check_provider_valid(check, repository)
+            || !match &check.provider {
+                G0CheckProvider::GithubActions {
+                    workflow_run_id, ..
+                } => pr.workflow_bindings.iter().any(|binding| {
+                    binding.run_ids.contains(workflow_run_id)
+                        && binding.event == check.event
+                        && binding.source_sha == check.source_sha
+                }),
+                G0CheckProvider::ExternalApp => true,
             }
-            || !pr.workflow_bindings.iter().any(|binding| {
-                binding.run_ids.contains(&check.workflow_run_id)
-                    && binding.event == check.event
-                    && binding.source_sha == check.source_sha
-            })
         {
             finding(
                 findings,
                 "g0-pr-check-producer",
                 repository,
                 "open_prs.required_check_producers",
-            "PR check producer must bind successful API status, source/event, workflow run/job, provider html_url, and App identity",
+            "PR check producer must bind successful API status, source/event, provider-specific identities, html_url, and App identity",
         );
         }
         check_g0_raw_refs(
@@ -4127,30 +4181,52 @@ fn check_g0_pull_request(
                 );
             }
             for check in &pr.required_check_producers {
-                let matched = snapshot_pr.executions.iter().any(|execution| {
-                    execution.run_id == check.workflow_run_id
-                        && execution.run_attempt == check.run_attempt
-                        && execution.event == check.event
-                        && execution.trigger_source_sha == check.source_sha
-                        && execution.actual_checkout_sha == check.actual_checkout_sha
-                        && execution.required_checks.iter().any(|observed| {
-                            observed.context == check.context
-                                && observed.app_id == check.app_id
-                                && observed.job_id == check.job_id.to_string()
-                                && observed.run_id == check.workflow_run_id
-                                && observed.status == check.status
-                                && observed.conclusion == check.conclusion
-                                && observed.source_url == check.html_url
-                                && observed.event == check.event
+                let matched = match &check.provider {
+                    G0CheckProvider::GithubActions {
+                        workflow_run_id,
+                        run_attempt,
+                        job_id,
+                        ..
+                    } => snapshot_pr.executions.iter().any(|execution| {
+                        execution.run_id == *workflow_run_id
+                            && execution.run_attempt == *run_attempt
+                            && execution.event == check.event
+                            && execution.trigger_source_sha == check.source_sha
+                            && execution.actual_checkout_sha == check.actual_checkout_sha
+                            && execution.required_checks.iter().any(|observed| {
+                                observed.context == check.context
+                                    && observed.app_id == check.app_id
+                                    && observed.job_id == job_id.to_string()
+                                    && observed.run_id == *workflow_run_id
+                                    && observed.status == check.status
+                                    && observed.conclusion == check.conclusion
+                                    && observed.source_url == check.html_url
+                                    && observed.event == check.event
+                            })
+                    }),
+                    G0CheckProvider::ExternalApp => {
+                        snapshot_pr.executions.iter().any(|execution| {
+                            execution.trigger_source_sha == check.source_sha
+                                && execution.actual_checkout_sha == check.actual_checkout_sha
+                                && execution.event == check.event
+                                && execution.required_checks.iter().any(|observed| {
+                                    observed.context == check.context
+                                        && observed.app_id == check.app_id
+                                        && observed.status == check.status
+                                        && observed.conclusion == check.conclusion
+                                        && observed.source_url == check.html_url
+                                        && observed.event == check.event
+                                })
                         })
-                });
+                    }
+                };
                 if !matched {
                     finding(
                         findings,
                         "g0-pr-check-snapshot-mismatch",
                         repository,
                         "open_prs.required_check_producers",
-                        "PR check producer does not match an independently observed run/check/job tuple",
+                        "PR check producer does not match an independently observed provider check tuple",
                     );
                 }
             }
@@ -7869,36 +7945,46 @@ mod tests {
             let repository_url = format!("https://github.com/{repository}");
             let rules_url = format!("{repository_url}/settings/rules");
             let workflow_url = format!("{repository_url}/{workflow_url_suffix}");
-            // Keep one real external-App shape in the positive fixture while
-            // exercising the captured GitHub Actions shape for the rest.
-            let provider = if index == 0 {
+            // Keep one captured external-App shape in the PR fixture while
+            // exercising the captured GitHub Actions shape for main and the
+            // remaining PRs.
+            let main_provider = G0CheckProvider::GithubActions {
+                workflow_run_id: main_run_id,
+                run_attempt: 1,
+                job_id: main_job_id,
+                job_run_id: main_run_id,
+                job_run_attempt: 1,
+                job_check_run_id: main_check_run_id,
+                job_source_sha: source_sha.clone(),
+                job_html_url: format!("{repository_url}/runs/{main_run_id}/jobs/{main_job_id}"),
+            };
+            let pr_provider = if index < 2 {
                 G0CheckProvider::ExternalApp
             } else {
-                G0CheckProvider::GithubActions
+                G0CheckProvider::GithubActions {
+                    workflow_run_id: pr_run_id,
+                    run_attempt: 1,
+                    job_id: pr_job_id,
+                    job_run_id: pr_run_id,
+                    job_run_attempt: 1,
+                    job_check_run_id: pr_check_run_id,
+                    job_source_sha: head_sha.clone(),
+                    job_html_url: format!("{repository_url}/runs/{pr_run_id}/jobs/{pr_job_id}"),
+                }
             };
-            let app_slug = if index == 0 {
-                "dco-2"
+            let main_app_slug = "github-actions";
+            let pr_app_slug = match index {
+                0 => "dco-2",
+                1 => "sonarcloud",
+                _ => "github-actions",
+            };
+            let main_check_url =
+                format!("{repository_url}/actions/runs/{main_run_id}/job/{main_check_run_id}");
+            let pr_check_url = if index < 2 {
+                format!("{repository_url}/runs/{pr_check_run_id}")
             } else {
-                "github-actions"
+                format!("{repository_url}/actions/runs/{pr_run_id}/job/{pr_check_run_id}")
             };
-            let main_check_url = match provider {
-                G0CheckProvider::GithubActions => {
-                    format!("{repository_url}/actions/runs/{main_run_id}/job/{main_check_run_id}")
-                }
-                G0CheckProvider::ExternalApp => {
-                    format!("{repository_url}/runs/{main_check_run_id}")
-                }
-            };
-            let pr_check_url = match provider {
-                G0CheckProvider::GithubActions => {
-                    format!("{repository_url}/actions/runs/{pr_run_id}/job/{pr_check_run_id}")
-                }
-                G0CheckProvider::ExternalApp => {
-                    format!("{repository_url}/runs/{pr_check_run_id}")
-                }
-            };
-            let main_job_url = format!("{repository_url}/runs/{main_run_id}/jobs/{main_job_id}");
-            let pr_job_url = format!("{repository_url}/runs/{pr_run_id}/jobs/{pr_job_id}");
             let main_job_id_string = main_job_id.to_string();
             let pr_job_id_string = pr_job_id.to_string();
             let required_context = RequiredContext {
@@ -8113,18 +8199,11 @@ mod tests {
             let main_check_producer = G0CheckProducer {
                 context: "ci".to_owned(),
                 app_id: "123".to_owned(),
-                provider,
-                app_slug: app_slug.to_owned(),
+                app_slug: main_app_slug.to_owned(),
+                provider: main_provider,
+                api: G0ApiKind::Rest,
                 check_suite_id: main_check_suite_id,
                 check_run_id: main_check_run_id,
-                workflow_run_id: main_run_id,
-                run_attempt: 1,
-                job_id: main_job_id,
-                job_run_id: main_run_id,
-                job_run_attempt: 1,
-                job_check_run_id: main_check_run_id,
-                job_source_sha: source_sha.clone(),
-                job_html_url: main_job_url,
                 source_sha: source_sha.clone(),
                 actual_checkout_sha: source_sha.clone(),
                 event: "push".to_owned(),
@@ -8136,18 +8215,11 @@ mod tests {
             let pr_check_producer = G0CheckProducer {
                 context: "ci".to_owned(),
                 app_id: "123".to_owned(),
-                provider,
-                app_slug: app_slug.to_owned(),
+                app_slug: pr_app_slug.to_owned(),
+                provider: pr_provider,
+                api: G0ApiKind::Rest,
                 check_suite_id: pr_check_suite_id,
                 check_run_id: pr_check_run_id,
-                workflow_run_id: pr_run_id,
-                run_attempt: 1,
-                job_id: pr_job_id,
-                job_run_id: pr_run_id,
-                job_run_attempt: 1,
-                job_check_run_id: pr_check_run_id,
-                job_source_sha: head_sha.clone(),
-                job_html_url: pr_job_url,
                 source_sha: head_sha.clone(),
                 actual_checkout_sha: merge_sha.clone(),
                 event: "pull_request".to_owned(),
@@ -8477,9 +8549,16 @@ mod tests {
 
         let mut wrong_check_url = complete_g0_fixture().2;
         let check = &mut wrong_check_url.collector_snapshot.repositories[0].main_checks[0];
+        let workflow_run_id = match &check.provider {
+            G0CheckProvider::GithubActions {
+                workflow_run_id, ..
+            } => *workflow_run_id,
+            G0CheckProvider::ExternalApp => panic!("fixture main check must be Actions"),
+        };
         check.html_url = format!(
-            "https://github.com/{}/runs/{}",
+            "https://github.com/{}/actions/runs/{}/job/{}",
             CANONICAL_REPOSITORIES[0],
+            workflow_run_id,
             check.check_run_id + 1
         );
         refresh_typed_inventory_bytes(&mut wrong_check_url);
@@ -8503,10 +8582,16 @@ mod tests {
 
         let mut wrong_actions_run = inventory.clone();
         let action_check = &mut wrong_actions_run.collector_snapshot.repositories[1].main_checks[0];
+        let action_run_id = match &action_check.provider {
+            G0CheckProvider::GithubActions {
+                workflow_run_id, ..
+            } => *workflow_run_id,
+            G0CheckProvider::ExternalApp => panic!("fixture check must be Actions"),
+        };
         action_check.html_url = format!(
             "https://github.com/{}/actions/runs/{}/job/{}",
             CANONICAL_REPOSITORIES[1],
-            action_check.workflow_run_id + 1,
+            action_run_id + 1,
             action_check.check_run_id
         );
         assert_check_url_rejected!(wrong_actions_run);
@@ -8514,22 +8599,38 @@ mod tests {
         let mut wrong_actions_check = inventory.clone();
         let action_check =
             &mut wrong_actions_check.collector_snapshot.repositories[1].main_checks[0];
+        let action_run_id = match &action_check.provider {
+            G0CheckProvider::GithubActions {
+                workflow_run_id, ..
+            } => *workflow_run_id,
+            G0CheckProvider::ExternalApp => panic!("fixture check must be Actions"),
+        };
         action_check.html_url = format!(
             "https://github.com/{}/actions/runs/{}/job/{}",
             CANONICAL_REPOSITORIES[1],
-            action_check.workflow_run_id,
+            action_run_id,
             action_check.check_run_id + 1
         );
         assert_check_url_rejected!(wrong_actions_check);
 
         let mut wrong_actions_job = inventory.clone();
         let action_check = &mut wrong_actions_job.collector_snapshot.repositories[1].main_checks[0];
-        action_check.job_html_url = format!(
-            "https://github.com/{}/runs/{}/jobs/{}",
-            CANONICAL_REPOSITORIES[1],
-            action_check.workflow_run_id,
-            action_check.job_id + 1
-        );
+        if let G0CheckProvider::GithubActions {
+            workflow_run_id,
+            job_id,
+            job_html_url,
+            ..
+        } = &mut action_check.provider
+        {
+            *job_html_url = format!(
+                "https://github.com/{}/runs/{}/jobs/{}",
+                CANONICAL_REPOSITORIES[1],
+                *workflow_run_id,
+                *job_id + 1
+            );
+        } else {
+            panic!("fixture check must be Actions");
+        }
         assert_check_url_rejected!(wrong_actions_job);
 
         let mut foreign_check_host = inventory.clone();
@@ -8550,6 +8651,31 @@ mod tests {
         let external_check = &mut details_url.collector_snapshot.repositories[0].main_checks[0];
         external_check.html_url = "https://cncf.github.io/dco2".to_owned();
         assert_check_url_rejected!(details_url);
+
+        let mut external_missing_app = inventory.clone();
+        external_missing_app.collector_snapshot.repositories[0].open_prs[0]
+            .required_check_producers[0]
+            .app_slug
+            .clear();
+        assert_check_url_rejected!(external_missing_app);
+
+        let mut external_wrong_app = inventory.clone();
+        external_wrong_app.collector_snapshot.repositories[0].open_prs[0]
+            .required_check_producers[0]
+            .app_slug = "github-actions".to_owned();
+        assert_check_url_rejected!(external_wrong_app);
+
+        let mut external_wrong_source = inventory.clone();
+        external_wrong_source.collector_snapshot.repositories[0].open_prs[0]
+            .required_check_producers[0]
+            .source_sha = sha('d');
+        assert_check_url_rejected!(external_wrong_source);
+
+        let mut external_wrong_api = inventory.clone();
+        external_wrong_api.collector_snapshot.repositories[0].open_prs[0]
+            .required_check_producers[0]
+            .api = G0ApiKind::Graphql;
+        assert_check_url_rejected!(external_wrong_api);
 
         let mut wrong_artifact_attempt = inventory.clone();
         wrong_artifact_attempt.collector_snapshot.repositories[0].artifacts[0].run_attempt = 2;
@@ -9680,6 +9806,15 @@ mod tests {
         assert!(serde_json::from_value::<G0RequestRecord>(request.clone()).is_ok());
         request["caller_claimed_success"] = json!(true);
         assert!(serde_json::from_value::<G0RequestRecord>(request).is_err());
+    }
+
+    #[test]
+    fn g0_provider_variant_rejects_unknown_fields() {
+        let (_, _, inventory) = complete_g0_fixture();
+        let mut value = serde_json::to_value(&inventory).unwrap();
+        value["collector_snapshot"]["repositories"][1]["main_checks"][0]["provider"]
+            ["github_actions"]["details_url"] = json!("https://example.invalid");
+        assert!(serde_json::from_value::<G0InventoryEvidence>(value).is_err());
     }
 
     #[test]
