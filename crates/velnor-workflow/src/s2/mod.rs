@@ -5889,7 +5889,7 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
         "      contents: read\n"
     };
     let candidate_roles = if candidate_graph {
-        policy_candidate_role_jobs(&runner, revision, default_branch)
+        policy_candidate_role_jobs(runner, revision, default_branch)
     } else {
         String::new()
     };
