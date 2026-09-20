@@ -2122,6 +2122,7 @@ fn render_native_product_preview_publish_job(
     if sign {
         needs.push("sign-deb");
     }
+    needs.push("native-product-phase-gate");
     needs.push("native-product-build");
     needs.push("native-product-subject-plan");
     needs.push("sign-native-product");
@@ -2496,7 +2497,9 @@ fn render_native_product_preview_publish_job(
     .replace("__MANIFEST_SCHEMA__", &manifest_schema);
 
     let signer_steps = native_product_signer_record_steps(download);
-    if let Some(start) = output.find("      - name: Assemble canonical preview product manifest and archives\n") {
+    if let Some(start) =
+        output.find("      - name: Assemble canonical preview product manifest and archives\n")
+    {
         output.insert_str(start, &signer_steps);
     }
 
@@ -3581,6 +3584,8 @@ fn render_native_preview(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     jobs.push('\n');
     let native_product = native_product_preview_workflow_file(config);
     if let Some(file) = native_product {
+        jobs.push_str(render_native_product_phase_gate());
+        jobs.push('\n');
         jobs.push_str(&render_native_product_preview_build_job(config, file));
         jobs.push('\n');
         jobs.push_str(&render_native_product_subject_plan_job(
@@ -5502,6 +5507,15 @@ fn render_native_product_preview_build_job(_config: &ProjectConfig, file: &str) 
     )
 }
 
+/// Existing published product tags cannot silently skip the native build,
+/// signer, and product publisher DAG.  Until the immutable remote-product
+/// verifier is admitted as a separate read-only lane, fail the run explicitly
+/// after provider admission; draft candidates pass this gate and use the full
+/// build/sign/publish path below.
+fn render_native_product_phase_gate() -> &'static str {
+    "  native-product-phase-gate:\n    name: Require native product publication path\n    needs: [admit-product-release]\n    if: ${{ always() && needs.admit-product-release.result == 'success' }}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions:\n      contents: read\n    env:\n      PRODUCT_RELEASE_PHASE: ${{ needs.admit-product-release.outputs.phase }}\n    steps:\n      - name: Reject unverified existing product release\n        run: |\n          set -euo pipefail\n          case \"$PRODUCT_RELEASE_PHASE\" in\n            draft) ;;\n            published)\n              echo '::error::existing published native product requires the immutable read-only product verifier; refusing a skipped build/signer/publisher DAG' >&2\n              exit 1\n              ;;\n            *)\n              echo \"::error::provider admission returned unknown product phase: $PRODUCT_RELEASE_PHASE\" >&2\n              exit 1\n              ;;\n          esac\n"
+}
+
 /// Admit one provider release identity before any product bytes are built.
 /// This is an identity reservation/read boundary only: it creates at most one
 /// empty draft on a classified 404 and never uploads, flips, deletes, or
@@ -5586,6 +5600,9 @@ fn render_native_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         "build".to_owned(),
     ];
     if let Some(file) = native_product {
+        extra.push_str(render_native_product_phase_gate());
+        extra.push('\n');
+        publish_needs.push("native-product-phase-gate".to_owned());
         extra.push_str(&render_native_product_build_job(file));
         extra.push('\n');
         publish_needs.push("native-product-build".to_owned());
@@ -7621,6 +7638,13 @@ mod tests {
         assert!(build.contains("VELNOR_RELEASE_BUILD: \"1\""), "{build}");
         assert!(build.contains("--features release-build"), "{build}");
         let product_build = yaml_job(&workflow, "native-product-build");
+        let product_gate = yaml_job(&workflow, "native-product-phase-gate");
+        assert!(
+            product_gate.contains("Reject unverified existing product release")
+                && product_gate.contains("requires the immutable read-only product verifier")
+                && product_gate.contains("PRODUCT_RELEASE_PHASE"),
+            "published native product reruns must fail explicitly, never skip as success: {product_gate}"
+        );
         assert!(
             product_build.contains("uses: ./.github/workflows/native-product.yml"),
             "{product_build}"
@@ -7816,7 +7840,7 @@ mod tests {
         );
         assert!(
             publish.contains(
-                "needs: [admit-provider, admit-product-release, verify, build, native-product-build, native-product-subject-plan, sign-native-product, image, metadata, debian, sign-deb]"
+                "needs: [admit-provider, admit-product-release, verify, build, native-product-phase-gate, native-product-build, native-product-subject-plan, sign-native-product, image, metadata, debian, sign-deb]"
             ),
             "{publish}"
         );
@@ -10827,6 +10851,16 @@ JSON
         assert!(
             publish.contains("preview-${{ needs.identity.outputs.commit }}"),
             "{publish}"
+        );
+        let product_gate = yaml_job(&preview, "native-product-phase-gate");
+        assert!(
+            product_gate.contains("Reject unverified existing product release")
+                && product_gate.contains("requires the immutable read-only product verifier"),
+            "published native preview reruns must fail explicitly, never skip as success: {product_gate}"
+        );
+        assert!(
+            publish.contains("native-product-phase-gate"),
+            "preview product publication must depend on the explicit phase gate: {publish}"
         );
         assert!(
             publish.contains("native-product-subject-plan")
