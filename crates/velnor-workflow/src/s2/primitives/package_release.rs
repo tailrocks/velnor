@@ -2109,13 +2109,18 @@ gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$transacti
 export VELNOR_VERIFIED_PACKAGE_DIR="$transaction_dir/rolling-published"
 "#,
     );
+    // Run the verifier in a subshell. Its temporary-file EXIT trap must not
+    // replace the publication rollback/cleanup traps, and a verifier failure
+    // must return to the parent so the ERR trap can roll back mutations.
+    script.push_str("\n(\n  trap - ERR\n  trap - EXIT\n");
     script.push_str(verification.script);
+    script.push_str("\n)\n");
     script.push_str("\nfor payload in \\\n");
     script.push_str(payload_names);
     script.push_str("do\n  gh attestation verify \"$transaction_dir/rolling-published/$payload\" ");
     script.push_str(verification.attestation_flags);
     script.push_str(
-        "\ndone\n# Every rolling byte and attestation is verified. The lock is safe to release;\n# failures before this point intentionally retain it for manual recovery.\nclear_publication_lock_retain\n# cleanup_publication releases the exact lock only after rollback or successful completion.\n",
+        "\ndone\nif ! assert_rolling_ownership \"$owner_draft\" \"$EXPECTED_SOURCE_COMMIT\" \"$owner_name\" \"$owner_body\" \"$owner_source_commit\"; then\n  echo \"::error::rolling preview ownership changed before lock release; refusing to release the publication lock\" >&2\n  false\nfi\n# Every rolling byte, attestation, and final ownership check is verified. The\n# lock is safe to release; failures before this point retain it for recovery.\nclear_publication_lock_retain\n# cleanup_publication releases the exact lock only after rollback or successful completion.\n",
     );
     script
 }
@@ -2211,7 +2216,7 @@ immutable_publication_handoff=0
 cleanup_immutable_publication() {
   local status="$1"
   trap - EXIT
-  if [ "$publication_lock_acquired" = 1 ] && [ "$immutable_publication_mutated" = 0 ] && [ "$immutable_publication_handoff" = 0 ]; then
+  if [ "$publication_lock_acquired" = 1 ] && [ "$immutable_publication_mutated" = 0 ] && [ "$immutable_publication_handoff" = 0 ] && [ "$publication_lock_retain" = 0 ]; then
     if ! release_publication_lock; then
       status=1
     fi
@@ -3884,6 +3889,60 @@ gh() {{
         assert!(rolling.contains("cleanup_publication \"$?\""));
         assert!(rolling.contains("release_publication_lock"));
         assert!(rolling.contains("assert_publication_lock"));
+        assert!(rolling.contains("trap - ERR"));
+        assert!(rolling.contains("trap - EXIT"));
+        assert!(rolling.contains(
+            "clear_publication_lock_retain\n# cleanup_publication releases the exact lock"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rolling_verification_failure_preserves_publication_traps() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: r#"set -euo pipefail
+trap 'rm -f -- "$TEST_TMPDIR/verifier-temp"' EXIT
+: > "$TEST_TMPDIR/verifier-temp"
+exit 1
+"#,
+            attestation_flags: "",
+        };
+        let rolling = render_rolling_refresh_script("", "", "", &verification);
+        let start = rolling
+            .find("\n(\n  trap - ERR\n  trap - EXIT\n")
+            .expect("verification subshell");
+        let end = rolling
+            .find("\n)\n\nfor payload")
+            .expect("verification subshell end")
+            + 2;
+        let fragment = &rolling[start..end];
+        let root = std::env::temp_dir().join(format!(
+            "velnor-publication-verifier-traps-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create verifier trap fixture");
+        let script = format!(
+            r#"set -Eeuo pipefail
+rollback() {{ : > "$TEST_TMPDIR/rollback"; }}
+cleanup_publication() {{ : > "$TEST_TMPDIR/cleanup"; }}
+trap 'rollback "$?"' ERR
+trap 'cleanup_publication "$?"' EXIT
+{fragment}
+"#
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env("TEST_TMPDIR", &root)
+            .output()
+            .expect("run verifier trap fixture");
+        assert!(!output.status.success());
+        assert!(root.join("rollback").exists());
+        assert!(root.join("cleanup").exists());
+        assert!(!root.join("verifier-temp").exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
@@ -3906,6 +3965,7 @@ gh() {{
             .find("\nremote_tag_sha() {")
             .expect("lock helper boundary");
         let lock = &rolling_script[lock_start..lock_end];
+        assert!(rolling_script.contains("\n(\n  trap - ERR\n  trap - EXIT\n"));
         assert!(rolling_script.contains(
             "clear_publication_lock_retain\n# cleanup_publication releases the exact lock"
         ));
@@ -4012,7 +4072,7 @@ cleanup_publication 0
 
     #[cfg(unix)]
     #[test]
-    #[allow(clippy::uninlined_format_args)]
+    #[allow(clippy::too_many_lines, clippy::uninlined_format_args)]
     fn immutable_lock_handoff_retains_failed_mutation_and_exports_sha() {
         use std::process::Command;
 
@@ -4038,7 +4098,11 @@ cleanup_publication 0
             .expect("lock handoff export");
         let lock_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-        for (mode, expected_status) in [("failed-mutation", 1), ("handoff", 0)] {
+        for (mode, expected_status) in [
+            ("failed-mutation", 1),
+            ("prepublish-retain", 1),
+            ("handoff", 0),
+        ] {
             let root = std::env::temp_dir().join(format!(
                 "velnor-immutable-lock-{mode}-{}",
                 crate::unique_suffix()
@@ -4075,6 +4139,8 @@ publication_lock_acquired=1
 publication_lock_sha={lock_sha}
 if [ "$TEST_MODE" = failed-mutation ]; then
   immutable_publication_mutated=1
+elif [ "$TEST_MODE" = prepublish-retain ]; then
+  mark_publication_lock_retain
 else
   {handoff}
   immutable_publication_handoff=1
