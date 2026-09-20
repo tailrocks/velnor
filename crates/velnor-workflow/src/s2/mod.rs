@@ -8650,7 +8650,14 @@ fn write_reviewed_file(
     content: &str,
     expected: &FilePreimage,
 ) -> Result<FilePreimage, GeneratorError> {
-    write_reviewed_file_observed(path, relative, content, expected, |_| Ok(()))
+    write_reviewed_file_observed_with_capture(
+        path,
+        relative,
+        content,
+        expected,
+        |_| Ok(()),
+        capture_post_write_preimage,
+    )
 }
 
 fn capture_post_write_preimage(
@@ -8674,15 +8681,17 @@ fn capture_post_write_preimage(
     Ok(after)
 }
 
-fn write_reviewed_file_observed<F>(
+fn write_reviewed_file_observed_with_capture<F, C>(
     path: &Path,
     relative: &Path,
     content: &str,
     expected: &FilePreimage,
     before_replace: F,
+    capture_post_write: C,
 ) -> Result<FilePreimage, GeneratorError>
 where
     F: FnOnce(&Path) -> Result<(), GeneratorError>,
+    C: Fn(&Path, &Path, Option<&[u8]>) -> Result<FilePreimage, GeneratorError>,
 {
     let current = capture_file_preimage(path, relative)?;
     if &current != expected {
@@ -8715,7 +8724,7 @@ where
                     staged.display()
                 )));
             }
-            capture_post_write_preimage(path, relative, Some(content.as_bytes()))
+            capture_post_write(path, relative, Some(content.as_bytes()))
         }
         FilePreimage::Regular { .. } => {
             let (backup_dir, backup) = reserve_backup_path(path)?;
@@ -8766,7 +8775,7 @@ where
             // ownership-state update; a leftover backup remains recoverable.
             let _ = fs::remove_file(&backup);
             let _ = fs::remove_dir(&backup_dir);
-            capture_post_write_preimage(path, relative, Some(content.as_bytes()))
+            capture_post_write(path, relative, Some(content.as_bytes()))
         }
     }
 }
@@ -21087,6 +21096,108 @@ lockfile = true
     }
 
     #[test]
+    fn post_capture_failure_after_commit_preserves_recovery_journal() {
+        let root = temporary_repository("post-capture-failure-recovery");
+        let relative = PathBuf::from(".github/workflows/ci-pr.yml");
+        let initial = BTreeMap::from([(
+            relative.clone(),
+            format!("{GENERATED_HEADER}name: initial\n"),
+        )]);
+        must(
+            write_generated(&root, &initial, false, false, false),
+            "write initial generated layout",
+        );
+        let baseline = committed_test_baseline(&root);
+        let wanted = BTreeMap::from([(
+            relative.clone(),
+            format!("{GENERATED_HEADER}name: wanted\n"),
+        )]);
+        let plan = must(
+            plan_generated_write_with_baseline(
+                &root,
+                &wanted,
+                &GenerationInputs::parts(0, 0),
+                false,
+                Some(&baseline),
+            ),
+            "plan post-capture failure write",
+        );
+        let mut journal = must(
+            create_transaction_journal(&root, &wanted, &GenerationInputs::parts(0, 0), &plan),
+            "create post-capture failure journal",
+        );
+        let planned = must_some(
+            plan.files.iter().find(|file| file.path == relative),
+            "find reviewed target preimage",
+        );
+        let path = root.join(&relative);
+        let write_error = must_some(
+            write_reviewed_file_observed_with_capture(
+                &path,
+                &relative,
+                &wanted[&relative],
+                &planned.preimage,
+                |_| Ok(()),
+                |_, _, _| {
+                    Err(GeneratorError::partial_apply_recovery_required(
+                        "injected post-write preimage capture failure",
+                    ))
+                },
+            )
+            .err(),
+            "post-capture failure must be reported",
+        );
+        let error = must_some(
+            rollback_after_error(&root, &[], write_error).err(),
+            "partial recovery must preserve the journal",
+        );
+        assert!(error.requires_partial_recovery());
+        assert_eq!(
+            must(fs::read_to_string(&path), "read committed replacement"),
+            wanted[&relative]
+        );
+        assert!(transaction_path(&root).is_dir());
+        let backup_count = fs::read_dir(must_some(path.parent(), "workflow parent"))
+            .into_iter()
+            .flat_map(|entries| entries.filter_map(Result::ok))
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".velnor-workflow-backup-")
+            })
+            .count();
+        assert_eq!(
+            backup_count, 0,
+            "committed backup must not be mistaken for proof"
+        );
+
+        let unproven = must_some(
+            recover_pending_transaction(&root).err(),
+            "recovery must refuse without post-write identity progress",
+        );
+        assert!(unproven
+            .to_string()
+            .contains("cannot prove mutation identity"));
+        assert!(transaction_path(&root).is_dir());
+
+        must(
+            journal.record(&root, &relative),
+            "record observed post-write identity for recovery",
+        );
+        must(
+            recover_pending_transaction(&root),
+            "recover journal after identity is observed",
+        );
+        assert_eq!(
+            must(fs::read_to_string(&path), "read recovered preimage"),
+            initial[&relative]
+        );
+        assert!(!transaction_path(&root).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn reviewed_update_keeps_live_path_present_until_atomic_replace() {
         let root = temporary_repository("atomic-reviewed-replace");
         let relative = PathBuf::from(".github/workflows/ci-pr.yml");
@@ -21103,13 +21214,20 @@ lockfile = true
         let live_was_present = std::cell::Cell::new(false);
 
         must(
-            write_reviewed_file_observed(&path, &relative, "new bytes\n", &expected, |live| {
-                live_was_present.set(
-                    live.is_file()
-                        && fs::read_to_string(live).is_ok_and(|value| value == "old bytes\n"),
-                );
-                Ok(())
-            }),
+            write_reviewed_file_observed_with_capture(
+                &path,
+                &relative,
+                "new bytes\n",
+                &expected,
+                |live| {
+                    live_was_present.set(
+                        live.is_file()
+                            && fs::read_to_string(live).is_ok_and(|value| value == "old bytes\n"),
+                    );
+                    Ok(())
+                },
+                capture_post_write_preimage,
+            ),
             "atomically replace reviewed bytes",
         );
         assert!(live_was_present.get());
