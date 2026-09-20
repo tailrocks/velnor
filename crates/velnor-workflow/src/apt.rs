@@ -1638,6 +1638,24 @@ fn run_fixed(
     Ok(output.stdout)
 }
 
+/// Build the only `gpgv` command shape used for live APT proofs.  `gpgv`
+/// rejects `--no-default-keyring`; `--no-options` plus a fresh home and one
+/// explicit keyring gives the same isolation without relying on a `gpg`-only
+/// option.
+fn gpgv_argv(homedir: &str, keyring: &str, inputs: &[&str]) -> Vec<String> {
+    let mut args = vec![
+        "--status-fd".to_owned(),
+        "1".to_owned(),
+        "--no-options".to_owned(),
+        "--homedir".to_owned(),
+        homedir.to_owned(),
+        "--keyring".to_owned(),
+        keyring.to_owned(),
+    ];
+    args.extend(inputs.iter().map(|input| (*input).to_owned()));
+    args
+}
+
 /// Extract one VALIDSIG and bind its signing key to the configured primary.
 /// GnuPG reports the signing-subkey fingerprint first and the primary-key
 /// fingerprint last; accepting any valid signing subkey under the pinned
@@ -5254,6 +5272,12 @@ pub(crate) fn read_verified_live_publication(
     let arm64_bytes = read_regular_file(arm64_packages)?;
     let mut scratch_dirs = Vec::new();
     let result = (|| {
+        // `gpgv` does not implement `--no-default-keyring` (unlike `gpg`).
+        // Keep the trust boundary explicit with a fresh home, disable option
+        // files, and pass only the materialized keyring below.  This prevents
+        // removing the unsupported flag from silently admitting ambient keys.
+        let gpgv_homedir = scratch_dir("gpgv-homedir")?;
+        scratch_dirs.push(gpgv_homedir.clone());
         let (scratch, keyring_path) = materialize_verified_bytes(&keyring_bytes)?;
         scratch_dirs.push(scratch);
         let (scratch, publication_path) = materialize_verified_bytes(&publication_bytes)?;
@@ -5274,17 +5298,16 @@ pub(crate) fn read_verified_live_publication(
         let inrelease_name = inrelease_path
             .to_str()
             .ok_or_else(|| GeneratorError::usage("materialized InRelease path is not UTF-8"))?;
+        let gpgv_homedir_name = gpgv_homedir
+            .to_str()
+            .ok_or_else(|| GeneratorError::usage("materialized gpgv home is not UTF-8"))?;
         let signature_status = run_fixed(
             "gpgv",
-            &[
-                "--status-fd".to_owned(),
-                "1".to_owned(),
-                "--no-default-keyring".to_owned(),
-                "--keyring".to_owned(),
-                keyring_name.to_owned(),
-                signature_name.to_owned(),
-                publication_name.to_owned(),
-            ],
+            &gpgv_argv(
+                gpgv_homedir_name,
+                keyring_name,
+                &[signature_name, publication_name],
+            ),
             None,
             path_overlay,
         )?;
@@ -5295,14 +5318,7 @@ pub(crate) fn read_verified_live_publication(
         )?;
         let inrelease_status = run_fixed(
             "gpgv",
-            &[
-                "--status-fd".to_owned(),
-                "1".to_owned(),
-                "--no-default-keyring".to_owned(),
-                "--keyring".to_owned(),
-                keyring_name.to_owned(),
-                inrelease_name.to_owned(),
-            ],
+            &gpgv_argv(gpgv_homedir_name, keyring_name, &[inrelease_name]),
             None,
             path_overlay,
         )?;
@@ -8902,6 +8918,88 @@ mod tests {
             "reject non-UTF-8 signer status",
         );
         assert!(error.contains("not UTF-8"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gpgv_live_proofs_use_supported_isolated_command_for_both_inputs() {
+        let root = fixture_dir("gpgv-command");
+        let bin = root.join("bin");
+        must(std::fs::create_dir_all(&bin), "create gpgv stub bin");
+        let log = root.join("gpgv.log");
+        write_bytes(
+            &bin.join("gpgv"),
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nprintf '%s\\n' '[GNUPG:] VALIDSIG {FIXTURE_FPR} 20260920 1789883126 0 4 0 22 10 00 {FIXTURE_FPR}'\n",
+                log.display()
+            )
+            .as_bytes(),
+        );
+        make_executable(&bin.join("gpgv"));
+        let homedir = root.join("gpgv-home");
+        let keyring = root.join("keyring.gpg");
+        let signature = root.join("Release.gpg");
+        let publication = root.join("publication.json");
+        let inrelease = root.join("InRelease");
+        for path in [&homedir, &keyring, &signature, &publication, &inrelease] {
+            if path == &homedir {
+                must(std::fs::create_dir(path), "create gpgv home fixture");
+            } else {
+                write_bytes(path, b"fixture");
+            }
+        }
+        let homedir_name = must(homedir.to_str().ok_or("gpgv home utf8"), "gpgv home utf8");
+        let keyring_name = must(
+            keyring.to_str().ok_or("gpgv keyring utf8"),
+            "gpgv keyring utf8",
+        );
+        let signature_name = must(
+            signature.to_str().ok_or("gpgv signature utf8"),
+            "gpgv signature utf8",
+        );
+        let publication_name = must(
+            publication.to_str().ok_or("gpgv publication utf8"),
+            "gpgv publication utf8",
+        );
+        let inrelease_name = must(
+            inrelease.to_str().ok_or("gpgv InRelease utf8"),
+            "gpgv InRelease utf8",
+        );
+        must(
+            run_fixed(
+                "gpgv",
+                &gpgv_argv(
+                    homedir_name,
+                    keyring_name,
+                    &[signature_name, publication_name],
+                ),
+                None,
+                Some(&bin),
+            ),
+            "run detached publication gpgv proof",
+        );
+        must(
+            run_fixed(
+                "gpgv",
+                &gpgv_argv(homedir_name, keyring_name, &[inrelease_name]),
+                None,
+                Some(&bin),
+            ),
+            "run InRelease gpgv proof",
+        );
+        let log = must(std::fs::read_to_string(&log), "read gpgv command log");
+        assert_eq!(log.lines().count(), 2, "{log}");
+        assert!(
+            log.lines().all(|line| line.contains("--no-options")),
+            "{log}"
+        );
+        assert!(log.lines().all(|line| line.contains("--homedir")), "{log}");
+        assert!(log.lines().all(|line| line.contains("--keyring")), "{log}");
+        assert!(!log.contains("--no-default-keyring"), "{log}");
+        assert!(log.contains(signature_name), "{log}");
+        assert!(log.contains(publication_name), "{log}");
+        assert!(log.contains(inrelease_name), "{log}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
