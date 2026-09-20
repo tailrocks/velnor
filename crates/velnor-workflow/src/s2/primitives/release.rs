@@ -2321,7 +2321,7 @@ fn inject_native_preview_bindings(
             1,
         );
         let publish_gate = format!(
-            "    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' && (needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish') }}}}\n    timeout-minutes: 20\n",
+            "    if: ${{{{ github.ref == 'refs/heads/{}' && needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish' }}}}\n    timeout-minutes: 20\n",
             config.default_branch,
         );
         output = output.replacen(
@@ -2911,10 +2911,14 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         &publish_if,
         &format!(
             "    if: ${{{{ {} && ({publish_gate}) }}}}\n",
-            format!(
-                "github.event_name == 'push' && github.ref == 'refs/heads/{}'",
-                config.default_branch
-            ),
+            if has_producer_binding(release) {
+                format!("github.ref == 'refs/heads/{}'", config.default_branch)
+            } else {
+                format!(
+                    "github.event_name == 'push' && github.ref == 'refs/heads/{}'",
+                    config.default_branch
+                )
+            },
         ),
         1,
     );
@@ -9098,7 +9102,7 @@ cp "$record" "$out"
                 "    needs: [build, release-github-hosted-rust-example, release-github-self-hosted-rust-example, release-velnor-rust-example, publish-gate]\n"
             )
                 && publish.contains(
-                    "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish') }}\n"
+                    "    if: ${{ github.ref == 'refs/heads/main' && (needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish') }}\n"
                 ),
             "the rolling publish must admit only the gate's publish mode: {publish}"
         );
