@@ -128,14 +128,16 @@ pub(crate) fn parse_include_str_literals(source: &str) -> Result<Vec<String>, St
 #[derive(Default)]
 struct IncludeScanner {
     includes: Vec<IncludeString>,
+    aliases: BTreeSet<String>,
 }
 
 impl IncludeScanner {
     fn scan_stream(&mut self, stream: TokenStream) -> Result<(), String> {
         let tokens = stream.into_iter().collect::<Vec<_>>();
+        discover_include_aliases(&tokens, &mut self.aliases);
         let mut index = 0;
         while index < tokens.len() {
-            if let Some((macro_name, group)) = include_invocation(&tokens, index)? {
+            if let Some((macro_name, group)) = include_invocation(&tokens, index, &self.aliases)? {
                 let expression = parse_static_string_expression(group.stream(), macro_name)?;
                 if let Some(include) = IncludeString::from_static(expression) {
                     self.includes.push(include);
@@ -156,16 +158,18 @@ impl IncludeScanner {
     }
 }
 
-fn include_invocation(
-    tokens: &[TokenTree],
+fn include_invocation<'a>(
+    tokens: &'a [TokenTree],
     index: usize,
-) -> Result<Option<(&'static str, &proc_macro2::Group)>, String> {
+    aliases: &BTreeSet<String>,
+) -> Result<Option<(&'static str, &'a proc_macro2::Group)>, String> {
     let TokenTree::Ident(identifier) = &tokens[index] else {
         return Ok(None);
     };
     let macro_name = match identifier.to_string().as_str() {
         "include_str" => "include_str!",
         "include_bytes" => "include_bytes!",
+        _ if aliases.contains(&identifier.to_string()) => "aliased include macro!",
         _ => return Ok(None),
     };
     // A path-qualified invocation is normally a user macro and must not be
@@ -185,6 +189,108 @@ fn include_invocation(
         return Err(format!("{macro_name} must have a delimited argument"));
     };
     Ok(Some((macro_name, group)))
+}
+
+fn discover_include_aliases(tokens: &[TokenTree], aliases: &mut BTreeSet<String>) {
+    let mut index = 0;
+    while index < tokens.len() {
+        if matches!(&tokens[index], TokenTree::Ident(identifier) if identifier == "use") {
+            let mut end = index + 1;
+            while end < tokens.len() && !is_punct(&tokens[end], ';') {
+                end += 1;
+            }
+            collect_use_tree(&tokens[index + 1..end], &[], aliases);
+            index = end.saturating_add(1);
+            continue;
+        }
+        if let TokenTree::Group(group) = &tokens[index] {
+            let nested = group.stream().into_iter().collect::<Vec<_>>();
+            discover_include_aliases(&nested, aliases);
+        }
+        index += 1;
+    }
+}
+
+fn collect_use_tree(
+    tokens: &[TokenTree],
+    inherited_prefix: &[String],
+    aliases: &mut BTreeSet<String>,
+) {
+    let mut branch_start = 0;
+    for index in 0..=tokens.len() {
+        if index == tokens.len() || is_punct(&tokens[index], ',') {
+            collect_use_branch(&tokens[branch_start..index], inherited_prefix, aliases);
+            branch_start = index.saturating_add(1);
+        }
+    }
+}
+
+fn collect_use_branch(
+    branch: &[TokenTree],
+    inherited_prefix: &[String],
+    aliases: &mut BTreeSet<String>,
+) {
+    let Some((group_index, group)) = branch.iter().enumerate().find_map(|(index, token)| {
+        if let TokenTree::Group(group) = token {
+            Some((index, group))
+        } else {
+            None
+        }
+    }) else {
+        let Some(as_index) = branch
+            .iter()
+            .position(|token| matches!(token, TokenTree::Ident(identifier) if identifier == "as"))
+        else {
+            return;
+        };
+        let Some(TokenTree::Ident(alias)) = branch.get(as_index + 1) else {
+            return;
+        };
+        let mut path = inherited_prefix.to_vec();
+        let Some(mut branch_path) = use_path_segments(&branch[..as_index]) else {
+            return;
+        };
+        path.append(&mut branch_path);
+        if matches!(
+            path.as_slice(),
+            [qualifier, name]
+                if matches!(qualifier.as_str(), "std" | "core")
+                    && matches!(name.as_str(), "include_str" | "include_bytes")
+        ) {
+            aliases.insert(alias.to_string());
+        }
+        return;
+    };
+
+    let mut prefix = inherited_prefix.to_vec();
+    if let Some(mut branch_prefix) = use_path_segments(&branch[..group_index]) {
+        prefix.append(&mut branch_prefix);
+    }
+    let nested = group.stream().into_iter().collect::<Vec<_>>();
+    collect_use_tree(&nested, &prefix, aliases);
+}
+
+fn use_path_segments(tokens: &[TokenTree]) -> Option<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut expect_segment = true;
+    for token in tokens {
+        match token {
+            TokenTree::Ident(identifier) if expect_segment => {
+                segments.push(identifier.to_string());
+                expect_segment = false;
+            }
+            TokenTree::Punct(punct) if punct.as_char() == ':' && !expect_segment => {
+                expect_segment = true;
+            }
+            TokenTree::Punct(punct) if punct.as_char() == ':' && expect_segment => {}
+            _ => return None,
+        }
+    }
+    if segments.is_empty() {
+        None
+    } else {
+        Some(segments)
+    }
 }
 
 fn parse_static_string_expression(
@@ -673,6 +779,25 @@ const _: &str = other::std::include_str!("nested-user-macro.txt");
             Some(vec![
                 IncludeString::Relative("std.txt".to_owned()),
                 IncludeString::Relative("core.bin".to_owned()),
+            ])
+        );
+    }
+
+    #[test]
+    fn accepts_aliases_of_standard_library_include_macros() {
+        let source = r#"
+use std::include_str as asset;
+use core::{include_bytes as bytes};
+use other::include_str as ignored;
+const _: &str = asset!("aliased.txt");
+const _: &[u8] = bytes!("aliased.bin");
+const _: &str = ignored!("user-macro.txt");
+"#;
+        assert_eq!(
+            parse_include_paths(source).ok(),
+            Some(vec![
+                IncludeString::Relative("aliased.txt".to_owned()),
+                IncludeString::Relative("aliased.bin".to_owned()),
             ])
         );
     }
