@@ -853,7 +853,12 @@ mod tests {
         );
         assert!(producer.contains("if: always()"), "{producer}");
         assert!(
-            producer.contains("build_image_platform_digest"),
+            producer.contains("velnor.bootstrap-producer-manifest.v1"),
+            "{producer}"
+        );
+        assert!(producer.contains("features: $features"), "{producer}");
+        assert!(
+            !producer.contains("build_image_platform_digest"),
             "{producer}"
         );
         assert!(
@@ -3164,8 +3169,10 @@ impl WorkflowIr {
           test -z "${{ACTIONS_RUNTIME_TOKEN:-}}"
           test -z "${{ACTIONS_RUNTIME_URL:-}}"
           test -z "${{ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}}"
+          case "$GITHUB_RUN_ID" in ''|*[!0-9]*) exit 1 ;; esac
           command -v docker >/dev/null
           command -v jq >/dev/null
+          command -v git >/dev/null
           command -v sha256sum >/dev/null
           command -v timeout >/dev/null
           docker_cmd() {{
@@ -3232,18 +3239,23 @@ impl WorkflowIr {
           install -m 0555 "$output/velnor-workflow" "$stage/velnor-workflow"
           chmod 0555 "$stage/velnor-workflow"
           binary_sha256="$(sha256sum "$stage/velnor-workflow" | awk '{{print $1}}')"
+          closure_input="$stage/closure-input"
+          git -C "$source" ls-tree -r "$CANDIDATE_HEAD_SHA" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo \
+            | LC_ALL=C sort > "$closure_input"
+          printf 'closure-version:1\\nfeatures:\\nprofile:debug\\n' >> "$closure_input"
+          candidate_closure="$(sha256sum "$closure_input" | awk '{{print $1}}')"
+          if [[ ! "$candidate_closure" =~ ^[0-9a-f]{{64}}$ ]]; then exit 1; fi
           jq -n \
-            --arg repository "$GITHUB_REPOSITORY" \
-            --arg head_sha "$CANDIDATE_HEAD_SHA" \
-            --arg artifact_name "$CANDIDATE_ARTIFACT_NAME" \
+            --arg schema "{manifest_schema}" \
             --arg profile debug \
-            --arg platform linux/amd64 \
-            --arg features tui \
-            --arg build_image_repository "$CANDIDATE_BUILD_IMAGE_REPOSITORY" \
-            --arg build_image_digest "$CANDIDATE_BUILD_IMAGE_DIGEST" \
-            --arg build_image_platform_digest "$builder_platform_digest" \
+            --argjson features '[]' \
+            --arg platform linux-amd64 \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --arg revision "$CANDIDATE_HEAD_SHA" \
+            --arg closure "$candidate_closure" \
             --arg binary_sha256 "$binary_sha256" \
-            '{{role: "producer", workflow_path: ".github/workflows/ci-pr.yml", job_name: "candidate_producer", event: "pull_request", repository: $repository, head_sha: $head_sha, artifact_name: $artifact_name, profile: $profile, platform: $platform, features: $features, build_image_repository: $build_image_repository, build_image_digest: $build_image_digest, build_image_platform_digest: $build_image_platform_digest, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
+            '{{schema: $schema, profile: $profile, features: $features, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
       - name: Upload candidate generator product
         id: candidate_upload
         uses: {upload}
@@ -3260,6 +3272,7 @@ impl WorkflowIr {
             artifact = crate::s2::CANDIDATE_ARTIFACT_NAME,
             build_image_repository = crate::s2::CANDIDATE_BUILD_IMAGE_REPOSITORY,
             build_image_digest = crate::s2::CANDIDATE_BUILD_IMAGE_DIGEST,
+            manifest_schema = crate::s2::CANDIDATE_MANIFEST_SCHEMA,
             checkout = self.pins.checkout,
             upload = self.pins.upload_artifact,
         );
