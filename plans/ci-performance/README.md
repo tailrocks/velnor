@@ -43,6 +43,28 @@ hypothesis → implementation → focused checks → controlled CI → independe
 results review → commit/push → rerank. Independent research runs concurrently;
 timing experiments must account for shared runner contention.
 
+Current bounded queue (2026-09-20, after `e1357dd6`):
+
+- Parent integrates scanner-input preservation first, then locked tool
+  installation. Each unit receives a separate reviewed commit and regeneration.
+- Velnor agent owns Bun/Docker watch implementation and independently challenges
+  source identity. Jackin agent independently reviews Bun, preserves identity
+  reproduction evidence, and inspects updated PR heads #966/#963.
+- Parallax agent independently challenges source identity, isolates the locked
+  installer patch, then reviews Docker closure parsing.
+- Policy slot separation depends on source identity repair; local self-issued
+  manifests currently misidentify dirty compiled code as clean HEAD. Hold it.
+- Auto-install disabling depends on inferred transitive task-tool requirements;
+  explicit root tool versions must not become a request to install every tool.
+- PR cancellation guards, Rust fail-fast ordering, early candidate production,
+  consumer runtime distribution, selected-but-unadmitted gate rejection, and
+  immutable historical source attribution remain queued. They are not completed
+  by the bounded units above.
+
+Latest pushed PR coverage passed; separate policy failed. See
+[e135 evidence](observations/velnor-e135-validation.md). No accepted speedup or
+completed plateau follows from that single run.
+
 ## Initial revisions and access
 
 - Velnor initial local main: `1048337062ea625fada1b4f7c07f2feed75f60c7`.
