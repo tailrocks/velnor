@@ -3682,6 +3682,38 @@ jobs:
     }
 
     #[test]
+    fn workflow_binding_rejects_conflicting_checkout_proofs() {
+        let source_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let execution = |checkout_sha: &str| LiveExecution {
+            run_id: 7,
+            run_attempt: 1,
+            workflow_path: ".github/workflows/ci.yml".to_owned(),
+            workflow_revision: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            event: "pull_request".to_owned(),
+            source_sha: source_sha.to_owned(),
+            checkout: LiveCheckoutObservation {
+                api_head_sha: source_sha.to_owned(),
+                api_raw_object_refs: vec!["api".to_owned()],
+                proof: Some(LiveCheckoutProof {
+                    checkout_sha: checkout_sha.to_owned(),
+                    source_kind: "runner-attestation".to_owned(),
+                    raw_object_refs: vec!["proof".to_owned()],
+                }),
+            },
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            source_url: "https://github.com/tailrocks/example/actions/runs/7/attempts/1".to_owned(),
+            jobs: Vec::new(),
+            raw_object_refs: vec!["raw".to_owned()],
+        };
+        assert!(workflow_bindings(&[
+            execution(source_sha),
+            execution("cccccccccccccccccccccccccccccccccccccccc")
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn check_suite_identity_requires_api_source_binding() {
         let source_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let value = serde_json::json!({
