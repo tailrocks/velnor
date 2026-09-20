@@ -47,6 +47,12 @@ pub(super) type TestMaterializeRenameHook = Box<dyn FnOnce() + Send + 'static>;
 pub(super) type TestSuccessfulCleanupHook = Box<dyn FnOnce() + Send + 'static>;
 
 #[cfg(test)]
+pub(super) type TestSuccessfulCleanupBeforeQuarantineHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
+pub(super) type TestSuccessfulCleanupBeforeDiscardHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
 use std::cell::RefCell;
 
 #[cfg(test)]
@@ -54,6 +60,10 @@ thread_local! {
     static TEST_PENDING_RENAME_HOOK: RefCell<Option<TestPendingRenameHook>> = RefCell::new(None);
     static TEST_MATERIALIZE_RENAME_HOOK: RefCell<Option<TestMaterializeRenameHook>> = RefCell::new(None);
     static TEST_SUCCESSFUL_CLEANUP_HOOK: RefCell<Option<TestSuccessfulCleanupHook>> = RefCell::new(None);
+    static TEST_SUCCESSFUL_CLEANUP_BEFORE_QUARANTINE_HOOK:
+        RefCell<Option<TestSuccessfulCleanupBeforeQuarantineHook>> = RefCell::new(None);
+    static TEST_SUCCESSFUL_CLEANUP_BEFORE_DISCARD_HOOK:
+        RefCell<Option<TestSuccessfulCleanupBeforeDiscardHook>> = RefCell::new(None);
 }
 
 #[cfg(test)]
@@ -69,6 +79,20 @@ pub(super) fn set_test_materialize_rename_hook(hook: TestMaterializeRenameHook) 
 #[cfg(test)]
 pub(super) fn set_test_successful_cleanup_hook(hook: TestSuccessfulCleanupHook) {
     TEST_SUCCESSFUL_CLEANUP_HOOK.with(|hooks| *hooks.borrow_mut() = Some(hook));
+}
+
+#[cfg(test)]
+pub(super) fn set_test_successful_cleanup_before_quarantine_hook(
+    hook: TestSuccessfulCleanupBeforeQuarantineHook,
+) {
+    TEST_SUCCESSFUL_CLEANUP_BEFORE_QUARANTINE_HOOK.with(|hooks| *hooks.borrow_mut() = Some(hook));
+}
+
+#[cfg(test)]
+pub(super) fn set_test_successful_cleanup_before_discard_hook(
+    hook: TestSuccessfulCleanupBeforeDiscardHook,
+) {
+    TEST_SUCCESSFUL_CLEANUP_BEFORE_DISCARD_HOOK.with(|hooks| *hooks.borrow_mut() = Some(hook));
 }
 
 #[cfg(test)]
@@ -133,6 +157,23 @@ fn invoke_test_materialize_rename_hook() {
 #[cfg(test)]
 fn invoke_test_successful_cleanup_hook() {
     let hook = TEST_SUCCESSFUL_CLEANUP_HOOK.with(|hooks| hooks.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn invoke_test_successful_cleanup_before_quarantine_hook() {
+    let hook =
+        TEST_SUCCESSFUL_CLEANUP_BEFORE_QUARANTINE_HOOK.with(|hooks| hooks.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn invoke_test_successful_cleanup_before_discard_hook() {
+    let hook = TEST_SUCCESSFUL_CLEANUP_BEFORE_DISCARD_HOOK.with(|hooks| hooks.borrow_mut().take());
     if let Some(hook) = hook {
         hook();
     }
@@ -1781,6 +1822,10 @@ fn remove_exact_file_with_disposition(
     if after != before {
         return Err(RawStorageError::Refused);
     }
+    #[cfg(test)]
+    if disposition == QuarantineDisposition::DiscardOnVerifiedSuccess {
+        invoke_test_successful_cleanup_before_quarantine_hook();
+    }
     quarantine_remove(
         directory,
         name,
@@ -1847,15 +1892,10 @@ fn quarantine_remove(
     match rename_no_clobber(directory, name, &quarantine, &entry_name) {
         Ok(()) => {}
         Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
-            if disposition == QuarantineDisposition::DiscardOnVerifiedSuccess {
-                return discard_quarantine_directory(
-                    directory,
-                    &quarantine_name,
-                    &quarantine,
-                    scope,
-                    source_namespace,
-                );
-            }
+            // The source was observed and verified above. ENOENT here means
+            // it disappeared after observation; never turn that race into a
+            // successful discard. Retain the private qdir (which may be an
+            // empty incident record) or fail closed when retention is full.
             return retain_quarantine_result(
                 directory,
                 &quarantine_name,
@@ -1998,6 +2038,10 @@ fn quarantine_remove(
             &quarantine_name,
             &quarantine,
             &entry_name,
+            expected,
+            max_bytes,
+            expected_bytes,
+            expected_links,
             scope,
             source_namespace,
         );
@@ -2055,9 +2099,44 @@ fn discard_verified_quarantine(
     quarantine_name: &CStr,
     quarantine: &File,
     entry_name: &CStr,
+    expected: FileIdentity,
+    max_bytes: Option<usize>,
+    expected_bytes: Option<&[u8]>,
+    expected_links: Option<u64>,
     scope: &RetentionScope<'_>,
     source_namespace: &str,
 ) -> Result<QuarantineResult, RawStorageError> {
+    #[cfg(test)]
+    invoke_test_successful_cleanup_before_discard_hook();
+    match quarantine_entry_matches(
+        quarantine,
+        entry_name,
+        expected,
+        max_bytes,
+        expected_bytes,
+        expected_links,
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
+            return retain_quarantine_result(
+                parent,
+                quarantine_name,
+                quarantine,
+                scope,
+                source_namespace,
+            )
+        }
+        Err(error) => {
+            let _ = retain_quarantine_result(
+                parent,
+                quarantine_name,
+                quarantine,
+                scope,
+                source_namespace,
+            );
+            return Err(error);
+        }
+    }
     let result = unsafe { libc::unlinkat(quarantine.as_raw_fd(), entry_name.as_ptr(), 0) };
     if result < 0 {
         let error = io::Error::last_os_error();
@@ -2106,7 +2185,9 @@ fn remove_quarantine_directory(
     let expected = stat_fd(quarantine).map_err(storage_io)?;
     let named = match stat_at(parent, name) {
         Ok(identity) => identity,
-        Err(RawStorageError::Unavailable) => return Ok(true),
+        // The qdir was already observed through its FD. A missing pathname
+        // after that observation is a race, not proof of successful removal.
+        Err(RawStorageError::Unavailable) => return Ok(false),
         Err(error) => return Err(error),
     };
     if !named.same_directory(expected) {
@@ -2116,7 +2197,9 @@ fn remove_quarantine_directory(
     if result < 0 {
         let error = io::Error::last_os_error();
         if matches!(error.raw_os_error(), Some(libc::ENOENT)) {
-            return Ok(true);
+            // The qdir name disappeared after it was opened. Do not report a
+            // successful discard when the retained evidence may be detached.
+            return Ok(false);
         }
         if matches!(error.raw_os_error(), Some(libc::ENOTEMPTY)) {
             return Ok(false);

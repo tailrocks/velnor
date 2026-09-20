@@ -531,6 +531,145 @@ fn successful_transaction_cleanup_releases_retention_capacity() {
 
 #[cfg(unix)]
 #[test]
+fn successful_cleanup_source_disappearance_fails_closed_and_retains_incident() {
+    let root = fixture("successful-transaction-source-race");
+    let mut store = must(
+        RawObjectFileStore::new(&root),
+        "open successful-transaction source-race store",
+    );
+    let transaction = root.join("refs").join("source-race.txn");
+    let transaction_for_hook = transaction.clone();
+    github_raw_store::set_test_successful_cleanup_before_quarantine_hook(Box::new(move || {
+        fs::remove_file(&transaction_for_hook)
+            .unwrap_or_else(|error| panic!("remove observed transaction journal: {error}"));
+    }));
+
+    assert!(
+        store
+            .store(capture("source-race", b"source", b"safe"))
+            .is_err(),
+        "an observed journal that disappears before quarantine must refuse",
+    );
+    drop(store);
+
+    assert!(
+        !transaction.exists(),
+        "the race hook removed the observed transaction pathname",
+    );
+    let source_quarantine = must(fs::read_dir(root.join("refs")), "read source-race refs")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .starts_with(".velnor-raw-quarantine-")
+            })
+        })
+        .unwrap_or_else(|| panic!("source-race quarantine missing"));
+    assert_eq!(
+        must(
+            fs::read_dir(&source_quarantine),
+            "read empty source-race incident qdir",
+        )
+        .flatten()
+        .count(),
+        0,
+        "an empty qdir records that the observed source vanished",
+    );
+    assert_eq!(
+        must(
+            fs::read_dir(root.join(".velnor-raw-quarantine")),
+            "read source-race retention record",
+        )
+        .flatten()
+        .count(),
+        1,
+    );
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "reopen source-race incident",
+    );
+    drop(reopened);
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_cleanup_source_disappearance_fails_closed_and_retains_incident() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("recovery-transaction-source-race");
+    let mut store = must(
+        RawObjectFileStore::new(&root),
+        "open recovery source-race store",
+    );
+    let reference = must(
+        store.store(capture("recovery-source-race", b"source", b"safe")),
+        "seed recovery source-race bundle",
+    );
+    drop(store);
+
+    let transaction = root.join("refs").join("recovery-source-race.txn");
+    must(
+        fs::write(&transaction, transaction_journal_bytes(&reference)),
+        "write recovery source-race journal",
+    );
+    must(
+        fs::set_permissions(&transaction, fs::Permissions::from_mode(0o400)),
+        "restrict recovery source-race journal",
+    );
+    let transaction_for_hook = transaction.clone();
+    github_raw_store::set_test_successful_cleanup_before_quarantine_hook(Box::new(move || {
+        fs::remove_file(&transaction_for_hook)
+            .unwrap_or_else(|error| panic!("remove observed recovery journal: {error}"));
+    }));
+
+    assert!(
+        RawObjectFileStore::new(&root).is_err(),
+        "recovery must refuse when its observed journal disappears before quarantine",
+    );
+    assert!(!transaction.exists());
+    assert_eq!(
+        must(
+            fs::read_dir(root.join(".velnor-raw-quarantine")),
+            "read recovery source-race retention record",
+        )
+        .flatten()
+        .count(),
+        1,
+    );
+    let source_quarantine = must(
+        fs::read_dir(root.join("refs")),
+        "read recovery source-race refs",
+    )
+    .flatten()
+    .map(|entry| entry.path())
+    .find(|path| {
+        path.file_name().is_some_and(|name| {
+            name.to_string_lossy()
+                .starts_with(".velnor-raw-quarantine-")
+        })
+    })
+    .unwrap_or_else(|| panic!("recovery source-race quarantine missing"));
+    assert_eq!(
+        must(
+            fs::read_dir(source_quarantine),
+            "read empty recovery source-race incident qdir",
+        )
+        .flatten()
+        .count(),
+        0,
+    );
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "reopen recovery source-race incident",
+    );
+    drop(reopened);
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
 fn successful_transaction_cleanup_retains_replacement_evidence() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -598,6 +737,79 @@ fn successful_transaction_cleanup_retains_replacement_evidence() {
     let reopened = must(
         RawObjectFileStore::new(&root),
         "reopen retained cleanup replacement",
+    );
+    drop(reopened);
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn successful_cleanup_postcheck_replacement_is_not_deleted() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("successful-transaction-postcheck-replacement");
+    let mut store = must(
+        RawObjectFileStore::new(&root),
+        "open successful-transaction postcheck store",
+    );
+    let refs = root.join("refs");
+    let refs_for_hook = refs.clone();
+    github_raw_store::set_test_successful_cleanup_before_discard_hook(Box::new(move || {
+        let quarantine = fs::read_dir(&refs_for_hook)
+            .unwrap_or_else(|error| panic!("read postcheck quarantine: {error}"))
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .starts_with(".velnor-raw-quarantine-")
+                })
+            })
+            .unwrap_or_else(|| panic!("postcheck quarantine missing"));
+        let entry = quarantine.join("entry");
+        fs::remove_file(&entry).unwrap_or_else(|error| panic!("remove postcheck journal: {error}"));
+        fs::write(&entry, b"postcheck-replacement")
+            .unwrap_or_else(|error| panic!("write postcheck replacement: {error}"));
+        fs::set_permissions(&entry, fs::Permissions::from_mode(0o400))
+            .unwrap_or_else(|error| panic!("restrict postcheck replacement: {error}"));
+    }));
+
+    assert!(
+        store
+            .store(capture("postcheck-race", b"source", b"safe"))
+            .is_err(),
+        "replacement after the first verification must fail closed",
+    );
+    let quarantine = must(fs::read_dir(&refs), "read postcheck quarantine")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .starts_with(".velnor-raw-quarantine-")
+            })
+        })
+        .unwrap_or_else(|| panic!("postcheck quarantine was removed"));
+    assert_eq!(
+        must(
+            fs::read(quarantine.join("entry")),
+            "read postcheck evidence"
+        ),
+        b"postcheck-replacement",
+    );
+    assert_eq!(
+        must(
+            fs::read_dir(root.join(".velnor-raw-quarantine")),
+            "read postcheck retention",
+        )
+        .flatten()
+        .count(),
+        1,
+    );
+    drop(store);
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "reopen postcheck replacement",
     );
     drop(reopened);
     remove_fixture(&root);
