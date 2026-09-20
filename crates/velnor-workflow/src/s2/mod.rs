@@ -5272,8 +5272,12 @@ macro_rules! policy_candidate_step_template {
           test "$(grep -Fxc "          name: {artifact}" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "        id: candidate_upload" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "        uses: {upload}" <<<"$candidate_block")" = 1
-          test "$(grep -Fxc "      artifact_id: \${{{{ steps.candidate_upload.outputs.artifact-id }}}}" <<<"$candidate_block")" = 1
-          test "$(grep -Fxc "      artifact_digest: \${{{{ steps.candidate_upload.outputs.artifact-digest }}}}" <<<"$candidate_block")" = 1
+          candidate_upload_id_expr='$'
+          candidate_upload_id_expr+="{{{{ steps.candidate_upload.outputs.artifact-id }}}}"
+          candidate_upload_digest_expr='$'
+          candidate_upload_digest_expr+="{{{{ steps.candidate_upload.outputs.artifact-digest }}}}"
+          test "$(grep -Fxc "      artifact_id: $candidate_upload_id_expr" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "      artifact_digest: $candidate_upload_digest_expr" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "      upload_step_id: {upload_step_id}" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "      artifact_binding_method: {artifact_binding_method}" <<<"$candidate_block")" = 1
           test "$(grep -Ec '^[[:space:]]+uses: .*upload-artifact@' <<<"$candidate_block")" = 1
