@@ -4085,6 +4085,7 @@ dependencies = [
  "sha2 0.11.0",
  "termrock",
  "toml",
+ "velnor-model",
  "velnor-runner",
 ]
 

@@ -11,6 +11,7 @@ use std::path::Path;
 
 use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
+use velnor_model::action_reference::ActionImageReference;
 
 use super::file_walk::is_test_support_path;
 use super::{unit, RepositoryShape, ScanContext};
@@ -1506,25 +1507,17 @@ fn is_full_sha_action_reference(value: &str) -> bool {
 /// runtime; only a basename named `Dockerfile` or beginning `Dockerfile.` is
 /// a host-side build source.
 fn is_dockerfile_reference(value: &str) -> bool {
-    let value = value.trim();
-    if value
-        .get(.."docker://".len())
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("docker://"))
-    {
-        return false;
-    }
-    let basename = value.rsplit('/').next().unwrap_or(value);
-    let basename = basename.to_ascii_lowercase();
-    basename == "dockerfile"
-        || basename.starts_with("dockerfile.")
-        || basename.ends_with("dockerfile")
+    matches!(
+        ActionImageReference::parse(value),
+        Ok(ActionImageReference::Dockerfile(_))
+    )
 }
 
 fn is_docker_image_reference(value: &str) -> bool {
-    let value = value.trim();
-    value.get("docker://".len()..).is_some_and(|image| {
-        value[.."docker://".len()].eq_ignore_ascii_case("docker://") && !image.is_empty()
-    })
+    matches!(
+        ActionImageReference::parse(value),
+        Ok(ActionImageReference::DockerImage(_))
+    )
 }
 
 /// Resolve the one host-local expression actions/runner makes available to a
@@ -3181,7 +3174,7 @@ mod tests {
         must(
             fs::write(
                 images.join("uppercase/action.yml"),
-                "runs:\n  using: docker\n  image: DOCKER://Dockerfile\n  entrypoint: /inside-image.sh\n",
+                "runs:\n  using: docker\n  image: DOCKER://ubuntu:24.04\n  entrypoint: /inside-image.sh\n",
             ),
             "write uppercase Docker scheme metadata",
         );
@@ -3214,6 +3207,25 @@ mod tests {
             .find(|unit| unit.root == "uppercase")
             .unwrap_or_else(|| panic!("uppercase Docker scheme action missing"));
         assert_eq!(uppercase.pr_commands.len(), 1);
+        let invalid = images.join("invalid");
+        must(
+            fs::create_dir_all(&invalid),
+            "create malformed Docker action",
+        );
+        must(
+            fs::write(
+                invalid.join("action.yml"),
+                "runs:\n  using: docker\n  image: docker://--privileged\n",
+            ),
+            "write malformed Docker image metadata",
+        );
+        let error = super::super::scan_shape(&images, &providers(), "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("flag-shaped Docker image must fail scan"));
+        assert!(
+            error.to_string().contains("must be a Dockerfile path"),
+            "{error}"
+        );
         let _ = fs::remove_dir_all(images);
 
         let missing_shell = fixture("missing-shell");

@@ -14,6 +14,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
 };
+use velnor_model::action_reference::ActionImageReference;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ActionMetadata {
@@ -777,23 +778,16 @@ impl ResolvedAction {
                 .map(|(name, value)| (input_env_name(name), value.clone())),
         );
 
-        let (image, build_context_host, dockerfile_host) =
-            if let Some(image) = image.strip_prefix("docker://") {
-                // `runs.image` is repository content, so in the fork-PR case it
-                // is attacker-controlled. Without a grammar check a value like
-                // `docker://--privileged` reaches the host `docker run` as a
-                // flag and hands the workflow root on a shared runner host.
-                // Reject anything that is not an OCI reference here, at the
-                // one place the scheme is stripped.
-                let image = crate::docker_argv::ImageReference::parse(image).map_err(|error| {
-                    anyhow::anyhow!(
-                        "action '{}' declares an invalid Docker image: {error}",
-                        self.plan.repository
-                    )
-                })?;
-                (image.as_str().to_string(), None, None)
-            } else {
-                let dockerfile_host = self.plan.action_dir.join(image);
+        let (image, build_context_host, dockerfile_host) = match ActionImageReference::parse(image)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "action '{}' declares an invalid Docker image: {error}",
+                    self.plan.repository
+                )
+            })? {
+            ActionImageReference::DockerImage(image) => (image.as_str().to_owned(), None, None),
+            ActionImageReference::Dockerfile(path) => {
+                let dockerfile_host = self.plan.action_dir.join(path);
                 let tag = docker_action_tag(
                     &self.plan.repository,
                     &self.plan.git_ref,
@@ -804,7 +798,8 @@ impl ResolvedAction {
                     Some(self.plan.action_dir.clone()),
                     Some(dockerfile_host),
                 )
-            };
+            }
+        };
         let entrypoint = self
             .metadata
             .runs
@@ -3639,7 +3634,7 @@ inputs:
     default: ghcr.io/renovatebot/renovate
 runs:
   using: docker
-  image: docker://alpine:3.20
+  image: DOCKER://alpine:3.20
   entrypoint: /entrypoint.sh
   args:
     - ${{ inputs.renovate-image }}
@@ -3686,6 +3681,7 @@ runs:
         let actions_host = Path::new("/tmp/actions");
         for image in [
             "docker://--privileged",
+            "DOCKER://--privileged",
             "docker://-v/:/host",
             "docker://--user=0:0",
             "docker://",
