@@ -6106,7 +6106,7 @@ cp "$record" "$out"
             ),
             (
                 "preview.yml",
-                "fca905a5d7239ad2f7ce0cd8185e0215f44f0efd0c51b1e2891afe8d448a06ab",
+                "2986fc55fa37a3ca35bd370e12c328db78f302f299e7dc9859c2396d7f9137fc",
             ),
         ];
         let root = scanned_root("identity-pinned");
