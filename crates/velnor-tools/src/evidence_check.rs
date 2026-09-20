@@ -2026,6 +2026,36 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
     for request in &collector.requests {
         let query = BASE64.decode(&request.query_base64);
         let variables = BASE64.decode(&request.variables_base64);
+        let response_schema = collector
+            .raw_objects
+            .iter()
+            .find(|raw| raw.raw_id == request.response_raw_ref)
+            .and_then(|raw| {
+                g0_raw_response_schema(&raw.object_kind, &request.endpoint_or_operation)
+            });
+        let unknown_paginated_response = collector
+            .raw_objects
+            .iter()
+            .find(|raw| raw.raw_id == request.response_raw_ref)
+            .is_some_and(|raw| {
+                g0_endpoint_is_paginated(&request.endpoint_or_operation)
+                    && g0_raw_response_schema(&raw.object_kind, &request.endpoint_or_operation)
+                        .is_none()
+            });
+        if unknown_paginated_response {
+            finding(
+                findings,
+                "g0-response-schema",
+                "",
+                "evidence.g0_inventory.collector_snapshot.raw_objects",
+                "every relevant paginated API stream must use a closed typed response schema",
+            );
+        }
+        let query_contract = match (query.as_ref(), response_schema) {
+            (Ok(bytes), Some(schema)) => g0_response_query_contract(request, bytes, schema),
+            (Err(_), Some(_)) => false,
+            (_, None) => true,
+        };
         if request.request_id.trim().is_empty()
             || request.method.trim().is_empty()
             || request.endpoint_or_operation.trim().is_empty()
@@ -2072,6 +2102,7 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
                 query.as_ref().ok().map(Vec::as_slice),
                 variables.as_ref().ok().map(Vec::as_slice),
             )
+            || !query_contract
         {
             finding(
                 findings,
@@ -2079,6 +2110,15 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
                 "",
                 "evidence.g0_inventory.collector_snapshot.requests",
                 "every request must be a complete successful page with query, viewer, rate-limit, and raw-response provenance",
+            );
+        }
+        if !query_contract {
+            finding(
+                findings,
+                "g0-request-query",
+                "",
+                "evidence.g0_inventory.collector_snapshot.requests.query_base64",
+                "request query must exactly bind endpoint pagination and provider filter semantics",
             );
         }
     }
@@ -2257,6 +2297,7 @@ fn g0_page_members(value: &Value, response_schema: G0RawResponseSchema) -> Optio
         G0RawResponseSchema::CheckRunsPage => "check_runs",
         G0RawResponseSchema::CheckSuitesPage => "check_suites",
         G0RawResponseSchema::JobsPage => "jobs",
+        G0RawResponseSchema::ArtifactsPage => "artifacts",
         G0RawResponseSchema::Singular => return None,
     };
     let total_count = value.get("total_count")?.as_u64()?;
@@ -2469,6 +2510,74 @@ fn g0_valid_app_id(value: &str) -> bool {
     value.parse::<u64>().is_ok_and(|id| id > 0)
 }
 
+fn g0_endpoint_is_paginated(endpoint: &str) -> bool {
+    let Some(parts) = endpoint
+        .strip_prefix('/')
+        .map(|path| path.split('/').collect::<Vec<_>>())
+    else {
+        return false;
+    };
+    if parts.len() < 2 || parts[0] != "repos" {
+        return false;
+    }
+    matches!(
+        parts.as_slice(),
+        ["repos", _, _, "pulls"]
+            | ["repos", _, _, "actions", "runs"]
+            | ["repos", _, _, "actions", "workflows"]
+            | ["repos", _, _, "actions", "runs", _, "artifacts"]
+            | ["repos", _, _, "actions", "runs", _, "attempts", _, "jobs"]
+            | ["repos", _, _, "commits", _, "check-runs"]
+            | ["repos", _, _, "commits", _, "check-suites"]
+            | ["repos", _, _, "rulesets"]
+    )
+}
+
+fn g0_response_query_contract(
+    request: &G0RequestRecord,
+    query: &[u8],
+    response_schema: G0RawResponseSchema,
+) -> bool {
+    let Some(ordered) = g0_rest_query_pairs_ordered(query) else {
+        return false;
+    };
+    if matches!(response_schema, G0RawResponseSchema::Singular) {
+        return true;
+    }
+
+    let keys = ordered
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<Vec<_>>();
+    let expected_keys = match response_schema {
+        G0RawResponseSchema::CheckRunsPage => vec!["per_page", "filter", "page"],
+        G0RawResponseSchema::CheckSuitesPage
+        | G0RawResponseSchema::JobsPage
+        | G0RawResponseSchema::ArtifactsPage => vec!["per_page", "page"],
+        G0RawResponseSchema::Singular => Vec::new(),
+    };
+    if keys != expected_keys {
+        return false;
+    }
+    let value = |key: &str| {
+        ordered
+            .iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, value)| value.as_str())
+    };
+    let Some(per_page) = value("per_page").and_then(|value| value.parse::<u32>().ok()) else {
+        return false;
+    };
+    let Some(page) = value("page").and_then(|value| value.parse::<u32>().ok()) else {
+        return false;
+    };
+    per_page == request.page.per_page
+        && per_page > 0
+        && per_page <= 100
+        && page == request.page.number
+        && (response_schema != G0RawResponseSchema::CheckRunsPage || value("filter") == Some("all"))
+}
+
 fn g0_request_semantics(
     request: &G0RequestRecord,
     query: Option<&[u8]>,
@@ -2557,6 +2666,12 @@ fn g0_request_semantics(
 }
 
 fn g0_rest_query_pairs(query: &[u8]) -> Option<Vec<(String, String)>> {
+    let mut pairs = g0_rest_query_pairs_ordered(query)?;
+    pairs.sort();
+    Some(pairs)
+}
+
+fn g0_rest_query_pairs_ordered(query: &[u8]) -> Option<Vec<(String, String)>> {
     let query = std::str::from_utf8(query).ok()?;
     if query.is_empty() {
         return Some(Vec::new());
@@ -2575,7 +2690,6 @@ fn g0_rest_query_pairs(query: &[u8]) -> Option<Vec<(String, String)>> {
         }
         pairs.push((key.to_owned(), value.to_owned()));
     }
-    pairs.sort();
     Some(pairs)
 }
 
@@ -2663,11 +2777,11 @@ fn g0_next_link_matches(current: &G0RequestRecord, next: &G0RequestRecord) -> bo
         let Some(next_query) = BASE64
             .decode(&next.query_base64)
             .ok()
-            .and_then(|bytes| g0_rest_query_pairs(&bytes))
+            .and_then(|bytes| g0_rest_query_pairs_ordered(&bytes))
         else {
             return false;
         };
-        let link_query = g0_rest_query_pairs(url.query().unwrap_or_default().as_bytes());
+        let link_query = g0_rest_query_pairs_ordered(url.query().unwrap_or_default().as_bytes());
         link_query == Some(next_query)
     } else {
         current.page.cursor_out.is_some() && current.page.cursor_out == next.page.cursor_in
@@ -3983,6 +4097,7 @@ enum G0RawResponseSchema {
     CheckRunsPage,
     CheckSuitesPage,
     JobsPage,
+    ArtifactsPage,
 }
 
 /// Map each retained raw object to the one REST response shape allowed for
@@ -4048,6 +4163,18 @@ fn g0_raw_response_schema(object_kind: &str, endpoint: &str) -> Option<G0RawResp
         {
             Some(G0RawResponseSchema::JobsPage)
         }
+        "workflow_artifacts"
+            if parts.len() == 7
+                && parts[0] == "repos"
+                && !parts[1].is_empty()
+                && !parts[2].is_empty()
+                && parts[3] == "actions"
+                && parts[4] == "runs"
+                && parts[5].parse::<u64>().is_ok_and(|id| id > 0)
+                && parts[6] == "artifacts" =>
+        {
+            Some(G0RawResponseSchema::ArtifactsPage)
+        }
         "workflow_run"
             if parts.len() == 6
                 && parts[0] == "repos"
@@ -4099,6 +4226,10 @@ fn g0_capture_raw_json(
         return None;
     }
     let response_schema = g0_raw_response_schema(object_kind, &request.endpoint_or_operation)?;
+    let query = BASE64.decode(&request.query_base64).ok()?;
+    if !g0_response_query_contract(request, &query, response_schema) {
+        return None;
+    }
     let bytes = BASE64.decode(&raw.bytes_base64).ok()?;
     if raw.byte_length != bytes.len() as u64
         || digest_bytes(&bytes) != raw.sha256
@@ -4127,6 +4258,7 @@ fn g0_select_raw_member(
         G0RawResponseSchema::CheckRunsPage => "check_runs",
         G0RawResponseSchema::CheckSuitesPage => "check_suites",
         G0RawResponseSchema::JobsPage => "jobs",
+        G0RawResponseSchema::ArtifactsPage => "artifacts",
         G0RawResponseSchema::Singular => {
             return (g0_json_u64(&value, &["id"]) == Some(member_id)
                 && request.page.items_returned == 1
@@ -8414,9 +8546,9 @@ mod tests {
                 api: G0ApiKind::Rest,
                 method: "GET".to_owned(),
                 endpoint_or_operation: endpoint,
-                query_base64: BASE64.encode(b"page=1"),
+                query_base64: BASE64.encode(b"per_page=100&page=1"),
                 variables_base64: BASE64.encode(b"{}"),
-                query_sha256: digest_bytes(b"page=1"),
+                query_sha256: digest_bytes(b"per_page=100&page=1"),
                 variables_sha256: digest_bytes(b"{}"),
                 auth_identity_ref: "collector.auth".to_owned(),
                 started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
@@ -8581,8 +8713,10 @@ mod tests {
                         .expect("digest has prefix")
                 ),
             });
-            let artifact_bytes =
-                format!("{{\"artifact_id\":{artifact_id},\"run_id\":{main_run_id}}}").into_bytes();
+            let artifact_bytes = format!(
+                "{{\"total_count\":1,\"artifacts\":[{{\"id\":{artifact_id},\"workflow_run\":{{\"id\":{main_run_id},\"run_attempt\":1}}}}]}}"
+            )
+            .into_bytes();
             let artifact_digest = digest_bytes(&artifact_bytes);
             raw_objects.push(G0RawObjectRef {
                 raw_id: artifact_raw_id.clone(),
@@ -8671,9 +8805,9 @@ mod tests {
                 endpoint_or_operation: format!(
                     "/repos/{repository}/actions/runs/{main_run_id}/artifacts"
                 ),
-                query_base64: BASE64.encode(b"page=1"),
+                query_base64: BASE64.encode(b"per_page=100&page=1"),
                 variables_base64: BASE64.encode(b"{}"),
-                query_sha256: digest_bytes(b"page=1"),
+                query_sha256: digest_bytes(b"per_page=100&page=1"),
                 variables_sha256: digest_bytes(b"{}"),
                 auth_identity_ref: "collector.auth".to_owned(),
                 started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
@@ -9297,6 +9431,24 @@ mod tests {
         let mut findings = Vec::new();
         check_g0_inventory(&manifest, &snapshot, Some(&inventory), &mut findings);
         assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+
+        let mut unknown_paginated = inventory.clone();
+        unknown_paginated
+            .collector_snapshot
+            .raw_objects
+            .iter_mut()
+            .find(|raw| raw.object_kind == "workflow_artifacts")
+            .expect("complete fixture artifact page")
+            .object_kind = "github-response".to_owned();
+        refresh_typed_inventory_bytes(&mut unknown_paginated);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&unknown_paginated),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-response-schema"));
 
         let mut missing_artifacts = inventory.clone();
         missing_artifacts.collector_snapshot.repositories[0]
@@ -10740,12 +10892,14 @@ mod tests {
     fn paginated_stream_rejects_omitted_duplicate_and_cross_scope_pages() {
         let mut collector = minimal_g0_collector();
         let endpoint = format!("/repos/tailrocks/velnor/commits/{}/check-runs", sha('a'));
-        let mut first = captured_page_request(&endpoint, "page=1", 1);
+        let mut first = captured_page_request(&endpoint, "per_page=100&filter=all&page=1", 1);
         first.request_id = "checks-page-1".to_owned();
         first.response_raw_ref = "checks-raw-1".to_owned();
         first.page.has_next_page = true;
-        first.page.link_next = Some(format!("https://api.github.com{endpoint}?page=2"));
-        let mut second = captured_page_request(&endpoint, "page=2", 1);
+        first.page.link_next = Some(format!(
+            "https://api.github.com{endpoint}?per_page=100&filter=all&page=2"
+        ));
+        let mut second = captured_page_request(&endpoint, "per_page=100&filter=all&page=2", 1);
         second.request_id = "checks-page-2".to_owned();
         second.response_raw_ref = "checks-raw-2".to_owned();
         second.page.number = 2;
@@ -10768,6 +10922,35 @@ mod tests {
             )
         }));
 
+        collector.requests[0].query_base64 = BASE64.encode(b"per_page=50&filter=all&page=1");
+        collector.requests[0].query_sha256 = digest_bytes(b"per_page=50&filter=all&page=1");
+        findings.clear();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-request-query"));
+
+        collector.requests[0].query_base64 = BASE64.encode(b"filter=all&per_page=100&page=1");
+        collector.requests[0].query_sha256 = digest_bytes(b"filter=all&per_page=100&page=1");
+        findings.clear();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-request-query"));
+
+        collector.requests[0].query_base64 =
+            BASE64.encode(b"per_page=100&per_page=100&filter=all&page=1");
+        collector.requests[0].query_sha256 =
+            digest_bytes(b"per_page=100&per_page=100&filter=all&page=1");
+        findings.clear();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-request-incomplete"));
+
+        collector.requests[0].query_base64 = BASE64.encode(b"per_page=100&filter=all&page=1");
+        collector.requests[0].query_sha256 = digest_bytes(b"per_page=100&filter=all&page=1");
+
         let duplicate_bytes = br#"{"total_count":2,"check_runs":[{"id":1}]}"#;
         collector.raw_objects[1] = captured_raw_reference(
             "checks-raw-2",
@@ -10784,7 +10967,7 @@ mod tests {
         collector.raw_objects[1] =
             captured_raw_reference("checks-raw-2", "checks-page-2", "check_run", second_bytes);
         collector.requests[0].page.link_next = Some(
-            "https://api.github.com/repos/other/repo/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?page=2"
+            "https://api.github.com/repos/other/repo/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?per_page=100&filter=all&page=2"
                 .to_owned(),
         );
         findings.clear();
@@ -10793,8 +10976,9 @@ mod tests {
             .iter()
             .any(|finding| finding.code == "g0-pagination"));
 
-        collector.requests[0].page.link_next =
-            Some(format!("https://api.github.com{endpoint}?page=2"));
+        collector.requests[0].page.link_next = Some(format!(
+            "https://api.github.com{endpoint}?per_page=100&filter=all&page=2"
+        ));
         collector.requests.pop();
         collector.raw_objects.pop();
         findings.clear();
@@ -11221,8 +11405,8 @@ mod tests {
     #[test]
     fn authenticated_supplement_binds_real_apps_and_suites() {
         // Exact body bytes from
-        // G0/real-api-fixture-supplement-20260920T085311Z, manifest
-        // 1146764830a0e6e31518dd05abd6c00e6627f554d6dbbc97a55d721facabe70a.
+        // G0/real-api-fixture-supplement-20260920T085311Z-corrected-20260920T090934Z,
+        // manifest fea65b61ff1668ff58762066b207ac1c9534452d328080f1f0680e7cb571447e.
         let supplement = |name: &str| -> Vec<u8> {
             let encoded = match name {
                 "app-dco" => include_str!(
