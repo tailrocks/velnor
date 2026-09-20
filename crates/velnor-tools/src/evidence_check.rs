@@ -1920,7 +1920,15 @@ fn check_g0_inventory(
         &collector.raw_objects,
         findings,
     );
-    check_g0_repositories(manifest, snapshot, collector, &raw_ids, findings);
+    check_g0_repositories(
+        manifest,
+        snapshot,
+        collector,
+        &raw_ids,
+        &collector.requests,
+        &collector.raw_objects,
+        findings,
+    );
     check_g0_reconciliation(manifest, snapshot, collector, &raw_ids, findings);
     check_g0_dependency_graph(manifest, collector, &raw_ids, findings);
     check_g0_model_session(collector, &raw_ids, findings);
@@ -2352,6 +2360,7 @@ fn g0_request_semantics(
                 || !(endpoint == "/user"
                     || endpoint == "/rate_limit"
                     || endpoint.starts_with("/repos/")
+                    || endpoint.starts_with("/apps/")
                     || endpoint.starts_with("/orgs/"))
             {
                 return false;
@@ -2612,7 +2621,7 @@ fn job_url_matches_repository(
         && url.port().is_none()
         && url.query().is_none()
         && url.fragment().is_none()
-        && url.path() == format!("/{repository}/runs/{workflow_run_id}/jobs/{job_id}")
+        && url.path() == format!("/{repository}/actions/runs/{workflow_run_id}/job/{job_id}")
 }
 
 fn g0_context_pairs(contexts: &[RequiredContext]) -> BTreeSet<(String, String)> {
@@ -2972,6 +2981,8 @@ fn check_g0_repositories(
     snapshot: &SnapshotDocument,
     collector: &G0CollectorSnapshot,
     raw_ids: &BTreeSet<String>,
+    requests: &[G0RequestRecord],
+    raw_objects: &[G0RawObjectRef],
     findings: &mut Vec<Finding>,
 ) {
     let expected = canonical_scope();
@@ -3369,6 +3380,13 @@ fn check_g0_repositories(
             },
             findings,
         );
+        check_g0_check_raw_evidence(
+            &repo.repository,
+            &repo.main_checks,
+            requests,
+            raw_objects,
+            findings,
+        );
 
         let snapshot_prs = snapshot
             .repositories
@@ -3403,6 +3421,13 @@ fn check_g0_repositories(
                 &manifest_contexts,
                 snapshot,
                 raw_ids,
+                findings,
+            );
+            check_g0_check_raw_evidence(
+                &repo.repository,
+                &pr.required_check_producers,
+                requests,
+                raw_objects,
                 findings,
             );
         }
@@ -3753,6 +3778,7 @@ fn g0_check_provider_valid(check: &G0CheckProducer, repository: &str) -> bool {
             job_check_run_id,
             job_source_sha,
             job_html_url,
+            actual_checkout_sha,
         } => {
             check.app_slug == "github-actions"
                 && *workflow_run_id != 0
@@ -3763,6 +3789,7 @@ fn g0_check_provider_valid(check: &G0CheckProducer, repository: &str) -> bool {
                 && *job_check_run_id == check.check_run_id
                 && valid_sha(job_source_sha)
                 && *job_source_sha == check.source_sha
+                && valid_sha(actual_checkout_sha)
                 && job_url_matches_repository(job_html_url, repository, *workflow_run_id, *job_id)
                 && check_run_url_matches_provider(
                     &check.html_url,
@@ -3771,6 +3798,16 @@ fn g0_check_provider_valid(check: &G0CheckProducer, repository: &str) -> bool {
                     check.check_run_id,
                 )
         }
+    }
+}
+
+fn g0_actions_checkout_sha(check: &G0CheckProducer) -> Option<&str> {
+    match &check.provider {
+        G0CheckProvider::GithubActions {
+            actual_checkout_sha,
+            ..
+        } => Some(actual_checkout_sha),
+        G0CheckProvider::ExternalApp => None,
     }
 }
 
@@ -3783,6 +3820,214 @@ fn g0_check_job_key(check: &G0CheckProducer) -> Option<(u64, u32, u64)> {
             ..
         } => Some((*workflow_run_id, *run_attempt, *job_id)),
         G0CheckProvider::ExternalApp => None,
+    }
+}
+
+fn g0_json_u64(value: &Value, path: &[&str]) -> Option<u64> {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
+        .and_then(Value::as_u64)
+}
+
+fn g0_json_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
+        .and_then(Value::as_str)
+}
+
+fn g0_capture_raw_json(
+    raw_refs: &[String],
+    object_kind: &str,
+    endpoints: &[String],
+    requests: &[G0RequestRecord],
+    raw_objects: &[G0RawObjectRef],
+) -> Option<Value> {
+    let candidates = raw_objects
+        .iter()
+        .filter(|raw| {
+            raw.object_kind == object_kind && raw_refs.iter().any(|raw_id| raw_id == &raw.raw_id)
+        })
+        .collect::<Vec<_>>();
+    if candidates.len() != 1 {
+        return None;
+    }
+    let raw = candidates[0];
+    let request = requests.iter().find(|request| {
+        request.request_id == raw.request_id && request.response_raw_ref == raw.raw_id
+    })?;
+    if request.api != G0ApiKind::Rest
+        || request.method != "GET"
+        || request.http_status != 200
+        || !request.complete
+        || !matches!(request.state, G0RequestState::Complete)
+        || !endpoints
+            .iter()
+            .any(|endpoint| endpoint == &request.endpoint_or_operation)
+    {
+        return None;
+    }
+    let bytes = BASE64.decode(&raw.bytes_base64).ok()?;
+    if raw.byte_length != bytes.len() as u64
+        || digest_bytes(&bytes) != raw.sha256
+        || !g0_storage_ref(&raw.storage_ref, &raw.sha256)
+    {
+        return None;
+    }
+    let value = serde_json::from_slice::<Value>(&bytes).ok()?;
+    value.is_object().then_some(value)
+}
+
+fn g0_api_path_is(value: &Value, path: &str) -> bool {
+    value
+        .as_str()
+        .and_then(g0_api_url)
+        .is_some_and(|url| url.query().is_none() && url.path() == path)
+}
+
+fn g0_check_raw_evidence_valid(
+    repository: &str,
+    check: &G0CheckProducer,
+    requests: &[G0RequestRecord],
+    raw_objects: &[G0RawObjectRef],
+) -> bool {
+    let check_run_endpoints = vec![
+        format!("/repos/{repository}/check-runs/{}", check.check_run_id),
+        format!(
+            "/repos/{repository}/commits/{}/check-runs",
+            check.source_sha
+        ),
+    ];
+    let suite_endpoints = vec![
+        format!("/repos/{repository}/check-suites/{}", check.check_suite_id),
+        format!(
+            "/repos/{repository}/commits/{}/check-suites",
+            check.source_sha
+        ),
+    ];
+    let app_endpoint = format!("/apps/{}", check.app_slug);
+    let check_run = g0_capture_raw_json(
+        &check.raw_object_refs,
+        "check_run",
+        &check_run_endpoints,
+        requests,
+        raw_objects,
+    );
+    let check_suite = g0_capture_raw_json(
+        &check.raw_object_refs,
+        "check_suite",
+        &suite_endpoints,
+        requests,
+        raw_objects,
+    );
+    let app = g0_capture_raw_json(
+        &check.raw_object_refs,
+        "app",
+        &[app_endpoint],
+        requests,
+        raw_objects,
+    );
+    let app_id = check.app_id.parse::<u64>().ok();
+    let common = app_id.is_some_and(|app_id| {
+        check_run.as_ref().is_some_and(|value| {
+            g0_json_u64(value, &["id"]) == Some(check.check_run_id)
+                && g0_json_string(value, &["name"]) == Some(check.context.as_str())
+                && g0_json_string(value, &["head_sha"]) == Some(check.source_sha.as_str())
+                && g0_json_string(value, &["status"]) == Some(check.status.as_str())
+                && g0_json_string(value, &["conclusion"]) == Some(check.conclusion.as_str())
+                && g0_json_string(value, &["html_url"]) == Some(check.html_url.as_str())
+                && g0_json_u64(value, &["check_suite", "id"]) == Some(check.check_suite_id)
+                && g0_json_u64(value, &["app", "id"]) == Some(app_id)
+                && g0_json_string(value, &["app", "slug"]) == Some(check.app_slug.as_str())
+        }) && check_suite.as_ref().is_some_and(|value| {
+            g0_json_u64(value, &["id"]) == Some(check.check_suite_id)
+                && g0_json_string(value, &["head_sha"]) == Some(check.source_sha.as_str())
+                && g0_json_string(value, &["status"]) == Some(check.status.as_str())
+                && g0_json_string(value, &["conclusion"]) == Some(check.conclusion.as_str())
+                && g0_json_u64(value, &["app", "id"]) == Some(app_id)
+                && g0_json_string(value, &["app", "slug"]) == Some(check.app_slug.as_str())
+        }) && app.as_ref().is_some_and(|value| {
+            g0_json_u64(value, &["id"]) == Some(app_id)
+                && g0_json_string(value, &["slug"]) == Some(check.app_slug.as_str())
+        })
+    });
+    if !common {
+        return false;
+    }
+    let has_actions_raw_objects = check.raw_object_refs.iter().any(|raw_id| {
+        raw_objects.iter().any(|raw| {
+            &raw.raw_id == raw_id && matches!(raw.object_kind.as_str(), "workflow_run" | "job")
+        })
+    });
+    match &check.provider {
+        G0CheckProvider::ExternalApp => !has_actions_raw_objects,
+        G0CheckProvider::GithubActions {
+            workflow_run_id,
+            run_attempt,
+            job_id,
+            job_run_id,
+            job_run_attempt,
+            job_check_run_id,
+            job_source_sha,
+            job_html_url,
+            ..
+        } => {
+            let run = g0_capture_raw_json(
+                &check.raw_object_refs,
+                "workflow_run",
+                &[format!(
+                    "/repos/{repository}/actions/runs/{workflow_run_id}"
+                )],
+                requests,
+                raw_objects,
+            );
+            let job = g0_capture_raw_json(
+                &check.raw_object_refs,
+                "job",
+                &[format!(
+                    "/repos/{repository}/actions/runs/{workflow_run_id}/jobs/{job_id}"
+                )],
+                requests,
+                raw_objects,
+            );
+            run.as_ref().is_some_and(|value| {
+                g0_json_u64(value, &["id"]) == Some(*workflow_run_id)
+                    && g0_json_u64(value, &["run_attempt"]) == Some(u64::from(*run_attempt))
+                    && g0_json_string(value, &["head_sha"]) == Some(job_source_sha.as_str())
+                    && g0_json_string(value, &["event"]) == Some(check.event.as_str())
+                    && g0_json_string(value, &["status"]) == Some(check.status.as_str())
+                    && g0_json_string(value, &["conclusion"]) == Some(check.conclusion.as_str())
+            }) && job.as_ref().is_some_and(|value| {
+                g0_json_u64(value, &["id"]) == Some(*job_id)
+                    && g0_json_u64(value, &["run_id"]) == Some(*job_run_id)
+                    && g0_json_u64(value, &["run_attempt"]) == Some(u64::from(*job_run_attempt))
+                    && g0_json_string(value, &["head_sha"]) == Some(job_source_sha.as_str())
+                    && g0_json_string(value, &["html_url"]) == Some(job_html_url.as_str())
+                    && g0_api_path_is(
+                        &value["check_run_url"],
+                        &format!("/repos/{repository}/check-runs/{job_check_run_id}"),
+                    )
+            })
+        }
+    }
+}
+
+fn check_g0_check_raw_evidence(
+    repository: &str,
+    checks: &[G0CheckProducer],
+    requests: &[G0RequestRecord],
+    raw_objects: &[G0RawObjectRef],
+    findings: &mut Vec<Finding>,
+) {
+    for check in checks {
+        if !g0_check_raw_evidence_valid(repository, check, requests, raw_objects) {
+            finding(
+                findings,
+                "g0-check-raw-evidence",
+                repository,
+                "check_producers.raw_object_refs",
+                "check producer must bind independently captured check-run, check-suite, App, source, status, conclusion, html_url, and provider-specific run/job objects",
+            );
+        }
     }
 }
 
@@ -3818,8 +4063,9 @@ fn check_g0_check_producers(
             || check.check_run_id == 0
             || !valid_sha(&check.source_sha)
             || check.source_sha != expectation.source_sha
-            || !valid_sha(&check.actual_checkout_sha)
-            || check.actual_checkout_sha != expectation.checkout_sha
+            || g0_actions_checkout_sha(check).is_some_and(|checkout_sha| {
+                !valid_sha(checkout_sha) || checkout_sha != expectation.checkout_sha
+            })
             || check.event != expectation.event
             || check.status != "completed"
             || check.conclusion != "success"
@@ -3880,12 +4126,13 @@ fn check_g0_main_checks_against_snapshot(
                 workflow_run_id,
                 run_attempt,
                 job_id,
+                actual_checkout_sha,
                 ..
             } => snapshot.main_executions.iter().any(|execution| {
                 execution.run_id == *workflow_run_id
                     && execution.run_attempt == *run_attempt
                     && execution.trigger_source_sha == check.source_sha
-                    && execution.actual_checkout_sha == check.actual_checkout_sha
+                    && execution.actual_checkout_sha == *actual_checkout_sha
                     && execution.event == check.event
                     && execution.required_checks.iter().any(|observed| {
                         observed.context == check.context
@@ -3900,7 +4147,6 @@ fn check_g0_main_checks_against_snapshot(
             }),
             G0CheckProvider::ExternalApp => snapshot.main_executions.iter().any(|execution| {
                 execution.trigger_source_sha == check.source_sha
-                    && execution.actual_checkout_sha == check.actual_checkout_sha
                     && execution.event == check.event
                     && execution.required_checks.iter().any(|observed| {
                         observed.context == check.context
@@ -4067,8 +4313,9 @@ fn check_g0_pull_request(
             || !g0_valid_app_id(&check.app_id)
             || !valid_sha(&check.source_sha)
             || check.source_sha != pr.head_sha
-            || !valid_sha(&check.actual_checkout_sha)
-            || check.actual_checkout_sha != pr.tested_merge_sha
+            || g0_actions_checkout_sha(check).is_some_and(|checkout_sha| {
+                !valid_sha(checkout_sha) || checkout_sha != pr.tested_merge_sha
+            })
             || check.event != "pull_request"
             || check.status != "completed"
             || check.conclusion != "success"
@@ -4080,6 +4327,8 @@ fn check_g0_pull_request(
                     binding.run_ids.contains(workflow_run_id)
                         && binding.event == check.event
                         && binding.source_sha == check.source_sha
+                        && g0_actions_checkout_sha(check)
+                            .is_some_and(|checkout_sha| binding.actual_checkout_sha == checkout_sha)
                 }),
                 G0CheckProvider::ExternalApp => true,
             }
@@ -4186,13 +4435,14 @@ fn check_g0_pull_request(
                         workflow_run_id,
                         run_attempt,
                         job_id,
+                        actual_checkout_sha,
                         ..
                     } => snapshot_pr.executions.iter().any(|execution| {
                         execution.run_id == *workflow_run_id
                             && execution.run_attempt == *run_attempt
                             && execution.event == check.event
                             && execution.trigger_source_sha == check.source_sha
-                            && execution.actual_checkout_sha == check.actual_checkout_sha
+                            && execution.actual_checkout_sha == *actual_checkout_sha
                             && execution.required_checks.iter().any(|observed| {
                                 observed.context == check.context
                                     && observed.app_id == check.app_id
@@ -4207,7 +4457,6 @@ fn check_g0_pull_request(
                     G0CheckProvider::ExternalApp => {
                         snapshot_pr.executions.iter().any(|execution| {
                             execution.trigger_source_sha == check.source_sha
-                                && execution.actual_checkout_sha == check.actual_checkout_sha
                                 && execution.event == check.event
                                 && execution.required_checks.iter().any(|observed| {
                                     observed.context == check.context
@@ -7760,6 +8009,152 @@ mod tests {
         }
     }
 
+    fn push_provider_raw_fixture(
+        requests: &mut Vec<G0RequestRecord>,
+        raw_objects: &mut Vec<G0RawObjectRef>,
+        repository: &str,
+        prefix: &str,
+        check: &G0CheckProducer,
+    ) -> Vec<String> {
+        let app_id = check.app_id.parse::<u64>().unwrap();
+        let mut raw_refs = Vec::new();
+        let mut push = |kind: &str, endpoint: String, body: Value| {
+            let raw_id = if kind == "app" {
+                format!("raw-app-{}", check.app_slug)
+            } else {
+                format!("raw-{prefix}-{kind}")
+            };
+            if raw_objects.iter().any(|raw| raw.raw_id == raw_id) {
+                raw_refs.push(raw_id);
+                return;
+            }
+            let request_id = if kind == "app" {
+                format!("request-app-{}", check.app_slug)
+            } else {
+                format!("request-{prefix}-{kind}")
+            };
+            let bytes = canonical_json(&body).into_bytes();
+            let digest = digest_bytes(&bytes);
+            let storage_ref = format!("sha256://{}", digest.strip_prefix("sha256:").unwrap());
+            raw_objects.push(G0RawObjectRef {
+                raw_id: raw_id.clone(),
+                request_id: request_id.clone(),
+                object_kind: kind.to_owned(),
+                canonicalization: "jcs".to_owned(),
+                sha256: digest.clone(),
+                byte_length: bytes.len() as u64,
+                bytes_base64: BASE64.encode(&bytes),
+                media_type: "application/json".to_owned(),
+                storage_ref: storage_ref.clone(),
+                original_sha256: digest.clone(),
+                original_byte_length: bytes.len() as u64,
+                original_storage_ref: storage_ref,
+            });
+            requests.push(G0RequestRecord {
+                request_id,
+                api: G0ApiKind::Rest,
+                method: "GET".to_owned(),
+                endpoint_or_operation: endpoint,
+                query_base64: BASE64.encode(b"page=1"),
+                variables_base64: BASE64.encode(b"{}"),
+                query_sha256: digest_bytes(b"page=1"),
+                variables_sha256: digest_bytes(b"{}"),
+                auth_identity_ref: "collector.auth".to_owned(),
+                started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+                completed_at_utc: "2026-09-20T00:00:01Z".to_owned(),
+                http_status: 200,
+                api_request_id: format!("api-{prefix}-{kind}"),
+                rate_limit_ref: "collector.rate_limit".to_owned(),
+                page: G0Page {
+                    number: 1,
+                    per_page: 100,
+                    link_next: None,
+                    cursor_in: None,
+                    cursor_out: None,
+                    has_next_page: false,
+                    items_returned: 1,
+                },
+                response_raw_ref: raw_id.clone(),
+                error_raw_ref: None,
+                state: G0RequestState::Complete,
+                complete: true,
+                truncation_reason: None,
+            });
+            raw_refs.push(raw_id);
+        };
+
+        push(
+            "check_run",
+            format!("/repos/{repository}/check-runs/{}", check.check_run_id),
+            json!({
+                "id": check.check_run_id,
+                "name": check.context,
+                "head_sha": check.source_sha,
+                "status": check.status,
+                "conclusion": check.conclusion,
+                "html_url": check.html_url,
+                "check_suite": {"id": check.check_suite_id},
+                "app": {"id": app_id, "slug": check.app_slug}
+            }),
+        );
+        push(
+            "check_suite",
+            format!("/repos/{repository}/check-suites/{}", check.check_suite_id),
+            json!({
+                "id": check.check_suite_id,
+                "head_sha": check.source_sha,
+                "status": check.status,
+                "conclusion": check.conclusion,
+                "app": {"id": app_id, "slug": check.app_slug}
+            }),
+        );
+        push(
+            "app",
+            format!("/apps/{}", check.app_slug),
+            json!({"id": app_id, "slug": check.app_slug}),
+        );
+        if let G0CheckProvider::GithubActions {
+            workflow_run_id,
+            run_attempt,
+            job_id,
+            job_run_id,
+            job_run_attempt,
+            job_check_run_id,
+            job_source_sha,
+            job_html_url,
+            ..
+        } = &check.provider
+        {
+            push(
+                "workflow_run",
+                format!("/repos/{repository}/actions/runs/{workflow_run_id}"),
+                json!({
+                    "id": workflow_run_id,
+                    "run_attempt": run_attempt,
+                    "head_sha": job_source_sha,
+                    "event": check.event,
+                    "status": check.status,
+                    "conclusion": check.conclusion
+                }),
+            );
+            push(
+                "job",
+                format!("/repos/{repository}/actions/runs/{workflow_run_id}/jobs/{job_id}"),
+                json!({
+                    "id": job_id,
+                    "run_id": job_run_id,
+                    "run_attempt": job_run_attempt,
+                    "head_sha": job_source_sha,
+                    "html_url": job_html_url,
+                    "check_run_url": format!(
+                        "https://api.github.com/repos/{repository}/check-runs/{job_check_run_id}"
+                    )
+                }),
+            );
+        }
+        raw_refs
+    }
+
     /// Complete typed collector fixture.  It is intentionally generated from
     /// the checker-owned canonical scope, with every repository, current PR,
     /// workflow, required check, raw object, reconciliation row, graph edge,
@@ -7956,7 +8351,10 @@ mod tests {
                 job_run_attempt: 1,
                 job_check_run_id: main_check_run_id,
                 job_source_sha: source_sha.clone(),
-                job_html_url: format!("{repository_url}/runs/{main_run_id}/jobs/{main_job_id}"),
+                job_html_url: format!(
+                    "{repository_url}/actions/runs/{main_run_id}/job/{main_job_id}"
+                ),
+                actual_checkout_sha: source_sha.clone(),
             };
             let pr_provider = if index < 2 {
                 G0CheckProvider::ExternalApp
@@ -7969,7 +8367,10 @@ mod tests {
                     job_run_attempt: 1,
                     job_check_run_id: pr_check_run_id,
                     job_source_sha: head_sha.clone(),
-                    job_html_url: format!("{repository_url}/runs/{pr_run_id}/jobs/{pr_job_id}"),
+                    job_html_url: format!(
+                        "{repository_url}/actions/runs/{pr_run_id}/job/{pr_job_id}"
+                    ),
+                    actual_checkout_sha: merge_sha.clone(),
                 }
             };
             let main_app_slug = "github-actions";
@@ -8196,7 +8597,7 @@ mod tests {
                 bytes_base64: BASE64.encode(workflow_bytes),
                 raw_object_refs: vec![workflow_raw_id.clone()],
             };
-            let main_check_producer = G0CheckProducer {
+            let mut main_check_producer = G0CheckProducer {
                 context: "ci".to_owned(),
                 app_id: "123".to_owned(),
                 app_slug: main_app_slug.to_owned(),
@@ -8205,14 +8606,13 @@ mod tests {
                 check_suite_id: main_check_suite_id,
                 check_run_id: main_check_run_id,
                 source_sha: source_sha.clone(),
-                actual_checkout_sha: source_sha.clone(),
                 event: "push".to_owned(),
                 status: "completed".to_owned(),
                 conclusion: "success".to_owned(),
                 html_url: main_check_url,
                 raw_object_refs: vec![raw_id.clone()],
             };
-            let pr_check_producer = G0CheckProducer {
+            let mut pr_check_producer = G0CheckProducer {
                 context: "ci".to_owned(),
                 app_id: "123".to_owned(),
                 app_slug: pr_app_slug.to_owned(),
@@ -8221,13 +8621,30 @@ mod tests {
                 check_suite_id: pr_check_suite_id,
                 check_run_id: pr_check_run_id,
                 source_sha: head_sha.clone(),
-                actual_checkout_sha: merge_sha.clone(),
                 event: "pull_request".to_owned(),
                 status: "completed".to_owned(),
                 conclusion: "success".to_owned(),
                 html_url: pr_check_url,
                 raw_object_refs: vec![raw_id.clone()],
             };
+            main_check_producer
+                .raw_object_refs
+                .extend(push_provider_raw_fixture(
+                    &mut requests,
+                    &mut raw_objects,
+                    &repository,
+                    &format!("{repository_id}-main"),
+                    &main_check_producer,
+                ));
+            pr_check_producer
+                .raw_object_refs
+                .extend(push_provider_raw_fixture(
+                    &mut requests,
+                    &mut raw_objects,
+                    &repository,
+                    &format!("{repository_id}-pr"),
+                    &pr_check_producer,
+                ));
             collector_repositories.push(G0RepositoryInventory {
                 repository: repository.clone(),
                 repository_id,
@@ -8623,7 +9040,7 @@ mod tests {
         } = &mut action_check.provider
         {
             *job_html_url = format!(
-                "https://github.com/{}/runs/{}/jobs/{}",
+                "https://github.com/{}/actions/runs/{}/job/{}",
                 CANONICAL_REPOSITORIES[1],
                 *workflow_run_id,
                 *job_id + 1
@@ -9815,6 +10232,182 @@ mod tests {
         value["collector_snapshot"]["repositories"][1]["main_checks"][0]["provider"]
             ["github_actions"]["details_url"] = json!("https://example.invalid");
         assert!(serde_json::from_value::<G0InventoryEvidence>(value).is_err());
+    }
+
+    #[test]
+    fn captured_app_and_actions_objects_bind_raw_provider_fields() {
+        // Values below are the captured provider subset from
+        // G0/fleet/check-contexts-full.json (SHA-256
+        // 1a51f8a276c912c6f03f3bcb749d1f5845b52c0551cdff6254c8e90c0c78901e).
+        let repository = "tailrocks/velnor";
+        let dco_source_sha = "b93157f7f0971c73d1964447b5570c39aca6bf5e".to_owned();
+        let mut requests = Vec::new();
+        let mut raw_objects = Vec::new();
+        let mut dco = G0CheckProducer {
+            context: "DCO".to_owned(),
+            app_id: "974774".to_owned(),
+            app_slug: "dco-2".to_owned(),
+            provider: G0CheckProvider::ExternalApp,
+            api: G0ApiKind::Rest,
+            check_suite_id: 96035378559,
+            check_run_id: 105952041178,
+            source_sha: dco_source_sha,
+            event: "pull_request".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: "success".to_owned(),
+            html_url: "https://github.com/tailrocks/velnor/runs/105952041178".to_owned(),
+            raw_object_refs: Vec::new(),
+        };
+        dco.raw_object_refs = push_provider_raw_fixture(
+            &mut requests,
+            &mut raw_objects,
+            repository,
+            "captured-dco",
+            &dco,
+        );
+        assert!(g0_check_raw_evidence_valid(
+            repository,
+            &dco,
+            &requests,
+            &raw_objects
+        ));
+
+        let mut sonar = G0CheckProducer {
+            context: "SonarCloud Code Analysis".to_owned(),
+            app_id: "12526".to_owned(),
+            app_slug: "sonarqubecloud".to_owned(),
+            provider: G0CheckProvider::ExternalApp,
+            api: G0ApiKind::Rest,
+            check_suite_id: 95096323852,
+            check_run_id: 104858624075,
+            source_sha: "b9db5b149cc46baba9c49549432307c29e3972b0".to_owned(),
+            event: "pull_request".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: "success".to_owned(),
+            html_url: "https://github.com/jackin-project/jackin-agent-smith/runs/104858624075"
+                .to_owned(),
+            raw_object_refs: Vec::new(),
+        };
+        sonar.raw_object_refs = push_provider_raw_fixture(
+            &mut requests,
+            &mut raw_objects,
+            "jackin-project/jackin-agent-smith",
+            "captured-sonar",
+            &sonar,
+        );
+        assert!(g0_check_raw_evidence_valid(
+            "jackin-project/jackin-agent-smith",
+            &sonar,
+            &requests,
+            &raw_objects
+        ));
+
+        let actions_source_sha = "e713841bdb9c33d853b7a9af88ceac924af1b3b6".to_owned();
+        let mut actions = G0CheckProducer {
+            context: "Publish runtime products".to_owned(),
+            app_id: "15368".to_owned(),
+            app_slug: "github-actions".to_owned(),
+            provider: G0CheckProvider::GithubActions {
+                workflow_run_id: 35463512640,
+                run_attempt: 1,
+                job_id: 105951823951,
+                job_run_id: 35463512640,
+                job_run_attempt: 1,
+                job_check_run_id: 105951823951,
+                job_source_sha: actions_source_sha.clone(),
+                job_html_url:
+                    "https://github.com/tailrocks/velnor/actions/runs/35463512640/job/105951823951"
+                        .to_owned(),
+                actual_checkout_sha: actions_source_sha.clone(),
+            },
+            api: G0ApiKind::Rest,
+            check_suite_id: 96034876638,
+            check_run_id: 105951823951,
+            source_sha: actions_source_sha,
+            event: "push".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: "success".to_owned(),
+            html_url:
+                "https://github.com/tailrocks/velnor/actions/runs/35463512640/job/105951823951"
+                    .to_owned(),
+            raw_object_refs: Vec::new(),
+        };
+        actions.raw_object_refs = push_provider_raw_fixture(
+            &mut requests,
+            &mut raw_objects,
+            repository,
+            "captured-actions",
+            &actions,
+        );
+        assert!(g0_check_raw_evidence_valid(
+            repository,
+            &actions,
+            &requests,
+            &raw_objects
+        ));
+
+        let dco_check_raw_id = dco
+            .raw_object_refs
+            .iter()
+            .find(|raw_id| raw_id.contains("check_run"))
+            .unwrap();
+        let dco_raw = raw_objects
+            .iter_mut()
+            .find(|raw| &raw.raw_id == dco_check_raw_id)
+            .unwrap();
+        let mut dco_body: Value =
+            serde_json::from_slice(&BASE64.decode(&dco_raw.bytes_base64).unwrap()).unwrap();
+        dco_body["html_url"] = json!("https://cncf.github.io/dco2");
+        let dco_bytes = canonical_json(&dco_body).into_bytes();
+        dco_raw.bytes_base64 = BASE64.encode(&dco_bytes);
+        let dco_digest = digest_bytes(&dco_bytes);
+        dco_raw.sha256 = dco_digest.clone();
+        dco_raw.byte_length = dco_bytes.len() as u64;
+        dco_raw.storage_ref = format!("sha256://{}", dco_digest.strip_prefix("sha256:").unwrap());
+        dco_raw.original_sha256 = dco_digest.clone();
+        dco_raw.original_byte_length = dco_bytes.len() as u64;
+        dco_raw.original_storage_ref =
+            format!("sha256://{}", dco_digest.strip_prefix("sha256:").unwrap());
+        assert!(!g0_check_raw_evidence_valid(
+            repository,
+            &dco,
+            &requests,
+            &raw_objects
+        ));
+
+        let actions_job_raw_id = actions
+            .raw_object_refs
+            .iter()
+            .find(|raw_id| raw_id.contains("job"))
+            .unwrap();
+        let actions_raw = raw_objects
+            .iter_mut()
+            .find(|raw| &raw.raw_id == actions_job_raw_id)
+            .unwrap();
+        let mut actions_body: Value =
+            serde_json::from_slice(&BASE64.decode(&actions_raw.bytes_base64).unwrap()).unwrap();
+        actions_body["run_attempt"] = json!(2);
+        let actions_bytes = canonical_json(&actions_body).into_bytes();
+        actions_raw.bytes_base64 = BASE64.encode(&actions_bytes);
+        let actions_digest = digest_bytes(&actions_bytes);
+        actions_raw.sha256 = actions_digest.clone();
+        actions_raw.byte_length = actions_bytes.len() as u64;
+        actions_raw.storage_ref = format!(
+            "sha256://{}",
+            actions_digest.strip_prefix("sha256:").unwrap()
+        );
+        actions_raw.original_sha256 = actions_digest.clone();
+        actions_raw.original_byte_length = actions_bytes.len() as u64;
+        actions_raw.original_storage_ref = format!(
+            "sha256://{}",
+            actions_digest.strip_prefix("sha256:").unwrap()
+        );
+        assert!(!g0_check_raw_evidence_valid(
+            repository,
+            &actions,
+            &requests,
+            &raw_objects
+        ));
     }
 
     #[test]

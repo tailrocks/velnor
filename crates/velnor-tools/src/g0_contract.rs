@@ -339,7 +339,6 @@ pub(crate) struct G0CheckProducer {
     pub check_suite_id: u64,
     pub check_run_id: u64,
     pub source_sha: String,
-    pub actual_checkout_sha: String,
     pub event: String,
     pub status: String,
     pub conclusion: String,
@@ -361,6 +360,9 @@ pub(crate) enum G0CheckProvider {
         job_check_run_id: u64,
         job_source_sha: String,
         job_html_url: String,
+        /// Checkout identity comes from the independently captured Actions
+        /// execution, not from an external App check.
+        actual_checkout_sha: String,
     },
     ExternalApp,
 }
