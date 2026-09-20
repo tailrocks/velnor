@@ -970,6 +970,11 @@ old_draft=""
 old_prerelease=""
 old_source_commit=""
 old_version=""
+owner_draft=""
+owner_tag_sha=""
+owner_name=""
+owner_body=""
+owner_source_commit=""
 candidate_version="$(jq -er '.version | strings' "$published_dir/release-manifest.json")"
 had_release=0
 mutated=0
@@ -987,14 +992,15 @@ remote_tag_sha() {
 validate_existing_rolling_release() {
   local body="$1"
   local source_dir="$2"
+  local expected_draft="${3:-false}"
   local manifest="$source_dir/release-manifest.json"
   local identity="$source_dir/identity.json"
   local manifest_assets="$transaction_dir/live-manifest-assets"
   local downloaded_assets="$transaction_dir/live-downloaded-assets"
   local name expected_digest actual_digest api_digest
 
-  jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" '
-    (.draft | type == "boolean") and .prerelease == $prerelease and .tag_name == $tag and
+  jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" --argjson draft "$expected_draft" '
+    (.draft == $draft) and .prerelease == $prerelease and .tag_name == $tag and
     (.id | type == "number") and
     (.assets | type == "array" and length > 0) and
     ((.assets | map(.name)) as $names |
@@ -1106,12 +1112,50 @@ validate_existing_rolling_release() {
   fi
 }
 
-discard_stale_rolling_draft() {
-  local stale_tag_sha
-  echo "::warning::discarding incomplete rolling draft and retrying publication" >&2
-  gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" >/dev/null
-  stale_tag_sha="$(remote_tag_sha "$rolling_tag")"
-  if [ -n "$stale_tag_sha" ]; then
+assert_rolling_ownership() {
+  local expected_draft="$1"
+  local expected_tag_sha="$2"
+  local expected_name="$3"
+  local expected_body="$4"
+  local expected_source_commit="$5"
+  local current_body current_tag_sha
+  if [ -z "$rolling_release_id" ] || [ -z "$expected_tag_sha" ] || [ -z "$expected_source_commit" ]; then
+    return 1
+  fi
+  if ! current_body="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id")"; then
+    return 1
+  fi
+  jq -e \
+    --arg id "$rolling_release_id" \
+    --arg tag "$rolling_tag" \
+    --arg name "$expected_name" \
+    --arg body "$expected_body" \
+    --argjson prerelease "$RELEASE_PRERELEASE" \
+    --argjson draft "$expected_draft" \
+    '(.id | tostring) == $id and .draft == $draft and .prerelease == $prerelease and
+     .tag_name == $tag and .name == $name and (.body // "") == $body' <<<"$current_body" >/dev/null || return 1
+  if ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+    return 1
+  fi
+  [ "$current_tag_sha" = "$expected_tag_sha" ] && [ "$current_tag_sha" = "$expected_source_commit" ]
+}
+
+discard_current_typed_rolling_draft() {
+  if ! assert_rolling_ownership true "$old_tag_sha" "$old_name" "$old_body" "$old_source_commit"; then
+    echo "::error::typed rolling draft ownership changed; refusing cleanup" >&2
+    return 1
+  fi
+  echo "::warning::discarding incomplete current-contract rolling draft and retrying publication" >&2
+  if ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" >/dev/null; then
+    return 1
+  fi
+  local current_tag_sha
+  current_tag_sha="$(remote_tag_sha "$rolling_tag")"
+  if [ -n "$current_tag_sha" ]; then
+    if [ "$current_tag_sha" != "$old_tag_sha" ] || [ "$current_tag_sha" != "$old_source_commit" ]; then
+      echo "::error::typed rolling draft tag ownership changed; refusing cleanup" >&2
+      return 1
+    fi
     gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null
   fi
   had_release=0
@@ -1188,50 +1232,97 @@ verify_restored_assets() {
 
 rollback() {
   local status="$1"
+  local current_tag_sha
   trap - ERR
   if [ "$mutated" = 1 ]; then
     set +e
     rollback_status=0
-    if [ "$had_release" = 1 ]; then
+    if [ -z "$rolling_release_id" ] || [ -z "$owner_draft" ] || [ -z "$owner_tag_sha" ]; then
+      rollback_status=1
+    elif ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+      echo "::error::rolling preview ownership changed; refusing rollback mutation" >&2
+      rollback_status=1
+    elif [ "$had_release" = 1 ]; then
       # Keep the rollback release hidden while restoring its complete old set.
-      if gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" -F draft=true >/dev/null; then
-        while IFS=$'\t' read -r asset_id asset_name; do
-          if ! grep -Fqx -- "$asset_name" "$old_assets"; then
-            gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >/dev/null || rollback_status=1
-          fi
-        done < <(gh api --paginate --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id/assets" --jq '.[] | [.id, .name] | @tsv')
-        while IFS= read -r asset_name; do
-          if ! gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber "$rollback_dir/$asset_name"; then
+      if ! gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" -F draft=true >/dev/null; then
+        rollback_status=1
+      else
+        owner_draft=true
+        if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+          echo "::error::rolling preview ownership changed after hiding release; refusing rollback mutation" >&2
+          rollback_status=1
+        fi
+        if [ "$rollback_status" -eq 0 ]; then
+          while IFS=$'\t' read -r asset_id asset_name; do
+            if ! grep -Fqx -- "$asset_name" "$old_assets"; then
+              if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit" \
+                || ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >/dev/null; then
+                rollback_status=1
+                break
+              fi
+            fi
+          done < <(gh api --paginate --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id/assets" --jq '.[] | [.id, .name] | @tsv')
+        fi
+        if [ "$rollback_status" -eq 0 ]; then
+          while IFS= read -r asset_name; do
+            if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit" \
+              || ! gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber "$rollback_dir/$asset_name"; then
+              rollback_status=1
+              break
+            fi
+          done < "$old_assets"
+        fi
+        if [ "$rollback_status" -eq 0 ] && ! verify_restored_assets "$rollback_dir" "$old_assets"; then
+          rollback_status=1
+        fi
+        if [ "$rollback_status" -eq 0 ] && ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+          echo "::error::rolling preview ownership changed before tag rollback; refusing force-move" >&2
+          rollback_status=1
+        fi
+        if [ "$rollback_status" -eq 0 ]; then
+          if ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+            rollback_status=1
+          elif [ "$current_tag_sha" = "$old_tag_sha" ]; then
+            :
+          elif [ "$current_tag_sha" = "$owner_tag_sha" ] && gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$old_tag_sha" -F force=true >/dev/null; then
+            owner_tag_sha="$old_tag_sha"
+          else
+            echo "::error::rolling preview tag changed before rollback; refusing force-move" >&2
             rollback_status=1
           fi
-        done < "$old_assets"
-        restore_dir="$rollback_dir"
-        restore_assets="$old_assets"
-        if ! verify_restored_assets "$restore_dir" "$restore_assets"; then
+        fi
+        if [ "$rollback_status" -eq 0 ] && ! assert_rolling_ownership "$owner_draft" "$old_tag_sha" "$owner_name" "$owner_body" "$old_source_commit"; then
+          echo "::error::rolling preview ownership changed before metadata rollback; refusing mutation" >&2
           rollback_status=1
         fi
-        rollback_ready=1
-        if [ "$rollback_status" -ne 0 ]; then
-          rollback_ready=0
-        fi
-        if [ -n "$old_tag_sha" ] && ! gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$old_tag_sha" -F force=true >/dev/null; then
-          rollback_ready=0
-        fi
-        if [ "$rollback_ready" = 1 ]; then
-          gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
-            -f "name=$old_name" -f "body=$old_body" -F "draft=$old_draft" -F "prerelease=$old_prerelease" -F make_latest=false >/dev/null || rollback_status=1
-        else
+        if [ "$rollback_status" -eq 0 ] && ! gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
+          -f "name=$old_name" -f "body=$old_body" -F "draft=$old_draft" -F "prerelease=$old_prerelease" -F make_latest=false >/dev/null; then
           rollback_status=1
         fi
-      else
-        rollback_status=1
+        if [ "$rollback_status" -eq 0 ]; then
+          owner_draft="$old_draft"
+          owner_tag_sha="$old_tag_sha"
+          owner_name="$old_name"
+          owner_body="$old_body"
+          owner_source_commit="$old_source_commit"
+          if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+            rollback_status=1
+          fi
+        fi
       fi
     else
-      if [ -n "$rolling_release_id" ]; then
-        gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" >/dev/null || rollback_status=1
-      fi
-      if [ -n "$(remote_tag_sha "$rolling_tag")" ]; then
-        gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null || rollback_status=1
+      if ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" >/dev/null; then
+        rollback_status=1
+      elif ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+        rollback_status=1
+      elif [ -z "$current_tag_sha" ]; then
+        :
+      elif [ "$current_tag_sha" = "$owner_tag_sha" ] && [ "$current_tag_sha" = "$owner_source_commit" ] \
+        && gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null; then
+        :
+      else
+        echo "::error::new rolling preview tag changed before rollback; refusing delete" >&2
+        rollback_status=1
       fi
     fi
     if [ "$rollback_status" -ne 0 ]; then
@@ -1272,7 +1363,11 @@ case "$rolling_http" in
   200)
     awk 'body {print; next} /^\r?$/ {body = 1}' "$rolling_response" > "$rolling_body"
     had_release=1
-    jq -e --arg tag "$rolling_tag" '(.draft | type == "boolean") and .tag_name == $tag and (.id | type == "number")' "$rolling_body" >/dev/null
+    if ! jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" \
+      '(.draft | type == "boolean") and .prerelease == $prerelease and .tag_name == $tag and (.id | type == "number")' "$rolling_body" >/dev/null; then
+      echo "::error::existing rolling release failed immutable validation; refusing mutation" >&2
+      exit 1
+    fi
     rolling_release_id="$(jq -er '.id' "$rolling_body")"
     old_name="$(jq -er '.name | strings' "$rolling_body")"
     old_body="$(jq -r '.body // ""' "$rolling_body")"
@@ -1280,28 +1375,25 @@ case "$rolling_http" in
     old_prerelease="$(jq -er '.prerelease | tostring' "$rolling_body")"
     old_tag_sha="$(remote_tag_sha "$rolling_tag")"
     if ! [[ "$old_tag_sha" =~ ^[0-9a-f]{40}$ ]]; then
-      if [ "$old_draft" = true ]; then
-        discard_stale_rolling_draft
-      else
-        echo "::error::rolling release tag is not a commit ref" >&2
-        exit 1
-      fi
-    elif [ "$old_draft" = true ] && [ "$old_prerelease" != "$RELEASE_PRERELEASE" ]; then
-      discard_stale_rolling_draft
+      echo "::error::existing public rolling release failed immutable validation; refusing mutation" >&2
+      exit 1
     elif ! mkdir -p "$rollback_dir" || ! gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$rollback_dir" --clobber; then
-      if [ "$old_draft" = true ]; then
-        discard_stale_rolling_draft
-      else
-        echo "::error::existing rolling release could not be downloaded" >&2
+      echo "::error::existing rolling release failed immutable validation; refusing mutation" >&2
+      exit 1
+    elif ! validate_existing_rolling_release "$rolling_body" "$rollback_dir" "$old_draft"; then
+      echo "::error::existing rolling release failed immutable validation; refusing mutation" >&2
+      exit 1
+    elif [ "$old_draft" = true ]; then
+      if ! discard_current_typed_rolling_draft; then
+        echo "::error::existing rolling draft ownership changed; refusing mutation" >&2
         exit 1
       fi
-    elif ! validate_existing_rolling_release "$rolling_body" "$rollback_dir"; then
-      if [ "$old_draft" = true ]; then
-        discard_stale_rolling_draft
-      else
-        echo "::error::existing public rolling release failed immutable validation; refusing mutation" >&2
-        exit 1
-      fi
+    else
+      owner_draft="$old_draft"
+      owner_tag_sha="$old_tag_sha"
+      owner_name="$old_name"
+      owner_body="$old_body"
+      owner_source_commit="$old_source_commit"
     fi
     if [ "$had_release" = 1 ]; then
       old_version_order="${old_version%%+*}"
@@ -1335,14 +1427,36 @@ if [ "$had_release" = 0 ]; then
     -f "body=Verified package release from $EXPECTED_SOURCE_COMMIT" \
     -F draft=true -F "prerelease=$RELEASE_PRERELEASE" -F make_latest=false)"
   rolling_release_id="$(jq -er '.id' <<<"$create_json")"
+  owner_draft=true
+  owner_tag_sha="$EXPECTED_SOURCE_COMMIT"
+  owner_name="$RELEASE_TITLE_PREFIX $candidate_version"
+  owner_body="Verified package release from $EXPECTED_SOURCE_COMMIT"
+  owner_source_commit="$EXPECTED_SOURCE_COMMIT"
+  if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+    echo "::error::new rolling preview ownership could not be established; refusing mutation" >&2
+    exit 1
+  fi
 else
   mutated=1
+  if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+    echo "::error::rolling preview ownership changed before publication; refusing mutation" >&2
+    exit 1
+  fi
   gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" -F draft=true >/dev/null
+  owner_draft=true
+  if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+    echo "::error::rolling preview ownership changed after publication was hidden; refusing mutation" >&2
+    exit 1
+  fi
 fi
 
 # The immutable source-bound release is the candidate staging record.  Copy its
 # already-verified files only while the rolling release remains a draft; draft
 # publication is the visibility boundary, so readers never see mixed assets.
+if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+  echo "::error::rolling preview ownership changed before asset publication; refusing mutation" >&2
+  exit 1
+fi
 gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber \
 "#,
     );
@@ -1356,12 +1470,34 @@ jq -r '.assets[].name' <<<"$rolling_stage_json" | LC_ALL=C sort > "$rolling_stag
 cmp -s "$expected_assets" "$rolling_staged_assets" || { echo "::error::staged rolling release asset set is not exact" >&2; exit 1; }
 
 if [ "$had_release" = 1 ]; then
+  if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+    echo "::error::rolling preview ownership changed before tag publication; refusing force-move" >&2
+    exit 1
+  fi
   gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$EXPECTED_SOURCE_COMMIT" -F force=true >/dev/null
+  owner_tag_sha="$EXPECTED_SOURCE_COMMIT"
+  owner_source_commit="$EXPECTED_SOURCE_COMMIT"
+  if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+    echo "::error::rolling preview ownership changed after tag publication; refusing mutation" >&2
+    exit 1
+  fi
+fi
+if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
+  echo "::error::rolling preview ownership changed before release publication; refusing mutation" >&2
+  exit 1
 fi
 gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
   -f "name=$RELEASE_TITLE_PREFIX $candidate_version" \
   -f "body=Verified package release from $EXPECTED_SOURCE_COMMIT" \
   -F draft=false -F "prerelease=$RELEASE_PRERELEASE" -F make_latest=false >/dev/null
+owner_draft=false
+owner_name="$RELEASE_TITLE_PREFIX $candidate_version"
+owner_body="Verified package release from $EXPECTED_SOURCE_COMMIT"
+owner_source_commit="$EXPECTED_SOURCE_COMMIT"
+if ! assert_rolling_ownership "$owner_draft" "$EXPECTED_SOURCE_COMMIT" "$owner_name" "$owner_body" "$owner_source_commit"; then
+  echo "::error::rolling preview ownership changed after release publication; refusing mutation" >&2
+  exit 1
+fi
 
 new_tag_sha="$(remote_tag_sha "$rolling_tag")"
 [ "$new_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::rolling tag does not resolve to the verified source commit" >&2; exit 1; }
@@ -1987,6 +2123,8 @@ concurrency_group = "package-release-preview"
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         assert!(!workflow.contains("LEGACY_ROLLING"));
         assert!(workflow.contains("validate_existing_rolling_release"));
+        assert!(workflow.contains("(.draft == $draft) and .prerelease == $prerelease"));
+        assert!(workflow.contains("(.draft | type == \"boolean\") and .prerelease == $prerelease"));
         assert!(workflow.contains("test -s \"$manifest\""));
         assert!(workflow.contains("test -s \"$identity\""));
         assert!(workflow
@@ -2000,27 +2138,35 @@ concurrency_group = "package-release-preview"
         assert!(workflow.contains(
             "existing public rolling release failed immutable validation; refusing mutation"
         ));
+        assert!(workflow.contains("assert_rolling_ownership"));
     }
 
     #[test]
-    fn rendered_workflow_recovers_or_discards_interrupted_rolling_draft() {
+    fn rendered_workflow_refuses_invalid_rolling_release_before_mutation() {
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        assert!(workflow.contains("discard_current_typed_rolling_draft"));
+        assert!(workflow.contains("typed rolling draft ownership changed; refusing cleanup"));
         assert!(workflow.contains(
-            "(.draft | type == \"boolean\") and .tag_name == $tag and (.id | type == \"number\")"
+            "existing public rolling release failed immutable validation; refusing mutation"
         ));
-        assert!(workflow.contains(
-            r#"if [ "$old_draft" = true ] && [ "$old_prerelease" != "$RELEASE_PRERELEASE" ]; then"#
-        ));
-        assert!(workflow.contains("elif ! validate_existing_rolling_release"));
-        assert!(workflow.contains("discard_stale_rolling_draft"));
-        assert!(workflow.contains("discarding incomplete rolling draft and retrying publication"));
-        assert!(workflow.contains(
-            "gh api --method DELETE --repo \"$GITHUB_REPOSITORY\" \"repos/$GITHUB_REPOSITORY/releases/$rolling_release_id\""
-        ));
-        assert!(workflow.contains("stale_tag_sha=\"$(remote_tag_sha \"$rolling_tag\")\""));
-        assert!(workflow.contains("git/refs/tags/$rolling_tag\""));
-        assert!(workflow.contains("had_release=0"));
+        assert!(!workflow.contains("discard_stale_rolling_draft"));
+        assert!(!workflow.contains("LEGACY_ROLLING"));
+        let refusal = workflow
+            .find("existing public rolling release failed immutable validation; refusing mutation")
+            .expect("invalid rolling release refusal");
+        let first_mutation = workflow
+            .find("if [ \"$had_release\" = 0 ]; then")
+            .expect("rolling publication mutation boundary");
+        assert!(refusal < first_mutation);
+    }
+
+    #[test]
+    fn package_release_schema_has_no_legacy_compatibility_fields() {
+        assert!(PackageRelease
+            .schema()
+            .iter()
+            .all(|field| !field.starts_with("legacy_")));
     }
 
     fn render_config() -> ProjectConfig {
@@ -2553,13 +2699,15 @@ concurrency_group = "package-release-preview"
         assert!(workflow.contains("validate_existing_rolling_release"));
         assert!(workflow
             .contains("existing rolling release assets are not exactly covered by its manifest"));
-        assert!(
-            workflow.contains("if ! verify_restored_assets \"$restore_dir\" \"$restore_assets\"")
-        );
+        assert!(workflow.contains(
+            "if [ \"$rollback_status\" -eq 0 ] && ! verify_restored_assets \"$rollback_dir\" \"$old_assets\""
+        ));
+        assert!(workflow.contains("rolling preview ownership changed; refusing rollback mutation"));
+        assert!(workflow.contains("refusing force-move"));
         assert!(workflow.contains("rollback restored bytes differ"));
         assert!(workflow.contains("rollback GitHub digest differs"));
         assert!(workflow.contains(
-            "if ! gh release upload \"$rolling_tag\" --repo \"$GITHUB_REPOSITORY\" --clobber"
+            "gh release upload \"$rolling_tag\" --repo \"$GITHUB_REPOSITORY\" --clobber"
         ));
         assert!(
             workflow.contains("gh release download \"$rolling_tag\" --repo \"$GITHUB_REPOSITORY\"")
@@ -2569,6 +2717,206 @@ concurrency_group = "package-release-preview"
         assert!(workflow.contains("VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_TAG\""));
         assert!(!workflow.contains("gh release delete"));
         assert!(!workflow.contains("HEAD:$CONSUMER_BRANCH"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn typed_draft_cleanup_refuses_release_state_and_tag_drift() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        let helper_start = rolling_script
+            .find("assert_rolling_ownership() {")
+            .expect("ownership helper");
+        let helper_end = rolling_script
+            .find("\nverify_restored_assets() {")
+            .expect("verification helper");
+        let helpers = &rolling_script[helper_start..helper_end];
+        let source_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-draft-race-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create shell fixture");
+
+        for mode in ["state", "tag"] {
+            let mut script = String::from("set -Eeuo pipefail\n");
+            script.push_str(helpers);
+            write!(
+                &mut script,
+                r#"
+GITHUB_REPOSITORY=example/project
+RELEASE_PRERELEASE=true
+rolling_tag=preview
+rolling_release_id=123
+old_tag_sha={source_commit}
+old_source_commit={source_commit}
+old_name='Preview 1.0.0-preview.1+aaaaaaa'
+old_body='old-body'
+old_draft=true
+old_prerelease=true
+rollback_dir="$TEST_TMPDIR/rollback"
+old_assets="$TEST_TMPDIR/old-assets"
+had_release=1
+: > "$old_assets"
+remote_tag_reads_file="$TEST_TMPDIR/tag-reads"
+remote_tag_sha() {{
+  remote_tag_reads=0
+  if [ -f "$remote_tag_reads_file" ]; then
+    remote_tag_reads="$(cat "$remote_tag_reads_file")"
+  fi
+  remote_tag_reads=$((remote_tag_reads + 1))
+  printf '%s\n' "$remote_tag_reads" > "$remote_tag_reads_file"
+  if [ "$TEST_MODE" = tag ] && [ "$remote_tag_reads" -gt 1 ]; then
+    printf '%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  else
+    printf '%s\n' {source_commit}
+  fi
+}}
+gh() {{
+  if [[ "$*" == *"releases/123"* ]] && [[ "$*" != *"--method"* ]]; then
+    if [ "$TEST_MODE" = state ]; then
+      printf '%s\n' '{{"id":123,"draft":true,"prerelease":true,"tag_name":"preview","name":"Foreign","body":"old-body"}}'
+    else
+      printf '%s\n' '{{"id":123,"draft":true,"prerelease":true,"tag_name":"preview","name":"Preview 1.0.0-preview.1+aaaaaaa","body":"old-body"}}'
+    fi
+    return 0
+  fi
+  if [[ "$*" == *"git/refs/tags/preview"* ]]; then
+    : > "$TEST_TMPDIR/tag-delete"
+  else
+    : > "$TEST_TMPDIR/release-delete"
+  fi
+}}
+TEST_MODE={mode}
+if discard_current_typed_rolling_draft; then
+  exit 1
+fi
+test ! -e "$TEST_TMPDIR/tag-delete"
+if [ "$TEST_MODE" = state ]; then
+  test ! -e "$TEST_TMPDIR/release-delete"
+else
+  test -e "$TEST_TMPDIR/release-delete"
+fi
+"#
+            )
+            .expect("render draft ownership regression shell");
+            let output = Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .env("TEST_TMPDIR", &root)
+                .output()
+                .expect("run draft ownership regression");
+            assert!(
+                output.status.success(),
+                "draft drift mode {mode} was not fail-closed:\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let _ = std::fs::remove_file(root.join("release-delete"));
+            let _ = std::fs::remove_file(root.join("tag-delete"));
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_refuses_release_or_tag_sha_drift_before_destructive_calls() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        let helper_start = rolling_script
+            .find("assert_rolling_ownership() {")
+            .expect("ownership helper");
+        let helper_end = rolling_script
+            .find("\ntrap 'rollback")
+            .expect("rollback trap");
+        let helpers = &rolling_script[helper_start..helper_end];
+        let source_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-rollback-race-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create shell fixture");
+
+        for mode in ["state", "tag"] {
+            let mut script = String::from("set -Eeuo pipefail\n");
+            script.push_str(helpers);
+            write!(
+                &mut script,
+                r#"
+GITHUB_REPOSITORY=example/project
+RELEASE_PRERELEASE=true
+rolling_tag=preview
+rolling_release_id=123
+owner_draft=false
+owner_tag_sha={source_commit}
+owner_name='Preview 1.0.0-preview.1+aaaaaaa'
+owner_body='old-body'
+owner_source_commit={source_commit}
+had_release=1
+mutated=1
+old_tag_sha={source_commit}
+old_source_commit={source_commit}
+old_name="$owner_name"
+old_body="$owner_body"
+old_draft=false
+old_prerelease=true
+old_assets="$TEST_TMPDIR/old-assets"
+rollback_dir="$TEST_TMPDIR/rollback"
+transaction_dir="$TEST_TMPDIR/transaction"
+: > "$old_assets"
+remote_tag_sha() {{
+  if [ "$TEST_MODE" = tag ]; then
+    printf '%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  else
+    printf '%s\n' {source_commit}
+  fi
+}}
+gh() {{
+  if [[ "$*" == *"releases/123"* ]] && [[ "$*" != *"--method"* ]]; then
+    if [ "$TEST_MODE" = state ]; then
+      printf '%s\n' '{{"id":123,"draft":false,"prerelease":true,"tag_name":"preview","name":"Foreign","body":"old-body"}}'
+    else
+      printf '%s\n' '{{"id":123,"draft":false,"prerelease":true,"tag_name":"preview","name":"Preview 1.0.0-preview.1+aaaaaaa","body":"old-body"}}'
+    fi
+    return 0
+  fi
+  : > "$TEST_TMPDIR/mutation"
+}}
+TEST_MODE={mode}
+set +e
+(rollback 1)
+rollback_status=$?
+set -e
+test "$rollback_status" -eq 1
+test ! -e "$TEST_TMPDIR/mutation"
+"#
+            )
+            .expect("render rollback ownership regression shell");
+            let output = Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .env("TEST_TMPDIR", &root)
+                .output()
+                .expect("run rollback ownership regression");
+            assert!(
+                output.status.success(),
+                "rollback drift mode {mode} was not fail-closed:\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let _ = std::fs::remove_file(root.join("mutation"));
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]

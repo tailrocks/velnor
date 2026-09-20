@@ -78,6 +78,13 @@ arbitrary command array. Omit it when a package has no repository-owned
 semantic verification beyond Velnor's generic manifest, checksum, and
 provenance checks.
 
+The rolling release is current-contract-only: an existing public release must
+match the declared manifest, identity, asset digests, tag, source, and version
+contract. An interrupted draft is discarded only after that same typed contract
+and release/tag ownership are re-read; missing or mixed state is rejected before
+publication mutation. Migration of an older consumer release belongs in that
+consumer's release automation.
+
 ## `[renovate]` — self-hosted dependency updates
 
 Scan evidence alone (`renovate.json`, `renovate.json5`, or `.github/renovate.json*`)

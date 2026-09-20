@@ -132,6 +132,12 @@ fn package_release_hook_renders_and_passes_policy() {
     assert!(
         workflow.contains("VELNOR_VERIFIED_PACKAGE_DIR: ${{ github.workspace }}/published-package")
     );
+    assert!(workflow.contains(
+        "existing public rolling release failed immutable validation; refusing mutation"
+    ));
+    assert!(workflow.contains("discard_current_typed_rolling_draft"));
+    assert!(workflow.contains("rolling preview ownership changed; refusing rollback mutation"));
+    assert!(!workflow.contains("discard_stale_rolling_draft"));
 
     let policy_workflow = fs::read_to_string(root.join(".github/workflows/ci-policy.yml")).unwrap();
     let revision = policy_workflow
