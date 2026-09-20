@@ -3536,11 +3536,22 @@ fn verify_provider_asset_payloads(
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run_fetch_selection(
     selection_path: &Path,
+    expected_source_repository: &str,
     dir: &Path,
     path_overlay: Option<&Path>,
 ) -> Result<DiscoverySelection, GeneratorError> {
     let selected_document = read_json(selection_path)?;
     let selection = parse_discovery_selection(&selected_document)?;
+    if !valid_repository_slug(expected_source_repository) {
+        return Err(GeneratorError::usage(
+            "configured APT source repository is not an owner/name slug",
+        ));
+    }
+    if selection.source_repository != expected_source_repository {
+        return Err(GeneratorError::usage(
+            "discovery selection source repository differs from configured APT source repository",
+        ));
+    }
     // The discovery script is an index, not an authority. Reconcile the
     // selected repository/release/ref/assets against fresh provider facts
     // before any selected asset can enter the incoming tree.
@@ -9341,7 +9352,12 @@ mod tests {
             mutate(&fixture.root);
             let fetched = fixture.root.join("fetched");
             let error = must_fail(
-                run_fetch_selection(&fixture.selection_path, &fetched, Some(&bin)),
+                run_fetch_selection(
+                    &fixture.selection_path,
+                    FIXTURE_SOURCE,
+                    &fetched,
+                    Some(&bin),
+                ),
                 name,
             );
             assert!(
@@ -9604,7 +9620,12 @@ mod tests {
         let bin = discovery_gh_stub(&fixture);
         let fetched = fixture.root.join("fetched");
         let selected = must(
-            run_fetch_selection(&fixture.selection_path, &fetched, Some(&bin)),
+            run_fetch_selection(
+                &fixture.selection_path,
+                FIXTURE_SOURCE,
+                &fetched,
+                Some(&bin),
+            ),
             "fetch immutable selection",
         );
         let log = must(
@@ -9683,6 +9704,35 @@ mod tests {
         );
         assert!(error.contains("absent from discovery"), "{error}");
         let _ = std::fs::remove_dir_all(&fixture.root);
+    }
+
+    #[test]
+    fn discovery_selection_rejects_configured_source_before_provider_api() {
+        let fixture = discovery_fixture("configured-source-mismatch");
+        let bin = discovery_gh_stub(&fixture);
+        let fetched = fixture.root.join("fetched");
+        let error = must_fail(
+            run_fetch_selection(
+                &fixture.selection_path,
+                "other/repository",
+                &fetched,
+                Some(&bin),
+            ),
+            "configured source mismatch",
+        );
+        assert!(
+            error.contains("configured APT source repository"),
+            "{error}"
+        );
+        assert!(
+            !fixture.root.join("gh.log").exists(),
+            "provider API invoked before configured-source admission"
+        );
+        assert!(
+            !fetched.exists(),
+            "fetch directory created before configured-source admission"
+        );
+        let _ = std::fs::remove_dir_all(fixture.root);
     }
 
     #[cfg(unix)]

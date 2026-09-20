@@ -3859,9 +3859,10 @@ fn assert_selection_contract(
 }
 
 fn apt_fetch(arguments: &[OsString]) -> Result<(), GeneratorError> {
-    let options = parse_options(arguments, &["selection", "dir"])?;
+    let options = parse_options(arguments, &["selection", "source-repo", "dir"])?;
     let selection = apt_result(crate::apt::run_fetch_selection(
         selection_path(&options)?,
+        required_option(&options, "source-repo")?,
         Path::new(required_option(&options, "dir")?),
         None,
     ))?;
@@ -4789,6 +4790,24 @@ mod tests {
             Ok(_) => panic!("{context}: expected a failure, got success"),
             Err(error) => error,
         }
+    }
+
+    #[test]
+    fn apt_fetch_cli_requires_configured_source_repository() {
+        let arguments = [
+            OsString::from("--selection"),
+            OsString::from("selection.json"),
+            OsString::from("--dir"),
+            OsString::from("incoming"),
+        ];
+        let error = must_fail(
+            apt_fetch(&arguments),
+            "apt-fetch without configured source repository",
+        );
+        assert!(
+            error.to_string().contains("--source-repo needs a value"),
+            "{error}"
+        );
     }
 
     /// A throwaway digest directory: the only way to feed `verify-digests`

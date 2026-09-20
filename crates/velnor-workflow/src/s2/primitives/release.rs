@@ -4298,7 +4298,11 @@ fn render_apt_discovery_feed(config: &ProjectConfig, contract: &crate::apt::AptC
     output.push_str(" > selection.json\n          jq -e --arg channel \"$CHANNEL\" --arg schema ");
     output.push_str(&canonical_schema);
     output.push_str(
-        " '.channel == $channel and .manifest_schema == $schema and (.release_assets | length > 0)' selection.json >/dev/null\n          selected_version=\"$(jq -er .version selection.json)\"\n          selected_ref=\"$(jq -er .source_ref selection.json)\"\n          selected_commit=\"$(jq -er .source_commit selection.json)\"\n          selected_tag=\"$(jq -er .release_tag selection.json)\"\n          case \"$CHANNEL\" in\n            stable) apt_version=\"v$selected_version\" ;;\n            preview) apt_version=\"${selected_version/-preview./~preview.}\" ;;\n          esac\n          if [ -n \"$INPUT_VERSION\" ] && [ \"$INPUT_VERSION\" != \"$selected_version\" ] && [ \"$INPUT_VERSION\" != \"$selected_tag\" ]; then\n            echo \"::error::requested version does not match immutable discovery\" >&2\n            exit 1\n          fi\n          if [ -n \"$INPUT_COMMIT\" ] && [ \"$INPUT_COMMIT\" != \"$selected_commit\" ]; then\n            echo \"::error::requested commit does not match immutable discovery\" >&2\n            exit 1\n          fi\n          velnor-workflow release apt-fetch --selection selection.json --dir incoming\n          shopt -s nullglob\n          subjects=(incoming/*.deb)\n          [ \"${#subjects[@]}\" -gt 0 ] || { echo \"::error::discovery produced no APT assets\" >&2; exit 1; }\n          for subject in \"${subjects[@]}\"; do\n            gh attestation verify \"$subject\" --repo ",
+        " '.channel == $channel and .manifest_schema == $schema and (.release_assets | length > 0)' selection.json >/dev/null\n          selected_version=\"$(jq -er .version selection.json)\"\n          selected_ref=\"$(jq -er .source_ref selection.json)\"\n          selected_commit=\"$(jq -er .source_commit selection.json)\"\n          selected_tag=\"$(jq -er .release_tag selection.json)\"\n          case \"$CHANNEL\" in\n            stable) apt_version=\"v$selected_version\" ;;\n            preview) apt_version=\"${selected_version/-preview./~preview.}\" ;;\n          esac\n          if [ -n \"$INPUT_VERSION\" ] && [ \"$INPUT_VERSION\" != \"$selected_version\" ] && [ \"$INPUT_VERSION\" != \"$selected_tag\" ]; then\n            echo \"::error::requested version does not match immutable discovery\" >&2\n            exit 1\n          fi\n          if [ -n \"$INPUT_COMMIT\" ] && [ \"$INPUT_COMMIT\" != \"$selected_commit\" ]; then\n            echo \"::error::requested commit does not match immutable discovery\" >&2\n            exit 1\n          fi\n          velnor-workflow release apt-fetch --selection selection.json --source-repo ",
+    );
+    output.push_str(&source);
+    output.push_str(
+        " --dir incoming\n          shopt -s nullglob\n          subjects=(incoming/*.deb)\n          [ \"${#subjects[@]}\" -gt 0 ] || { echo \"::error::discovery produced no APT assets\" >&2; exit 1; }\n          for subject in \"${subjects[@]}\"; do\n            gh attestation verify \"$subject\" --repo ",
     );
     output.push_str(source_raw);
     output.push_str(" --signer-workflow \"");
@@ -8125,7 +8129,9 @@ mod tests {
                 "{release}"
             );
             assert!(
-                release.contains("apt-fetch --selection selection.json --dir incoming"),
+                release.contains(&format!(
+                    "apt-fetch --selection selection.json --source-repo '{source}' --dir incoming"
+                )),
                 "{release}"
             );
             assert!(
