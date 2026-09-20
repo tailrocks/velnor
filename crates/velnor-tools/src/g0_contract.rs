@@ -153,6 +153,13 @@ pub(crate) struct G0RawObjectRef {
     pub bytes_base64: String,
     pub media_type: String,
     pub storage_ref: String,
+    /// Digest and immutable storage reference for the exact provider response
+    /// before credential masking or safe-byte canonicalization. The producer
+    /// store computes these values from the original bytes; a caller cannot
+    /// make them authoritative by supplying strings alone.
+    pub original_sha256: String,
+    pub original_byte_length: u64,
+    pub original_storage_ref: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

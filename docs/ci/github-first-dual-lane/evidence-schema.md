@@ -303,10 +303,16 @@ Each request must be a successful complete page with the read-only HTTP
 method, repository-bound endpoint or GraphQL operation, base64-encoded
 canonical query/variables, recomputable query/variables digests, API request
 identity, the canonical `collector.auth` and `collector.rate_limit`
-references, page metadata, and a raw response object. Raw object bytes are
-supplied in base64 and their byte length and digest are recomputed; every raw
-object storage reference is digest-addressed (`sha256://<hex>`) and must match
-the measured bytes. `has_next_page`
+references, page metadata, and a raw response object. Raw object safe bytes
+are supplied in base64 and their byte length and digest are recomputed; every
+raw object storage reference is digest-addressed (`sha256://<hex>`) and must
+match the measured bytes. A raw object also carries
+`original_sha256`, `original_byte_length`, and `original_storage_ref` for the
+exact authenticated provider response before credential masking. The
+producer's canonical CAS keeps that original response under its typed
+`original` namespace; offline validation reopens and rehashes it, while live
+authority must receive the producer-verified binding. A caller-supplied
+original digest or URI is never proof. `has_next_page`
 requires the next captured page in the same canonical stream, with contiguous
 page number/cursor and an exact `https://api.github.com` URL/path/query link;
 forbidden, rate-limited, malformed, truncated, unknown, or missing pages fail

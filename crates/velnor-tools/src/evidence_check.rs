@@ -2024,6 +2024,14 @@ fn check_g0_external_storage(
             &bytes,
             findings,
         );
+        check_g0_external_original(
+            "evidence.g0_inventory.collector_snapshot.raw_objects.original_storage_ref",
+            &store,
+            &raw.original_storage_ref,
+            &raw.original_sha256,
+            raw.original_byte_length,
+            findings,
+        );
     }
     check_g0_external_artifact(
         "evidence.g0_inventory.collector_snapshot.workload_artifact",
@@ -2129,6 +2137,41 @@ fn check_g0_external_object(
             };
             finding(findings, code, "", field, error.to_string());
         }
+    }
+}
+
+fn check_g0_external_original(
+    field: &str,
+    store: &RawEvidenceStore,
+    storage_ref: &str,
+    digest: &str,
+    byte_length: u64,
+    findings: &mut Vec<Finding>,
+) {
+    if let Err(error) = store.read_original_verified(storage_ref, digest, byte_length) {
+        let code = match error {
+            crate::github_raw_store::RawStoreError::InvalidReference
+            | crate::github_raw_store::RawStoreError::InvalidDigest => "g0-storage-ref",
+            crate::github_raw_store::RawStoreError::NotRegular
+            | crate::github_raw_store::RawStoreError::TooLarge => "g0-storage-size",
+            crate::github_raw_store::RawStoreError::OpenObject(ref io)
+                if io.kind() == std::io::ErrorKind::NotFound =>
+            {
+                "g0-storage-missing"
+            }
+            crate::github_raw_store::RawStoreError::OpenObject(_)
+            | crate::github_raw_store::RawStoreError::Read(_)
+            | crate::github_raw_store::RawStoreError::Length { .. }
+            | crate::github_raw_store::RawStoreError::Digest { .. } => "g0-storage-mismatch",
+            crate::github_raw_store::RawStoreError::OpenRoot(_) => "g0-storage-root",
+        };
+        finding(
+            findings,
+            code,
+            "",
+            field,
+            format!("original provider-response CAS verification failed: {error}"),
+        );
     }
 }
 
@@ -2422,8 +2465,12 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
                 .as_ref()
                 .is_ok_and(|bytes| digest_bytes(bytes) != raw.sha256)
             || !g0_storage_ref(&raw.storage_ref, &raw.sha256)
+            || !valid_digest(&raw.original_sha256)
+            || raw.original_byte_length == 0
+            || !g0_storage_ref(&raw.original_storage_ref, &raw.original_sha256)
             || raw.media_type.trim().is_empty()
             || raw.storage_ref.trim().is_empty()
+            || raw.original_storage_ref.trim().is_empty()
         {
             finding(
                 findings,
@@ -7919,6 +7966,14 @@ mod tests {
                         .strip_prefix("sha256:")
                         .expect("digest has prefix")
                 ),
+                original_sha256: raw_digest.clone(),
+                original_byte_length: raw_bytes.len() as u64,
+                original_storage_ref: format!(
+                    "sha256://{}",
+                    raw_digest
+                        .strip_prefix("sha256:")
+                        .expect("digest has prefix")
+                ),
             });
             let artifact_bytes =
                 format!("{{\"artifact_id\":{artifact_id},\"run_id\":{main_run_id}}}").into_bytes();
@@ -7938,6 +7993,14 @@ mod tests {
                         .strip_prefix("sha256:")
                         .expect("digest has prefix")
                 ),
+                original_sha256: artifact_digest.clone(),
+                original_byte_length: artifact_bytes.len() as u64,
+                original_storage_ref: format!(
+                    "sha256://{}",
+                    artifact_digest
+                        .strip_prefix("sha256:")
+                        .expect("digest has prefix")
+                ),
             });
             let workflow_raw_id = format!("raw-workflow-{repository_id}");
             let workflow_raw_digest = digest_bytes(workflow_bytes);
@@ -7951,6 +8014,14 @@ mod tests {
                 bytes_base64: BASE64.encode(workflow_bytes),
                 media_type: "text/yaml".to_owned(),
                 storage_ref: format!(
+                    "sha256://{}",
+                    workflow_raw_digest
+                        .strip_prefix("sha256:")
+                        .expect("digest has prefix")
+                ),
+                original_sha256: workflow_raw_digest.clone(),
+                original_byte_length: workflow_bytes.len() as u64,
+                original_storage_ref: format!(
                     "sha256://{}",
                     workflow_raw_digest
                         .strip_prefix("sha256:")
@@ -8574,6 +8645,13 @@ mod tests {
         );
         assert!(g0_codes(&findings).contains("g0-artifact-inventory"));
 
+        let mut missing_original = inventory.clone();
+        missing_original.collector_snapshot.raw_objects[0].original_storage_ref =
+            "sha256://not-the-digest".to_owned();
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&missing_original), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-raw-object"));
+
         let mut wrong_artifact = inventory.clone();
         wrong_artifact.collector_snapshot.repositories[0].artifacts[0].source_url =
             "https://api.github.com/repos/other/repository/actions/artifacts/90001/zip".to_owned();
@@ -8811,6 +8889,8 @@ mod tests {
         let store_root = directory.join("store");
         let store_objects = store_root.join("sha256");
         std::fs::create_dir_all(&store_objects).expect("create CAS directory");
+        let original_objects = store_root.join("original");
+        std::fs::create_dir_all(&original_objects).expect("create original CAS directory");
         let snapshot_bytes = BASE64
             .decode(&baseline_inventory.collector_snapshot_bytes_base64)
             .expect("decode fixture snapshot bytes");
@@ -8827,6 +8907,15 @@ mod tests {
                 .strip_prefix("sha256:")
                 .expect("raw digest has prefix");
             std::fs::write(store_objects.join(hex), bytes).expect("write raw CAS object");
+            let original_hex = raw
+                .original_sha256
+                .strip_prefix("sha256:")
+                .expect("original digest has prefix");
+            let original_bytes = BASE64
+                .decode(&raw.bytes_base64)
+                .expect("decode original fixture bytes");
+            std::fs::write(original_objects.join(original_hex), original_bytes)
+                .expect("write original CAS object");
         }
         let manifest_path = directory.join("manifest.json");
         let snapshot_path = directory.join("snapshot.json");
@@ -8862,6 +8951,26 @@ mod tests {
             .any(|finding| finding.code == "offline-validation-only"));
         assert_eq!(report.status, "fail");
         assert_eq!(report.mode, "offline");
+
+        let first_original_hex = baseline_inventory.collector_snapshot.raw_objects[0]
+            .original_sha256
+            .strip_prefix("sha256:")
+            .expect("original digest has prefix");
+        std::fs::remove_file(original_objects.join(first_original_hex))
+            .expect("remove original response object");
+        let missing_original_report = check_paths(&EvidenceCheckInput {
+            stage: "G0".to_owned(),
+            manifest: manifest_path.clone(),
+            snapshot: snapshot_path.clone(),
+            evidence: evidence_path.clone(),
+            release_manifest: None,
+            live: false,
+            evidence_root: Some(store_root.clone()),
+        })
+        .expect("public checker reports missing original CAS object");
+        assert!(missing_original_report.findings.iter().any(|finding| {
+            finding.code == "g0-storage-missing" && finding.field.contains("original_storage_ref")
+        }));
         let missing_store_report = check_paths(&EvidenceCheckInput {
             stage: "G0".to_owned(),
             manifest: manifest_path.clone(),
@@ -8999,6 +9108,15 @@ mod tests {
                 .strip_prefix("sha256:")
                 .expect("root raw digest has prefix")
         );
+        root_raw.original_sha256 = digest_bytes(root_yaml.as_bytes());
+        root_raw.original_byte_length = root_yaml.len() as u64;
+        root_raw.original_storage_ref = format!(
+            "sha256://{}",
+            root_raw
+                .original_sha256
+                .strip_prefix("sha256:")
+                .expect("root original digest has prefix")
+        );
 
         let child_yaml = b"on:\n  workflow_call: {}\njobs:\n  nested:\n    strategy:\n      matrix:\n        os: [ubuntu-24.04, ubuntu-22.04]\n    runs-on: ${{ matrix.os }}\n    steps: []\n";
         let child_digest = digest_bytes(child_yaml);
@@ -9017,6 +9135,14 @@ mod tests {
                 bytes_base64: BASE64.encode(child_yaml),
                 media_type: "text/yaml".to_owned(),
                 storage_ref: format!(
+                    "sha256://{}",
+                    child_digest
+                        .strip_prefix("sha256:")
+                        .expect("child digest has prefix")
+                ),
+                original_sha256: child_digest.clone(),
+                original_byte_length: child_yaml.len() as u64,
+                original_storage_ref: format!(
                     "sha256://{}",
                     child_digest
                         .strip_prefix("sha256:")
@@ -9063,6 +9189,8 @@ mod tests {
             .join(format!("velnor-g0-child-matrix-cli-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(directory.join("store/sha256")).expect("create fixture store");
+        std::fs::create_dir_all(directory.join("store/original"))
+            .expect("create original fixture store");
         let store_root = directory.join("store");
         let snapshot_bytes = BASE64
             .decode(&inventory.collector_snapshot_bytes_base64)
@@ -9080,6 +9208,18 @@ mod tests {
                 .strip_prefix("sha256:")
                 .expect("raw digest has prefix");
             std::fs::write(store_root.join("sha256").join(hex), bytes).expect("write raw object");
+            let original_hex = raw
+                .original_sha256
+                .strip_prefix("sha256:")
+                .expect("original digest has prefix");
+            let original_bytes = BASE64
+                .decode(&raw.bytes_base64)
+                .expect("decode original fixture bytes");
+            std::fs::write(
+                store_root.join("original").join(original_hex),
+                original_bytes,
+            )
+            .expect("write original object");
         }
 
         let manifest_path = directory.join("manifest.json");
@@ -9859,6 +9999,14 @@ mod tests {
                     .strip_prefix("sha256:")
                     .expect("digest has prefix")
             ),
+            original_sha256: digest_bytes(b"{}"),
+            original_byte_length: 2,
+            original_storage_ref: format!(
+                "sha256://{}",
+                digest_bytes(b"{}")
+                    .strip_prefix("sha256:")
+                    .expect("digest has prefix")
+            ),
         });
         let mut second = collector.requests[0].clone();
         second.request_id = "request-2".to_owned();
@@ -9882,6 +10030,14 @@ mod tests {
             bytes_base64: BASE64.encode(second_bytes),
             media_type: "application/json".to_owned(),
             storage_ref: format!(
+                "sha256://{}",
+                second_digest
+                    .strip_prefix("sha256:")
+                    .expect("digest has prefix")
+            ),
+            original_sha256: second_digest.clone(),
+            original_byte_length: second_bytes.len() as u64,
+            original_storage_ref: format!(
                 "sha256://{}",
                 second_digest
                     .strip_prefix("sha256:")

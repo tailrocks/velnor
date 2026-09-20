@@ -104,12 +104,35 @@ impl RawEvidenceStore {
         }
     }
 
-    /// Read and hash one content-addressed object from the opened store.
+    /// Read and hash one safe content-addressed object from the opened store.
     /// `expected_len` is checked against the bytes read from the same file
     /// descriptor, so metadata and content cannot silently refer to different
     /// paths during a concurrent replacement.
     pub(crate) fn read_verified(
         &self,
+        storage_ref: &str,
+        expected_digest: &str,
+        expected_len: u64,
+    ) -> Result<Vec<u8>, RawStoreError> {
+        self.read_verified_in_namespace("sha256", storage_ref, expected_digest, expected_len)
+    }
+
+    /// Read and hash the exact provider response retained by the producer
+    /// before safe-byte masking.  The reference syntax is identical to the
+    /// safe object, but the namespace is selected by this typed operation;
+    /// callers cannot redirect it to an arbitrary store path.
+    pub(crate) fn read_original_verified(
+        &self,
+        storage_ref: &str,
+        expected_digest: &str,
+        expected_len: u64,
+    ) -> Result<Vec<u8>, RawStoreError> {
+        self.read_verified_in_namespace("original", storage_ref, expected_digest, expected_len)
+    }
+
+    fn read_verified_in_namespace(
+        &self,
+        namespace: &str,
         storage_ref: &str,
         expected_digest: &str,
         expected_len: u64,
@@ -126,7 +149,7 @@ impl RawEvidenceStore {
         {
             let objects = open_child(
                 &self.root,
-                "sha256",
+                namespace,
                 libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )
             .map_err(RawStoreError::OpenObject)?;
@@ -158,7 +181,7 @@ impl RawEvidenceStore {
         }
         #[cfg(not(unix))]
         {
-            let _ = (storage_ref, expected_digest, expected_len);
+            let _ = (namespace, storage_ref, expected_digest, expected_len);
             Err(RawStoreError::OpenObject(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "descriptor-relative CAS verification is unsupported on this platform",
@@ -318,6 +341,34 @@ mod tests {
             )
             .expect("verified bytes");
         assert_eq!(read, bytes);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn original_response_read_uses_separate_verified_namespace() {
+        let root = temp_root("original");
+        let bytes = b"unmasked provider response";
+        let digest = sha256_digest(bytes);
+        fs::create_dir_all(root.join("original")).expect("original objects");
+        fs::write(
+            root.join("original")
+                .join(digest.strip_prefix("sha256:").expect("digest")),
+            bytes,
+        )
+        .expect("original object");
+        let store = RawEvidenceStore::open(&root).expect("open store");
+        let reference = format!(
+            "sha256://{}",
+            digest.strip_prefix("sha256:").expect("digest")
+        );
+        let read = store
+            .read_original_verified(&reference, &digest, bytes.len() as u64)
+            .expect("verified original bytes");
+        assert_eq!(read, bytes);
+        let safe_namespace_error = store
+            .read_verified(&reference, &digest, bytes.len() as u64)
+            .expect_err("safe namespace must not read original objects");
+        assert!(matches!(safe_namespace_error, RawStoreError::OpenObject(_)));
         let _ = fs::remove_dir_all(root);
     }
 
