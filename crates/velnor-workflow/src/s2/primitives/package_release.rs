@@ -986,12 +986,16 @@ remote_tag_sha() {
   if ! refs="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name^{}")"; then
     return 1
   fi
-  sha="$(awk 'NR == 1 {print $1}' <<<"$refs")"
+  if ! sha="$(awk 'NR == 1 {print $1}' <<<"$refs")"; then
+    return 1
+  fi
   if [ -z "$sha" ]; then
     if ! refs="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name")"; then
       return 1
     fi
-    sha="$(awk 'NR == 1 {print $1}' <<<"$refs")"
+    if ! sha="$(awk 'NR == 1 {print $1}' <<<"$refs")"; then
+      return 1
+    fi
   fi
   if [ -n "$sha" ] && ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
     return 1
@@ -1007,23 +1011,19 @@ read_rolling_asset_set() {
     --jq '.[] | if (type == "object" and (.id | type == "number" and floor == . and . > 0) and (.name | type == "string" and length > 0 and test("^[-A-Za-z0-9._+~]+$")) and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))) then [.id, .name, .digest] | @tsv else error("invalid rolling release asset") end')"; then
     return 1
   fi
-  if ! LC_ALL=C sort <<<"$asset_set" > "$output"; then
-    return 1
+  if [ -n "$asset_set" ]; then
+    if ! LC_ALL=C sort <<<"$asset_set" > "$output"; then
+      return 1
+    fi
+  else
+    if ! : > "$output"; then
+      return 1
+    fi
   fi
   if ! awk -F '\t' '
     NF == 3 && ++ids[$1] == 1 && ++names[$2] == 1 { next }
     { exit 1 }
   ' "$output"; then
-    return 1
-  fi
-}
-
-refresh_owned_asset_set() {
-  local refreshed="$transaction_dir/refreshed-assets"
-  if ! read_rolling_asset_set "$refreshed"; then
-    return 1
-  fi
-  if ! mv -- "$refreshed" "$owner_assets"; then
     return 1
   fi
 }
@@ -1456,6 +1456,21 @@ assert_asset_set_matches_files() {
   done < "$asset_set"
 }
 
+adopt_owned_asset_set_from_files() {
+  local source_dir="$1"
+  local expected_names="$2"
+  local refreshed="$transaction_dir/refreshed-assets"
+  if ! read_rolling_asset_set "$refreshed"; then
+    return 1
+  fi
+  if ! assert_asset_set_matches_files "$refreshed" "$source_dir" "$expected_names"; then
+    return 1
+  fi
+  if ! mv -- "$refreshed" "$owner_assets"; then
+    return 1
+  fi
+}
+
 rollback() {
   local status="$1"
   local current_tag_sha
@@ -1691,8 +1706,17 @@ if [ "$had_release" = 0 ]; then
   owner_name="$RELEASE_TITLE_PREFIX $candidate_version"
   owner_body="Verified package release from $EXPECTED_SOURCE_COMMIT"
   owner_source_commit="$EXPECTED_SOURCE_COMMIT"
-  if ! read_rolling_asset_set "$owner_assets"; then
+  created_assets="$transaction_dir/created-assets"
+  if ! read_rolling_asset_set "$created_assets"; then
     echo "::error::new rolling preview asset ownership could not be established; refusing mutation" >&2
+    exit 1
+  fi
+  if [ -s "$created_assets" ]; then
+    echo "::error::new rolling preview unexpectedly contains assets; refusing mutation" >&2
+    exit 1
+  fi
+  if ! cp -- "$created_assets" "$owner_assets"; then
+    echo "::error::new rolling preview asset ownership could not be recorded; refusing mutation" >&2
     exit 1
   fi
   if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
@@ -1728,11 +1752,7 @@ gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber \
         r#"
 
 rolling_stage_json="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id")"
-if ! refresh_owned_asset_set; then
-  echo "::error::rolling asset ownership could not be re-read after upload" >&2
-  exit 1
-fi
-if ! assert_asset_set_matches_files "$owner_assets" "$published_dir" "$expected_assets"; then
+if ! adopt_owned_asset_set_from_files "$published_dir" "$expected_assets"; then
   echo "::error::rolling staged asset set is not exactly the verified package" >&2
   exit 1
 fi
@@ -1828,12 +1848,16 @@ remote_tag_sha() {
   if ! refs="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name^{}")"; then
     return 1
   fi
-  sha="$(awk 'NR == 1 {print $1}' <<<"$refs")"
+  if ! sha="$(awk 'NR == 1 {print $1}' <<<"$refs")"; then
+    return 1
+  fi
   if [ -z "$sha" ]; then
     if ! refs="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name")"; then
       return 1
     fi
-    sha="$(awk 'NR == 1 {print $1}' <<<"$refs")"
+    if ! sha="$(awk 'NR == 1 {print $1}' <<<"$refs")"; then
+      return 1
+    fi
   fi
   if [ -n "$sha" ] && ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
     return 1
@@ -2220,7 +2244,18 @@ fn render_publish_job(
               gh pr close "$stale_pr_url" --repo "$CONSUMER_REPOSITORY" --comment "Superseded by immutable package release $RELEASE_ASSET_TAG"
             fi
           done < <(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$stale_branch" --base "$CONSUMER_BRANCH" --state open --json url --jq '.[].url')
-          remote_branch_sha="$(git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" ls-remote origin "refs/heads/$automation_branch" | awk 'NR == 1 {print $1}')"
+          if ! remote_branch_refs="$(git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" ls-remote origin "refs/heads/$automation_branch")"; then
+            echo "::error::consumer automation branch lookup failed; refusing branch mutation" >&2
+            exit 1
+          fi
+          if ! remote_branch_sha="$(awk 'NF >= 2 {print $1; exit}' <<<"$remote_branch_refs")"; then
+            echo "::error::consumer automation branch response could not be parsed; refusing branch mutation" >&2
+            exit 1
+          fi
+          if [ -n "$remote_branch_sha" ] && ! [[ "$remote_branch_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::consumer automation branch response contained an invalid object ID" >&2
+            exit 1
+          fi
           if [ -n "$remote_branch_sha" ]; then
             git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" fetch origin "refs/heads/$automation_branch:refs/remotes/origin/$automation_branch"
             git switch --detach "origin/$automation_branch"
@@ -3019,6 +3054,86 @@ concurrency_group = "package-release-preview"
 
     #[cfg(unix)]
     #[test]
+    fn malformed_existing_release_validation_fails_inside_negated_call() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        let helper_start = rolling_script
+            .find("validate_existing_rolling_release() {")
+            .expect("validation helper");
+        let helper_end = rolling_script
+            .find("\nassert_rolling_ownership() {")
+            .expect("ownership helper");
+        let helper = &rolling_script[helper_start..helper_end];
+        let source_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-malformed-release-{}",
+            crate::unique_suffix()
+        ));
+        let source_dir = root.join("rollback");
+        std::fs::create_dir_all(&source_dir).expect("create malformed release fixture");
+        let mut script = String::from("set -Eeuo pipefail\n");
+        script.push_str(helper);
+        write!(
+            &mut script,
+            r#"
+transaction_dir="$TEST_TMPDIR/transaction"
+mkdir -p "$transaction_dir"
+rolling_tag=preview
+RELEASE_PRERELEASE=true
+RELEASE_TITLE_PREFIX=Preview
+EXPECTED_MANIFEST_SCHEMA=example.consumer-manifest-v1
+EXPECTED_SOURCE_REPOSITORY=example/project
+EXPECTED_SOURCE_REF=refs/heads/main
+VELNOR_PACKAGE_CHANNEL=preview
+EXPECTED_SOURCE_COMMIT={source_commit}
+old_tag_sha={source_commit}
+owner_assets="$TEST_TMPDIR/owner-assets"
+: > "$owner_assets"
+source_dir="$TEST_TMPDIR/rollback"
+digest={digest}
+printf '%s\n' payload > "$source_dir/a.tar.gz"
+printf '{{"assets":[{{"name":"a.tar.gz","sha256":"%s"}}],"schema":"example.consumer-manifest-v1","source_commit":"{source_commit}","source_ref":"refs/heads/main","source_repository":"example/project","supporting_assets":[],"version":"1.0.0-preview.1+aaaaaaa"}}\n' "$digest" > "$source_dir/release-manifest.json"
+printf '{{\n' > "$source_dir/identity.json"
+sha256sum() {{ printf '%s  %s\n' "$digest" "$2"; }}
+git() {{ return 0; }}
+read_rolling_asset_set() {{ : > "$1"; }}
+body="$(printf '{{"draft":false,"prerelease":true,"tag_name":"preview","id":123,"name":"Preview 1.0.0-preview.1+aaaaaaa","assets":[{{"id":1,"name":"release-manifest.json","digest":"sha256:%s"}},{{"id":2,"name":"identity.json","digest":"sha256:%s"}},{{"id":3,"name":"a.tar.gz","digest":"sha256:%s"}}]}}' "$digest" "$digest" "$digest")"
+if false; then
+  :
+elif ! validate_existing_rolling_release "$body" "$source_dir" false; then
+  validation_failed=1
+else
+  validation_failed=0
+fi
+test "$validation_failed" -eq 1
+"#,
+            source_commit = source_commit,
+            digest = digest,
+        )
+        .expect("render malformed release validation fixture");
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env("TEST_TMPDIR", &root)
+            .output()
+            .expect("run malformed release validation");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            output.status.success(),
+            "malformed release validation was not fail-closed:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn typed_draft_cleanup_refuses_release_state_and_tag_drift() {
         use std::process::Command;
 
@@ -3028,8 +3143,8 @@ concurrency_group = "package-release-preview"
         };
         let rolling_script = render_rolling_refresh_script("", "", "", &verification);
         let helper_start = rolling_script
-            .find("assert_rolling_ownership() {")
-            .expect("ownership helper");
+            .find("read_rolling_asset_set() {")
+            .expect("asset ownership helper");
         let helper_end = rolling_script
             .find("\nverify_restored_assets() {")
             .expect("verification helper");
@@ -3041,7 +3156,7 @@ concurrency_group = "package-release-preview"
         ));
         std::fs::create_dir_all(&root).expect("create shell fixture");
 
-        for mode in ["state", "tag"] {
+        for mode in ["state", "tag", "release-present", "tag-delete"] {
             let mut script = String::from("set -Eeuo pipefail\n");
             script.push_str(helpers);
             write!(
@@ -3059,8 +3174,12 @@ old_draft=true
 old_prerelease=true
 rollback_dir="$TEST_TMPDIR/rollback"
 old_assets="$TEST_TMPDIR/old-assets"
+transaction_dir="$TEST_TMPDIR/transaction"
+owner_assets="$TEST_TMPDIR/owner-assets"
 had_release=1
 : > "$old_assets"
+: > "$owner_assets"
+mkdir -p "$transaction_dir"
 remote_tag_reads_file="$TEST_TMPDIR/tag-reads"
 remote_tag_sha() {{
   remote_tag_reads=0
@@ -3071,11 +3190,28 @@ remote_tag_sha() {{
   printf '%s\n' "$remote_tag_reads" > "$remote_tag_reads_file"
   if [ "$TEST_MODE" = tag ] && [ "$remote_tag_reads" -gt 1 ]; then
     printf '%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  elif [ "$TEST_MODE" = tag-delete ] || [ "$TEST_MODE" = release-present ]; then
+    printf '%s\n' {source_commit}
   else
     printf '%s\n' {source_commit}
   fi
 }}
 gh() {{
+  if [[ "$*" == *"releases/123/assets"* ]]; then
+    return 0
+  fi
+  if [[ "$*" == *"releases/123"* ]] && [[ "$*" == *"--method DELETE"* ]]; then
+    : > "$TEST_TMPDIR/release-delete"
+    return 0
+  fi
+  if [[ "$*" == *"releases/123"* ]] && [ -f "$TEST_TMPDIR/release-delete" ]; then
+    if [ "$TEST_MODE" = release-present ]; then
+      printf '%s\n' '{{"id":123}}'
+      return 0
+    fi
+    printf '%s\n' 'HTTP/2 404 Not Found'
+    return 1
+  fi
   if [[ "$*" == *"releases/123"* ]] && [[ "$*" != *"--method"* ]]; then
     if [ "$TEST_MODE" = state ]; then
       printf '%s\n' '{{"id":123,"draft":true,"prerelease":true,"tag_name":"preview","name":"Foreign","body":"old-body"}}'
@@ -3086,20 +3222,31 @@ gh() {{
   fi
   if [[ "$*" == *"git/refs/tags/preview"* ]]; then
     : > "$TEST_TMPDIR/tag-delete"
+    if [ "$TEST_MODE" = tag-delete ]; then
+      return 1
+    fi
   else
-    : > "$TEST_TMPDIR/release-delete"
+    return 1
   fi
 }}
 TEST_MODE={mode}
 if discard_current_typed_rolling_draft; then
   exit 1
 fi
-test ! -e "$TEST_TMPDIR/tag-delete"
-if [ "$TEST_MODE" = state ]; then
-  test ! -e "$TEST_TMPDIR/release-delete"
+if [ "$TEST_MODE" = tag-delete ]; then
+  test -e "$TEST_TMPDIR/tag-delete"
 else
-  test -e "$TEST_TMPDIR/release-delete"
+  test ! -e "$TEST_TMPDIR/tag-delete"
 fi
+    if [ "$TEST_MODE" = state ]; then
+      test ! -e "$TEST_TMPDIR/release-delete"
+    elif [ "$TEST_MODE" = tag ] || [ "$TEST_MODE" = release-present ] || [ "$TEST_MODE" = tag-delete ]; then
+      test -e "$TEST_TMPDIR/release-delete"
+    fi
+    if [ "$TEST_MODE" = release-present ] || [ "$TEST_MODE" = tag-delete ]; then
+      test "$had_release" -eq 1
+      test "$rolling_release_id" = 123
+    fi
 "#
             )
             .expect("render draft ownership regression shell");
@@ -3132,8 +3279,8 @@ fi
         };
         let rolling_script = render_rolling_refresh_script("", "", "", &verification);
         let helper_start = rolling_script
-            .find("assert_rolling_ownership() {")
-            .expect("ownership helper");
+            .find("read_rolling_asset_set() {")
+            .expect("asset ownership helper");
         let helper_end = rolling_script
             .find("\ntrap 'rollback")
             .expect("rollback trap");
@@ -3171,7 +3318,10 @@ old_prerelease=true
 old_assets="$TEST_TMPDIR/old-assets"
 rollback_dir="$TEST_TMPDIR/rollback"
 transaction_dir="$TEST_TMPDIR/transaction"
+owner_assets="$TEST_TMPDIR/owner-assets"
 : > "$old_assets"
+: > "$owner_assets"
+mkdir -p "$transaction_dir"
 remote_tag_sha() {{
   if [ "$TEST_MODE" = tag ]; then
     printf '%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -3180,6 +3330,9 @@ remote_tag_sha() {{
   fi
 }}
 gh() {{
+  if [[ "$*" == *"releases/123/assets"* ]]; then
+    return 0
+  fi
   if [[ "$*" == *"releases/123"* ]] && [[ "$*" != *"--method"* ]]; then
     if [ "$TEST_MODE" = state ]; then
       printf '%s\n' '{{"id":123,"draft":false,"prerelease":true,"tag_name":"preview","name":"Foreign","body":"old-body"}}'
@@ -3215,6 +3368,136 @@ test ! -e "$TEST_TMPDIR/mutation"
             let _ = std::fs::remove_file(root.join("mutation"));
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_refuses_complete_asset_set_drift_before_mutation() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        let helper_start = rolling_script
+            .find("read_rolling_asset_set() {")
+            .expect("asset ownership helper");
+        let helper_end = rolling_script
+            .find("\ntrap 'rollback")
+            .expect("rollback trap");
+        let helpers = &rolling_script[helper_start..helper_end];
+        let source_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-rollback-asset-race-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create shell fixture");
+        let mut script = String::from("set -Eeuo pipefail\n");
+        script.push_str(helpers);
+        write!(
+            &mut script,
+            r#"
+GITHUB_REPOSITORY=example/project
+RELEASE_PRERELEASE=true
+rolling_tag=preview
+rolling_release_id=123
+owner_draft=false
+owner_tag_sha={source_commit}
+owner_name='Preview 1.0.0-preview.1+aaaaaaa'
+owner_body='old-body'
+owner_source_commit={source_commit}
+owner_assets="$TEST_TMPDIR/owner-assets"
+old_assets="$TEST_TMPDIR/old-assets"
+rollback_dir="$TEST_TMPDIR/rollback"
+transaction_dir="$TEST_TMPDIR/transaction"
+mkdir -p "$transaction_dir"
+: > "$old_assets"
+printf '%s\n' '10	candidate.tar.gz	sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > "$owner_assets"
+had_release=1
+mutated=1
+remote_tag_sha() {{ printf '%s\n' {source_commit}; }}
+gh() {{
+  if [[ "$*" == *"releases/123/assets"* ]]; then
+    printf '%s\n' '11	foreign.tar.gz	sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    return 0
+  fi
+  if [[ "$*" == *"releases/123"* ]] && [[ "$*" != *"--method"* ]]; then
+    printf '%s\n' '{{"id":123,"draft":false,"prerelease":true,"tag_name":"preview","name":"Preview 1.0.0-preview.1+aaaaaaa","body":"old-body"}}'
+    return 0
+  fi
+  : > "$TEST_TMPDIR/mutation"
+}}
+set +e
+(rollback 1)
+rollback_status=$?
+set -e
+test "$rollback_status" -eq 1
+test ! -e "$TEST_TMPDIR/mutation"
+"#,
+            source_commit = source_commit,
+        )
+        .expect("render asset drift regression shell");
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env("TEST_TMPDIR", &root)
+            .output()
+            .expect("run asset drift regression");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            output.status.success(),
+            "rollback asset drift was not fail-closed:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_tag_lookup_does_not_mask_ls_remote_failure() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        let helper_start = rolling_script
+            .find("remote_tag_sha() {")
+            .expect("tag helper");
+        let helper_end = rolling_script
+            .find("\nread_rolling_asset_set() {")
+            .expect("asset helper");
+        let helper = &rolling_script[helper_start..helper_end];
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-tag-lookup-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create shell fixture");
+        let script = format!(
+            r#"set -Eeuo pipefail
+{helper}
+git() {{ return 42; }}
+if remote_tag_sha preview; then
+  exit 1
+fi
+"#,
+            helper = helper
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .current_dir(&root)
+            .output()
+            .expect("run tag lookup regression");
+        let _ = std::fs::remove_dir_all(root);
+        assert!(
+            output.status.success(),
+            "ls-remote failure was masked:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[cfg(unix)]
