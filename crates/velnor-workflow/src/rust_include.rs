@@ -9,7 +9,7 @@ use proc_macro2::{Spacing, TokenStream, TokenTree};
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::token::Comma;
-use syn::{Expr, ExprMacro, Lit};
+use syn::{Expr, ExprMacro, Lit, UnOp};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum IncludeString {
@@ -204,13 +204,38 @@ fn parse_static_string_expression(
 
 fn evaluate_static_expression(expression: &Expr, macro_name: &str) -> Result<StaticString, String> {
     match expression {
-        Expr::Lit(literal) => match &literal.lit {
-            Lit::Str(value) => Ok(StaticString::literal(value.value())),
-            _ => Err(format!("{macro_name} must use a static string expression")),
-        },
+        Expr::Lit(literal) => evaluate_static_literal(&literal.lit, macro_name),
+        Expr::Unary(unary) if matches!(unary.op, UnOp::Neg(_)) => {
+            let Expr::Lit(literal) = unary.expr.as_ref() else {
+                return Err(format!("{macro_name} must use a static string expression"));
+            };
+            if !matches!(literal.lit, Lit::Int(_) | Lit::Float(_)) {
+                return Err(format!("{macro_name} must use a static string expression"));
+            }
+            let mut static_value = evaluate_static_literal(&literal.lit, macro_name)?;
+            let [ManifestPart::Literal(value)] = &mut static_value.parts[..] else {
+                return Err(format!("{macro_name} must use a static string expression"));
+            };
+            value.insert(0, '-');
+            Ok(static_value)
+        }
         Expr::Macro(expression) => evaluate_static_macro(expression, macro_name),
         _ => Err(format!("{macro_name} must use a static string expression")),
     }
+}
+
+fn evaluate_static_literal(literal: &Lit, macro_name: &str) -> Result<StaticString, String> {
+    let value = match literal {
+        Lit::Str(value) => value.value(),
+        Lit::Bool(value) => value.value.to_string(),
+        Lit::Char(value) => value.value().to_string(),
+        Lit::Int(value) => value.base10_digits().to_owned(),
+        Lit::Float(value) => value.base10_digits().to_owned(),
+        _ => {
+            return Err(format!("{macro_name} must use a static string expression"));
+        }
+    };
+    Ok(StaticString::literal(value))
 }
 
 fn evaluate_static_macro(
@@ -515,6 +540,17 @@ mod tests {
                 ManifestPart::ManifestDir,
                 ManifestPart::Literal("/src/lib.rs".to_owned()),
             ])])
+        );
+    }
+
+    #[test]
+    fn accepts_all_static_literal_forms_supported_by_concat() {
+        assert_eq!(
+            parse_include_paths("include_str!(concat!(\"asset-\", 42u8, true, 'x', -7, 1.5f32));")
+                .ok(),
+            Some(vec![IncludeString::Relative(
+                "asset-42truex-71.5".to_owned()
+            )])
         );
     }
 
