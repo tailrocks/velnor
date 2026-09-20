@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -125,19 +125,78 @@ pub(crate) fn parse_include_str_literals(source: &str) -> Result<Vec<String>, St
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IncludeAlias {
+    Builtin,
+    Shadowed,
+}
+
+#[derive(Clone, Debug)]
+struct MacroWrapper {
+    parameter: String,
+    body: TokenStream,
+}
+
 #[derive(Default)]
 struct IncludeScanner {
     includes: Vec<IncludeString>,
-    aliases: BTreeSet<String>,
 }
 
 impl IncludeScanner {
     fn scan_stream(&mut self, stream: TokenStream) -> Result<(), String> {
         let tokens = stream.into_iter().collect::<Vec<_>>();
-        discover_include_aliases(&tokens, &mut self.aliases);
+        let mut aliases = BTreeMap::new();
+        let mut wrappers = BTreeMap::new();
+        self.scan_tokens(&tokens, &mut aliases, &mut wrappers)
+    }
+
+    fn scan_tokens(
+        &mut self,
+        tokens: &[TokenTree],
+        aliases: &mut BTreeMap<String, IncludeAlias>,
+        wrappers: &mut BTreeMap<String, MacroWrapper>,
+    ) -> Result<(), String> {
         let mut index = 0;
         while index < tokens.len() {
-            if let Some((macro_name, group)) = include_invocation(&tokens, index, &self.aliases)? {
+            if let Some((name, body, next)) = macro_rules_definition(tokens, index) {
+                aliases.insert(name.clone(), IncludeAlias::Shadowed);
+                wrappers.remove(&name);
+                if let Some(wrapper) = parse_macro_wrapper(body) {
+                    wrappers.insert(name, wrapper);
+                }
+                // A macro definition is not an invocation. Its metavariables
+                // are resolved only when the supported literal wrapper is
+                // called below; scanning its body as ordinary Rust would
+                // incorrectly reject include_str!($path).
+                index = next;
+                continue;
+            }
+            if matches!(&tokens[index], TokenTree::Ident(identifier) if identifier == "use") {
+                let mut end = index + 1;
+                while end < tokens.len() && !is_punct(&tokens[end], ';') {
+                    end += 1;
+                }
+                collect_use_tree(&tokens[index + 1..end], &[], aliases);
+                index = end.saturating_add(1);
+                continue;
+            }
+            if let Some((name, group)) = macro_invocation(tokens, index)
+                && let Some(wrapper) = wrappers.get(&name).cloned()
+            {
+                let arguments = group.stream().into_iter().collect::<Vec<_>>();
+                if arguments.len() != 1 || !matches!(arguments.first(), Some(TokenTree::Literal(_)))
+                {
+                    index += 3;
+                    continue;
+                }
+                let expanded =
+                    substitute_macro_tokens(&wrapper.body, &wrapper.parameter, &arguments);
+                let expanded = expanded.into_iter().collect::<Vec<_>>();
+                self.scan_tokens(&expanded, aliases, wrappers)?;
+                index += 3;
+                continue;
+            }
+            if let Some((macro_name, group)) = include_invocation(tokens, index, aliases)? {
                 let expression = parse_static_string_expression(group.stream(), macro_name)?;
                 if let Some(include) = IncludeString::from_static(expression) {
                     self.includes.push(include);
@@ -145,12 +204,27 @@ impl IncludeScanner {
                 // An include argument may itself contain a macro group. The
                 // evaluator has already rejected a dynamic include argument;
                 // recurse only to discover includes in arbitrary macro bodies.
-                self.scan_stream(group.stream())?;
+                let nested = group.stream().into_iter().collect::<Vec<_>>();
+                self.scan_tokens(&nested, aliases, wrappers)?;
                 index += 3;
                 continue;
             }
             if let TokenTree::Group(group) = &tokens[index] {
-                self.scan_stream(group.stream())?;
+                // A child module has its own lexical imports and macro names;
+                // ordinary blocks/items inherit the surrounding module scope.
+                let module_scope = is_module_body(tokens, index);
+                let mut nested_aliases = if module_scope {
+                    BTreeMap::new()
+                } else {
+                    aliases.clone()
+                };
+                let mut nested_wrappers = if module_scope {
+                    BTreeMap::new()
+                } else {
+                    wrappers.clone()
+                };
+                let nested = group.stream().into_iter().collect::<Vec<_>>();
+                self.scan_tokens(&nested, &mut nested_aliases, &mut nested_wrappers)?;
             }
             index += 1;
         }
@@ -161,7 +235,7 @@ impl IncludeScanner {
 fn include_invocation<'a>(
     tokens: &'a [TokenTree],
     index: usize,
-    aliases: &BTreeSet<String>,
+    aliases: &BTreeMap<String, IncludeAlias>,
 ) -> Result<Option<(&'static str, &'a proc_macro2::Group)>, String> {
     let TokenTree::Ident(identifier) = &tokens[index] else {
         return Ok(None);
@@ -169,7 +243,9 @@ fn include_invocation<'a>(
     let macro_name = match identifier.to_string().as_str() {
         "include_str" => "include_str!",
         "include_bytes" => "include_bytes!",
-        _ if aliases.contains(&identifier.to_string()) => "aliased include macro!",
+        _ if aliases.get(&identifier.to_string()) == Some(&IncludeAlias::Builtin) => {
+            "aliased include macro!"
+        }
         _ => return Ok(None),
     };
     // A path-qualified invocation is normally a user macro and must not be
@@ -191,30 +267,10 @@ fn include_invocation<'a>(
     Ok(Some((macro_name, group)))
 }
 
-fn discover_include_aliases(tokens: &[TokenTree], aliases: &mut BTreeSet<String>) {
-    let mut index = 0;
-    while index < tokens.len() {
-        if matches!(&tokens[index], TokenTree::Ident(identifier) if identifier == "use") {
-            let mut end = index + 1;
-            while end < tokens.len() && !is_punct(&tokens[end], ';') {
-                end += 1;
-            }
-            collect_use_tree(&tokens[index + 1..end], &[], aliases);
-            index = end.saturating_add(1);
-            continue;
-        }
-        if let TokenTree::Group(group) = &tokens[index] {
-            let nested = group.stream().into_iter().collect::<Vec<_>>();
-            discover_include_aliases(&nested, aliases);
-        }
-        index += 1;
-    }
-}
-
 fn collect_use_tree(
     tokens: &[TokenTree],
     inherited_prefix: &[String],
-    aliases: &mut BTreeSet<String>,
+    aliases: &mut BTreeMap<String, IncludeAlias>,
 ) {
     let mut branch_start = 0;
     for index in 0..=tokens.len() {
@@ -228,7 +284,7 @@ fn collect_use_tree(
 fn collect_use_branch(
     branch: &[TokenTree],
     inherited_prefix: &[String],
-    aliases: &mut BTreeSet<String>,
+    aliases: &mut BTreeMap<String, IncludeAlias>,
 ) {
     let Some((group_index, group)) = branch.iter().enumerate().find_map(|(index, token)| {
         if let TokenTree::Group(group) = token {
@@ -251,14 +307,17 @@ fn collect_use_branch(
             return;
         };
         path.append(&mut branch_path);
-        if matches!(
+        let alias_kind = if matches!(
             path.as_slice(),
             [qualifier, name]
                 if matches!(qualifier.as_str(), "std" | "core")
                     && matches!(name.as_str(), "include_str" | "include_bytes")
         ) {
-            aliases.insert(alias.to_string());
-        }
+            IncludeAlias::Builtin
+        } else {
+            IncludeAlias::Shadowed
+        };
+        aliases.insert(alias.to_string(), alias_kind);
         return;
     };
 
@@ -291,6 +350,126 @@ fn use_path_segments(tokens: &[TokenTree]) -> Option<Vec<String>> {
     } else {
         Some(segments)
     }
+}
+
+fn macro_rules_definition(
+    tokens: &[TokenTree],
+    index: usize,
+) -> Option<(String, &proc_macro2::Group, usize)> {
+    if !matches!(
+        tokens.get(index),
+        Some(TokenTree::Ident(identifier)) if identifier == "macro_rules"
+    ) || !tokens
+        .get(index + 1)
+        .is_some_and(|token| is_punct(token, '!'))
+    {
+        return None;
+    }
+    let TokenTree::Ident(name) = tokens.get(index + 2)? else {
+        return None;
+    };
+    let TokenTree::Group(body) = tokens.get(index + 3)? else {
+        return None;
+    };
+    Some((name.to_string(), body, index + 4))
+}
+
+fn parse_macro_wrapper(body: &proc_macro2::Group) -> Option<MacroWrapper> {
+    let tokens = body.stream().into_iter().collect::<Vec<_>>();
+    let (pattern, expansion) = tokens.iter().enumerate().find_map(|(index, token)| {
+        let TokenTree::Group(pattern) = token else {
+            return None;
+        };
+        let equals = index + 1;
+        if !is_punct(tokens.get(equals)?, '=') || !is_punct(tokens.get(equals + 1)?, '>') {
+            return None;
+        }
+        let TokenTree::Group(expansion) = tokens.get(equals + 2)? else {
+            return None;
+        };
+        Some((pattern, expansion))
+    })?;
+    let parameter = macro_literal_parameter(pattern)?;
+    Some(MacroWrapper {
+        parameter,
+        body: expansion.stream(),
+    })
+}
+
+fn macro_literal_parameter(pattern: &proc_macro2::Group) -> Option<String> {
+    let tokens = pattern.stream().into_iter().collect::<Vec<_>>();
+    for index in 0..tokens.len().saturating_sub(3) {
+        if !is_punct(&tokens[index], '$') {
+            continue;
+        }
+        let TokenTree::Ident(name) = &tokens[index + 1] else {
+            continue;
+        };
+        if !is_punct(&tokens[index + 2], ':')
+            || !matches!(&tokens[index + 3], TokenTree::Ident(kind) if kind == "literal")
+        {
+            continue;
+        }
+        return Some(name.to_string());
+    }
+    None
+}
+
+fn macro_invocation(tokens: &[TokenTree], index: usize) -> Option<(String, &proc_macro2::Group)> {
+    let TokenTree::Ident(identifier) = tokens.get(index)? else {
+        return None;
+    };
+    if !tokens
+        .get(index + 1)
+        .is_some_and(|token| is_punct(token, '!'))
+    {
+        return None;
+    }
+    let Some(TokenTree::Group(group)) = tokens.get(index + 2) else {
+        return None;
+    };
+    Some((identifier.to_string(), group))
+}
+
+fn substitute_macro_tokens(
+    tokens: &TokenStream,
+    parameter: &str,
+    arguments: &[TokenTree],
+) -> TokenStream {
+    let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+    let mut output = TokenStream::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if is_punct(&tokens[index], '$')
+            && matches!(tokens.get(index + 1), Some(TokenTree::Ident(name)) if name == parameter)
+        {
+            output.extend(arguments.iter().cloned());
+            index += 2;
+            continue;
+        }
+        let token = match &tokens[index] {
+            TokenTree::Group(group) => {
+                let nested = substitute_macro_tokens(&group.stream(), parameter, arguments);
+                let mut replacement = proc_macro2::Group::new(group.delimiter(), nested);
+                replacement.set_span(group.span());
+                TokenTree::Group(replacement)
+            }
+            token => token.clone(),
+        };
+        output.extend([token]);
+        index += 1;
+    }
+    output
+}
+
+fn is_module_body(tokens: &[TokenTree], index: usize) -> bool {
+    matches!(
+        tokens.get(index.wrapping_sub(2)),
+        Some(TokenTree::Ident(identifier)) if identifier == "mod"
+    ) || matches!(
+        tokens.get(index.wrapping_sub(3)),
+        Some(TokenTree::Ident(keyword)) if keyword == "mod"
+    )
 }
 
 fn parse_static_string_expression(
@@ -798,6 +977,61 @@ const _: &str = ignored!("user-macro.txt");
             Some(vec![
                 IncludeString::Relative("aliased.txt".to_owned()),
                 IncludeString::Relative("aliased.bin".to_owned()),
+            ])
+        );
+    }
+
+    #[test]
+    fn expands_literal_include_wrapper_macros_without_scanning_metavariables() {
+        let source = r#"
+macro_rules! embed {
+    ($p:literal) => { include_str!($p) };
+}
+const _: &str = embed!("wrapped.txt");
+"#;
+        assert_eq!(
+            parse_include_paths(source).ok(),
+            Some(vec![IncludeString::Relative("wrapped.txt".to_owned())])
+        );
+    }
+
+    #[test]
+    fn ignores_nonliteral_calls_to_literal_wrapper_macros() {
+        let source = r#"
+macro_rules! embed {
+    ($p:literal) => { include_str!($p) };
+}
+const PATH: &str = "dynamic.txt";
+const _: &str = embed!(PATH);
+"#;
+        assert_eq!(parse_include_paths(source).ok(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn aliases_and_macro_names_follow_lexical_module_scope() {
+        let source = r#"
+use std::include_str as asset;
+const _: &str = asset!("root.txt");
+
+mod child {
+    const PATH: &str = "not-an-include.txt";
+    const _: &str = asset!(PATH);
+    macro_rules! asset {
+        ($p:literal) => { $p };
+    }
+    const _: &str = asset!(PATH);
+}
+
+mod sibling {
+    use core::include_bytes as asset;
+    const _: &[u8] = asset!("sibling.bin");
+}
+"#;
+        assert_eq!(
+            parse_include_paths(source).ok(),
+            Some(vec![
+                IncludeString::Relative("root.txt".to_owned()),
+                IncludeString::Relative("sibling.bin".to_owned()),
             ])
         );
     }
