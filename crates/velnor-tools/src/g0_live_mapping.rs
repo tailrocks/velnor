@@ -30,8 +30,8 @@ pub struct G0MappingBindings {
     pub collector_name: String,
     pub collector_revision: String,
     pub phase: String,
-    pub model_session: G0ModelSession,
-    pub workload_artifact: G0ArtifactReference,
+    pub model_session: CapturedModelSession,
+    pub workload_artifact: CapturedWorkloadArtifact,
     /// External CAS reference written by the same collector process for the
     /// canonical typed snapshot bytes.  A URI supplied without an object
     /// write is not accepted as authoritative evidence.
@@ -39,6 +39,86 @@ pub struct G0MappingBindings {
     /// Explicit workflow-to-workload mapping for repos with more than one
     /// reviewed workload.  A single-workload repo is mapped automatically.
     pub workflow_workloads: BTreeMap<(String, String), Vec<String>>,
+}
+
+/// Model-session evidence parsed from one collector-owned raw object.  The
+/// fields stay private so a caller cannot construct an effective Luna/max
+/// claim by filling the typed contract directly.
+#[derive(Debug, Clone)]
+pub struct CapturedModelSession {
+    value: G0ModelSession,
+    raw_object_ref: String,
+}
+
+impl CapturedModelSession {
+    pub(crate) fn from_raw_object(raw: &RawObjectRef) -> Result<Self> {
+        if raw.object_kind != "model.session" {
+            bail!(
+                "model session must come from a model.session raw object, got {}",
+                raw.object_kind
+            );
+        }
+        let value = parse_bound_json::<G0ModelSession>(raw, "model session")?;
+        require_raw_binding(&value.raw_object_refs, raw, "model session")?;
+        Ok(Self {
+            value,
+            raw_object_ref: raw.raw_id.clone(),
+        })
+    }
+
+    fn value(&self) -> &G0ModelSession {
+        &self.value
+    }
+}
+
+/// Reviewed workload artifact evidence parsed from one collector-owned raw
+/// object.  It is intentionally distinct from a caller-provided path or
+/// digest string.
+#[derive(Debug, Clone)]
+pub struct CapturedWorkloadArtifact {
+    value: G0ArtifactReference,
+    raw_object_ref: String,
+}
+
+impl CapturedWorkloadArtifact {
+    pub(crate) fn from_raw_object(raw: &RawObjectRef) -> Result<Self> {
+        if raw.object_kind != "workload.artifact" {
+            bail!(
+                "workload artifact must come from a workload.artifact raw object, got {}",
+                raw.object_kind
+            );
+        }
+        let value = parse_bound_json::<G0ArtifactReference>(raw, "workload artifact")?;
+        require_raw_binding(&value.raw_object_refs, raw, "workload artifact")?;
+        Ok(Self {
+            value,
+            raw_object_ref: raw.raw_id.clone(),
+        })
+    }
+
+    fn value(&self) -> &G0ArtifactReference {
+        &self.value
+    }
+}
+
+fn parse_bound_json<T: for<'de> serde::Deserialize<'de>>(
+    raw: &RawObjectRef,
+    label: &str,
+) -> Result<T> {
+    let bytes = BASE64
+        .decode(&raw.bytes_base64)
+        .with_context(|| format!("decode {label} raw bytes"))?;
+    if bytes.len() as u64 != raw.byte_length || sha256_digest(&bytes) != raw.sha256 {
+        bail!("{label} raw bytes do not match collector digest/length");
+    }
+    serde_json::from_slice(&bytes).with_context(|| format!("parse bound {label} JSON"))
+}
+
+fn require_raw_binding(raw_ids: &[String], raw: &RawObjectRef, label: &str) -> Result<()> {
+    if !raw_ids.iter().any(|raw_id| raw_id == &raw.raw_id) {
+        bail!("{label} does not bind its source raw object {}", raw.raw_id);
+    }
+    Ok(())
 }
 
 /// Fields already captured by the live collector but absent from exact
@@ -118,7 +198,7 @@ impl G0MappingBindings {
         {
             bail!("G0 collector identity fields are required");
         }
-        let session = &self.model_session;
+        let session = self.model_session.value();
         if !session.effective
             || session.orchestrator_model != ORCHESTRATOR_MODEL
             || session.orchestrator_effort != ORCHESTRATOR_EFFORT
@@ -129,7 +209,11 @@ impl G0MappingBindings {
         {
             bail!("effective model session must be Astra/low with Luna/max agents");
         }
-        if session.raw_object_refs.is_empty() || self.workload_artifact.raw_object_refs.is_empty() {
+        if session.raw_object_refs.is_empty()
+            || self.workload_artifact.value().raw_object_refs.is_empty()
+            || self.model_session.raw_object_ref.trim().is_empty()
+            || self.workload_artifact.raw_object_ref.trim().is_empty()
+        {
             bail!("model and workload inputs require independently captured raw references");
         }
         Ok(())
@@ -227,9 +311,9 @@ pub fn map_g0_inventory_with_supplement(
         repositories,
         reconciliation,
         dependency_graph,
-        model_session: bindings.model_session.clone(),
+        model_session: bindings.model_session.value().clone(),
         access: map_access(live, &raw_by_id)?,
-        workload_artifact: bindings.workload_artifact.clone(),
+        workload_artifact: bindings.workload_artifact.value().clone(),
     };
     let canonical = canonical_json_bytes(&snapshot).context("serialize canonical G0 snapshot")?;
     let snapshot_sha256 = sha256_digest(&canonical);
@@ -1588,4 +1672,100 @@ fn utc_now() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "unknown".to_owned())
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::github_acquisition::sha256_digest;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    fn raw_object(kind: &str, raw_id: &str, value: serde_json::Value) -> RawObjectRef {
+        let bytes = serde_json::to_vec(&value).expect("fixture JSON");
+        let digest = sha256_digest(&bytes);
+        let digest_hex = digest.strip_prefix("sha256:").expect("digest prefix");
+        RawObjectRef {
+            raw_id: raw_id.to_owned(),
+            request_id: format!("{raw_id}-request"),
+            object_kind: kind.to_owned(),
+            canonicalization: "json-utf8".to_owned(),
+            sha256: digest.clone(),
+            byte_length: bytes.len() as u64,
+            bytes_base64: BASE64.encode(&bytes),
+            media_type: "application/json".to_owned(),
+            storage_ref: format!("sha256://{digest_hex}"),
+            original_sha256: digest.clone(),
+            original_byte_length: bytes.len() as u64,
+            original_storage_ref: format!("sha256://{digest_hex}"),
+        }
+    }
+
+    #[test]
+    fn model_and_workload_bindings_require_typed_raw_objects() {
+        let model = raw_object(
+            "model.session",
+            "model-1",
+            serde_json::json!({
+                "session_id": "session-1",
+                "effective": true,
+                "orchestrator_model": "gpt-6-astra",
+                "orchestrator_effort": "low",
+                "agents": [{
+                    "agent_id": "agent-1",
+                    "model": "gpt-5.6-luna",
+                    "effort": "max",
+                    "effective": true,
+                    "raw_object_refs": ["model-1"]
+                }],
+                "raw_object_refs": ["model-1"]
+            }),
+        );
+        let workload = raw_object(
+            "workload.artifact",
+            "workload-1",
+            serde_json::json!({
+                "name": "fleet.json",
+                "schema": "github-first-dual-lane.v2",
+                "source_url": "https://github.com/tailrocks/velnor/blob/abe9ad82a2d4d01b706bbc6122ab6ccb150faad9/docs/ci/github-first-dual-lane/fleet.json",
+                "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "storage_ref": "sha256://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "source_revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+                "source_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "observed_at_utc": "2026-09-20T00:00:00Z",
+                "raw_object_refs": ["workload-1"]
+            }),
+        );
+        let captured_model =
+            CapturedModelSession::from_raw_object(&model).expect("typed model binding");
+        let captured_workload =
+            CapturedWorkloadArtifact::from_raw_object(&workload).expect("typed workload binding");
+        assert_eq!(captured_model.raw_object_ref, "model-1");
+        assert_eq!(captured_workload.raw_object_ref, "workload-1");
+        assert_eq!(captured_model.value.session_id, "session-1");
+        assert_eq!(captured_workload.value.name, "fleet.json");
+
+        let mut wrong_kind = model.clone();
+        wrong_kind.object_kind = "caller.claim".to_owned();
+        assert!(CapturedModelSession::from_raw_object(&wrong_kind).is_err());
+    }
+
+    #[test]
+    fn bound_model_object_digest_tamper_fails_closed() {
+        let model = raw_object(
+            "model.session",
+            "model-1",
+            serde_json::json!({
+                "session_id": "session-1",
+                "effective": true,
+                "orchestrator_model": "gpt-6-astra",
+                "orchestrator_effort": "low",
+                "agents": [],
+                "raw_object_refs": ["model-1"]
+            }),
+        );
+        let mut tampered = model;
+        tampered.bytes_base64 = BASE64.encode(b"{}");
+        assert!(CapturedModelSession::from_raw_object(&tampered).is_err());
+    }
 }
