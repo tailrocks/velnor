@@ -232,7 +232,7 @@ impl TransportFixture {
         .expect("scenario");
     }
 
-    fn run_acquire(&self, failure: Option<FailureCase>) -> Output {
+    fn prepare_acquire_fixture(&self, failure: Option<FailureCase>) {
         let base_contract = fs::read_to_string(&self.contract).expect("contract text");
         let mut head_contract = base_contract.clone();
         if failure == Some(FailureCase::HeadWorkflowSubstitution) {
@@ -307,6 +307,10 @@ impl TransportFixture {
             serde_json::to_vec(&scenario).expect("scenario JSON"),
         )
         .expect("scenario");
+    }
+
+    fn run_acquire(&self, failure: Option<FailureCase>) -> Output {
+        self.prepare_acquire_fixture(failure);
         let _ = fs::remove_dir_all(&self.run_temp);
         fs::create_dir_all(&self.run_temp).expect("run temp");
         let mut command = Command::new("bash");
