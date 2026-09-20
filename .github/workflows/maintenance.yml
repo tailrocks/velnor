@@ -122,10 +122,10 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 325719f1e05d3d46322c9fd3eeb9ad545e175638
+          rev: 0dc79895ff1c5e88be7c3822c437e1c5b5282e12
       - name: Set trusted workflow policy revision
         if: steps.retention-gate.outputs.skip != 'true'
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=325719f1e05d3d46322c9fd3eeb9ad545e175638" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=0dc79895ff1c5e88be7c3822c437e1c5b5282e12" >> "$GITHUB_ENV"
       - name: Sweep closed-PR merge-ref caches
         if: steps.retention-gate.outputs.skip != 'true'
         env:
