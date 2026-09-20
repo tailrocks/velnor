@@ -15,7 +15,7 @@
 
 use std::fmt::Write as _;
 
-use super::{Args, Primitive, RenderCtx, Rendered};
+use super::{Args, Primitive, ProviderAdmission, RenderCtx, Rendered, WorkflowIr};
 use crate::s2::provider::{runs_on_for, ProviderId};
 use crate::s2::{
     runs_on_labels_yaml, yaml_scalar, ActionPin, DocsSpec, GeneratorError, ProjectConfig,
@@ -47,10 +47,10 @@ pub(crate) fn canonical_docs_site_side_file(primitive: &str) -> Option<&'static 
 /// no docs contract.
 pub(crate) fn docs_site_content(config: &ProjectConfig) -> Option<String> {
     let spec = config.docs.as_ref()?;
-    let runner = docs_runner(config).ok()?;
+    let (provider, runner) = docs_runner(config).ok()?;
     Some(format!(
         "{GENERATED_HEADER}{}",
-        render_docs_site(config, spec, &runner)
+        render_docs_site(config, spec, provider, &runner)
     ))
 }
 
@@ -74,14 +74,14 @@ impl Primitive for DocsSite {
             ))
         })?;
         let _ = args;
-        // Every job takes the one docs runner: the first provider of the
-        // universe in canonical order. The pipeline is a single-provider
-        // job family like the renovate writer, so it carries no dispatch
-        // provider input of its own.
-        let runner = docs_runner(ctx.config)?;
+        // Hosted stays preferred. A local fallback is eligible only when it
+        // appears in automatic_providers, and its jobs carry the canonical
+        // provider admission gate. The pipeline is a single-provider job
+        // family like the renovate writer, so it has no dispatch provider input.
+        let (provider, runner) = docs_runner(ctx.config)?;
         let content = format!(
             "{GENERATED_HEADER}{}",
-            render_docs_site(ctx.config, &spec, &runner)
+            render_docs_site(ctx.config, &spec, provider, &runner)
         );
         render_file(ctx, DOCS_SITE_FILE, content)
     }
@@ -112,21 +112,34 @@ fn render_file(
     })
 }
 
-/// The provider the pipeline runs on: the first provider of the universe
-/// in canonical order. Pages deployment and artifact reuse are
-/// GitHub-platform operations, but a repository without the hosted provider
-/// runs them on its local fleet instead.
-fn docs_runner(config: &ProjectConfig) -> Result<String, GeneratorError> {
+/// The provider the pipeline runs on: hosted when configured, otherwise the
+/// first enabled local provider in canonical order. A local provider outside
+/// `automatic_providers` is never chosen as a fallback.
+fn docs_runner(config: &ProjectConfig) -> Result<(ProviderId, String), GeneratorError> {
     let provider = ProviderId::ALL
         .iter()
-        .find(|provider| config.providers.contains(provider))
+        .find(|provider| {
+            config.providers.contains(provider)
+                && (!provider.is_local() || config.automatic_providers.contains(provider))
+        })
         .copied()
         .ok_or_else(|| {
             GeneratorError::usage(
-                "`docs-site` renders a pipeline but [workflow] providers is empty; declare the provider universe",
+                "`docs-site` needs a configured hosted runner or a local provider enabled in [workflow] automatic_providers",
             )
         })?;
-    runs_on_for(&config.selectors, provider).map(runs_on_labels_yaml)
+    runs_on_for(&config.selectors, provider)
+        .map(runs_on_labels_yaml)
+        .map(|runner| (provider, runner))
+}
+
+/// Add the selected local provider's admission predicate to every job. Hosted
+/// docs workflows keep their existing event gates unchanged.
+fn admitted_condition(condition: &str, admission_gate: Option<&str>) -> String {
+    admission_gate.map_or_else(
+        || condition.to_owned(),
+        |gate| format!("({gate}) && ({condition})"),
+    )
 }
 
 /// The reuse-recipe contract version. It feeds the recipe fingerprint and the
@@ -304,14 +317,20 @@ fn render_triggers(config: &ProjectConfig, spec: &DocsSpec) -> String {
 /// The lookup never trusts an artifact name: a candidate must come from a
 /// default-branch run, download intact, hold exactly `docs-result.txt`, and
 /// byte-match this run's recipe and digest before `hit` can turn true.
-fn render_gate_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> String {
+fn render_gate_job(
+    config: &ProjectConfig,
+    runner: &str,
+    spec: &DocsSpec,
+    admission_gate: Option<&str>,
+) -> String {
     let checkout = ActionPin::Checkout.reference();
     let hash_files = hash_files_call(&spec.docs_paths);
     let recipe = docs_reuse_recipe(spec);
     let branch = bash_escape(&config.default_branch);
+    let condition = admitted_condition("github.event_name != 'schedule'", admission_gate);
     format!(
         r#"  gate:
-    if: github.event_name != 'schedule'
+    if: {condition}
     runs-on: {runner}
     timeout-minutes: 10
     outputs:
@@ -393,13 +412,18 @@ fn render_local_check_job(
     job_name: &str,
     commands: &[String],
     label: &str,
+    admission_gate: Option<&str>,
 ) -> String {
     let checkout = ActionPin::Checkout.reference();
     let steps = command_steps(commands, label, None, None);
+    let condition = admitted_condition(
+        "github.event_name != 'schedule' && needs.gate.outputs.result-reuse != 'true'",
+        admission_gate,
+    );
     format!(
         r"  {job_id}:
     name: {job_name}
-    if: github.event_name != 'schedule' && needs.gate.outputs.result-reuse != 'true'
+    if: {condition}
     needs: gate
     runs-on: {runner}
     timeout-minutes: 15
@@ -494,7 +518,12 @@ fn render_built_site_lookup(spec: &DocsSpec, hash_files: &str, default_branch: &
 
 /// The build job: reuse or rebuild the site, always re-check its links, then
 /// publish the built site for reuse and stage the Pages artifact for deploy.
-fn render_site_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> String {
+fn render_site_job(
+    config: &ProjectConfig,
+    runner: &str,
+    spec: &DocsSpec,
+    admission_gate: Option<&str>,
+) -> String {
     let checkout = ActionPin::Checkout.reference();
     let upload_artifact = ActionPin::UploadArtifact.reference();
     let upload_pages = ActionPin::UploadPages.reference();
@@ -517,6 +546,12 @@ fn render_site_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> Str
     let site_dir = yaml_scalar(&spec.site_dir);
     let escaped = bash_escape(&spec.site_dir);
     let recipe = docs_reuse_recipe(spec);
+    let condition = admitted_condition(
+        &format!(
+            "github.event_name != 'schedule' && (needs.gate.outputs.result-reuse != 'true' || ({deploy_gate}))"
+        ),
+        admission_gate,
+    );
     // The receipt rides inside the uploaded site directory so the lookup can
     // verify the exact bytes it restores. All three receipt steps share one
     // condition: the receipt is written if and only if the publish runs, and
@@ -525,7 +560,7 @@ fn render_site_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> Str
     format!(
         r#"  site:
     name: Build and check the site
-    if: github.event_name != 'schedule' && (needs.gate.outputs.result-reuse != 'true' || ({deploy_gate}))
+    if: {condition}
     needs: gate
     runs-on: {runner}
     timeout-minutes: 30
@@ -570,7 +605,12 @@ fn render_site_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> Str
 
 /// The Pages deployment: three bounded attempts over the transient handoff,
 /// then a fail-closed report. Validation never retries — only this handoff.
-fn render_deploy_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> String {
+fn render_deploy_job(
+    config: &ProjectConfig,
+    runner: &str,
+    spec: &DocsSpec,
+    admission_gate: Option<&str>,
+) -> String {
     let checkout = ActionPin::Checkout.reference();
     let deploy_pages = ActionPin::DeployPages.reference();
     let deploy_gate = main_deploy_gate(&config.default_branch);
@@ -584,10 +624,14 @@ fn render_deploy_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> S
     }
     let needs = needs.join(", ");
     let checks = checks.join(" && ");
+    let condition = admitted_condition(
+        &format!("always() && ({deploy_gate}) && {checks}"),
+        admission_gate,
+    );
     format!(
         r#"  deploy:
     name: Deploy to GitHub Pages
-    if: always() && ({deploy_gate}) && {checks}
+    if: {condition}
     needs: [{needs}]
     runs-on: {runner}
     timeout-minutes: 20
@@ -643,7 +687,12 @@ fn render_deploy_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> S
 
 /// Post-deployment verification: prove the deployed sitemap answers, with a
 /// bounded wait for propagation, then run the consumer-owned verify commands.
-fn render_verify_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> String {
+fn render_verify_job(
+    config: &ProjectConfig,
+    runner: &str,
+    spec: &DocsSpec,
+    admission_gate: Option<&str>,
+) -> String {
     let checkout = ActionPin::Checkout.reference();
     let deploy_gate = main_deploy_gate(&config.default_branch);
     let sitemap = bash_escape(&spec.sitemap_path);
@@ -654,10 +703,14 @@ fn render_verify_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> S
         None,
         Some(env),
     );
+    let condition = admitted_condition(
+        &format!("always() && needs.deploy.result == 'success' && ({deploy_gate})"),
+        admission_gate,
+    );
     format!(
         r#"  verify-deployed:
     name: Verify the deployed site
-    if: always() && needs.deploy.result == 'success' && ({deploy_gate})
+    if: {condition}
     needs: deploy
     runs-on: {runner}
     timeout-minutes: 10
@@ -694,7 +747,7 @@ fn render_verify_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> S
 
 /// The scheduled-external live-link check: the only job that runs on schedule,
 /// against the deployed site rather than the checkout.
-fn render_live_job(runner: &str, spec: &DocsSpec) -> String {
+fn render_live_job(runner: &str, spec: &DocsSpec, admission_gate: Option<&str>) -> String {
     let checkout = ActionPin::Checkout.reference();
     let steps = command_steps(
         &spec.external_link_commands,
@@ -702,10 +755,11 @@ fn render_live_job(runner: &str, spec: &DocsSpec) -> String {
         None,
         None,
     );
+    let condition = admitted_condition("github.event_name == 'schedule'", admission_gate);
     format!(
         r"  check-live:
     name: Check the live site
-    if: github.event_name == 'schedule'
+    if: {condition}
     runs-on: {runner}
     timeout-minutes: 15
     permissions:
@@ -723,7 +777,12 @@ fn render_live_job(runner: &str, spec: &DocsSpec) -> String {
 /// and record the successful result for reuse. The manifest stamps the exact
 /// recipe and digest the gate verified, so a future lookup compares bytes,
 /// never a name.
-fn render_required_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) -> String {
+fn render_required_job(
+    config: &ProjectConfig,
+    runner: &str,
+    spec: &DocsSpec,
+    admission_gate: Option<&str>,
+) -> String {
     let upload_artifact = ActionPin::UploadArtifact.reference();
     let publish = publish_guard(&config.default_branch);
     let recipe = docs_reuse_recipe(spec);
@@ -740,10 +799,14 @@ fn render_required_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) ->
         .collect::<Vec<_>>()
         .join(" || ");
     let needs = needs.join(", ");
+    let condition = admitted_condition(
+        "always() && github.event_name != 'schedule'",
+        admission_gate,
+    );
     format!(
         r#"  docs-required:
     name: Docs required
-    if: always() && github.event_name != 'schedule'
+    if: {condition}
     needs: [{needs}]
     runs-on: {runner}
     timeout-minutes: 5
@@ -774,13 +837,23 @@ fn render_required_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) ->
     )
 }
 
-fn render_docs_site(config: &ProjectConfig, spec: &DocsSpec, runner: &str) -> String {
+fn render_docs_site(
+    config: &ProjectConfig,
+    spec: &DocsSpec,
+    provider: ProviderId,
+    runner: &str,
+) -> String {
+    let admission_gate = provider.is_local().then(|| {
+        WorkflowIr::from_config(config)
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(provider))
+    });
+    let admission_gate = admission_gate.as_deref();
     let mut output = format!(
         "name: Docs\nrun-name: Docs \u{b7} ${{{{ github.event_name }}}}\n\n{}\npermissions:\n  contents: read\n\nconcurrency:\n  group: docs-${{{{ github.repository }}}}-${{{{ github.ref }}}}\n  cancel-in-progress: ${{{{ github.event_name == 'pull_request' }}}}\n\nenv:\n  DOCS_SITE_URL: {}\n\njobs:\n",
         render_triggers(config, spec),
         yaml_scalar(&spec.site_url),
     );
-    output.push_str(&render_gate_job(config, runner, spec));
+    output.push_str(&render_gate_job(config, runner, spec, admission_gate));
     for (job_id, commands, label) in local_check_jobs(spec) {
         let name = match job_id {
             "source-links" => "Check source links",
@@ -788,16 +861,21 @@ fn render_docs_site(config: &ProjectConfig, spec: &DocsSpec, runner: &str) -> St
             _ => label,
         };
         output.push_str(&render_local_check_job(
-            runner, job_id, name, commands, label,
+            runner,
+            job_id,
+            name,
+            commands,
+            label,
+            admission_gate,
         ));
     }
-    output.push_str(&render_site_job(config, runner, spec));
-    output.push_str(&render_deploy_job(config, runner, spec));
-    output.push_str(&render_verify_job(config, runner, spec));
+    output.push_str(&render_site_job(config, runner, spec, admission_gate));
+    output.push_str(&render_deploy_job(config, runner, spec, admission_gate));
+    output.push_str(&render_verify_job(config, runner, spec, admission_gate));
     if !spec.external_link_commands.is_empty() {
-        output.push_str(&render_live_job(runner, spec));
+        output.push_str(&render_live_job(runner, spec, admission_gate));
     }
-    output.push_str(&render_required_job(config, runner, spec));
+    output.push_str(&render_required_job(config, runner, spec, admission_gate));
     output
 }
 
@@ -920,8 +998,23 @@ mod tests {
 
     fn render(spec: &DocsSpec) -> String {
         let config = docs_config(spec.clone());
-        let runner = must_ok(docs_runner(&config), "docs test runner resolves");
-        render_docs_site(&config, spec, &runner)
+        let (provider, runner) = must_ok(docs_runner(&config), "docs test runner resolves");
+        render_docs_site(&config, spec, provider, &runner)
+    }
+
+    fn velnor_config(spec: DocsSpec) -> ProjectConfig {
+        let mut config = docs_config(spec);
+        config.providers =
+            std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]);
+        config.automatic_providers = config.providers.clone();
+        config.default_dispatch_providers.clear();
+        config.selectors = std::collections::BTreeMap::from([(
+            crate::s2::provider::ProviderId::Velnor,
+            crate::s2::provider::ProviderSelector {
+                runs_on: vec!["self-hosted".to_owned(), "example-fleet".to_owned()],
+            },
+        )]);
+        config
     }
 
     #[test]
@@ -929,6 +1022,10 @@ mod tests {
         let workflow = render(&docs_spec());
         assert!(workflow.contains("branches: [main]"), "{workflow}");
         assert!(workflow.contains("- cron: \"17 4 * * *\""), "{workflow}");
+        assert!(
+            !workflow.contains("github.repository =="),
+            "hosted docs jobs keep their existing event gates: {workflow}"
+        );
         for job in ["gate:", "source-links:", "  site:", "  spell:"] {
             let block = must_some(workflow.split(job).nth(1), "the local job renders");
             let gate = must_some(
@@ -1304,6 +1401,7 @@ mod tests {
         let mut config = docs_config(docs_spec());
         config.providers =
             std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]);
+        config.automatic_providers = config.providers.clone();
         config.selectors = std::collections::BTreeMap::new();
         let error = must_fail(
             docs_runner(&config),
@@ -1314,17 +1412,65 @@ mod tests {
 
     #[test]
     fn velnor_only_universe_runs_on_the_velnor_selector() {
-        let mut config = docs_config(docs_spec());
-        config.providers =
-            std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]);
-        config.selectors = std::collections::BTreeMap::from([(
-            crate::s2::provider::ProviderId::Velnor,
-            crate::s2::provider::ProviderSelector {
-                runs_on: vec!["self-hosted".to_owned(), "example-fleet".to_owned()],
-            },
-        )]);
-        let runner = must_ok(docs_runner(&config), "docs test runner resolves");
+        let config = velnor_config(docs_spec());
+        let (provider, runner) = must_ok(docs_runner(&config), "docs test runner resolves");
+        assert_eq!(provider, crate::s2::provider::ProviderId::Velnor);
         assert!(runner.contains("self-hosted"), "{runner}");
+    }
+
+    #[test]
+    fn local_provider_jobs_use_the_canonical_admission_gate() {
+        let spec = docs_spec();
+        let config = velnor_config(spec.clone());
+        let (provider, runner) = must_ok(docs_runner(&config), "docs test runner resolves");
+        let admission = WorkflowIr::from_config(&config).provider_admission_expression(
+            ProviderAdmission::ProviderTrusted(crate::s2::provider::ProviderId::Velnor),
+        );
+        assert_eq!(provider, crate::s2::provider::ProviderId::Velnor);
+        let workflow = render_docs_site(&config, &spec, provider, &runner);
+        for job in [
+            "gate:",
+            "source-links:",
+            "spell:",
+            "  site:",
+            "  deploy:",
+            "verify-deployed:",
+            "check-live:",
+            "docs-required:",
+        ] {
+            let block = must_some(workflow.split(job).nth(1), "the local job renders");
+            let condition = must_some(
+                block.lines().find(|line| line.contains("if:")),
+                "the local job has an admission condition",
+            );
+            assert!(
+                condition.contains(&admission),
+                "local job {job} uses the canonical provider gate: {condition}"
+            );
+        }
+        assert!(
+            admission.contains("github.repository == 'example/docs-fixture'"),
+            "local admission binds to the configured repository: {admission}"
+        );
+        assert!(
+            admission.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"),
+            "local admission is restricted to the default-branch push: {admission}"
+        );
+    }
+
+    #[test]
+    fn disabled_local_provider_is_not_selected_as_a_docs_fallback() {
+        let mut config = velnor_config(docs_spec());
+        config.automatic_providers.clear();
+        let error = must_fail(
+            docs_runner(&config),
+            "a disabled local provider cannot serve as the docs fallback",
+        );
+        assert!(error.to_string().contains("automatic_providers"), "{error}");
+        assert!(
+            docs_site_content(&config).is_none(),
+            "no workflow renders without an eligible provider"
+        );
     }
 
     #[test]

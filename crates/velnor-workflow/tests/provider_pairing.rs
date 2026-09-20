@@ -1,7 +1,7 @@
 //! Structural provider pairing: every selected unit fans out to one caller
 //! per provider in the universe, comparison names stay provider-first, and
-//! automatic gates do not silently drop local providers except the documented
-//! fork-PR trust exclusion.
+//! local-provider admission binds to the configured repository and default
+//! branch.
 
 #![expect(clippy::panic, reason = "a test whose setup fails should panic loudly")]
 #![expect(
@@ -344,7 +344,7 @@ fn velnor_only_emits_only_velnor_callers() {
 }
 
 #[test]
-fn automatic_all_gates_pair_except_fork_pr_trust_exclusion() {
+fn automatic_all_gates_pair_and_scope_local_provider_admission() {
     let root = unique_dir("automatic-all-gates");
     write_rust_fixture(&root, 1);
     write_workflow_config(&root, &all_providers_config());
@@ -366,33 +366,34 @@ fn automatic_all_gates_pair_except_fork_pr_trust_exclusion() {
         velnor_if.contains("inputs.provider == 'velnor'"),
         "Velnor verify job must require its provider: {velnor_if}"
     );
+    assert!(
+        hosted_if.contains("github.event_name != 'workflow_dispatch'"),
+        "hosted must admit automatic events: {hosted_if}"
+    );
+    assert!(
+        hosted_if.contains(
+            "contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')"
+        ),
+        "hosted must admit dispatches selecting it: {hosted_if}"
+    );
     for (provider, gate) in [
-        ("github-hosted", &hosted_if),
         ("github-self-hosted", &self_hosted_if),
         ("velnor", &velnor_if),
     ] {
         assert!(
-            gate.contains("github.event_name != 'workflow_dispatch'"),
-            "{provider} must admit automatic events: {gate}"
+            gate.contains("github.repository == 'example/monorepo'"),
+            "{provider} admission must bind to the configured repository: {gate}"
         );
         assert!(
-            gate.contains(&format!(
-                "contains(format(',{{0}},', github.event.inputs.providers), ',{provider},')"
-            )),
-            "{provider} must admit dispatches selecting it: {gate}"
+            gate.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"),
+            "{provider} admits only default-branch pushes: {gate}"
         );
     }
-    // Fork and bot pull requests are untrusted: local providers exclude them
-    // inline, hosted executes them.
-    let untrusted =
-        "!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))";
+    // Local providers admit only the trusted default-branch push. Hosted
+    // keeps its automatic-event and dispatch selection behavior.
     assert!(
-        self_hosted_if.contains(untrusted),
-        "self-hosted must exclude untrusted PRs: {self_hosted_if}"
-    );
-    assert!(
-        velnor_if.contains(untrusted),
-        "Velnor must exclude untrusted PRs: {velnor_if}"
+        !self_hosted_if.contains("workflow_dispatch") && !velnor_if.contains("workflow_dispatch"),
+        "local providers must not admit dispatches: {self_hosted_if} {velnor_if}"
     );
     assert!(
         !hosted_if.contains("pull_request.head.repo.fork"),
@@ -410,6 +411,29 @@ fn automatic_all_gates_pair_except_fork_pr_trust_exclusion() {
     assert!(pr.contains_key("github-self-hosted-rust-crate00"));
     assert!(pr.contains_key("velnor-rust-crate00"));
     assert!(pr.contains_key("prepare-cargo"));
+}
+
+#[test]
+fn disabled_local_provider_has_false_admission() {
+    let root = unique_dir("disabled-local-admission");
+    write_rust_fixture(&root, 1);
+    write_workflow_config(
+        &root,
+        &format!(
+            "providers = [\"github-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\"]\n\n{HOSTED_SELECTOR}\n{VELNOR_SELECTOR}"
+        ),
+    );
+
+    let rust = parse_jobs(&generate(&root).workflow("ci-unit-rust.yml"));
+    let velnor_if = job_if(&rust["verify-velnor"]);
+    assert!(
+        velnor_if.contains("github.repository == 'example/monorepo' && (false)"),
+        "Velnor outside automatic_providers must have false admission: {velnor_if}"
+    );
+    assert!(
+        !velnor_if.contains("github.event_name == 'push'"),
+        "a disabled Velnor provider cannot admit any push: {velnor_if}"
+    );
 }
 
 #[test]
