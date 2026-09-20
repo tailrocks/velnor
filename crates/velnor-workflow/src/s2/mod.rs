@@ -402,15 +402,15 @@ pub(crate) fn candidate_bounded_gh_api_script() -> String {
             mv -- "$partial" "$destination"
           }
           bounded_gh_api_value() {
-            local destination
-            destination="$(mktemp "$RUNNER_TEMP/gh-api.XXXXXX")"
-            rm -f -- "$destination"
+            local directory destination
+            directory="$(mktemp -d "$RUNNER_TEMP/gh-api.XXXXXX")"
+            destination="$directory/value.json"
             if ! bounded_gh_api "$destination" "$@"; then
-              rm -f -- "$destination" "$destination.partial"
+              rm -rf -- "$directory"
               return 1
             fi
             cat -- "$destination"
-            rm -f -- "$destination"
+            rm -rf -- "$directory"
           }
 "#
     .replace(
