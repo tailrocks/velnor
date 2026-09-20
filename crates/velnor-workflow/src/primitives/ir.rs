@@ -232,7 +232,10 @@ mod tests {
         assert!(output.contains("needs.plan.outputs.planned_no_work_base_sha"));
         assert!(output.contains("needs.plan.outputs.planned_no_work_head_sha"));
         assert!(output.contains("EXPECTED_FULL_UNITS: \",rust,\""));
+        assert!(output.contains("EXPECTED_UNIT_CENSUS: \",rust,\""));
         assert!(output.contains("actual_units=\"$(printf"));
+        assert!(output.contains("plan emitted workload outside generated child census"));
+        assert!(output.contains("plan emitted duplicate selected workloads"));
         assert!(output.contains("full CI plan omitted or added expected workloads"));
         assert!(output.contains("empty affected CI plan lacks an explicit no-work proof"));
     }
@@ -287,6 +290,7 @@ mod tests {
                     .env("PLAN_FULL_UNITS", full_units)
                     .env("PLAN_NO_WORK", no_work)
                     .env("EXPECTED_FULL_UNITS", ",rust,")
+                    .env("EXPECTED_UNIT_CENSUS", ",rust,")
                     .env("LANE_ADMITTED_GITHUB", "true")
                     .output(),
                 "run required shell",
@@ -318,6 +322,24 @@ mod tests {
             base_sha.as_str(),
             head_sha.as_str(),
             true,
+        );
+        run(
+            "affected",
+            "evil",
+            "",
+            "false",
+            base_sha.as_str(),
+            head_sha.as_str(),
+            false,
+        );
+        run(
+            "affected",
+            "rust,rust",
+            "rust",
+            "false",
+            base_sha.as_str(),
+            head_sha.as_str(),
+            false,
         );
     }
 
@@ -4257,9 +4279,10 @@ impl WorkflowIr {
         };
         let _ = write!(
             output,
-            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_SCOPE: {plan_scope}\n          PLAN_BASE_SHA: {plan_base_sha}\n          PLAN_HEAD_SHA: {plan_head_sha}\n          PLAN_FULL_UNITS: {plan_full_units}\n          PLAN_NO_WORK: {plan_no_work}\n          EXPECTED_FULL_UNITS: {}\n{}",
+            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_SCOPE: {plan_scope}\n          PLAN_BASE_SHA: {plan_base_sha}\n          PLAN_HEAD_SHA: {plan_head_sha}\n          PLAN_FULL_UNITS: {plan_full_units}\n          PLAN_NO_WORK: {plan_no_work}\n          EXPECTED_FULL_UNITS: {}\n          EXPECTED_UNIT_CENSUS: {}\n{}",
             needs.join(", "),
             self.runner_for(self.control_plane_lane()),
+            yaml_scalar(&expected_full_units),
             yaml_scalar(&expected_full_units),
             render_required_admission_env(self, &callers),
         );
@@ -4290,7 +4313,9 @@ impl WorkflowIr {
                 "          result=\"$(result_for_job velnor-lane-admission)\"\n          case \"$result\" in\n            success|skipped) ;;\n            *) echo \"required CI prerequisite velnor-lane-admission did not pass: $result\" >&2; exit 1 ;;\n          esac\n",
             );
         }
-        output.push_str("          actual_units=\"$(printf '%s\\n' \"$SELECTED_UNITS\" | tr ',' '\\n' | sed '/^$/d' | sort -u | paste -sd, -)\"\n          selected=\",$actual_units,\"\n");
+        output.push_str(
+            "          selected_lines=\"$(printf '%s\\n' \"$SELECTED_UNITS\" | tr ',' '\\n' | sed '/^$/d')\"\n          selected_count=\"$(printf '%s\\n' \"$selected_lines\" | sed '/^$/d' | wc -l | tr -d ' ')\"\n          unique_count=\"$(printf '%s\\n' \"$selected_lines\" | sed '/^$/d' | sort -u | wc -l | tr -d ' ')\"\n          [[ \"$selected_count\" == \"$unique_count\" ]] || { echo \"plan emitted duplicate selected workloads\" >&2; exit 1; }\n          expected_census=\"$(printf '%s\\n' \"$EXPECTED_UNIT_CENSUS\" | tr ',' '\\n' | sed '/^$/d')\"\n          while IFS= read -r unit; do\n            [[ -z \"$unit\" ]] && continue\n            grep -Fqx \"$unit\" <<<\"$expected_census\" || { echo \"plan emitted workload outside generated child census: $unit\" >&2; exit 1; }\n          done <<<\"$selected_lines\"\n          actual_units=\"$(printf '%s\\n' \"$selected_lines\" | sort -u | paste -sd, -)\"\n          selected=\",$actual_units,\"\n",
+        );
         output.push_str(
             "          case \"$PLAN_SCOPE\" in\n            full)\n              [[ \"$PLAN_NO_WORK\" == false ]] || { echo \"full CI plan cannot declare no-work\" >&2; exit 1; }\n              [[ \"$PLAN_FULL_UNITS\" != \"\" ]] || { echo \"full CI plan selected no workloads\" >&2; exit 1; }\n              [[ \"$selected\" == \"$EXPECTED_FULL_UNITS\" ]] || { echo \"full CI plan omitted or added expected workloads: selected=$selected expected=$EXPECTED_FULL_UNITS\" >&2; exit 1; }\n              [[ \",$PLAN_FULL_UNITS,\" == \"$EXPECTED_FULL_UNITS\" ]] || { echo \"full CI plan has an incomplete full baseline: full_units=,$PLAN_FULL_UNITS, expected=$EXPECTED_FULL_UNITS\" >&2; exit 1; }\n              ;;\n            affected)\n              if [[ \"$SELECTED_UNITS\" == \"\" ]]; then\n                [[ \"$PLAN_NO_WORK\" == true ]] || { echo \"empty affected CI plan lacks an explicit no-work proof\" >&2; exit 1; }\n                [[ -n \"$PLAN_BASE_SHA\" && \"$PLAN_BASE_SHA\" != \"$PLAN_HEAD_SHA\" ]] || { echo \"empty affected CI plan lacks distinct resolved revisions\" >&2; exit 1; }\n              else\n                [[ \"$PLAN_NO_WORK\" == false ]] || { echo \"nonempty affected CI plan carries a contradictory no-work proof\" >&2; exit 1; }\n              fi\n              ;;\n            *)\n              echo \"unsupported CI plan scope: $PLAN_SCOPE\" >&2\n              exit 1\n              ;;\n          esac\n",
         );
@@ -6659,6 +6684,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the aggregate shell is one complete validation contract"
+    )]
     pub(crate) fn render_required(
         &self,
         output: &mut String,
@@ -6730,9 +6759,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         };
         let _ = writeln!(
             output,
-            "  ci-required:\n    name: {display_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_SCOPE: {plan_scope}\n          PLAN_BASE_SHA: {plan_base_sha}\n          PLAN_HEAD_SHA: {plan_head_sha}\n          PLAN_FULL_UNITS: {plan_full_units}\n          PLAN_NO_WORK: {plan_no_work}\n          EXPECTED_FULL_UNITS: {}\n{}        shell: bash\n        run: |\n          set -euo pipefail\n          result_for_job() {{\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }}",
+            "  ci-required:\n    name: {display_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_SCOPE: {plan_scope}\n          PLAN_BASE_SHA: {plan_base_sha}\n          PLAN_HEAD_SHA: {plan_head_sha}\n          PLAN_FULL_UNITS: {plan_full_units}\n          PLAN_NO_WORK: {plan_no_work}\n          EXPECTED_FULL_UNITS: {}\n          EXPECTED_UNIT_CENSUS: {}\n{}        shell: bash\n        run: |\n          set -euo pipefail\n          result_for_job() {{\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }}",
             needs.join(", "),
             self.runner_for(self.control_plane_lane()),
+            yaml_scalar(&expected_full_units),
             yaml_scalar(&expected_full_units),
             render_required_admission_env(self, &callers),
         );
@@ -6750,7 +6780,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 "          result=\"$(result_for_job velnor-lane-admission)\"\n          case \"$result\" in\n            success|skipped) ;;\n            *) echo \"required CI prerequisite velnor-lane-admission did not pass: $result\" >&2; exit 1 ;;\n          esac\n",
             );
         }
-        output.push_str("          actual_units=\"$(printf '%s\\n' \"$SELECTED_UNITS\" | tr ',' '\\n' | sed '/^$/d' | sort -u | paste -sd, -)\"\n          selected=\",$actual_units,\"\n");
+        output.push_str(
+            "          selected_lines=\"$(printf '%s\\n' \"$SELECTED_UNITS\" | tr ',' '\\n' | sed '/^$/d')\"\n          selected_count=\"$(printf '%s\\n' \"$selected_lines\" | sed '/^$/d' | wc -l | tr -d ' ')\"\n          unique_count=\"$(printf '%s\\n' \"$selected_lines\" | sed '/^$/d' | sort -u | wc -l | tr -d ' ')\"\n          [[ \"$selected_count\" == \"$unique_count\" ]] || { echo \"plan emitted duplicate selected workloads\" >&2; exit 1; }\n          expected_census=\"$(printf '%s\\n' \"$EXPECTED_UNIT_CENSUS\" | tr ',' '\\n' | sed '/^$/d')\"\n          while IFS= read -r unit; do\n            [[ -z \"$unit\" ]] && continue\n            grep -Fqx \"$unit\" <<<\"$expected_census\" || { echo \"plan emitted workload outside generated child census: $unit\" >&2; exit 1; }\n          done <<<\"$selected_lines\"\n          actual_units=\"$(printf '%s\\n' \"$selected_lines\" | sort -u | paste -sd, -)\"\n          selected=\",$actual_units,\"\n",
+        );
         output.push_str(
             "          case \"$PLAN_SCOPE\" in\n            full)\n              [[ \"$PLAN_NO_WORK\" == false ]] || { echo \"full CI plan cannot declare no-work\" >&2; exit 1; }\n              [[ \"$PLAN_FULL_UNITS\" != \"\" ]] || { echo \"full CI plan selected no workloads\" >&2; exit 1; }\n              [[ \"$selected\" == \"$EXPECTED_FULL_UNITS\" ]] || { echo \"full CI plan omitted or added expected workloads: selected=$selected expected=$EXPECTED_FULL_UNITS\" >&2; exit 1; }\n              [[ \",$PLAN_FULL_UNITS,\" == \"$EXPECTED_FULL_UNITS\" ]] || { echo \"full CI plan has an incomplete full baseline: full_units=,$PLAN_FULL_UNITS, expected=$EXPECTED_FULL_UNITS\" >&2; exit 1; }\n              ;;\n            affected)\n              if [[ \"$SELECTED_UNITS\" == \"\" ]]; then\n                [[ \"$PLAN_NO_WORK\" == true ]] || { echo \"empty affected CI plan lacks an explicit no-work proof\" >&2; exit 1; }\n                [[ -n \"$PLAN_BASE_SHA\" && \"$PLAN_BASE_SHA\" != \"$PLAN_HEAD_SHA\" ]] || { echo \"empty affected CI plan lacks distinct resolved revisions\" >&2; exit 1; }\n              else\n                [[ \"$PLAN_NO_WORK\" == false ]] || { echo \"nonempty affected CI plan carries a contradictory no-work proof\" >&2; exit 1; }\n              fi\n              ;;\n            *)\n              echo \"unsupported CI plan scope: $PLAN_SCOPE\" >&2\n              exit 1\n              ;;\n          esac\n",
         );

@@ -249,7 +249,9 @@ mod tests {
         assert!(output.contains("needs.plan.outputs.planned_no_work_base_sha"));
         assert!(output.contains("needs.plan.outputs.planned_no_work_head_sha"));
         assert!(output.contains("EXPECTED_FULL_UNITS: \",rust,\""));
+        assert!(output.contains("EXPECTED_UNIT_CENSUS: \",rust,\""));
         assert!(output.contains("plan emitted malformed or duplicate expected workloads"));
+        assert!(output.contains("plan emitted workload outside generated child census"));
         assert!(output.contains("full CI plan omitted or added expected workloads"));
         assert!(output.contains("empty affected CI plan lacks an explicit no-work proof"));
     }
@@ -329,6 +331,7 @@ mod tests {
                 .env("PLAN_FULL_UNITS", full_units)
                 .env("PLAN_NO_WORK", no_work)
                 .env("EXPECTED_FULL_UNITS", ",rust,")
+                .env("EXPECTED_UNIT_CENSUS", ",rust,")
                 .env("PLAN_DIGEST", "digest");
             for admission in &admission_names {
                 command.env(admission, "true");
@@ -390,6 +393,33 @@ mod tests {
             head_sha.as_str(),
             &skipped_needs,
             true,
+        );
+        let unknown_json =
+            serde_json::json!([{"unit_id": "evil", "providers": providers}]).to_string();
+        run(
+            "affected",
+            &unknown_json,
+            "",
+            "false",
+            base_sha.as_str(),
+            head_sha.as_str(),
+            &success_needs,
+            false,
+        );
+        let duplicate_json = serde_json::json!([
+            {"unit_id": "rust", "providers": ["github-hosted"]},
+            {"unit_id": "rust", "providers": ["github-hosted"]}
+        ])
+        .to_string();
+        run(
+            "affected",
+            &duplicate_json,
+            "rust",
+            "false",
+            base_sha.as_str(),
+            head_sha.as_str(),
+            &success_needs,
+            false,
         );
     }
 
@@ -4265,9 +4295,10 @@ impl WorkflowIr {
         };
         let _ = write!(
             output,
-            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_SCOPE: {plan_scope}\n          PLAN_BASE_SHA: {plan_base_sha}\n          PLAN_HEAD_SHA: {plan_head_sha}\n          PLAN_FULL_UNITS: {plan_full_units}\n          PLAN_NO_WORK: {plan_no_work}\n          EXPECTED_FULL_UNITS: {}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n{}",
+            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_SCOPE: {plan_scope}\n          PLAN_BASE_SHA: {plan_base_sha}\n          PLAN_HEAD_SHA: {plan_head_sha}\n          PLAN_FULL_UNITS: {plan_full_units}\n          PLAN_NO_WORK: {plan_no_work}\n          EXPECTED_FULL_UNITS: {}\n          EXPECTED_UNIT_CENSUS: {}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n{}",
             needs.join(", "),
             self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
+            yaml_scalar(&expected_full_units),
             yaml_scalar(&expected_full_units),
             render_required_admission_env(self, &callers),
         );
@@ -4285,7 +4316,10 @@ impl WorkflowIr {
             "          if [[ -z \"$PLAN_DIGEST\" ]]; then\n            echo \"plan did not freeze a plan digest: the expected set has no identity\" >&2\n            exit 1\n          fi\n          echo \"verdict binds plan digest $PLAN_DIGEST\"\n          result_for_job() {\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }\n          plan_expects() {\n            [[ \"$(jq -r --arg unit \"$1\" --arg provider \"$2\" '[.[] | select(.unit_id == $unit) | .providers[] | select(. == $provider)] | length' <<<\"$SELECTED_UNITS\")\" -gt 0 ]]\n          }\n",
         );
         output.push_str(
-            "          selected_count=\"$(jq -er 'if type == \"array\" then length else error(\"plan units must be an array\") end' <<<\"$SELECTED_UNITS\")\"\n          jq -e 'type == \"array\" and all(.[]; (.unit_id | type) == \"string\" and (.unit_id | length) > 0 and (.providers | type) == \"array\" and (.providers | length) > 0) and ([.[].unit_id] | length == (unique | length))' <<<\"$SELECTED_UNITS\" >/dev/null || { echo \"plan emitted malformed or duplicate expected workloads\" >&2; exit 1; }\n          actual_units=\"$(jq -r '.[].unit_id' <<<\"$SELECTED_UNITS\" | sort -u | paste -sd, -)\"\n          selected=\",$actual_units,\"\n          case \"$PLAN_SCOPE\" in\n            full)\n              [[ \"$PLAN_NO_WORK\" == false ]] || { echo \"full CI plan cannot declare no-work\" >&2; exit 1; }\n              (( selected_count > 0 )) || { echo \"full CI plan selected no workloads\" >&2; exit 1; }\n              [[ \"$selected\" == \"$EXPECTED_FULL_UNITS\" ]] || { echo \"full CI plan omitted or added expected workloads: selected=$selected expected=$EXPECTED_FULL_UNITS\" >&2; exit 1; }\n              [[ \",$PLAN_FULL_UNITS,\" == \"$EXPECTED_FULL_UNITS\" ]] || { echo \"full CI plan has an incomplete full baseline: full_units=,$PLAN_FULL_UNITS, expected=$EXPECTED_FULL_UNITS\" >&2; exit 1; }\n              ;;\n            affected)\n              if (( selected_count == 0 )); then\n                [[ \"$PLAN_NO_WORK\" == true ]] || { echo \"empty affected CI plan lacks an explicit no-work proof\" >&2; exit 1; }\n                [[ -n \"$PLAN_BASE_SHA\" && \"$PLAN_BASE_SHA\" != \"$PLAN_HEAD_SHA\" ]] || { echo \"empty affected CI plan lacks distinct resolved revisions\" >&2; exit 1; }\n              else\n                [[ \"$PLAN_NO_WORK\" == false ]] || { echo \"nonempty affected CI plan carries a contradictory no-work proof\" >&2; exit 1; }\n              fi\n              ;;\n            *)\n              echo \"unsupported CI plan scope: $PLAN_SCOPE\" >&2\n              exit 1\n              ;;\n          esac\n",
+            "          selected_count=\"$(jq -er 'if type == \"array\" then length else error(\"plan units must be an array\") end' <<<\"$SELECTED_UNITS\")\"\n          jq -e 'type == \"array\" and all(.[]; (.unit_id | type) == \"string\" and (.unit_id | length) > 0 and (.providers | type) == \"array\" and (.providers | length) > 0) and ([.[].unit_id] | length == (unique | length))' <<<\"$SELECTED_UNITS\" >/dev/null || { echo \"plan emitted malformed or duplicate expected workloads\" >&2; exit 1; }\n          jq -e --arg expected \"$EXPECTED_UNIT_CENSUS\" 'all(.[]; (\",\" + .unit_id + \",\") as $needle | ($expected | contains($needle)))' <<<\"$SELECTED_UNITS\" >/dev/null || { echo \"plan emitted workload outside generated child census\" >&2; exit 1; }\n          actual_units=\"$(jq -r '.[].unit_id' <<<\"$SELECTED_UNITS\" | sort -u | paste -sd, -)\"\n          selected=\",$actual_units,\"\n          case \"$PLAN_SCOPE\" in\n            full)\n              [[ \"$PLAN_NO_WORK\" == false ]] || { echo \"full CI plan cannot declare no-work\" >&2; exit 1; }\n              (( selected_count > 0 )) || { echo \"full CI plan selected no workloads\" >&2; exit 1; }\n              [[ \"$selected\" == \"$EXPECTED_FULL_UNITS\" ]] || { echo \"full CI plan omitted or added expected workloads: selected=$selected expected=$EXPECTED_FULL_UNITS\" >&2; exit 1; }\n              [[ \",$PLAN_FULL_UNITS,\" == \"$EXPECTED_FULL_UNITS\" ]] || { echo \"full CI plan has an incomplete full baseline: full_units=,$PLAN_FULL_UNITS, expected=$EXPECTED_FULL_UNITS\" >&2; exit 1; }\n              ;;\n            affected)\n              if (( selected_count == 0 )); then\n                [[ \"$PLAN_NO_WORK\" == true ]] || { echo \"empty affected CI plan lacks an explicit no-work proof\" >&2; exit 1; }\n                [[ -n \"$PLAN_BASE_SHA\" && \"$PLAN_BASE_SHA\" != \"$PLAN_HEAD_SHA\" ]] || { echo \"empty affected CI plan lacks distinct resolved revisions\" >&2; exit 1; }\n              else\n                [[ \"$PLAN_NO_WORK\" == false ]] || { echo \"nonempty affected CI plan carries a contradictory no-work proof\" >&2; exit 1; }\n              fi\n              ;;\n            *)\n              echo \"unsupported CI plan scope: $PLAN_SCOPE\" >&2\n              exit 1\n              ;;\n          esac\n",
+        );
+        output.push_str(
+            "          jq -e --arg expected \"$EXPECTED_UNIT_CENSUS\" '($expected | split(\",\") | map(select(length > 0))) as $allowed | all(.[]; .unit_id as $unit | ($allowed | index($unit)) != null)' <<<\"$SELECTED_UNITS\" >/dev/null || { echo \"plan emitted workload outside generated child census\" >&2; exit 1; }\n",
         );
         // The prerequisite trigger: the unit is expected on any local
         // provider, whose stores the prerequisite warms. The local set is
