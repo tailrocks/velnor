@@ -2408,6 +2408,14 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
         "          PRODUCT_RELEASE_ID: ${{ steps.product-release.outputs.release_id }}\n",
         "          GH_TOKEN: ${{ github.token }}\n          PRODUCT_RELEASE_ID: ${{ steps.product-release.outputs.release_id }}\n",
     );
+    // Debian packages already belong to the release-root inventory. Keep
+    // their canonical basename in the product manifest, but do not copy a
+    // second physical subject into product-assets: the final census/upload
+    // admits each basename as one immutable release asset.
+    output = output.replace(
+        r#"name="$(basename "$deb")"; cp -- "$deb" "product-assets/$name"; digest="#,
+        r#"name="$(basename "$deb")"; digest="#,
+    );
     output = output.replace(
         r#"          product_version="$(jq -er '.version' "$contract")"
           source_commit="#,
@@ -2415,6 +2423,10 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
           [ "$blocked_targets" = '[]' ] || { echo '::error::native product has blocked targets; publication is blocked until every required target is buildable' >&2; exit 1; }
           product_version="$(jq -er '.version' "$contract")"
           source_commit="#,
+    );
+    output = output.replace(
+        "          [ \"$source_repository\" = \"$GITHUB_REPOSITORY\" ] || { echo '::error::product source repository differs from publisher repository' >&2; exit 1; }\n",
+        "          [ \"$source_repository\" = \"$GITHUB_REPOSITORY\" ] || { echo '::error::product source repository differs from publisher repository' >&2; exit 1; }\n          [ \"$source_ref\" = \"$GITHUB_REF\" ] || { echo '::error::product source ref differs from publisher ref' >&2; exit 1; }\n",
     );
     output = output
         .replace("${{#contracts[@]}}", "${#contracts[@]}")
@@ -2494,7 +2506,8 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
           rm -rf -- product-payload\n\
           mkdir product-payload\n\
           while IFS= read -r name; do\n\
-            cp -- \"product-assets/$name\" \"product-payload/$name\"\n\
+            case \"$name\" in ''|*[!a-zA-Z0-9._-]*) echo \"::error::unsafe product artifact name: $name\" >&2; exit 1 ;; esac\n\
+            if [ -f \"product-assets/$name\" ]; then cp -- \"product-assets/$name\" \"product-payload/$name\"; elif [ -f \"artifacts/$name\" ]; then cp -- \"artifacts/$name\" \"product-payload/$name\"; else echo \"::error::missing product artifact: $name\" >&2; exit 1; fi\n\
           done < <(jq -r '.artifacts[].name' product-assets/product-manifest.json)\n\
           product_schema=\"$(jq -er '.schema' product-assets/product-manifest.json)\"\n\
           product_id=\"$(jq -er '.product_id' product-assets/product-manifest.json)\"\n\
@@ -2977,7 +2990,11 @@ fn render_native_publish_job(
             rm -rf -- "$boundary_dir"
 "#
         .replace("{binary}", &release.binary)
-        .replace("__RUNTIME_ASSETS__", &assets);
+        .replace("__RUNTIME_ASSETS__", &assets)
+        .replace(
+            r#"product_release_id="$(jq -er '.release_id | numbers | tostring' "$tmp/product-manifest.json")""#,
+            r#"product_release_id="$(jq -er '.release_id | strings | select(test("^[1-9][0-9]*$"))' "$tmp/product-manifest.json")""#,
+        );
         create_verify = create_verify.replace(
             "            # The record must name this exact tag, source commit, crate version\n",
             &format!("{product_existing}            # The record must name this exact tag, source commit, crate version\n"),
@@ -7288,6 +7305,16 @@ mod tests {
         assert!(publish.contains("product-manifest.json"), "{publish}");
         assert!(publish.contains("release-attestation.json"), "{publish}");
         assert!(
+            publish.contains(
+                "product_release_id=\"$(jq -er '.release_id | strings | select(test(\"^[1-9][0-9]*$\"))'"
+            ),
+            "published product rerun must consume the canonical string release id: {publish}"
+        );
+        assert!(
+            !publish.contains("cp -- \"$deb\" \"product-assets/$name\""),
+            "runtime Debian subjects must not be copied into product-assets: {publish}"
+        );
+        assert!(
             publish.contains("velnor.github-release-attestation/v1"),
             "{publish}"
         );
@@ -7374,6 +7401,68 @@ mod tests {
             publish.contains("GitHub does not make the upload+flip atomic"),
             "stable product publication must not claim provider atomicity: {publish}"
         );
+
+        let release_id_line = publish
+            .lines()
+            .find(|line| {
+                line.contains("product_release_id=\"$(jq -er '.release_id | strings | select(test(")
+            })
+            .expect("rendered stable rerun must contain the release id admission");
+        let rerun_root = std::env::temp_dir().join(format!(
+            "velnor-native-product-rerun-{}",
+            crate::s2::unique_suffix()
+        ));
+        fs::create_dir_all(&rerun_root).expect("create rerun fixture");
+        fs::write(
+            rerun_root.join("product-manifest.json"),
+            r#"{"release_id":"12345"}"#,
+        )
+        .expect("write canonical string release id");
+        let rerun = Command::new("bash")
+            .current_dir(&rerun_root)
+            .args([
+                "-eu",
+                "-o",
+                "pipefail",
+                "-c",
+                &format!(
+                    "tmp=.; {}; printf '%s' \"$product_release_id\"",
+                    release_id_line.trim()
+                ),
+            ])
+            .output()
+            .expect("run rendered stable rerun admission");
+        assert!(
+            rerun.status.success(),
+            "canonical string release id must pass rendered rerun: {}",
+            String::from_utf8_lossy(&rerun.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&rerun.stdout),
+            "12345",
+            "rendered rerun must preserve the canonical decimal string"
+        );
+        fs::write(
+            rerun_root.join("product-manifest.json"),
+            r#"{"release_id":12345}"#,
+        )
+        .expect("write numeric release id regression fixture");
+        let rejected = Command::new("bash")
+            .current_dir(&rerun_root)
+            .args([
+                "-eu",
+                "-o",
+                "pipefail",
+                "-c",
+                &format!("tmp=.; {}", release_id_line.trim()),
+            ])
+            .output()
+            .expect("run numeric release id rejection");
+        assert!(
+            !rejected.status.success(),
+            "numeric release id must fail the rendered string-only rerun"
+        );
+        fs::remove_dir_all(rerun_root).expect("remove rerun fixture");
     }
 
     #[test]
@@ -7671,6 +7760,7 @@ JSON
             .env("PRODUCT_CONTRACT", product_contract_path)
             .env("VERSION", "1.2.3")
             .env("GITHUB_REPOSITORY", "tailrocks/velnor")
+            .env("GITHUB_REF", "refs/tags/v1.2.3")
             .output()
             .expect("run rendered canonical assembly");
         assert!(
@@ -7700,6 +7790,17 @@ JSON
                 );
             }
         };
+        for arch in ["amd64", "arm64"] {
+            assert!(
+                !root
+                    .join(format!(
+                        "product-assets/{}-1.2.3-{arch}.deb",
+                        release.package
+                    ))
+                    .exists(),
+                "runtime Debian subject must remain in the release-root inventory"
+            );
+        }
         let attestation: Value = serde_json::from_slice(
             &fs::read(root.join("product-assets/release-attestation.json"))
                 .expect("read assembled release attestation"),
@@ -7766,11 +7867,14 @@ JSON
         let payload = root.join("product-payload");
         fs::create_dir_all(&payload).expect("create runner payload");
         for artifact in &manifest.artifacts {
-            fs::copy(
-                root.join("product-assets").join(&artifact.name),
-                payload.join(&artifact.name),
-            )
-            .expect("stage runner payload artifact");
+            let product_asset = root.join("product-assets").join(&artifact.name);
+            let product_asset = if product_asset.is_file() {
+                product_asset
+            } else {
+                root.join("artifacts").join(&artifact.name)
+            };
+            fs::copy(product_asset, payload.join(&artifact.name))
+                .expect("stage runner payload artifact");
         }
         manifest
             .verify_artifacts_with_contract(&payload, Some(&component_contract))
