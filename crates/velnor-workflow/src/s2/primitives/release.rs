@@ -9938,6 +9938,12 @@ JSON
             "{publish}"
         );
         assert!(
+            publish.contains("release-attestation.json")
+                && publish.contains("velnor.github-release-attestation/v1")
+                && publish.contains("Verify canonical native product attestations"),
+            "preview must emit and verify the provider-bound product attestation: {publish}"
+        );
+        assert!(
             publish.contains("--component-contract product-component-contract.json"),
             "{publish}"
         );
