@@ -173,6 +173,13 @@ fn derive_source(
                 depth + 1,
                 Some(root_for_job.clone()),
             )?;
+            if !child_plan.events.contains("workflow_call") {
+                bail!(
+                    "reusable workflow {}/{} must declare workflow_call",
+                    target.repository,
+                    target.path
+                );
+            }
             let child_job = child_plan.jobs.first().cloned().ok_or_else(|| {
                 anyhow!(
                     "reusable workflow {}/{} has no derived jobs",
@@ -735,6 +742,36 @@ jobs:
             source: child,
         }];
         assert!(derive_workflow_plan(&root, &dependencies).is_err());
+    }
+
+    #[test]
+    fn reusable_source_without_workflow_call_is_rejected() {
+        let root_yaml = r#"
+on: [push]
+jobs:
+  child:
+    uses: ./.github/workflows/reusable.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"#;
+        let child_yaml = r#"
+on: [push]
+jobs:
+  nested:
+    runs-on: ubuntu-24.04
+    steps: []
+"#;
+        let root = source("tailrocks/velnor", ".github/workflows/ci.yml", root_yaml);
+        let child = source(
+            "tailrocks/velnor",
+            ".github/workflows/reusable.yml",
+            child_yaml,
+        );
+        let dependencies = vec![G0WorkflowDependency {
+            kind: "reusable_workflow".to_owned(),
+            source: child,
+        }];
+        let error = derive_workflow_plan(&root, &dependencies)
+            .expect_err("a job-level uses source must be reusable");
+        assert!(error.to_string().contains("must declare workflow_call"));
     }
 
     #[test]

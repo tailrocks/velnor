@@ -12,6 +12,7 @@
 use crate::g0_contract::*;
 use crate::g0_workflow::{derive_workflow_plan, DerivedWorkflowPlan};
 use crate::github_raw_store::RawEvidenceStore;
+use crate::live_authority::AuthenticatedClosingCollector;
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use clap::Args;
@@ -205,6 +206,21 @@ pub struct CheckReport {
     pub mode: &'static str,
     pub status: &'static str,
     pub findings: Vec<Finding>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckMode {
+    Offline,
+    TrustedLive,
+}
+
+impl CheckMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Offline => "offline",
+            Self::TrustedLive => "live",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -850,7 +866,7 @@ pub async fn evidence_check(args: EvidenceCheckArgs) -> Result<()> {
         evidence_root: args.evidence_root,
     };
     let report = if input.live {
-        check_paths_live(&input)?
+        check_paths_live(&input).await?
     } else {
         check_paths(&input)?
     };
@@ -899,7 +915,7 @@ pub fn check_paths(input: &EvidenceCheckInput) -> Result<CheckReport> {
         &snapshot,
         &evidence,
         release.as_ref(),
-        "offline",
+        CheckMode::Offline,
     );
     check_g0_external_storage(
         stage,
@@ -927,11 +943,25 @@ pub fn check_paths(input: &EvidenceCheckInput) -> Result<CheckReport> {
 /// collector authenticated to the requested account, or that the closing API
 /// state was reconciled.  Refusing the input here prevents `--live` from
 /// upgrading caller-authored offline evidence into gate evidence.
-pub fn check_paths_live(input: &EvidenceCheckInput) -> Result<CheckReport> {
-    let _ = input;
-    bail!(
-        "--live is unavailable: trusted authenticated collector/current-API reconciliation is not wired; offline files cannot authorize a gate"
-    )
+pub async fn check_paths_live(input: &EvidenceCheckInput) -> Result<CheckReport> {
+    let stage = Stage::parse(&input.stage)?;
+    let capture = crate::live_authority::current_collector()
+        .collect_closing(crate::live_authority::ClosingCaptureRequest::from_input(input))
+        .await?;
+    let (manifest, snapshot, evidence, release, raw_store) = capture.into_parts();
+    if let Some(inventory) = evidence.g0_inventory.as_ref() {
+        raw_store
+            .verify_g0(inventory)
+            .context("verify producer raw-store binding")?;
+    }
+    Ok(check_documents(
+        stage,
+        &manifest,
+        &snapshot,
+        &evidence,
+        release.as_ref(),
+        CheckMode::TrustedLive,
+    ))
 }
 
 fn read_release_manifest(
@@ -1074,7 +1104,7 @@ fn check_documents(
     snapshot: &SnapshotDocument,
     evidence: &EvidenceDocument,
     release: Option<&CanonicalReleaseDocument>,
-    mode: &'static str,
+    mode: CheckMode,
 ) -> CheckReport {
     let mut findings = Vec::new();
     check_headers(stage, manifest, snapshot, evidence, &mut findings);
@@ -1154,7 +1184,7 @@ fn check_documents(
         &mut findings,
     );
     check_lane_parity(stage, &records, &mut findings);
-    if stage == Stage::G7 && mode != "live" {
+    if stage == Stage::G7 && mode != CheckMode::TrustedLive {
         finding(
             &mut findings,
             "live-required",
@@ -1163,7 +1193,7 @@ fn check_documents(
             "G7 cannot pass from an offline fixture or caller-supplied snapshot",
         );
     }
-    if stage.needs_execution() {
+    if stage.needs_execution() && mode != CheckMode::TrustedLive {
         finding(
             &mut findings,
             "authoritative-collector-required",
@@ -1176,7 +1206,7 @@ fn check_documents(
     CheckReport {
         schema_version: EVIDENCE_SCHEMA_VERSION,
         stage: stage.as_str().to_owned(),
-        mode,
+        mode: mode.as_str(),
         status: if findings.is_empty() { "pass" } else { "fail" },
         findings,
     }
@@ -1517,6 +1547,16 @@ fn check_manifest_repository(repo: &ManifestRepository, findings: &mut Vec<Findi
         &repo.workload_platform_architecture,
         findings,
     );
+    let workload_targets = repo
+        .workload_platform_architecture
+        .iter()
+        .map(|platform| {
+            (
+                platform.workload_id.as_str(),
+                (platform.platform.as_str(), platform.architecture.as_str()),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     if repo.expected_jobs.is_empty() {
         finding(
             findings,
@@ -1529,6 +1569,38 @@ fn check_manifest_repository(repo: &ManifestRepository, findings: &mut Vec<Findi
     let mut job_ids = BTreeSet::new();
     for job in &repo.expected_jobs {
         check_expected_job(&repo.repository, job, &repo.provider_eligibility, findings);
+        match workload_targets.get(job.workload_id.as_str()) {
+            None => finding(
+                findings,
+                "expected-job-workload",
+                &repo.repository,
+                "expected_jobs.workload_id",
+                format!(
+                    "expected job {} names workload {} absent from the reviewed workload map",
+                    job.job_id, job.workload_id
+                ),
+            ),
+            Some((platform, architecture))
+                if (*platform, *architecture) != (job.platform.as_str(), job.architecture.as_str()) =>
+            {
+                finding(
+                    findings,
+                    "expected-job-target",
+                    &repo.repository,
+                    "expected_jobs.platform/architecture",
+                    format!(
+                        "expected job {} target {}-{} differs from workload {} target {}-{}",
+                        job.job_id,
+                        job.platform,
+                        job.architecture,
+                        job.workload_id,
+                        platform,
+                        architecture
+                    ),
+                )
+            }
+            Some(_) => {}
+        }
         if !job_ids.insert(job.job_id.clone()) {
             finding(
                 findings,
@@ -3784,6 +3856,20 @@ fn check_g0_source_jobs(
             )
         })
         .collect::<BTreeSet<_>>();
+    let derived_job_ids = plan
+        .jobs
+        .iter()
+        .map(|job| job.job_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if derived_job_ids.len() != plan.jobs.len() {
+        finding(
+            findings,
+            "g0-source-job-matrix",
+            repository,
+            "repositories.workflows.source_jobs",
+            "finite matrix expands a logical job into multiple instances, but the reviewed source-job contract has no concrete matrix identity; collector must publish every instance before this gate can pass",
+        );
+    }
     if source_jobs != expected_jobs {
         finding(
             findings,
@@ -9927,7 +10013,7 @@ mod tests {
                 g0_inventory: None,
             },
             None,
-            "offline",
+            CheckMode::Offline,
         );
         assert!(report
             .findings
@@ -9936,7 +10022,62 @@ mod tests {
     }
 
     #[test]
-    fn live_checker_requires_producer_typed_capture() {
+    fn source_job_checker_rejects_collapsed_matrix_instances() {
+        let (manifest, _snapshot, inventory) = complete_g0_fixture();
+        let manifest_repo = &manifest.repositories[0];
+        let workflow = &inventory.collector_snapshot.repositories[0].workflows[0];
+        let expected = &manifest_repo.expected_jobs[0];
+        let job = crate::g0_workflow::DerivedWorkflowJob {
+            job_id: expected.job_id.clone(),
+            provider: expected.provider.clone(),
+            platform: expected.platform.clone(),
+            architecture: expected.architecture.clone(),
+            uses_reusable_workflow: false,
+            matrix: BTreeMap::from([(String::from("os"), String::from("ubuntu-24.04"))]),
+        };
+        let mut second = job.clone();
+        second
+            .matrix
+            .insert("os".to_owned(), "ubuntu-22.04".to_owned());
+        let plan = DerivedWorkflowPlan {
+            jobs: vec![job, second],
+            child_edges: Vec::new(),
+            events: BTreeSet::from([String::from("push"), String::from("pull_request")]),
+        };
+        let raw_ids = workflow
+            .source_jobs
+            .iter()
+            .flat_map(|job| job.raw_object_refs.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let mut findings = Vec::new();
+        check_g0_source_jobs(
+            &manifest_repo.repository,
+            manifest_repo,
+            workflow,
+            &plan,
+            &raw_ids,
+            &mut findings,
+        );
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-source-job-matrix"));
+    }
+
+    #[test]
+    fn manifest_job_target_must_match_workload_map() {
+        let (manifest, _snapshot, _inventory) = complete_g0_fixture();
+        let mut repository = manifest.repositories[0].clone();
+        repository.expected_jobs[0].platform = "macos".to_owned();
+        repository.expected_jobs[0].architecture = "arm64".to_owned();
+        let mut findings = Vec::new();
+        check_manifest_repository(&repository, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "expected-job-target"));
+    }
+
+    #[tokio::test]
+    async fn live_checker_requires_producer_typed_capture() {
         let (manifest, snapshot, _) = complete_g0_fixture();
         let evidence = EvidenceDocument {
             schema_version: EVIDENCE_SCHEMA_VERSION,
@@ -9983,6 +10124,7 @@ mod tests {
             live: true,
             evidence_root: None,
         })
+        .await
         .expect_err("live mode must reject a result-only envelope");
         assert!(error
             .to_string()
@@ -9990,8 +10132,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
-    #[test]
-    fn public_live_checker_rejects_caller_authored_capture_before_reading_files() {
+    #[tokio::test]
+    async fn public_live_checker_rejects_caller_authored_capture_before_reading_files() {
         let error = check_paths_live(&EvidenceCheckInput {
             stage: "G0".to_owned(),
             manifest: PathBuf::from("caller-authored-manifest.json"),
@@ -10001,6 +10143,7 @@ mod tests {
             live: true,
             evidence_root: Some(PathBuf::from("caller-authored-store")),
         })
+        .await
         .expect_err("public live entrypoint must not upgrade local files");
         assert!(error
             .to_string()

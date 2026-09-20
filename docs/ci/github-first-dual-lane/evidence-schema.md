@@ -233,21 +233,27 @@ The integration target is one in-process path, not a second JSON normalizer:
    from result records or accept a capture merely because its timestamp, digest,
    or `--live` flag looks fresh.
 
-The minimum handoff API is:
+The checker now exposes the producer seam in
+`crates/velnor-tools/src/live_authority.rs`. The minimum handoff API is:
 
 ```text
-AuthenticatedCollector::collect_closing(manifest, reviewed_source, auth)
-    -> TrustedLiveCapture {
-         g0_inventory: G0InventoryEvidence,
-         raw_store: VerifiedRawStoreHandle,
-         authority: AuthenticatedClosingReconciliation,
-       }
+AuthenticatedClosingCollector::collect_closing(
+    ClosingCaptureRequest { stage, reviewed_manifest }
+) -> AuthenticatedClosingCapture {
+    manifest: ManifestDocument,
+    snapshot: SnapshotDocument,
+    evidence: EvidenceDocument,
+    release: Option<CanonicalReleaseDocument>,
+    raw_store: VerifiedRawStoreHandle,
+}
 ```
 
-`TrustedLiveCapture` is producer-owned and must not be constructible from
-deserialized caller JSON. `AuthenticatedClosingReconciliation` must bind the
-authenticated viewer/scopes, API request identities, complete pagination,
-opening/closing revision sets, and measured raw objects. A future checker
+`AuthenticatedClosingCapture` is producer-owned and must not be constructible
+from deserialized caller JSON. Its producer must bind the authenticated
+viewer/scopes, API request identities, complete pagination, opening/closing
+revision sets, source-derived expectations, and measured raw objects before
+constructing it. `VerifiedRawStoreHandle` must call the production
+descriptor-relative store's reopen/rehash verification. A future checker
 integration may accept only this in-process value; offline files continue to use
 `check_paths` for rejection tests and cannot authorize G0 or G7.
 
@@ -331,6 +337,11 @@ raw_object_refs}` and must exactly equal both the reviewed expected-job plan
 and the jobs derived from the immutable source bytes. An empty, duplicated,
 target-mismatched, or unbound source-job row fails G0; observed run jobs cannot
 fill a missing source obligation.
+
+The current v2 row has no concrete matrix-assignment identity. A finite matrix
+that expands one logical job into multiple instances therefore fails closed
+until the reviewed plan and source-job contract enumerate those instances; the
+checker never collapses them into one self-attested row.
 
 The dependency graph is also typed source evidence, not a summary digest.
 Every node and edge has an immutable source SHA/ref, raw-object references,
