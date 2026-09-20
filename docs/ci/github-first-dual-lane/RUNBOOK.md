@@ -61,9 +61,9 @@ gate, mutation, merge, publication, or host operation.
 | Authority v3/v4 records | v3 remains frozen/unapproved; v4 is approval-required with no mutation (v4 Markdown SHA-256 `48b1e19ac7b9be59d78200f9e5de7b09e9a1de68fba9b41e3192b952ec022e52`) | Do not execute the authority transition. Six readiness classes remain: placeholders, real old-parser fixture, B closure/two renders, freeze/lease/watchdog/ruleset proof, complete Main-B census, and independent/owner approval with cleanup |
 | Old-parser `static_files` feasibility | External MD/JSON hashes `8764712693e2883d05846de05a3c2137fb3d31e3ee97ab0ad129186f3ff960f4` / `01ad40d473aa26ae7e5e814ef7c3f93e854d682d2c359fa7588f0bba2b4943e9` show byte transport only | No actual B source, admission, provenance, or authority was proved |
 | Checker public harness | Exact source `27eb094ccd545b642206ea3d52336e0ac74d6abd`; `27eb-harness-results.json` SHA-256 `a4e7d7f29289b16438602872867295a84cc39c5ad398b974bb0ef6bd192bead1` | Live self-authored use exits because authenticated collector/current API is unwired; offline fixtures are explicitly validation-only and fail closed |
-| Bootstrap owner checkpoint | Exact `b981f43e8dfd70b4c628d29b0e7e9dce679ce537`; owner reports regenerated workflows/state and 1,727/1,727 library plus actionlint/fmt | Treat as owner-reported checkpoint only; independent security review and real transport fixtures remain pending; source full tests are not G1 evidence |
-| APT/native/consumer source reviews | APT `91bdf6c` review pending; corrected workload index is exact-disjoint 32 but `not_evaluated`; native `a8d46536e7e11db0bbd5e207be802970362b751f`, action scanner `40ddcc02dde1ff07aff538ea2ca95da091379e17`, and fixture `d60c0e2211b2830c64e7489d05b4cfe0bc77d65f` remain changes-required | No G2/G3 admission; d60 still requires ZIP-only assertion; source findings do not authorize generated/runtime work |
-| Scan owner checkpoint | Abbreviated `0a15` reports 1,756 full tests | Immutable pin/closure remains blocking; full SHA/report is not verified here |
+| Bootstrap owner checkpoint | Exact `b981f43e8dfd70b4c628d29b0e7e9dce679ce537`; owner reports regenerated workflows/state and 1,727/1,727 library plus actionlint/fmt | Exact `G1/reviews/bootstrap-b981f43e-independent.md` rejects the G1 source checkpoint for archive/API-tree, freshness, provenance, legacy, fixture, and image-digest gaps; source full tests are not G1 evidence |
+| APT/native/consumer source reviews | APT `91bdf6cc1d0a5c429c5c01f17bf15dbb153c661b` is blocked by `G1/reviews/apt-83e7ab4-91bdf6c-independent.md`; corrected workload index is exact-disjoint 32 but `not_evaluated`; native `a8d46536e7e11db0bbd5e207be802970362b751f`, action scanner `40ddcc02dde1ff07aff538ea2ca95da091379e17`, and fixture `d60c0e2211b2830c64e7489d05b4cfe0bc77d65f` remain changes-required | No G2/G3 admission; d60 still requires ZIP-only assertion; source findings do not authorize generated/runtime work |
+| Scan candidate | Exact `0a15fd06e002f57dca546d5c041754f1ec433508` reports 1,756 full tests | `G1/scan-integrity/source-review-0a15fd06.md` rejects exact D19 closure plus authority, detector-input, rollback, and hostile-fixture gaps; no G1 approval |
 
 ### Pending authority-transition procedure
 
@@ -114,11 +114,14 @@ remain timestamped `b5`-bound evidence, not current-main proof. See external
 - PR961 is the historical open path at head
   `5b9a16a620951b65bbfe0a5cf7b1ffe04a317303` on base `b5a4b4af`; its history
   contains unsigned `857` and DCO is `action_required`. It is not repaired or
-  approved. PR963 is the separate signed replacement at head
-  `fb78d85d464fd5082e5c161922afd7942380fabc`; external comparison records the
-  tree-equivalent replacement with `857` excluded. Its hosted checks were
-  observed successful, but exact-head independent review rejects source
-  admission. Never force-push or override required checks.
+  approved. PR963's `fb78d85d464fd5082e5c161922afd7942380fabc` signed
+  replacement is historical to the `b5` snapshot; external comparison records
+  the tree-equivalent replacement with `857` excluded. The current query
+  reports head `c440d4db3fd59a9e4abd396d7a75e670c4f3d862` on base
+  `d20d4d1d17590cca85b501d982cbaad70d42c641`; no fresh exact-head review or
+  approval was observed. The independent review of
+  `0c1ec75753cf9f8044a3a2ff01c2d144e9c59132` does not transfer to `c440d4db`.
+  Never force-push or override required checks.
 - Product validation uses the separately typed validator-only
   product/publisher design owned by `/root/g0_inventory` and reviewed by
   `/root/g0_reviewer`; publication precedes separate PR957 pin adoption. Do
@@ -318,9 +321,11 @@ run it from the exact candidate revision and attach output/digests.
 The latest owner checkpoint is exact
 `b981f43e8dfd70b4c628d29b0e7e9dce679ce537`, with regenerated workflows/state
 and owner-reported 1,727/1,727 library plus actionlint/fmt results. This is an
-external report, not a command verification by this records task. Independent
-security review and real transport fixtures remain pending; do not treat the
-older `7c`/`5cdf` abbreviations or the owner test count as G1 evidence.
+external report, not a command verification by this records task. Exact review
+`G1/reviews/bootstrap-b981f43e-independent.md` rejects the G1 source
+checkpoint; archive/API-tree, freshness, provenance, legacy, fixture, and
+image-digest gaps remain. Do not treat the older `7c`/`5cdf` abbreviations or
+the owner test count as G1 evidence.
 
 ```bash
 # [PENDING] inspect source config/schema and CLI help

@@ -131,7 +131,8 @@ generator-rendering reproducibility only. The rows below remain timestamped
 | PR960, head `2c810f1b46ce8eddb5906fd4bdcc8ae23e78ed40`, base `b5a4b4afaa6ca807927cacc03659b570a895dd5c` | Open; Policy observed in progress; no review decision or merge | Candidate checks/review remain incomplete |
 | PR962, head `94b43578cad9720e569780d18dc966370ed47c11`, base `b5a4b4afaa6ca807927cacc03659b570a895dd5c` | Open; required and Velnor-workflow hosted failures observed | Not merge-ready; no gate evidence |
 | PR961 historical path | Open head `5b9a16a620951b65bbfe0a5cf7b1ffe04a317303` on base `b5a4b4afaa6ca807927cacc03659b570a895dd5c`; its history contains unsigned `857`, and DCO is `action_required` | Historical record only; not repaired, approved, merged, or a gate result |
-| PR963 signed replacement | Open head `fb78d85d464fd5082e5c161922afd7942380fabc` on the same observed base; external comparison records the tree-equivalent signed replacement with redundant `857` excluded | Hosted checks observed successful, but exact-head independent review rejects source admission; no merge/override/gate |
+| PR963 signed replacement (historical b5 snapshot) | Open head `fb78d85d464fd5082e5c161922afd7942380fabc` on the same observed base; external comparison records the tree-equivalent signed replacement with redundant `857` excluded | Historical only; hosted checks were observed successful, but no disposition transfers to a later head |
+| PR963 current query | Head `c440d4db3fd59a9e4abd396d7a75e670c4f3d862`, base `d20d4d1d17590cca85b501d982cbaad70d42c641` | Fresh exact-head review/approval not observed; the historical `0c1ec75753cf9f8044a3a2ff01c2d144e9c59132` review does not transfer |
 
 The selected G2 design is a separately typed validator-only product/publisher,
 owned by `/root/g0_inventory` and reviewed by `/root/g0_reviewer`. It must not
@@ -190,12 +191,18 @@ result is not producer integration or G0 proof.
 The latest bootstrap owner checkpoint is exact
 `b981f43e8dfd70b4c628d29b0e7e9dce679ce537`: generated workflows/state were
 regenerated and the owner reports 1,727/1,727 library tests plus actionlint and
-format checks passing. Independent security review and real transport
-fixtures remain pending; a full source-suite result is not G1 evidence. Older
+format checks passing. Exact review
+`G1/reviews/bootstrap-b981f43e-independent.md` rejects it as a G1 source
+checkpoint for independent archive/API-tree, attempt/freshness,
+action/upload-provenance, legacy-path, transport-fixture, and runtime-image
+digest gaps. A full source-suite result is not G1 evidence. Older
 abbreviations such as `7c` or `5cdf` are not the current owner revision.
 
-Other bounded source checkpoints remain incomplete: APT `91bdf6c` is a source
-checkpoint with independent review and native handoff pending; corrected
+Other bounded source checkpoints remain incomplete: APT
+`91bdf6cc1d0a5c429c5c01f17bf15dbb153c661b` is **blocked** by
+`G1/reviews/apt-83e7ab4-91bdf6c-independent.md` (provider/source authority,
+verify-to-publish binding, extraction races, absent native handoff, and
+generated actionlint); corrected
 source workload index `G0/fleet/workload-contract-index-20260920T002955Z-corrected.json`
 (SHA-256 `2b3bf88b42f291a40dcc2d6eb65a489d72d2a5bdcf9ab094a69a43e01f750c9c`)
 has an exact disjoint 32-row union but is source-only with
@@ -203,9 +210,11 @@ has an exact disjoint 32-row union but is source-only with
 requires changes and grants no G2 approval; action scanner review
 `40ddcc02dde1ff07aff538ea2ca95da091379e17` requires changes; hostile fixture
 review `d60c0e2211b2830c64e7489d05b4cfe0bc77d65f` still has a ZIP-only
-format assertion residual; and scan owner ref `0a15` reports 1,756 full tests
-but remains blocked on immutable pin/closure proof (full SHA/report not
-observed here). None is a gate result.
+format assertion residual; and scan candidate
+`0a15fd06e002f57dca546d5c041754f1ec433508` is **rejected** by
+`G1/scan-integrity/source-review-0a15fd06.md`: its 1,756-test report still
+fails the exact D19 check on an incompatible symlink closure and retains
+authority/detector/rollback/hostile-fixture gaps. None is a gate result.
 
 ## G0 acceptance-matrix handoff
 
@@ -323,7 +332,7 @@ reviewer. Unknown thread/worktree metadata stays `unknown` until observed.
 | ID | Repository/component | Owner | Dependencies | Owned files/worktree | Acceptance commands | Evidence output | Reviewer |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `G0-inventory` | Fixed 32-repository fleet | `/root/g0_inventory` | none | External ledger inventory only; worktree `unknown` | `[pending]` live GitHub inventory with pagination; reconcile static `default_branch`/SHA; type dependency/dependent-workload edges | `G0/inventory.json`, access and dependency graph records | `/root/g0-reviewer` |
-| `G0-bootstrap` | Velnor generator/runtime bootstrap | `/root/g0_bootstrap` | `G0-inventory` findings as needed | Generator worktree `unknown`; no records in source | `[checkpoint]` exact owner ref `b981f43e8dfd70b4c628d29b0e7e9dce679ce537`; generated workflows/state and 1,727/1,727 library + actionlint/fmt report; independent security/transport review pending; full source suite is not G1 proof | `G0/bootstrap.json` with source/artifact/output identities | `/root/g0-reviewer` |
+| `G0-bootstrap` | Velnor generator/runtime bootstrap | `/root/g0_bootstrap` | `G0-inventory` findings as needed | Generator worktree `unknown`; no records in source | `[rejected]` exact owner ref `b981f43e8dfd70b4c628d29b0e7e9dce679ce537`; generated workflows/state and 1,727/1,727 library + actionlint/fmt reported, but `G1/reviews/bootstrap-b981f43e-independent.md` rejects the G1 source checkpoint for archive/API-tree, freshness, provenance, legacy, fixture, and image-digest gaps | `G0/bootstrap.json` with source/artifact/output identities | `/root/g0-reviewer` |
 | `G0-distribution` | Velnor, `velnor-apt`, `homebrew-velnor` | `/root/g0_distribution` | `G0-inventory` | Distribution investigation worktree `unknown`; external evidence only | `[pending]` release discovery/feed/formula inventory | `G0/distribution.json` and access gaps | `/root/g0-reviewer` |
 | `G0-fleet` | Fleet categories/workload matrix | `/root/g0_fleet` | `G0-inventory` | Fleet worktree `unknown`; source edits prohibited in this wave | `[observed]` read-only 32-row workload/platform projection; exact emitted scanner IDs remain partial | External `G0/workload-matrix.json` plus fleet refresh files | `/root/g0-reviewer` |
 | `G0-runtime` | macOS/OrbStack capability analysis | `/root/g0_runtime` | `G0-inventory` | Runtime investigation worktree `unknown`; no live host mutation | `[pending]` source capability and host-access checks | `G0/runtime-capabilities.json` | `/root/g0-reviewer` |
@@ -336,7 +345,7 @@ reviewer. Unknown thread/worktree metadata stays `unknown` until observed.
 | `G1-run-operations` | Existing failed run/child graph | `/root/g1_run_operations` (Luna/max) | `G0-inventory` | Thread `01a0ba7a-9d5d-7291-a2f5-357ff78dba5e`; owns external `G0/stale-runs.json` | `[observed]` failed-run/child reconciliation in progress | `G1/run-operations.json`, `G0/stale-runs.json` | `/root/g0-reviewer` |
 | `G1-runtime-product-audit` | Published runtime product and promotion sequence | `/root/g1_run_operations` (Luna/max) | `G0-bootstrap`, `G1-seed-pin` | Same thread; external audit only | `[observed]` old pin/release verified; current main and unpublished candidate distinguished | `G1/runtime-product-audit/{runtime-product-audit.json,PROMOTION.md}` | `/root/g0-reviewer` |
 | `G1-seed-pin` | Generator seed/pin reuse | `/root/g0_inventory` (Luna/max) | `G0-bootstrap`, `G0-inventory` | Thread `01a0ba72-3925-7141-b1f7-5529a5cf6c98`; worktree `generator→g0_inventory` | `[observed]` exact seed/pin review; clean pin adoption/regeneration pending | `G1/reviews/seed-pin.md` | `/root/g0-reviewer` |
-| `G1-scan-integrity` | Generated-output/source scan integrity | `/root/g0_inventory` | `G0-bootstrap`, `G1-hosted-config` | Worktree `dual-lane-scan-integrity`; source edits gated/reviewed | `[observed]` candidate `6409a086` from parent `12cc87b` has 1740 source tests excluding expected stale snapshot plus fmt/clippy; approval pending exact G1-review952 | External `G1/scan-integrity/REPORT.md` and integration status | `/root/g1_review_952` |
+| `G1-scan-integrity` | Generated-output/source scan integrity | `/root/g0_inventory` | `G0-bootstrap`, `G1-hosted-config` | Worktree `dual-lane-scan-integrity`; source edits gated/reviewed | `[rejected]` `6409a086` and `7e9a2b5f` rejected; corrected `3c46b9e83c9a0ca57be88743e49ecae27f731685` rejected for forged-sidecar deletion and `./.github` self-source bypass; current `0a15fd06e002f57dca546d5c041754f1ec433508` rejects exact D19 closure and retains authority/detector/rollback gaps | External `G1/scan-integrity/{REPORT.md,corrected-independent-review.md,source-review-0a15fd06.md}` | `/root/g1_review_952` |
 | `G2-native-packages` | Native package/Homebrew prerequisites | `/root/g2_native_packages` (Luna/max) | `G1`, `G0-distribution` | Thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`; worktree `dual-lane-native-packages` | `[observed]` three ARM64 macOS binaries compile/smoke only; worker now also owns product/manifest contract; install/publication pending | `G0/native-packages/findings.md` | `/root/g0-reviewer` |
 | `G2-homebrew-contract` | Homebrew consumer/producer contract | `/root/g2_homebrew_contract` (Luna/max) | `G1`, `G0-distribution`, `G2-native-packages` | Thread `01a0ba80-8408-7380-8ac2-b743eb4494a5`; worktree `dual-lane-homebrew` | `[pending]` typed Homebrew contract and producer coordination | `G2/homebrew-contract/findings.md` | `/root/g2_distribution_review` |
 | `G2-native-product` | Product binary/component identity and authoritative package manifest | `/root/g2_native_packages` (Luna/max) | `G1`, `G0-distribution` | Thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`; worktree `dual-lane-native-product` | `[pending]` application/runtime component inventory, identity, and package contract | `G2/native-product.json` | `/root/g2_distribution_review` |
