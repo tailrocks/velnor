@@ -72,8 +72,8 @@ fn generate(root: &Path) -> Generated {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
+            "--providers",
+            "github-hosted,velnor",
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -220,7 +220,7 @@ fn profile_platforms_tasks_timeouts_and_dependencies_render() {
 
     let weekly = generated.workflow("scheduled-weekly.yml");
     let compat = job_block(&weekly, "compat").unwrap();
-    assert!(compat.contains("runs-on: macos-15"), "{compat}");
+    assert!(compat.contains("runs-on: macos-26"), "{compat}");
     assert!(compat.contains("timeout-minutes: 60"), "{compat}");
     assert!(compat.contains("install_args: ripgrep"), "{compat}");
     assert!(compat.contains("mise run check-compat"), "{compat}");
@@ -243,8 +243,8 @@ fn an_unrendered_profile_stops_generation() {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
+            "--providers",
+            "github-hosted,velnor",
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -315,8 +315,8 @@ fn an_unknown_event_stops_generation() {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
+            "--providers",
+            "github-hosted,velnor",
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -354,8 +354,8 @@ fn mixed_schedules_name_the_file() {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
+            "--providers",
+            "github-hosted,velnor",
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),

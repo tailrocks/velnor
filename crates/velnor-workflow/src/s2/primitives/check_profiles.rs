@@ -29,8 +29,8 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use super::{Args, Primitive, RenderCtx, Rendered};
-use crate::s2::provider::{runs_on_for, ProviderId};
+use super::{Args, Primitive, ProviderAdmission, RenderCtx, Rendered, WorkflowIr};
+use crate::s2::provider::{provider_caps, runs_on_for, Platform, ProviderId};
 use crate::s2::{
     runs_on_labels_yaml, yaml_scalar, ActionPin, CheckProfileSpec, GeneratorError, ProjectConfig,
     GENERATED_HEADER,
@@ -441,6 +441,11 @@ fn render_profile_job(
     if !profile.needs.is_empty() {
         let _ = writeln!(output, "    needs: [{}]", profile.needs.join(", "));
     }
+    if profile.provider == ProviderId::Velnor {
+        let admission = WorkflowIr::from_config(config)
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        let _ = writeln!(output, "    if: ${{{{ {admission} }}}}");
+    }
     let runs_on = profile_runs_on(config, profile)?;
     let _ = writeln!(output, "    runs-on: {runs_on}");
     let _ = writeln!(output, "    timeout-minutes: {}", profile.timeout_minutes);
@@ -468,22 +473,30 @@ fn render_profile_job(
     Ok(())
 }
 
-/// The `runs-on` for one profile: the hosted selector, the fixed
-/// GitHub-owned Apple image, or the repository's own Velnor selector.
+/// The `runs-on` for one profile, resolved from its typed provider/platform.
 fn profile_runs_on(
     config: &ProjectConfig,
     profile: &CheckProfileSpec,
 ) -> Result<String, GeneratorError> {
-    match profile.runner.as_str() {
-        "github" => runs_on_for(&config.selectors, ProviderId::GithubHosted)
-            .map(runs_on_labels_yaml),
-        "macos" => Ok(yaml_scalar(crate::s2::MACOS_HOSTED_RUNS_ON)),
-        "velnor" => runs_on_for(&config.selectors, ProviderId::Velnor).map(runs_on_labels_yaml),
-        runner => Err(GeneratorError::usage(format!(
-            "check profile `{}` runs on `{runner}`, which names no profile runner; use github, macos, or velnor",
+    if profile.provider == ProviderId::Velnor && !config.providers.contains(&ProviderId::Velnor) {
+        return Err(GeneratorError::usage(format!(
+            "check profile `{}` selects provider `velnor`, but [workflow] providers does not include it",
             profile.id
-        ))),
+        )));
     }
+    if !provider_caps(profile.provider)
+        .platforms
+        .contains(&profile.platform)
+    {
+        return Err(GeneratorError::usage(format!(
+            "check profile `{}` selects platform `{}` unsupported by provider `{}`",
+            profile.id, profile.platform, profile.provider
+        )));
+    }
+    if profile.platform == Platform::MacosArm64 {
+        return Ok(yaml_scalar(crate::s2::MACOS_HOSTED_RUNS_ON));
+    }
+    runs_on_for(&config.selectors, profile.provider).map(runs_on_labels_yaml)
 }
 
 fn render_checkout_step(output: &mut String) {
@@ -501,7 +514,7 @@ fn render_checkout_step(output: &mut String) {
 /// installing.
 fn render_tool_steps(output: &mut String, config: &ProjectConfig, profile: &CheckProfileSpec) {
     let mise = ActionPin::Mise.reference();
-    if profile.runner == "velnor" {
+    if profile.provider.is_local() {
         if !profile.tools.is_empty() {
             let _ = writeln!(
                 output,
@@ -570,7 +583,8 @@ mod tests {
             id: id.to_owned(),
             name: format!("{id} check"),
             schedule: "23 2 * * *".to_owned(),
-            runner: "github".to_owned(),
+            provider: ProviderId::GithubHosted,
+            platform: Platform::LinuxX64,
             tools: Vec::new(),
             tasks: vec![format!("check-{id}")],
             needs: Vec::new(),
@@ -773,10 +787,10 @@ mod tests {
         let mut hosted = profile("hosted");
         hosted.tools = vec!["ripgrep".to_owned(), "cargo:example-tool".to_owned()];
         let mut fleet = profile("fleet");
-        fleet.runner = "velnor".to_owned();
+        fleet.provider = ProviderId::Velnor;
         fleet.tools = vec!["ripgrep".to_owned()];
         let mut bare = profile("bare");
-        bare.runner = "velnor".to_owned();
+        bare.provider = ProviderId::Velnor;
         let config = profile_config(vec![hosted, fleet, bare]);
         let map = args_for("");
         let selected = must(
@@ -887,7 +901,7 @@ mod tests {
     #[test]
     fn velnor_profile_needs_a_selector_and_renders_it() {
         let mut fleet = profile("fleet");
-        fleet.runner = "velnor".to_owned();
+        fleet.provider = ProviderId::Velnor;
         let config = profile_config(vec![fleet.clone()]);
         let runs_on = must(
             profile_runs_on(&config, &fleet),
@@ -905,7 +919,89 @@ mod tests {
     }
 
     #[test]
-    fn runner_selection_covers_hosted_runners_and_refuses_unknown() {
+    fn velnor_profile_requires_the_provider_to_be_enabled() {
+        let mut fleet = profile("fleet");
+        fleet.provider = ProviderId::Velnor;
+        let mut config = profile_config(vec![fleet.clone()]);
+        config.providers.remove(&ProviderId::Velnor);
+
+        let error = must_fail(
+            profile_runs_on(&config, &fleet),
+            "a Velnor profile on a provider set without Velnor must fail",
+        );
+        assert!(
+            error.to_string().contains("providers does not include it"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn velnor_profile_uses_canonical_default_branch_push_admission() {
+        let mut fleet = profile("fleet");
+        fleet.provider = ProviderId::Velnor;
+        let mut config = profile_config(vec![fleet.clone()]);
+        config.repository = "example/owner".to_owned();
+        let expected = "github.repository == 'example/owner' && (github.event_name == 'push' && github.ref == 'refs/heads/main')";
+        let admission = WorkflowIr::from_config(&config)
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        assert_eq!(admission, expected);
+
+        let mut job = String::new();
+        must(
+            render_profile_job(&mut job, &config, &fleet),
+            "render the Velnor profile job",
+        );
+        assert!(
+            job.contains(&format!("    if: ${{{{ {expected} }}}}\n")),
+            "the profile job uses the canonical admission expression: {job}"
+        );
+        let hosted = profile("hosted");
+        let mut hosted_job = String::new();
+        must(
+            render_profile_job(&mut hosted_job, &config, &hosted),
+            "render the hosted profile job",
+        );
+        assert!(
+            !hosted_job.contains("    if:"),
+            "hosted profile admission stays unchanged: {hosted_job}"
+        );
+        for excluded in [
+            "pull_request",
+            "workflow_dispatch",
+            "schedule",
+            "refs/tags/",
+        ] {
+            assert!(
+                !admission.contains(excluded),
+                "Velnor profile admission excludes {excluded}: {admission}"
+            );
+        }
+    }
+
+    #[test]
+    fn velnor_profile_without_automatic_admission_is_false() {
+        let mut fleet = profile("fleet");
+        fleet.provider = ProviderId::Velnor;
+        let mut config = profile_config(vec![fleet.clone()]);
+        config.repository = "example/owner".to_owned();
+        config.automatic_providers.remove(&ProviderId::Velnor);
+        let admission = WorkflowIr::from_config(&config)
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        assert_eq!(admission, "github.repository == 'example/owner' && (false)");
+
+        let mut job = String::new();
+        must(
+            render_profile_job(&mut job, &config, &fleet),
+            "render the disabled Velnor profile job",
+        );
+        assert!(
+            job.contains(&format!("    if: ${{{{ {admission} }}}}\n")),
+            "a Velnor job outside automatic_providers is always skipped: {job}"
+        );
+    }
+
+    #[test]
+    fn provider_platform_selection_covers_hosted_and_refuses_unsupported_pairs() {
         let config = profile_config(Vec::new());
         let hosted = profile("hosted");
         assert_eq!(
@@ -916,18 +1012,19 @@ mod tests {
             "ubuntu-24.04"
         );
         let mut apple = profile("apple");
-        apple.runner = "macos".to_owned();
+        apple.platform = Platform::MacosArm64;
         assert_eq!(
             must(profile_runs_on(&config, &apple), "render the Apple runner"),
             "macos-26"
         );
-        let mut unknown = profile("unknown");
-        unknown.runner = "planetary".to_owned();
+        let mut unsupported = profile("unsupported");
+        unsupported.provider = ProviderId::Velnor;
+        unsupported.platform = Platform::MacosArm64;
         let error = must_fail(
-            profile_runs_on(&config, &unknown),
-            "an unknown runner must fail",
+            profile_runs_on(&config, &unsupported),
+            "an unsupported provider/platform pair must fail",
         );
-        assert!(error.to_string().contains("planetary"), "{error}");
+        assert!(error.to_string().contains("macos-arm64"), "{error}");
     }
 
     #[test]
