@@ -1,0 +1,30 @@
+{
+  "scope": "actual Velnor staged workspace plus completed hook patch",
+  "base": "39b67ecd9ecc47462a32b337c056f8eabe28080e",
+  "fixture_commit": "55a78818fb430293d23cc7cbe10f24252cbca4d9",
+  "bootstrap": [
+    "mise trust",
+    "mise install",
+    "mise run bootstrap"
+  ],
+  "tool_provision": "12 pinned tools already cached; isolated Cargo caches initially empty",
+  "warm_closed_proxy_seconds": [
+    8.765254833,
+    8.531134334,
+    8.528132125
+  ],
+  "cold_empty_cargo_seconds": 198.007794417,
+  "earlier_confounded_cold_seconds": 99.717814208,
+  "platform": "macOS 27 arm64",
+  "limitations": [
+    "One controlled cold-cache sample; no percentile or optimization claim.",
+    "Team Rust compilation paused for second cold/warm trials; host-wide exclusivity was not continuously established.",
+    "Warm HTTP(S)/ALL proxy pointed at closed loopback port; no OS network sandbox.",
+    "Production-default/package-isolated/all-feature CI correspondence remains a separate acceptance item."
+  ],
+  "commands_succeeded": [
+    "actual installed pre-commit hook (cold and warm)",
+    "git commit -s with installed pre-commit hook"
+  ],
+  "disposable_clone_clean_after_commit": true
+}

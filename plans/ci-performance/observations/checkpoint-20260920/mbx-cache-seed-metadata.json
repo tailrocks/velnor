@@ -1,0 +1,14 @@
+{
+  "total_count": 1,
+  "actions_caches": [
+    {
+      "id": 7902037869,
+      "ref": "refs/heads/main",
+      "key": "velnor-mbx-v3-7a4d74b185e3-Linux-X64-github-hosted-linux-x64-untrusted-ok-rust-velnor-runner-6e7532641e21af3cf50183b6174cb1dc1d208342d441de4c286268d47137c65e-9db6b44bace0bcae8bf1ee56dfe4286d9c268d1d2572511e5e3616e9e23eeb8d",
+      "version": "0157fd6dc00a4028c01319445731e038de11127c91c5df4087964826ce683348",
+      "last_accessed_at": "2026-09-20T17:46:01.756764Z",
+      "created_at": "2026-09-20T14:16:36.316130Z",
+      "size_in_bytes": 272175196
+    }
+  ]
+}
