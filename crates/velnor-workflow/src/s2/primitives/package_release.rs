@@ -3175,11 +3175,11 @@ old_prerelease=true
 rollback_dir="$TEST_TMPDIR/rollback"
 old_assets="$TEST_TMPDIR/old-assets"
 transaction_dir="$TEST_TMPDIR/transaction"
-owner_assets="$TEST_TMPDIR/owner-assets"
+owner_assets="$transaction_dir/owner-assets"
 had_release=1
 : > "$old_assets"
-: > "$owner_assets"
 mkdir -p "$transaction_dir"
+printf '%s\t%s\t%s\n' 7 package.tar.gz sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > "$owner_assets"
 remote_tag_reads_file="$TEST_TMPDIR/tag-reads"
 remote_tag_sha() {{
   remote_tag_reads=0
@@ -3198,6 +3198,7 @@ remote_tag_sha() {{
 }}
 gh() {{
   if [[ "$*" == *"releases/123/assets"* ]]; then
+    printf '%s\t%s\t%s\n' 7 package.tar.gz sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     return 0
   fi
   if [[ "$*" == *"releases/123"* ]] && [[ "$*" == *"--method DELETE"* ]]; then
@@ -3242,6 +3243,9 @@ fi
       test ! -e "$TEST_TMPDIR/release-delete"
     elif [ "$TEST_MODE" = tag ] || [ "$TEST_MODE" = release-present ] || [ "$TEST_MODE" = tag-delete ]; then
       test -e "$TEST_TMPDIR/release-delete"
+    fi
+    if [ "$TEST_MODE" = tag ]; then
+      test "$(cat "$remote_tag_reads_file")" -eq 2
     fi
     if [ "$TEST_MODE" = release-present ] || [ "$TEST_MODE" = tag-delete ]; then
       test "$had_release" -eq 1
