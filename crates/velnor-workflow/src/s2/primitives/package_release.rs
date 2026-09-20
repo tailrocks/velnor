@@ -975,18 +975,84 @@ owner_tag_sha=""
 owner_name=""
 owner_body=""
 owner_source_commit=""
+owner_assets="$transaction_dir/owner-assets"
 candidate_version="$(jq -er '.version | strings' "$published_dir/release-manifest.json")"
 had_release=0
 mutated=0
 
 remote_tag_sha() {
   local tag_name="$1"
-  local sha
-  sha="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name^{}" | awk 'NR == 1 {print $1}')"
+  local refs sha
+  if ! refs="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name^{}")"; then
+    return 1
+  fi
+  sha="$(awk 'NR == 1 {print $1}' <<<"$refs")"
   if [ -z "$sha" ]; then
-    sha="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name" | awk 'NR == 1 {print $1}')"
+    if ! refs="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name")"; then
+      return 1
+    fi
+    sha="$(awk 'NR == 1 {print $1}' <<<"$refs")"
+  fi
+  if [ -n "$sha" ] && ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+    return 1
   fi
   printf '%s\n' "$sha"
+}
+
+read_rolling_asset_set() {
+  local output="$1"
+  local asset_set
+  if ! asset_set="$(gh api --paginate --repo "$GITHUB_REPOSITORY" \
+    "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id/assets" \
+    --jq '.[] | if (type == "object" and (.id | type == "number" and floor == . and . > 0) and (.name | type == "string" and length > 0 and test("^[-A-Za-z0-9._+~]+$")) and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))) then [.id, .name, .digest] | @tsv else error("invalid rolling release asset") end')"; then
+    return 1
+  fi
+  if ! LC_ALL=C sort <<<"$asset_set" > "$output"; then
+    return 1
+  fi
+  if ! awk -F '\t' '
+    NF == 3 && ++ids[$1] == 1 && ++names[$2] == 1 { next }
+    { exit 1 }
+  ' "$output"; then
+    return 1
+  fi
+}
+
+refresh_owned_asset_set() {
+  local refreshed="$transaction_dir/refreshed-assets"
+  if ! read_rolling_asset_set "$refreshed"; then
+    return 1
+  fi
+  if ! mv -- "$refreshed" "$owner_assets"; then
+    return 1
+  fi
+}
+
+assert_asset_names() {
+  local asset_set="$1"
+  local expected_names="$2"
+  local actual_names="$transaction_dir/asset-names"
+  if ! cut -f2 "$asset_set" | LC_ALL=C sort > "$actual_names"; then
+    return 1
+  fi
+  cmp -s "$expected_names" "$actual_names"
+}
+
+assert_release_absent() {
+  local response="$transaction_dir/release-absence"
+  local response_http
+  if gh api --repo "$GITHUB_REPOSITORY" -i \
+    "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" > "$response" 2>/dev/null; then
+    echo "::error::rolling release still exists after DELETE" >&2
+    return 1
+  fi
+  if ! response_http="$(awk '/^HTTP\/[0-9.]+ [0-9]+/ {print $2; exit}' "$response")"; then
+    return 1
+  fi
+  if [ "$response_http" != 404 ]; then
+    echo "::error::rolling release DELETE was not verified as HTTP 404" >&2
+    return 1
+  fi
 }
 
 validate_existing_rolling_release() {
@@ -997,9 +1063,14 @@ validate_existing_rolling_release() {
   local identity="$source_dir/identity.json"
   local manifest_assets="$transaction_dir/live-manifest-assets"
   local downloaded_assets="$transaction_dir/live-downloaded-assets"
+  local body_assets="$transaction_dir/body-assets"
+  local manifest_names="$transaction_dir/manifest-names"
+  local body_names="$transaction_dir/body-names"
+  local manifest_digests="$transaction_dir/manifest-digests"
+  local api_digests="$transaction_dir/api-digests"
   local name expected_digest actual_digest api_digest
 
-  jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" --argjson draft "$expected_draft" '
+  if ! jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" --argjson draft "$expected_draft" '
     (.draft == $draft) and .prerelease == $prerelease and .tag_name == $tag and
     (.id | type == "number") and
     (.assets | type == "array" and length > 0) and
@@ -1007,13 +1078,17 @@ validate_existing_rolling_release() {
       ($names | unique | length) == ($names | length)) and
     (.assets | all(.[];
         type == "object" and
-        (.name | type == "string") and
+        (.id | type == "number" and floor == . and . > 0) and
+        (.name | type == "string" and length > 0 and test("^[-A-Za-z0-9._+~]+$")) and
         (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))))
-  ' <<<"$body" >/dev/null
-  test -s "$manifest"
-  test -s "$identity"
+  ' <<<"$body" >/dev/null; then
+    return 1
+  fi
+  if ! test -s "$manifest" || ! test -s "$identity"; then
+    return 1
+  fi
 
-  jq -e '
+  if ! jq -e '
     keys == ["assets","schema","source_commit","source_ref","source_repository","supporting_assets","version"] and
     (.assets | type == "array" and
       all(.[];
@@ -1029,10 +1104,16 @@ validate_existing_rolling_release() {
         (.sha256 | type == "string" and test("^[0-9a-f]{64}$")))) and
     ((.assets + .supporting_assets | map(.name)) as $names |
       ($names | unique | length) == ($names | length))
-  ' "$manifest" >/dev/null
+  ' "$manifest" >/dev/null; then
+    return 1
+  fi
 
-  old_source_commit="$(jq -er '.source_commit | strings' "$manifest")"
-  old_version="$(jq -er '.version | strings' "$manifest")"
+  if ! old_source_commit="$(jq -er '.source_commit | strings' "$manifest")"; then
+    return 1
+  fi
+  if ! old_version="$(jq -er '.version | strings' "$manifest")"; then
+    return 1
+  fi
   [[ "$old_source_commit" =~ ^[0-9a-f]{40}$ ]] || {
     echo "::error::existing rolling manifest source_commit is not 40 lowercase hex" >&2
     return 1
@@ -1053,30 +1134,48 @@ validate_existing_rolling_release() {
     echo "::error::existing rolling manifest version does not bind to its source" >&2
     return 1
   }
-  jq -e \
+  if ! jq -e \
     --arg schema "$EXPECTED_MANIFEST_SCHEMA" \
     --arg repository "$EXPECTED_SOURCE_REPOSITORY" \
     --arg source_ref "$EXPECTED_SOURCE_REF" \
     --arg commit "$old_source_commit" \
     --slurpfile rolling_manifest "$manifest" \
     '.schema == $schema and .source_repository == $repository and
-     .source_ref == $source_ref and .source_commit == $commit' "$manifest" >/dev/null
-  jq -e \
+     .source_ref == $source_ref and .source_commit == $commit' "$manifest" >/dev/null; then
+    return 1
+  fi
+  if ! jq -e \
     --arg repository "$EXPECTED_SOURCE_REPOSITORY" \
     --arg source_ref "$EXPECTED_SOURCE_REF" \
     --arg commit "$old_source_commit" \
     --slurpfile rolling_manifest "$manifest" \
     'keys == ["manifest","source_digest","source_ref","source_repository"] and
      .source_repository == $repository and .source_ref == $source_ref and
-     .source_digest == $commit and .manifest == $rolling_manifest[0]' "$identity" >/dev/null
-  jq -e --arg name "$RELEASE_TITLE_PREFIX $old_version" '.name == $name' <<<"$body" >/dev/null
+     .source_digest == $commit and .manifest == $rolling_manifest[0]' "$identity" >/dev/null; then
+    return 1
+  fi
+  if ! jq -e --arg name "$RELEASE_TITLE_PREFIX $old_version" '.name == $name' <<<"$body" >/dev/null; then
+    return 1
+  fi
 
-  {
+  if ! jq -r '(.assets[] | .name), (.supporting_assets[] | .name)' "$manifest" > "$manifest_names"; then
+    return 1
+  fi
+  if ! {
     printf '%s\n' "release-manifest.json" "identity.json"
-    jq -r '(.assets[] | .name), (.supporting_assets[] | .name)' "$manifest"
-  } | LC_ALL=C sort > "$manifest_assets"
-  jq -r '.assets[].name' <<<"$body" | LC_ALL=C sort > "$old_assets"
-  find "$source_dir" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$downloaded_assets"
+    cat "$manifest_names"
+  } | LC_ALL=C sort > "$manifest_assets"; then
+    return 1
+  fi
+  if ! jq -r '.assets[].name' <<<"$body" > "$body_names"; then
+    return 1
+  fi
+  if ! LC_ALL=C sort "$body_names" > "$old_assets"; then
+    return 1
+  fi
+  if ! find "$source_dir" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$downloaded_assets"; then
+    return 1
+  fi
   cmp -s "$manifest_assets" "$old_assets" || {
     echo "::error::existing rolling release assets are not exactly covered by its manifest" >&2
     return 1
@@ -1086,21 +1185,47 @@ validate_existing_rolling_release() {
     return 1
   }
 
+  if ! jq -r '(.assets[] | [.name, .sha256] | @tsv), (.supporting_assets[] | [.name, .sha256] | @tsv)' "$manifest" > "$manifest_digests"; then
+    return 1
+  fi
   while IFS=$'\t' read -r name expected_digest; do
-    test -s "$source_dir/$name"
-    actual_digest="$(sha256sum -- "$source_dir/$name" | awk '{print $1}')"
+    if ! test -s "$source_dir/$name"; then
+      return 1
+    fi
+    if ! actual_digest="$(sha256sum -- "$source_dir/$name" | awk '{print $1}')"; then
+      return 1
+    fi
     [ "$actual_digest" = "$expected_digest" ] || {
       echo "::error::existing rolling manifest digest mismatch: $name" >&2
       return 1
     }
-  done < <(jq -r '(.assets[] | [.name, .sha256] | @tsv), (.supporting_assets[] | [.name, .sha256] | @tsv)' "$manifest")
+  done < "$manifest_digests"
+  if ! jq -r '.assets[] | [.name, .digest] | @tsv' <<<"$body" > "$api_digests"; then
+    return 1
+  fi
   while IFS=$'\t' read -r name api_digest; do
-    actual_digest="$(sha256sum -- "$source_dir/$name" | awk '{print $1}')"
+    if ! actual_digest="$(sha256sum -- "$source_dir/$name" | awk '{print $1}')"; then
+      return 1
+    fi
     [ "$api_digest" = "sha256:$actual_digest" ] || {
       echo "::error::existing rolling GitHub asset digest mismatch: $name" >&2
       return 1
     }
-  done < <(jq -r '.assets[] | [.name, .digest] | @tsv' <<<"$body")
+  done < "$api_digests"
+
+  if ! read_rolling_asset_set "$body_assets"; then
+    return 1
+  fi
+  if ! jq -r '.assets[] | [.id, .name, .digest] | @tsv' <<<"$body" | LC_ALL=C sort > "$body_assets.expected"; then
+    return 1
+  fi
+  if ! cmp -s "$body_assets.expected" "$body_assets"; then
+    echo "::error::existing rolling release asset set changed during validation" >&2
+    return 1
+  fi
+  if ! cp -- "$body_assets" "$owner_assets"; then
+    return 1
+  fi
 
   if ! git -C source cat-file -e "${old_source_commit}^{commit}"; then
     echo "::error::existing rolling source commit is not present in the checked-out history" >&2
@@ -1118,8 +1243,8 @@ assert_rolling_ownership() {
   local expected_name="$3"
   local expected_body="$4"
   local expected_source_commit="$5"
-  local current_body current_tag_sha
-  if [ -z "$rolling_release_id" ] || [ -z "$expected_tag_sha" ] || [ -z "$expected_source_commit" ]; then
+  local current_body current_tag_sha current_assets
+  if [ -z "$rolling_release_id" ] || [ -z "$expected_tag_sha" ] || [ -z "$expected_source_commit" ] || ! test -f "$owner_assets"; then
     return 1
   fi
   if ! current_body="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id")"; then
@@ -1137,7 +1262,14 @@ assert_rolling_ownership() {
   if ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
     return 1
   fi
-  [ "$current_tag_sha" = "$expected_tag_sha" ] && [ "$current_tag_sha" = "$expected_source_commit" ]
+  if [ "$current_tag_sha" != "$expected_tag_sha" ] || [ "$current_tag_sha" != "$expected_source_commit" ]; then
+    return 1
+  fi
+  current_assets="$transaction_dir/current-assets"
+  if ! read_rolling_asset_set "$current_assets"; then
+    return 1
+  fi
+  cmp -s "$owner_assets" "$current_assets"
 }
 
 discard_current_typed_rolling_draft() {
@@ -1149,14 +1281,32 @@ discard_current_typed_rolling_draft() {
   if ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" >/dev/null; then
     return 1
   fi
+  if ! assert_release_absent; then
+    echo "::error::typed rolling draft release deletion could not be verified; refusing tag cleanup" >&2
+    return 1
+  fi
   local current_tag_sha
-  current_tag_sha="$(remote_tag_sha "$rolling_tag")"
+  if ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+    echo "::error::typed rolling draft tag lookup failed; refusing tag cleanup" >&2
+    return 1
+  fi
   if [ -n "$current_tag_sha" ]; then
     if [ "$current_tag_sha" != "$old_tag_sha" ] || [ "$current_tag_sha" != "$old_source_commit" ]; then
       echo "::error::typed rolling draft tag ownership changed; refusing cleanup" >&2
       return 1
     fi
-    gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null
+    if ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null; then
+      echo "::error::typed rolling draft tag deletion failed; preserving cleanup state" >&2
+      return 1
+    fi
+    if ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+      echo "::error::typed rolling draft tag deletion could not be verified" >&2
+      return 1
+    fi
+    if [ -n "$current_tag_sha" ]; then
+      echo "::error::typed rolling draft tag still exists after DELETE" >&2
+      return 1
+    fi
   fi
   had_release=0
   rolling_release_id=""
@@ -1168,6 +1318,7 @@ discard_current_typed_rolling_draft() {
   old_source_commit=""
   old_version=""
   : > "$old_assets"
+  : > "$owner_assets"
   rm -rf -- "$rollback_dir"
 }
 
@@ -1230,6 +1381,81 @@ verify_restored_assets() {
   done < "$expected_names"
 }
 
+replace_owned_asset_after_delete() {
+  local asset_id="$1"
+  local asset_name="$2"
+  local expected="$transaction_dir/expected-after-delete"
+  local current="$transaction_dir/current-assets"
+  if ! awk -F '\t' -v id="$asset_id" -v name="$asset_name" '
+    $1 == id && $2 == name { removed++; next }
+    { print }
+    END { if (removed != 1) exit 1 }
+  ' "$owner_assets" | LC_ALL=C sort > "$expected"; then
+    return 1
+  fi
+  if ! read_rolling_asset_set "$current"; then
+    return 1
+  fi
+  if ! cmp -s "$expected" "$current"; then
+    echo "::error::rollback asset set drifted after DELETE" >&2
+    return 1
+  fi
+  if ! mv -- "$current" "$owner_assets"; then
+    return 1
+  fi
+}
+
+replace_owned_asset_after_upload() {
+  local asset_name="$1"
+  local source_file="$2"
+  local expected="$transaction_dir/expected-before-upload"
+  local current="$transaction_dir/current-assets"
+  local source_digest uploaded_digest uploaded_count
+  if ! source_digest="$(sha256sum -- "$source_file" | awk '{print $1}')"; then
+    return 1
+  fi
+  if ! awk -F '\t' -v name="$asset_name" '$2 != name { print }' "$owner_assets" | LC_ALL=C sort > "$expected"; then
+    return 1
+  fi
+  if ! read_rolling_asset_set "$current"; then
+    return 1
+  fi
+  if ! awk -F '\t' -v name="$asset_name" '$2 != name { print }' "$current" | LC_ALL=C sort | cmp -s - "$expected"; then
+    echo "::error::rollback asset set drifted after upload" >&2
+    return 1
+  fi
+  if ! uploaded_count="$(awk -F '\t' -v name="$asset_name" '$2 == name { count++; digest = $3 } END { if (count != 1) exit 1; print digest }' "$current")"; then
+    return 1
+  fi
+  uploaded_digest="$uploaded_count"
+  if [ "$uploaded_digest" != "sha256:$source_digest" ]; then
+    echo "::error::rollback uploaded asset digest differs: $asset_name" >&2
+    return 1
+  fi
+  if ! mv -- "$current" "$owner_assets"; then
+    return 1
+  fi
+}
+
+assert_asset_set_matches_files() {
+  local asset_set="$1"
+  local source_dir="$2"
+  local expected_names="$3"
+  local asset_id asset_name asset_digest expected_digest
+  if ! assert_asset_names "$asset_set" "$expected_names"; then
+    return 1
+  fi
+  while IFS=$'\t' read -r asset_id asset_name asset_digest; do
+    if ! expected_digest="$(sha256sum -- "$source_dir/$asset_name" | awk '{print $1}')"; then
+      return 1
+    fi
+    if [ "$asset_digest" != "sha256:$expected_digest" ]; then
+      echo "::error::owned asset digest differs: $asset_name" >&2
+      return 1
+    fi
+  done < "$asset_set"
+}
+
 rollback() {
   local status="$1"
   local current_tag_sha
@@ -1254,19 +1480,27 @@ rollback() {
         fi
         if [ "$rollback_status" -eq 0 ]; then
           while IFS=$'\t' read -r asset_id asset_name; do
-            if ! grep -Fqx -- "$asset_name" "$old_assets"; then
-              if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit" \
-                || ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >/dev/null; then
-                rollback_status=1
-                break
-              fi
+            if grep -Fqx -- "$asset_name" "$old_assets"; then
+              continue
             fi
-          done < <(gh api --paginate --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id/assets" --jq '.[] | [.id, .name] | @tsv')
+            grep_status="$?"
+            if [ "$grep_status" -ne 1 ]; then
+              rollback_status=1
+              break
+            fi
+            if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit" \
+              || ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >/dev/null \
+              || ! replace_owned_asset_after_delete "$asset_id" "$asset_name"; then
+              rollback_status=1
+              break
+            fi
+          done < "$owner_assets"
         fi
         if [ "$rollback_status" -eq 0 ]; then
           while IFS= read -r asset_name; do
             if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit" \
-              || ! gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber "$rollback_dir/$asset_name"; then
+              || ! gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber "$rollback_dir/$asset_name" \
+              || ! replace_owned_asset_after_upload "$asset_name" "$rollback_dir/$asset_name"; then
               rollback_status=1
               break
             fi
@@ -1313,13 +1547,20 @@ rollback() {
     else
       if ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" >/dev/null; then
         rollback_status=1
+      elif ! assert_release_absent; then
+        rollback_status=1
       elif ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
         rollback_status=1
       elif [ -z "$current_tag_sha" ]; then
         :
-      elif [ "$current_tag_sha" = "$owner_tag_sha" ] && [ "$current_tag_sha" = "$owner_source_commit" ] \
-        && gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null; then
-        :
+      elif [ "$current_tag_sha" = "$owner_tag_sha" ] && [ "$current_tag_sha" = "$owner_source_commit" ]; then
+        if ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null; then
+          rollback_status=1
+        elif ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+          rollback_status=1
+        elif [ -n "$current_tag_sha" ]; then
+          rollback_status=1
+        fi
       else
         echo "::error::new rolling preview tag changed before rollback; refusing delete" >&2
         rollback_status=1
@@ -1349,10 +1590,19 @@ if ! staged_body="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY
   echo "::error::verified immutable staging release is missing" >&2
   exit 1
 fi
-jq -e --arg tag "$staged_tag" --argjson prerelease "$RELEASE_PRERELEASE" '(.draft | not) and .prerelease == $prerelease and .tag_name == $tag' <<<"$staged_body" >/dev/null
-jq -r '.assets[].name' <<<"$staged_body" | LC_ALL=C sort > "$staged_assets"
+if ! jq -e --arg tag "$staged_tag" --argjson prerelease "$RELEASE_PRERELEASE" '(.draft | not) and .prerelease == $prerelease and .tag_name == $tag' <<<"$staged_body" >/dev/null; then
+  echo "::error::verified immutable staging release identity is invalid" >&2
+  exit 1
+fi
+if ! jq -r '.assets[].name' <<<"$staged_body" | LC_ALL=C sort > "$staged_assets"; then
+  echo "::error::verified immutable staging release assets are invalid" >&2
+  exit 1
+fi
 cmp -s "$expected_assets" "$staged_assets" || { echo "::error::immutable staging release asset set is not exact" >&2; exit 1; }
-staged_tag_sha="$(remote_tag_sha "$staged_tag")"
+if ! staged_tag_sha="$(remote_tag_sha "$staged_tag")"; then
+  echo "::error::immutable staging tag lookup failed" >&2
+  exit 1
+fi
 [ "$staged_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::immutable staging tag does not resolve to the verified source commit" >&2; exit 1; }
 
 if gh api --repo "$GITHUB_REPOSITORY" -i "repos/$GITHUB_REPOSITORY/releases/tags/$rolling_tag" > "$rolling_response" 2>/dev/null; then
@@ -1373,17 +1623,22 @@ case "$rolling_http" in
     old_body="$(jq -r '.body // ""' "$rolling_body")"
     old_draft="$(jq -er '.draft | tostring' "$rolling_body")"
     old_prerelease="$(jq -er '.prerelease | tostring' "$rolling_body")"
-    old_tag_sha="$(remote_tag_sha "$rolling_tag")"
+    if ! old_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+      echo "::error::existing rolling tag lookup failed; refusing mutation" >&2
+      exit 1
+    fi
     if ! [[ "$old_tag_sha" =~ ^[0-9a-f]{40}$ ]]; then
       echo "::error::existing public rolling release failed immutable validation; refusing mutation" >&2
       exit 1
     elif ! mkdir -p "$rollback_dir" || ! gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$rollback_dir" --clobber; then
       echo "::error::existing rolling release failed immutable validation; refusing mutation" >&2
       exit 1
-    elif ! validate_existing_rolling_release "$rolling_body" "$rollback_dir" "$old_draft"; then
+    fi
+    if ! validate_existing_rolling_release "$rolling_body" "$rollback_dir" "$old_draft"; then
       echo "::error::existing rolling release failed immutable validation; refusing mutation" >&2
       exit 1
-    elif [ "$old_draft" = true ]; then
+    fi
+    if [ "$old_draft" = true ]; then
       if ! discard_current_typed_rolling_draft; then
         echo "::error::existing rolling draft ownership changed; refusing mutation" >&2
         exit 1
@@ -1411,7 +1666,11 @@ case "$rolling_http" in
         r#"
     ;;
   404)
-    test -z "$(remote_tag_sha "$rolling_tag")" || { echo "::error::rolling tag exists without a release; refusing to overwrite it" >&2; exit 1; }
+    if ! rolling_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+      echo "::error::rolling tag lookup failed; refusing to overwrite it" >&2
+      exit 1
+    fi
+    test -z "$rolling_tag_sha" || { echo "::error::rolling tag exists without a release; refusing to overwrite it" >&2; exit 1; }
     ;;
   *)
     echo "::error::rolling release preflight failed with HTTP $rolling_http" >&2
@@ -1432,6 +1691,10 @@ if [ "$had_release" = 0 ]; then
   owner_name="$RELEASE_TITLE_PREFIX $candidate_version"
   owner_body="Verified package release from $EXPECTED_SOURCE_COMMIT"
   owner_source_commit="$EXPECTED_SOURCE_COMMIT"
+  if ! read_rolling_asset_set "$owner_assets"; then
+    echo "::error::new rolling preview asset ownership could not be established; refusing mutation" >&2
+    exit 1
+  fi
   if ! assert_rolling_ownership "$owner_draft" "$owner_tag_sha" "$owner_name" "$owner_body" "$owner_source_commit"; then
     echo "::error::new rolling preview ownership could not be established; refusing mutation" >&2
     exit 1
@@ -1465,8 +1728,22 @@ gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber \
         r#"
 
 rolling_stage_json="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id")"
-jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" '.draft == true and .prerelease == $prerelease and .tag_name == $tag' <<<"$rolling_stage_json" >/dev/null
-jq -r '.assets[].name' <<<"$rolling_stage_json" | LC_ALL=C sort > "$rolling_staged_assets"
+if ! refresh_owned_asset_set; then
+  echo "::error::rolling asset ownership could not be re-read after upload" >&2
+  exit 1
+fi
+if ! assert_asset_set_matches_files "$owner_assets" "$published_dir" "$expected_assets"; then
+  echo "::error::rolling staged asset set is not exactly the verified package" >&2
+  exit 1
+fi
+if ! jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" '.draft == true and .prerelease == $prerelease and .tag_name == $tag' <<<"$rolling_stage_json" >/dev/null; then
+  echo "::error::staged rolling release identity is invalid" >&2
+  exit 1
+fi
+if ! jq -r '.assets[].name' <<<"$rolling_stage_json" | LC_ALL=C sort > "$rolling_staged_assets"; then
+  echo "::error::staged rolling release assets are invalid" >&2
+  exit 1
+fi
 cmp -s "$expected_assets" "$rolling_staged_assets" || { echo "::error::staged rolling release asset set is not exact" >&2; exit 1; }
 
 if [ "$had_release" = 1 ]; then
@@ -1499,7 +1776,10 @@ if ! assert_rolling_ownership "$owner_draft" "$EXPECTED_SOURCE_COMMIT" "$owner_n
   exit 1
 fi
 
-new_tag_sha="$(remote_tag_sha "$rolling_tag")"
+if ! new_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+  echo "::error::rolling tag lookup failed after publication" >&2
+  exit 1
+fi
 [ "$new_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::rolling tag does not resolve to the verified source commit" >&2; exit 1; }
 rolling_post_json="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/tags/$rolling_tag")"
 jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" '(.draft | not) and .prerelease == $prerelease and .tag_name == $tag' <<<"$rolling_post_json" >/dev/null
@@ -1544,10 +1824,19 @@ trap 'rm -rf -- "$transaction_dir"' EXIT
 
 remote_tag_sha() {
   local tag_name="$1"
-  local sha
-  sha="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name^{}" | awk 'NR == 1 {print $1}')"
+  local refs sha
+  if ! refs="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name^{}")"; then
+    return 1
+  fi
+  sha="$(awk 'NR == 1 {print $1}' <<<"$refs")"
   if [ -z "$sha" ]; then
-    sha="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name" | awk 'NR == 1 {print $1}')"
+    if ! refs="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name")"; then
+      return 1
+    fi
+    sha="$(awk 'NR == 1 {print $1}' <<<"$refs")"
+  fi
+  if [ -n "$sha" ] && ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+    return 1
   fi
   printf '%s\n' "$sha"
 }
@@ -1592,7 +1881,10 @@ fn render_immutable_publish_script(spec: &PackageReleaseSpec) -> String {
     script.push_str(
         r#"} | LC_ALL=C sort > "$expected_assets"
 
-tag_sha="$(remote_tag_sha "$tag")"
+if ! tag_sha="$(remote_tag_sha "$tag")"; then
+  echo "::error::immutable release tag lookup failed" >&2
+  exit 1
+fi
 if [ -n "$tag_sha" ] && [ "$tag_sha" != "$EXPECTED_SOURCE_COMMIT" ]; then
   echo "::error::immutable release tag resolves to an unexpected source commit" >&2
   exit 1
@@ -1609,7 +1901,10 @@ case "$response_http" in
     else
       gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$EXPECTED_SOURCE_COMMIT" --draft "${release_flags[@]}" --title "$title" --notes "Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT"
     fi
-    tag_sha="$(remote_tag_sha "$tag")"
+    if ! tag_sha="$(remote_tag_sha "$tag")"; then
+      echo "::error::new immutable release tag lookup failed" >&2
+      exit 1
+    fi
     [ "$tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::new immutable release tag does not resolve to the verified source commit" >&2; exit 1; }
     ;;
   200)
@@ -1677,7 +1972,10 @@ cmp -s "$expected_assets" "$existing_assets" || {
   echo "::error::immutable release asset set is not exact after publication" >&2
   exit 1
 }
-final_tag_sha="$(remote_tag_sha "$tag")"
+if ! final_tag_sha="$(remote_tag_sha "$tag")"; then
+  echo "::error::immutable release tag lookup failed after publication" >&2
+  exit 1
+fi
 [ "$final_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::immutable tag does not resolve to the verified source commit" >&2; exit 1; }
 printf 'immutable_tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
 "#
