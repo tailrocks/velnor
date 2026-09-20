@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use super::{Args, Primitive, RenderCtx, Rendered};
+use super::{render_pinned_toolchain_steps, Args, Primitive, RenderCtx, Rendered};
 use crate::s2::provider::{runs_on_for, ProviderId};
 use crate::s2::{
     runs_on_labels_yaml, yaml_scalar, ActionPin, CheckProfileSpec, GeneratorError, ProjectConfig,
@@ -436,6 +436,7 @@ fn render_profile_job(
     config: &ProjectConfig,
     profile: &CheckProfileSpec,
 ) -> Result<(), GeneratorError> {
+    validate_mise_env(profile)?;
     let _ = writeln!(output, "  {}:", profile.id);
     let _ = writeln!(output, "    name: {}", yaml_scalar(&profile.name));
     if !profile.needs.is_empty() {
@@ -447,14 +448,10 @@ fn render_profile_job(
     if profile.advisory {
         output.push_str("    continue-on-error: true\n");
     }
-    if !profile.env.is_empty() {
-        output.push_str("    env:\n");
-        for (key, value) in &profile.env {
-            let _ = writeln!(output, "      {key}: {}", yaml_scalar(value));
-        }
-    }
+    render_mise_env(output, profile);
     output.push_str("    steps:\n");
     render_checkout_step(output);
+    render_rust_toolchain_steps(output, config, profile);
     render_tool_steps(output, config, profile);
     for task in &profile.tasks {
         let _ = writeln!(
@@ -494,11 +491,118 @@ fn render_checkout_step(output: &mut String) {
     );
 }
 
-/// Tool provisioning per profile runner. Hosted runners install through the
-/// pinned `mise` action, which the Velnor fleet cannot admit, so Velnor
-/// installs with the preinstalled `mise` binary instead. Every profile runs
-/// named tasks, so hosted runners always set up even when no tool needs
-/// installing.
+/// Rust is provisioned from the typed repository pin, outside Mise's generic
+/// tool closure. Hosted runners install the checked-out file-driven pin; the
+/// Velnor lane verifies the preinstalled image contract without downloading a
+/// second toolchain.
+fn render_rust_toolchain_steps(
+    output: &mut String,
+    config: &ProjectConfig,
+    profile: &CheckProfileSpec,
+) {
+    let Some(toolchain) = profile.rust_toolchain.as_ref() else {
+        return;
+    };
+    if profile.runner != "velnor" {
+        render_pinned_toolchain_steps(
+            output,
+            ActionPin::CacheRestore.reference(),
+            ActionPin::CacheSave.reference(),
+            toolchain,
+            Some(&format!(
+                "({}) && steps.rustup-toolchain.outputs.cache-hit != 'true'",
+                super::trusted_cache_save_expression(&config.default_branch)
+            )),
+        );
+        render_rustup_activation_step(output);
+        return;
+    }
+    let channel = crate::s2::shell_quote(toolchain.channel());
+    let _ = writeln!(
+        output,
+        "      - name: Verify preinstalled Rust toolchain\n        shell: bash\n        run: |\n          set -euo pipefail\n          rustup run {channel} rustc --version >/dev/null\n          rustup_host=\"$({})\"\n          test -n \"$rustup_host\"",
+        crate::rustup_host_command(toolchain.channel())
+    );
+    for component in toolchain.components() {
+        let _ = writeln!(
+            output,
+            "          {}",
+            crate::rustup_component_check_command(toolchain.channel(), component)
+        );
+    }
+    for target in toolchain.targets() {
+        let target = crate::s2::shell_quote(target);
+        let _ = writeln!(
+            output,
+            "          rustup target list --toolchain {channel} --installed | grep -Fx {target}"
+        );
+    }
+    render_rustup_activation_step(output);
+}
+
+fn render_rustup_activation_step(output: &mut String) {
+    output.push_str(
+        "      - name: Activate pinned Rust shims\n        shell: bash\n        run: |\n          set -euo pipefail\n          printf '%s\\n' \"$HOME/.cargo/bin\" >> \"$GITHUB_PATH\"\n",
+    );
+}
+
+/// Mise settings owned by the generated profile job. `profile.tools` is the
+/// explicit closure supplied by the config resolver; task-local tools outside
+/// that closure must fail at task execution instead of being installed by a
+/// hidden mise fallback.
+const MISE_AUTO_INSTALL_KEYS: &[&str] = &[
+    "MISE_AUTO_INSTALL",
+    "MISE_EXEC_AUTO_INSTALL",
+    "MISE_NOT_FOUND_AUTO_INSTALL",
+    "MISE_TASK_RUN_AUTO_INSTALL",
+];
+
+const PINNED_RUST_ENV_KEYS: &[&str] = &["PATH", "RUSTUP_TOOLCHAIN"];
+
+fn validate_mise_env(profile: &CheckProfileSpec) -> Result<(), GeneratorError> {
+    for key in MISE_AUTO_INSTALL_KEYS {
+        if profile.env.contains_key(*key) {
+            return Err(GeneratorError::usage(format!(
+                "check profile `{}` env `{key}` conflicts with generated Mise auto-install policy; omit it",
+                profile.id
+            )));
+        }
+    }
+    if profile.rust_toolchain.is_some() {
+        for key in PINNED_RUST_ENV_KEYS {
+            if profile.env.contains_key(*key) {
+                return Err(GeneratorError::usage(format!(
+                    "check profile `{}` env `{key}` conflicts with generated pinned Rust activation; omit it",
+                    profile.id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_mise_env(output: &mut String, profile: &CheckProfileSpec) {
+    output.push_str("    env:\n");
+    for (key, value) in &profile.env {
+        let _ = writeln!(output, "      {key}: {}", yaml_scalar(value));
+    }
+    for key in MISE_AUTO_INSTALL_KEYS {
+        let _ = writeln!(output, "      {key}: \"false\"");
+    }
+    if let Some(toolchain) = profile.rust_toolchain.as_ref() {
+        let _ = writeln!(
+            output,
+            "      RUSTUP_TOOLCHAIN: {}",
+            yaml_scalar(toolchain.channel())
+        );
+    }
+}
+
+/// Tool provisioning per profile runner. Hosted runners use one pinned
+/// `mise` action: non-empty profiles pass only their explicit `install_args`,
+/// while empty profiles bootstrap the runtime without installing the
+/// repository's root tool set. The Velnor fleet uses its preinstalled `mise`
+/// binary instead.
 fn render_tool_steps(output: &mut String, config: &ProjectConfig, profile: &CheckProfileSpec) {
     let mise = ActionPin::Mise.reference();
     if profile.runner == "velnor" {
@@ -572,6 +676,7 @@ mod tests {
             name: format!("{id} check"),
             schedule: "23 2 * * *".to_owned(),
             runner: "github".to_owned(),
+            rust_toolchain: None,
             tools: Vec::new(),
             tasks: vec![format!("check-{id}")],
             needs: Vec::new(),
@@ -790,15 +895,28 @@ mod tests {
             "{workflow}"
         );
         assert_eq!(
-            workflow.matches(crate::ActionPin::Mise.reference()).count(),
+            workflow
+                .matches(crate::s2::ActionPin::Mise.reference())
+                .count(),
             1,
             "one hosted profile owns one Mise bootstrap action: {workflow}"
+        );
+        assert!(
+            !workflow.contains("name: Set up Mise tools"),
+            "tool installation and runtime setup must not be split into two actions: {workflow}"
         );
         assert!(workflow.contains("MISE_TOOLS: ripgrep"), "{workflow}");
         assert!(
             workflow.contains("mise --yes --locked install \"${tools[@]}\""),
-            "{workflow}"
+            "Velnor check profiles must install only locked Mise tools: {workflow}"
         );
+        for key in MISE_AUTO_INSTALL_KEYS {
+            assert_eq!(
+                workflow.matches(&format!("      {key}: \"false\"")).count(),
+                3,
+                "every profile must disable {key}: {workflow}"
+            );
+        }
         let mut bare_job = String::new();
         must(
             render_profile_job(&mut bare_job, &config, &config.check_profiles[2]),
@@ -808,10 +926,149 @@ mod tests {
             !bare_job.contains("Install declared Mise tools"),
             "a tool-less Velnor job installs nothing: {bare_job}"
         );
+        assert!(bare_job.contains("Run check-bare"), "{bare_job}");
+        assert!(
+            bare_job.contains("MISE_TASK_RUN_AUTO_INSTALL: \"false\""),
+            "a task-local tool omitted from the explicit closure must fail visibly: {bare_job}"
+        );
+        let mut empty_hosted_job = String::new();
+        let empty_hosted = profile("empty-hosted");
+        must(
+            render_profile_job(&mut empty_hosted_job, &config, &empty_hosted),
+            "render the tool-less hosted job",
+        );
+        assert!(
+            empty_hosted_job.contains("install: false"),
+            "{empty_hosted_job}"
+        );
+        assert!(
+            !empty_hosted_job.contains("install_args:"),
+            "{empty_hosted_job}"
+        );
         assert!(
             workflow.contains(crate::s2::ActionPin::Mise.reference()),
             "{workflow}"
         );
+    }
+
+    #[test]
+    fn typed_rust_profile_is_provisioned_outside_mise_closure() {
+        let mut profile = profile("rust");
+        profile.runner = "macos".to_owned();
+        profile.tools = vec!["ripgrep".to_owned()];
+        profile.rust_toolchain = Some(crate::s2::RustToolchain {
+            channel: "1.97.1".to_owned(),
+            components: vec!["clippy".to_owned(), "rustfmt".to_owned()],
+            targets: vec!["aarch64-unknown-linux-gnu".to_owned()],
+            profile: Some("minimal".to_owned()),
+        });
+        let config = profile_config(vec![profile.clone()]);
+        let mut output = String::new();
+        must(
+            render_profile_job(&mut output, &config, &profile),
+            "render typed Rust profile",
+        );
+        assert!(
+            output.contains("name: Provision Rust toolchain"),
+            "{output}"
+        );
+        assert!(
+            output.contains("rustup toolchain install --profile minimal"),
+            "{output}"
+        );
+        assert!(
+            output.contains("rustup target add 'aarch64-unknown-linux-gnu'"),
+            "{output}"
+        );
+        assert!(
+            output.contains("name: Save Rust toolchain")
+                && output.contains(
+                    "if: ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true'"
+                ),
+            "{output}"
+        );
+        assert!(output.contains("install_args: ripgrep"), "{output}");
+        assert!(!output.contains("install_args: rust"), "{output}");
+        assert!(output.contains("RUSTUP_TOOLCHAIN: \"1.97.1\""), "{output}");
+        assert!(
+            output.contains("name: Activate pinned Rust shims"),
+            "{output}"
+        );
+        assert!(output.contains("$HOME/.cargo/bin"), "{output}");
+        assert!(output.contains("$GITHUB_PATH"), "{output}");
+
+        profile.runner = "velnor".to_owned();
+        let config = profile_config(vec![profile.clone()]);
+        let mut output = String::new();
+        must(
+            render_profile_job(&mut output, &config, &profile),
+            "render Velnor Rust profile",
+        );
+        assert!(
+            output.contains("name: Verify preinstalled Rust toolchain"),
+            "{output}"
+        );
+        assert!(output.contains("rustup component list"), "{output}");
+        assert!(
+            output.contains("rustup_host=\"$(rustup run '1.97.1' rustc -vV")
+                && output.contains("awk '$1 == \"host:\" { print $2; exit }'"),
+            "the host must come from the selected toolchain: {output}"
+        );
+        assert!(
+            output.contains("$1 == want || $1 == want \"-\" host")
+                && !output.contains("index($0, want \"-\")"),
+            "component matching must accept exact bare/host names only: {output}"
+        );
+        assert!(output.contains("rustup target list"), "{output}");
+        assert!(!output.contains("rustup show profile"), "{output}");
+        assert!(
+            output.contains("name: Activate pinned Rust shims"),
+            "{output}"
+        );
+        assert!(output.contains("$HOME/.cargo/bin"), "{output}");
+        assert!(output.contains("$GITHUB_PATH"), "{output}");
+        assert!(!output.contains("rustup toolchain install"), "{output}");
+    }
+
+    #[test]
+    fn typed_rust_profile_rejects_path_and_toolchain_overrides() {
+        for key in ["PATH", "RUSTUP_TOOLCHAIN"] {
+            let mut unsafe_profile = profile("unsafe");
+            unsafe_profile.rust_toolchain = Some(crate::s2::RustToolchain {
+                channel: "1.97.1".to_owned(),
+                components: Vec::new(),
+                targets: Vec::new(),
+                profile: None,
+            });
+            unsafe_profile
+                .env
+                .insert(key.to_owned(), "/tmp/override".to_owned());
+            let config = profile_config(vec![unsafe_profile.clone()]);
+            let error = must_fail(
+                render_profile_job(&mut String::new(), &config, &unsafe_profile),
+                "a typed Rust profile must reject conflicting environment",
+            );
+            assert!(error.to_string().contains(key), "{error}");
+            assert!(
+                error.to_string().contains("pinned Rust activation"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_cannot_override_mise_auto_install_policy() {
+        let mut unsafe_profile = profile("unsafe");
+        unsafe_profile
+            .env
+            .insert("MISE_AUTO_INSTALL".to_owned(), "true".to_owned());
+        let config = profile_config(vec![unsafe_profile.clone()]);
+        let error = must_fail(
+            render_profile_job(&mut String::new(), &config, &unsafe_profile),
+            "a profile must not override generated Mise settings",
+        );
+        assert!(error.to_string().contains("MISE_AUTO_INSTALL"), "{error}");
+        assert!(error.to_string().contains("conflicts"), "{error}");
     }
 
     #[test]
