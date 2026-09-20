@@ -744,15 +744,15 @@ mod tests {
             report.marked_uncertain,
             vec![native_permit_holder("crashed")]
         );
-        assert!(swept.is_empty());
+        // Native uncertain with a recorded dead pid is the one startup sweep
+        // that deletes: the live attested row stays.
+        assert_eq!(swept, vec![native_permit_holder("crashed")]);
         let ledger = PermitLedger::open(&path).unwrap();
-        assert_eq!(ledger.occupied().unwrap(), 2);
-        assert_eq!(
-            ledger
-                .holder_state(&native_permit_holder("crashed"))
-                .unwrap(),
-            Some(PermitState::Uncertain)
-        );
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        assert!(ledger
+            .holder_state(&native_permit_holder("crashed"))
+            .unwrap()
+            .is_none());
         live.release();
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
