@@ -807,6 +807,23 @@ mod tests {
             1,
             "{rendered}"
         );
+        assert!(
+            rendered.contains("artifact_id: ${{ steps.candidate_upload.outputs.artifact-id }}"),
+            "producer must expose the fixed uploader artifact id: {rendered}"
+        );
+        assert!(
+            rendered
+                .contains("artifact_digest: ${{ steps.candidate_upload.outputs.artifact-digest }}"),
+            "producer must expose the fixed uploader artifact digest: {rendered}"
+        );
+        assert!(
+            rendered.contains("upload_step_id: candidate_upload"),
+            "producer must expose the fixed uploader step: {rendered}"
+        );
+        assert!(
+            rendered.contains("artifact_binding_method: static-single-uploader-v1"),
+            "producer must expose the binding method: {rendered}"
+        );
         assert!(rendered.contains("permissions: {}"), "{rendered}");
         assert!(
             rendered.contains("name: velnor-workflow-candidate-linux-x64"),
@@ -825,6 +842,10 @@ mod tests {
             "candidate producer boundary",
         );
         let producer = &rendered[producer_start..producer_start + producer_end];
+        assert_candidate_producer_render_contract(producer);
+    }
+
+    fn assert_candidate_producer_render_contract(producer: &str) {
         assert!(!producer.contains("needs:"), "{producer}");
         assert!(
             producer.contains("CANDIDATE_BUILD_IMAGE_DIGEST"),
@@ -861,6 +882,21 @@ mod tests {
         );
         assert!(producer.contains("CARGO_NET_OFFLINE=true"), "{producer}");
         assert!(producer.contains("CARGO_TARGET_DIR=/target"), "{producer}");
+        assert!(
+            producer.contains("Prepare bounded transport scratch"),
+            "{producer}"
+        );
+        assert!(producer.contains("mkfs.ext4 -F"), "{producer}");
+        assert!(
+            producer.contains(
+                "path: ${{ runner.temp }}/velnor-bootstrap-scratch/velnor-workflow-candidate-upload"
+            ),
+            "{producer}"
+        );
+        assert!(
+            producer.contains("artifact_id: ${{ steps.candidate_upload.outputs.artifact-id }}"),
+            "{producer}"
+        );
         assert!(producer.contains("uid=65532; gid=65532"), "{producer}");
         assert!(
             producer.contains("docker_cmd cp \"$cid:/output/.\""),
@@ -2997,6 +3033,11 @@ macro_rules! render_candidate_producer_template {
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions: {{}}
+    outputs:
+      artifact_id: ${{{{ steps.candidate_upload.outputs.artifact-id }}}}
+      artifact_digest: ${{{{ steps.candidate_upload.outputs.artifact-digest }}}}
+      upload_step_id: candidate_upload
+      artifact_binding_method: static-single-uploader-v1
     steps:
       - name: Check out base-owned producer control source
         uses: {checkout}
@@ -3014,6 +3055,11 @@ macro_rules! render_candidate_producer_template {
           path: candidate-source
           fetch-depth: 1
           persist-credentials: false
+      - name: Prepare bounded transport scratch
+        id: transport_scratch
+        working-directory: candidate-control
+        run: |
+{scratch_setup}
       - name: Build candidate generator
         id: candidate_build
         working-directory: candidate-control
@@ -3025,6 +3071,7 @@ macro_rules! render_candidate_producer_template {
           CANDIDATE_BUILD_IMAGE_DIGEST: "{build_image_digest}"
         run: |
           set -euo pipefail
+          export RUNNER_TEMP="${{VELNOR_TRANSPORT_SCRATCH:?bounded transport scratch was not prepared}}"
           if [[ ! "$CANDIDATE_BASE_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
           if [[ ! "$CANDIDATE_HEAD_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
           test "$CANDIDATE_ARTIFACT_NAME" = "{artifact}"
@@ -3127,24 +3174,36 @@ macro_rules! render_candidate_producer_template {
             --arg closure "$candidate_closure" \
             --arg binary_sha256 "$binary_sha256" \
             '{{schema: $schema, profile: $profile, features: $features, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
+          artifact="$RUNNER_TEMP/velnor-workflow-candidate-upload"
+          rm -rf "$artifact"
+          mkdir -m 0700 "$artifact"
+          install -m 0555 "$stage/velnor-workflow" "$artifact/velnor-workflow"
+          install -m 0444 "$stage/candidate-manifest.json" "$artifact/candidate-manifest.json"
       - name: Upload candidate generator product
         id: candidate_upload
         uses: {upload}
         with:
           name: {artifact}
-          path: ${{{{ runner.temp }}}}/velnor-workflow-candidate
+          path: ${{{{ runner.temp }}}}/velnor-bootstrap-scratch/velnor-workflow-candidate-upload
           if-no-files-found: error
           retention-days: 1
       - name: Remove candidate build workspace
         if: always()
         working-directory: candidate-control
-        run: rm -rf -- "${{{{ runner.temp }}}}/velnor-workflow-candidate"
+        run: rm -rf -- "${{{{ runner.temp }}}}/velnor-bootstrap-scratch/velnor-workflow-candidate-upload"
+      - name: Remove bounded transport scratch
+        if: always()
+        working-directory: candidate-control
+        run: |
+{scratch_cleanup}
 "#,
             job = CANDIDATE_PRODUCER_JOB,
             artifact = crate::s2::CANDIDATE_ARTIFACT_NAME,
             build_image_repository = crate::s2::CANDIDATE_BUILD_IMAGE_REPOSITORY,
             build_image_digest = crate::s2::CANDIDATE_BUILD_IMAGE_DIGEST,
             manifest_schema = crate::s2::CANDIDATE_MANIFEST_SCHEMA,
+            scratch_cleanup = crate::s2::candidate_transport_scratch_cleanup_script(),
+            scratch_setup = crate::s2::candidate_transport_scratch_setup_script(),
             checkout = $this.pins.checkout,
             upload = $this.pins.upload_artifact,
         );

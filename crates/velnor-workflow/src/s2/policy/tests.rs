@@ -1589,6 +1589,22 @@ fn assert_candidate_transport_acquisition(job: &str) {
     );
     assert!(job.contains("repository_api"), "{job}");
     assert!(job.contains("artifact_raw_zip_sha256"), "{job}");
+    assert!(job.contains("upload_step_id"), "{job}");
+    assert!(job.contains("artifact_binding_method"), "{job}");
+    assert!(job.contains("run_status"), "{job}");
+    assert!(job.contains("run_conclusion"), "{job}");
+    assert!(job.contains("status"), "{job}");
+    assert!(job.contains("conclusion"), "{job}");
+    assert!(job.contains("object_format"), "{job}");
+    assert!(job.contains("static-single-uploader-v1"), "{job}");
+    assert!(job.contains("--max-filesize 268435456"), "{job}");
+    assert!(job.contains("mkfs.ext4 -F"), "{job}");
+    assert!(
+        job.contains("test \"$(findmnt -rn -T \"$scratch_root\" -o FSTYPE)\" = ext4"),
+        "{job}"
+    );
+    assert!(job.contains("VELNOR_TRANSPORT_SCRATCH"), "{job}");
+    assert!(!job.contains("df -Pk \"$RUNNER_TEMP\""), "{job}");
     assert!(job.contains("fromdateiso8601 > now"), "{job}");
     assert!(
         job.contains("test \"$raw_zip_sha256\" = \"$service_digest\""),

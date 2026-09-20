@@ -328,6 +328,7 @@ impl TransportFixture {
             .env("FIXTURE_BASE_TREE", BASE_TREE_SHA)
             .env("FIXTURE_CLOSURE", CLOSURE)
             .env("RUNNER_TEMP", &self.run_temp)
+            .env("VELNOR_TRANSPORT_SCRATCH", &self.run_temp)
             .env("GITHUB_REPOSITORY", REPOSITORY)
             .env("GITHUB_REPOSITORY_ID", "42")
             .env("GITHUB_API_URL", "https://api.invalid")
@@ -367,6 +368,7 @@ impl TransportFixture {
             .current_dir(self.root.join("candidate-control"))
             .env("PATH", prepend_path(&self.bin_dir))
             .env("RUNNER_TEMP", &self.run_temp)
+            .env("VELNOR_TRANSPORT_SCRATCH", &self.run_temp)
             .env("GITHUB_WORKSPACE", &self.root)
             .env("GITHUB_REPOSITORY", REPOSITORY)
             .env("GITHUB_RUN_ID", RUN_ID.to_string())
@@ -408,6 +410,8 @@ impl TransportFixture {
         let handoff = json!({
             "role": "handoff", "workflow_path": ".github/workflows/ci-pr.yml",
             "workflow_id": WORKFLOW_ID, "run_id": RUN_ID, "run_attempt": RUN_ATTEMPT,
+            "run_status": "completed", "run_conclusion": "success",
+            "status": "completed", "conclusion": "success",
             "job_id": JOB_ID, "job_name": "candidate_producer", "event": "pull_request",
             "target_repository": REPOSITORY, "target_repository_id": 42,
             "head_repository": REPOSITORY, "head_repository_id": 42,
@@ -423,6 +427,7 @@ impl TransportFixture {
             "checkout_action_archive_sha256": "cebb825b471e77ce4dd7f1f37ccdfb3ae5b68e78f6f6d2f6e2521c3cfce27e72",
             "download_action_archive_sha256": "498e5a207a6e181257cfe7bb4d8e273e758ea729ad10f0eff617505006bd1d77",
             "upload_action_archive_sha256": "69baddda1bd8d80441109e489128f1b6944fddd92586ad1855275121beeae897",
+            "upload_step_id": "candidate_upload", "artifact_binding_method": "static-single-uploader-v1", "object_format": "zip",
             "manifest_member": "candidate-manifest.json",
             "manifest_schema_sha256": "a".repeat(64),
             "artifact_name": self.generated.artifact_name, "artifact_id": ARTIFACT_ID,
@@ -460,6 +465,7 @@ impl TransportFixture {
             .env("PATH", prepend_path(&self.bin_dir))
             .env("HANDOFF", &handoff_dir)
             .env("RUNNER_TEMP", &self.run_temp)
+            .env("VELNOR_TRANSPORT_SCRATCH", &self.run_temp)
             .env("RUNNER_OS", "Linux")
             .env("RUNNER_ARCH", "X64")
             .env("GITHUB_REPOSITORY", REPOSITORY)
@@ -629,6 +635,14 @@ fn generated_execute_uses_fixed_uid_allowlist_and_rejects_extra_output() {
     let args = create["args"].as_array().expect("docker args");
     let user_index = args.iter().position(|arg| arg == "--user").expect("--user");
     assert_eq!(args[user_index + 1], json!("65532:65532"));
+    assert!(
+        args.iter().any(|arg| arg == "--pids-limit=64"),
+        "execute must use the approved PID budget: {args:?}"
+    );
+    assert!(
+        args.iter().any(|arg| arg == "--cpus=2"),
+        "execute must use the approved CPU budget: {args:?}"
+    );
     let envs: Vec<_> = args
         .iter()
         .enumerate()
@@ -762,7 +776,8 @@ fn valid_scenario(
             "id": JOB_ID, "name": "candidate_producer", "run_id": RUN_ID,
             "head_sha": HEAD_SHA, "status": "completed", "conclusion": "success",
             "run_attempt": RUN_ATTEMPT, "started_at": "2026-09-20T00:01:00Z",
-            "completed_at": "2026-09-20T00:10:00Z"
+            "completed_at": "2026-09-20T00:10:00Z",
+            "steps": [{"id": "candidate_upload", "name": "Upload candidate generator product", "status": "completed", "conclusion": "success"}]
         }],
         "artifacts": [{
             "id": ARTIFACT_ID, "name": artifact_name, "expired": false,

@@ -134,6 +134,65 @@ pub const VELNOR_WORKFLOW_PINNED_BINARY_ENV: &str = "VELNOR_WORKFLOW_PINNED_BINA
 pub(crate) const CANDIDATE_ARTIFACT_NAME: &str = "velnor-workflow-candidate-linux-x64";
 pub(crate) const CANDIDATE_HANDOFF_ARTIFACT_NAME: &str = "velnor-workflow-candidate-handoff";
 pub(crate) const CANDIDATE_RESULT_ARTIFACT_NAME: &str = "velnor-workflow-candidate-result";
+/// Every artifact transport is checked against the same bounded envelope
+/// before a byte is downloaded or extracted.  These are transport limits, not
+/// claims about the hosted runner's free disk.
+pub(crate) const CANDIDATE_TRANSPORT_MAX_COMPRESSED_BYTES: u64 = 268_435_456;
+pub(crate) const CANDIDATE_TRANSPORT_MAX_MEMBERS: u64 = 4_096;
+pub(crate) const CANDIDATE_TRANSPORT_MAX_UNCOMPRESSED_BYTES: u64 = 536_870_912;
+pub(crate) const CANDIDATE_RESULT_MAX_UNCOMPRESSED_BYTES: u64 = 67_108_864;
+pub(crate) const CANDIDATE_HOST_SCRATCH_BYTES: u64 = 8_589_934_592;
+pub(crate) const CANDIDATE_UPLOAD_STEP_ID: &str = "candidate_upload";
+pub(crate) const CANDIDATE_ARTIFACT_BINDING_METHOD: &str = "static-single-uploader-v1";
+pub(crate) const CANDIDATE_TRANSPORT_OBJECT_FORMAT: &str = "zip";
+
+/// Establish a real, fixed-size host filesystem before any artifact transport
+/// touches runner storage.  A plain directory plus `df` is not a quota: the
+/// loopback ext4 mount makes the bound explicit, and every capability failure
+/// is fatal.  The setup step exports the mount root for later shell steps.
+pub(crate) fn candidate_transport_scratch_setup_script() -> String {
+    r#"          set -euo pipefail
+          test "${RUNNER_OS:-}" = Linux
+          host_runner_temp="$RUNNER_TEMP"
+          scratch_root="$host_runner_temp/velnor-bootstrap-scratch"
+          scratch_image="$host_runner_temp/velnor-bootstrap-scratch.ext4"
+          if findmnt -rn -T "$scratch_root" >/dev/null 2>&1; then sudo umount "$scratch_root"; fi
+          rm -rf "$scratch_root" "$scratch_image"
+          command -v fallocate >/dev/null
+          command -v mkfs.ext4 >/dev/null
+          command -v findmnt >/dev/null
+          command -v mount >/dev/null
+          command -v sudo >/dev/null
+          mkdir -m 0700 "$scratch_root"
+          fallocate -l {scratch_bytes} "$scratch_image"
+          mkfs.ext4 -F "$scratch_image" >/dev/null
+          sudo mount -o loop,nodev,nosuid,noexec "$scratch_image" "$scratch_root"
+          test "$(findmnt -rn -T "$scratch_root" -o FSTYPE)" = ext4
+          scratch_capacity="$(df -P -B1 "$scratch_root" | awk 'NR == 2 {print $2}')"
+          case "$scratch_capacity" in ''|*[!0-9]*) exit 1 ;; esac
+          test "$scratch_capacity" -ge {scratch_bytes}
+          printf '%s\n' "$scratch_root" > "$host_runner_temp/velnor-bootstrap-scratch.path"
+          printf '%s\n' "$scratch_image" > "$host_runner_temp/velnor-bootstrap-scratch.image"
+          echo "VELNOR_TRANSPORT_SCRATCH=$scratch_root" >> "$GITHUB_ENV"
+"#
+    .replace("{scratch_bytes}", &CANDIDATE_HOST_SCRATCH_BYTES.to_string())
+}
+
+/// Unmount the fixed host filesystem after the last artifact action.  Missing
+/// mount state is an error unless both marker files are already gone, so a
+/// failed setup cannot silently degrade into an unbounded runner directory.
+pub(crate) fn candidate_transport_scratch_cleanup_script() -> &'static str {
+    r#"          set -euo pipefail
+          host_runner_temp="$RUNNER_TEMP"
+          scratch_root="$(cat "$host_runner_temp/velnor-bootstrap-scratch.path")"
+          scratch_image="$(cat "$host_runner_temp/velnor-bootstrap-scratch.image")"
+          test "$scratch_root" = "$host_runner_temp/velnor-bootstrap-scratch"
+          test "$scratch_image" = "$host_runner_temp/velnor-bootstrap-scratch.ext4"
+          test "$(findmnt -rn -T "$scratch_root" -o FSTYPE)" = ext4
+          sudo umount "$scratch_root"
+          rm -rf "$scratch_root" "$scratch_image" "$host_runner_temp/velnor-bootstrap-scratch.path" "$host_runner_temp/velnor-bootstrap-scratch.image"
+"#
+}
 pub(crate) const CANDIDATE_MANIFEST_SCHEMA: &str = "velnor.bootstrap-producer-manifest.v1";
 /// The producer manifest schema is embedded in the base-owned policy
 /// renderer.  The policy job writes this exact text before it accepts a
@@ -5121,6 +5180,7 @@ macro_rules! policy_candidate_step_template {
           BASE_REVISION: {revision}
         run: |
           set -euo pipefail
+          export RUNNER_TEMP="${{VELNOR_TRANSPORT_SCRATCH:?bounded transport scratch was not prepared}}"
           test "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY" || {{ echo "::error::fork producer artifacts are not eligible" >&2; exit 1; }}
           test "$HEAD_REPOSITORY_ID" = "$TARGET_REPOSITORY_ID" || {{ echo "::error::head repository id is not the target repository id" >&2; exit 1; }}
           if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
@@ -5133,7 +5193,7 @@ macro_rules! policy_candidate_step_template {
             local label="$4"
             if [[ ! "$revision" =~ ^[0-9a-f]{{40}}$ || ! "$expected" =~ ^[0-9a-f]{{64}}$ ]]; then exit 1; fi
             local archive="$RUNNER_TEMP/action-$label.tar.gz"
-            curl --fail --location --silent --show-error \
+            curl --fail --location --silent --show-error --max-filesize {max_compressed} \
               --header "Accept: application/vnd.github+json" \
               --header "Authorization: Bearer $GH_TOKEN" \
               --header "X-GitHub-Api-Version: 2022-11-28" \
@@ -5195,7 +5255,7 @@ macro_rules! policy_candidate_step_template {
           test "$(grep -Fxc "          path: candidate-source" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "          fetch-depth: 1" <<<"$candidate_block")" = 2
           test "$(grep -Fxc "          persist-credentials: false" <<<"$candidate_block")" = 2
-          test "$(grep -Fxc "        working-directory: candidate-control" <<<"$candidate_block")" = 2
+          test "$(grep -Fxc "        working-directory: candidate-control" <<<"$candidate_block")" = 4
           test "$(grep -Fxc "        uses: {upload}" <<<"$candidate_block")" = 1
           test "$(grep -Ec "^[[:space:]]+uses: " <<<"$candidate_block")" = 3
           test "$(grep -Ec "^[[:space:]]+uses: \.\/" <<<"$candidate_block")" = 0
@@ -5212,8 +5272,12 @@ macro_rules! policy_candidate_step_template {
           test "$(grep -Fxc "          name: {artifact}" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "        id: candidate_upload" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "        uses: {upload}" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "      artifact_id: \${{{{ steps.candidate_upload.outputs.artifact-id }}}}" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "      artifact_digest: \${{{{ steps.candidate_upload.outputs.artifact-digest }}}}" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "      upload_step_id: {upload_step_id}" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "      artifact_binding_method: {artifact_binding_method}" <<<"$candidate_block")" = 1
           test "$(grep -Ec '^[[:space:]]+uses: .*upload-artifact@' <<<"$candidate_block")" = 1
-          test "$(grep -Fxc "          path: ${{{{ runner.temp }}}}/velnor-workflow-candidate" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "          path: ${{{{ runner.temp }}}}/velnor-bootstrap-scratch/velnor-workflow-candidate-upload" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "          name: {artifact}" "$contract")" = 1
 {namespace_scan}
           read -r candidate_workflow_contract_sha256 candidate_workflow_binding_sha256 < "$RUNNER_TEMP/candidate-workflow-contract.txt"
@@ -5232,6 +5296,8 @@ macro_rules! policy_candidate_step_template {
           run="$(jq -c '.[0]' <<<"$runs")"
           run_id="$(jq -er '.id | numbers' <<<"$run")"
           run_attempt="$(jq -er '.run_attempt | numbers' <<<"$run")"
+          run_status="$(jq -er '.status | strings' <<<"$run")"
+          run_conclusion="$(jq -er '.conclusion | strings' <<<"$run")"
           run_created_at="$(jq -er '.created_at | strings' <<<"$run")"
           run_created_epoch="$(jq -er '.created_at | fromdateiso8601' <<<"$run")"
           jq -e --argjson run_created "$run_created_epoch" '.created_at | fromdateiso8601 == $run_created' <<<"$run" >/dev/null
@@ -5248,11 +5314,13 @@ macro_rules! policy_candidate_step_template {
           job_started_epoch="$(jq -er '.started_at | fromdateiso8601' <<<"$job")"
           job_completed_epoch="$(jq -er '.completed_at | fromdateiso8601' <<<"$job")"
           test "$job_completed_epoch" -ge "$job_started_epoch"
+          upload_steps="$(jq -c '[.steps[]? | select(.id == "candidate_upload" and .name == "Upload candidate generator product" and .status == "completed" and .conclusion == "success")]' <<<"$job")"
+          test "$(jq -r 'length' <<<"$upload_steps")" = 1
 
           artifacts="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
             | jq -c --arg name "{artifact}" --argjson run_id "$run_id" --argjson run_created "$run_created_epoch" \
                 --argjson job_started "$job_started_epoch" --argjson job_completed "$job_completed_epoch" \
-                '[.[][] | select(.name == $name and .expired == false and (.workflow_run.id | tonumber) == $run_id and (.size_in_bytes | numbers) <= 268435456 and (.created_at | strings | fromdateiso8601) >= $run_created and (.created_at | strings | fromdateiso8601) >= $job_started and (.updated_at | strings | fromdateiso8601) <= $job_completed and (.updated_at | strings | fromdateiso8601) >= (.created_at | strings | fromdateiso8601))]')"
+                '[.[][] | select(.name == $name and .expired == false and (.workflow_run.id | tonumber) == $run_id and (.size_in_bytes | numbers) <= {max_compressed} and (.created_at | strings | fromdateiso8601) >= $run_created and (.created_at | strings | fromdateiso8601) >= $job_started and (.updated_at | strings | fromdateiso8601) <= $job_completed and (.updated_at | strings | fromdateiso8601) >= (.created_at | strings | fromdateiso8601))]')"
           test "$(jq -r 'length' <<<"$artifacts")" = 1
           artifact="$(jq -c '.[0]' <<<"$artifacts")"
           artifact_id="$(jq -er '.id | numbers' <<<"$artifact")"
@@ -5265,15 +5333,15 @@ macro_rules! policy_candidate_step_template {
           jq -e --argjson run_created "$run_created_epoch" '.expired == false and (.expires_at | strings | fromdateiso8601 > now) and (.created_at | strings | fromdateiso8601) >= $run_created and (.updated_at | strings | fromdateiso8601) >= (.created_at | strings | fromdateiso8601)' <<<"$artifact" >/dev/null
 
           archive="$RUNNER_TEMP/candidate.zip"
-          available_kib="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 {{print $4}}')"
-          test "$available_kib" -ge 1048576
-          curl --fail --location --silent --show-error \
+          curl --fail --location --silent --show-error --max-filesize {max_compressed} \
             --header "Accept: application/vnd.github+json" \
             --header "Authorization: Bearer $GH_TOKEN" \
             --header "X-GitHub-Api-Version: 2022-11-28" \
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" \
             --output "$archive"
           raw_zip_sha256="$(sha256sum "$archive" | awk '{{print $1}}')"
+          archive_size="$(stat -c '%s' "$archive")"
+          test "$archive_size" -le {max_compressed}
           service_digest="$(printf '%s' "$artifact_digest" | sed 's/^sha256://')"
           test "$raw_zip_sha256" != ''
           test "$service_digest" != ''
@@ -5289,8 +5357,12 @@ macro_rules! policy_candidate_step_template {
           archive = Path(sys.argv[1])
           destination = Path(sys.argv[2])
           seen = set()
+          total_bytes = 0
           with zipfile.ZipFile(archive) as payload:
-              for info in payload.infolist():
+              members = payload.infolist()
+              if len(members) > {max_members}:
+                  raise SystemExit("candidate archive has too many members")
+              for info in members:
                   name = info.filename
                   parts = name.split("/")
                   if name.startswith("/") or "\\" in name or any(part in ("", ".", "..") for part in parts):
@@ -5301,9 +5373,12 @@ macro_rules! policy_candidate_step_template {
                   if name in seen:
                       raise SystemExit("duplicate archive member")
                   seen.add(name)
+                  total_bytes += info.file_size
+                  if total_bytes > {max_uncompressed}:
+                      raise SystemExit("candidate archive is too large")
               if sorted(seen) != ["candidate-manifest.json", "velnor-workflow"]:
                   raise SystemExit("candidate artifact surface is not exact")
-              for info in payload.infolist():
+              for info in members:
                   payload.extract(info, destination)
           PY
           manifest="$candidate/candidate-manifest.json"
@@ -5330,7 +5405,7 @@ macro_rules! policy_candidate_step_template {
           GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$HEAD_SHA" > "$handoff/source.tar"
           source_archive_sha256="$(sha256sum "$handoff/source.tar" | awk '{{print $1}}')"
           source_size="$(stat -c '%s' "$handoff/source.tar")"
-          test "$source_size" -le 536870912
+          test "$source_size" -le {max_uncompressed}
           closure_input="$RUNNER_TEMP/candidate-closure"
           GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" ls-tree -r "$HEAD_SHA" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo \
             | LC_ALL=C sort > "$closure_input"
@@ -5344,6 +5419,10 @@ macro_rules! policy_candidate_step_template {
             --argjson workflow_id "$workflow_id" \
             --argjson run_id "$run_id" \
             --argjson run_attempt "$run_attempt" \
+            --arg run_status "$run_status" \
+            --arg run_conclusion "$run_conclusion" \
+            --arg status "$run_status" \
+            --arg conclusion "$run_conclusion" \
             --arg producer_run_created_at "$run_created_at" \
             --argjson job_id "$job_id" \
             --arg job_name "$job_name" \
@@ -5370,6 +5449,9 @@ macro_rules! policy_candidate_step_template {
             --arg artifact_created_at "$artifact_created_at" \
             --arg artifact_updated_at "$artifact_updated_at" \
             --arg artifact_expires_at "$expires_at" \
+            --arg upload_step_id "{upload_step_id}" \
+            --arg artifact_binding_method "{artifact_binding_method}" \
+            --arg object_format "{object_format}" \
             --arg profile debug \
             --arg platform linux-amd64 \
             --argjson features '[]' \
@@ -5384,17 +5466,20 @@ macro_rules! policy_candidate_step_template {
             --arg candidate_workflow_contract_sha256 "$candidate_workflow_contract_sha256" \
             --arg candidate_workflow_binding_sha256 "$candidate_workflow_binding_sha256" \
             --arg contract_sha256 "$contract_sha256" \
-            '{{role: $role, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, producer_run_created_at: $producer_run_created_at, job_id: $job_id, job_name: $job_name, job_started_at: $job_started_at, job_completed_at: $job_completed_at, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, checkout_action_archive_sha256: $checkout_action_archive_sha256, download_action_archive_sha256: $download_action_archive_sha256, upload_action_archive_sha256: $upload_action_archive_sha256, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_created_at: $artifact_created_at, artifact_updated_at: $artifact_updated_at, artifact_expires_at: $artifact_expires_at, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, candidate_workflow_contract_sha256: $candidate_workflow_contract_sha256, candidate_workflow_binding_sha256: $candidate_workflow_binding_sha256, contract_sha256: $contract_sha256}}' > "$handoff/handoff.json"
+            '{{role: $role, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, run_status: $run_status, run_conclusion: $run_conclusion, status: $status, conclusion: $conclusion, producer_run_created_at: $producer_run_created_at, job_id: $job_id, job_name: $job_name, job_started_at: $job_started_at, job_completed_at: $job_completed_at, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, checkout_action_archive_sha256: $checkout_action_archive_sha256, download_action_archive_sha256: $download_action_archive_sha256, upload_action_archive_sha256: $upload_action_archive_sha256, upload_step_id: $upload_step_id, artifact_binding_method: $artifact_binding_method, object_format: $object_format, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_created_at: $artifact_created_at, artifact_updated_at: $artifact_updated_at, artifact_expires_at: $artifact_expires_at, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, candidate_workflow_contract_sha256: $candidate_workflow_contract_sha256, candidate_workflow_binding_sha256: $candidate_workflow_binding_sha256, contract_sha256: $contract_sha256}}' > "$handoff/handoff.json"
       - name: Upload candidate handoff
         id: handoff_upload
         uses: {upload}
         with:
           name: {handoff}
-          path: ${{{{ runner.temp }}}}/candidate-handoff
+          path: ${{{{ runner.temp }}}}/velnor-bootstrap-scratch/candidate-handoff
           if-no-files-found: error
           retention-days: 1
 "#,
         artifact = crate::s2::CANDIDATE_ARTIFACT_NAME,
+        max_compressed = crate::s2::CANDIDATE_TRANSPORT_MAX_COMPRESSED_BYTES,
+        max_members = crate::s2::CANDIDATE_TRANSPORT_MAX_MEMBERS,
+        max_uncompressed = crate::s2::CANDIDATE_TRANSPORT_MAX_UNCOMPRESSED_BYTES,
         revision = $revision,
         checkout = ActionPin::Checkout.reference(),
         checkout_action_archive_sha256 = crate::s2::CANDIDATE_CHECKOUT_ACTION_ARCHIVE_SHA256,
@@ -5408,6 +5493,9 @@ macro_rules! policy_candidate_step_template {
         namespace_scan = candidate_namespace_scan_script(),
         upload_action_archive_sha256 = crate::s2::CANDIDATE_UPLOAD_ACTION_ARCHIVE_SHA256,
         upload_action_revision = crate::s2::CANDIDATE_UPLOAD_ACTION_REVISION,
+        upload_step_id = crate::s2::CANDIDATE_UPLOAD_STEP_ID,
+        artifact_binding_method = crate::s2::CANDIDATE_ARTIFACT_BINDING_METHOD,
+        object_format = crate::s2::CANDIDATE_TRANSPORT_OBJECT_FORMAT,
         upload = ActionPin::UploadArtifact.reference(),
         )
     };
@@ -5425,6 +5513,14 @@ fn policy_candidate_step(revision: &str) -> String {
 macro_rules! policy_candidate_role_jobs_template {
     ($runner:expr, $revision:expr, $default_branch:expr) => {{
         let acquire = policy_candidate_step($revision);
+        let scratch_setup_step = format!(
+            "      - name: Prepare bounded transport scratch\n        id: transport_scratch\n        run: |\n{}",
+            crate::s2::candidate_transport_scratch_setup_script()
+        );
+        let scratch_cleanup_step = format!(
+            "      - name: Remove bounded transport scratch\n        if: always()\n        run: |\n{}",
+            crate::s2::candidate_transport_scratch_cleanup_script()
+        );
         format!(
         r#"  policy_acquire:
     name: policy_acquire
@@ -5444,6 +5540,7 @@ macro_rules! policy_candidate_role_jobs_template {
           path: policy-checkout
           fetch-depth: 0
           persist-credentials: false
+{scratch_setup_step}
 {acquire}
   candidate_execute:
     name: candidate_execute
@@ -5456,21 +5553,23 @@ macro_rules! policy_candidate_role_jobs_template {
       result_id: ${{{{ steps.result_upload.outputs.artifact-id }}}}
       result_digest: ${{{{ steps.result_upload.outputs.artifact-digest }}}}
     steps:
+{scratch_setup_step}
       - name: Download trusted candidate handoff
         uses: {download}
         with:
           artifact-ids: ${{{{ needs.policy_acquire.outputs.handoff_id }}}}
-          path: ${{{{ runner.temp }}}}/candidate-handoff
+          path: ${{{{ runner.temp }}}}/velnor-bootstrap-scratch/candidate-handoff
       - name: Execute candidate in pinned sandbox
         id: candidate_execute
         env:
-          HANDOFF: ${{{{ runner.temp }}}}/candidate-handoff/{handoff}
+          HANDOFF: ${{{{ runner.temp }}}}/velnor-bootstrap-scratch/candidate-handoff/{handoff}
           SANDBOX_IMAGE_REPOSITORY: {image_repository}
           SANDBOX_IMAGE_DIGEST: "{image_digest}"
           DEFAULT_BRANCH: {default_branch}
           PR_NUMBER: ${{{{ github.event.pull_request.number }}}}
         run: |
           set -euo pipefail
+          export RUNNER_TEMP="${{VELNOR_TRANSPORT_SCRATCH:?bounded transport scratch was not prepared}}"
           test "${{RUNNER_OS:-}}" = Linux
           test "${{RUNNER_ARCH:-}}" = X64
           test "$(uname -m)" = x86_64
@@ -5494,6 +5593,8 @@ macro_rules! policy_candidate_role_jobs_template {
             (.workflow_path == ".github/workflows/ci-pr.yml") and
             (.workflow_id | numbers) and (.run_id | numbers) and
             (.run_attempt | numbers and . >= 1) and
+            (.run_status == "completed") and (.run_conclusion == "success") and
+            (.status == "completed") and (.conclusion == "success") and
             (.producer_run_created_at | strings | fromdateiso8601) and
             (.job_id | numbers) and (.job_name == "candidate_producer") and
             (.job_started_at | strings | fromdateiso8601) and (.job_completed_at | strings | fromdateiso8601) and
@@ -5514,6 +5615,9 @@ macro_rules! policy_candidate_role_jobs_template {
             (.checkout_action_archive_sha256 == "{checkout_action_archive_sha256}") and
             (.download_action_archive_sha256 == "{download_action_archive_sha256}") and
             (.upload_action_archive_sha256 == "{upload_action_archive_sha256}") and
+            (.upload_step_id == "{upload_step_id}") and
+            (.artifact_binding_method == "{artifact_binding_method}") and
+            (.object_format == "{object_format}") and
             (.manifest_member == "candidate-manifest.json") and (.manifest_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
             (.manifest_schema_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
             (.artifact_name == "{artifact}") and (.artifact_id | numbers) and (.artifact_size | numbers | . <= 268435456) and
@@ -5548,6 +5652,8 @@ macro_rules! policy_candidate_role_jobs_template {
           test "$(sha256sum "$HANDOFF/candidate-manifest.json" | awk '{{print $1}}')" = "$(jq -er .manifest_sha256 "$HANDOFF/handoff.json")"
           source_archive_sha256="$(sha256sum "$HANDOFF/source.tar" | awk '{{print $1}}')"
           test "$source_archive_sha256" = "$(jq -er .source_archive_sha256 "$HANDOFF/handoff.json")"
+          source_archive_size="$(stat -c '%s' "$HANDOFF/source.tar")"
+          test "$source_archive_size" -le {max_uncompressed}
           test -n "$SANDBOX_IMAGE_DIGEST"
           if [[ ! "$SANDBOX_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{{64}}$ ]]; then exit 1; fi
           image="$SANDBOX_IMAGE_REPOSITORY@$SANDBOX_IMAGE_DIGEST"
@@ -5578,7 +5684,7 @@ macro_rules! policy_candidate_role_jobs_template {
               members = payload.getmembers()
               names = set()
               total_bytes = 0
-              if len(members) > 200000:
+              if len(members) > {max_members}:
                   raise SystemExit("source archive has too many members")
               for member in members:
                   name = member.name
@@ -5593,7 +5699,7 @@ macro_rules! policy_candidate_role_jobs_template {
                       raise SystemExit("unsafe or duplicate source archive member")
                   names.add(name)
                   total_bytes += member.size
-                  if total_bytes > 536870912:
+                  if total_bytes > {max_uncompressed}:
                       raise SystemExit("source archive is too large")
               payload.extractall(destination)
           PY
@@ -5607,7 +5713,7 @@ macro_rules! policy_candidate_role_jobs_template {
           for value in "$head_sha" "$head_tree_sha" "$head_repository" "$source_closure"; do
             case "$value" in *$'\\n'*|*$'\\r'*|*' '*|*'"'*) exit 1 ;; esac
           done
-          cid="$(docker_cmd create --name "velnor-sandbox-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --platform linux/amd64 --pull=never --network=none --read-only --pid=private --cap-drop=ALL --security-opt no-new-privileges=true --pids-limit=128 --memory=512m --memory-swap=512m --cpus=1 --ulimit fsize=67108864:67108864 --ulimit nofile=1024:1024 --ulimit core=0 --shm-size=16m --stop-timeout=5 --log-driver=none --user "$uid:$gid" --workdir /input --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --tmpfs /output:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --mount "type=bind,src=$input,dst=/input,readonly,bind-propagation=rprivate" --mount "type=bind,src=$candidate,dst=/candidate,readonly,bind-propagation=rprivate" --env "SOURCE_HEAD_SHA=$head_sha" --env "SOURCE_TREE_SHA=$head_tree_sha" --env "SOURCE_REPOSITORY=$head_repository" --env "SOURCE_CLOSURE=$source_closure" --env HOME=/tmp/home --env PATH=/usr/bin:/bin --entrypoint /candidate/velnor-workflow "$platform_image" /input --output /output --plain --force --default-branch "$DEFAULT_BRANCH")"
+          cid="$(docker_cmd create --name "velnor-sandbox-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --platform linux/amd64 --pull=never --network=none --read-only --pid=private --cap-drop=ALL --security-opt no-new-privileges=true --pids-limit=64 --memory=512m --memory-swap=512m --cpus=2 --ulimit fsize=67108864:67108864 --ulimit nofile=1024:1024 --ulimit core=0 --shm-size=16m --stop-timeout=5 --log-driver=none --user "$uid:$gid" --workdir /input --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --tmpfs /output:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --mount "type=bind,src=$input,dst=/input,readonly,bind-propagation=rprivate" --mount "type=bind,src=$candidate,dst=/candidate,readonly,bind-propagation=rprivate" --env "SOURCE_HEAD_SHA=$head_sha" --env "SOURCE_TREE_SHA=$head_tree_sha" --env "SOURCE_REPOSITORY=$head_repository" --env "SOURCE_CLOSURE=$source_closure" --env HOME=/tmp/home --env PATH=/usr/bin:/bin --entrypoint /candidate/velnor-workflow "$platform_image" /input --output /output --plain --force --default-branch "$DEFAULT_BRANCH")"
           cleanup() {{
             status=$?
             if [[ -n "${{cid:-}}" ]]; then docker_cmd rm -f "$cid" >/dev/null 2>&1 || status=1; fi
@@ -5629,10 +5735,10 @@ macro_rules! policy_candidate_role_jobs_template {
             ((.[0].HostConfig.UsernsMode // "") != "host") and
             ((.[0].HostConfig.SecurityOpt // []) | index("no-new-privileges=true") != null) and
             ((.[0].HostConfig.SecurityOpt // []) | all(. != "seccomp=unconfined")) and
-            .[0].HostConfig.PidsLimit == 128 and
+            .[0].HostConfig.PidsLimit == 64 and
             .[0].HostConfig.Memory == 536870912 and
             .[0].HostConfig.MemorySwap == 536870912 and
-            .[0].HostConfig.NanoCpus == 1000000000 and
+            .[0].HostConfig.NanoCpus == 2000000000 and
             .[0].HostConfig.LogConfig.Type == "none" and
             .[0].Config.User == $user and
             .[0].Config.WorkingDir == "/input" and
@@ -5682,6 +5788,10 @@ macro_rules! policy_candidate_role_jobs_template {
             --argjson workflow_id "$(jq -er .workflow_id "$handoff_json")" \
             --argjson run_id "$(jq -er .run_id "$handoff_json")" \
             --argjson run_attempt "$(jq -er .run_attempt "$handoff_json")" \
+            --arg run_status "$(jq -er .run_status "$handoff_json")" \
+            --arg run_conclusion "$(jq -er .run_conclusion "$handoff_json")" \
+            --arg status "$(jq -er .status "$handoff_json")" \
+            --arg conclusion "$(jq -er .conclusion "$handoff_json")" \
             --arg producer_run_created_at "$(jq -er .producer_run_created_at "$handoff_json")" \
             --argjson job_id "$(jq -er .job_id "$handoff_json")" \
             --arg job_name "$(jq -er .job_name "$handoff_json")" \
@@ -5721,21 +5831,25 @@ macro_rules! policy_candidate_role_jobs_template {
             --arg artifact_created_at "$(jq -er .artifact_created_at "$handoff_json")" \
             --arg artifact_updated_at "$(jq -er .artifact_updated_at "$handoff_json")" \
             --arg artifact_expires_at "$(jq -er .artifact_expires_at "$handoff_json")" \
+            --arg upload_step_id "$(jq -er .upload_step_id "$handoff_json")" \
+            --arg artifact_binding_method "$(jq -er .artifact_binding_method "$handoff_json")" \
+            --arg object_format "$(jq -er .object_format "$handoff_json")" \
             --arg execution_run_id "$GITHUB_RUN_ID" \
             --arg execution_run_attempt "$GITHUB_RUN_ATTEMPT" \
             --arg execution_job "$GITHUB_JOB" \
             --arg sandbox_index_digest "$SANDBOX_IMAGE_DIGEST" \
             --arg sandbox_platform_digest "$platform_digest" \
             --arg sandbox_config_digest "$config_digest" \
-            '{{role: $role, render_sha256: $render_sha256, handoff_id: $handoff_id, handoff_digest: $handoff_digest, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, producer_run_created_at: $producer_run_created_at, job_id: $job_id, job_name: $job_name, job_started_at: $job_started_at, job_completed_at: $job_completed_at, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, checkout_action_archive_sha256: $checkout_action_archive_sha256, download_action_archive_sha256: $download_action_archive_sha256, upload_action_archive_sha256: $upload_action_archive_sha256, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, candidate_workflow_contract_sha256: $candidate_workflow_contract_sha256, candidate_workflow_binding_sha256: $candidate_workflow_binding_sha256, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_created_at: $artifact_created_at, artifact_updated_at: $artifact_updated_at, artifact_expires_at: $artifact_expires_at, execution_run_id: $execution_run_id, execution_run_attempt: $execution_run_attempt, execution_job: $execution_job, sandbox_index_digest: $sandbox_index_digest, sandbox_platform_digest: $sandbox_platform_digest, sandbox_config_digest: $sandbox_config_digest}}' > "$result/result.json"
+            '{{role: $role, render_sha256: $render_sha256, handoff_id: $handoff_id, handoff_digest: $handoff_digest, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, run_status: $run_status, run_conclusion: $run_conclusion, status: $status, conclusion: $conclusion, producer_run_created_at: $producer_run_created_at, job_id: $job_id, job_name: $job_name, job_started_at: $job_started_at, job_completed_at: $job_completed_at, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, checkout_action_archive_sha256: $checkout_action_archive_sha256, download_action_archive_sha256: $download_action_archive_sha256, upload_action_archive_sha256: $upload_action_archive_sha256, upload_step_id: $upload_step_id, artifact_binding_method: $artifact_binding_method, object_format: $object_format, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, candidate_workflow_contract_sha256: $candidate_workflow_contract_sha256, candidate_workflow_binding_sha256: $candidate_workflow_binding_sha256, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_created_at: $artifact_created_at, artifact_updated_at: $artifact_updated_at, artifact_expires_at: $artifact_expires_at, execution_run_id: $execution_run_id, execution_run_attempt: $execution_run_attempt, execution_job: $execution_job, sandbox_index_digest: $sandbox_index_digest, sandbox_platform_digest: $sandbox_platform_digest, sandbox_config_digest: $sandbox_config_digest}}' > "$result/result.json"
       - name: Upload candidate verification result
         id: result_upload
         uses: {upload}
         with:
           name: {result}
-          path: ${{{{ runner.temp }}}}/candidate-result
+          path: ${{{{ runner.temp }}}}/velnor-bootstrap-scratch/candidate-result
           if-no-files-found: error
           retention-days: 1
+{scratch_cleanup_step}
 "#,
         acquire = acquire,
         artifact = CANDIDATE_ARTIFACT_NAME,
@@ -5748,9 +5862,16 @@ macro_rules! policy_candidate_role_jobs_template {
         handoff = CANDIDATE_HANDOFF_ARTIFACT_NAME,
         image_digest = CANDIDATE_SANDBOX_IMAGE_DIGEST,
         image_repository = CANDIDATE_SANDBOX_IMAGE_REPOSITORY,
+        max_members = CANDIDATE_TRANSPORT_MAX_MEMBERS,
+        max_uncompressed = CANDIDATE_TRANSPORT_MAX_UNCOMPRESSED_BYTES,
         manifest_schema = crate::s2::CANDIDATE_MANIFEST_SCHEMA,
         result = CANDIDATE_RESULT_ARTIFACT_NAME,
         runner = $runner,
+        scratch_setup_step = scratch_setup_step,
+        scratch_cleanup_step = scratch_cleanup_step,
+        upload_step_id = CANDIDATE_UPLOAD_STEP_ID,
+        artifact_binding_method = CANDIDATE_ARTIFACT_BINDING_METHOD,
+        object_format = CANDIDATE_TRANSPORT_OBJECT_FORMAT,
         upload = ActionPin::UploadArtifact.reference(),
         )
     }};
@@ -5817,6 +5938,7 @@ macro_rules! policy_candidate_result_verification_template {
           TARGET_REPOSITORY_ID: ${{{{ github.repository_id }}}}
         run: |
           set -euo pipefail
+          export RUNNER_TEMP="${{VELNOR_TRANSPORT_SCRATCH:?bounded transport scratch was not prepared}}"
           case "$RESULT_ID" in ''|*[!0-9]*) exit 1 ;; esac
           if [[ ! "$RESULT_DIGEST" =~ ^sha256:[0-9a-f]{{64}}$ ]]; then exit 1; fi
           case "$PR_NUMBER" in ''|*[!0-9]*) exit 1 ;; esac
@@ -5831,7 +5953,7 @@ macro_rules! policy_candidate_result_verification_template {
             local label="$4"
             if [[ ! "$revision" =~ ^[0-9a-f]{{40}}$ || ! "$expected" =~ ^[0-9a-f]{{64}}$ ]]; then exit 1; fi
             local archive="$RUNNER_TEMP/verify-action-$label.tar.gz"
-            curl --fail --location --silent --show-error \
+            curl --fail --location --silent --show-error --max-filesize {max_compressed} \
               --header "Accept: application/vnd.github+json" \
               --header "Authorization: Bearer $GH_TOKEN" \
               --header "X-GitHub-Api-Version: 2022-11-28" \
@@ -5843,18 +5965,20 @@ macro_rules! policy_candidate_result_verification_template {
           verify_action_archive actions/download-artifact "{download_action_revision}" "{download_action_archive_sha256}" download
           result_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RESULT_ID")"
           jq -e --argjson id "$RESULT_ID" --arg digest "$RESULT_DIGEST" --arg name "{result}" --argjson run_id "$GITHUB_RUN_ID" --argjson run_created "$policy_run_created_epoch" '
-            .id == $id and .name == $name and .expired == false and (.expires_at | strings | fromdateiso8601 > now) and .digest == $digest and
+            .id == $id and .name == $name and .expired == false and (.size_in_bytes | numbers | . <= {max_compressed}) and (.expires_at | strings | fromdateiso8601 > now) and .digest == $digest and
             ((.workflow_run.id | tonumber) == $run_id) and (.created_at | strings | fromdateiso8601) >= $run_created and
             (.updated_at | strings | fromdateiso8601) >= (.created_at | strings | fromdateiso8601)
           ' <<<"$result_api" >/dev/null
           result_archive="$RUNNER_TEMP/candidate-result.zip"
-          curl --fail --location --silent --show-error \
+          curl --fail --location --silent --show-error --max-filesize {max_compressed} \
             --header "Accept: application/vnd.github+json" \
             --header "Authorization: Bearer $GH_TOKEN" \
             --header "X-GitHub-Api-Version: 2022-11-28" \
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$RESULT_ID/zip" \
             --output "$result_archive"
           result_raw_zip_sha256="$(sha256sum "$result_archive" | awk '{{print $1}}')"
+          result_archive_size="$(stat -c '%s' "$result_archive")"
+          test "$result_archive_size" -le {max_compressed}
           if [[ ! "$result_raw_zip_sha256" =~ ^[0-9a-f]{{64}}$ ]]; then exit 1; fi
           result_service_digest="${{RESULT_DIGEST#sha256:}}"
           test "$result_raw_zip_sha256" = "$result_service_digest"
@@ -5866,7 +5990,7 @@ macro_rules! policy_candidate_result_verification_template {
           archive, destination = Path(sys.argv[1]), Path(sys.argv[2])
           with zipfile.ZipFile(archive) as payload:
               members = payload.infolist()
-              if len(members) > 4096:
+              if len(members) > {max_members}:
                   raise SystemExit("result archive has too many members")
               names = set()
               total_bytes = 0
@@ -5885,7 +6009,7 @@ macro_rules! policy_candidate_result_verification_template {
                       raise SystemExit("result archive surface is not exact")
                   names.add(name)
                   total_bytes += info.file_size
-                  if total_bytes > 67108864:
+                  if total_bytes > {result_max_uncompressed}:
                       raise SystemExit("result archive is too large")
               if "result.json" not in names or not any(name.startswith("render/") for name in names):
                   raise SystemExit("result archive is incomplete")
@@ -5906,6 +6030,8 @@ macro_rules! policy_candidate_result_verification_template {
             (.handoff_id | strings | test("^[0-9]+$")) and (.handoff_digest | strings | test("^sha256:[0-9a-f]{{64}}$")) and
             (.workflow_path == ".github/workflows/ci-pr.yml") and (.workflow_id | numbers) and
             (.run_id | numbers) and (.run_attempt | numbers and . >= 1) and
+            (.run_status == "completed") and (.run_conclusion == "success") and
+            (.status == "completed") and (.conclusion == "success") and
             (.producer_run_created_at | strings | fromdateiso8601) and (.job_id | numbers) and
             (.job_name == "candidate_producer") and (.event == "pull_request") and
             (.job_started_at | strings | fromdateiso8601) and (.job_completed_at | strings | fromdateiso8601) and
@@ -5921,6 +6047,9 @@ macro_rules! policy_candidate_result_verification_template {
             (.checkout_action_archive_sha256 == "{checkout_action_archive_sha256}") and
             (.download_action_archive_sha256 == "{download_action_archive_sha256}") and
             (.upload_action_archive_sha256 == "{upload_action_archive_sha256}") and
+            (.upload_step_id == "{upload_step_id}") and
+            (.artifact_binding_method == "{artifact_binding_method}") and
+            (.object_format == "{object_format}") and
             (.manifest_member == "candidate-manifest.json") and (.manifest_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
             (.manifest_schema_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
             (.source_archive_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
@@ -5942,18 +6071,20 @@ macro_rules! policy_candidate_result_verification_template {
           handoff_digest="$(jq -er '.handoff_digest | strings | select(test("^sha256:[0-9a-f]{{64}}$"))' "$result_json")"
           handoff_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$handoff_id")"
           jq -e --argjson id "$handoff_id" --arg digest "$handoff_digest" --arg name "{handoff}" --argjson run_id "$GITHUB_RUN_ID" --argjson run_created "$policy_run_created_epoch" '
-            .id == $id and .name == $name and .expired == false and (.expires_at | strings | fromdateiso8601 > now) and .digest == $digest and
+            .id == $id and .name == $name and .expired == false and (.size_in_bytes | numbers | . <= {max_compressed}) and (.expires_at | strings | fromdateiso8601 > now) and .digest == $digest and
             ((.workflow_run.id | tonumber) == $run_id) and (.created_at | strings | fromdateiso8601) >= $run_created and
             (.updated_at | strings | fromdateiso8601) >= (.created_at | strings | fromdateiso8601)
           ' <<<"$handoff_api" >/dev/null
           handoff_archive="$RUNNER_TEMP/candidate-handoff.zip"
-          curl --fail --location --silent --show-error \
+          curl --fail --location --silent --show-error --max-filesize {max_compressed} \
             --header "Accept: application/vnd.github+json" \
             --header "Authorization: Bearer $GH_TOKEN" \
             --header "X-GitHub-Api-Version: 2022-11-28" \
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$handoff_id/zip" \
             --output "$handoff_archive"
           handoff_raw_zip_sha256="$(sha256sum "$handoff_archive" | awk '{{print $1}}')"
+          handoff_archive_size="$(stat -c '%s' "$handoff_archive")"
+          test "$handoff_archive_size" -le {max_compressed}
           if [[ ! "$handoff_raw_zip_sha256" =~ ^[0-9a-f]{{64}}$ ]]; then exit 1; fi
           handoff_service_digest="${{handoff_digest#sha256:}}"
           test "$handoff_raw_zip_sha256" = "$handoff_service_digest"
@@ -5965,7 +6096,11 @@ macro_rules! policy_candidate_result_verification_template {
           archive, destination = Path(sys.argv[1]), Path(sys.argv[2])
           with zipfile.ZipFile(archive) as payload:
               names = set()
-              for info in payload.infolist():
+              members = payload.infolist()
+              if len(members) > {max_members}:
+                  raise SystemExit("handoff archive has too many members")
+              total_bytes = 0
+              for info in members:
                   parts = info.filename.split("/")
                   mode = (info.external_attr >> 16) & 0o170000
                   if info.filename.startswith("/") or "\\" in info.filename or any(part in ("", ".", "..") for part in parts):
@@ -5973,9 +6108,12 @@ macro_rules! policy_candidate_result_verification_template {
                   if info.filename in names or (mode not in (0, 0o100000) and not info.is_dir()):
                       raise SystemExit("duplicate or non-regular handoff member")
                   names.add(info.filename)
+                  total_bytes += info.file_size
+                  if total_bytes > {max_uncompressed}:
+                      raise SystemExit("handoff archive is too large")
               if sorted(names) != ["candidate-manifest.json", "handoff.json", "source.tar", "velnor-workflow"]:
                   raise SystemExit("handoff artifact surface is not exact")
-              for info in payload.infolist():
+              for info in members:
                   payload.extract(info, destination)
           PY
           handoff_json="$handoff_dir/handoff.json"
@@ -5984,6 +6122,8 @@ macro_rules! policy_candidate_result_verification_template {
             . as $h | $result[0] as $r |
             $h.role == "handoff" and $r.handoff_id == ($handoff_id|tostring) and
             $h.workflow_path == $r.workflow_path and $h.workflow_id == $r.workflow_id and $h.run_id == $r.run_id and $h.run_attempt == $r.run_attempt and
+            $h.run_status == $r.run_status and $h.run_conclusion == $r.run_conclusion and
+            $h.status == $r.status and $h.conclusion == $r.conclusion and
             $h.producer_run_created_at == $r.producer_run_created_at and
             $h.job_id == $r.job_id and $h.job_name == $r.job_name and
             $h.job_started_at == $r.job_started_at and $h.job_completed_at == $r.job_completed_at and
@@ -5998,6 +6138,8 @@ macro_rules! policy_candidate_result_verification_template {
             $h.checkout_action_archive_sha256 == $r.checkout_action_archive_sha256 and
             $h.download_action_archive_sha256 == $r.download_action_archive_sha256 and
             $h.upload_action_archive_sha256 == $r.upload_action_archive_sha256 and
+            $h.upload_step_id == $r.upload_step_id and $h.artifact_binding_method == $r.artifact_binding_method and
+            $h.object_format == $r.object_format and
             $h.manifest_member == $r.manifest_member and $h.manifest_sha256 == $r.manifest_sha256 and
             $h.manifest_schema_sha256 == $r.manifest_schema_sha256 and
             $h.source_archive_sha256 == $r.source_archive_sha256 and $h.candidate_closure == $r.candidate_closure and
@@ -6019,12 +6161,14 @@ macro_rules! policy_candidate_result_verification_template {
             (.updated_at | strings | fromdateiso8601) >= (.created_at | strings | fromdateiso8601)
           ' <<<"$producer_api" >/dev/null
           producer_archive="$RUNNER_TEMP/candidate-producer-verified.zip"
-          curl --fail --location --silent --show-error \
+          curl --fail --location --silent --show-error --max-filesize {max_compressed} \
             --header "Accept: application/vnd.github+json" \
             --header "Authorization: Bearer $GH_TOKEN" \
             --header "X-GitHub-Api-Version: 2022-11-28" \
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$producer_id/zip" \
             --output "$producer_archive"
+          producer_archive_size="$(stat -c '%s' "$producer_archive")"
+          test "$producer_archive_size" -le {max_compressed}
           test "$(sha256sum "$producer_archive" | awk '{{print $1}}')" = "$(jq -er .artifact_raw_zip_sha256 "$handoff_json")"
           producer_service_digest="${{producer_digest#sha256:}}"
           test "$(sha256sum "$producer_archive" | awk '{{print $1}}')" = "$producer_service_digest"
@@ -6035,8 +6179,12 @@ macro_rules! policy_candidate_result_verification_template {
           from pathlib import Path
           archive, destination = Path(sys.argv[1]), Path(sys.argv[2])
           with zipfile.ZipFile(archive) as payload:
+              members = payload.infolist()
+              if len(members) > {max_members}:
+                  raise SystemExit("producer archive has too many members")
               names = set()
-              for info in payload.infolist():
+              total_bytes = 0
+              for info in members:
                   parts = info.filename.split("/")
                   mode = (info.external_attr >> 16) & 0o170000
                   if info.filename.startswith("/") or "\\" in info.filename or any(part in ("", ".", "..") for part in parts):
@@ -6044,9 +6192,12 @@ macro_rules! policy_candidate_result_verification_template {
                   if info.filename in names or (mode not in (0, 0o100000) and not info.is_dir()):
                       raise SystemExit("duplicate or non-regular producer member")
                   names.add(info.filename)
+                  total_bytes += info.file_size
+                  if total_bytes > {max_uncompressed}:
+                      raise SystemExit("producer archive is too large")
               if sorted(names) != ["candidate-manifest.json", "velnor-workflow"]:
                   raise SystemExit("producer artifact surface is not exact")
-              for info in payload.infolist():
+              for info in members:
                   payload.extract(info, destination)
           PY
           producer_manifest="$producer_dir/candidate-manifest.json"
@@ -6110,6 +6261,8 @@ macro_rules! policy_candidate_result_verification_template {
           test "$verifier_manifest_schema_sha256" = "$(jq -er .manifest_schema_sha256 "$handoff_json")"
           verifier_source_archive="$RUNNER_TEMP/verifier-source.tar"
           GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" archive --format=tar "$HEAD_SHA" > "$verifier_source_archive"
+          verifier_source_archive_size="$(stat -c '%s' "$verifier_source_archive")"
+          test "$verifier_source_archive_size" -le {max_uncompressed}
           test "$(sha256sum "$verifier_source_archive" | awk '{{print $1}}')" = "$(jq -er .source_archive_sha256 "$handoff_json")"
           cmp -s "$verifier_source_archive" "$handoff_dir/source.tar"
           workflow_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml")"
@@ -6169,6 +6322,13 @@ macro_rules! policy_candidate_result_verification_template {
         manifest_validation = $manifest_validation,
         namespace_scan = candidate_namespace_scan_script(),
         result = crate::s2::CANDIDATE_RESULT_ARTIFACT_NAME,
+        upload_step_id = crate::s2::CANDIDATE_UPLOAD_STEP_ID,
+        artifact_binding_method = crate::s2::CANDIDATE_ARTIFACT_BINDING_METHOD,
+        object_format = crate::s2::CANDIDATE_TRANSPORT_OBJECT_FORMAT,
+        max_compressed = crate::s2::CANDIDATE_TRANSPORT_MAX_COMPRESSED_BYTES,
+        max_members = crate::s2::CANDIDATE_TRANSPORT_MAX_MEMBERS,
+        max_uncompressed = crate::s2::CANDIDATE_TRANSPORT_MAX_UNCOMPRESSED_BYTES,
+        result_max_uncompressed = crate::s2::CANDIDATE_RESULT_MAX_UNCOMPRESSED_BYTES,
         upload_action_archive_sha256 = crate::s2::CANDIDATE_UPLOAD_ACTION_ARCHIVE_SHA256,
         upload_action_revision = crate::s2::CANDIDATE_UPLOAD_ACTION_REVISION,
         )
@@ -6249,6 +6409,15 @@ fn render_policy_job(
             &format!(
                 "{candidate_result_verification}      - name: Resolve required status checks\n"
             ),
+            1,
+        );
+        let scratch_cleanup = format!(
+            "      - name: Remove bounded transport scratch\n        if: always()\n        run: |\n{}",
+            candidate_transport_scratch_cleanup_script()
+        );
+        policy = policy.replacen(
+            "      - name: Lint caller workflows\n",
+            &format!("{scratch_cleanup}      - name: Lint caller workflows\n"),
             1,
         );
     }
@@ -6351,12 +6520,12 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
         String::new()
     };
     let candidate_result_verification = if candidate_graph {
-        policy_candidate_result_verification_step()
+        candidate_policy_transport_verification_steps()
     } else {
         String::new()
     };
     let candidate_render_argument = if candidate_graph {
-        "          candidate_args=()\n          if [[ \"$GITHUB_EVENT_NAME\" == pull_request_target ]]; then\n            candidate_args+=(--candidate-render \"$RUNNER_TEMP/candidate-result-verified/render\")\n          fi\n"
+        "          export RUNNER_TEMP=\"${VELNOR_TRANSPORT_SCRATCH:?bounded transport scratch was not prepared}\"\n          candidate_args=()\n          if [[ \"$GITHUB_EVENT_NAME\" == pull_request_target ]]; then\n            candidate_args+=(--candidate-render \"$RUNNER_TEMP/candidate-result-verified/render\")\n          fi\n"
     } else {
         ""
     };
@@ -6387,6 +6556,14 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
         &candidate_roles,
         &candidate_result_verification,
         candidate_render_argument,
+    )
+}
+
+fn candidate_policy_transport_verification_steps() -> String {
+    format!(
+        "      - name: Prepare bounded transport scratch\n        id: transport_scratch\n        run: |\n{}{}",
+        candidate_transport_scratch_setup_script(),
+        policy_candidate_result_verification_step()
     )
 }
 
