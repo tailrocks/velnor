@@ -3695,14 +3695,15 @@ jobs:
             "name": "bundle",
             "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "expired": false,
+            "url": "https://api.github.com/repos/tailrocks/velnor/actions/artifacts/9",
             "archive_download_url": "https://api.github.com/repos/tailrocks/velnor/actions/artifacts/9/zip",
-            "workflow_run": {"id": 7, "head_sha": "cccccccccccccccccccccccccccccccccccccccc"}
+            "workflow_run": {"id": 7, "repository_id": 1, "head_sha": "cccccccccccccccccccccccccccccccccccccccc"}
         });
         let artifact = parse_artifact(
             &value,
             "tailrocks/velnor",
+            1,
             7,
-            2,
             "cccccccccccccccccccccccccccccccccccccccc",
             vec!["raw".to_owned()],
         )
@@ -3712,12 +3713,13 @@ jobs:
             &serde_json::json!({
                 "id": 9,
                 "name": "bundle",
+                "url": "https://api.github.com/repos/tailrocks/velnor/actions/artifacts/9",
                 "archive_download_url": "https://api.github.com/repos/tailrocks/velnor/actions/artifacts/9/zip",
-                "workflow_run": {"id": 7, "head_sha": "cccccccccccccccccccccccccccccccccccccccc"}
+                "workflow_run": {"id": 7, "repository_id": 1, "head_sha": "cccccccccccccccccccccccccccccccccccccccc"}
             }),
             "tailrocks/velnor",
+            1,
             7,
-            2,
             "cccccccccccccccccccccccccccccccccccccccc",
             vec![]
         )
