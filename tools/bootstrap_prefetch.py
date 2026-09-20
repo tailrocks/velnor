@@ -727,10 +727,7 @@ def _write_new(bundle_root: Path, relative: str, content: bytes) -> None:
     if path.exists() or path.is_symlink():
         _fail(f"bundle output already exists: {safe}")
     path.write_bytes(content)
-
-
-def _expected_git_records(reviewed_git: set[tuple[str, str]]) -> list[dict[str, str]]:
-    return [{"url": url, "rev": rev} for url, rev in sorted(reviewed_git)]
+    path.chmod(0o644)
 
 
 def build_bundle(
@@ -958,7 +955,13 @@ def _manifest_keys() -> set[str]:
 
 
 def _read_manifest(bundle_root: Path) -> dict[str, Any]:
-    raw = _lstat_regular(bundle_root / "manifest.json", "manifest.json", 4 * 1024 * 1024)
+    raw = _lstat_regular(
+        bundle_root / "manifest.json",
+        "manifest.json",
+        4 * 1024 * 1024,
+        single_link=True,
+        exact_mode=0o644,
+    )
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -1297,11 +1300,7 @@ def git_census(
 ) -> list[dict[str, str]]:
     """Require a fresh Cargo Git cache with exact, clean reviewed checkouts."""
 
-    expected = (
-        reviewed_git
-        if isinstance(reviewed_git, set)
-        else _reviewed_git_set(reviewed_git)
-    )
+    expected = _reviewed_git_set(tuple(reviewed_git))
     if not expected:
         _fail("reviewed Git source set must not be empty")
     dbs = _direct_directories(cargo_home / "git" / "db", "Cargo git DB root")
