@@ -352,14 +352,17 @@ fn recovers_private_temporary_files_but_leaves_replaced_public_entry() {
     let reopened = must(RawObjectFileStore::new(&root), "reconcile temporary files");
     drop(reopened);
     for directory in ["sha256", "original"] {
-        assert_eq!(
-            must(
-                fs::read_dir(root.join(directory)),
-                "read reconciled object directory",
-            )
-            .count(),
-            0
-        );
+        let entries = must(
+            fs::read_dir(root.join(directory)),
+            "read reconciled object directory",
+        )
+        .flatten()
+        .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0]
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".velnor-raw-quarantine-"));
     }
     assert_eq!(
         must(fs::read(&replaced), "read replaced temp"),
@@ -404,7 +407,8 @@ fn reconciles_crash_left_quarantine_into_store_retention() {
         "reconcile crash-left quarantine",
     );
     drop(reopened);
-    assert!(!source_quarantine.exists());
+    assert!(source_quarantine.is_dir());
+    assert!(source_quarantine.join("manifest.json").is_file());
     let retention = root.join(".velnor-raw-quarantine");
     let retained = must(fs::read_dir(&retention), "read retained quarantines")
         .flatten()
@@ -860,6 +864,11 @@ fn concurrent_different_payloads_same_raw_id_publish_one_bundle() {
             fs::read_dir(root.join("refs")),
             "read concurrent collision sidecars",
         )
+        .flatten()
+        .filter(|entry| entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "json"))
         .count(),
         1
     );
@@ -1058,5 +1067,82 @@ fn rejects_fifo_sidecar_without_blocking() {
     let started = Instant::now();
     assert!(store.verify(&reference).is_err());
     assert!(started.elapsed().as_secs() < 2);
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn retention_unknown_child_fails_closed_without_reclaim() {
+    let root = fixture("retention-unknown-child");
+    let store = must(RawObjectFileStore::new(&root), "open retention store");
+    drop(store);
+    let unknown = root.join(".velnor-raw-quarantine").join("operator-entry");
+    must(
+        fs::write(&unknown, b"operator-owned"),
+        "write unknown retention child",
+    );
+
+    assert!(RawObjectFileStore::new(&root).is_err());
+    assert_eq!(
+        must(fs::read(&unknown), "read unknown retention child"),
+        b"operator-owned"
+    );
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn retention_admission_is_bounded_and_reopens_fail_closed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("retention-quota");
+    let store = must(RawObjectFileStore::new(&root), "open retention quota store");
+    drop(store);
+    for index in 0..129_u32 {
+        let quarantine = root
+            .join("sha256")
+            .join(format!(".velnor-raw-quarantine-{index}-0-0"));
+        must(fs::create_dir(&quarantine), "create quota quarantine");
+        must(
+            fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o700)),
+            "restrict quota quarantine",
+        );
+        let entry = quarantine.join("entry");
+        must(fs::write(&entry, index.to_le_bytes()), "write quota entry");
+        must(
+            fs::set_permissions(&entry, fs::Permissions::from_mode(0o400)),
+            "restrict quota entry",
+        );
+    }
+
+    assert!(RawObjectFileStore::new(&root).is_err());
+    assert_eq!(
+        must(
+            fs::read_dir(root.join(".velnor-raw-quarantine")),
+            "read bounded retention records",
+        )
+        .flatten()
+        .count(),
+        128
+    );
+    assert_eq!(
+        must(
+            fs::read_dir(root.join("sha256")),
+            "read pending quota quarantines"
+        )
+        .flatten()
+        .count(),
+        129
+    );
+    assert!(RawObjectFileStore::new(&root).is_err());
+    assert_eq!(
+        must(
+            fs::read_dir(root.join(".velnor-raw-quarantine")),
+            "reread bounded retention records",
+        )
+        .flatten()
+        .count(),
+        128
+    );
     remove_fixture(&root);
 }
