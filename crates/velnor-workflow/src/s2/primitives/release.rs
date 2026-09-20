@@ -2068,7 +2068,7 @@ fn render_native_product_preview_publish_job(
               test -x "product-assets/$asset"
             done < <(jq -c '.' "$artifact_file")
           done < <(jq -r '.[]' <<<"$expected_targets")
-          actual_targets="$(jq -Rsc 'split("\\n") | map(select(length > 0)) | sort' native-product-target-census.txt)"
+          actual_targets="$(jq -Rsc 'split("\n") | map(select(length > 0)) | sort' native-product-target-census.txt)"
           [ "$actual_targets" = "$expected_targets" ] || { echo '::error::native product target census differs from source' >&2; exit 1; }
       - name: Assemble and verify preview Debian identity
         run: |
@@ -7625,6 +7625,154 @@ mod tests {
             "provider contract output: {outputs}"
         );
         fs::remove_dir_all(root).expect("remove native census fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rendered_native_product_preview_census_splits_targets_nominally() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let config =
+            native_identity_config(&["release.yml", "preview.yml", "native-product-preview.yml"]);
+        let release = config
+            .release
+            .as_ref()
+            .expect("identity fixture must carry a release contract");
+        let workflow = super::render_preview(&config, Some(release));
+        let publish = yaml_job(&workflow, "publish");
+        let marker = "      - name: Verify source-bound native product census\n";
+        let start = publish
+            .find(marker)
+            .expect("rendered preview publisher must carry the native census step");
+        let step = &publish[start + marker.len()..];
+        let run_marker = "        run: |\n";
+        let run_start = step
+            .find(run_marker)
+            .expect("preview native census step must carry a shell body");
+        let script_tail = &step[run_start + run_marker.len()..];
+        let end = script_tail
+            .find("\n      - name: ")
+            .expect("preview native census shell must end at the next step");
+        let census = script_tail[..end]
+            .lines()
+            .map(|line| line.strip_prefix("          ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-native-preview-census-{}",
+            crate::s2::unique_suffix()
+        ));
+        fs::create_dir_all(root.join("native-product"))
+            .expect("create preview native product fixture");
+        let contract_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.github/ci/native-product-preview-contract.json");
+        let mut contract: Value = serde_json::from_str(
+            &fs::read_to_string(contract_path).expect("read preview contract source"),
+        )
+        .expect("parse preview contract source");
+        contract["blocked_targets"] = json!([]);
+        let contract_bytes =
+            serde_json::to_vec_pretty(&contract).expect("serialize preview contract fixture");
+        fs::create_dir_all(root.join(".github/ci")).expect("create preview source contract");
+        fs::write(
+            root.join(".github/ci/native-product-preview-contract.json"),
+            &contract_bytes,
+        )
+        .expect("write preview source contract");
+        let targets = contract["targets"]
+            .as_array()
+            .expect("preview contract targets")
+            .iter()
+            .map(|target| target.as_str().expect("preview target string").to_owned())
+            .collect::<Vec<_>>();
+        let components = contract["components"]
+            .as_array()
+            .expect("preview contract components")
+            .clone();
+        for target in &targets {
+            fs::write(
+                root.join("native-product")
+                    .join(format!("product-contract-{target}.json")),
+                &contract_bytes,
+            )
+            .expect("write preview target contract");
+            let component_rows = components
+                .iter()
+                .map(|component| {
+                    serde_json::to_string(&json!({
+                        "name": component["name"],
+                        "crate": component["crate"],
+                        "binary": component["binary"],
+                        "feature": component["feature"],
+                        "identity": component["identity"],
+                        "target": target,
+                        "version": "0.1.0",
+                    }))
+                    .expect("serialize preview component row")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            fs::write(
+                root.join("native-product")
+                    .join(format!("components-{target}.jsonl")),
+                format!("{component_rows}\n"),
+            )
+            .expect("write preview component rows");
+
+            let artifact_rows = components
+                .iter()
+                .map(|component| {
+                    let binary = component["binary"].as_str().expect("preview binary name");
+                    let name = format!("{binary}-{target}");
+                    let bytes = format!("preview-{binary}-{target}\n").into_bytes();
+                    let sibling = root.join("native-product").join(&name);
+                    fs::write(&sibling, &bytes).expect("write preview native sibling");
+                    let mut permissions = fs::metadata(&sibling)
+                        .expect("stat preview native sibling")
+                        .permissions();
+                    permissions.set_mode(0o755);
+                    fs::set_permissions(&sibling, permissions)
+                        .expect("make preview native sibling executable");
+                    serde_json::to_string(&json!({
+                        "kind": "binary",
+                        "name": name,
+                        "sha256": digest_of_bytes(&bytes),
+                        "size": bytes.len(),
+                        "target": target,
+                    }))
+                    .expect("serialize preview artifact row")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            fs::write(
+                root.join("native-product")
+                    .join(format!("artifacts-{target}.jsonl")),
+                format!("{artifact_rows}\n"),
+            )
+            .expect("write preview artifact rows");
+        }
+
+        let result = Command::new("bash")
+            .current_dir(&root)
+            .args(["-eu", "-o", "pipefail", "-c", census.as_str()])
+            .output()
+            .expect("run rendered preview native census shell");
+        assert!(
+            result.status.success(),
+            "rendered preview census must pass; stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let mut expected_targets = targets;
+        expected_targets.sort();
+        assert_eq!(
+            fs::read_to_string(root.join("native-product-target-census.txt"))
+                .expect("read preview target census"),
+            format!("{}\n", expected_targets.join("\n"))
+        );
+        fs::remove_dir_all(root).expect("remove preview native census fixture");
     }
 
     #[test]
