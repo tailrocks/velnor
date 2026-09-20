@@ -1881,18 +1881,11 @@ rollback() {
         rollback_status=1
       elif [ -z "$current_tag_sha" ]; then
         :
-      elif [ "$current_tag_sha" = "$owner_tag_sha" ] && [ "$current_tag_sha" = "$owner_source_commit" ]; then
-        if ! assert_publication_lock; then
-          rollback_status=1
-        elif ! gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null; then
-          rollback_status=1
-        elif ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
-          rollback_status=1
-        elif [ -n "$current_tag_sha" ]; then
-          rollback_status=1
-        fi
       else
-        echo "::error::new rolling preview tag changed before rollback; refusing delete" >&2
+        # The release-create API does not prove that this run created the tag.
+        # A matching SHA is not ownership: another writer may have created the
+        # tag after the preflight snapshot. Never delete such a tag.
+        echo "::error::rolling preview tag retained without proven ownership; retaining publication lock for manual recovery" >&2
         rollback_status=1
       fi
     fi
@@ -3205,6 +3198,93 @@ test "$publication_lock_retain" -eq 1
         assert!(
             output.status.success(),
             "pre-existing tag rollback was unsafe:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_does_not_delete_tag_created_after_preflight_at_expected_commit() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification);
+        let rollback_start = rolling_script
+            .find("rollback() {")
+            .expect("rollback helper");
+        let rollback_end = rolling_script
+            .find("\ncleanup_publication() {")
+            .expect("cleanup helper");
+        let rollback = rolling_script[rollback_start..rollback_end]
+            .replace("\n  exit \"$status\"\n}", "\n  return \"$status\"\n}");
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-concurrent-tag-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create rollback fixture");
+        let script = format!(
+            r#"set -Eeuo pipefail
+GITHUB_REPOSITORY=example/project
+rolling_tag=preview
+rolling_release_id=123
+owner_draft=true
+owner_tag_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+owner_name=candidate-name
+owner_body=candidate-body
+owner_source_commit=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+# The preflight saw no tag. An external writer creates the matching tag before rollback.
+preexisting_rolling_tag=0
+had_release=0
+mutated=1
+publication_lock_retain=0
+assert_rolling_ownership() {{ return 0; }}
+assert_publication_lock() {{ return 0; }}
+assert_release_absent() {{ return 0; }}
+: > "$TEST_TMPDIR/external-tag-created-after-preflight"
+remote_tag_sha() {{
+  if [ -e "$TEST_TMPDIR/tag-deleted" ]; then
+    printf '\n'
+  else
+    test -e "$TEST_TMPDIR/external-tag-created-after-preflight"
+    printf '%s\n' "$owner_tag_sha"
+  fi
+}}
+gh() {{
+  if [[ "$*" == *"releases/123"* ]] && [[ "$*" == *"--method DELETE"* ]]; then
+    : > "$TEST_TMPDIR/release-deleted"
+    return 0
+  fi
+  if [[ "$*" == *"git/refs/tags/preview"* ]] && [[ "$*" == *"--method DELETE"* ]]; then
+    : > "$TEST_TMPDIR/tag-deleted"
+    return 0
+  fi
+  return 0
+}}
+{rollback}
+set +e
+rollback 1
+rollback_status=$?
+set -e
+test "$rollback_status" -eq 1
+test -e "$TEST_TMPDIR/release-deleted"
+test ! -e "$TEST_TMPDIR/tag-deleted"
+test "$publication_lock_retain" -eq 1
+"#
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env("TEST_TMPDIR", &root)
+            .output()
+            .expect("run concurrent tag rollback fixture");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            output.status.success(),
+            "concurrent tag rollback was unsafe:\n{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
