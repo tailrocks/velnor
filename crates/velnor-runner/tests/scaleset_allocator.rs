@@ -137,7 +137,7 @@ fn occupancy_never_exceeds_n_under_churn() {
                     }
                 } else {
                     let holder = native_permit_holder(&format!("churn-{lane}-{round}"));
-                    if let Some(guard) =
+                    if let Some(mut guard) =
                         NativePermitGuard::acquire(&ledger_path, holder, "scope-test").unwrap()
                     {
                         if allocator.occupied().unwrap() > 4 {
