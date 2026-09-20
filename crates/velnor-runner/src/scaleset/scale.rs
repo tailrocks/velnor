@@ -400,7 +400,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                 LedgerLane::ScaleSet,
                 &scope,
                 first_seen_unix,
-                crate::native_demand::now_unix(),
+                velnor_control::permit_ledger::unix_now(),
             )
             .map_err(|error| ScaleError::Ledger(ledger_error(error)))
     }
