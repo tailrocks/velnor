@@ -62,3 +62,33 @@ The first authenticated 30-day Velnor response reports **5,538 runs**. GitHub
 [limits filtered searches to 1,000 results](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository),
 so collection must partition time ranges and verify completeness within each
 partition. No claim of complete 30-day history is made yet.
+
+## Bounded cross-repository raw observations
+
+The following seven run IDs are a bounded baseline set, not matched cohorts.
+Each saved jobs response has `total_count == jobs.length` and fits in page 1;
+raw files retain every returned job, including skipped jobs. Durations use raw
+job `started_at`/`completed_at`; `updated_at` is not used as execution end.
+The execution sum excludes skipped jobs and is separate from the max job and
+the jobs-span envelope. Each selected run response says `run_attempt = 1`.
+The attempted `/actions/runs/{id}/attempts?...` collection URL is not a GitHub
+REST endpoint and returned HTTP 404; that failed probe is not evidence about
+older attempts. No older attempt was selected or saved in this bounded set.
+
+| Repository / run | Event / result | Head SHA | Jobs | Job span s | Max job / raw job | Max s | /10 target s | Execution sum s |
+| --- | --- | --- | ---: | ---: | --- | ---: | ---: | ---: |
+| [Jackin desktop 35475235030](https://github.com/jackin-project/jackin/actions/runs/35475235030) | push / success | `3b1e1fc0a20a7d861454746c9ebb50a335c9b412` | 1 | 2040 | [Desktop merge cadence](https://github.com/jackin-project/jackin/actions/runs/35475235030/job/105983237683) | 2040 | 204 | 2040 |
+| [Jackin Swift 35475235267](https://github.com/jackin-project/jackin/actions/runs/35475235267) | push / success | `3b1e1fc0a20a7d861454746c9ebb50a335c9b412` | 44 | 890 | [Swift · Apple](https://github.com/jackin-project/jackin/actions/runs/35475235267/job/105983319926) | 766 | 76.6 | 3823 |
+| [Parallax PR #109 35300721965](https://github.com/tailrocks/parallax/actions/runs/35300721965) | pull_request / failure | `93cee3556b3bf08c9ba38a43aace43312c233c0a` | 26 | 675 | [parallax-server](https://github.com/tailrocks/parallax/actions/runs/35300721965/job/105794536030) | 636 | 63.6 | 2674 |
+| [Jackin desktop 35478203836](https://github.com/jackin-project/jackin/actions/runs/35478203836) | push / success | `41796158b1e45535ae4e74d5ff048cb5bb4e0488` | 1 | 2635 | [Desktop merge cadence](https://github.com/jackin-project/jackin/actions/runs/35478203836/job/105991074920) | 2635 | 263.5 | 2635 |
+| [Jackin Swift 35478203945](https://github.com/jackin-project/jackin/actions/runs/35478203945) | push / success | `41796158b1e45535ae4e74d5ff048cb5bb4e0488` | 44 | 1065 | [Swift · Apple](https://github.com/jackin-project/jackin/actions/runs/35478203945/job/105991186732) | 855 | 85.5 | 4967 |
+| [Parallax nightly scheduler 35430906774](https://github.com/tailrocks/parallax/actions/runs/35430906774) | schedule / success | `6a12bf47a816b63e848b563aaa45ef9694159c79` | 3 | 7 | [Dispatch ci-main](https://github.com/tailrocks/parallax/actions/runs/35430906774/job/105865174259) | 4 | 0.4 | 4 |
+| [Parallax dispatched child 35430912434](https://github.com/tailrocks/parallax/actions/runs/35430912434) | workflow_dispatch / failure | `6a12bf47a816b63e848b563aaa45ef9694159c79` | 52 | 135 | [Policy](https://github.com/tailrocks/parallax/actions/runs/35430912434/job/105865197187) | 119 | 11.9 | 139 |
+
+The Parallax PR and dispatched child are failed observations and remain in the
+table to preserve failure order; they are not successful baselines. The
+scheduler's success records dispatch acceptance only. No provider, runner
+image, runtime revision, compiler identity, or cache claim is inferred from
+these raw API responses; those require job logs and referenced-workflow
+evidence. Max job is not a critical path because no dependency graph is
+available.

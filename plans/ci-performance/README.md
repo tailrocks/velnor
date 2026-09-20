@@ -27,15 +27,15 @@ Only parent performs shared branch/index/commit operations.
 
 | Work | Owner | Inputs | Output / acceptance | State |
 | --- | --- | --- | --- | --- |
-| Velnor inventory | `/root/velnor_inventory` | current source, PR diffs, historical jobs | source/runtime distinctions, measured bottlenecks, compatible fixes | bounded inventory delivered; full history pending |
-| Jackin inventory | `/root/jackin_inventory` | current source, PR diffs, desktop/Swift runs | product graph, tool boundaries, duplicate-work proof | running |
-| Parallax inventory | `/root/parallax_inventory` | current source, PR diffs, failed/scheduled runs | actual language graph, prerequisites, scheduler outcomes | bounded inventory delivered; full history pending |
-| Timing collection/tooling | `/root/parallax_inventory` (reused) | raw paginated run/job/attempt data | reproducible JSONL/CSV and ranked cohorts | design and independent challenge |
-| Typed validation stages | `/root/velnor_inventory` (reused) | scan and opaque runtime command contract | exact scoped commands, visible stages, regression tests | design and independent challenge |
-| Compiler/cache/tools | next available agent | inventory + cache statistics | alternatives with compatibility and trust constraints | queued |
+| Velnor inventory | `/root/velnor_inventory` | current source, PR diffs, historical jobs | source/runtime distinctions, measured bottlenecks, compatible fixes | bounded inventory delivered; 30-day metadata collected; obligation mapping and detailed job evidence ongoing |
+| Jackin inventory | `/root/jackin_inventory` | current source, PR diffs, desktop/Swift runs | product graph, tool boundaries, duplicate-work proof | bounded inventory delivered; desktop tool experiment queued |
+| Parallax inventory | `/root/parallax_inventory` | current source, PR diffs, failed/scheduled runs | actual language graph, prerequisites, scheduler outcomes | bounded inventory delivered; 30-day metadata collected; obligation mapping and detailed job evidence ongoing |
+| Timing collection/tooling | `/root/parallax_inventory` (reused) | raw paginated run/job/attempt data | reproducible JSONL/CSV and ranked cohorts | committed and pushed f8ac97b1; independent review, 16 timing tests, fmt and clippy pass |
+| Typed validation stages | `/root/velnor_inventory` (reused) | scan and opaque runtime command contract | exact scoped commands, visible stages, regression tests | inferred shell-classifier draft rejected and stashed; typed constructor design queued |
+| Compiler/cache/tools | `/root/velnor_inventory` (reused) | inventory, PR #967, actual quota failure | alternatives with compatibility and trust constraints | PR #967 actual runtime/transport independently reviewed; source integration and tests underway |
 | Swift/Docker/artifacts | next available agent | product inventory + primary sources | explicit producer/consumer contracts and experiments | queued |
 | Relevance/scheduling | next available agent | events, gates, transitive inputs | scenario matrix and fail-closed checks | queued |
-| Independent review | `/root/jackin_inventory` | hypotheses, diff, raw measurements | recorded findings before acceptance | first stage and collector designs queued |
+| Independent review | `/root/jackin_inventory` | hypotheses, diff, raw measurements | recorded findings before acceptance | collector PASS; consumer pin reviews delivered; Parallax source2 HOLD; gate and policy findings under investigation |
 | Integration/final checks | parent | reviewed units | small signed commits, regular pushes, exact-SHA CI | active |
 
 Dependency order: inventories → ranked baseline → independently challenged
@@ -68,6 +68,19 @@ timing experiments must account for shared runner contention.
   negative relevance diagnostic; conclusions pending.
 - Current generator build (`--locked --no-default-features`) and dry-run scans
   succeeded for all three checkouts. These are local checks, not CI acceptance.
+- Existing attested e94 runtime promoted through the generator in all three
+  repositories. Exact-runtime checks pass; see
+  [consumer experiment](experiments/CONSUMER-RUNTIME-001.md) and
+  [independent review](reviews/consumer-upgrade.md). Parallax PR #112 and Jackin
+  PR #1007 are pushed. Real CI exposes failures; no performance acceptance.
+- Velnor main advanced to `325719f1e05d3d46322c9fd3eeb9ad545e175638` during
+  execution. Integrated its package consumer rendering fix in merge
+  `58447892`, preserving the campaign pin and regenerating ownership in a
+  clean detached integration checkout. The old renderer passed its own check but
+  source-generator CI correctly rejected revision 53 versus 54. Commit c0a46790
+  promoted the attested 325719 runtime and repaired that mismatch. Latest f8ac97b1
+  PR run 35483490582 passes all selected units; separate policy 35483489289 fails
+  candidate/pin closure validation. The rejected stage draft remains stashed.
 
 ## Evidence and experiment rules
 
