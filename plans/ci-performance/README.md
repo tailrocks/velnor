@@ -84,6 +84,48 @@ Upstream #117 cache safeguards were integrated and pushed as `60cf651b`,
 retaining the UI guard, whole-package watch and both sets of contract assertions.
 The structural runtime transport upgrade remains a separate candidate.
 
+## September 20 follow-up checkpoint
+
+Parallax `60cf651b` passed PR [35522592113](https://github.com/tailrocks/parallax/actions/runs/35522592113)
+and policy [35522590702](https://github.com/tailrocks/parallax/actions/runs/35522590702).
+Its required result completed 841 seconds after trigger; aggregate execution
+was 2,028 seconds. Server took 787 seconds, CLI 201 seconds, UI 111 seconds.
+The provisional 10× targets are 84.1 seconds end-to-required, 78.7 seconds
+server and 20.1 seconds CLI. One observation is not a baseline distribution.
+Server reported zero MBX hits, 1,654/1,569 operations not looked up and
+128/126 bypasses despite a prefix archive restore. Compatible compiler reuse
+remains unproven. The original failed quota attempt remains in the ledger.
+
+Velnor telemetry commit `de6e1811` passed PR
+[35522199636](https://github.com/tailrocks/velnor/actions/runs/35522199636)
+and policy [35522199497](https://github.com/tailrocks/velnor/actions/runs/35522199497).
+Required-result latency was 593 seconds; aggregate execution 1,367 seconds.
+Runner took 542 seconds; generator 180 seconds. Corresponding provisional
+10× targets are 59.3, 54.2 and 18 seconds. Generator schema 4 measured candidate
+preparation/publication as 3/7 seconds; post-job cache cost remains explicitly
+unobserved. Raw timestamps, normalized rows and compressed logs are retained.
+No speedup comparison is valid across these differing revisions and cache states.
+
+Upstream runner changes from `97bac4c` were integrated without modifying their
+source as `3fb38643`. All 2,997 core tests passed, with five existing skips
+and one checkout-process leak report. Policy passed; its PR run was cancelled
+when the next candidate was pushed. The preceding `49b8e560` policy run was
+also cancelled; no successful exact-head PR run exists for that revision.
+Retain these attempts rather than substituting adjacent successes.
+
+Typed Mise/Rust ownership is committed as `4f70cf74` after independent review,
+1,988 tests and strict Clippy; one APT-process leak report remains investigated.
+Complete package-input selection is committed as `c107796` after independent
+review, 1,991 tests and strict Clippy. It broadens correctness coverage for
+root packages and does not itself establish a performance improvement.
+
+Current ownership: parent integrates, commits, pushes and collects exact-head
+evidence; Jackin agent reviews Parallax runtime transport then prepares Jackin
+consumer migration; Parallax agent reviews the same-repository PR cache writer;
+Velnor agent implements reviewed environment partitions and diagnoses leaked
+processes. Consumers and runtime candidates depend on reviewed generator source.
+Substantive iteration and plateau credit remain zero.
+
 ## Completion contract
 
 - Generator/runtime fixes, regenerated Velnor, Jackin and Parallax consumers.
