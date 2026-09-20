@@ -930,7 +930,6 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     /// Synthetic generation inputs for tests that exercise the file plan
     /// directly instead of a scanned repository.
@@ -1251,12 +1250,9 @@ mod tests {
 
     #[test]
     fn confirmation_rejects_filesystem_changes_after_review() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos());
         let root = std::env::temp_dir().join(format!(
-            "github-actions-unified-confirmation-{}-{nonce}",
-            std::process::id()
+            "github-actions-unified-confirmation-{}",
+            crate::unique_suffix()
         ));
         let relative = PathBuf::from(".github/workflows/ci-pr.yml");
         let content = format!("{}name: CI\n", crate::GENERATED_HEADER);

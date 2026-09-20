@@ -3749,7 +3749,7 @@ mod tests {
     fn scanned_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-config-{name}-{}",
-            crate::s2::unique_suffix()
+            crate::unique_suffix()
         ));
         let _ = fs::remove_dir_all(&root);
         must(fs::create_dir_all(&root), "create config test repository");

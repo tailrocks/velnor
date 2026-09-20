@@ -13,6 +13,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
@@ -7390,7 +7391,7 @@ fn stage_generated_file(path: &Path, content: &str) -> Result<PathBuf, Generator
         let staged = parent.join(format!(
             ".{filename}.stage-{}-{}-{attempt}",
             std::process::id(),
-            unique_suffix()
+            crate::unique_suffix()
         ));
         match fs::OpenOptions::new()
             .write(true)
@@ -7433,7 +7434,7 @@ fn reserve_backup_path(path: &Path) -> Result<(PathBuf, PathBuf), GeneratorError
         let directory = parent.join(format!(
             ".velnor-workflow-backup-{}-{}-{attempt}",
             std::process::id(),
-            unique_suffix()
+            crate::unique_suffix()
         ));
         match fs::create_dir(&directory) {
             Ok(()) => return Ok((directory.clone(), directory.join(filename))),
@@ -7476,22 +7477,6 @@ fn preimage_changed(relative: &Path) -> GeneratorError {
         "generated file changed after preflight: {}; review again",
         relative.display()
     ))
-}
-
-/// Uniqueness must never depend on clock resolution: parallel tests that
-/// start in the same instant previously collided on one temporary root and
-/// spuriously failed generation with "another generation is in progress".
-/// The atomic sequence guarantees in-process uniqueness; the process id
-/// separates concurrent test binaries; the timestamp keeps names legible.
-pub(crate) fn unique_suffix() -> u128 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    (nanos << 64)
-        | (u128::from(std::process::id()) << 32)
-        | u128::from(SEQUENCE.fetch_add(1, Ordering::Relaxed))
 }
 
 enum RepositorySource {
@@ -7804,7 +7789,7 @@ impl Checkout {
     fn clone_github(owner: &str, repository: &str) -> Result<Self, GeneratorError> {
         let mut target = env::temp_dir().join(format!(
             "velnor-workflow-{owner}-{repository}-{}",
-            unique_suffix()
+            crate::unique_suffix()
         ));
         let mut attempts = 0;
         loop {
@@ -7819,7 +7804,7 @@ impl Checkout {
                     }
                     target = env::temp_dir().join(format!(
                         "velnor-workflow-{owner}-{repository}-{}",
-                        unique_suffix()
+                        crate::unique_suffix()
                     ));
                 }
                 Err(error) => {
@@ -8070,7 +8055,10 @@ mod tests {
     }
 
     fn temporary_repository(name: &str) -> PathBuf {
-        let root = env::temp_dir().join(format!("velnor-workflow-test-{name}-{}", unique_suffix()));
+        let root = env::temp_dir().join(format!(
+            "velnor-workflow-test-{name}-{}",
+            crate::unique_suffix()
+        ));
         must(fs::create_dir_all(&root), "create test repository");
         // A Rust repository must pin its toolchain for the scan to accept it,
         // and most tests add Rust packages. The pin is inert where no Rust
@@ -8088,9 +8076,22 @@ mod tests {
     /// An empty scratch directory: for assertions that a refused write left a
     /// location untouched, which a scan-ready repository would fail.
     fn temporary_directory(name: &str) -> PathBuf {
-        let root = env::temp_dir().join(format!("velnor-workflow-test-{name}-{}", unique_suffix()));
+        let root = env::temp_dir().join(format!(
+            "velnor-workflow-test-{name}-{}",
+            crate::unique_suffix()
+        ));
         must(fs::create_dir_all(&root), "create test directory");
         root
+    }
+
+    #[test]
+    fn legacy_and_schema_two_fixture_paths_are_distinct() {
+        let legacy = crate::runtime::tests::digest_fixture("cross-module");
+        let schema_two = crate::s2::runtime::tests::digest_fixture("cross-module");
+
+        assert_ne!(legacy, schema_two);
+        let _ = fs::remove_dir_all(legacy);
+        let _ = fs::remove_dir_all(schema_two);
     }
 
     #[expect(
@@ -8310,6 +8311,53 @@ mod tests {
         assert!(kind.contains("${{ runner.os }}-${{ runner.arch }}"));
         assert!(kind.contains("manifest.json"));
         assert!(!kind.contains("cargo install --locked --git"));
+    }
+
+    #[test]
+    fn premerge_generator_changes_bootstrap_from_published_base_runtime() {
+        const PUBLISHED_BASE_REVISION: &str = "0dc79895ff1c5e88be7c3822c437e1c5b5282e12";
+        let mut config = scanned_fixture(provider_set([ProviderId::GithubHosted]));
+        config.repository = workflow_setup_action_repository().to_owned();
+        config.workflow_revision = PUBLISHED_BASE_REVISION.to_owned();
+        assert_ne!(
+            SOURCE_REVISION, PUBLISHED_BASE_REVISION,
+            "the test must model an unpublished generator revision"
+        );
+
+        let workflow = WorkflowIr::from_config(&config);
+        let pull_request = generated_ci_pr(&workflow);
+        assert!(
+            pull_request.contains(&format!("rev: {PUBLISHED_BASE_REVISION}")),
+            "PR planning must use the published base runtime: {pull_request}"
+        );
+        assert!(
+            !pull_request.contains(SOURCE_REVISION),
+            "PR planning must not bootstrap an unpublished generator revision: {pull_request}"
+        );
+
+        let policy = generated_ci_policy(&config);
+        assert!(
+            policy.contains(&format!("rev: {PUBLISHED_BASE_REVISION}")),
+            "policy must use the published base runtime: {policy}"
+        );
+        assert!(
+            policy.contains(&format!("BASE_PIN: {PUBLISHED_BASE_REVISION}")),
+            "candidate acquisition must compare against the published base runtime: {policy}"
+        );
+        assert!(
+            !policy.contains(SOURCE_REVISION),
+            "policy must not acquire an unpublished Stage-0 runtime: {policy}"
+        );
+        assert!(
+            policy.contains("name: Acquire candidate generator product"),
+            "policy must retain the candidate acquisition path: {policy}"
+        );
+        assert!(
+            policy.contains(
+                "head_candidate=\"$(velnor-workflow closure --rev=\"$HEAD_SHA\" --candidate)\""
+            ),
+            "candidate verification must remain anchored to the audited head: {policy}"
+        );
     }
 
     #[test]

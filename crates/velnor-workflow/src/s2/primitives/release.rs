@@ -5077,7 +5077,7 @@ mod tests {
     fn scanned_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-release-{name}-{}",
-            crate::s2::unique_suffix()
+            crate::unique_suffix()
         ));
         must(fs::create_dir_all(&root), "create release test repository");
         must(
