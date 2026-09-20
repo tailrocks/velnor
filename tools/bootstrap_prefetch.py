@@ -39,6 +39,8 @@ DEFAULT_MAX_LOCK_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_FILE_BYTES = 8 * 1024 * 1024 * 1024
 DEFAULT_MAX_FILES = 200_000
 DEFAULT_MAX_CACHE_BYTES = 8 * 1024 * 1024 * 1024
+DEFAULT_MAX_DIRECTORIES = 200_000
+DEFAULT_MAX_PATH_DEPTH = 128
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _SECTION = re.compile(r"^\s*(\[\[|\[)([A-Za-z0-9_.-]+)(\]\]|\])\s*(?:#.*)?$")
@@ -60,6 +62,20 @@ class Limits:
     max_files: int = DEFAULT_MAX_FILES
     max_cache_bytes: int = DEFAULT_MAX_CACHE_BYTES
     max_path_bytes: int = 4096
+    max_directories: int = DEFAULT_MAX_DIRECTORIES
+    max_path_depth: int = DEFAULT_MAX_PATH_DEPTH
+
+
+@dataclass(frozen=True)
+class BundleContract:
+    """Base-owned admission inputs; bundle self-fields are never authority."""
+
+    source_head_sha: str
+    source_tree_sha: str
+    dependency_contract_digest: str
+    toolchain_input_digest: str
+    closure: Mapping[str, Any]
+    recipe: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -88,19 +104,12 @@ class _GitSnapshot:
                 f"{field} must be a 100644 regular Git blob, "
                 f"got mode={entry.mode} type={entry.kind}"
             )
-        path = self.root / relative
-        raw = _lstat_regular(
-            path,
-            field,
-            limit,
-            single_link=True,
-            exact_mode=0o644,
-        )
         expected = _git_bytes(self.root, ["cat-file", "blob", f"{self.commit}:{relative}"])
         if len(expected) > limit:
             _fail(f"{field} exceeds {limit} bytes")
-        if raw != expected:
-            _fail(f"{field} worktree bytes differ from Git {self.commit}:{relative}")
+        # Read only the content-addressed blob.  A status check followed by a
+        # worktree path read leaves a same-user replacement race; the Git blob
+        # is the reviewed source and its object ID is checked by Git.
         return expected
 
 
@@ -147,6 +156,15 @@ def _safe_relative(value: str, field: str, *, glob: bool = False) -> str:
     if not glob and any(char in value for char in "*?["):
         _fail(f"{field} must not contain a glob")
     return path.as_posix()
+
+
+def _bounded_relative(value: str, field: str, limits: Limits) -> str:
+    relative = _safe_relative(value, field)
+    if len(relative.encode("utf-8")) > limits.max_path_bytes:
+        _fail(f"{field} exceeds the path-byte bound")
+    if len(PurePosixPath(relative).parts) > limits.max_path_depth:
+        _fail(f"{field} exceeds the path-depth bound")
+    return relative
 
 
 def _validate_dependency_path(
@@ -197,6 +215,121 @@ def _lstat_regular(
         return path.read_bytes()
     except OSError as exc:
         _fail(f"read {field}: {exc}")
+
+
+def _resolve_executable(value: str, path: str, field: str) -> Path:
+    if not isinstance(value, str) or not value:
+        _fail(f"{field} must be a non-empty executable path or name")
+    if "/" in value:
+        candidate = Path(value)
+    else:
+        found = shutil.which(value, path=path)
+        if found is None:
+            _fail(f"{field} is not resolvable through the reviewed PATH")
+        candidate = Path(found)
+    candidate = candidate.absolute()
+    try:
+        info = candidate.lstat()
+    except OSError as exc:
+        _fail(f"{field} is unavailable: {exc}")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        _fail(f"{field} must resolve to a regular non-symlink file")
+    if not info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+        _fail(f"{field} is not executable")
+    return candidate
+
+
+def _executable_record(value: str, path: str, field: str) -> dict[str, Any]:
+    executable = _resolve_executable(value, path, field)
+    raw = _lstat_regular(
+        executable,
+        field,
+        DEFAULT_MAX_FILE_BYTES,
+        single_link=True,
+    )
+    info = executable.lstat()
+    return {
+        "path": str(executable),
+        "blob_sha": _sha256(raw),
+        "size": len(raw),
+        "mode": stat.S_IMODE(info.st_mode),
+    }
+
+
+def _feature_list(features: Sequence[str]) -> list[str]:
+    values = list(features)
+    if any(not isinstance(item, str) or not item for item in values):
+        _fail("features must be a non-empty-string sequence")
+    if len(values) != len(set(values)):
+        _fail("features must not contain duplicates")
+    return values
+
+
+def _cargo_feature_args(features: Sequence[str]) -> list[str]:
+    values = _feature_list(features)
+    if values == ["default"]:
+        return []
+    if "default" in values:
+        values = [item for item in values if item != "default"]
+        return ["--features", ",".join(values)] if values else []
+    result = ["--no-default-features"]
+    if values:
+        result.extend(("--features", ",".join(values)))
+    return result
+
+
+def builder_recipe_contract(
+    *,
+    cargo_bin: str,
+    rustc_bin: str,
+    path: str,
+    builder_base_digest: str | None,
+    target_package: str,
+    target_triple: str,
+    manifest: str,
+    features: Sequence[str] = ("default",),
+) -> dict[str, Any]:
+    """Return measured executable/base identities for the fixed closure recipe."""
+
+    if builder_base_digest is not None:
+        _digest(builder_base_digest, "builder_base_digest")
+    _safe_relative(manifest, "recipe manifest")
+    if not isinstance(target_package, str) or not target_package:
+        _fail("recipe target_package is required")
+    if not isinstance(target_triple, str) or not target_triple:
+        _fail("recipe target_triple is required")
+    if not isinstance(path, str) or not path:
+        _fail("recipe PATH is required")
+    feature_values = _feature_list(features)
+    command = [
+        "cargo",
+        "tree",
+        "--locked",
+        "--offline",
+        "--target",
+        target_triple,
+        "--edges",
+        "normal,build",
+        "--prefix",
+        "none",
+        "--format",
+        "{p}",
+        *_cargo_feature_args(feature_values),
+        "--manifest-path",
+        manifest,
+    ]
+    return {
+        "schema": "bootstrap.prefetch.recipe.v1",
+        "base_image_digest": builder_base_digest,
+        "cargo": _executable_record(cargo_bin, path, "cargo_bin"),
+        "rustc": _executable_record(rustc_bin, path, "rustc_bin"),
+        "path": path,
+        "target_package": target_package,
+        "target_triple": target_triple,
+        "features": feature_values,
+        "manifest": manifest,
+        "command": command,
+    }
 
 
 def _parse_toml(raw: bytes, field: str) -> dict[str, Any]:
@@ -534,6 +667,30 @@ def _target_specs(data: Mapping[str, Any], package_name: str) -> list[tuple[str,
     return specs
 
 
+def _expected_target_stubs(
+    data: Mapping[str, Any],
+    *,
+    package_name: str,
+    member_relative: str,
+) -> list[str]:
+    specs = _target_specs(data, package_name)
+    package_safe = re.sub(r"[^A-Za-z0-9_.-]", "_", package_name)
+    stubs: list[str] = []
+    for ordinal, (kind, index) in enumerate(specs):
+        value = data.get(kind)
+        values = [value] if kind == "lib" else value
+        if not isinstance(values, list) or index >= len(values):
+            _fail(f"target table {kind} is missing in {member_relative}")
+        target = values[index]
+        if not isinstance(target, dict):
+            _fail(f"target table {kind}[{index}] is malformed in {member_relative}")
+        expected = f".prefetch-targets/{package_safe}-{kind}-{ordinal}.rs"
+        if target.get("path") != expected:
+            _fail(f"target {kind}[{index}] is not bound to its trusted stub")
+        stubs.append(f"{member_relative}/{expected}")
+    return stubs
+
+
 def _section(line: str) -> str | None:
     match = _SECTION.fullmatch(line.rstrip("\r\n"))
     if not match:
@@ -730,6 +887,27 @@ def _write_new(bundle_root: Path, relative: str, content: bytes) -> None:
     path.chmod(0o644)
 
 
+def _directory_records(bundle_root: Path, limits: Limits) -> list[str]:
+    directories: list[str] = []
+    for path in bundle_root.rglob("*"):
+        relative = _bounded_relative(
+            path.relative_to(bundle_root).as_posix(),
+            "bundle directory path",
+            limits,
+        )
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            _fail(f"bundle contains a symlink: {relative}")
+        if stat.S_ISDIR(info.st_mode):
+            directories.append(relative)
+        elif not stat.S_ISREG(info.st_mode):
+            _fail(f"bundle contains a special file: {relative}")
+    directories.sort()
+    if len(directories) > limits.max_directories:
+        _fail("bundle directory-count quota exceeded")
+    return directories
+
+
 def build_bundle(
     source_root: Path,
     output: Path,
@@ -737,11 +915,13 @@ def build_bundle(
     source_revision: str | None,
     target_package: str,
     cargo_home: Path,
+    builder_base_digest: str | None = None,
     target_triple: str = DEFAULT_TARGET,
     cargo_bin: str = "cargo",
     rustc_bin: str = "rustc",
     path: str = DEFAULT_PATH,
     reviewed_git: Sequence[tuple[str, str]],
+    features: Sequence[str] = ("default",),
     limits: Limits = Limits(),
 ) -> dict[str, Any]:
     """Construct a source-free prefetch bundle from an exact clean Git tree."""
@@ -750,6 +930,7 @@ def build_bundle(
         _fail("target_package is not a Cargo package name")
     if not isinstance(target_triple, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", target_triple):
         _fail("target_triple is not a target triple")
+    feature_values = _feature_list(features)
     reviewed_git_set = _reviewed_git_set(reviewed_git)
     snapshot = _validated_git_snapshot(
         source_root,
@@ -850,15 +1031,29 @@ def build_bundle(
         limits.max_manifest_bytes,
     )
 
-    closure = measure_closure(
+    target_manifest = f"{package_members[target_package]}/Cargo.toml"
+    closure_contract = measure_closure_contract(
         snapshot.root,
-        manifest=f"{package_members[target_package]}/Cargo.toml",
+        manifest=target_manifest,
         package_name=target_package,
+        source_head_sha=snapshot.commit,
+        source_tree_sha=snapshot.tree,
         target=target_triple,
         cargo_home=cargo_home,
         cargo_bin=cargo_bin,
         rustc_bin=rustc_bin,
         path=path,
+        features=feature_values,
+    )
+    recipe = builder_recipe_contract(
+        cargo_bin=cargo_bin,
+        rustc_bin=rustc_bin,
+        path=path,
+        builder_base_digest=builder_base_digest,
+        target_package=target_package,
+        target_triple=target_triple,
+        manifest=target_manifest,
+        features=feature_values,
     )
 
     output.mkdir(parents=True)
@@ -879,6 +1074,7 @@ def build_bundle(
         + target_stubs
     )
     files = [_file_record(output, relative) for relative in relative_files]
+    directories = _directory_records(output, limits)
     dependency_files = [
         record
         for record in files
@@ -906,13 +1102,16 @@ def build_bundle(
         "source_tree_sha": snapshot.tree,
         "target_package": target_package,
         "target_triple": target_triple,
-        "features": ["default"],
+        "features": feature_values,
         "workspace_manifest_count": len(members),
         "lock_package_count": lock_count,
-        "closure_package_count": closure,
+        "closure_package_count": closure_contract["package_count"],
+        "closure_output_sha256": closure_contract["output_sha256"],
         "files": files,
+        "directories": directories,
         "dependency_contract_digest": dependency_contract_digest,
         "toolchain_input_digest": toolchain_input_digest,
+        "builder_recipe_digest": _sha256(_canonical(recipe)),
         "registry_sources": [REGISTRY_SOURCE],
         "registry_transport": REGISTRY_TRANSPORT,
         "registry_checksum_count": len(registries),
@@ -941,9 +1140,12 @@ def _manifest_keys() -> set[str]:
         "workspace_manifest_count",
         "lock_package_count",
         "closure_package_count",
+        "closure_output_sha256",
         "files",
+        "directories",
         "dependency_contract_digest",
         "toolchain_input_digest",
+        "builder_recipe_digest",
         "registry_sources",
         "registry_transport",
         "registry_checksum_count",
@@ -993,18 +1195,169 @@ def _manifest_git_records(value: Any) -> set[tuple[str, str]]:
     return result
 
 
+def _validated_closure_contract(
+    value: Mapping[str, Any],
+    *,
+    source_head_sha: str,
+    source_tree_sha: str,
+) -> dict[str, Any]:
+    expected_keys = {
+        "source_head_sha",
+        "source_tree_sha",
+        "target_package",
+        "target_triple",
+        "features",
+        "package_count",
+        "output_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_keys:
+        _fail("trusted closure contract schema mismatch")
+    _identity(value["source_head_sha"], "trusted closure source_head_sha")
+    _identity(value["source_tree_sha"], "trusted closure source_tree_sha")
+    if value["source_head_sha"] != source_head_sha or value["source_tree_sha"] != source_tree_sha:
+        _fail("trusted closure source identity differs from trusted source")
+    if not isinstance(value["target_package"], str) or not value["target_package"]:
+        _fail("trusted closure target package is invalid")
+    if not isinstance(value["target_triple"], str) or not value["target_triple"]:
+        _fail("trusted closure target triple is invalid")
+    if not isinstance(value["features"], list):
+        _fail("trusted closure features must be an array")
+    features = _feature_list(value["features"])
+    _integer(value["package_count"], "trusted closure package_count")
+    _digest(value["output_sha256"], "trusted closure output_sha256")
+    return {
+        "source_head_sha": value["source_head_sha"],
+        "source_tree_sha": value["source_tree_sha"],
+        "target_package": value["target_package"],
+        "target_triple": value["target_triple"],
+        "features": features,
+        "package_count": value["package_count"],
+        "output_sha256": value["output_sha256"],
+    }
+
+
+def _validated_recipe_contract(value: Mapping[str, Any]) -> dict[str, Any]:
+    expected_keys = {
+        "schema",
+        "base_image_digest",
+        "cargo",
+        "rustc",
+        "path",
+        "target_package",
+        "target_triple",
+        "features",
+        "manifest",
+        "command",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_keys:
+        _fail("trusted builder recipe schema mismatch")
+    if value["schema"] != "bootstrap.prefetch.recipe.v1":
+        _fail("unsupported trusted builder recipe schema")
+    _digest(value["base_image_digest"], "trusted base_image_digest")
+    if not isinstance(value["path"], str) or not value["path"]:
+        _fail("trusted recipe PATH is invalid")
+    if not isinstance(value["target_package"], str) or not value["target_package"]:
+        _fail("trusted recipe target package is invalid")
+    if not isinstance(value["target_triple"], str) or not value["target_triple"]:
+        _fail("trusted recipe target triple is invalid")
+    if not isinstance(value["features"], list):
+        _fail("trusted recipe features must be an array")
+    features = _feature_list(value["features"])
+    manifest = _safe_relative(value["manifest"], "trusted recipe manifest")
+    command = value["command"]
+    if not isinstance(command, list) or any(not isinstance(item, str) for item in command):
+        _fail("trusted recipe command must be a string array")
+    records: dict[str, dict[str, Any]] = {}
+    for name in ("cargo", "rustc"):
+        record = value[name]
+        if not isinstance(record, Mapping) or set(record) != {"path", "blob_sha", "size", "mode"}:
+            _fail(f"trusted recipe {name} identity schema mismatch")
+        if not isinstance(record["path"], str) or not Path(record["path"]).is_absolute():
+            _fail(f"trusted recipe {name} path must be absolute")
+        _digest(record["blob_sha"], f"trusted recipe {name}.blob_sha")
+        _integer(record["size"], f"trusted recipe {name}.size")
+        if (
+            isinstance(record["mode"], bool)
+            or not isinstance(record["mode"], int)
+            or record["mode"] <= 0
+        ):
+            _fail(f"trusted recipe {name}.mode is invalid")
+        records[name] = dict(record)
+    expected_command = [
+        "cargo",
+        "tree",
+        "--locked",
+        "--offline",
+        "--target",
+        value["target_triple"],
+        "--edges",
+        "normal,build",
+        "--prefix",
+        "none",
+        "--format",
+        "{p}",
+        *_cargo_feature_args(features),
+        "--manifest-path",
+        manifest,
+    ]
+    if command != expected_command:
+        _fail("trusted recipe command is not the fixed offline closure command")
+    for name in ("cargo", "rustc"):
+        actual = _executable_record(records[name]["path"], value["path"], f"trusted {name}")
+        if actual != records[name]:
+            _fail(f"trusted {name} executable identity changed")
+    return {
+        "schema": value["schema"],
+        "base_image_digest": value["base_image_digest"],
+        "cargo": records["cargo"],
+        "rustc": records["rustc"],
+        "path": value["path"],
+        "target_package": value["target_package"],
+        "target_triple": value["target_triple"],
+        "features": features,
+        "manifest": manifest,
+        "command": list(command),
+    }
+
+
+def _validated_bundle_contract(contract: BundleContract) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not isinstance(contract, BundleContract):
+        _fail("trusted BundleContract is required; manifest fields are not authority")
+    _identity(contract.source_head_sha, "trusted source_head_sha")
+    _identity(contract.source_tree_sha, "trusted source_tree_sha")
+    _digest(contract.dependency_contract_digest, "trusted dependency_contract_digest")
+    _digest(contract.toolchain_input_digest, "trusted toolchain_input_digest")
+    closure = _validated_closure_contract(
+        contract.closure,
+        source_head_sha=contract.source_head_sha,
+        source_tree_sha=contract.source_tree_sha,
+    )
+    recipe = _validated_recipe_contract(contract.recipe)
+    if recipe["target_package"] != closure["target_package"]:
+        _fail("trusted recipe and closure target packages differ")
+    if recipe["target_triple"] != closure["target_triple"]:
+        _fail("trusted recipe and closure target triples differ")
+    if recipe["features"] != closure["features"]:
+        _fail("trusted recipe and closure feature selections differ")
+    return closure, recipe
+
+
 def validate_bundle(
     bundle_root: Path,
     *,
+    contract: BundleContract | None = None,
     reviewed_git: Sequence[tuple[str, str]] | None = None,
     limits: Limits = Limits(),
     cargo_home: Path | None = None,
 ) -> dict[str, Any]:
-    """Validate hashes, source census, trusted stubs, and optional Git cache."""
+    """Validate against base-owned source, closure, and recipe identities."""
 
     bundle_root = bundle_root.absolute()
     if not bundle_root.is_dir() or bundle_root.is_symlink():
         _fail("bundle root must be a non-symlink directory")
+    closure_contract, recipe_contract = _validated_bundle_contract(contract)
+    if cargo_home is None:
+        _fail("trusted closure validation requires an offline Cargo home")
     manifest = _read_manifest(bundle_root)
     if manifest["schema"] != SCHEMA:
         _fail(f"unsupported schema: {manifest['schema']!r}")
@@ -1012,6 +1365,8 @@ def validate_bundle(
     _identity(manifest["source_tree_sha"], "source_tree_sha")
     _digest(manifest["dependency_contract_digest"], "dependency_contract_digest")
     _digest(manifest["toolchain_input_digest"], "toolchain_input_digest")
+    _digest(manifest["closure_output_sha256"], "closure_output_sha256")
+    _digest(manifest["builder_recipe_digest"], "builder_recipe_digest")
     _digest(manifest["registry_checksum_digest"], "registry_checksum_digest")
     _digest(manifest["bundle_sha256"], "bundle_sha256")
     for field in (
@@ -1025,6 +1380,26 @@ def validate_bundle(
         not isinstance(item, str) for item in manifest["features"]
     ):
         _fail("features must be a string array")
+    if manifest["source_head_sha"] != contract.source_head_sha:
+        _fail("bundle source HEAD differs from the trusted source contract")
+    if manifest["source_tree_sha"] != contract.source_tree_sha:
+        _fail("bundle source tree differs from the trusted source contract")
+    if manifest["dependency_contract_digest"] != contract.dependency_contract_digest:
+        _fail("bundle dependency contract differs from the trusted source contract")
+    if manifest["toolchain_input_digest"] != contract.toolchain_input_digest:
+        _fail("bundle toolchain input differs from the trusted source contract")
+    if manifest["target_package"] != closure_contract["target_package"]:
+        _fail("bundle target package differs from the trusted closure contract")
+    if manifest["target_triple"] != closure_contract["target_triple"]:
+        _fail("bundle target triple differs from the trusted closure contract")
+    if manifest["features"] != closure_contract["features"]:
+        _fail("bundle features differ from the trusted closure contract")
+    if manifest["closure_package_count"] != closure_contract["package_count"]:
+        _fail("bundle closure count differs from the trusted closure contract")
+    if manifest["closure_output_sha256"] != closure_contract["output_sha256"]:
+        _fail("bundle closure output differs from the trusted closure contract")
+    if manifest["builder_recipe_digest"] != _sha256(_canonical(recipe_contract)):
+        _fail("bundle builder recipe differs from the trusted recipe contract")
     if manifest["registry_sources"] != [REGISTRY_SOURCE]:
         _fail("registry source census is not exactly the reviewed crates.io source")
     if manifest["registry_transport"] != REGISTRY_TRANSPORT:
@@ -1050,12 +1425,23 @@ def validate_bundle(
     records = manifest["files"]
     if not isinstance(records, list) or not records:
         _fail("files must be a non-empty array")
+    declared_directories = manifest["directories"]
+    if not isinstance(declared_directories, list):
+        _fail("directories must be a string array")
+    directory_paths: set[str] = set()
+    for value in declared_directories:
+        relative = _bounded_relative(value, "manifest directory path", limits)
+        if relative in directory_paths:
+            _fail(f"duplicate manifest directory path: {relative}")
+        directory_paths.add(relative)
+    if len(directory_paths) > limits.max_directories:
+        _fail("bundle directory-count quota exceeded")
     paths: set[str] = set()
     total_bytes = 0
     for record in records:
         if not isinstance(record, dict) or set(record) != {"path", "blob_sha", "size"}:
             _fail("each files record must have exactly path/blob_sha/size")
-        relative = _safe_relative(record["path"], "manifest file path")
+        relative = _bounded_relative(record["path"], "manifest file path", limits)
         if relative == "manifest.json" or relative in paths:
             _fail(f"manifest file path is duplicate or self-referential: {relative}")
         paths.add(relative)
@@ -1075,18 +1461,30 @@ def validate_bundle(
             _fail("bundle file count/bytes exceed the bounded census")
 
     actual: set[str] = set()
+    actual_directories: set[str] = set()
     for path in bundle_root.rglob("*"):
-        relative = path.relative_to(bundle_root).as_posix()
+        relative = _bounded_relative(
+            path.relative_to(bundle_root).as_posix(),
+            "bundle path",
+            limits,
+        )
         if relative == "manifest.json":
             continue
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode):
             _fail(f"bundle contains a symlink: {relative}")
         if stat.S_ISDIR(info.st_mode):
+            actual_directories.add(relative)
             continue
         if not stat.S_ISREG(info.st_mode):
             _fail(f"bundle contains a special file: {relative}")
         actual.add(relative)
+    if actual_directories != directory_paths:
+        _fail(
+            "bundle directory census mismatch: "
+            f"extra={sorted(actual_directories - directory_paths)} "
+            f"missing={sorted(directory_paths - actual_directories)}"
+        )
     if actual != paths:
         _fail(
             "bundle file census mismatch: "
@@ -1148,6 +1546,8 @@ def validate_bundle(
             f"declared={sorted(expected_member_manifests)}"
         )
     member_names: set[str] = set()
+    expected_stub_paths: set[str] = set()
+    target_manifest_relative: str | None = None
     for relative in manifest_paths:
         if relative == "Cargo.toml":
             continue
@@ -1155,7 +1555,19 @@ def validate_bundle(
         package = data.get("package")
         if not isinstance(package, dict) or not isinstance(package.get("name"), str):
             _fail(f"bundle manifest lacks package.name: {relative}")
-        member_names.add(package["name"])
+        package_name = package["name"]
+        member_names.add(package_name)
+        expected_stub_paths.update(
+            _expected_target_stubs(
+                data,
+                package_name=package_name,
+                member_relative=relative.rsplit("/", 1)[0],
+            )
+        )
+        if package_name == closure_contract["target_package"]:
+            if target_manifest_relative is not None:
+                _fail("trusted target package appears in multiple manifests")
+            target_manifest_relative = relative
         declared_git.update(
             _validate_manifest_sources(
                 data,
@@ -1166,6 +1578,29 @@ def validate_bundle(
                 reviewed_git=reviewed_git_set,
             )
         )
+    if target_manifest_relative is None:
+        _fail("trusted target package is absent from bundle workspace members")
+    if target_manifest_relative != recipe_contract["manifest"]:
+        _fail("bundle target manifest differs from the trusted recipe")
+    expected_paths = (
+        set(manifest_paths)
+        | {"Cargo.lock"}
+        | set(toolchain_paths)
+        | expected_stub_paths
+    )
+    if paths != expected_paths:
+        _fail(
+            "bundle file paths differ from the sanitized workspace contract: "
+            f"extra={sorted(paths - expected_paths)} "
+            f"missing={sorted(expected_paths - paths)}"
+        )
+    expected_directories: set[str] = set()
+    for relative in expected_paths:
+        parts = PurePosixPath(relative).parts[:-1]
+        for index in range(1, len(parts) + 1):
+            expected_directories.add("/".join(parts[:index]))
+    if directory_paths != expected_directories:
+        _fail("bundle directories are not exactly the sanitized workspace parents")
     lock_count, registries, git_records, lock_git = _validate_lock(
         lock_data,
         reviewed_git=reviewed_git_set,
@@ -1207,7 +1642,25 @@ def validate_bundle(
     )
     if expected_toolchain_digest != manifest["toolchain_input_digest"]:
         _fail("toolchain input digest does not match the recorded preimage")
-    if cargo_home is not None:
+    actual_closure = measure_closure_contract(
+        bundle_root,
+        manifest=target_manifest_relative,
+        package_name=closure_contract["target_package"],
+        source_head_sha=contract.source_head_sha,
+        source_tree_sha=contract.source_tree_sha,
+        target=closure_contract["target_triple"],
+        cargo_home=cargo_home,
+        cargo_bin=recipe_contract["cargo"]["path"],
+        rustc_bin=recipe_contract["rustc"]["path"],
+        path=recipe_contract["path"],
+        features=closure_contract["features"],
+    )
+    if actual_closure != closure_contract:
+        _fail(
+            "offline Cargo closure differs from the trusted contract: "
+            f"actual={actual_closure} expected={closure_contract}"
+        )
+    if reviewed_git_set:
         git_census(cargo_home, reviewed_git_set)
     return manifest
 
@@ -1405,7 +1858,7 @@ def copy_cache_bounded(
     return {"files": files, "bytes": total}
 
 
-def measure_closure(
+def _measure_closure_output(
     source_root: Path,
     *,
     manifest: str,
@@ -1415,12 +1868,16 @@ def measure_closure(
     cargo_bin: str = "cargo",
     rustc_bin: str = "rustc",
     path: str = DEFAULT_PATH,
-) -> int:
+    features: Sequence[str] = ("default",),
+) -> tuple[int, str]:
     """Measure exact normal/build package identities with Cargo offline only."""
 
     _safe_relative(manifest, "closure manifest")
     if not isinstance(package_name, str) or not package_name:
         _fail("closure package_name is required")
+    if not isinstance(target, str) or not target:
+        _fail("closure target is required")
+    feature_values = _feature_list(features)
     home = Path(tempfile.mkdtemp(prefix="bootstrap-measure-home-"))
     try:
         environment = fetch_environment(
@@ -1446,6 +1903,7 @@ def measure_closure(
                 "none",
                 "--format",
                 "{p}",
+                *_cargo_feature_args(feature_values),
                 "--manifest-path",
                 manifest,
             ],
@@ -1468,7 +1926,77 @@ def measure_closure(
         value = re.sub(r" \(.*$", "", value)
         if not value.startswith(f"{package_name} "):
             values.add(value)
-    return len(values)
+    normalized = sorted(values)
+    return len(normalized), _sha256(_canonical({"packages": normalized}))
+
+
+def measure_closure_contract(
+    source_root: Path,
+    *,
+    manifest: str,
+    package_name: str,
+    source_head_sha: str,
+    source_tree_sha: str,
+    target: str = DEFAULT_TARGET,
+    cargo_home: Path,
+    cargo_bin: str = "cargo",
+    rustc_bin: str = "rustc",
+    path: str = DEFAULT_PATH,
+    features: Sequence[str] = ("default",),
+) -> dict[str, Any]:
+    """Return a closure contract with an independently hashed package list."""
+
+    _identity(source_head_sha, "closure source_head_sha")
+    _identity(source_tree_sha, "closure source_tree_sha")
+    feature_values = _feature_list(features)
+    count, output_sha256 = _measure_closure_output(
+        source_root,
+        manifest=manifest,
+        package_name=package_name,
+        target=target,
+        cargo_home=cargo_home,
+        cargo_bin=cargo_bin,
+        rustc_bin=rustc_bin,
+        path=path,
+        features=feature_values,
+    )
+    return {
+        "source_head_sha": source_head_sha,
+        "source_tree_sha": source_tree_sha,
+        "target_package": package_name,
+        "target_triple": target,
+        "features": feature_values,
+        "package_count": count,
+        "output_sha256": output_sha256,
+    }
+
+
+def measure_closure(
+    source_root: Path,
+    *,
+    manifest: str,
+    package_name: str,
+    target: str = DEFAULT_TARGET,
+    cargo_home: Path,
+    cargo_bin: str = "cargo",
+    rustc_bin: str = "rustc",
+    path: str = DEFAULT_PATH,
+    features: Sequence[str] = ("default",),
+) -> int:
+    """Return only the count for callers that do not need admission proof."""
+
+    count, _ = _measure_closure_output(
+        source_root,
+        manifest=manifest,
+        package_name=package_name,
+        target=target,
+        cargo_home=cargo_home,
+        cargo_bin=cargo_bin,
+        rustc_bin=rustc_bin,
+        path=path,
+        features=features,
+    )
+    return count
 
 
 def _parse_reviewed_git(value: str) -> tuple[str, str]:
@@ -1478,6 +2006,31 @@ def _parse_reviewed_git(value: str) -> tuple[str, str]:
     if not url or not _HEX40.fullmatch(rev):
         _fail("--reviewed-git must be URL@full-40-hex-revision")
     return url, rev
+
+
+def _read_bundle_contract(path: Path) -> BundleContract:
+    raw = _lstat_regular(path, "trusted bundle contract", 4 * 1024 * 1024)
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _fail(f"trusted bundle contract is not valid JSON: {exc}")
+    if not isinstance(value, dict) or set(value) != {
+        "source_head_sha",
+        "source_tree_sha",
+        "dependency_contract_digest",
+        "toolchain_input_digest",
+        "closure",
+        "recipe",
+    }:
+        _fail("trusted bundle contract schema mismatch")
+    return BundleContract(
+        value["source_head_sha"],
+        value["source_tree_sha"],
+        value["dependency_contract_digest"],
+        value["toolchain_input_digest"],
+        value["closure"],
+        value["recipe"],
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1490,12 +2043,15 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--target-package", required=True)
     build.add_argument("--target-triple", default=DEFAULT_TARGET)
     build.add_argument("--cargo-home", type=Path, required=True)
+    build.add_argument("--builder-base-digest", required=True)
     build.add_argument("--cargo-bin", default="cargo")
     build.add_argument("--rustc-bin", default="rustc")
     build.add_argument("--path", default=DEFAULT_PATH)
     build.add_argument("--reviewed-git", action="append", required=True)
     validate = commands.add_parser("validate")
     validate.add_argument("--bundle", type=Path, required=True)
+    validate.add_argument("--contract", type=Path, required=True)
+    validate.add_argument("--cargo-home", type=Path, required=True)
     validate.add_argument("--reviewed-git", action="append")
     copy = commands.add_parser("copy-cache")
     copy.add_argument("--source", type=Path, required=True)
@@ -1518,6 +2074,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 target_package=args.target_package,
                 target_triple=args.target_triple,
                 cargo_home=args.cargo_home,
+                builder_base_digest=args.builder_base_digest,
                 cargo_bin=args.cargo_bin,
                 rustc_bin=args.rustc_bin,
                 path=args.path,
@@ -1531,7 +2088,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.reviewed_git
                 else None
             )
-            manifest = validate_bundle(args.bundle, reviewed_git=reviewed)
+            manifest = validate_bundle(
+                args.bundle,
+                contract=_read_bundle_contract(args.contract),
+                reviewed_git=reviewed,
+                cargo_home=args.cargo_home,
+            )
             print(json.dumps(manifest, indent=2, sort_keys=True))
             return 0
         if args.command == "copy-cache":

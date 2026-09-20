@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import subprocess
@@ -12,12 +13,15 @@ import unittest
 from pathlib import Path
 
 from tools.bootstrap_prefetch import (
+    BundleContract,
     PrefetchError,
+    builder_recipe_contract,
     build_bundle,
     copy_cache_bounded,
     fetch_environment,
     git_census,
     measure_closure,
+    measure_closure_contract,
     network_policy,
     validate_bundle,
 )
@@ -33,6 +37,7 @@ TARGET_MANIFEST = next(
     .endswith("-workflow")
 )
 TARGET_PACKAGE = tomllib.loads(TARGET_MANIFEST.read_text(encoding="utf-8"))["package"]["name"]
+TEST_BASE_IMAGE_DIGEST = hashlib.sha256(b"owned unit-test builder identity").hexdigest()
 
 
 def _cargo_tool(name: str) -> str:
@@ -51,6 +56,10 @@ def _git(directory: Path, *args: str, check: bool = True) -> str:
 
 def _source_revision(directory: Path = ROOT) -> str:
     return _git(directory, "rev-parse", "HEAD")
+
+
+def _source_tree(directory: Path = ROOT) -> str:
+    return _git(directory, "rev-parse", "HEAD^{tree}")
 
 
 def _reviewed_git_sources() -> tuple[tuple[str, str], ...]:
@@ -131,11 +140,70 @@ def _fixture_build(directory: Path, output: Path, revision: str) -> dict[str, ob
         target_package="member",
         target_triple="x86_64-unknown-linux-gnu",
         cargo_home=Path.home() / ".cargo",
+        builder_base_digest=TEST_BASE_IMAGE_DIGEST,
         cargo_bin=_cargo_tool("cargo"),
         rustc_bin=_cargo_tool("rustc"),
         path=os.environ["PATH"],
         reviewed_git=(),
     )
+
+
+def _trusted_contract(
+    source_root: Path,
+    manifest: dict[str, object],
+    *,
+    target_manifest: str,
+    target_package: str,
+    path: str,
+    base_digest: str = TEST_BASE_IMAGE_DIGEST,
+) -> BundleContract:
+    cargo = _cargo_tool("cargo")
+    rustc = _cargo_tool("rustc")
+    head = _source_revision(source_root)
+    tree = _source_tree(source_root)
+    closure = measure_closure_contract(
+        source_root,
+        manifest=target_manifest,
+        package_name=target_package,
+        source_head_sha=head,
+        source_tree_sha=tree,
+        target="x86_64-unknown-linux-gnu",
+        cargo_home=Path.home() / ".cargo",
+        cargo_bin=cargo,
+        rustc_bin=rustc,
+        path=path,
+    )
+    recipe = builder_recipe_contract(
+        cargo_bin=cargo,
+        rustc_bin=rustc,
+        path=path,
+        builder_base_digest=base_digest,
+        target_package=target_package,
+        target_triple="x86_64-unknown-linux-gnu",
+        manifest=target_manifest,
+    )
+    return BundleContract(
+        head,
+        tree,
+        str(manifest["dependency_contract_digest"]),
+        str(manifest["toolchain_input_digest"]),
+        closure,
+        recipe,
+    )
+
+
+def _rewrite_manifest(path: Path, value: dict[str, object]) -> None:
+    base = dict(value)
+    base.pop("bundle_sha256", None)
+    value["bundle_sha256"] = hashlib.sha256(
+        json.dumps(
+            base,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    path.write_text(json.dumps(value), encoding="utf-8")
 
 
 class BootstrapPrefetchTests(unittest.TestCase):
@@ -147,6 +215,7 @@ class BootstrapPrefetchTests(unittest.TestCase):
             source_revision=_source_revision(),
             target_package=TARGET_PACKAGE,
             cargo_home=Path.home() / ".cargo",
+            builder_base_digest=TEST_BASE_IMAGE_DIGEST,
             cargo_bin=_cargo_tool("cargo"),
             rustc_bin=_cargo_tool("rustc"),
             path=os.environ["PATH"],
@@ -172,7 +241,19 @@ class BootstrapPrefetchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="bootstrap-prefetch-test-") as name:
             temporary = Path(name)
             bundle = self._bundle(temporary)
-            manifest = validate_bundle(bundle, reviewed_git=GIT_SOURCE)
+            manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+            manifest = validate_bundle(
+                bundle,
+                contract=_trusted_contract(
+                    ROOT,
+                    manifest,
+                    target_manifest=TARGET_MANIFEST.relative_to(ROOT).as_posix(),
+                    target_package=TARGET_PACKAGE,
+                    path=os.environ["PATH"],
+                ),
+                reviewed_git=GIT_SOURCE,
+                cargo_home=Path.home() / ".cargo",
+            )
             self.assertEqual(manifest["workspace_manifest_count"], 10)
             self.assertEqual(manifest["lock_package_count"], 438)
             self.assertEqual(manifest["closure_package_count"], 115)
@@ -236,6 +317,7 @@ class BootstrapPrefetchTests(unittest.TestCase):
                     source_revision=wrong_head,
                     target_package=TARGET_PACKAGE,
                     cargo_home=Path.home() / ".cargo",
+                    builder_base_digest=TEST_BASE_IMAGE_DIGEST,
                     reviewed_git=GIT_SOURCE,
                 )
 
@@ -249,6 +331,7 @@ class BootstrapPrefetchTests(unittest.TestCase):
                     source_revision=None,
                     target_package="member",
                     cargo_home=Path.home() / ".cargo",
+                    builder_base_digest=TEST_BASE_IMAGE_DIGEST,
                     reviewed_git=(),
                 )
 
@@ -272,6 +355,7 @@ class BootstrapPrefetchTests(unittest.TestCase):
                         source_revision=_source_revision(clone),
                         target_package=TARGET_PACKAGE,
                         cargo_home=Path.home() / ".cargo",
+                        builder_base_digest=TEST_BASE_IMAGE_DIGEST,
                         reviewed_git=GIT_SOURCE,
                     )
 
@@ -286,6 +370,7 @@ class BootstrapPrefetchTests(unittest.TestCase):
                     source_revision=revision,
                     target_package="member",
                     cargo_home=Path.home() / ".cargo",
+                    builder_base_digest=TEST_BASE_IMAGE_DIGEST,
                     reviewed_git=(),
                 )
 
@@ -308,21 +393,110 @@ class BootstrapPrefetchTests(unittest.TestCase):
                 second_manifest["dependency_contract_digest"],
             )
 
+    def test_trusted_contract_rejects_forged_count_source_recipe_and_directories(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="bootstrap-contract-" ) as name:
+            temporary = Path(name)
+            source = temporary / "source"
+            source.mkdir()
+            revision = _fixture(source)
+            bundle = temporary / "bundle"
+            manifest = _fixture_build(source, bundle, revision)
+            contract = _trusted_contract(
+                source,
+                manifest,
+                target_manifest="member/Cargo.toml",
+                target_package="member",
+                path=os.environ["PATH"],
+            )
+
+            forged_count = temporary / "forged-count"
+            shutil.copytree(bundle, forged_count)
+            forged_manifest = json.loads(
+                (forged_count / "manifest.json").read_text(encoding="utf-8")
+            )
+            forged_manifest["closure_package_count"] += 1
+            _rewrite_manifest(forged_count / "manifest.json", forged_manifest)
+            with self.assertRaises(PrefetchError):
+                validate_bundle(
+                    forged_count,
+                    contract=contract,
+                    reviewed_git=(),
+                    cargo_home=Path.home() / ".cargo",
+                )
+
+            forged_source = temporary / "forged-source"
+            shutil.copytree(bundle, forged_source)
+            forged_manifest = json.loads(
+                (forged_source / "manifest.json").read_text(encoding="utf-8")
+            )
+            forged_manifest["source_head_sha"] = "0" * 40
+            _rewrite_manifest(forged_source / "manifest.json", forged_manifest)
+            with self.assertRaises(PrefetchError):
+                validate_bundle(
+                    forged_source,
+                    contract=contract,
+                    reviewed_git=(),
+                    cargo_home=Path.home() / ".cargo",
+                )
+
+            extra_directory = temporary / "extra-directory"
+            shutil.copytree(bundle, extra_directory)
+            (extra_directory / "unexpected-member").mkdir()
+            with self.assertRaises(PrefetchError):
+                validate_bundle(
+                    extra_directory,
+                    contract=contract,
+                    reviewed_git=(),
+                    cargo_home=Path.home() / ".cargo",
+                )
+
+            recipe_mismatch = _trusted_contract(
+                source,
+                manifest,
+                target_manifest="member/Cargo.toml",
+                target_package="member",
+                path="/recipe/different",
+            )
+            with self.assertRaises(PrefetchError):
+                validate_bundle(
+                    bundle,
+                    contract=recipe_mismatch,
+                    reviewed_git=(),
+                    cargo_home=Path.home() / ".cargo",
+                )
+
     def test_self_excluding_digest_and_numeric_schema(self) -> None:
         with tempfile.TemporaryDirectory(prefix="bootstrap-schema-") as name:
             bundle = self._bundle(Path(name))
             manifest_path = bundle / "manifest.json"
             value = json.loads(manifest_path.read_text(encoding="utf-8"))
+            contract = _trusted_contract(
+                ROOT,
+                value,
+                target_manifest=TARGET_MANIFEST.relative_to(ROOT).as_posix(),
+                target_package=TARGET_PACKAGE,
+                path=os.environ["PATH"],
+            )
             value["workspace_manifest_count"] = "10"
             manifest_path.write_text(json.dumps(value), encoding="utf-8")
             with self.assertRaises(PrefetchError):
-                validate_bundle(bundle, reviewed_git=GIT_SOURCE)
+                validate_bundle(
+                    bundle,
+                    contract=contract,
+                    reviewed_git=GIT_SOURCE,
+                    cargo_home=Path.home() / ".cargo",
+                )
 
             value["workspace_manifest_count"] = 10
             value["bundle_sha256"] = "0" * 64
             manifest_path.write_text(json.dumps(value), encoding="utf-8")
             with self.assertRaises(PrefetchError):
-                validate_bundle(bundle, reviewed_git=GIT_SOURCE)
+                validate_bundle(
+                    bundle,
+                    contract=contract,
+                    reviewed_git=GIT_SOURCE,
+                    cargo_home=Path.home() / ".cargo",
+                )
 
     def test_fetch_environment_ignores_ambient_credentials(self) -> None:
         old = os.environ.get("GH_TOKEN")
