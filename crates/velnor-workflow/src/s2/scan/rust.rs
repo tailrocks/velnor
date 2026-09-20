@@ -23,15 +23,39 @@ const POLICY_UNIT_ID: &str = "rust-policy";
 /// other value fails the install, so the scan rejects it up front.
 const RUSTUP_PROFILES: [&str; 3] = ["minimal", "default", "complete"];
 
-/// Parse the pinned toolchain from a detector-approved regular-file view.
+/// Parse the pinned toolchain from the immutable detector snapshot.
 /// Generation-config units must use the same raw detector inputs as the rest
-/// of the scan; consulting a fresh Git-index walk here would hide an
-/// untracked regular pin or follow a symlinked pin.
-pub(crate) fn parse_rust_toolchain_from_files(
-    root: &Path,
+/// of the scan; consulting a fresh worktree path would re-open a TOCTOU race.
+pub(crate) fn parse_rust_toolchain_from_contents(
     files: &BTreeSet<String>,
+    contents: &BTreeMap<String, Box<[u8]>>,
 ) -> Result<Option<RustToolchain>, GeneratorError> {
-    parse_rust_toolchain(root, files)
+    if files.contains("rust-toolchain.toml") {
+        let path = Path::new("rust-toolchain.toml");
+        let source = contents.get("rust-toolchain.toml").ok_or_else(|| {
+            GeneratorError::usage("detector snapshot is missing rust-toolchain.toml bytes")
+        })?;
+        let source = std::str::from_utf8(source).map_err(|error| {
+            GeneratorError::usage(format!("read rust-toolchain.toml as UTF-8: {error}"))
+        })?;
+        return parse_toolchain_table(source, path).map(Some);
+    }
+    if files.contains("rust-toolchain") {
+        let path = Path::new("rust-toolchain");
+        let source = contents.get("rust-toolchain").ok_or_else(|| {
+            GeneratorError::usage("detector snapshot is missing rust-toolchain bytes")
+        })?;
+        let source = std::str::from_utf8(source).map_err(|error| {
+            GeneratorError::usage(format!("read rust-toolchain as UTF-8: {error}"))
+        })?;
+        return Ok(Some(RustToolchain {
+            channel: validate_toolchain_value("channel", source.trim(), path)?,
+            components: Vec::new(),
+            targets: Vec::new(),
+            profile: None,
+        }));
+    }
+    Ok(None)
 }
 
 /// Parse the repository's pinned Rust toolchain, if it declares one.

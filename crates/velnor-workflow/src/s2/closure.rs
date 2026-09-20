@@ -340,6 +340,59 @@ mod tests {
         assert_eq!(lines.len(), 2);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn closure_of_tree_rejects_tracked_symlink_record() {
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("velnor-closure-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        must(
+            std::fs::create_dir_all(root.join("crates/velnor-workflow")),
+            "create closure symlink fixture",
+        );
+        for (name, content) in [
+            ("Cargo.toml", "[workspace]\n"),
+            ("Cargo.lock", "# lock\n"),
+            ("crates/velnor-workflow/AGENTS.md", "workflow rules\n"),
+        ] {
+            must(
+                std::fs::write(root.join(name), content),
+                "write closure fixture",
+            );
+        }
+        must(
+            symlink("AGENTS.md", root.join("crates/velnor-workflow/CLAUDE.md")),
+            "create closure symlink",
+        );
+        git_in(&root, &["init", "--quiet"]);
+        git_in(&root, &["add", "-A"]);
+        git_in(
+            &root,
+            &[
+                "-c",
+                "user.email=closure@test",
+                "-c",
+                "user.name=closure",
+                "commit",
+                "--quiet",
+                "--message",
+                "symlink closure fixture",
+            ],
+        );
+        let head = git_output(&root, &["rev-parse", "HEAD"]);
+        let error = must_some(
+            closure_of_tree(&root, &head, CI_FEATURES, PROFILE_RELEASE).err(),
+            "closure must reject tracked symlink",
+        );
+        assert!(error
+            .to_string()
+            .contains("unsupported or malformed closure entry"));
+        assert!(error.to_string().contains("CLAUDE.md"), "{error}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn dev_features_pin_the_candidate_build() {
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");

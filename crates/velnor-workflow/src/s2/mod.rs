@@ -539,19 +539,33 @@ fn clap_usage_error(error: &clap::Error) -> GeneratorError {
 #[derive(Debug)]
 pub struct GeneratorError {
     message: String,
+    partial_recovery_required: bool,
 }
 
 impl GeneratorError {
     fn usage(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            partial_recovery_required: false,
         }
     }
 
     fn io(operation: &str, path: &Path, source: &io::Error) -> Self {
         Self {
             message: format!("{operation} {}: {source}", path.display()),
+            partial_recovery_required: false,
         }
+    }
+
+    fn partial_apply_recovery_required(message: impl Into<String>) -> Self {
+        Self {
+            message: format!("partial_apply_recovery_required: {}", message.into()),
+            partial_recovery_required: true,
+        }
+    }
+
+    fn requires_partial_recovery(&self) -> bool {
+        self.partial_recovery_required
     }
 }
 
@@ -1356,6 +1370,23 @@ impl RawInventory {
             .collect()
     }
 
+    fn detector_regular_file_contents(
+        &self,
+        detector_inputs: &BTreeSet<PathBuf>,
+    ) -> BTreeMap<String, Box<[u8]>> {
+        detector_inputs
+            .iter()
+            .filter_map(|path| {
+                let RawInventoryEntry::Regular(FilePreimage::Regular { bytes, .. }) =
+                    self.entries.get(path)?
+                else {
+                    return None;
+                };
+                Some((path.to_string_lossy().into_owned(), bytes.clone()))
+            })
+            .collect()
+    }
+
     fn omitted_non_regular_files(&self, detector_inputs: &BTreeSet<PathBuf>) -> Vec<String> {
         detector_inputs
             .iter()
@@ -1702,6 +1733,37 @@ fn scan_target(
     scan_target_with_baseline(root, providers, default_branch, None)
 }
 
+struct FixedPointObservation<T, S> {
+    value: T,
+    next_owned: BTreeSet<PathBuf>,
+    signature: S,
+}
+
+fn run_bounded_fixed_point<T, S, F>(
+    mut owned_paths: BTreeSet<PathBuf>,
+    mut observe: F,
+) -> Result<T, GeneratorError>
+where
+    F: FnMut(&BTreeSet<PathBuf>) -> Result<FixedPointObservation<T, S>, GeneratorError>,
+    S: Clone + Eq,
+{
+    let mut previous_signature = None;
+    for pass in 0..3 {
+        let observation = observe(&owned_paths)?;
+        if pass > 0
+            && observation.next_owned == owned_paths
+            && previous_signature.as_ref() == Some(&observation.signature)
+        {
+            return Ok(observation.value);
+        }
+        previous_signature = Some(observation.signature);
+        owned_paths = observation.next_owned;
+    }
+    Err(GeneratorError::usage(
+        "detector_fixed_point_unreachable: generated inputs did not stabilize after three passes; no files were written",
+    ))
+}
+
 fn scan_target_with_baseline(
     root: &Path,
     providers: Option<provider::ProviderSet>,
@@ -1735,49 +1797,47 @@ fn scan_target_with_baseline(
     // can exclude only exact current-render bytes.
     let raw_inventory = capture_raw_inventory(root, exclude)?;
     let baseline_paths = baseline_owned_paths(root, baseline)?;
-    let mut owned_paths = baseline_paths.clone();
-    let mut previous_rendered = None;
-    let mut previous_shape = None;
-    let mut previous_detector_fingerprint = None;
-    for pass in 0..3 {
+    let fixed_baseline_paths = baseline_paths.clone();
+    run_bounded_fixed_point(baseline_paths, |owned_paths| {
         let pass_inventory = capture_raw_inventory(root, exclude)?;
         if pass_inventory != raw_inventory {
             return Err(GeneratorError::usage(
                 "detector_fixed_point_unreachable: raw inventory changed during bounded scan; no files were written",
             ));
         }
-        let detector_inputs = pass_inventory.detector_inputs(&owned_paths);
+        let detector_inputs = pass_inventory.detector_inputs(owned_paths);
         let detector_files = pass_inventory.detector_regular_files(&detector_inputs);
+        let detector_contents = pass_inventory.detector_regular_file_contents(&detector_inputs);
         let omitted_non_regular = pass_inventory.omitted_non_regular_files(&detector_inputs);
         let shape = scan::scan_shape_with_detector_files(
-            root,
             &scan_providers,
             scan_default_branch,
             detector_files,
+            &detector_contents,
             omitted_non_regular,
         )?;
         let detector_file_set = shape.files().iter().cloned().collect();
-        let scanned = resolve_scanned_target(root, generation.as_ref(), shape, &detector_file_set)?;
+        let scanned = resolve_scanned_target(
+            root,
+            generation.as_ref(),
+            shape,
+            &detector_file_set,
+            &detector_contents,
+        )?;
         let rendered = rendered_files_for_scanned(root, &scanned)?;
-        let mut next = baseline_paths.clone();
+        let mut next = fixed_baseline_paths.clone();
         next.extend(current_exact_paths(root, &rendered)?);
-        if pass > 0
-            && next == owned_paths
-            && previous_rendered.as_ref() == Some(&rendered)
-            && previous_shape.as_ref() == Some(&scanned.shape)
-            && previous_detector_fingerprint.as_ref()
-                == Some(&pass_inventory.fingerprint(&detector_inputs))
-        {
-            return Ok(scanned);
-        }
-        previous_rendered = Some(rendered);
-        previous_shape = Some(scanned.shape.clone());
-        previous_detector_fingerprint = Some(pass_inventory.fingerprint(&detector_inputs));
-        owned_paths = next;
-    }
-    Err(GeneratorError::usage(
-        "detector_fixed_point_unreachable: generated inputs did not stabilize after three passes; no files were written",
-    ))
+        let shape_signature = scanned.shape.clone();
+        Ok(FixedPointObservation {
+            value: scanned,
+            next_owned: next,
+            signature: (
+                rendered,
+                shape_signature,
+                pass_inventory.fingerprint(&detector_inputs),
+            ),
+        })
+    })
 }
 
 fn resolve_scanned_target(
@@ -1785,6 +1845,7 @@ fn resolve_scanned_target(
     generation: Option<&config::RepoGenerationConfig>,
     shape: scan::RepositoryShape,
     detector_files: &BTreeSet<String>,
+    detector_contents: &BTreeMap<String, Box<[u8]>>,
 ) -> Result<ScannedTarget, GeneratorError> {
     let mut config = ProjectConfig::from(shape.clone());
     if let Some(generation) = generation {
@@ -1816,7 +1877,9 @@ fn resolve_scanned_target(
     // Rust unit, so the parsed pin is stamped onto any Rust unit that lacks
     // one; a repository with no pin leaves them unstamped for generation to
     // refuse.
-    if let Some(toolchain) = scan::rust::parse_rust_toolchain_from_files(root, detector_files)? {
+    if let Some(toolchain) =
+        scan::rust::parse_rust_toolchain_from_contents(detector_files, detector_contents)?
+    {
         for unit in &mut config.units {
             if unit.kind == UnitKind::Rust && unit.toolchain.is_none() {
                 unit.toolchain = Some(toolchain.clone());
@@ -7897,14 +7960,20 @@ fn rollback_after_error(
     mutated: &[AppliedMutation],
     error: GeneratorError,
 ) -> Result<WriteOutcome, GeneratorError> {
+    if error.requires_partial_recovery() {
+        // The mutation may have committed before its post-image became
+        // observable. Keep the durable journal and require explicit recovery;
+        // deleting it would erase the only trusted rollback evidence.
+        return Err(error);
+    }
     if let Err(rollback) = rollback_generated_files(root, mutated) {
-        return Err(GeneratorError::usage(format!(
-            "{error}; rollback failed: {rollback}"
+        return Err(GeneratorError::partial_apply_recovery_required(format!(
+            "{error}; rollback failed: {rollback}; transaction journal preserved"
         )));
     }
     if let Err(cleanup) = cleanup_transaction_journal(root) {
-        return Err(GeneratorError::usage(format!(
-            "{error}; rollback succeeded but transaction journal cleanup failed: {cleanup}"
+        return Err(GeneratorError::partial_apply_recovery_required(format!(
+            "{error}; rollback succeeded but transaction journal cleanup failed: {cleanup}; journal preserved"
         )));
     }
     Err(error)
@@ -7916,9 +7985,14 @@ fn rollback_generated_files(
 ) -> Result<(), GeneratorError> {
     for mutation in mutated.iter().rev() {
         let path = root.join(&mutation.relative);
-        let current = capture_file_preimage(&path, &mutation.relative)?;
+        let current = capture_file_preimage(&path, &mutation.relative).map_err(|error| {
+            GeneratorError::partial_apply_recovery_required(format!(
+                "inspect generated file during rollback {}: {error}",
+                mutation.relative.display()
+            ))
+        })?;
         if current != mutation.after {
-            return Err(GeneratorError::usage(format!(
+            return Err(GeneratorError::partial_apply_recovery_required(format!(
                 "cannot roll back generated file after post-write identity changed: {}",
                 mutation.relative.display()
             )));
@@ -7932,28 +8006,39 @@ fn rollback_generated_files(
                     )));
                 }
                 Ok(_) => fs::remove_file(&path).map_err(|error| {
-                    GeneratorError::io("roll back generated file", &path, &error)
+                    GeneratorError::partial_apply_recovery_required(format!(
+                        "remove generated file during rollback {}: {error}",
+                        mutation.relative.display()
+                    ))
                 })?,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => (),
                 Err(error) => {
-                    return Err(GeneratorError::io(
-                        "inspect generated file during rollback",
-                        &path,
-                        &error,
-                    ));
+                    return Err(GeneratorError::partial_apply_recovery_required(format!(
+                        "inspect generated file during rollback {}: {error}",
+                        mutation.relative.display()
+                    )));
                 }
             },
             FilePreimage::Regular { bytes, identity } => {
-                let staged = stage_generated_bytes(&path, bytes)?;
+                let staged = stage_generated_bytes(&path, bytes).map_err(|error| {
+                    GeneratorError::partial_apply_recovery_required(format!(
+                        "stage generated file during rollback {}: {error}",
+                        mutation.relative.display()
+                    ))
+                })?;
                 #[cfg(unix)]
-                restore_file_mode(&staged, identity.mode)?;
+                restore_file_mode(&staged, identity.mode).map_err(|error| {
+                    GeneratorError::partial_apply_recovery_required(format!(
+                        "restore generated mode during rollback {}: {error}",
+                        mutation.relative.display()
+                    ))
+                })?;
                 if let Err(error) = fs::rename(&staged, &path) {
                     let _ = fs::remove_file(&staged);
-                    return Err(GeneratorError::io(
-                        "restore generated file during rollback",
-                        &path,
-                        &error,
-                    ));
+                    return Err(GeneratorError::partial_apply_recovery_required(format!(
+                        "restore generated file during rollback {}: {error}",
+                        mutation.relative.display()
+                    )));
                 }
             }
         }
@@ -8568,6 +8653,27 @@ fn write_reviewed_file(
     write_reviewed_file_observed(path, relative, content, expected, |_| Ok(()))
 }
 
+fn capture_post_write_preimage(
+    path: &Path,
+    relative: &Path,
+    expected_bytes: Option<&[u8]>,
+) -> Result<FilePreimage, GeneratorError> {
+    let after = capture_file_preimage(path, relative).map_err(|error| {
+        GeneratorError::partial_apply_recovery_required(format!(
+            "post-write identity capture failed for {}: {error}",
+            relative.display()
+        ))
+    })?;
+    let bytes_match = expected_bytes.is_none_or(|expected| after.has_bytes(expected));
+    if !bytes_match {
+        return Err(GeneratorError::partial_apply_recovery_required(format!(
+            "post-write bytes changed for {}",
+            relative.display()
+        )));
+    }
+    Ok(after)
+}
+
 fn write_reviewed_file_observed<F>(
     path: &Path,
     relative: &Path,
@@ -8603,13 +8709,13 @@ where
                     &error,
                 ));
             }
-            fs::remove_file(&staged)
-                .map_err(|error| GeneratorError::io("remove staged file", &staged, &error))?;
-            let after = capture_file_preimage(path, relative)?;
-            if !after.has_bytes(content.as_bytes()) {
-                return Err(preimage_changed(relative));
+            if let Err(error) = fs::remove_file(&staged) {
+                return Err(GeneratorError::partial_apply_recovery_required(format!(
+                    "remove committed staged file {}: {error}",
+                    staged.display()
+                )));
             }
-            Ok(after)
+            capture_post_write_preimage(path, relative, Some(content.as_bytes()))
         }
         FilePreimage::Regular { .. } => {
             let (backup_dir, backup) = reserve_backup_path(path)?;
@@ -8660,11 +8766,7 @@ where
             // ownership-state update; a leftover backup remains recoverable.
             let _ = fs::remove_file(&backup);
             let _ = fs::remove_dir(&backup_dir);
-            let after = capture_file_preimage(path, relative)?;
-            if !after.has_bytes(content.as_bytes()) {
-                return Err(preimage_changed(relative));
-            }
-            Ok(after)
+            capture_post_write_preimage(path, relative, Some(content.as_bytes()))
         }
     }
 }
@@ -8705,11 +8807,16 @@ fn delete_reviewed_file(
     // progress monotonic even if cleanup leaves a recoverable hidden backup.
     let _ = fs::remove_file(&backup);
     let _ = fs::remove_dir(&backup_dir);
-    let after = capture_file_preimage(path, relative)?;
-    if !matches!(after, FilePreimage::Missing) {
-        return Err(preimage_changed(relative));
-    }
-    Ok(after)
+    capture_post_write_preimage(path, relative, None).and_then(|after| {
+        if matches!(after, FilePreimage::Missing) {
+            Ok(after)
+        } else {
+            Err(GeneratorError::partial_apply_recovery_required(format!(
+                "stale generated file remained after deletion: {}",
+                relative.display()
+            )))
+        }
+    })
 }
 
 /// Test helper: replace a path with new content through the same staged
@@ -9344,6 +9451,84 @@ mod tests {
         assert!(error.to_string().contains(expected), "{error}");
     }
 
+    #[test]
+    fn exact_baseline_outputs_exclude_only_exact_bytes() {
+        let root = temporary_repository("exact-baseline-ownership");
+        let exact = PathBuf::from(".github/workflows/exact.yml");
+        let modified = PathBuf::from(".github/workflows/modified.yml");
+        let unknown = PathBuf::from(".github/workflows/unknown.yml");
+        for (relative, content) in [
+            (&exact, "exact\n"),
+            (&modified, "modified-worktree\n"),
+            (&unknown, "unknown\n"),
+        ] {
+            let path = root.join(relative);
+            must(
+                fs::create_dir_all(path.parent().unwrap_or(&root)),
+                "create baseline ownership directory",
+            );
+            must(fs::write(path, content), "write baseline ownership fixture");
+        }
+        let baseline = TrustedBaseline {
+            revision: "a".repeat(40),
+            tree: "b".repeat(40),
+            inputs: None,
+            outputs: BTreeMap::from([(exact.clone(), b"exact\n".to_vec().into_boxed_slice())]),
+        };
+        let baseline_owned = must(
+            baseline_owned_paths(&root, Some(&baseline)),
+            "derive exact baseline ownership",
+        );
+        assert_eq!(baseline_owned, BTreeSet::from([exact.clone()]));
+        let inventory = must(
+            capture_raw_inventory(&root, &[]),
+            "capture baseline ownership inventory",
+        );
+        let detector_inputs = inventory.detector_inputs(&baseline_owned);
+        assert!(!detector_inputs.contains(&exact));
+        assert!(detector_inputs.contains(&modified));
+        assert!(detector_inputs.contains(&unknown));
+
+        let rendered = BTreeMap::from([
+            (exact.clone(), "exact\n".to_owned()),
+            (modified.clone(), "wanted\n".to_owned()),
+        ]);
+        let current_exact = must(
+            current_exact_paths(&root, &rendered),
+            "derive exact current ownership",
+        );
+        assert_eq!(current_exact, BTreeSet::from([exact]));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cyclic_renderer_fails_closed_after_three_passes() {
+        let mut calls = 0;
+        let error = must_fail(
+            run_bounded_fixed_point(BTreeSet::new(), |_owned| {
+                calls += 1;
+                let next_owned = if calls % 2 == 0 {
+                    BTreeSet::new()
+                } else {
+                    BTreeSet::from([PathBuf::from(".github/workflows/cyclic.yml")])
+                };
+                Ok(FixedPointObservation {
+                    value: calls,
+                    next_owned,
+                    signature: calls,
+                })
+            }),
+            "cyclic renderer must fail closed",
+        );
+        assert_eq!(calls, 3, "bounded renderer must not spin past three passes");
+        assert!(
+            error
+                .to_string()
+                .contains("detector_fixed_point_unreachable"),
+            "{error}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn immutable_baseline_rejects_sidecar_claimed_symlink_outputs() {
@@ -9783,6 +9968,63 @@ mod tests {
             Some(RawInventoryEntry::Symlink { .. })
         ));
 
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detector_snapshot_does_not_follow_replaced_path() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_repository("detector-snapshot-no-follow");
+        let outside = temporary_directory("detector-snapshot-no-follow-outside");
+        let package = root.join("package.json");
+        must(
+            fs::write(
+                &package,
+                "{\"name\":\"snapshot\",\"scripts\":{\"test\":\"safe\"}}\n",
+            ),
+            "write detector snapshot source",
+        );
+        let snapshot_bytes =
+            must(fs::read(&package), "read detector snapshot source").into_boxed_slice();
+        let lockfile = root.join("package-lock.json");
+        must(
+            fs::write(&lockfile, "{\"lockfileVersion\":3}\n"),
+            "write detector snapshot lockfile",
+        );
+        let lockfile_bytes =
+            must(fs::read(&lockfile), "read detector snapshot lockfile").into_boxed_slice();
+        must(
+            fs::write(outside.join("package.json"), "{\"name\":\"outside\"}\n"),
+            "write detector snapshot outside source",
+        );
+        must(
+            fs::remove_file(&package),
+            "remove replaceable detector source",
+        );
+        must(
+            symlink(outside.join("package.json"), &package),
+            "create replacement symlink",
+        );
+        let files = vec!["package.json".to_owned(), "package-lock.json".to_owned()];
+        let contents = BTreeMap::from([
+            ("package.json".to_owned(), snapshot_bytes),
+            ("package-lock.json".to_owned(), lockfile_bytes),
+        ]);
+        let shape = must(
+            scan::scan_shape_with_detector_files(
+                &provider_set([ProviderId::GithubHosted]),
+                "main",
+                files,
+                &contents,
+                Vec::new(),
+            ),
+            "scan immutable detector snapshot",
+        );
+        let canonical = must(shape.canonical_json(), "serialize detector snapshot shape");
+        assert!(canonical.contains("package-script:.:test"), "{canonical}");
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
     }
@@ -20719,6 +20961,30 @@ lockfile = true
             must(fs::read_to_string(&path), "read preserved recreation"),
             "generated bytes\n"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn partial_recovery_error_preserves_transaction_journal() {
+        let root = temporary_repository("partial-recovery-journal");
+        let journal = transaction_path(&root);
+        must(
+            fs::create_dir(&journal),
+            "create partial-recovery journal sentinel",
+        );
+        let error = must_some(
+            rollback_after_error(
+                &root,
+                &[],
+                GeneratorError::partial_apply_recovery_required("forced post-write observation"),
+            )
+            .err(),
+            "partial recovery must stop without cleanup",
+        );
+        assert!(error
+            .to_string()
+            .contains("partial_apply_recovery_required"));
+        assert!(journal.exists(), "durable journal must remain for recovery");
         let _ = fs::remove_dir_all(root);
     }
 

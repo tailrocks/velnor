@@ -18,7 +18,15 @@ mod signals;
 mod swift;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::fs::{self, OpenOptions};
+use std::io::{Read as _, Write as _};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt as _;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt as _;
 
 use serde::Serialize;
 
@@ -54,7 +62,8 @@ pub(crate) fn scan_shape_with_owned_paths(
     owned_paths: &BTreeSet<std::path::PathBuf>,
 ) -> Result<RepositoryShape, GeneratorError> {
     let files = file_walk::repository_files_with_owned_paths(root, exclude, owned_paths)?;
-    scan_shape_with_detector_files(root, providers, default_branch, files, Vec::new())
+    let contents = read_detector_files(root, &files)?;
+    scan_shape_with_detector_files(providers, default_branch, files, &contents, Vec::new())
 }
 
 /// Run the detector pipeline over a caller-owned, physically regular file
@@ -63,19 +72,23 @@ pub(crate) fn scan_shape_with_owned_paths(
 /// paths. Their omission is explicit in the shape limitations rather than
 /// silently changing capability inference.
 pub(crate) fn scan_shape_with_detector_files(
-    root: &Path,
     providers: &ProviderSet,
     default_branch: &str,
     mut files: Vec<String>,
+    contents: &BTreeMap<String, Box<[u8]>>,
     mut omitted_non_regular: Vec<String>,
 ) -> Result<RepositoryShape, GeneratorError> {
     files.sort();
     files.dedup();
     omitted_non_regular.sort();
     omitted_non_regular.dedup();
+    let snapshot = DetectorSnapshot::create(&files, contents)?;
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
     let context = ScanContext {
-        root,
+        // Detectors read this private regular-file snapshot, never the
+        // mutable target paths. Raw identity/fixed-point checks remain owned
+        // by the caller; this root only prevents symlink TOCTOU during parse.
+        root: &snapshot.root,
         files: &files,
         file_set: &file_set,
     };
@@ -112,6 +125,155 @@ pub(crate) fn scan_shape_with_detector_files(
     shape.finalize();
     shape.files = files;
     Ok(shape)
+}
+
+static DETECTOR_SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Immutable regular-file checkout consumed by detectors. Every path is
+/// created by this process under a fresh private directory, so a target
+/// symlink replacement cannot redirect a detector read outside the snapshot.
+struct DetectorSnapshot {
+    root: PathBuf,
+}
+
+impl DetectorSnapshot {
+    fn create(
+        files: &[String],
+        contents: &BTreeMap<String, Box<[u8]>>,
+    ) -> Result<Self, GeneratorError> {
+        let sequence = DETECTOR_SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-detector-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&root)
+            .map_err(|error| GeneratorError::io("create detector snapshot", &root, &error))?;
+        let snapshot = Self { root };
+        for relative in files {
+            let relative_path = detector_relative_path(relative)?;
+            let bytes = contents.get(relative).ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "detector snapshot is missing regular-file bytes: {relative}"
+                ))
+            })?;
+            let path = snapshot.root.join(relative_path);
+            let Some(parent) = path.parent() else {
+                return Err(GeneratorError::usage(format!(
+                    "detector snapshot path has no parent: {relative}"
+                )));
+            };
+            fs::create_dir_all(parent).map_err(|error| {
+                GeneratorError::io("create detector snapshot directory", parent, &error)
+            })?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|error| {
+                    GeneratorError::io("create detector snapshot file", &path, &error)
+                })?;
+            file.write_all(bytes).map_err(|error| {
+                GeneratorError::io("write detector snapshot file", &path, &error)
+            })?;
+        }
+        Ok(snapshot)
+    }
+}
+
+impl Drop for DetectorSnapshot {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn detector_relative_path(relative: &str) -> Result<&Path, GeneratorError> {
+    let path = Path::new(relative);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::RootDir | Component::Prefix(_) | Component::ParentDir
+            )
+        })
+    {
+        return Err(GeneratorError::usage(format!(
+            "detector snapshot path escapes repository: {relative}"
+        )));
+    }
+    Ok(path)
+}
+
+fn read_detector_files(
+    root: &Path,
+    files: &[String],
+) -> Result<BTreeMap<String, Box<[u8]>>, GeneratorError> {
+    files
+        .iter()
+        .map(|relative| {
+            let relative_path = detector_relative_path(relative)?;
+            let path = root.join(relative_path);
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| GeneratorError::io("inspect detector input", &path, &error))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(GeneratorError::usage(format!(
+                    "detector input is not a regular file: {relative}"
+                )));
+            }
+            let mut options = OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            options.custom_flags(libc::O_NOFOLLOW);
+            #[cfg(windows)]
+            options.custom_flags(0x0020_0000);
+            let mut file = options
+                .open(&path)
+                .map_err(|error| GeneratorError::io("open detector input", &path, &error))?;
+            let opened = file.metadata().map_err(|error| {
+                GeneratorError::io("inspect opened detector input", &path, &error)
+            })?;
+            if opened.file_type().is_symlink() || !opened.is_file() {
+                return Err(GeneratorError::usage(format!(
+                    "detector input changed to a non-regular file: {relative}"
+                )));
+            }
+            if detector_file_identity(&opened) != detector_file_identity(&metadata) {
+                return Err(GeneratorError::usage(format!(
+                    "detector input changed during open: {relative}"
+                )));
+            }
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)
+                .map_err(|error| GeneratorError::io("read detector input", &path, &error))?;
+            let final_metadata = file
+                .metadata()
+                .map_err(|error| GeneratorError::io("reinspect detector input", &path, &error))?;
+            if detector_file_identity(&final_metadata) != detector_file_identity(&opened)
+                || final_metadata.len() != bytes.len() as u64
+            {
+                return Err(GeneratorError::usage(format!(
+                    "detector input changed during snapshot: {relative}"
+                )));
+            }
+            Ok((relative.clone(), bytes.into_boxed_slice()))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn detector_file_identity(metadata: &fs::Metadata) -> (u64, u64, u32, u64) {
+    use std::os::unix::fs::MetadataExt as _;
+
+    (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.mode() & 0o7777,
+        metadata.len(),
+    )
+}
+
+#[cfg(not(unix))]
+fn detector_file_identity(metadata: &fs::Metadata) -> u64 {
+    metadata.len()
 }
 
 impl RepositoryShape {
