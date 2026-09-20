@@ -1,6 +1,7 @@
 # V-ROLLBACK-SIGNAL-001 — cancellation fixture signal ownership
 
-Status: local repair and independent review pass; exact-head Linux CI pending.
+Status: repair published; local checks and one exact-head Linux CI pass.
+Independent result review and repeated outcomes remain pending.
 No performance acceptance or completed iteration credit. Preserve failed attempt
 and eventual repetitions together.
 
@@ -60,3 +61,25 @@ cleanup without signaling the caller's group.
 
 Next question: does the owned-process implementation retain every cancellation
 assertion and pass actual Linux CI without runner termination?
+
+## First fresh Linux result
+
+Published [fecc59e9](https://github.com/tailrocks/velnor/commit/fecc59e9e40568d92b6d828a6515ad3c68c81438),
+with effective merge `4ef5c402e2842e9392b505acfeaf9b829cd50e81`.
+[PR run 35508236735](https://github.com/tailrocks/velnor/actions/runs/35508236735)
+and [policy run 35508235601](https://github.com/tailrocks/velnor/actions/runs/35508235601)
+succeeded. The generator ran 1,943 tests, all passing, none skipped; the
+cancellation fixture and invalid process-group fixture passed explicitly.
+
+Raw job completion gives 458 seconds trigger-to-required, 1,210 aggregate
+execution seconds, 20 executed jobs and 48 configured skipped jobs. Runner:
+413 seconds; generator: 186 seconds. These are one observation, not a speedup
+claim. The previous full run failed and cannot be its successful baseline.
+
+The runner retained 2,516 passing tests, five skipped tests, and the same
+pre-existing leaky `guest_docker_probe_kills_hung_process_at_deadline` test
+observed in run 35506628393. No test selection was reduced by this repair.
+Generator preparation (three seconds) and upload (six seconds) still appear
+as cleanup in schema-2 telemetry; phase attribution remains a separate defect.
+Raw JSON, logs, collector JSONL/CSV and validation limits are retained under
+`observations/velnor-35508236735-*`.

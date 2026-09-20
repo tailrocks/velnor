@@ -83,6 +83,17 @@ Current bounded queue (2026-09-20, after `56017bac`):
 
 See [upstream integration review](reviews/upstream-9e5-integration-review.md).
 
+Latest published repair `fecc59e9` passes fresh Linux PR run `35508236735`
+and policy run `35508235601`. Generator: 1,943 tests passed, none skipped.
+PR trigger-to-required: 458 seconds; aggregate execution: 1,210 seconds.
+Runner remains largest at 413 seconds, generator 186 seconds. One observation
+is not performance acceptance. The preceding failed run remains below.
+
+Jackin branch advanced to `f4054488` with the attested `4fa7a3a8` runtime and
+current main. PR `35505323064` and policy `35505321838` pass, but the PR executes
+only planning and gates; expensive jobs are skipped. It is not full build proof.
+The existing desktop edits were preserved during local fast-forward.
+
 Latest pushed integration `3a7da430` has an exact clean build and generation
 check, but PR run `35506628393` failed. Its generator job received SIGTERM during
 new cancellation fixtures; required gates failed. The fixture's external process
