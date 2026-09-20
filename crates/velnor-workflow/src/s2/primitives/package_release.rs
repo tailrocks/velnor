@@ -1697,7 +1697,8 @@ fn render_publish_job(
             echo "::notice::consumer updater produced untracked files; staging them"
             printf '%s\n' "$untracked_files"
           fi
-          git diff --check
+          git add -A
+          git diff --cached --check
           if [ -z "$(git status --porcelain --untracked-files=all)" ]; then
             echo "consumer already references the verified release"
           else
@@ -1705,7 +1706,6 @@ fn render_publish_job(
               echo "::error::immutable consumer branch already exists and would need rewriting; refusing to mutate it" >&2
               exit 1
             fi
-            git add -A
             git commit -s -m "$UPDATE_COMMIT_MESSAGE"
             git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" push origin "HEAD:refs/heads/$automation_branch"
           fi
@@ -2245,10 +2245,15 @@ concurrency_group = "package-release-preview"
         let untracked_check = workflow
             .find("git ls-files --others --exclude-standard")
             .expect("untracked output check");
+        let stage_check = workflow
+            .find("git add -A")
+            .expect("stage all consumer output");
         let diff_check = workflow
-            .find("git diff --check")
-            .expect("consumer diff check");
-        assert!(untracked_check < diff_check);
+            .find("git diff --cached --check")
+            .expect("staged consumer diff check");
+        assert!(untracked_check < stage_check);
+        assert!(stage_check < diff_check);
+        assert!(!workflow.contains("git diff --check"));
         let source_checkout = workflow
             .find("Checkout verified source for publication")
             .expect("source checkout");
@@ -2268,6 +2273,83 @@ concurrency_group = "package-release-preview"
             .expect("consumer commit");
         assert!(branch_rewrite_guard < consumer_commit);
         serde_yaml::from_str::<serde_yaml::Value>(&workflow).expect("rendered workflow is YAML");
+    }
+
+    #[test]
+    fn consumer_commit_check_rejects_trailing_whitespace_in_untracked_output() {
+        use std::process::Command;
+
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        let lines = workflow.lines().collect::<Vec<_>>();
+        let stage_index = lines
+            .iter()
+            .position(|line| line.trim() == "git add -A")
+            .expect("consumer staging command");
+        let check_index = lines
+            .iter()
+            .position(|line| line.trim() == "git diff --cached --check")
+            .expect("staged whitespace check");
+        assert_eq!(check_index, stage_index + 1, "stage before checking output");
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-consumer-diff-check-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create Git fixture");
+        let git = |arguments: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(arguments)
+                .output()
+                .expect("run Git fixture command")
+        };
+        let initialized = git(&["init", "--quiet"]);
+        assert!(initialized.status.success(), "initialize Git fixture");
+        std::fs::write(root.join("README.md"), "clean baseline\n").expect("write baseline");
+        let added = git(&["add", "-A"]);
+        assert!(added.status.success(), "stage baseline");
+        let committed = git(&[
+            "-c",
+            "user.name=consumer",
+            "-c",
+            "user.email=consumer@example.test",
+            "commit",
+            "--quiet",
+            "--message",
+            "baseline",
+        ]);
+        assert!(committed.status.success(), "commit baseline");
+        std::fs::write(root.join("generated.yml"), "generated value \t\n")
+            .expect("write malformed untracked output");
+
+        let validation = format!(
+            "set -euo pipefail\n{}\n{}",
+            lines[stage_index].trim(),
+            lines[check_index].trim()
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(validation)
+            .current_dir(&root)
+            .output()
+            .expect("run generated validation commands");
+        let _ = std::fs::remove_dir_all(root);
+        assert!(
+            !output.status.success(),
+            "cached whitespace check accepted malformed untracked output"
+        );
+        let diagnostics = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            diagnostics.contains("trailing whitespace"),
+            "cached whitespace check did not identify trailing whitespace: {}",
+            diagnostics
+        );
     }
 
     #[test]
