@@ -29,6 +29,7 @@ from tools.bootstrap_prefetch import (
     network_policy,
     load_base_owned_contract,
     validate_bundle,
+    _validate_git_url,
 )
 
 
@@ -426,6 +427,39 @@ class BootstrapPrefetchTests(unittest.TestCase):
                     reviewed_git=(),
                 )
 
+    def test_git_url_requires_canonical_owner_repository(self) -> None:
+        self.assertEqual(
+            _validate_git_url(
+                "git+https://github.com/example/repo.git",
+                "fixture URL",
+            ),
+            "https://github.com/example/repo.git",
+        )
+        for value in (
+            "https://github.com/",
+            "https://github.com////",
+            "https://github.com/owner",
+            "https://github.com/owner/",
+            "https://github.com/.git",
+            "https://github.com/owner/.git",
+            "https://github.com/example/repo?",
+            "https://github.com/example/repo#",
+            "https://github.com/example/repo%2F.git",
+            "https://github.com/example/repo%5C.git",
+            "https://github.com/example/repo%3Fq.git",
+            "https://github.com/example/repo/../other.git",
+            "https://github.com/example//repo.git",
+            "https://github.com/example/repo;param.git",
+            "https://github.com/example/repo%00.git",
+            "https://github.com/example/repo%2e%2e/other.git",
+            "https://github.com/example/repo\\other.git",
+            "https://github.com/example/repo.git@other",
+            "https://github.com/Example/repo.git",
+            "https://github.com/example/repo.git.git",
+        ):
+            with self.subTest(value=value), self.assertRaises(PrefetchError):
+                _validate_git_url(value, "fixture URL")
+
     def test_dependency_digest_excludes_source_identity(self) -> None:
         with tempfile.TemporaryDirectory(prefix="bootstrap-source-identity-") as name:
             root = Path(name)
@@ -643,6 +677,93 @@ class BootstrapPrefetchTests(unittest.TestCase):
             provenance = ((reviewed[0][0], revision, tree),)
             records = git_census(cargo_home, reviewed, provenance=provenance)
             self.assertEqual(records[0]["rev"], revision)
+
+            submodule_source = root / "submodule-source"
+            submodule_source.mkdir()
+            nested = root / "nested-submodule"
+            nested.mkdir()
+            subprocess.run(["git", "init", "-q", str(nested)], check=True)
+            (nested / "nested.txt").write_text("nested\n", encoding="utf-8")
+            nested_revision = _commit(nested, "nested")
+            subprocess.run(["git", "init", "-q", str(submodule_source)], check=True)
+            (submodule_source / "root.txt").write_text("root\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(submodule_source), "add", "root.txt"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(submodule_source),
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    f"160000,{nested_revision},submodule",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(submodule_source),
+                    "-c",
+                    "user.name=bootstrap-test",
+                    "-c",
+                    "user.email=bootstrap-test@example.invalid",
+                    "commit",
+                    "-qm",
+                    "submodule",
+                ],
+                check=True,
+            )
+            submodule_revision = _source_revision(submodule_source)
+            submodule_home = root / "submodule-cargo-home"
+            submodule_db = submodule_home / "git" / "db" / "fixture"
+            submodule_checkout = (
+                submodule_home / "git" / "checkouts" / "fixture" / submodule_revision
+            )
+            submodule_db.parent.mkdir(parents=True)
+            submodule_checkout.parent.mkdir(parents=True)
+            subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "-q",
+                    "--bare",
+                    str(submodule_source),
+                    str(submodule_db),
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(submodule_db),
+                    "remote",
+                    "set-url",
+                    "origin",
+                    reviewed[0][0],
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "clone", "-q", str(submodule_db), str(submodule_checkout)],
+                check=True,
+            )
+            submodule_tree = _git(
+                submodule_db,
+                "rev-parse",
+                f"{submodule_revision}^{{tree}}",
+            )
+            with self.assertRaises(PrefetchError):
+                git_census(
+                    submodule_home,
+                    ((reviewed[0][0], submodule_revision),),
+                    provenance=((reviewed[0][0], submodule_revision, submodule_tree),),
+                )
 
             wrong_url = ("https://github.com/other/fixture.git", revision)
             with self.assertRaises(PrefetchError):

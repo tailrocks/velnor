@@ -27,7 +27,6 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
-from urllib.parse import urlparse
 
 
 SCHEMA = "bootstrap.prefetch.v2"
@@ -46,6 +45,11 @@ DEFAULT_MAX_DIRECTORIES = 200_000
 DEFAULT_MAX_PATH_DEPTH = 128
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_GITHUB_CANONICAL_URL = re.compile(
+    r"^https://github\.com/"
+    r"(?P<owner>[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?)/"
+    r"(?P<repo>[a-z0-9](?:[a-z0-9._-]{0,98}[a-z0-9])?)\.git$"
+)
 _SECTION = re.compile(r"^\s*(\[\[|\[)([A-Za-z0-9_.-]+)(\]\]|\])\s*(?:#.*)?$")
 _KEY = re.compile(r"^\s*([A-Za-z0-9_.-]+)\s*=")
 _TARGET_SECTIONS = {"lib", "bin", "example", "test", "bench"}
@@ -574,6 +578,31 @@ def _git_bytes(directory: Path, args: Sequence[str]) -> bytes:
     return result.stdout
 
 
+def _reject_git_submodule_entry(mode: str, kind: str, relative: str, field: str) -> None:
+    if mode == "160000" or kind == "commit":
+        _fail(f"{field} contains an unsupported Git submodule entry: {relative}")
+    if relative == ".gitmodules" or relative.endswith("/.gitmodules"):
+        _fail(f"{field} contains a .gitmodules file: {relative}")
+
+
+def _reject_git_submodules(directory: Path, revision: str, field: str) -> None:
+    raw_tree = _git_bytes(
+        directory,
+        ["ls-tree", "-r", "-z", "--full-tree", f"{revision}^{{commit}}"],
+    )
+    for record in raw_tree.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, raw_path = record.split(b"\t", 1)
+            mode, kind, _object_id = metadata.decode("ascii").split(" ")
+            relative = raw_path.decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            _fail(f"malformed Git tree entry in {field}: {exc}")
+        relative = _safe_relative(relative, f"{field} tree path", glob=True)
+        _reject_git_submodule_entry(mode, kind, relative, field)
+
+
 def _validated_git_snapshot(
     source_root: Path,
     *,
@@ -627,6 +656,7 @@ def _validated_git_snapshot(
         except (ValueError, UnicodeDecodeError) as exc:
             _fail(f"malformed Git tree entry: {exc}")
         relative = _safe_relative(relative, "Git tree path", glob=True)
+        _reject_git_submodule_entry(mode, kind, relative, "reviewed Git tree")
         if relative in entries:
             _fail(f"duplicate Git tree path: {relative}")
         entries[relative] = _TreeEntry(mode, kind, object_id)
@@ -754,19 +784,12 @@ def _validate_git_url(value: str, field: str) -> str:
     if not isinstance(value, str) or not value:
         _fail(f"{field} must be a URL")
     candidate = value[4:] if value.startswith("git+") else value
-    parsed = urlparse(candidate)
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname != "github.com"
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.port is not None
-        or not parsed.path
-        or parsed.query
-        or parsed.fragment
-    ):
-        _fail(f"{field} must be an HTTPS github.com URL without credentials/query")
-    return candidate.rstrip("/")
+    match = _GITHUB_CANONICAL_URL.fullmatch(candidate)
+    if match is None or match.group("repo").endswith(".git"):
+        _fail(
+            f"{field} must be the canonical lowercase HTTPS GitHub owner/repository.git URL"
+        )
+    return candidate
 
 
 def _reviewed_git_set(
@@ -2022,6 +2045,11 @@ def git_census(
         url = next(url for url, candidate_rev in expected if candidate_rev == rev)
         if _git_origin_url(db_matches[rev], f"Git DB {db_matches[rev]}") != url:
             _fail(f"Git DB origin URL differs from trusted source for {url}@{rev}")
+        _reject_git_submodules(
+            db_matches[rev],
+            rev,
+            f"Git DB {db_matches[rev]} revision {rev}",
+        )
     checkout_records: list[dict[str, str]] = []
     for checkout in checkouts:
         status = _git_run(
