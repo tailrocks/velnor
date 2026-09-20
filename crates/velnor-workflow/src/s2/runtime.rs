@@ -4015,6 +4015,7 @@ fn apt_previous_pointer(arguments: &[OsString]) -> Result<(), GeneratorError> {
             "live-packages-amd64",
             "live-packages-arm64",
             "keyring",
+            "expect-signer",
             "bootstrap",
         ],
     )?;
@@ -4046,6 +4047,7 @@ fn apt_previous_pointer(arguments: &[OsString]) -> Result<(), GeneratorError> {
                 Path::new(required_option(&options, "live-packages-amd64")?),
                 Path::new(required_option(&options, "live-packages-arm64")?),
                 Path::new(required_option(&options, "keyring")?),
+                required_option(&options, "expect-signer")?,
                 None,
             ))?;
             let pointer = apt_result(crate::apt::derive_previous_pointer(
@@ -4088,6 +4090,7 @@ fn apt_previous_pointer(arguments: &[OsString]) -> Result<(), GeneratorError> {
                     Path::new(required_option(&options, "live-packages-amd64")?),
                     Path::new(required_option(&options, "live-packages-arm64")?),
                     Path::new(required_option(&options, "keyring")?),
+                    required_option(&options, "expect-signer")?,
                     None,
                 ))?;
                 let live_candidate = live

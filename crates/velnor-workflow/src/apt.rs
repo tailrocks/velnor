@@ -1638,6 +1638,27 @@ fn run_fixed(
     Ok(output.stdout)
 }
 
+/// Extract the one signer fingerprint that gpgv status output reported.
+/// Success from gpgv alone is insufficient when a keyring can contain more
+/// than the configured publisher: the cryptographic signer must equal the
+/// typed expected identity.
+fn gpgv_signer(output: &[u8], expected: &str, label: &str) -> Result<(), GeneratorError> {
+    let text = String::from_utf8(output.to_vec())
+        .map_err(|_| GeneratorError::usage(format!("{label} signer status is not UTF-8")))?;
+    let signers = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("[GNUPG:] VALIDSIG "))
+        .filter_map(|line| line.split_whitespace().next())
+        .map(normalize_fingerprint)
+        .collect::<Vec<_>>();
+    if signers.len() != 1 || !signers.iter().all(|signer| signer == expected) {
+        return Err(GeneratorError::usage(format!(
+            "{label} signature signer does not match the pinned publisher key"
+        )));
+    }
+    Ok(())
+}
+
 /// Whether a fixed tool resolves on `PATH` (honoring the test overlay).
 fn tool_present(program: &str, path_overlay: Option<&Path>) -> bool {
     let mut dirs = Vec::new();
@@ -5194,8 +5215,15 @@ pub(crate) fn read_verified_live_publication(
     amd64_packages: &Path,
     arm64_packages: &Path,
     keyring: &Path,
+    expected_signer: &str,
     path_overlay: Option<&Path>,
 ) -> Result<VerifiedLivePublication, GeneratorError> {
+    let expected_signer = normalize_fingerprint(expected_signer);
+    if !is_full_fingerprint(&expected_signer) {
+        return Err(GeneratorError::usage(
+            "live publication expected signer is not a full fingerprint",
+        ));
+    }
     let keyring_name = keyring
         .to_str()
         .ok_or_else(|| GeneratorError::usage("live publication keyring is not UTF-8"))?;
@@ -5232,9 +5260,11 @@ pub(crate) fn read_verified_live_publication(
         let inrelease_name = inrelease_path
             .to_str()
             .ok_or_else(|| GeneratorError::usage("materialized InRelease path is not UTF-8"))?;
-        run_fixed(
+        let signature_status = run_fixed(
             "gpgv",
             &[
+                "--status-fd".to_owned(),
+                "1".to_owned(),
                 "--no-default-keyring".to_owned(),
                 "--keyring".to_owned(),
                 keyring_name.to_owned(),
@@ -5244,9 +5274,16 @@ pub(crate) fn read_verified_live_publication(
             None,
             path_overlay,
         )?;
-        run_fixed(
+        gpgv_signer(
+            &signature_status,
+            &expected_signer,
+            "live publication record",
+        )?;
+        let inrelease_status = run_fixed(
             "gpgv",
             &[
+                "--status-fd".to_owned(),
+                "1".to_owned(),
                 "--no-default-keyring".to_owned(),
                 "--keyring".to_owned(),
                 keyring_name.to_owned(),
@@ -5255,11 +5292,17 @@ pub(crate) fn read_verified_live_publication(
             None,
             path_overlay,
         )?;
+        gpgv_signer(&inrelease_status, &expected_signer, "live InRelease")?;
         let document =
             serde_json::from_slice::<serde_json::Value>(&publication_bytes).map_err(|error| {
                 GeneratorError::usage(format!("live publication is not valid JSON: {error}"))
             })?;
         let record = parse_publication_record(&document)?;
+        if !fingerprints_match(&record.signer_fingerprint, &expected_signer) {
+            return Err(GeneratorError::usage(
+                "live publication record signer does not match the pinned publisher key",
+            ));
+        }
         match suite {
             Suite::Stable => {
                 if record.suite.is_some()
@@ -8797,6 +8840,33 @@ mod tests {
             FIXTURE_FPR,
             "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
         ));
+    }
+
+    #[test]
+    fn gpgv_status_requires_exactly_the_pinned_signer() {
+        let valid = format!(
+            "[GNUPG:] NEWSIG\n[GNUPG:] VALIDSIG {FIXTURE_FPR} 20260920 0 0 1 10 {FIXTURE_FPR}\n"
+        );
+        must(
+            gpgv_signer(valid.as_bytes(), FIXTURE_FPR, "record"),
+            "accept pinned signer",
+        );
+
+        for output in [
+            "[GNUPG:] NEWSIG\n",
+            "[GNUPG:] VALIDSIG FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 20260920 0 0 1 10 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\n",
+            &format!(
+                "[GNUPG:] VALIDSIG {FIXTURE_FPR} 20260920 0 0 1 10 {FIXTURE_FPR}\n[GNUPG:] VALIDSIG {FIXTURE_FPR} 20260920 0 0 1 10 {FIXTURE_FPR}\n"
+            ),
+        ] {
+            let error = must_fail(gpgv_signer(output.as_bytes(), FIXTURE_FPR, "record"), "reject signer status");
+            assert!(error.contains("does not match"), "{error}");
+        }
+        let error = must_fail(
+            gpgv_signer(b"\xff", FIXTURE_FPR, "record"),
+            "reject non-UTF-8 signer status",
+        );
+        assert!(error.contains("not UTF-8"), "{error}");
     }
 
     #[test]
