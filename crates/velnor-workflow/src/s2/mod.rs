@@ -23,6 +23,7 @@ use std::os::windows::fs::OpenOptionsExt as _;
 use clap::Parser;
 use serde::Serialize;
 use serde_yaml::Value;
+use sha2::{Digest as _, Sha256};
 
 mod capability_tests;
 mod closure;
@@ -6534,7 +6535,9 @@ enum TransactionSnapshot {
     Regular {
         mode: Option<u32>,
         length: u64,
-        digest: u64,
+        // This detects local journal/snapshot drift; the journal is operator-local
+        // state and this digest is not an authentication or remote trust proof.
+        digest: String,
     },
 }
 
@@ -6556,6 +6559,176 @@ struct TransactionJournal {
     path: PathBuf,
     indexes: BTreeMap<PathBuf, usize>,
     completed: BTreeMap<usize, TransactionProgress>,
+}
+
+struct TransactionAnchors {
+    #[cfg(unix)]
+    output_root: fs::File,
+    #[cfg(unix)]
+    journal: fs::File,
+    #[cfg(unix)]
+    before: fs::File,
+    #[cfg(unix)]
+    after: fs::File,
+    #[cfg(not(unix))]
+    root: PathBuf,
+}
+
+impl TransactionAnchors {
+    fn open(root: &Path) -> Result<Self, GeneratorError> {
+        #[cfg(unix)]
+        {
+            let output_root = open_transaction_directory_path(root)?;
+            let journal = open_transaction_directory_child(
+                &output_root,
+                Path::new(TRANSACTION_DIRECTORY),
+                &transaction_path(root),
+            )?;
+            let before = open_transaction_directory_child(
+                &journal,
+                Path::new("before"),
+                &transaction_path(root).join("before"),
+            )?;
+            let after = open_transaction_directory_child(
+                &journal,
+                Path::new("after"),
+                &transaction_path(root).join("after"),
+            )?;
+            Ok(Self {
+                output_root,
+                journal,
+                before,
+                after,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {
+                root: root.to_path_buf(),
+            })
+        }
+    }
+
+    fn read_journal_file(&self, name: &Path, display: &Path) -> Result<Vec<u8>, GeneratorError> {
+        #[cfg(unix)]
+        {
+            read_transaction_file_at(&self.journal, name, display)
+        }
+        #[cfg(not(unix))]
+        {
+            return read_transaction_file(&self.root.join(TRANSACTION_DIRECTORY).join(name));
+        }
+    }
+
+    fn journal_file_exists(&self, name: &Path, display: &Path) -> Result<bool, GeneratorError> {
+        #[cfg(unix)]
+        {
+            match rustix::fs::statat(&self.journal, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => Ok(true),
+                Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
+                Err(error) => {
+                    let io_error = io::Error::from(error);
+                    Err(GeneratorError::io(
+                        "inspect transaction journal file",
+                        display,
+                        &io_error,
+                    ))
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            return match fs::symlink_metadata(self.root.join(TRANSACTION_DIRECTORY).join(name)) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(GeneratorError::io(
+                    "inspect transaction journal file",
+                    display,
+                    &error,
+                )),
+            };
+        }
+    }
+
+    fn read_snapshot_file(
+        &self,
+        directory: &str,
+        name: &Path,
+        display: &Path,
+    ) -> Result<Vec<u8>, GeneratorError> {
+        #[cfg(unix)]
+        {
+            let parent = match directory {
+                "before" => &self.before,
+                "after" => &self.after,
+                _ => {
+                    return Err(GeneratorError::usage(format!(
+                        "invalid transaction snapshot directory: {directory}"
+                    )))
+                }
+            };
+            read_transaction_file_at(parent, name, display)
+        }
+        #[cfg(not(unix))]
+        {
+            return read_transaction_file(
+                &self
+                    .root
+                    .join(TRANSACTION_DIRECTORY)
+                    .join(directory)
+                    .join(name),
+            );
+        }
+    }
+
+    fn snapshot_exists(
+        &self,
+        directory: &str,
+        name: &Path,
+        display: &Path,
+    ) -> Result<bool, GeneratorError> {
+        #[cfg(unix)]
+        {
+            let parent = match directory {
+                "before" => &self.before,
+                "after" => &self.after,
+                _ => {
+                    return Err(GeneratorError::usage(format!(
+                        "invalid transaction snapshot directory: {directory}"
+                    )))
+                }
+            };
+            match rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => Ok(true),
+                Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
+                Err(error) => {
+                    let io_error = io::Error::from(error);
+                    Err(GeneratorError::io(
+                        "inspect transaction snapshot",
+                        display,
+                        &io_error,
+                    ))
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            return match fs::symlink_metadata(
+                self.root
+                    .join(TRANSACTION_DIRECTORY)
+                    .join(directory)
+                    .join(name),
+            ) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(GeneratorError::io(
+                    "inspect transaction snapshot",
+                    display,
+                    &error,
+                )),
+            };
+        }
+    }
 }
 
 impl TransactionJournal {
@@ -6606,7 +6779,7 @@ fn transaction_snapshot(preimage: &FilePreimage) -> TransactionSnapshot {
             TransactionSnapshot::Regular {
                 mode,
                 length: bytes.len() as u64,
-                digest: content_digest_bytes(bytes),
+                digest: transaction_snapshot_digest(bytes),
             }
         }
     }
@@ -6640,8 +6813,16 @@ fn transaction_length(snapshot: &TransactionSnapshot) -> String {
 fn transaction_digest(snapshot: &TransactionSnapshot) -> String {
     match snapshot {
         TransactionSnapshot::Missing => "-".to_owned(),
-        TransactionSnapshot::Regular { digest, .. } => format!("{digest:016x}"),
+        TransactionSnapshot::Regular { digest, .. } => digest.clone(),
     }
+}
+
+fn transaction_snapshot_digest(bytes: &[u8]) -> String {
+    let mut digest = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        let _ = write!(digest, "{byte:02x}");
+    }
+    digest
 }
 
 fn parse_transaction_snapshot(
@@ -6672,12 +6853,15 @@ fn parse_transaction_snapshot(
                     path.display()
                 ))
             })?;
-            let digest = u64::from_str_radix(digest, 16).map_err(|_| {
-                GeneratorError::usage(format!(
-                    "invalid transaction journal digest in {}",
-                    path.display()
-                ))
-            })?;
+            let digest =
+                if digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    digest.to_ascii_lowercase()
+                } else {
+                    return Err(GeneratorError::usage(format!(
+                        "invalid transaction journal digest in {}",
+                        path.display()
+                    )));
+                };
             Ok(TransactionSnapshot::Regular {
                 mode,
                 length,
@@ -6718,7 +6902,7 @@ fn snapshot_matches(
             };
             current_bytes.as_ref() == snapshot_bytes
                 && current_bytes.len() as u64 == *length
-                && content_digest_bytes(current_bytes) == *digest
+                && transaction_snapshot_digest(current_bytes) == *digest
                 && mode_matches
         }
         _ => false,
@@ -6822,6 +7006,7 @@ fn open_transaction_file(path: &Path) -> Result<(fs::File, FileIdentity), Genera
     Ok((file, opened_identity))
 }
 
+#[cfg(not(unix))]
 fn read_transaction_file(path: &Path) -> Result<Vec<u8>, GeneratorError> {
     let (mut file, opened_identity) = open_transaction_file(path)?;
     let mut bytes = Vec::new();
@@ -6845,6 +7030,118 @@ fn sync_transaction_file(path: &Path) -> Result<(), GeneratorError> {
     let (file, _) = open_transaction_file(path)?;
     file.sync_all()
         .map_err(|error| GeneratorError::io("sync transaction journal file", path, &error))
+}
+
+#[cfg(unix)]
+fn open_transaction_directory_path(path: &Path) -> Result<fs::File, GeneratorError> {
+    let descriptor = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| {
+        let io_error = io::Error::from(error);
+        GeneratorError::io("open transaction directory", path, &io_error)
+    })?;
+    let directory: fs::File = descriptor.into();
+    if !directory
+        .metadata()
+        .map_err(|error| GeneratorError::io("inspect transaction directory", path, &error))?
+        .is_dir()
+    {
+        return Err(GeneratorError::usage(format!(
+            "transaction root is not a directory: {}",
+            path.display()
+        )));
+    }
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn open_transaction_directory_child(
+    parent: &fs::File,
+    name: &Path,
+    display: &Path,
+) -> Result<fs::File, GeneratorError> {
+    let descriptor = rustix::fs::openat(
+        parent,
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| {
+        let io_error = io::Error::from(error);
+        GeneratorError::io("open transaction directory", display, &io_error)
+    })?;
+    let directory: fs::File = descriptor.into();
+    if !directory
+        .metadata()
+        .map_err(|error| GeneratorError::io("inspect transaction directory", display, &error))?
+        .is_dir()
+    {
+        return Err(GeneratorError::usage(format!(
+            "transaction snapshot directory is not a directory: {}",
+            display.display()
+        )));
+    }
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn read_transaction_file_at(
+    parent: &fs::File,
+    name: &Path,
+    display: &Path,
+) -> Result<Vec<u8>, GeneratorError> {
+    let descriptor = rustix::fs::openat(
+        parent,
+        name,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| {
+        if error == rustix::io::Errno::LOOP {
+            GeneratorError::usage(format!(
+                "transaction journal file is not a regular file: {}",
+                display.display()
+            ))
+        } else {
+            let io_error = io::Error::from(error);
+            GeneratorError::io("open transaction journal file", display, &io_error)
+        }
+    })?;
+    let mut file: fs::File = descriptor.into();
+    let opened = file
+        .metadata()
+        .map_err(|error| GeneratorError::io("inspect transaction journal file", display, &error))?;
+    if !opened.is_file() {
+        return Err(GeneratorError::usage(format!(
+            "transaction journal file is not a regular file: {}",
+            display.display()
+        )));
+    }
+    let opened_identity = file_identity(&opened);
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| GeneratorError::io("read transaction journal file", display, &error))?;
+    let final_metadata = file.metadata().map_err(|error| {
+        GeneratorError::io("reinspect transaction journal file", display, &error)
+    })?;
+    if file_identity(&final_metadata) != opened_identity
+        || final_metadata.len() != bytes.len() as u64
+    {
+        return Err(GeneratorError::usage(format!(
+            "transaction journal file changed during read: {}",
+            display.display()
+        )));
+    }
+    Ok(bytes)
 }
 
 fn sync_transaction_directory(path: &Path) -> Result<(), GeneratorError> {
@@ -7001,14 +7298,18 @@ fn create_transaction_journal(
     result
 }
 
-fn parse_transaction_manifest(journal: &Path) -> Result<Vec<TransactionRecord>, GeneratorError> {
+fn parse_transaction_manifest(
+    journal: &Path,
+    anchors: &TransactionAnchors,
+) -> Result<Vec<TransactionRecord>, GeneratorError> {
     let path = journal.join("manifest");
-    let content = String::from_utf8(read_transaction_file(&path)?).map_err(|_| {
-        GeneratorError::usage(format!(
-            "transaction journal manifest is not UTF-8: {}",
-            path.display()
-        ))
-    })?;
+    let content = String::from_utf8(anchors.read_journal_file(Path::new("manifest"), &path)?)
+        .map_err(|_| {
+            GeneratorError::usage(format!(
+                "transaction journal manifest is not UTF-8: {}",
+                path.display()
+            ))
+        })?;
     let mut lines = content.lines();
     if lines.next() != Some("# Velnor workflow transaction journal; do not edit.")
         || lines.next() != Some("schema = 2")
@@ -7068,24 +7369,19 @@ fn parse_transaction_manifest(journal: &Path) -> Result<Vec<TransactionRecord>, 
 
 fn parse_transaction_progress(
     journal: &Path,
+    anchors: &TransactionAnchors,
 ) -> Result<BTreeMap<usize, TransactionProgress>, GeneratorError> {
     let path = journal.join("progress");
-    let content = match fs::symlink_metadata(&path) {
-        Ok(_) => String::from_utf8(read_transaction_file(&path)?).map_err(|_| {
+    if !anchors.journal_file_exists(Path::new("progress"), &path)? {
+        return Ok(BTreeMap::new());
+    }
+    let content = String::from_utf8(anchors.read_journal_file(Path::new("progress"), &path)?)
+        .map_err(|_| {
             GeneratorError::usage(format!(
                 "transaction journal progress is not UTF-8: {}",
                 path.display()
             ))
-        })?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(error) => {
-            return Err(GeneratorError::io(
-                "inspect transaction journal progress",
-                &path,
-                &error,
-            ))
-        }
-    };
+        })?;
     let mut lines = content.lines();
     if lines.next() != Some("# Velnor workflow transaction progress; do not edit.") {
         return Err(GeneratorError::usage(format!(
@@ -7169,7 +7465,20 @@ fn parse_transaction_progress(
     Ok(progress)
 }
 
+#[cfg(test)]
 fn transaction_snapshot_bytes(
+    journal: &Path,
+    directory: &str,
+    record: &TransactionRecord,
+    snapshot: &TransactionSnapshot,
+) -> Result<Option<Vec<u8>>, GeneratorError> {
+    let root = journal.parent().unwrap_or_else(|| Path::new("."));
+    let anchors = TransactionAnchors::open(root)?;
+    transaction_snapshot_bytes_at(&anchors, journal, directory, record, snapshot)
+}
+
+fn transaction_snapshot_bytes_at(
+    anchors: &TransactionAnchors,
     journal: &Path,
     directory: &str,
     record: &TransactionRecord,
@@ -7177,21 +7486,17 @@ fn transaction_snapshot_bytes(
 ) -> Result<Option<Vec<u8>>, GeneratorError> {
     let path = journal.join(directory).join(record.index.to_string());
     let TransactionSnapshot::Regular { length, digest, .. } = snapshot else {
-        return match fs::symlink_metadata(&path) {
-            Ok(_) => Err(GeneratorError::usage(format!(
+        if anchors.snapshot_exists(directory, Path::new(&record.index.to_string()), &path)? {
+            return Err(GeneratorError::usage(format!(
                 "unexpected transaction snapshot for missing preimage: {}",
                 path.display()
-            ))),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(GeneratorError::io(
-                "inspect missing transaction snapshot",
-                &path,
-                &error,
-            )),
-        };
+            )));
+        }
+        return Ok(None);
     };
-    let bytes = read_transaction_file(&path)?;
-    if bytes.len() as u64 != *length || content_digest_bytes(&bytes) != *digest {
+    let bytes =
+        anchors.read_snapshot_file(directory, Path::new(&record.index.to_string()), &path)?;
+    if bytes.len() as u64 != *length || transaction_snapshot_digest(&bytes) != *digest {
         return Err(GeneratorError::usage(format!(
             "transaction snapshot digest mismatch for {}; journal preserved",
             record.relative.display()
@@ -7203,16 +7508,19 @@ fn transaction_snapshot_bytes(
 fn recover_transaction_record(
     root: &Path,
     journal: &Path,
+    anchors: &TransactionAnchors,
     record: &TransactionRecord,
     progress: &BTreeMap<usize, TransactionProgress>,
 ) -> Result<(), GeneratorError> {
-    let path = root.join(&record.relative);
-    let current = capture_file_preimage(&path, &record.relative)?;
-    let before_bytes = transaction_snapshot_bytes(journal, "before", record, &record.before)?;
+    let _path = root.join(&record.relative);
+    let current = capture_transaction_output_at(anchors, root, &record.relative)?;
+    let before_bytes =
+        transaction_snapshot_bytes_at(anchors, journal, "before", record, &record.before)?;
     if snapshot_matches(&current, &record.before, before_bytes.as_deref()) {
         return Ok(());
     }
-    let after_bytes = transaction_snapshot_bytes(journal, "after", record, &record.after)?;
+    let after_bytes =
+        transaction_snapshot_bytes_at(anchors, journal, "after", record, &record.after)?;
     let Some(expected_identity) = progress.get(&record.index) else {
         return Err(GeneratorError::usage(format!(
             "transaction recovery cannot prove mutation identity for {}; inspect the journaled after-image, then run `velnor-workflow --recover-transaction <local-target>`",
@@ -7228,33 +7536,52 @@ fn recover_transaction_record(
         )));
     }
     match (&record.before, before_bytes) {
-        (TransactionSnapshot::Missing, None) => match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                Err(GeneratorError::usage(format!(
-                    "transaction recovery found a non-regular output: {}",
-                    record.relative.display()
-                )))
-            }
-            Ok(_) => fs::remove_file(&path).map_err(|error| {
-                GeneratorError::io("remove recovered generated file", &path, &error)
-            }),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(GeneratorError::io(
-                "inspect recovered generated file",
-                &path,
-                &error,
-            )),
-        },
-        (TransactionSnapshot::Regular { mode, .. }, Some(bytes)) => {
-            let staged = stage_generated_bytes(&path, &bytes)?;
+        (TransactionSnapshot::Missing, None) => {
             #[cfg(unix)]
-            if let Some(mode) = mode {
-                restore_file_mode(&staged, *mode)?;
+            {
+                remove_transaction_output_at(anchors, root, &record.relative, &current)
             }
-            fs::rename(&staged, &path).map_err(|error| {
-                let _ = fs::remove_file(&staged);
-                GeneratorError::io("restore transaction preimage", &path, &error)
-            })
+            #[cfg(not(unix))]
+            {
+                match fs::symlink_metadata(&_path) {
+                    Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                        Err(GeneratorError::usage(format!(
+                            "transaction recovery found a non-regular output: {}",
+                            record.relative.display()
+                        )))
+                    }
+                    Ok(_) => fs::remove_file(&_path).map_err(|error| {
+                        GeneratorError::io("remove recovered generated file", &_path, &error)
+                    }),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(GeneratorError::io(
+                        "inspect recovered generated file",
+                        &_path,
+                        &error,
+                    )),
+                }
+            }
+        }
+        (TransactionSnapshot::Regular { mode, .. }, Some(bytes)) => {
+            #[cfg(unix)]
+            {
+                restore_transaction_output_at(
+                    anchors,
+                    root,
+                    &record.relative,
+                    &current,
+                    &bytes,
+                    *mode,
+                )
+            }
+            #[cfg(not(unix))]
+            {
+                let staged = stage_generated_bytes(&_path, &bytes)?;
+                fs::rename(&staged, &_path).map_err(|error| {
+                    let _ = fs::remove_file(&staged);
+                    GeneratorError::io("restore transaction preimage", &_path, &error)
+                })
+            }
         }
         _ => Err(GeneratorError::usage(format!(
             "transaction recovery preimage store is inconsistent for {}",
@@ -7286,8 +7613,104 @@ fn cleanup_transaction_journal(root: &Path) -> Result<(), GeneratorError> {
     }
 }
 
+#[cfg(unix)]
+fn cleanup_transaction_journal_at(
+    root: &Path,
+    anchors: &TransactionAnchors,
+    records: &[TransactionRecord],
+) -> Result<(), GeneratorError> {
+    let unlink = |parent: &fs::File, name: &Path, display: &Path, flags| match rustix::fs::unlinkat(
+        parent, name, flags,
+    ) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
+        Err(error) => {
+            let io_error = io::Error::from(error);
+            Err(GeneratorError::io(
+                "remove transaction journal entry",
+                display,
+                &io_error,
+            ))
+        }
+    };
+    for record in records {
+        let name_string = record.index.to_string();
+        let name = Path::new(&name_string);
+        unlink(
+            &anchors.before,
+            name,
+            &transaction_path(root).join("before").join(name),
+            rustix::fs::AtFlags::empty(),
+        )?;
+        unlink(
+            &anchors.after,
+            name,
+            &transaction_path(root).join("after").join(name),
+            rustix::fs::AtFlags::empty(),
+        )?;
+    }
+    for name in ["manifest", "manifest.stage", "progress", "progress.stage"] {
+        unlink(
+            &anchors.journal,
+            Path::new(name),
+            &transaction_path(root).join(name),
+            rustix::fs::AtFlags::empty(),
+        )?;
+    }
+    anchors
+        .before
+        .sync_all()
+        .map_err(|error| GeneratorError::io("sync transaction preimage removal", root, &error))?;
+    anchors
+        .after
+        .sync_all()
+        .map_err(|error| GeneratorError::io("sync transaction output removal", root, &error))?;
+    anchors
+        .journal
+        .sync_all()
+        .map_err(|error| GeneratorError::io("sync transaction journal removal", root, &error))?;
+    unlink(
+        &anchors.journal,
+        Path::new("before"),
+        &transaction_path(root).join("before"),
+        rustix::fs::AtFlags::REMOVEDIR,
+    )?;
+    unlink(
+        &anchors.journal,
+        Path::new("after"),
+        &transaction_path(root).join("after"),
+        rustix::fs::AtFlags::REMOVEDIR,
+    )?;
+    unlink(
+        &anchors.output_root,
+        Path::new(TRANSACTION_DIRECTORY),
+        &transaction_path(root),
+        rustix::fs::AtFlags::REMOVEDIR,
+    )?;
+    anchors
+        .output_root
+        .sync_all()
+        .map_err(|error| GeneratorError::io("sync transaction journal removal", root, &error))
+}
+
+fn cleanup_transaction_journal_at_portable(
+    root: &Path,
+    anchors: &TransactionAnchors,
+    records: &[TransactionRecord],
+) -> Result<(), GeneratorError> {
+    #[cfg(unix)]
+    {
+        cleanup_transaction_journal_at(root, anchors, records)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (anchors, records);
+        cleanup_transaction_journal(root)
+    }
+}
+
 struct PendingTransaction {
     path: PathBuf,
+    anchors: TransactionAnchors,
     records: Vec<TransactionRecord>,
     progress: BTreeMap<usize, TransactionProgress>,
 }
@@ -7311,6 +7734,7 @@ fn inspect_pending_transaction(root: &Path) -> Result<Option<PendingTransaction>
             path.display()
         )));
     }
+    let anchors = TransactionAnchors::open(root)?;
     for directory in ["before", "after"] {
         let directory_path = path.join(directory);
         let metadata = fs::symlink_metadata(&directory_path).map_err(|error| {
@@ -7327,9 +7751,9 @@ fn inspect_pending_transaction(root: &Path) -> Result<Option<PendingTransaction>
             )));
         }
     }
-    let records = parse_transaction_manifest(&path)?;
+    let records = parse_transaction_manifest(&path, &anchors)?;
     reject_managed_symlink_ancestors(root, records.iter().map(|record| &record.relative))?;
-    let progress = parse_transaction_progress(&path)?;
+    let progress = parse_transaction_progress(&path, &anchors)?;
     if progress.keys().any(|index| *index >= records.len()) {
         return Err(GeneratorError::usage(format!(
             "transaction journal progress references an unknown entry: {}",
@@ -7338,14 +7762,17 @@ fn inspect_pending_transaction(root: &Path) -> Result<Option<PendingTransaction>
     }
     Ok(Some(PendingTransaction {
         path,
+        anchors,
         records,
         progress,
     }))
 }
 
 fn recover_pending_transaction(root: &Path) -> Result<(), GeneratorError> {
+    let _generation_lock = GenerationLock::acquire(root, std::iter::empty::<&PathBuf>())?;
     let Some(PendingTransaction {
         path,
+        anchors,
         records,
         progress,
     }) = inspect_pending_transaction(root)?
@@ -7353,9 +7780,9 @@ fn recover_pending_transaction(root: &Path) -> Result<(), GeneratorError> {
         return Ok(());
     };
     for record in records.iter().rev() {
-        recover_transaction_record(root, &path, record, &progress)?;
+        recover_transaction_record(root, &path, &anchors, record, &progress)?;
     }
-    cleanup_transaction_journal(root)
+    cleanup_transaction_journal_at_portable(root, &anchors, &records)
 }
 
 /// Explicit operator recovery for a mutation whose post-write identity was
@@ -7368,6 +7795,7 @@ fn recover_pending_transaction_with_operator_attestation(
     let _generation_lock = GenerationLock::acquire(root, std::iter::empty::<&PathBuf>())?;
     let Some(PendingTransaction {
         path,
+        anchors,
         records,
         mut progress,
     }) = inspect_pending_transaction(root)?
@@ -7382,12 +7810,14 @@ fn recover_pending_transaction_with_operator_attestation(
         if progress.contains_key(&record.index) {
             continue;
         }
-        let current = capture_file_preimage(&root.join(&record.relative), &record.relative)?;
-        let before_bytes = transaction_snapshot_bytes(&path, "before", record, &record.before)?;
+        let current = capture_transaction_output_at(&anchors, root, &record.relative)?;
+        let before_bytes =
+            transaction_snapshot_bytes_at(&anchors, &path, "before", record, &record.before)?;
         if snapshot_matches(&current, &record.before, before_bytes.as_deref()) {
             continue;
         }
-        let after_bytes = transaction_snapshot_bytes(&path, "after", record, &record.after)?;
+        let after_bytes =
+            transaction_snapshot_bytes_at(&anchors, &path, "after", record, &record.after)?;
         if !snapshot_matches(&current, &record.after, after_bytes.as_deref()) {
             return Err(GeneratorError::usage(format!(
                 "operator recovery refused {}; current output does not match its journaled after-image; journal preserved",
@@ -7405,9 +7835,9 @@ fn recover_pending_transaction_with_operator_attestation(
         write_transaction_progress(&path, &progress)?;
     }
     for record in records.iter().rev() {
-        recover_transaction_record(root, &path, record, &progress)?;
+        recover_transaction_record(root, &path, &anchors, record, &progress)?;
     }
-    cleanup_transaction_journal(root)
+    cleanup_transaction_journal_at_portable(root, &anchors, &records)
 }
 
 pub(crate) enum WriteOutcome {
@@ -8524,6 +8954,240 @@ fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
             length: metadata.len(),
         }
     }
+}
+
+#[cfg(unix)]
+fn transaction_output_parent(
+    root: &fs::File,
+    relative: &Path,
+    display: &Path,
+) -> Result<(fs::File, PathBuf), GeneratorError> {
+    let name = relative.file_name().ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "transaction output path has no file name: {}",
+            relative.display()
+        ))
+    })?;
+    let mut parent = root
+        .try_clone()
+        .map_err(|error| GeneratorError::io("clone transaction output root", display, &error))?;
+    if let Some(parent_path) = relative.parent() {
+        for component in parent_path.components() {
+            let Component::Normal(component) = component else {
+                return Err(GeneratorError::usage(format!(
+                    "transaction output path is not relative: {}",
+                    relative.display()
+                )));
+            };
+            parent = open_transaction_directory_child(
+                &parent,
+                Path::new(component),
+                &display.join(component),
+            )?;
+        }
+    }
+    Ok((parent, name.to_owned().into()))
+}
+
+#[cfg(unix)]
+fn capture_transaction_output(
+    root: &fs::File,
+    relative: &Path,
+    display: &Path,
+) -> Result<FilePreimage, GeneratorError> {
+    let (parent, name) = transaction_output_parent(root, relative, display)?;
+    let stat = match rustix::fs::statat(&parent, &name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => stat,
+        Err(error) if error == rustix::io::Errno::NOENT => return Ok(FilePreimage::Missing),
+        Err(error) => {
+            let io_error = io::Error::from(error);
+            return Err(GeneratorError::io(
+                "inspect generated file",
+                display,
+                &io_error,
+            ));
+        }
+    };
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
+        return Err(GeneratorError::usage(format!(
+            "refusing non-regular generated file: {}",
+            relative.display()
+        )));
+    }
+    let descriptor = rustix::fs::openat(
+        &parent,
+        &name,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| {
+        let io_error = io::Error::from(error);
+        GeneratorError::io("open generated file", display, &io_error)
+    })?;
+    let mut file: fs::File = descriptor.into();
+    let opened = file
+        .metadata()
+        .map_err(|error| GeneratorError::io("inspect opened generated file", display, &error))?;
+    let opened_identity = file_identity(&opened);
+    let length = u64::try_from(stat.st_size).map_err(|_| {
+        GeneratorError::usage(format!(
+            "generated file has an invalid size: {}",
+            relative.display()
+        ))
+    })?;
+    let device = u64::try_from(stat.st_dev).map_err(|_| {
+        GeneratorError::usage(format!(
+            "generated file has an invalid device identity: {}",
+            relative.display()
+        ))
+    })?;
+    let inode = stat.st_ino;
+    let stat_identity = FileIdentity {
+        length,
+        device,
+        inode,
+        mode: u32::from(stat.st_mode & 0o7777),
+    };
+    if opened_identity != stat_identity {
+        return Err(GeneratorError::usage(format!(
+            "generated file changed during open: {}",
+            relative.display()
+        )));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| GeneratorError::io("read generated file", display, &error))?;
+    let final_identity = file
+        .metadata()
+        .map(|metadata| file_identity(&metadata))
+        .map_err(|error| GeneratorError::io("reinspect generated file", display, &error))?;
+    if final_identity != opened_identity || final_identity.length != bytes.len() as u64 {
+        return Err(GeneratorError::usage(format!(
+            "generated file changed during recovery snapshot: {}",
+            relative.display()
+        )));
+    }
+    Ok(FilePreimage::Regular {
+        identity: opened_identity,
+        bytes: bytes.into_boxed_slice(),
+    })
+}
+
+fn capture_transaction_output_at(
+    anchors: &TransactionAnchors,
+    root: &Path,
+    relative: &Path,
+) -> Result<FilePreimage, GeneratorError> {
+    #[cfg(unix)]
+    {
+        capture_transaction_output(&anchors.output_root, relative, &root.join(relative))
+    }
+    #[cfg(not(unix))]
+    {
+        return capture_file_preimage(&root.join(relative), relative);
+    }
+}
+
+#[cfg(unix)]
+fn remove_transaction_output_at(
+    anchors: &TransactionAnchors,
+    root: &Path,
+    relative: &Path,
+    expected: &FilePreimage,
+) -> Result<(), GeneratorError> {
+    let display = root.join(relative);
+    let latest = capture_transaction_output_at(anchors, root, relative)?;
+    if &latest != expected {
+        return Err(GeneratorError::usage(format!(
+            "generated file changed during transaction recovery: {}; journal preserved",
+            relative.display()
+        )));
+    }
+    let (parent, name) = transaction_output_parent(&anchors.output_root, relative, &display)?;
+    rustix::fs::unlinkat(&parent, &name, rustix::fs::AtFlags::empty()).map_err(|error| {
+        let io_error = io::Error::from(error);
+        GeneratorError::io("remove recovered generated file", &display, &io_error)
+    })?;
+    parent
+        .sync_all()
+        .map_err(|error| GeneratorError::io("sync recovered generated directory", &display, &error))
+}
+
+#[cfg(unix)]
+fn restore_transaction_output_at(
+    anchors: &TransactionAnchors,
+    root: &Path,
+    relative: &Path,
+    expected: &FilePreimage,
+    bytes: &[u8],
+    mode: Option<u32>,
+) -> Result<(), GeneratorError> {
+    let display = root.join(relative);
+    let latest = capture_transaction_output_at(anchors, root, relative)?;
+    if &latest != expected {
+        return Err(GeneratorError::usage(format!(
+            "generated file changed during transaction recovery: {}; journal preserved",
+            relative.display()
+        )));
+    }
+    let (parent, name) = transaction_output_parent(&anchors.output_root, relative, &display)?;
+    let temporary = format!(".velnor-workflow-recovery-{}", unique_suffix());
+    let descriptor = rustix::fs::openat(
+        &parent,
+        Path::new(&temporary),
+        rustix::fs::OFlags::WRONLY
+            | rustix::fs::OFlags::CREATE
+            | rustix::fs::OFlags::EXCL
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::from_raw_mode(0o600),
+    )
+    .map_err(|error| {
+        let io_error = io::Error::from(error);
+        GeneratorError::io("stage transaction preimage", &display, &io_error)
+    })?;
+    let mut staged: fs::File = descriptor.into();
+    let result = (|| {
+        staged
+            .write_all(bytes)
+            .map_err(|error| GeneratorError::io("write transaction preimage", &display, &error))?;
+        if let Some(mode) = mode {
+            let mode = u16::try_from(mode & 0o7777).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "transaction recovery mode is not representable: {}",
+                    display.display()
+                ))
+            })?;
+            rustix::fs::fchmod(&staged, rustix::fs::Mode::from_raw_mode(mode)).map_err(
+                |error| {
+                    let io_error = io::Error::from(error);
+                    GeneratorError::io("restore transaction preimage mode", &display, &io_error)
+                },
+            )?;
+        }
+        staged
+            .sync_all()
+            .map_err(|error| GeneratorError::io("sync transaction preimage", &display, &error))?;
+        drop(staged);
+        let latest = capture_transaction_output_at(anchors, root, relative)?;
+        if &latest != expected {
+            return Err(GeneratorError::usage(format!(
+                "generated file changed during transaction recovery: {}; journal preserved",
+                relative.display()
+            )));
+        }
+        rustix::fs::renameat(&parent, Path::new(&temporary), &parent, &name).map_err(|error| {
+            let io_error = io::Error::from(error);
+            GeneratorError::io("restore transaction preimage", &display, &io_error)
+        })?;
+        parent.sync_all().map_err(|error| {
+            GeneratorError::io("sync recovered generated directory", &display, &error)
+        })
+    })();
+    if result.is_err() {
+        let _ = rustix::fs::unlinkat(&parent, Path::new(&temporary), rustix::fs::AtFlags::empty());
+    }
+    result
 }
 
 #[cfg(unix)]
@@ -21470,9 +22134,13 @@ lockfile = true
             create_transaction_journal(&root, &wanted, &GenerationInputs::parts(0, 0), &plan),
             "create transaction snapshot integrity journal",
         );
+        let anchors = must(
+            TransactionAnchors::open(&root),
+            "open transaction snapshot integrity anchors",
+        );
         let record = must_some(
             must(
-                parse_transaction_manifest(&journal.path),
+                parse_transaction_manifest(&journal.path, &anchors),
                 "parse transaction snapshot integrity manifest",
             )
             .into_iter()
@@ -21514,6 +22182,68 @@ lockfile = true
         assert!(
             journal.path.is_dir(),
             "journal must survive symlink failure"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_refuses_hostile_output_swap_without_clobbering_outside_file() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_repository("transaction-output-swap");
+        let relative = PathBuf::from(".github/workflows/ci-pr.yml");
+        let initial = BTreeMap::from([(
+            relative.clone(),
+            format!("{GENERATED_HEADER}name: initial\n"),
+        )]);
+        must(
+            write_generated(&root, &initial, false, false, false),
+            "write initial output for swap test",
+        );
+        let baseline = committed_test_baseline(&root);
+        let wanted = BTreeMap::from([(
+            relative.clone(),
+            format!("{GENERATED_HEADER}name: wanted\n"),
+        )]);
+        let plan = must(
+            plan_generated_write_with_baseline(
+                &root,
+                &wanted,
+                &GenerationInputs::parts(0, 0),
+                false,
+                Some(&baseline),
+            ),
+            "plan output swap test",
+        );
+        let _journal = must(
+            create_transaction_journal(&root, &wanted, &GenerationInputs::parts(0, 0), &plan),
+            "create output swap journal",
+        );
+        let output = root.join(&relative);
+        let outside = root.join("outside-output");
+        must(
+            fs::write(&outside, b"outside must survive\n"),
+            "write outside output",
+        );
+        must(
+            fs::remove_file(&output),
+            "remove output before hostile swap",
+        );
+        must(symlink(&outside, &output), "swap output with symlink");
+
+        let error = must_some(
+            recover_pending_transaction(&root).err(),
+            "refuse hostile output swap",
+        );
+        assert!(error.to_string().contains("non-regular generated file"));
+        assert_eq!(
+            must(fs::read(&outside), "read untouched outside output"),
+            b"outside must survive\n"
+        );
+        assert!(
+            transaction_path(&root).is_dir(),
+            "journal remains for review"
         );
         let _ = fs::remove_dir_all(root);
     }

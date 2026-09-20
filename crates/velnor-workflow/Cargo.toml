@@ -19,6 +19,7 @@ clap = { workspace = true }
 crossterm = { version = "0.29.0", optional = true }
 globset = { workspace = true }
 libc = { workspace = true }
+rustix = { workspace = true }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "unstable-rendered-line-info"], optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
