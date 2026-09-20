@@ -5998,6 +5998,29 @@ mod tests {
     }
 
     #[test]
+    fn discovery_sentinel_binds_candidate_bytes_after_verification() {
+        let fixture = discovery_fixture("discovery-sentinel-bytes");
+        must(
+            verify_discovery_incoming(&fixture.selection_path, &fixture.incoming),
+            "verify immutable incoming selection",
+        );
+        must(
+            arm_sentinel(&fixture.incoming),
+            "arm immutable selection sentinel",
+        );
+        write_bytes(
+            &fixture.incoming.join("example-1.2.3-amd64.deb"),
+            b"tamperxxx",
+        );
+        let error = must_fail(
+            check_sentinel(&fixture.incoming),
+            "reject candidate replacement after verification",
+        );
+        assert!(error.contains("stale"), "{error}");
+        let _ = std::fs::remove_dir_all(&fixture.root);
+    }
+
+    #[test]
     fn discovery_selection_requires_every_manifest_artifact_asset() {
         let fixture = discovery_fixture("discovery-inventory");
         let mut tampered = fixture.document.clone();
