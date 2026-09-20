@@ -4718,7 +4718,7 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                       if stream is None:
                           raise SystemExit("workflow archive member is unreadable")
                       contents = stream.read()
-                      archive_source_members[member.name] = contents
+                      archive_source_members[member.name] = (member.mode, contents)
                       if not member.name.endswith((".yml", ".yaml")):
                           continue
                       lines = contents.decode("utf-8").splitlines()
@@ -4895,7 +4895,7 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
               normalized_contract_material(base_reachable, workflow_lines[base_archive])
               + b"\n"
               + "\n".join(
-                  f"action-file:{path}:{hashlib.sha256(base_action_files[path]).hexdigest()}"
+                      f"action-file:{path}:mode:{base_action_files[path][0]:o}:sha256:{hashlib.sha256(base_action_files[path][1]).hexdigest()}"
                   for path in sorted(base_action_files)
               ).encode("utf-8")
           ).hexdigest()
