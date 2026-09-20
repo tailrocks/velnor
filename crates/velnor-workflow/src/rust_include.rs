@@ -21,27 +21,38 @@ pub(crate) enum IncludeString {
 pub(crate) enum ManifestPart {
     Literal(String),
     ManifestDir,
+    BuildOutput,
 }
 
 impl IncludeString {
-    fn from_static(expression: StaticString) -> Self {
+    fn from_static(expression: StaticString) -> Option<Self> {
+        if expression
+            .parts
+            .iter()
+            .any(|part| matches!(part, ManifestPart::BuildOutput))
+        {
+            // Build-script outputs live under Cargo's OUT_DIR and are not
+            // repository inputs. Ignore the include; source/build-script
+            // watches still explain when its contents may change.
+            return None;
+        }
         if expression
             .parts
             .iter()
             .any(|part| matches!(part, ManifestPart::ManifestDir))
         {
-            Self::ManifestDir(expression.parts)
+            Some(Self::ManifestDir(expression.parts))
         } else {
-            Self::Relative(
+            Some(Self::Relative(
                 expression
                     .parts
                     .into_iter()
                     .filter_map(|part| match part {
                         ManifestPart::Literal(value) => Some(value),
-                        ManifestPart::ManifestDir => None,
+                        ManifestPart::ManifestDir | ManifestPart::BuildOutput => None,
                     })
                     .collect(),
-            )
+            ))
         }
     }
 
@@ -53,6 +64,7 @@ impl IncludeString {
                 .map(|part| match part {
                     ManifestPart::Literal(value) => value.as_str(),
                     ManifestPart::ManifestDir => "<CARGO_MANIFEST_DIR>",
+                    ManifestPart::BuildOutput => "<OUT_DIR>",
                 })
                 .collect(),
         }
@@ -74,6 +86,12 @@ impl StaticString {
     fn manifest_dir() -> Self {
         Self {
             parts: vec![ManifestPart::ManifestDir],
+        }
+    }
+
+    fn build_output() -> Self {
+        Self {
+            parts: vec![ManifestPart::BuildOutput],
         }
     }
 
@@ -119,7 +137,9 @@ impl IncludeScanner {
         while index < tokens.len() {
             if let Some((macro_name, group)) = include_invocation(&tokens, index)? {
                 let expression = parse_static_string_expression(group.stream(), macro_name)?;
-                self.includes.push(IncludeString::from_static(expression));
+                if let Some(include) = IncludeString::from_static(expression) {
+                    self.includes.push(include);
+                }
                 // An include argument may itself contain a macro group. The
                 // evaluator has already rejected a dynamic include argument;
                 // recurse only to discover includes in arbitrary macro bodies.
@@ -171,9 +191,15 @@ fn parse_static_string_expression(
     tokens: TokenStream,
     macro_name: &str,
 ) -> Result<StaticString, String> {
-    let expression = syn::parse2::<Expr>(tokens)
+    let arguments = Punctuated::<Expr, Comma>::parse_terminated
+        .parse2(tokens)
         .map_err(|error| format!("{macro_name} must use a static string expression: {error}"))?;
-    evaluate_static_expression(&expression, macro_name)
+    let Some(expression) = arguments.first().filter(|_| arguments.len() == 1) else {
+        return Err(format!(
+            "{macro_name} must use exactly one static string expression"
+        ));
+    };
+    evaluate_static_expression(expression, macro_name)
 }
 
 fn evaluate_static_expression(expression: &Expr, macro_name: &str) -> Result<StaticString, String> {
@@ -224,12 +250,15 @@ fn evaluate_static_macro(
                     Lit::Str(value) if value.value() == "CARGO_MANIFEST_DIR" => {
                         Ok(StaticString::manifest_dir())
                     }
+                    Lit::Str(value) if value.value() == "OUT_DIR" => {
+                        Ok(StaticString::build_output())
+                    }
                     _ => Err(format!(
-                        "{include_macro} only resolves env!(\"CARGO_MANIFEST_DIR\")"
+                        "{include_macro} only resolves env!(\"CARGO_MANIFEST_DIR\") or env!(\"OUT_DIR\")"
                     )),
                 },
                 _ => Err(format!(
-                    "{include_macro} only resolves env!(\"CARGO_MANIFEST_DIR\")"
+                    "{include_macro} only resolves env!(\"CARGO_MANIFEST_DIR\") or env!(\"OUT_DIR\")"
                 )),
             }
         }
@@ -325,6 +354,10 @@ pub(crate) fn resolve_include_path(
                 match part {
                     ManifestPart::Literal(value) => exact.push(value),
                     ManifestPart::ManifestDir => exact.push(manifest_dir.as_os_str()),
+                    // `IncludeString::from_static` filters these before
+                    // resolution; keep the match defensive if a new caller
+                    // constructs a manifest expression directly.
+                    ManifestPart::BuildOutput => return Err(IncludePathError::Missing),
                 }
             }
             let exact = PathBuf::from(exact);
@@ -500,6 +533,31 @@ mod tests {
                 "failed source: {source}"
             );
         }
+    }
+
+    #[test]
+    fn accepts_trailing_commas_in_include_invocations() {
+        assert_eq!(
+            parse_include_paths(
+                "include_str!(\"source.txt\",); include_bytes!(concat!(\"assets/\", \"font.bin\",),);"
+            )
+            .ok(),
+            Some(vec![
+                IncludeString::Relative("source.txt".to_owned()),
+                IncludeString::Relative("assets/font.bin".to_owned()),
+            ])
+        );
+    }
+
+    #[test]
+    fn ignores_build_script_out_dir_includes() {
+        assert_eq!(
+            parse_include_paths(
+                "include_bytes!(concat!(env!(\"OUT_DIR\"), \"/blob\")); include_str!(\"tracked.txt\");"
+            )
+            .ok(),
+            Some(vec![IncludeString::Relative("tracked.txt".to_owned())])
+        );
     }
 
     #[test]
