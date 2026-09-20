@@ -330,10 +330,10 @@ fn recovers_private_temporary_files_but_leaves_replaced_public_entry() {
     let root = fixture("temporary-recovery");
     let store = must(RawObjectFileStore::new(&root), "open temporary store");
     drop(store);
-    for directory in ["sha256", "original", "refs"] {
+    for (index, directory) in ["sha256", "original", "refs"].into_iter().enumerate() {
         let temporary = root
             .join(directory)
-            .join(format!(".velnor-raw-crashed-{directory}.tmp"));
+            .join(format!(".velnor-raw-7-{index}-0.tmp"));
         must(
             fs::write(&temporary, b"stale-private-temp"),
             "write stale temp",
@@ -343,7 +343,7 @@ fn recovers_private_temporary_files_but_leaves_replaced_public_entry() {
             "restrict stale temp",
         );
     }
-    let replaced = root.join("refs").join(".velnor-raw-replaced.tmp");
+    let replaced = root.join("refs").join("operator-owned-entry.tmp");
     must(
         fs::write(&replaced, b"operator-owned-entry"),
         "write replaced temp",
@@ -383,7 +383,7 @@ fn reconciles_crash_left_quarantine_into_store_retention() {
     );
     drop(store);
 
-    let source_quarantine = root.join("sha256").join(".velnor-raw-quarantine-crashed");
+    let source_quarantine = root.join("sha256").join(".velnor-raw-quarantine-1-0-0");
     must(
         fs::create_dir(&source_quarantine),
         "create crash-left quarantine",
@@ -408,7 +408,8 @@ fn reconciles_crash_left_quarantine_into_store_retention() {
     );
     drop(reopened);
     assert!(source_quarantine.is_dir());
-    assert!(source_quarantine.join("manifest.json").is_file());
+    assert!(source_quarantine.join("entry").is_file());
+    assert!(!source_quarantine.join("manifest.json").exists());
     let retention = root.join(".velnor-raw-quarantine");
     let retained = must(fs::read_dir(&retention), "read retained quarantines")
         .flatten()
@@ -418,13 +419,15 @@ fn reconciles_crash_left_quarantine_into_store_retention() {
                 .is_some_and(|name| name.to_string_lossy().starts_with(".velnor-raw-retained-"))
         })
         .unwrap_or_else(|| panic!("crash-left quarantine was not retained"));
-    assert_eq!(
-        must(
-            fs::read(retained.join("entry")),
-            "read retained crash entry"
-        ),
-        b"crash-left-bytes"
-    );
+    let retained_manifest = String::from_utf8(must(
+        fs::read(retained.join("manifest.json")),
+        "read retained crash manifest",
+    ))
+    .unwrap_or_else(|error| panic!("retained crash manifest UTF-8: {error}"));
+    assert!(retained_manifest.contains("\"source_name\":\".velnor-raw-quarantine-1-0-0\""));
+    assert!(retained_manifest.contains("\"byte_length\":16"));
+    assert!(retained_manifest.contains(&github_acquisition::sha256_digest(b"crash-left-bytes")));
+    assert!(!retained.join("entry").exists());
 
     let reopened_again = must(
         RawObjectFileStore::new(&root),
@@ -442,7 +445,56 @@ fn reconciles_crash_left_quarantine_into_store_retention() {
 
 #[cfg(unix)]
 #[test]
-fn reconciliation_leaves_fifo_symlink_and_unknown_entries() {
+fn retention_replay_rejects_replaced_source_entry_identity() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("retention-source-replay");
+    let store = must(RawObjectFileStore::new(&root), "open source-replay store");
+    drop(store);
+    let source_quarantine = root.join("sha256").join(".velnor-raw-quarantine-1-0-0");
+    must(
+        fs::create_dir(&source_quarantine),
+        "create source-replay quarantine",
+    );
+    must(
+        fs::set_permissions(&source_quarantine, fs::Permissions::from_mode(0o700)),
+        "restrict source-replay quarantine",
+    );
+    let entry = source_quarantine.join("entry");
+    must(
+        fs::write(&entry, b"authenticated-source"),
+        "write source-replay entry",
+    );
+    must(
+        fs::set_permissions(&entry, fs::Permissions::from_mode(0o400)),
+        "restrict source-replay entry",
+    );
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "materialize source-replay record",
+    );
+    drop(reopened);
+
+    must(fs::remove_file(&entry), "replace source-replay entry");
+    must(
+        fs::write(&entry, b"attacker-replacement"),
+        "write replacement entry",
+    );
+    must(
+        fs::set_permissions(&entry, fs::Permissions::from_mode(0o400)),
+        "restrict replacement entry",
+    );
+    assert!(RawObjectFileStore::new(&root).is_err());
+    assert_eq!(
+        must(fs::read(&entry), "read replacement source entry"),
+        b"attacker-replacement"
+    );
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn reconciliation_fails_closed_on_fifo_symlink_and_unknown_entries() {
     use std::os::unix::fs::{symlink, FileTypeExt, PermissionsExt};
 
     let root = fixture("hostile-temporary-entries");
@@ -488,11 +540,7 @@ fn reconciliation_leaves_fifo_symlink_and_unknown_entries() {
         "make operator temporary file public",
     );
 
-    let reopened = must(
-        RawObjectFileStore::new(&root),
-        "reconcile hostile entries without following or deleting them",
-    );
-    drop(reopened);
+    assert!(RawObjectFileStore::new(&root).is_err());
     assert!(fs::symlink_metadata(&fifo)
         .unwrap_or_else(|error| panic!("stat hostile FIFO: {error}"))
         .file_type()
@@ -1007,8 +1055,10 @@ fn cleanup_leaves_replaced_regular_temporary_name_instead_of_unlinking_it() {
         }
     });
 
-    let started = Instant::now();
-    while !replaced.load(Ordering::Relaxed) && started.elapsed().as_secs() < 15 {
+    for _ in 0..20_000 {
+        if replaced.load(Ordering::Relaxed) {
+            break;
+        }
         let _ = store.store(capture("cleanup-race", b"source", &safe));
         thread::yield_now();
     }
@@ -1098,7 +1148,7 @@ fn retention_admission_is_bounded_and_reopens_fail_closed() {
     let root = fixture("retention-quota");
     let store = must(RawObjectFileStore::new(&root), "open retention quota store");
     drop(store);
-    for index in 0..129_u32 {
+    for index in 0..128_u32 {
         let quarantine = root
             .join("sha256")
             .join(format!(".velnor-raw-quarantine-{index}-0-0"));
@@ -1115,7 +1165,11 @@ fn retention_admission_is_bounded_and_reopens_fail_closed() {
         );
     }
 
-    assert!(RawObjectFileStore::new(&root).is_err());
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "materialize bounded retention records",
+    );
+    drop(reopened);
     assert_eq!(
         must(
             fs::read_dir(root.join(".velnor-raw-quarantine")),
@@ -1125,6 +1179,24 @@ fn retention_admission_is_bounded_and_reopens_fail_closed() {
         .count(),
         128
     );
+
+    let quarantine = root.join("sha256").join(".velnor-raw-quarantine-128-0-0");
+    must(fs::create_dir(&quarantine), "create over-quota quarantine");
+    must(
+        fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o700)),
+        "restrict over-quota quarantine",
+    );
+    let entry = quarantine.join("entry");
+    must(
+        fs::write(&entry, 128_u32.to_le_bytes()),
+        "write over-quota entry",
+    );
+    must(
+        fs::set_permissions(&entry, fs::Permissions::from_mode(0o400)),
+        "restrict over-quota entry",
+    );
+
+    assert!(RawObjectFileStore::new(&root).is_err());
     assert_eq!(
         must(
             fs::read_dir(root.join("sha256")),
@@ -1143,6 +1215,120 @@ fn retention_admission_is_bounded_and_reopens_fail_closed() {
         .flatten()
         .count(),
         128
+    );
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn partial_retention_record_fails_closed_without_reclaim() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("retention-partial-record");
+    let store = must(RawObjectFileStore::new(&root), "open partial-record store");
+    drop(store);
+
+    let record = root
+        .join(".velnor-raw-quarantine")
+        .join(".velnor-raw-retained-1-0-0");
+    must(fs::create_dir(&record), "create partial retention record");
+    must(
+        fs::set_permissions(&record, fs::Permissions::from_mode(0o700)),
+        "restrict partial retention record",
+    );
+    let manifest = record.join("manifest.json");
+    must(
+        fs::write(&manifest, b"{\"schema\":1"),
+        "write partial manifest",
+    );
+    must(
+        fs::set_permissions(&manifest, fs::Permissions::from_mode(0o400)),
+        "restrict partial manifest",
+    );
+
+    assert!(RawObjectFileStore::new(&root).is_err());
+    assert_eq!(
+        must(fs::read(&manifest), "read partial manifest"),
+        b"{\"schema\":1"
+    );
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn retention_disk_usage_does_not_duplicate_source_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const PAYLOAD_BYTES: usize = 60 * 1024 * 1024;
+    const RETENTION_QUOTA_BYTES: u64 = 128 * 1024 * 1024;
+    const NAMESPACE_OVERHEAD_BYTES: u64 = 4 * 64 * 1024;
+    const SOURCE_OVERHEAD_BYTES: u64 = 2 * 64 * 1024;
+    const RECORD_OVERHEAD_BYTES: u64 = 2 * 64 * 1024;
+
+    let root = fixture("retention-disk-usage");
+    let store = must(RawObjectFileStore::new(&root), "open disk-usage store");
+    drop(store);
+    let payload = vec![b'q'; PAYLOAD_BYTES];
+    for index in 0..2_u32 {
+        let quarantine = root
+            .join("sha256")
+            .join(format!(".velnor-raw-quarantine-{index}-0-0"));
+        must(fs::create_dir(&quarantine), "create disk-usage quarantine");
+        must(
+            fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o700)),
+            "restrict disk-usage quarantine",
+        );
+        let entry = quarantine.join("entry");
+        must(fs::write(&entry, &payload), "write disk-usage entry");
+        must(
+            fs::set_permissions(&entry, fs::Permissions::from_mode(0o400)),
+            "restrict disk-usage entry",
+        );
+    }
+
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "reopen two 60MiB retained sources",
+    );
+    drop(reopened);
+
+    let retention = root.join(".velnor-raw-quarantine");
+    let mut manifest_bytes = 0_u64;
+    let mut duplicate_entry_bytes = 0_u64;
+    for record in must(fs::read_dir(&retention), "read disk-usage records").flatten() {
+        let record = record.path();
+        manifest_bytes += must(
+            fs::metadata(record.join("manifest.json")),
+            "stat disk-usage manifest",
+        )
+        .len();
+        if record.join("entry").is_file() {
+            duplicate_entry_bytes += must(
+                fs::metadata(record.join("entry")),
+                "stat duplicate disk-usage entry",
+            )
+            .len();
+        }
+    }
+    let mut source_bytes = 0_u64;
+    for quarantine in must(fs::read_dir(root.join("sha256")), "read source qdirs").flatten() {
+        let path = quarantine.path();
+        if path.file_name().is_some_and(|name| {
+            name.to_string_lossy()
+                .starts_with(".velnor-raw-quarantine-")
+        }) {
+            source_bytes += must(fs::metadata(path.join("entry")), "stat source entry").len();
+        }
+    }
+    assert_eq!(source_bytes, (2 * PAYLOAD_BYTES) as u64);
+    assert_eq!(duplicate_entry_bytes, 0);
+    assert!(
+        source_bytes
+            + manifest_bytes
+            + NAMESPACE_OVERHEAD_BYTES
+            + SOURCE_OVERHEAD_BYTES
+            + RECORD_OVERHEAD_BYTES
+            <= RETENTION_QUOTA_BYTES
     );
     remove_fixture(&root);
 }

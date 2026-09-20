@@ -41,7 +41,10 @@ const MAX_RAW_OBJECT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RAW_SIDECAR_BYTES: usize = MAX_RAW_OBJECT_BYTES * 2 + 4096;
 const MAX_RETAINED_ENTRIES: usize = 128;
 const MAX_RETAINED_MANIFEST_BYTES: usize = 64 * 1024;
-const MAX_RETAINED_BYTES: u64 = MAX_RAW_SIDECAR_BYTES as u64 + MAX_RETAINED_MANIFEST_BYTES as u64;
+const MAX_RETAINED_BYTES: u64 = 128 * 1024 * 1024;
+const RETENTION_SOURCE_OVERHEAD_BYTES: u64 = 64 * 1024;
+const RETENTION_RECORD_OVERHEAD_BYTES: u64 = 64 * 1024;
+const RETENTION_NAMESPACE_OVERHEAD_BYTES: u64 = 64 * 1024;
 const RETENTION_MANIFEST_NAME: &[u8] = b"manifest.json\0";
 const RETENTION_ENTRY_NAME: &[u8] = b"entry\0";
 
@@ -51,13 +54,14 @@ const RETENTION_SCHEMA_VERSION: u32 = 1;
 #[cfg(unix)]
 // Retention invariants:
 // * the anchored retention root contains only generated record directories;
-// * every record has exactly this schema, a private manifest, and (when
-//   present) one private entry whose FD-derived digest/length are recorded;
+// * every record has exactly this schema and a private manifest. The manifest
+//   points at the descriptor-owned source entry; bytes are never duplicated;
 // * source quarantine directories are never renamed or removed, so a source
 //   path race cannot orphan the original reachable identity;
-// * admission counts records and bytes and refuses before mutation at either
-//   bound. Recovery likewise fails closed on any unknown or malformed child.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// * admission counts source bytes, pending qdirs, record metadata, and
+//   partial/debris namespaces and refuses before mutation at either bound.
+//   Recovery likewise fails closed on any unknown or malformed child.
+#[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RetentionIdentity {
     device: u64,
@@ -91,11 +95,24 @@ struct RetentionManifest {
 }
 
 #[cfg(unix)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default, Eq, PartialEq)]
 struct RetentionUsage {
     entries: usize,
     bytes: u64,
+    keys: HashSet<RetentionKey>,
 }
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct RetentionScope<'a> {
+    objects: &'a File,
+    originals: &'a File,
+    refs: &'a File,
+    retention: &'a File,
+}
+
+#[cfg(unix)]
+type RetentionKey = (String, String, FileIdentity, FileIdentity);
 
 /// Immutable local CAS for original response bytes, redacted/safe bytes, and
 /// provenance sidecars. Original bytes remain local and are never serialized
@@ -205,6 +222,12 @@ impl RawObjectFileStore {
         let _publication_lock = NamespaceLock::acquire(&self.anchor.root)?;
         self.anchor
             .validate(&self.objects, &self.originals, &self.refs, &self.quarantine)?;
+        let scope = RetentionScope {
+            objects: &self.objects,
+            originals: &self.originals,
+            refs: &self.refs,
+            retention: &self.quarantine,
+        };
         let sidecar_name = raw_id_name(&object.raw_id)?;
         let safe_digest = sha256_digest(&object.bytes);
         let safe_length =
@@ -249,7 +272,7 @@ impl RawObjectFileStore {
             &transaction_name,
             &sidecar_bytes,
             MAX_RAW_SIDECAR_BYTES,
-            &self.quarantine,
+            &scope,
             "refs",
         )?;
         publish_if_absent(
@@ -257,7 +280,7 @@ impl RawObjectFileStore {
             &original_object_name,
             &object.original_bytes,
             MAX_RAW_OBJECT_BYTES,
-            &self.quarantine,
+            &scope,
             "original",
         )?;
         publish_if_absent(
@@ -265,7 +288,7 @@ impl RawObjectFileStore {
             &object_name,
             &object.bytes,
             MAX_RAW_OBJECT_BYTES,
-            &self.quarantine,
+            &scope,
             "sha256",
         )?;
         publish_if_absent(
@@ -273,7 +296,7 @@ impl RawObjectFileStore {
             &sidecar_name,
             &sidecar_bytes,
             MAX_RAW_SIDECAR_BYTES,
-            &self.quarantine,
+            &scope,
             "refs",
         )?;
         remove_exact_file(
@@ -281,7 +304,7 @@ impl RawObjectFileStore {
             &transaction_name,
             &sidecar_bytes,
             MAX_RAW_SIDECAR_BYTES,
-            &self.quarantine,
+            &scope,
             "refs",
         )?;
         self.anchor
@@ -422,7 +445,7 @@ fn sidecar_size_within_limit(reference: &RawObjectRef) -> bool {
 }
 
 #[cfg(unix)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 struct FileIdentity {
     device: u64,
     inode: u64,
@@ -925,7 +948,33 @@ fn open_directory_named(directory: &File, name: &CStr) -> Result<Option<File>, R
 
 #[cfg(unix)]
 fn is_quarantine_name(name: &CStr) -> bool {
-    name.to_bytes().starts_with(b".velnor-raw-quarantine-")
+    valid_quarantine_name(name.to_bytes())
+}
+
+#[cfg(unix)]
+fn valid_generated_numeric_name(bytes: &[u8], prefix: &[u8], suffix: &[u8]) -> bool {
+    let Some(rest) = bytes
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_suffix(suffix))
+    else {
+        return false;
+    };
+    let mut parts = rest.split(|byte| *byte == b'-');
+    (0..3).all(|_| {
+        parts
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.iter().all(u8::is_ascii_digit))
+    }) && parts.next().is_none()
+}
+
+#[cfg(unix)]
+fn valid_quarantine_name(bytes: &[u8]) -> bool {
+    valid_generated_numeric_name(bytes, b".velnor-raw-quarantine-", b"")
+}
+
+#[cfg(unix)]
+fn valid_temporary_name(bytes: &[u8]) -> bool {
+    valid_generated_numeric_name(bytes, b".velnor-raw-", b".tmp")
 }
 
 #[cfg(unix)]
@@ -986,44 +1035,50 @@ fn reconcile_namespace(
     refs: &File,
     quarantine: &File,
 ) -> Result<(), RawStorageError> {
+    let scope = RetentionScope {
+        objects,
+        originals,
+        refs,
+        retention: quarantine,
+    };
     // The retention namespace is a durable journal, not a best-effort cache.
     // Validate its complete bounded schema before touching public namespaces;
     // malformed or unknown children fail closed with no quota-driven deletion.
-    retention_usage(quarantine)?;
+    retention_usage(&scope)?;
     // Recover durable intents before scanning public references. A complete
     // intent can finish publication after a crash; an incomplete one is
     // discarded and its unreferenced objects are swept below.
     for name in directory_names(refs)? {
         let bytes = name.as_bytes();
         if bytes.starts_with(b".velnor-raw-") {
-            reconcile_temporary(refs, &name, quarantine, "refs")?;
+            reconcile_temporary(refs, &name, &scope, "refs")?;
             continue;
         }
         let Some(raw_id_bytes) = bytes.strip_suffix(b".txn") else {
             continue;
         };
         let Ok(raw_id) = std::str::from_utf8(raw_id_bytes) else {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine, "refs")?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), &scope, "refs")?;
             continue;
         };
         let Ok(expected_name) = transaction_name(raw_id) else {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine, "refs")?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), &scope, "refs")?;
             continue;
         };
         if expected_name.as_bytes() != name.as_bytes() {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine, "refs")?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), &scope, "refs")?;
             continue;
         }
         let transaction_bytes = read_named(refs, &name, MAX_RAW_SIDECAR_BYTES)?;
         let Some(reference) = parse_reference(raw_id, &transaction_bytes) else {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine, "refs")?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), &scope, "refs")?;
             continue;
         };
         let sidecar_name = raw_id_name(raw_id)?;
         if object_bundle_matches(objects, originals, &reference) {
             let expected_sidecar = sidecar_bytes(&reference)?;
             if transaction_bytes != expected_sidecar {
-                remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine, "refs")?;
+                remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), &scope, "refs")?;
                 continue;
             }
             ensure_sidecar_slot(refs, &sidecar_name, &expected_sidecar)?;
@@ -1032,7 +1087,7 @@ fn reconcile_namespace(
                 &sidecar_name,
                 &expected_sidecar,
                 MAX_RAW_SIDECAR_BYTES,
-                quarantine,
+                &scope,
                 "refs",
             )?;
         }
@@ -1041,7 +1096,7 @@ fn reconcile_namespace(
             &name,
             &transaction_bytes,
             MAX_RAW_SIDECAR_BYTES,
-            quarantine,
+            &scope,
             "refs",
         )?;
     }
@@ -1051,7 +1106,7 @@ fn reconcile_namespace(
     for name in directory_names(refs)? {
         let bytes = name.as_bytes();
         if bytes.starts_with(b".velnor-raw-") {
-            reconcile_temporary(refs, &name, quarantine, "refs")?;
+            reconcile_temporary(refs, &name, &scope, "refs")?;
             continue;
         }
         if bytes.ends_with(b".txn") {
@@ -1061,15 +1116,15 @@ fn reconcile_namespace(
             continue;
         };
         let Ok(raw_id) = std::str::from_utf8(raw_id_bytes) else {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine, "refs")?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), &scope, "refs")?;
             continue;
         };
         let Ok(expected_name) = raw_id_name(raw_id) else {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine, "refs")?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), &scope, "refs")?;
             continue;
         };
         if expected_name.as_bytes() != name.as_bytes() {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine, "refs")?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), &scope, "refs")?;
             continue;
         }
         let valid = parse_reference(raw_id, &read_named(refs, &name, MAX_RAW_SIDECAR_BYTES)?)
@@ -1088,16 +1143,16 @@ fn reconcile_namespace(
                 true
             });
         if !valid {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine, "refs")?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), &scope, "refs")?;
         }
     }
-    reconcile_object_directory(objects, &safe_names, quarantine, "sha256")?;
-    reconcile_object_directory(originals, &original_names, quarantine, "original")?;
+    reconcile_object_directory(objects, &safe_names, &scope, "sha256")?;
+    reconcile_object_directory(originals, &original_names, &scope, "original")?;
     sync_directory(objects)?;
     sync_directory(originals)?;
     sync_directory(refs)?;
-    retention_usage(quarantine)?;
-    sync_directory(quarantine)?;
+    retention_usage(&scope)?;
+    sync_directory(scope.retention)?;
     Ok(())
 }
 
@@ -1155,7 +1210,7 @@ fn object_matches(
 fn reconcile_object_directory(
     directory: &File,
     referenced: &HashSet<String>,
-    quarantine: &File,
+    scope: &RetentionScope<'_>,
     source_namespace: &str,
 ) -> Result<(), RawStorageError> {
     for name in directory_names(directory)? {
@@ -1171,7 +1226,7 @@ fn reconcile_object_directory(
             None
         };
         if temporary {
-            reconcile_temporary(directory, &name, quarantine, source_namespace)?;
+            reconcile_temporary(directory, &name, scope, source_namespace)?;
         } else if digest.is_some_and(|digest| !referenced.contains(digest)) {
             // A final object may leave its public namespace only when it is
             // still a private, single-link regular file. Hardlink/symlink
@@ -1181,7 +1236,7 @@ fn reconcile_object_directory(
                 directory,
                 &name,
                 Some(MAX_RAW_OBJECT_BYTES),
-                quarantine,
+                scope,
                 source_namespace,
             )?;
         }
@@ -1234,7 +1289,7 @@ fn remove_private_named(
     directory: &File,
     name: &CStr,
     max_bytes: Option<usize>,
-    retention: &File,
+    scope: &RetentionScope<'_>,
     source_namespace: &str,
 ) -> Result<(), RawStorageError> {
     let Some(mut file) = (match open_named(directory, name) {
@@ -1266,7 +1321,7 @@ fn remove_private_named(
         max_bytes,
         None,
         Some(1),
-        retention,
+        scope,
         source_namespace,
     )? {
         QuarantineResult::Retained | QuarantineResult::Left => Ok(()),
@@ -1279,7 +1334,7 @@ fn remove_exact_file(
     name: &CStr,
     expected: &[u8],
     max_bytes: usize,
-    retention: &File,
+    scope: &RetentionScope<'_>,
     source_namespace: &str,
 ) -> Result<(), RawStorageError> {
     let Some(mut file) = open_named(directory, name)? else {
@@ -1302,7 +1357,7 @@ fn remove_exact_file(
         Some(max_bytes),
         Some(expected),
         Some(1),
-        retention,
+        scope,
         source_namespace,
     )? {
         QuarantineResult::Retained => Ok(()),
@@ -1344,10 +1399,10 @@ fn quarantine_remove(
     max_bytes: Option<usize>,
     expected_bytes: Option<&[u8]>,
     expected_links: Option<u64>,
-    retention: &File,
+    scope: &RetentionScope<'_>,
     source_namespace: &str,
 ) -> Result<QuarantineResult, RawStorageError> {
-    quarantine_admission(directory, retention)?;
+    quarantine_admission(scope)?;
     let (quarantine_name, quarantine) = create_quarantine_directory(directory)?;
     let entry_name = CString::new("entry").map_err(|_| RawStorageError::Refused)?;
     match rename_no_clobber(directory, name, &quarantine, &entry_name) {
@@ -1357,7 +1412,7 @@ fn quarantine_remove(
                 directory,
                 &quarantine_name,
                 &quarantine,
-                retention,
+                scope,
                 source_namespace,
             );
         }
@@ -1366,7 +1421,7 @@ fn quarantine_remove(
                 directory,
                 &quarantine_name,
                 &quarantine,
-                retention,
+                scope,
                 source_namespace,
             );
             return Err(storage_io(error));
@@ -1382,7 +1437,7 @@ fn quarantine_remove(
                 directory,
                 &quarantine_name,
                 &quarantine,
-                retention,
+                scope,
                 source_namespace,
             )
         }
@@ -1391,7 +1446,7 @@ fn quarantine_remove(
                 directory,
                 &quarantine_name,
                 &quarantine,
-                retention,
+                scope,
                 source_namespace,
             );
             return Err(error);
@@ -1401,7 +1456,7 @@ fn quarantine_remove(
             directory,
             &quarantine_name,
             &quarantine,
-            retention,
+            scope,
             source_namespace,
         );
     };
@@ -1414,7 +1469,7 @@ fn quarantine_remove(
             directory,
             &quarantine_name,
             &quarantine,
-            retention,
+            scope,
             source_namespace,
         );
     }
@@ -1426,7 +1481,7 @@ fn quarantine_remove(
                     directory,
                     &quarantine_name,
                     &quarantine,
-                    retention,
+                    scope,
                     source_namespace,
                 );
                 return Err(error);
@@ -1440,7 +1495,7 @@ fn quarantine_remove(
             directory,
             &quarantine_name,
             &quarantine,
-            retention,
+            scope,
             source_namespace,
         );
     }
@@ -1453,7 +1508,7 @@ fn quarantine_remove(
             directory,
             &quarantine_name,
             &quarantine,
-            retention,
+            scope,
             source_namespace,
         );
     }
@@ -1462,22 +1517,22 @@ fn quarantine_remove(
         directory,
         &quarantine_name,
         &quarantine,
-        retention,
+        scope,
         source_namespace,
     )
 }
 
 #[cfg(unix)]
-fn quarantine_admission(directory: &File, retention: &File) -> Result<(), RawStorageError> {
-    let usage = retention_usage(retention)?;
+fn quarantine_admission(scope: &RetentionScope<'_>) -> Result<(), RawStorageError> {
+    let usage = retention_usage(scope)?;
     if usage.entries >= MAX_RETAINED_ENTRIES {
         return Err(RawStorageError::Refused);
     }
-    let pending = directory_names(directory)?
-        .iter()
-        .filter(|name| is_quarantine_name(name))
-        .count();
-    if pending >= MAX_RETAINED_ENTRIES {
+    let reserved = usage
+        .bytes
+        .checked_add(RETENTION_SOURCE_OVERHEAD_BYTES)
+        .ok_or(RawStorageError::Refused)?;
+    if reserved > MAX_RETAINED_BYTES {
         return Err(RawStorageError::Refused);
     }
     Ok(())
@@ -1526,11 +1581,10 @@ fn retain_quarantine_result(
     parent: &File,
     name: &CStr,
     quarantine: &File,
-    retention: &File,
+    scope: &RetentionScope<'_>,
     source_namespace: &str,
 ) -> Result<QuarantineResult, RawStorageError> {
-    let retained =
-        materialize_retained_record(parent, name, quarantine, retention, source_namespace)?;
+    let retained = materialize_retained_record(parent, name, quarantine, scope, source_namespace)?;
     Ok(if retained {
         QuarantineResult::Retained
     } else {
@@ -1543,7 +1597,7 @@ fn materialize_retained_record(
     parent: &File,
     name: &CStr,
     quarantine: &File,
-    retention: &File,
+    scope: &RetentionScope<'_>,
     source_namespace: &str,
 ) -> Result<bool, RawStorageError> {
     let expected = stat_fd(quarantine).map_err(storage_io)?;
@@ -1560,34 +1614,15 @@ fn materialize_retained_record(
         return Ok(false);
     }
     validate_quarantine_children(quarantine)?;
-    let usage = retention_usage(retention)?;
     let source_name = source_name_string(name)?;
     let parent_identity = stat_fd(parent).map_err(storage_io)?;
-    let manifest_name =
-        CStr::from_bytes_with_nul(RETENTION_MANIFEST_NAME).map_err(|_| RawStorageError::Refused)?;
     let entry_name =
         CStr::from_bytes_with_nul(RETENTION_ENTRY_NAME).map_err(|_| RawStorageError::Refused)?;
     let entry = read_retained_entry(quarantine, entry_name)?;
-
-    if let Some(manifest_bytes) =
-        read_named_if_present(quarantine, manifest_name, MAX_RETAINED_MANIFEST_BYTES)?
-    {
-        let manifest = parse_retention_manifest(&manifest_bytes)?;
-        validate_manifest_source(
-            &manifest,
-            &source_name,
-            source_namespace,
-            parent_identity,
-            expected,
-        )?;
-        validate_manifest_entry(&manifest, entry.as_ref())?;
-        if validate_retained_record_by_name(retention, &manifest.record_name, &manifest_bytes)? {
-            return Ok(true);
-        }
-    }
+    let usage = retention_usage(scope)?;
 
     if let Some((record_name, manifest_bytes)) = find_matching_retained_record(
-        retention,
+        scope.retention,
         &source_name,
         source_namespace,
         parent_identity,
@@ -1595,74 +1630,45 @@ fn materialize_retained_record(
     )? {
         let manifest = parse_retention_manifest(&manifest_bytes)?;
         validate_manifest_entry(&manifest, entry.as_ref())?;
-        write_private_file(
-            quarantine,
-            manifest_name,
-            &manifest_bytes,
-            MAX_RETAINED_MANIFEST_BYTES,
-        )?;
-        sync_directory(quarantine)?;
         let _ = record_name;
         return Ok(true);
     }
 
-    let record_name = create_retained_record_name(retention)?;
-    let entry_bytes = entry.as_ref().map_or(0, |(_, bytes)| bytes.len() as u64);
-    let entry_digest = entry.as_ref().map(|(_, bytes)| sha256_digest(bytes));
-    let entry_length = entry.as_ref().map(|(_, bytes)| bytes.len() as u64);
-    let manifest_without_entry = retention_manifest(
-        &record_name,
-        source_namespace,
-        &source_name,
-        parent_identity,
-        expected,
-        None,
-    );
-    let manifest_without_entry_bytes =
-        serde_json::to_vec(&manifest_without_entry).map_err(|_| RawStorageError::Refused)?;
-    if manifest_without_entry_bytes.len() > MAX_RETAINED_MANIFEST_BYTES {
-        return Err(RawStorageError::Refused);
-    }
-    let next_bytes = usage
-        .bytes
-        .checked_add(entry_bytes)
-        .and_then(|bytes| bytes.checked_add(MAX_RETAINED_MANIFEST_BYTES as u64))
-        .ok_or(RawStorageError::Refused)?;
-    if usage.entries >= MAX_RETAINED_ENTRIES || next_bytes > MAX_RETAINED_BYTES {
-        return Err(RawStorageError::Refused);
-    }
-
-    let record = create_retained_record_directory(retention, &record_name)?;
-    if let Some((_, bytes)) = &entry {
-        write_private_file(&record, entry_name, bytes, MAX_RAW_SIDECAR_BYTES)?;
-    }
-    let retained_entry = if let (Some(digest), Some(byte_length)) = (entry_digest, entry_length) {
-        let entry_file = open_named(&record, entry_name)?.ok_or(RawStorageError::Unavailable)?;
-        let identity = stat_fd(&entry_file).map_err(storage_io)?;
-        if !identity.is_private_regular_single_link() {
-            return Err(RawStorageError::Refused);
-        }
-        Some(RetentionEntry {
-            name: "entry".to_owned(),
-            identity: identity.into(),
-            byte_length,
-            sha256: digest,
-        })
-    } else {
-        None
-    };
+    let record_name = create_retained_record_name(scope.retention)?;
+    let source_key = retention_key(source_namespace, &source_name, parent_identity, expected);
     let manifest = retention_manifest(
         &record_name,
         source_namespace,
         &source_name,
         parent_identity,
         expected,
-        retained_entry,
+        entry.as_ref().map(|(identity, bytes)| RetentionEntry {
+            name: "entry".to_owned(),
+            identity: (*identity).into(),
+            byte_length: bytes.len() as u64,
+            sha256: sha256_digest(bytes),
+        }),
     );
     let manifest_bytes = serde_json::to_vec(&manifest).map_err(|_| RawStorageError::Refused)?;
     if manifest_bytes.len() > MAX_RETAINED_MANIFEST_BYTES {
         return Err(RawStorageError::Refused);
     }
+    let next_bytes = usage
+        .bytes
+        .checked_add(RETENTION_RECORD_OVERHEAD_BYTES)
+        .and_then(|bytes| bytes.checked_add(manifest_bytes.len() as u64))
+        .ok_or(RawStorageError::Refused)?;
+    let next_entries = usage
+        .entries
+        .checked_add(usize::from(!usage.keys.contains(&source_key)))
+        .ok_or(RawStorageError::Refused)?;
+    if next_entries > MAX_RETAINED_ENTRIES || next_bytes > MAX_RETAINED_BYTES {
+        return Err(RawStorageError::Refused);
+    }
+
+    let record = create_retained_record_directory(scope.retention, &record_name)?;
+    let manifest_name =
+        CStr::from_bytes_with_nul(RETENTION_MANIFEST_NAME).map_err(|_| RawStorageError::Refused)?;
     write_private_file(
         &record,
         manifest_name,
@@ -1670,14 +1676,7 @@ fn materialize_retained_record(
         MAX_RETAINED_MANIFEST_BYTES,
     )?;
     sync_directory(&record)?;
-    sync_directory(retention)?;
-    write_private_file(
-        quarantine,
-        manifest_name,
-        &manifest_bytes,
-        MAX_RETAINED_MANIFEST_BYTES,
-    )?;
-    sync_directory(quarantine)?;
+    sync_directory(scope.retention)?;
     sync_directory(parent)?;
     Ok(true)
 }
@@ -1726,6 +1725,7 @@ fn parse_retention_manifest(bytes: &[u8]) -> Result<RetentionManifest, RawStorag
         || manifest.source_name.is_empty()
         || manifest.source_name.contains('/')
         || matches!(manifest.source_name.as_str(), "." | "..")
+        || !valid_quarantine_name(manifest.source_name.as_bytes())
         || !valid_retained_name(manifest.record_name.as_bytes())
         || manifest.source_parent.file_identity().mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32
         || manifest.source_parent.file_identity().mode & 0o777 != 0o700
@@ -1749,38 +1749,15 @@ fn parse_retention_manifest(bytes: &[u8]) -> Result<RetentionManifest, RawStorag
 }
 
 #[cfg(unix)]
-fn validate_manifest_source(
-    manifest: &RetentionManifest,
-    source_name: &str,
-    source_namespace: &str,
-    parent: FileIdentity,
-    quarantine: FileIdentity,
-) -> Result<(), RawStorageError> {
-    if manifest.source_name != source_name
-        || manifest.source_namespace != source_namespace
-        || !manifest
-            .source_parent
-            .file_identity()
-            .same_directory(parent)
-        || !manifest
-            .quarantine
-            .file_identity()
-            .same_directory(quarantine)
-    {
-        return Err(RawStorageError::Refused);
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
 fn validate_manifest_entry(
     manifest: &RetentionManifest,
     entry: Option<&(FileIdentity, Vec<u8>)>,
 ) -> Result<(), RawStorageError> {
     match (&manifest.entry, entry) {
         (None, None) => Ok(()),
-        (Some(expected), Some((_, bytes)))
-            if expected.byte_length == bytes.len() as u64
+        (Some(expected), Some((identity, bytes)))
+            if expected.identity.file_identity() == *identity
+                && expected.byte_length == bytes.len() as u64
                 && expected.sha256 == sha256_digest(bytes) =>
         {
             Ok(())
@@ -1790,9 +1767,48 @@ fn validate_manifest_entry(
 }
 
 #[cfg(unix)]
+fn validate_retained_source(
+    scope: &RetentionScope<'_>,
+    manifest: &RetentionManifest,
+) -> Result<(), RawStorageError> {
+    let source_directory = match manifest.source_namespace.as_str() {
+        "sha256" => scope.objects,
+        "original" => scope.originals,
+        "refs" => scope.refs,
+        _ => return Err(RawStorageError::Refused),
+    };
+    let parent = stat_fd(source_directory).map_err(storage_io)?;
+    if !manifest
+        .source_parent
+        .file_identity()
+        .same_directory(parent)
+    {
+        return Err(RawStorageError::Refused);
+    }
+    let source_name =
+        CString::new(manifest.source_name.as_bytes()).map_err(|_| RawStorageError::Refused)?;
+    let Some(quarantine) = open_directory_named(source_directory, &source_name)? else {
+        return Err(RawStorageError::Refused);
+    };
+    let quarantine_identity = stat_fd(&quarantine).map_err(storage_io)?;
+    if !manifest
+        .quarantine
+        .file_identity()
+        .same_directory(quarantine_identity)
+    {
+        return Err(RawStorageError::Refused);
+    }
+    validate_quarantine_children(&quarantine)?;
+    let entry_name =
+        CStr::from_bytes_with_nul(RETENTION_ENTRY_NAME).map_err(|_| RawStorageError::Refused)?;
+    let entry = read_retained_entry(&quarantine, entry_name)?;
+    validate_manifest_entry(manifest, entry.as_ref())
+}
+
+#[cfg(unix)]
 fn validate_quarantine_children(quarantine: &File) -> Result<(), RawStorageError> {
     for name in directory_names(quarantine)? {
-        if !matches!(name.to_bytes(), b"entry" | b"manifest.json") {
+        if name.to_bytes() != b"entry" {
             return Err(RawStorageError::Refused);
         }
     }
@@ -1869,54 +1885,13 @@ fn read_retained_record(
     if manifest.record_name != name.to_string_lossy() {
         return Err(RawStorageError::Refused);
     }
-    let entry_name =
-        CStr::from_bytes_with_nul(RETENTION_ENTRY_NAME).map_err(|_| RawStorageError::Refused)?;
-    let entry_bytes = if let Some(entry) = &manifest.entry {
-        let Some(mut file) = open_named(&record, entry_name)? else {
-            return Err(RawStorageError::Refused);
-        };
-        let actual = stat_fd(&file).map_err(storage_io)?;
-        if actual != entry.identity.file_identity() {
-            return Err(RawStorageError::Refused);
-        }
-        let bytes = read_verified_fd(&mut file, MAX_RAW_SIDECAR_BYTES)?;
-        if bytes.len() as u64 != entry.byte_length || sha256_digest(&bytes) != entry.sha256 {
-            return Err(RawStorageError::Refused);
-        }
-        bytes
-    } else {
-        match stat_at(&record, entry_name) {
-            Ok(_) => return Err(RawStorageError::Refused),
-            Err(RawStorageError::Unavailable) => {}
-            Err(error) => return Err(error),
-        }
-        Vec::new()
-    };
     let mut names = directory_names(&record)?;
     names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-    let expected_names = if manifest.entry.is_some() {
-        vec![b"entry".as_slice(), b"manifest.json".as_slice()]
-    } else {
-        vec![b"manifest.json".as_slice()]
-    };
+    let expected_names = vec![b"manifest.json".as_slice()];
     if names.iter().map(|name| name.to_bytes()).collect::<Vec<_>>() != expected_names {
         return Err(RawStorageError::Refused);
     }
-    Ok((record, manifest_bytes, manifest, entry_bytes.len() as u64))
-}
-
-#[cfg(unix)]
-fn validate_retained_record_by_name(
-    retention: &File,
-    name: &str,
-    expected_manifest: &[u8],
-) -> Result<bool, RawStorageError> {
-    let name = CString::new(name).map_err(|_| RawStorageError::Refused)?;
-    match read_retained_record(retention, &name) {
-        Ok((_record, manifest_bytes, _manifest, _bytes)) => Ok(manifest_bytes == expected_manifest),
-        Err(RawStorageError::Unavailable) => Ok(false),
-        Err(error) => Err(error),
-    }
+    Ok((record, manifest_bytes, manifest, 0))
 }
 
 #[cfg(unix)]
@@ -1950,23 +1925,147 @@ fn find_matching_retained_record(
 }
 
 #[cfg(unix)]
-fn retention_usage(retention: &File) -> Result<RetentionUsage, RawStorageError> {
-    let mut usage = RetentionUsage::default();
-    for name in directory_names(retention)? {
-        let (_record, manifest_bytes, _manifest, entry_bytes) =
-            read_retained_record(retention, &name)?;
-        usage.entries = usage
-            .entries
-            .checked_add(1)
-            .ok_or(RawStorageError::Refused)?;
-        usage.bytes = usage
-            .bytes
-            .checked_add(manifest_bytes.len() as u64)
-            .and_then(|bytes| bytes.checked_add(entry_bytes))
-            .ok_or(RawStorageError::Refused)?;
-        if usage.entries > MAX_RETAINED_ENTRIES || usage.bytes > MAX_RETAINED_BYTES {
+fn retention_key(
+    source_namespace: &str,
+    source_name: &str,
+    source_parent: FileIdentity,
+    quarantine: FileIdentity,
+) -> RetentionKey {
+    (
+        source_namespace.to_owned(),
+        source_name.to_owned(),
+        source_parent,
+        quarantine,
+    )
+}
+
+#[cfg(unix)]
+fn retention_usage(scope: &RetentionScope<'_>) -> Result<RetentionUsage, RawStorageError> {
+    let mut usage = RetentionUsage {
+        entries: 0,
+        bytes: RETENTION_NAMESPACE_OVERHEAD_BYTES * 4,
+        keys: HashSet::new(),
+    };
+    let mut retained_keys = HashSet::new();
+    for name in directory_names(scope.retention)? {
+        let (_record, manifest_bytes, manifest, _entry_bytes) =
+            read_retained_record(scope.retention, &name)?;
+        // A root record is only an authenticated pointer, not an independent
+        // payload.  Re-open the descriptor-bound source qdir and replay the
+        // recorded entry proof before counting the record.  A missing,
+        // replaced, or digest-mismatched source fails closed instead of
+        // turning an unreachable journal row into accepted evidence.
+        validate_retained_source(scope, &manifest)?;
+        let key = retention_key(
+            &manifest.source_namespace,
+            &manifest.source_name,
+            manifest.source_parent.file_identity(),
+            manifest.quarantine.file_identity(),
+        );
+        if !retained_keys.insert(key) {
             return Err(RawStorageError::Refused);
         }
+        usage.bytes = usage
+            .bytes
+            .checked_add(RETENTION_RECORD_OVERHEAD_BYTES)
+            .and_then(|bytes| bytes.checked_add(manifest_bytes.len() as u64))
+            .ok_or(RawStorageError::Refused)?;
+    }
+
+    let mut source_keys = HashSet::new();
+    for (directory, source_namespace) in [
+        (scope.objects, "sha256"),
+        (scope.originals, "original"),
+        (scope.refs, "refs"),
+    ] {
+        let parent = stat_fd(directory).map_err(storage_io)?;
+        let entry_name = CStr::from_bytes_with_nul(RETENTION_ENTRY_NAME)
+            .map_err(|_| RawStorageError::Refused)?;
+        for name in directory_names(directory)? {
+            let name_bytes = name.to_bytes();
+            if valid_temporary_name(name_bytes) {
+                usage.bytes = usage
+                    .bytes
+                    .checked_add(RETENTION_SOURCE_OVERHEAD_BYTES)
+                    .ok_or(RawStorageError::Refused)?;
+                let Some(mut temporary) = open_named(directory, &name)? else {
+                    return Err(RawStorageError::Refused);
+                };
+                let identity = stat_fd(&temporary).map_err(storage_io)?;
+                if !identity.is_private_regular_single_link() {
+                    return Err(RawStorageError::Refused);
+                }
+                let max_bytes = if source_namespace == "refs" {
+                    MAX_RAW_SIDECAR_BYTES
+                } else {
+                    MAX_RAW_OBJECT_BYTES
+                };
+                let bytes = read_verified_fd(&mut temporary, max_bytes)?;
+                usage.bytes = usage
+                    .bytes
+                    .checked_add(bytes.len() as u64)
+                    .ok_or(RawStorageError::Refused)?;
+                let source_name = source_name_string(&name)?;
+                source_keys.insert(retention_key(
+                    source_namespace,
+                    &source_name,
+                    parent,
+                    identity,
+                ));
+                continue;
+            }
+            if !valid_quarantine_name(name_bytes) {
+                if name_bytes.starts_with(b".velnor-raw-") {
+                    // Every store-owned recovery name has a bounded schema.
+                    // Unknown/debris names fail closed instead of escaping
+                    // accounting through an unbounded private file.
+                    return Err(RawStorageError::Refused);
+                }
+                continue;
+            }
+            usage.bytes = usage
+                .bytes
+                .checked_add(RETENTION_SOURCE_OVERHEAD_BYTES)
+                .ok_or(RawStorageError::Refused)?;
+            let Some(quarantine) = (match open_directory_named(directory, &name) {
+                Ok(quarantine) => quarantine,
+                // A generated qname occupied by a symlink, FIFO, or other
+                // unknown entry is not safely measurable. Preserve it and
+                // fail closed before any reconciliation mutation.
+                Err(RawStorageError::Refused) => return Err(RawStorageError::Refused),
+                Err(error) => return Err(error),
+            }) else {
+                return Err(RawStorageError::Refused);
+            };
+            let quarantine_identity = stat_fd(&quarantine).map_err(storage_io)?;
+            if quarantine_identity.mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32
+                || quarantine_identity.mode & 0o777 != 0o700
+            {
+                return Err(RawStorageError::Refused);
+            }
+            validate_quarantine_children(&quarantine)?;
+            if let Some((_, bytes)) = read_retained_entry(&quarantine, entry_name)? {
+                usage.bytes = usage
+                    .bytes
+                    .checked_add(bytes.len() as u64)
+                    .ok_or(RawStorageError::Refused)?;
+            }
+            let source_name = source_name_string(&name)?;
+            source_keys.insert(retention_key(
+                source_namespace,
+                &source_name,
+                parent,
+                quarantine_identity,
+            ));
+        }
+    }
+
+    let mut keys = retained_keys;
+    keys.extend(source_keys);
+    usage.entries = keys.len();
+    usage.keys = keys;
+    if usage.entries > MAX_RETAINED_ENTRIES || usage.bytes > MAX_RETAINED_BYTES {
+        return Err(RawStorageError::Refused);
     }
     Ok(usage)
 }
@@ -2058,7 +2157,7 @@ fn write_private_file(
 fn reconcile_temporary(
     directory: &File,
     name: &CStr,
-    retention: &File,
+    scope: &RetentionScope<'_>,
     source_namespace: &str,
 ) -> Result<(), RawStorageError> {
     if is_quarantine_name(name) {
@@ -2070,8 +2169,7 @@ fn reconcile_temporary(
             // namespace-denial condition.
             Ok(None) | Err(_) => return Ok(()),
         };
-        let _ =
-            retain_quarantine_result(directory, name, &quarantine, retention, source_namespace)?;
+        let _ = retain_quarantine_result(directory, name, &quarantine, scope, source_namespace)?;
         return Ok(());
     }
     let Some(file) = (match open_named(directory, name) {
@@ -2090,7 +2188,7 @@ fn reconcile_temporary(
     // regular file by name.
     let permissions = identity.mode & 0o777;
     if identity.is_private_regular_single_link() && matches!(permissions, 0o400 | 0o600) {
-        remove_private_named(directory, name, None, retention, source_namespace)?;
+        remove_private_named(directory, name, None, scope, source_namespace)?;
     }
     Ok(())
 }
@@ -2101,7 +2199,7 @@ fn publish_if_absent(
     name: &CStr,
     bytes: &[u8],
     max_bytes: usize,
-    retention: &File,
+    scope: &RetentionScope<'_>,
     source_namespace: &str,
 ) -> Result<(), RawStorageError> {
     if bytes.len() > max_bytes {
@@ -2112,7 +2210,7 @@ fn publish_if_absent(
         Some(_) => return Err(RawStorageError::Refused),
         None => {}
     }
-    let mut temporary = TemporaryFile::create(directory, retention, source_namespace)?;
+    let mut temporary = TemporaryFile::create(directory, scope, source_namespace)?;
     (|| {
         temporary
             .file
@@ -2328,7 +2426,7 @@ impl Drop for NamespaceLock<'_> {
 #[cfg(unix)]
 struct TemporaryFile<'a> {
     directory: &'a File,
-    retention: &'a File,
+    scope: &'a RetentionScope<'a>,
     source_namespace: &'a str,
     name: CString,
     identity: FileIdentity,
@@ -2340,7 +2438,7 @@ struct TemporaryFile<'a> {
 impl<'a> TemporaryFile<'a> {
     fn create(
         directory: &'a File,
-        retention: &'a File,
+        scope: &'a RetentionScope<'a>,
         source_namespace: &'a str,
     ) -> Result<Self, RawStorageError> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -2377,7 +2475,7 @@ impl<'a> TemporaryFile<'a> {
             }
             return Ok(Self {
                 directory,
-                retention,
+                scope,
                 source_namespace,
                 name,
                 identity,
@@ -2408,7 +2506,7 @@ impl<'a> TemporaryFile<'a> {
             None,
             None,
             Some(expected_links),
-            self.retention,
+            self.scope,
             self.source_namespace,
         )? {
             QuarantineResult::Retained => {
@@ -2454,7 +2552,7 @@ impl Drop for TemporaryFile<'_> {
             None,
             None,
             Some(named_identity.nlink),
-            self.retention,
+            self.scope,
             self.source_namespace,
         ) {
             self.name_removed = true;
@@ -2465,9 +2563,9 @@ impl Drop for TemporaryFile<'_> {
 #[cfg(unix)]
 fn storage_io(error: io::Error) -> RawStorageError {
     match error.raw_os_error() {
-        Some(libc::ELOOP | libc::EACCES | libc::EPERM | libc::EMLINK | libc::EISDIR) => {
-            RawStorageError::Refused
-        }
+        Some(
+            libc::ELOOP | libc::EACCES | libc::EPERM | libc::EMLINK | libc::EISDIR | libc::ENOTDIR,
+        ) => RawStorageError::Refused,
         Some(libc::ENOENT) => RawStorageError::Unavailable,
         _ => RawStorageError::Unavailable,
     }
