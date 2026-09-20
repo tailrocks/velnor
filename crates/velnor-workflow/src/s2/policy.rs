@@ -445,9 +445,8 @@ fn pin_rules(
         .push(generated_tree_report(pin, comparison, mainline));
 }
 
-/// Report the `generated-tree` verdict. The candidate exception passes on
-/// pull requests (a generator change in flight) but fails on mainline: once
-/// merged, the pin must advance so the tight invariant holds again.
+/// The same exact-pin contract applies before and after integration.
+/// A candidate-only match diagnoses an unpinned renderer; it never authorizes merge.
 fn generated_tree_report(
     pin: &str,
     comparison: Result<TreeComparison, GeneratorError>,
@@ -460,18 +459,12 @@ fn generated_tree_report(
                 "every generated file is byte-identical to the render of velnor-workflow at {pin}"
             ),
         ),
-        Ok(TreeComparison::Candidate(closure)) if mainline => RuleReport::fail(
+        Ok(TreeComparison::Candidate(closure)) => RuleReport::fail(
             "generated-tree",
             format!(
-                "the pin is stale on mainline: the tree matches the candidate render ({closure}), not the render of velnor-workflow at {pin}; bump [generator] revision to HEAD and regenerate"
+                "the declared pin {pin} does not render the tree: only candidate {closure} matches; commit the renderer source, pin that commit, and regenerate before merge (mainline={mainline})"
             ),
             Vec::new(),
-        ),
-        Ok(TreeComparison::Candidate(closure)) => RuleReport::pass(
-            "generated-tree",
-            format!(
-                "the tree matches the candidate render ({closure}), not the render of velnor-workflow at {pin}: a generator change in flight; bump [generator] revision after merge"
-            ),
         ),
         Ok(TreeComparison::Differences(differences)) => RuleReport::fail(
             "generated-tree",
@@ -575,12 +568,9 @@ pub(crate) fn verify_declared_pin_renders_tree(
         &source,
     )? {
         TreeComparison::Pin => Ok(()),
-        TreeComparison::Candidate(closure) => {
-            eprintln!(
-                "notice: the tree matches the candidate render ({closure}), not the render of the declared pin {pin}; bump `[generator] revision` in {GENERATION_CONFIG} after merge"
-            );
-            Ok(())
-        }
+        TreeComparison::Candidate(closure) => Err(GeneratorError::usage(format!(
+            "only candidate {closure} renders the tree; pin the committed renderer source and regenerate before merge (declared pin {pin})"
+        ))),
         TreeComparison::Differences(differences) => Err(GeneratorError::usage(format!(
             "the declared generator pin {pin} renders the tree differently; set `[generator] revision` in {GENERATION_CONFIG} to the last generator commit and regenerate:\n{}",
             differences.join("\n")

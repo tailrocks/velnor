@@ -176,7 +176,7 @@ fn package_release_hook_renders_and_passes_policy() {
 }
 
 #[test]
-fn package_release_owner_publish_uses_source_checkout_for_runtime_action() {
+fn package_release_owner_publish_verifies_runtime_against_source_checkout() {
     let workspace = temporary_root("owner-runtime");
     let root = fixture_root(&workspace.join("repo"));
     let owner_repository = ["tailrocks", "velnor"].join("/");
@@ -195,18 +195,16 @@ fn package_release_owner_publish_uses_source_checkout_for_runtime_action() {
     let workflow = fs::read_to_string(root.join(".github/workflows/preview.yml")).unwrap();
     let publish = workflow
         .split_once("  publish:\n")
-        .map(|(_, job)| job)
+        .map(|(_, job)| job.split("\n  runtime:").next().expect("publish body"))
         .expect("publish job");
     assert!(
-        publish.contains("uses: ./source/.github/actions/setup-velnor-workflow\n"),
-        "owner publish must resolve its action from the source checkout: {publish}"
+        publish.contains("name: Verify Velnor workflow runtime\n        shell: bash\n        working-directory: source"),
+        "owner publish must bind artifact closure to its source checkout: {publish}"
     );
+    assert!(!publish.contains("setup-velnor-workflow"));
+    assert!(!publish.contains("cargo build"));
     assert!(
-        !publish.contains("uses: ./.github/actions/setup-velnor-workflow\n"),
-        "owner publish must not resolve its action from the empty workspace root: {publish}"
-    );
-    assert!(
-        publish.contains("rev: ") && !publish.contains("rev: ${{"),
+        publish.contains("EXPECTED_REVISION: ") && !publish.contains("EXPECTED_REVISION: ${{"),
         "owner publish must retain a literal runtime pin: {publish}"
     );
     let _ = fs::remove_dir_all(workspace);

@@ -78,6 +78,7 @@ impl Primitive for PackageRelease {
     }
 
     fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
+        super::runtime_bootstrap::validate_control_platform(ctx.config)?;
         let spec = parse_spec(args)?;
         validate_mise_tasks(ctx.root, "verify_tasks", &spec.verify_tasks)?;
         validate_mise_tasks(ctx.root, "pre_publish_tasks", &spec.pre_publish_tasks)?;
@@ -827,8 +828,18 @@ fn render_workflow(
     spec: &PackageReleaseSpec,
     workflow_file: &str,
 ) -> String {
+    let owner = super::runtime_bootstrap::owns_runtime(&config.repository);
+    let runtime_needs = if owner { "    needs: [runtime]\n" } else { "" };
     let (provider, runner) = release_runner(config);
-    let runtime_setup = if provider == ProviderId::GithubHosted {
+    let runtime_setup = if owner {
+        crate::s2::workflow_runtime_download_at(
+            ProviderId::GithubHosted,
+            &config.workflow_revision,
+            ".",
+            true,
+            true,
+        )
+    } else if provider == ProviderId::GithubHosted {
         workflow_runtime_setup(
             ProviderId::GithubHosted,
             &config.repository,
@@ -837,7 +848,15 @@ fn render_workflow(
     } else {
         String::new()
     };
-    let publish_runtime_setup = if provider == ProviderId::GithubHosted {
+    let publish_runtime_setup = if owner {
+        crate::s2::workflow_runtime_download_at(
+            ProviderId::GithubHosted,
+            &config.workflow_revision,
+            "source",
+            true,
+            true,
+        )
+    } else if provider == ProviderId::GithubHosted {
         workflow_runtime_setup_at_checkout_path(
             ProviderId::GithubHosted,
             &config.repository,
@@ -941,7 +960,7 @@ fn render_workflow(
     );
     let _ = writeln!(
         output,
-        "jobs:\n  build:\n    name: Verify package release\n    if: {build_if}\n    runs-on: {runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    outputs:\n      version: {}\n      source_commit: {}\n    env:\n      PACKAGE_DIR: {package_dir_yaml}\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/{package_dir}\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n",
+        "jobs:\n  build:\n    name: Verify package release\n{runtime_needs}    if: {build_if}\n    runs-on: {runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    outputs:\n      version: {}\n      source_commit: {}\n    env:\n      PACKAGE_DIR: {package_dir_yaml}\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/{package_dir}\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n",
         github_expression("steps.verify.outputs.version"),
         github_expression("steps.verify.outputs.source_commit"),
     );
@@ -978,6 +997,15 @@ fn render_workflow(
         &message_yaml,
         &concurrency_yaml,
     ));
+    if owner {
+        output.push_str(&super::runtime_bootstrap::render_root_job(
+            &config.repository,
+            &config.workflow_revision,
+            &super::runtime_bootstrap::control_platform(config)
+                .into_iter()
+                .collect(),
+        ));
+    }
     output
 }
 
@@ -2876,6 +2904,36 @@ concurrency_group = "package-release-preview"
         assert_eq!(spec.release_title_prefix, "Preview");
         assert_eq!(spec.consumer_branch, "main");
         assert_eq!(spec.concurrency_group, "package-release-preview");
+    }
+
+    #[test]
+    fn source_bootstrap_package_release_has_one_readonly_producer() {
+        let spec = parse_spec(&Args(&args())).expect("valid package fixture");
+        let mut config = render_config();
+        config.repository = crate::s2::workflow_setup_action_repository().to_owned();
+        let workflow = render_workflow(&config, &spec, "preview.yml");
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).expect("valid workflow");
+        let jobs = &yaml["jobs"];
+        assert_eq!(jobs["build"]["needs"][0].as_str(), Some("runtime"));
+        assert_eq!(
+            jobs["runtime"]["permissions"]["contents"].as_str(),
+            Some("read")
+        );
+        assert_eq!(
+            workflow
+                .matches("name: Build exact renderer source")
+                .count(),
+            1
+        );
+        for job in ["build", "publish"] {
+            let steps = jobs[job]["steps"].as_sequence().expect("job steps");
+            assert!(
+                steps
+                    .iter()
+                    .any(|step| step["name"].as_str() == Some("Verify Velnor workflow runtime")),
+                "{job}"
+            );
+        }
     }
 
     #[test]

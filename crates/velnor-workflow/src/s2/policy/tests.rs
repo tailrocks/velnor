@@ -593,6 +593,7 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
 #[test]
 fn owner_entrypoint_pin_ignores_variable_references() {
     let job = crate::s2::policy_job(&PolicyJobSpec {
+        runtime_from_plan: false,
         name: "Policy",
         revision: PIN_A,
         runner: "ubuntu-24.04",
@@ -692,6 +693,7 @@ fn entrypoint_audit_names_each_escalation() {
 #[test]
 fn velnor_entrypoint_is_gated_and_never_builds_the_pin() {
     let job = crate::s2::policy_job(&PolicyJobSpec {
+        runtime_from_plan: false,
         name: "Policy",
         revision: PIN_A,
         runner: "[self-hosted, velnor]",
@@ -1358,20 +1360,16 @@ fn generated_tree_report_distinguishes_pin_candidate_and_stale_main() {
         Ok(TreeComparison::Candidate(CLOSURE_A.to_owned())),
         false,
     );
-    assert!(flight.passed, "{:?}", flight.details);
-    assert!(flight.reason.contains("in flight"), "{}", flight.reason);
-    assert!(flight.reason.contains("after merge"), "{}", flight.reason);
+    assert!(!flight.passed, "{:?}", flight.details);
+    assert!(flight.reason.contains("before merge"), "{}", flight.reason);
+    assert!(!flight.reason.contains("after merge"), "{}", flight.reason);
     let stale = generated_tree_report(
         PIN_A,
         Ok(TreeComparison::Candidate(CLOSURE_A.to_owned())),
         true,
     );
     assert!(!stale.passed);
-    assert!(
-        stale.reason.contains("stale on mainline"),
-        "{}",
-        stale.reason
-    );
+    assert!(stale.reason.contains("before merge"), "{}", stale.reason);
     let drift = generated_tree_report(
         PIN_A,
         Ok(TreeComparison::Differences(vec!["ci-pr.yml".to_owned()])),
@@ -1392,6 +1390,7 @@ fn rendered_entrypoints_pass_the_legacy_space_marker_scan() {
         "example/consumer",
     ] {
         let job = crate::s2::policy_job(&PolicyJobSpec {
+            runtime_from_plan: false,
             name: "Policy",
             revision: PIN_A,
             runner: "ubuntu-24.04",
