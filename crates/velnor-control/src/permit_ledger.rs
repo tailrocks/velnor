@@ -1188,8 +1188,37 @@ impl PermitLedger {
         is_alive: &dyn Fn(u32) -> bool,
         protected: &std::collections::BTreeSet<String>,
     ) -> Result<Vec<String>, LedgerError> {
-        let _ = (is_alive, protected);
-        Ok(Vec::new())
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let candidates: Vec<(String, i64)> = {
+            let mut select = tx.prepare(
+                "SELECT holder, pid FROM permits
+                 WHERE state = 'uncertain' AND lane = 'native' AND pid IS NOT NULL",
+            )?;
+            select
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?
+                .collect::<Result<_, _>>()?
+        };
+        let mut swept = Vec::new();
+        for (holder, pid) in candidates {
+            if protected.contains(&holder) {
+                continue;
+            }
+            let Ok(pid) = u32::try_from(pid) else {
+                continue;
+            };
+            if is_alive(pid) {
+                continue;
+            }
+            tx.execute("DELETE FROM permits WHERE holder = ?1", params![holder])?;
+            swept.push(holder);
+        }
+        tx.commit()?;
+        swept.sort();
+        Ok(swept)
     }
 
     /// Number of permits in `state` (observability; every state counts).
