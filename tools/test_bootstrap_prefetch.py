@@ -24,7 +24,14 @@ from tools.bootstrap_prefetch import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGET_MANIFEST = ROOT / "crates" / "velnor-workflow" / "Cargo.toml"
+TARGET_MANIFEST = next(
+    candidate
+    for candidate in sorted((ROOT / "crates").glob("*/Cargo.toml"))
+    if tomllib.loads(candidate.read_text(encoding="utf-8"))
+    .get("package", {})
+    .get("name", "")
+    .endswith("-workflow")
+)
 TARGET_PACKAGE = tomllib.loads(TARGET_MANIFEST.read_text(encoding="utf-8"))["package"]["name"]
 
 
