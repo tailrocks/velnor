@@ -2382,12 +2382,21 @@ fn validate_workflow_content(
         .next()
         .is_some_and(|(key, value)| key == "ref" && value == source_sha)
         && query.next().is_none();
+    let path_binding = parsed
+        .path()
+        .strip_prefix("/repos/")
+        .and_then(|value| value.split_once("/contents/"))
+        .is_some_and(|(content_repository, content_path)| {
+            validate_repository_slug(content_repository).is_ok()
+                && content_repository.eq_ignore_ascii_case(repository)
+                && content_path == encode_api_path(path)
+        });
     if parsed.scheme() != "https"
         || parsed.host_str() != Some("api.github.com")
         || parsed.username() != ""
         || parsed.password().is_some()
         || parsed.fragment().is_some()
-        || parsed.path() != format!("/repos/{repository}/contents/{}", encode_api_path(path))
+        || !path_binding
         || !has_exact_ref
     {
         bail!("workflow content URL is not bound to requested repository/path/ref");
@@ -3628,6 +3637,23 @@ jobs:
             source_sha
         )
         .is_err());
+    }
+
+    #[test]
+    fn workflow_content_url_allows_github_canonical_repository_case() {
+        let source_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let content = serde_json::json!({
+            "path": "action.yml",
+            "sha": source_sha,
+            "url": "https://api.github.com/repos/Mozilla-Actions/sccache-action/contents/action.yml?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        });
+        assert!(validate_workflow_content(
+            &content,
+            "mozilla-actions/sccache-action",
+            "action.yml",
+            source_sha
+        )
+        .is_ok());
     }
 
     #[test]
