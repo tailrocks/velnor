@@ -745,6 +745,7 @@ fn analyze_rust_manifests(
     Ok(result)
 }
 
+#[cfg(test)]
 fn include_str_paths(
     root: &Path,
     files: &[String],
