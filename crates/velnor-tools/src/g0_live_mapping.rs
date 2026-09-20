@@ -5,8 +5,8 @@
 //! IDs or successful empty rows.
 
 use super::live_collector::{
-    LiveCheck, LiveCollection, LiveDependency, LiveExecution, LivePullRequest,
-    LivePullRequestIdentity, LiveRepository, LiveWorkflow,
+    LiveCheck, LiveCheckoutObservation, LiveCollection, LiveDependency, LiveExecution,
+    LivePullRequest, LivePullRequestIdentity, LiveRepository, LiveWorkflow,
 };
 use super::{sha256_digest, AcquisitionState, ApiKind, HttpMethod, RawObjectRef, RequestRecord};
 use crate::evidence_check::{ManifestDocument, ManifestRepository};
@@ -53,10 +53,12 @@ pub struct G0MappingSupplement {
     pub request_payloads: BTreeMap<String, G0RequestPayloadSupplement>,
     pub raw_objects: Vec<G0RawObjectSupplement>,
     pub artifacts: Vec<G0ArtifactObservationSupplement>,
+    pub checkout_observations: Vec<G0CheckoutObservationSupplement>,
     pub workflow_binding_checkout_shas: BTreeMap<String, String>,
     pub check_checkout_shas: BTreeMap<String, String>,
     pub pull_request_source_urls: BTreeMap<String, String>,
     pub graph_source: BTreeMap<String, (String, String)>,
+    pub source_api_urls: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -90,6 +92,16 @@ pub struct G0ArtifactObservationSupplement {
     pub expired: Option<bool>,
     pub source_url: String,
     pub raw_object_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct G0CheckoutObservationSupplement {
+    pub subject: String,
+    pub api_head_sha: String,
+    pub checkout_sha: Option<String>,
+    pub api_raw_object_refs: Vec<String>,
+    pub proof_raw_object_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -526,57 +538,142 @@ fn map_supplement(live: &LiveCollection, canonical: &[u8]) -> G0MappingSupplemen
         .collect();
     let mut workflow_binding_checkout_shas = BTreeMap::new();
     let mut check_checkout_shas = BTreeMap::new();
+    let mut checkout_observations = Vec::new();
     let mut pull_request_source_urls = BTreeMap::new();
     let mut graph_source = BTreeMap::new();
+    let mut source_api_urls = BTreeMap::new();
     for repository in &live.repositories {
         for workflow in &repository.workflows {
+            let workflow_key = format!("workflow:{}:{}", repository.repository, workflow.path);
             graph_source.insert(
-                format!("workflow:{}:{}", repository.repository, workflow.path),
+                workflow_key.clone(),
                 (workflow.source_sha.clone(), workflow.path.clone()),
             );
+            source_api_urls.insert(workflow_key, workflow.source_url.clone());
+            for dependency in workflow
+                .reusable_workflows
+                .iter()
+                .chain(workflow.actions.iter())
+                .chain(workflow.scanners.iter())
+            {
+                let dependency_key = format!(
+                    "dependency:{}:{}@{}",
+                    dependency.repository, dependency.path, dependency.revision
+                );
+                if let Some(source_url) = &dependency.source_url {
+                    source_api_urls.insert(dependency_key, source_url.clone());
+                }
+            }
         }
         for pull_request in &repository.open_prs {
             let pr_key = format!("{}#{}", repository.repository, pull_request.identity.number);
             pull_request_source_urls
                 .insert(pr_key.clone(), pull_request.identity.source_url.clone());
+            for execution in &pull_request.executions {
+                checkout_observations.push(map_checkout_observation(
+                    format!(
+                        "{pr_key}:run/{}/attempt/{}",
+                        execution.run_id, execution.run_attempt
+                    ),
+                    &execution.checkout,
+                ));
+                for job in &execution.jobs {
+                    checkout_observations.push(map_checkout_observation(
+                        format!(
+                            "{pr_key}:run/{}/attempt/{}/job/{}",
+                            execution.run_id, execution.run_attempt, job.job_id
+                        ),
+                        &job.checkout,
+                    ));
+                }
+            }
             for binding in &pull_request.workflow_bindings {
-                if let Some(checkout) = &binding.actual_checkout_sha {
+                if let Some(checkout) = binding.checkout.actual_checkout_sha() {
                     workflow_binding_checkout_shas.insert(
                         format!("{pr_key}:{}:{}", binding.workflow_path, binding.event),
-                        checkout.clone(),
+                        checkout.to_owned(),
                     );
                 }
             }
             for check in &pull_request.checks {
-                if let Some(checkout) = &check.actual_checkout_sha {
+                checkout_observations.push(map_checkout_observation(
+                    format!("{pr_key}:check/{}", check.check_run_id),
+                    &check.checkout,
+                ));
+                if let Some(checkout) = check.checkout.actual_checkout_sha() {
                     check_checkout_shas.insert(
                         format!("{pr_key}:{}:{}", check.context, check.check_run_id),
-                        checkout.clone(),
+                        checkout.to_owned(),
                     );
                 }
             }
         }
+        for execution in &repository.main_executions {
+            checkout_observations.push(map_checkout_observation(
+                format!(
+                    "{}:main:run/{}/attempt/{}",
+                    repository.repository, execution.run_id, execution.run_attempt
+                ),
+                &execution.checkout,
+            ));
+            for job in &execution.jobs {
+                checkout_observations.push(map_checkout_observation(
+                    format!(
+                        "{}:main:run/{}/attempt/{}/job/{}",
+                        repository.repository, execution.run_id, execution.run_attempt, job.job_id
+                    ),
+                    &job.checkout,
+                ));
+            }
+        }
         for check in &repository.main_checks {
-            if let Some(checkout) = &check.actual_checkout_sha {
+            checkout_observations.push(map_checkout_observation(
+                format!(
+                    "{}:main:check/{}",
+                    repository.repository, check.check_run_id
+                ),
+                &check.checkout,
+            ));
+            if let Some(checkout) = check.checkout.actual_checkout_sha() {
                 check_checkout_shas.insert(
                     format!(
                         "{}:{}:{}",
                         repository.repository, check.context, check.check_run_id
                     ),
-                    checkout.clone(),
+                    checkout.to_owned(),
                 );
             }
         }
     }
+    checkout_observations.sort_by(|left, right| left.subject.cmp(&right.subject));
     G0MappingSupplement {
         canonical_snapshot_bytes_base64: BASE64.encode(canonical),
         request_payloads,
         raw_objects,
         artifacts,
+        checkout_observations,
         workflow_binding_checkout_shas,
         check_checkout_shas,
         pull_request_source_urls,
         graph_source,
+        source_api_urls,
+    }
+}
+
+fn map_checkout_observation(
+    subject: String,
+    observation: &LiveCheckoutObservation,
+) -> G0CheckoutObservationSupplement {
+    G0CheckoutObservationSupplement {
+        subject,
+        api_head_sha: observation.api_head_sha.clone(),
+        checkout_sha: observation.actual_checkout_sha().map(str::to_owned),
+        api_raw_object_refs: observation.api_raw_object_refs.clone(),
+        proof_raw_object_refs: observation
+            .proof
+            .as_ref()
+            .map(|proof| proof.raw_object_refs.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -1026,7 +1123,7 @@ fn map_pull_request(
         .workflow_bindings
         .iter()
         .map(|binding| {
-            let _actual_checkout_sha = binding.actual_checkout_sha.clone().ok_or_else(|| {
+            let _actual_checkout_sha = binding.checkout.actual_checkout_sha().ok_or_else(|| {
                 anyhow!(
                     "PR #{} workflow binding lacks checkout SHA",
                     identity.number
@@ -1037,12 +1134,16 @@ fn map_pull_request(
                 workflow_revision: binding.workflow_revision.clone(),
                 event: binding.event.clone(),
                 source_sha: binding.source_sha.clone(),
-                actual_checkout_sha: binding.actual_checkout_sha.clone().ok_or_else(|| {
-                    anyhow!(
-                        "PR #{} workflow binding lacks checkout SHA",
-                        identity.number
-                    )
-                })?,
+                actual_checkout_sha: binding
+                    .checkout
+                    .actual_checkout_sha()
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "PR #{} workflow binding lacks checkout SHA",
+                            identity.number
+                        )
+                    })?,
                 run_ids: binding.run_ids.clone(),
                 raw_object_refs: binding.raw_object_refs.clone(),
             })
@@ -1170,9 +1271,10 @@ fn map_check(
     }
     let job_id = job.job_id;
     let actual_checkout_sha = check
-        .actual_checkout_sha
-        .clone()
-        .or_else(|| execution.actual_checkout_sha.clone())
+        .checkout
+        .actual_checkout_sha()
+        .or_else(|| execution.checkout.actual_checkout_sha())
+        .map(str::to_owned)
         .ok_or_else(|| anyhow!("check {} lacks checkout identity", check.context))?;
     let run_attempt = check
         .run_attempt
