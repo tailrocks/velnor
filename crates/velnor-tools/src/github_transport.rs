@@ -2,8 +2,11 @@
 //!
 //! The acquisition module owns the request/page state machine.  This module
 //! supplies the production boundary it calls: one fixed GitHub API origin,
-//! no redirects, bearer credentials held only in memory, bounded response
-//! bodies, and an immutable content-addressed store with a provenance sidecar.
+//! no redirects for authenticated requests, bearer credentials held only in
+//! memory, bounded response bodies, and an immutable content-addressed store
+//! with a provenance sidecar. GitHub's artifact archive route has one
+//! narrowly validated no-auth redirect exception because its documented API
+//! contract returns a short-lived signed URL.
 
 use super::{
     AcquisitionFuture, AcquisitionRequest, AcquisitionTransport, AuthIdentity, HttpMethod,
@@ -26,8 +29,9 @@ const USER_AGENT_VALUE: &str = "velnor-tools-g0-live-collector";
 ///
 /// `token` never appears in `Debug`, request records, or errors.  The
 /// transport rejects any request that is not a GET REST call or a POST to the
-/// fixed GraphQL endpoint.  Redirects are disabled so a server cannot move an
-/// auth-bearing request to another origin.
+/// fixed GraphQL endpoint. Redirects are disabled for authenticated requests;
+/// only the exact artifact archive route may perform one validated no-auth
+/// follow to GitHub's archive host.
 pub struct GithubHttpTransport {
     client: reqwest::Client,
     token: String,
