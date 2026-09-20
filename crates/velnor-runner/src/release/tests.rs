@@ -843,9 +843,29 @@ fn assemble_command_rejects_extra_artifact_checksum_tokens() {
     .unwrap();
 
     let error = assemble_command(assemble_args(record, artifacts)).unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("artifact checksum file must contain only one checksum"));
+    assert!(error.to_string().contains("artifact checksum basename"));
+}
+
+#[test]
+fn artifact_checksum_accepts_matching_basename() {
+    let digest = digest_of("product-manifest");
+    let parsed = parse_artifact_checksum(
+        &format!("{digest}  product-manifest.json\n"),
+        "product-manifest.json",
+    )
+    .unwrap();
+    assert_eq!(parsed, digest);
+}
+
+#[test]
+fn artifact_checksum_rejects_wrong_basename() {
+    let digest = digest_of("product-manifest");
+    let error = parse_artifact_checksum(
+        &format!("{digest}  product-assets/product-manifest.json\n"),
+        "product-manifest.json",
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("artifact checksum basename"));
 }
 
 #[test]

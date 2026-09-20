@@ -2042,7 +2042,8 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
     let product_verification = {
         let release_tool = format!("artifacts/{package}-release-tool");
         let block = format!(
-        "          sha256sum product-assets/product-manifest.json | awk '{{print $1}}' > product-assets/product-manifest.json.sha256\n\
+        "          manifest_sha256=\"$(cd product-assets && sha256sum -- product-manifest.json | awk '{{print $1}}')\"\n\
+          printf '%s  product-manifest.json\\n' \"$manifest_sha256\" > product-assets/product-manifest.json.sha256\n\
           provider_release=\"$(gh api \"repos/$GITHUB_REPOSITORY/releases/tags/$release_tag\")\"\n\
           provider_release_id=\"$(jq -er '.id | numbers | tostring' <<<\"$provider_release\")\"\n\
           [ \"$provider_release_id\" = \"$PRODUCT_RELEASE_ID\" ] || {{ echo '::error::provider release id changed while assembling product' >&2; exit 1; }}\n\
@@ -6610,8 +6611,14 @@ mod tests {
         assert!(publish.contains("release-manifest.json"), "{publish}");
         assert!(publish.contains("product-manifest.json"), "{publish}");
         assert!(publish.contains("release-attestation.json"), "{publish}");
-        assert!(publish.contains("velnor.github-release-attestation/v1"), "{publish}");
-        assert!(publish.contains("provider release URL is not canonical"), "{publish}");
+        assert!(
+            publish.contains("velnor.github-release-attestation/v1"),
+            "{publish}"
+        );
+        assert!(
+            publish.contains("provider release URL is not canonical"),
+            "{publish}"
+        );
         assert!(publish.contains("provider release id"), "{publish}");
         assert!(publish.contains("release verify-product"), "{publish}");
         assert!(

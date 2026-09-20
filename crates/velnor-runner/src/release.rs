@@ -1745,11 +1745,19 @@ fn parse_checksum(text: &str) -> Result<Sha256Hex> {
 
 const MAX_ARTIFACT_CHECKSUM_BYTES: usize = 4096;
 
-fn parse_artifact_checksum(text: &str) -> Result<Sha256Hex> {
+fn parse_artifact_checksum(text: &str, expected_artifact_name: &str) -> Result<Sha256Hex> {
     let mut fields = text.split_whitespace();
     let first = fields.next().context("artifact checksum file is empty")?;
-    if fields.next().is_some() {
-        bail!("artifact checksum file must contain only one checksum");
+    if let Some(actual_name) = fields.next() {
+        if fields.next().is_some() {
+            bail!("artifact checksum file must contain one checksum and optional basename");
+        }
+        let actual_name = actual_name.strip_prefix("./").unwrap_or(actual_name);
+        if actual_name != expected_artifact_name {
+            bail!(
+                "artifact checksum basename {actual_name:?} does not match {expected_artifact_name:?}"
+            );
+        }
     }
     Sha256Hex::parse(first)
 }
@@ -1769,7 +1777,12 @@ fn read_artifact_checksum(path: &Path, kind: &str) -> Result<Sha256Hex> {
     }
     let text = std::str::from_utf8(&bytes)
         .with_context(|| format!("{kind} checksum {} is not UTF-8", path.display()))?;
-    parse_artifact_checksum(text)
+    let sidecar_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("artifact checksum path has no UTF-8 filename")?;
+    let expected_artifact_name = sidecar_name.strip_suffix(".sha256").unwrap_or(sidecar_name);
+    parse_artifact_checksum(text, expected_artifact_name)
 }
 
 fn validate_artifact_version_component(version: &str) -> Result<()> {
