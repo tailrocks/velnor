@@ -73,6 +73,10 @@ pub(crate) struct BindingCaptureReport {
     pub workflow_count: usize,
     pub scanner_dependency_count: usize,
     pub checkout_proof: CheckoutProofStatus,
+    /// Safe references for the separate local-binding ledger. These are not
+    /// inserted into the GitHub request ledger: their request IDs are local
+    /// FD/derivation observations, not provider API request identities.
+    pub raw_objects: Vec<RawObjectRef>,
 }
 
 /// Concrete producer result.  The wrappers are constructed only after the
@@ -198,6 +202,7 @@ pub(crate) fn capture_bindings<S: RawObjectStore>(
         .context("reopen captured model session")?;
     let workload_artifact = CapturedWorkloadArtifact::from_raw_object(&artifact_ref)
         .context("reopen derived workload artifact")?;
+    let raw_objects = vec![model_ref, source_ref, artifact_ref];
     let report = BindingCaptureReport {
         schema_version: 1,
         observed_at_utc: observed_at_utc.to_owned(),
@@ -212,11 +217,12 @@ pub(crate) fn capture_bindings<S: RawObjectStore>(
             status: "unavailable",
             reason: "GitHub API head_sha is not a runner checkout attestation; no run/job/attempt-bound checkout artifact is captured",
         },
+        raw_objects: raw_objects.clone(),
     };
     Ok(ProducedBindings {
         model_session,
         workload_artifact,
-        raw_objects: vec![model_ref, source_ref, artifact_ref],
+        raw_objects,
         report,
     })
 }
