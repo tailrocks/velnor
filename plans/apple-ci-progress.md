@@ -41,9 +41,13 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
   remote binaryTarget). 3b done (`24d225c6`: structural XcodeGen spec
   recognition, include closures with cycle/escape diagnostics, app +
   scheme selection, committed-project dedup; lib 1876 green, no
-  Jackin literals in added lines). Remaining in 3: BoltFFI producer
-  matching (Rust scan facts) + xcode scheme-id collision follow-up
-  (same-named schemes in different containers share an id today).
+  Jackin literals in added lines). 3c done (`f4a4faef`: boltffi.toml
+  producer facts mirroring boltffi_cli 0.30.1, path+module join to
+  local binaryTargets, taskless NamedProduct/Prerequisite edges,
+  conflict/mismatch/escape diagnostics; 16 new tests, lib 1892
+  green, no Jackin literals). Remaining in 3: xcode scheme-id
+  collision follow-up (same-named schemes in different containers
+  share an id today).
 - Increments 4-8 per goal: cache/artifact, hosted macOS, Jackin
   migration (#1013 incl. Landlock P1), native provider, proof/cleanup.
 - Benchmarks: none yet; set latency goals after first controlled baseline.
