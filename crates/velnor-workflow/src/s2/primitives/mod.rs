@@ -720,6 +720,11 @@ pub(crate) fn generate(
     // surface, and the project config records the same result.
     let providers = providers::resolve(config, &rows)?;
     let mut units = config.units.clone();
+    // Contract primitives may contribute checked-in consumer workflows as well
+    // as unit mutations. Keep those files in the same collision-checked map
+    // as ordinary renderers; dropping them here would make a declared action
+    // consumer test-only instead of part of the generated surface.
+    let mut files = BTreeMap::new();
     for row in rows.iter().filter(|row| row.unit_contract) {
         let primitive = lookup(&row.primitive)?;
         // An empty `units` list means every unit: a contract is repository
@@ -749,6 +754,14 @@ pub(crate) fn generate(
             ),
             &row.args(),
         )?;
+        for (path, content) in rendered.files {
+            if files.insert(path.clone(), content).is_some() {
+                return Err(GeneratorError::usage(format!(
+                    "two declared primitives both render {}",
+                    path.display()
+                )));
+            }
+        }
         apply_units(&mut units, rendered.units, &row.primitive)?;
     }
     let mut resolved = config.clone();
@@ -756,7 +769,6 @@ pub(crate) fn generate(
     let providers = providers::resolve(&resolved, &rows)?;
 
     // Per-unit pipelines, then the plan, then the aggregates that compose both.
-    let mut files = BTreeMap::new();
     let mut nodes = Vec::new();
     let mut contracts = BTreeMap::new();
     for row in rows.iter().filter(|row| !row.unit_contract) {

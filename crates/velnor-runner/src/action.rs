@@ -1675,7 +1675,7 @@ fn composite_expression_token_at(
             && let Some(input) = input_value_case_insensitive(inputs, name)
             && token_boundary_after(value, name_end)
         {
-            return Some((name_end, expression_single_quote(input)));
+            return Some((name_end, expression_input_value(input)));
         }
     }
     for (token, replacement) in [
@@ -1858,6 +1858,21 @@ fn workspace_path(workspace_container: &str, path: &str) -> String {
 
 fn expression_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Keep a caller expression live when a nested composite action uses its input
+/// inside another expression. A caller's `${{ steps.build.outputs.ready }}`
+/// input is a typed expression in the nested action, not the literal text of
+/// that template. Literal inputs still use the runner's single-quoted form.
+fn expression_input_value(value: &str) -> String {
+    let value = value.trim();
+    value
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map_or_else(
+            || expression_single_quote(value),
+            |expression| expression.trim().to_owned(),
+        )
 }
 
 fn sanitize_segment(value: &str) -> String {

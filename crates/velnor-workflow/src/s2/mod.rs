@@ -5623,6 +5623,7 @@ fn generated_files_with_surface(
             files.insert(path, content);
         }
     }
+    merge_declared_surface_files(&mut files, surface)?;
     for (name, template) in &config.workflow_templates {
         files.insert(
             PathBuf::from(WORKFLOW_TEMPLATE_DIR).join(name),
@@ -5649,6 +5650,30 @@ fn generated_files_with_surface(
     // generator's 8 MiB ceiling before it can fail every run at startup.
     template_memory::validate_template_memory(&files)?;
     Ok(files)
+}
+
+fn merge_declared_surface_files(
+    files: &mut BTreeMap<PathBuf, String>,
+    surface: Option<&primitives::Surface>,
+) -> Result<(), GeneratorError> {
+    let Some(surface) = surface else {
+        return Ok(());
+    };
+    for (path, content) in &surface.files {
+        match files.entry(path.clone()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(content.clone());
+            }
+            std::collections::btree_map::Entry::Occupied(entry) if entry.get() == content => {}
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                return Err(GeneratorError::usage(format!(
+                    "declared primitive output collides with generated file {}",
+                    entry.key().display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Composite actions the generator always emits; repository `static_files`

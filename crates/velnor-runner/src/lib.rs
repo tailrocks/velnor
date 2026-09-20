@@ -33,6 +33,13 @@ pub mod action_contract {
     };
     pub use crate::script_step::ScriptStep;
 
+    /// Build the exact argv used by the runner for a composite `run` step.
+    /// The generator's consumer harness uses this narrow test-support seam so
+    /// shell selection stays owned by the runner rather than being guessed.
+    pub fn script_command_args(step: &ScriptStep, script_path: &str) -> Vec<String> {
+        step.shell.command_args(script_path)
+    }
+
     /// Minimal step result needed to evaluate a composite condition with the
     /// same outcome/conclusion rules as job execution.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,9 +57,49 @@ pub mod action_contract {
         value: &str,
         step_outputs: &BTreeMap<String, BTreeMap<String, String>>,
     ) -> Result<String, String> {
-        let mut state = crate::executor::JobExecutionState::try_new_with_context(&[], &[])
-            .map_err(|error| error.to_string())?;
-        state.outputs = step_outputs.clone();
+        render_action_expression_with_context(
+            value,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            step_outputs,
+        )
+    }
+
+    /// Render an action expression with the contexts supplied to a composite
+    /// action's embedded steps.
+    pub fn render_action_expression_with_context(
+        value: &str,
+        action_inputs: &BTreeMap<String, String>,
+        action_env: &BTreeMap<String, String>,
+        step_outputs: &BTreeMap<String, BTreeMap<String, String>>,
+    ) -> Result<String, String> {
+        render_action_expression_with_step_context(
+            value,
+            action_inputs,
+            action_env,
+            step_outputs,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+    }
+
+    /// Render a composite expression with step statuses and the current
+    /// composite's aliases for its flattened child-step IDs.
+    pub fn render_action_expression_with_step_context(
+        value: &str,
+        action_inputs: &BTreeMap<String, String>,
+        action_env: &BTreeMap<String, String>,
+        step_outputs: &BTreeMap<String, BTreeMap<String, String>>,
+        step_statuses: &BTreeMap<String, ActionStepStatus>,
+        step_aliases: &BTreeMap<String, String>,
+    ) -> Result<String, String> {
+        let state = action_expression_state(
+            action_inputs,
+            action_env,
+            step_outputs,
+            step_statuses,
+            step_aliases,
+        )?;
         state
             .resolve_expressions(value)
             .map_err(|error| error.to_string())
@@ -192,8 +239,115 @@ pub mod action_contract {
         step_outputs: &BTreeMap<String, BTreeMap<String, String>>,
         step_statuses: &BTreeMap<String, ActionStepStatus>,
     ) -> Result<bool, String> {
-        let mut state = crate::executor::JobExecutionState::try_new_with_context(&[], &[])
-            .map_err(|error| error.to_string())?;
+        evaluate_action_condition_with_context(
+            condition,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            step_outputs,
+            step_statuses,
+        )
+    }
+
+    /// Evaluate a composite-step condition with the runner's inputs, env,
+    /// typed truthiness, implicit success, and status functions.
+    pub fn evaluate_action_condition_with_context(
+        condition: Option<&str>,
+        action_inputs: &BTreeMap<String, String>,
+        action_env: &BTreeMap<String, String>,
+        step_outputs: &BTreeMap<String, BTreeMap<String, String>>,
+        step_statuses: &BTreeMap<String, ActionStepStatus>,
+    ) -> Result<bool, String> {
+        evaluate_action_condition_with_step_context(
+            condition,
+            action_inputs,
+            action_env,
+            step_outputs,
+            step_statuses,
+            &BTreeMap::new(),
+        )
+    }
+
+    /// Evaluate a composite condition with aliases that expose flattened child
+    /// results under the step IDs visible inside this composite.
+    pub fn evaluate_action_condition_with_step_context(
+        condition: Option<&str>,
+        action_inputs: &BTreeMap<String, String>,
+        action_env: &BTreeMap<String, String>,
+        step_outputs: &BTreeMap<String, BTreeMap<String, String>>,
+        step_statuses: &BTreeMap<String, ActionStepStatus>,
+        step_aliases: &BTreeMap<String, String>,
+    ) -> Result<bool, String> {
+        action_expression_state(
+            action_inputs,
+            action_env,
+            step_outputs,
+            step_statuses,
+            step_aliases,
+        )?
+        .evaluate_condition(condition)
+        .map_err(|error| error.to_string())
+    }
+
+    fn action_expression_state(
+        action_inputs: &BTreeMap<String, String>,
+        action_env: &BTreeMap<String, String>,
+        step_outputs: &BTreeMap<String, BTreeMap<String, String>>,
+        step_statuses: &BTreeMap<String, ActionStepStatus>,
+        step_aliases: &BTreeMap<String, String>,
+    ) -> Result<crate::executor::JobExecutionState, String> {
+        let state = action_expression_state_with_inputs(
+            action_inputs,
+            action_env,
+            step_outputs,
+            step_statuses,
+            step_aliases,
+        )?;
+        let mut resolved_inputs = BTreeMap::new();
+        for (name, value) in action_inputs {
+            resolved_inputs.insert(
+                name.clone(),
+                state
+                    .resolve_expressions(value)
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        if resolved_inputs == *action_inputs {
+            Ok(state)
+        } else {
+            action_expression_state_with_inputs(
+                &resolved_inputs,
+                action_env,
+                step_outputs,
+                step_statuses,
+                step_aliases,
+            )
+        }
+    }
+
+    fn action_expression_state_with_inputs(
+        action_inputs: &BTreeMap<String, String>,
+        action_env: &BTreeMap<String, String>,
+        step_outputs: &BTreeMap<String, BTreeMap<String, String>>,
+        step_statuses: &BTreeMap<String, ActionStepStatus>,
+        step_aliases: &BTreeMap<String, String>,
+    ) -> Result<crate::executor::JobExecutionState, String> {
+        fn context_object(values: &BTreeMap<String, String>) -> serde_json::Value {
+            serde_json::Value::Object(
+                values
+                    .iter()
+                    .map(|(name, value)| (name.clone(), serde_json::Value::String(value.clone())))
+                    .collect(),
+            )
+        }
+
+        let context_data = [("inputs".to_owned(), context_object(action_inputs))];
+        let base_env = action_env
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        let mut state =
+            crate::executor::JobExecutionState::try_new_with_context(&base_env, &context_data)
+                .map_err(|error| error.to_string())?;
         state.outputs = step_outputs.clone();
         for (step_id, status) in step_statuses {
             state.apply(
@@ -208,9 +362,18 @@ pub mod action_contract {
                 },
             );
         }
-        state
-            .evaluate_condition(condition)
-            .map_err(|error| error.to_string())
+        for (step_id, source_id) in step_aliases {
+            if let Some(outputs) = state.outputs.get(source_id).cloned() {
+                state.outputs.insert(step_id.clone(), outputs);
+            }
+            if let Some(outcome) = state.outcomes.get(source_id).copied() {
+                state.outcomes.insert(step_id.clone(), outcome);
+            }
+            if let Some(conclusion) = state.conclusions.get(source_id).copied() {
+                state.conclusions.insert(step_id.clone(), conclusion);
+            }
+        }
+        Ok(state)
     }
 
     #[cfg(test)]
@@ -224,7 +387,9 @@ pub mod action_contract {
         use std::collections::BTreeMap;
 
         use super::{
-            evaluate_action_condition, parse_action_output_file_contents, ActionStepStatus,
+            evaluate_action_condition, evaluate_action_condition_with_context,
+            evaluate_action_condition_with_step_context, parse_action_output_file_contents,
+            render_action_expression_with_step_context, ActionStepStatus,
         };
 
         #[test]
@@ -282,6 +447,72 @@ pub mod action_contract {
             )]);
             assert!(evaluate_action_condition(Some("true"), &outputs, &tolerated).unwrap());
             assert!(!evaluate_action_condition(Some("failure()"), &outputs, &tolerated).unwrap());
+        }
+
+        #[test]
+        fn action_conditions_receive_composite_inputs_and_environment() {
+            let inputs = BTreeMap::from([
+                ("run".to_owned(), "true".to_owned()),
+                ("tolerate".to_owned(), "false".to_owned()),
+            ]);
+            let env = BTreeMap::from([("FLAG".to_owned(), "enabled".to_owned())]);
+
+            assert!(evaluate_action_condition_with_context(
+                Some("inputs.run == 'true' && env.FLAG == 'enabled'"),
+                &inputs,
+                &env,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+            )
+            .unwrap());
+            assert!(!evaluate_action_condition_with_context(
+                Some("inputs.tolerate == 'true'"),
+                &inputs,
+                &env,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+            )
+            .unwrap());
+        }
+
+        #[test]
+        fn action_step_aliases_expose_outputs_outcome_and_conclusion() {
+            let outputs = BTreeMap::from([(
+                "parent-before".to_owned(),
+                BTreeMap::from([("flag".to_owned(), "true".to_owned())]),
+            )]);
+            let statuses = BTreeMap::from([(
+                "parent-before".to_owned(),
+                ActionStepStatus {
+                    exit_code: 9,
+                    skipped: false,
+                    continue_on_error: true,
+                },
+            )]);
+            let aliases = BTreeMap::from([("before".to_owned(), "parent-before".to_owned())]);
+            let expected = "true|failure|success";
+
+            assert_eq!(
+                render_action_expression_with_step_context(
+                    "${{ steps.before.outputs.flag }}|${{ steps.before.outcome }}|${{ steps.before.conclusion }}",
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    &outputs,
+                    &statuses,
+                    &aliases,
+                )
+                .unwrap(),
+                expected
+            );
+            assert!(evaluate_action_condition_with_step_context(
+                Some("steps.before.outputs.flag == 'true' && steps.before.outcome == 'failure' && steps.before.conclusion == 'success'"),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &outputs,
+                &statuses,
+                &aliases,
+            )
+            .unwrap());
         }
 
         #[test]

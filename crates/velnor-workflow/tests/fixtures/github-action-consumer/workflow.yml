@@ -1,0 +1,51 @@
+name: generic action consumer
+
+on: workflow_dispatch
+
+jobs:
+  success-and-output:
+    runs-on: ubuntu-latest
+    steps:
+      - id: action
+        uses: __VELNOR_ACTION_PATH__
+        env:
+          ACTION_CONSUMER_ENV: success
+        with:
+          mode: success
+          skip-build: 'false'
+          marker: action-consumer.log
+      - id: downstream
+        if: ${{ steps.action.outputs.result == 'downloaded' }}
+        shell: bash
+        run: test -s action-consumer.log
+
+  expected-download-failure:
+    runs-on: ubuntu-latest
+    steps:
+      - id: action
+        continue-on-error: true
+        uses: __VELNOR_ACTION_PATH__
+        env:
+          ACTION_CONSUMER_ENV: failure
+        with:
+          mode: download-failure
+          skip-build: 'false'
+          marker: action-download-failure.log
+      - if: ${{ steps.action.outcome == 'failure' }}
+        shell: bash
+        run: test -s action-download-failure.log
+
+  skip-build:
+    runs-on: ubuntu-latest
+    steps:
+      - id: action
+        uses: __VELNOR_ACTION_PATH__
+        env:
+          ACTION_CONSUMER_ENV: skip-build
+        with:
+          mode: success
+          skip-build: 'true'
+          marker: action-skip-build.log
+      - if: ${{ steps.action.outputs.result == 'downloaded' }}
+        shell: bash
+        run: test -s action-skip-build.log

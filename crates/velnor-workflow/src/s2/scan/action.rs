@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use serde::de::{Error as _, MapAccess, SeqAccess, Visitor};
+use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 
 use super::file_walk::is_test_support_path;
@@ -66,7 +66,7 @@ struct ActionRuns {
     #[serde(default)]
     env: serde_yaml::Value,
     #[serde(default)]
-    steps: Vec<ActionStep>,
+    steps: Option<Vec<ActionStep>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,9 +94,10 @@ struct ActionStep {
     env: serde_yaml::Value,
 }
 
-/// Check mapping keys before `serde_yaml::Value` converts them. The runner's
-/// metadata parser accepts only non-empty string mapping keys; validating here
-/// prevents numeric, null, and empty YAML keys from being silently coerced.
+/// Check mapping keys before `serde_yaml::Value` converts them. Runner first
+/// converts scalar keys to strings, then applies schema-specific key checks
+/// and ordinal-ignore-case duplicate detection. `Value` loses enough source
+/// information that those checks must happen during deserialization.
 #[derive(Debug)]
 struct RunnerYamlValue;
 
@@ -105,11 +106,78 @@ impl<'de> Deserialize<'de> for RunnerYamlValue {
     where
         D: serde::Deserializer<'de>,
     {
-        deserializer.deserialize_any(RunnerYamlValueVisitor)
+        RunnerYamlValueSeed {
+            role: RunnerYamlMapRole::Manifest,
+        }
+        .deserialize(deserializer)
     }
 }
 
-struct RunnerYamlValueVisitor;
+#[derive(Clone, Copy)]
+enum RunnerYamlMapRole {
+    Manifest,
+    Inputs,
+    InputDefinition,
+    Outputs,
+    OutputDefinition,
+    Runs,
+    RunEnvironment,
+    CompositeSteps,
+    CompositeStep,
+    StepWith,
+    StepEnvironment,
+    Any,
+}
+
+impl RunnerYamlMapRole {
+    fn requires_non_empty_keys(self) -> bool {
+        !matches!(self, Self::Any)
+    }
+
+    fn value_role(self, key: &str) -> Self {
+        match self {
+            Self::Manifest if runner_ordinal_ignore_case_eq(key, "inputs") => Self::Inputs,
+            Self::Manifest if runner_ordinal_ignore_case_eq(key, "outputs") => Self::Outputs,
+            Self::Manifest if runner_ordinal_ignore_case_eq(key, "runs") => Self::Runs,
+            Self::Inputs => Self::InputDefinition,
+            Self::Outputs => Self::OutputDefinition,
+            Self::Runs if runner_ordinal_ignore_case_eq(key, "env") => Self::RunEnvironment,
+            Self::Runs if runner_ordinal_ignore_case_eq(key, "steps") => Self::CompositeSteps,
+            Self::CompositeStep if runner_ordinal_ignore_case_eq(key, "with") => Self::StepWith,
+            Self::CompositeStep if runner_ordinal_ignore_case_eq(key, "env") => {
+                Self::StepEnvironment
+            }
+            _ => Self::Any,
+        }
+    }
+
+    fn sequence_element_role(self) -> Self {
+        if matches!(self, Self::CompositeSteps) {
+            Self::CompositeStep
+        } else {
+            Self::Any
+        }
+    }
+}
+
+struct RunnerYamlValueSeed {
+    role: RunnerYamlMapRole,
+}
+
+impl<'de> DeserializeSeed<'de> for RunnerYamlValueSeed {
+    type Value = RunnerYamlValue;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(RunnerYamlValueVisitor { role: self.role })
+    }
+}
+
+struct RunnerYamlValueVisitor {
+    role: RunnerYamlMapRole,
+}
 
 impl<'de> Visitor<'de> for RunnerYamlValueVisitor {
     type Value = RunnerYamlValue;
@@ -154,21 +222,25 @@ impl<'de> Visitor<'de> for RunnerYamlValueVisitor {
     where
         D: serde::Deserializer<'de>,
     {
-        RunnerYamlValue::deserialize(deserializer)
+        RunnerYamlValueSeed { role: self.role }.deserialize(deserializer)
     }
 
     fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        RunnerYamlValue::deserialize(deserializer)
+        RunnerYamlValueSeed { role: self.role }.deserialize(deserializer)
     }
 
     fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
     where
         A: SeqAccess<'de>,
     {
-        while sequence.next_element::<RunnerYamlValue>()?.is_some() {}
+        let role = self.role.sequence_element_role();
+        while sequence
+            .next_element_seed(RunnerYamlValueSeed { role })?
+            .is_some()
+        {}
         Ok(RunnerYamlValue)
     }
 
@@ -176,18 +248,48 @@ impl<'de> Visitor<'de> for RunnerYamlValueVisitor {
     where
         A: MapAccess<'de>,
     {
+        let role = self.role;
         let mut keys = BTreeSet::new();
         while let Some(key) = mapping.next_key::<RunnerYamlMapKey>()? {
-            if !keys.insert(key.0.to_ascii_lowercase()) {
+            if role.requires_non_empty_keys() && key.0.is_empty() {
+                return Err(A::Error::custom(
+                    "actions/runner requires non-empty strings for action schema mapping keys",
+                ));
+            }
+            if !keys.insert(runner_ordinal_ignore_case_key(&key.0)) {
                 return Err(A::Error::custom(format!(
                     "duplicate YAML mapping key after Runner case-insensitive matching: `{}`",
                     key.0
                 )));
             }
-            let _: RunnerYamlValue = mapping.next_value()?;
+            let value_role = role.value_role(&key.0);
+            let _: RunnerYamlValue =
+                mapping.next_value_seed(RunnerYamlValueSeed { role: value_role })?;
         }
         Ok(RunnerYamlValue)
     }
+}
+
+/// Runner's ordinal-ignore-case matching folds one Unicode scalar at a time.
+/// Dotless i and long s remain distinct in the runner's invariant comparison.
+fn runner_ordinal_ignore_case_key(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if matches!(character, '\u{0131}' | '\u{017f}') {
+                return character;
+            }
+            let mut uppercase = character.to_uppercase();
+            match (uppercase.next(), uppercase.next()) {
+                (Some(single), None) => single,
+                _ => character,
+            }
+        })
+        .collect()
+}
+
+fn runner_ordinal_ignore_case_eq(left: &str, right: &str) -> bool {
+    runner_ordinal_ignore_case_key(left) == runner_ordinal_ignore_case_key(right)
 }
 
 struct RunnerYamlMapKey(String);
@@ -214,11 +316,6 @@ impl<'de> Visitor<'de> for RunnerYamlMapKeyVisitor {
     where
         E: serde::de::Error,
     {
-        if key.is_empty() {
-            return Err(E::custom(
-                "actions/runner requires mapping keys to be non-empty strings",
-            ));
-        }
         Ok(RunnerYamlMapKey(key.to_owned()))
     }
 
@@ -226,66 +323,31 @@ impl<'de> Visitor<'de> for RunnerYamlMapKeyVisitor {
     where
         E: serde::de::Error,
     {
-        if key.is_empty() {
-            return Err(E::custom(
-                "actions/runner requires mapping keys to be non-empty strings",
-            ));
-        }
         Ok(RunnerYamlMapKey(key))
     }
 
-    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Err(E::custom(
-            "actions/runner requires mapping keys to be non-empty strings",
-        ))
+    fn visit_bool<E>(self, key: bool) -> Result<Self::Value, E> {
+        Ok(RunnerYamlMapKey(key.to_string()))
     }
 
-    fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Err(E::custom(
-            "actions/runner requires mapping keys to be non-empty strings",
-        ))
+    fn visit_i64<E>(self, key: i64) -> Result<Self::Value, E> {
+        Ok(RunnerYamlMapKey(key.to_string()))
     }
 
-    fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Err(E::custom(
-            "actions/runner requires mapping keys to be non-empty strings",
-        ))
+    fn visit_u64<E>(self, key: u64) -> Result<Self::Value, E> {
+        Ok(RunnerYamlMapKey(key.to_string()))
     }
 
-    fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Err(E::custom(
-            "actions/runner requires mapping keys to be non-empty strings",
-        ))
+    fn visit_f64<E>(self, key: f64) -> Result<Self::Value, E> {
+        Ok(RunnerYamlMapKey(key.to_string()))
     }
 
-    fn visit_none<E>(self) -> Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Err(E::custom(
-            "actions/runner requires mapping keys to be non-empty strings",
-        ))
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(RunnerYamlMapKey(String::new()))
     }
 
-    fn visit_unit<E>(self) -> Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Err(E::custom(
-            "actions/runner requires mapping keys to be non-empty strings",
-        ))
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(RunnerYamlMapKey(String::new()))
     }
 
     fn visit_seq<A>(self, _: A) -> Result<Self::Value, A::Error>
@@ -315,50 +377,43 @@ impl<'de> Visitor<'de> for RunnerYamlMapKeyVisitor {
 }
 
 #[derive(Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the source preflight records independent runner syntax violations"
+)]
 struct RunnerYamlSyntax {
     has_anchor_or_alias: bool,
     has_complex_mapping_key: bool,
+    has_non_string_mapping_key: bool,
+    has_duplicate_mapping_key: bool,
 }
 
-fn inspect_runner_yaml_syntax(node: &serde_yaml::cst::GreenNode, syntax: &mut RunnerYamlSyntax) {
+fn inspect_runner_yaml_syntax(
+    node: &serde_yaml::cst::GreenNode,
+    source: &str,
+    base: usize,
+    syntax: &mut RunnerYamlSyntax,
+) {
     use serde_yaml::cst::{GreenChild, SyntaxKind};
 
     match node.kind() {
+        SyntaxKind::BlockMapping => {
+            inspect_runner_block_mapping_keys(node, source, base, syntax);
+        }
         SyntaxKind::MappingEntry => {
             inspect_runner_mapping_entry_key(node, syntax);
         }
         SyntaxKind::FlowMapping => {
-            let mut in_key = false;
-            for child in node.children() {
-                match child {
-                    GreenChild::Token {
-                        kind: SyntaxKind::OpenBrace | SyntaxKind::Comma,
-                        ..
-                    } => {
-                        in_key = true;
-                    }
-                    GreenChild::Token {
-                        kind: SyntaxKind::ColonIndicator,
-                        ..
-                    } => in_key = false,
-                    GreenChild::Token {
-                        kind: SyntaxKind::CloseBrace,
-                        ..
-                    } => break,
-                    GreenChild::Node(_) if in_key => {
-                        syntax.has_complex_mapping_key = true;
-                    }
-                    _ => {}
-                }
-            }
+            inspect_runner_flow_mapping_keys(node, source, base, syntax);
         }
         _ => {}
     }
 
+    let mut offset = base;
     for child in node.children() {
         match child {
-            GreenChild::Node(child) => {
-                inspect_runner_yaml_syntax(child, syntax);
+            GreenChild::Node(child_node) => {
+                inspect_runner_yaml_syntax(child_node, source, offset, syntax);
             }
             GreenChild::Token { kind, .. } => match kind {
                 SyntaxKind::AnchorMark | SyntaxKind::AliasMark => {
@@ -367,7 +422,185 @@ fn inspect_runner_yaml_syntax(node: &serde_yaml::cst::GreenNode, syntax: &mut Ru
                 _ => {}
             },
         }
+        offset += child.text_len();
     }
+}
+
+fn inspect_runner_block_mapping_keys(
+    node: &serde_yaml::cst::GreenNode,
+    source: &str,
+    base: usize,
+    syntax: &mut RunnerYamlSyntax,
+) {
+    use serde_yaml::cst::{GreenChild, SyntaxKind};
+
+    let mut keys = BTreeSet::new();
+    let mut offset = base;
+    for child in node.children() {
+        if let GreenChild::Node(entry) = child
+            && entry.kind() == SyntaxKind::MappingEntry
+        {
+            let raw_key = runner_mapping_entry_key_source(entry, source, offset);
+            if let Some(raw_key) = raw_key {
+                inspect_runner_mapping_key(&raw_key, &mut keys, syntax);
+            }
+        }
+        offset += child.text_len();
+    }
+}
+
+fn runner_mapping_entry_key_source(
+    node: &serde_yaml::cst::GreenNode,
+    source: &str,
+    base: usize,
+) -> Option<String> {
+    use serde_yaml::cst::{GreenChild, SyntaxKind};
+
+    let mut raw_key = String::new();
+    let mut offset = base;
+    for child in node.children() {
+        match child {
+            GreenChild::Token {
+                kind: SyntaxKind::ColonIndicator,
+                ..
+            } => break,
+            GreenChild::Node(_) => return None,
+            GreenChild::Token { kind, len } => {
+                if !runner_mapping_key_trivia(*kind) {
+                    let end = offset + *len as usize;
+                    let token = source.get(offset..end)?;
+                    if !raw_key.is_empty() {
+                        raw_key.push(' ');
+                    }
+                    raw_key.push_str(token);
+                }
+            }
+        }
+        offset += child.text_len();
+    }
+    Some(raw_key)
+}
+
+fn inspect_runner_flow_mapping_keys(
+    node: &serde_yaml::cst::GreenNode,
+    source: &str,
+    base: usize,
+    syntax: &mut RunnerYamlSyntax,
+) {
+    use serde_yaml::cst::{GreenChild, SyntaxKind};
+
+    let mut keys = BTreeSet::new();
+    let mut in_key = false;
+    let mut key_has_collection = false;
+    let mut raw_key = String::new();
+    let mut offset = base;
+    for child in node.children() {
+        match child {
+            GreenChild::Token { kind, len } => match kind {
+                SyntaxKind::OpenBrace => {
+                    in_key = true;
+                    key_has_collection = false;
+                    raw_key.clear();
+                }
+                SyntaxKind::ColonIndicator if in_key => {
+                    if key_has_collection {
+                        syntax.has_complex_mapping_key = true;
+                    } else {
+                        inspect_runner_mapping_key(&raw_key, &mut keys, syntax);
+                    }
+                    in_key = false;
+                }
+                SyntaxKind::Comma => {
+                    if in_key && !raw_key.is_empty() {
+                        if key_has_collection {
+                            syntax.has_complex_mapping_key = true;
+                        } else {
+                            inspect_runner_mapping_key(&raw_key, &mut keys, syntax);
+                        }
+                    }
+                    in_key = true;
+                    key_has_collection = false;
+                    raw_key.clear();
+                }
+                SyntaxKind::CloseBrace => {
+                    if in_key && !raw_key.is_empty() {
+                        if key_has_collection {
+                            syntax.has_complex_mapping_key = true;
+                        } else {
+                            inspect_runner_mapping_key(&raw_key, &mut keys, syntax);
+                        }
+                    }
+                    break;
+                }
+                _ if in_key && !runner_mapping_key_trivia(*kind) => {
+                    let end = offset + *len as usize;
+                    if let Some(token) = source.get(offset..end) {
+                        if !raw_key.is_empty() {
+                            raw_key.push(' ');
+                        }
+                        raw_key.push_str(token);
+                    }
+                }
+                _ => {}
+            },
+            GreenChild::Node(_) if in_key => {
+                key_has_collection = true;
+                syntax.has_complex_mapping_key = true;
+            }
+            GreenChild::Node(_) => {}
+        }
+        offset += child.text_len();
+    }
+}
+
+fn runner_mapping_key_trivia(kind: serde_yaml::cst::SyntaxKind) -> bool {
+    matches!(
+        kind,
+        serde_yaml::cst::SyntaxKind::Whitespace
+            | serde_yaml::cst::SyntaxKind::Newline
+            | serde_yaml::cst::SyntaxKind::Comment
+            | serde_yaml::cst::SyntaxKind::QuestionIndicator
+    )
+}
+
+fn inspect_runner_mapping_key(
+    raw_key: &str,
+    keys: &mut BTreeSet<String>,
+    syntax: &mut RunnerYamlSyntax,
+) {
+    if !runner_mapping_key_is_string(raw_key) {
+        syntax.has_non_string_mapping_key = true;
+        return;
+    }
+    let key = if raw_key.trim().is_empty() {
+        String::new()
+    } else {
+        let parser_config = serde_yaml::ParserConfig::new()
+            .merge_key_policy(serde_yaml::MergeKeyPolicy::AsOrdinary);
+        let Ok(key) = serde_yaml::from_str_with_config::<RunnerYamlMapKey>(raw_key, &parser_config)
+        else {
+            return;
+        };
+        key.0
+    };
+    if !keys.insert(runner_ordinal_ignore_case_key(&key)) {
+        syntax.has_duplicate_mapping_key = true;
+    }
+}
+
+/// actions/runner's manifest mappings require string keys.  Noyalib's normal
+/// mapping deserializer stringifies scalar keys before schema validation, so
+/// classify the source scalar while the CST still preserves whether it was a
+/// number, boolean, null, or quoted/plain string.
+fn runner_mapping_key_is_string(raw_key: &str) -> bool {
+    let raw_key = raw_key.trim();
+    if raw_key.is_empty() {
+        return false;
+    }
+    let parser_config =
+        serde_yaml::ParserConfig::new().merge_key_policy(serde_yaml::MergeKeyPolicy::AsOrdinary);
+    serde_yaml::from_str_with_config::<serde_yaml::Value>(raw_key, &parser_config)
+        .is_ok_and(|value| matches!(value, serde_yaml::Value::String(value) if !value.is_empty()))
 }
 
 fn inspect_runner_mapping_entry_key(
@@ -389,38 +622,6 @@ fn inspect_runner_mapping_entry_key(
             GreenChild::Token { .. } => {}
         }
     }
-}
-
-fn validate_runner_mapping_collisions(
-    value: &serde_yaml::Value,
-) -> Result<(), crate::s2::GeneratorError> {
-    match value {
-        serde_yaml::Value::Mapping(mapping) => {
-            let mut keys = BTreeSet::new();
-            for (key, value) in mapping {
-                let canonical = key.to_ascii_lowercase();
-                if !keys.insert(canonical) {
-                    return Err(crate::s2::GeneratorError::usage(format!(
-                        "GitHub Action metadata has duplicate mapping key `{key}` after Runner case-insensitive matching"
-                    )));
-                }
-                validate_runner_mapping_collisions(value)?;
-            }
-        }
-        serde_yaml::Value::Sequence(sequence) => {
-            for value in sequence {
-                validate_runner_mapping_collisions(value)?;
-            }
-        }
-        serde_yaml::Value::Tagged(tagged) => {
-            validate_runner_mapping_collisions(tagged.value())?;
-        }
-        serde_yaml::Value::Null
-        | serde_yaml::Value::Bool(_)
-        | serde_yaml::Value::Number(_)
-        | serde_yaml::Value::String(_) => {}
-    }
-    Ok(())
 }
 
 fn normalize_runner_tags(value: &mut serde_yaml::Value) -> Result<(), crate::s2::GeneratorError> {
@@ -466,7 +667,7 @@ fn validate_runner_yaml_syntax(
         ))
     })?;
     let mut syntax = RunnerYamlSyntax::default();
-    inspect_runner_yaml_syntax(document.syntax(), &mut syntax);
+    inspect_runner_yaml_syntax(document.syntax(), contents, 0, &mut syntax);
     if syntax.has_anchor_or_alias {
         return Err(crate::s2::GeneratorError::usage(format!(
             "parse GitHub Action metadata {}: actions/runner does not support YAML anchors or aliases",
@@ -476,6 +677,18 @@ fn validate_runner_yaml_syntax(
     if syntax.has_complex_mapping_key {
         return Err(crate::s2::GeneratorError::usage(format!(
             "parse GitHub Action metadata {}: actions/runner does not support collection mapping keys",
+            metadata_file.display()
+        )));
+    }
+    if syntax.has_non_string_mapping_key {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "parse GitHub Action metadata {}: actions/runner requires mapping keys to be non-empty strings",
+            metadata_file.display()
+        )));
+    }
+    if syntax.has_duplicate_mapping_key {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "parse GitHub Action metadata {}: duplicate YAML mapping key after Runner case-insensitive matching",
             metadata_file.display()
         )));
     }
@@ -567,7 +780,7 @@ fn discover_action_sources(
             continue;
         }
         let metadata = parse_metadata(root, &source.path)?;
-        for step in &metadata.runs.steps {
+        for step in metadata.runs.steps.as_deref().unwrap_or_default() {
             let Some(uses) = step.uses.as_deref() else {
                 continue;
             };
@@ -837,7 +1050,10 @@ fn parse_metadata(
     })?;
     validate_runner_yaml_syntax(&contents, &metadata_file)?;
     let parser_config = serde_yaml::ParserConfig::new()
-        .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error)
+        // The source-aware preflight applies Runner's scalar stringification
+        // and ordinal-ignore-case duplicate rules. Noyalib's Value map has
+        // different scalar coercions, so it must not reject those pairs first.
+        .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Last)
         // actions/runner treats `<<` as an ordinary key and rejects aliases.
         .merge_key_policy(serde_yaml::MergeKeyPolicy::AsOrdinary);
     // Inspect source key types before Noyalib's string-keyed Value map erases
@@ -859,7 +1075,6 @@ fn parse_metadata(
             ))
         })?;
     normalize_runner_tags(&mut document)?;
-    validate_runner_mapping_collisions(&document)?;
     validate_metadata_shape(&document)?;
     let metadata: ActionMetadata = serde_yaml::from_value(&document).map_err(|error| {
         crate::s2::GeneratorError::usage(format!(
@@ -949,8 +1164,8 @@ fn validate_inputs(value: &serde_yaml::Value) -> Result<(), crate::s2::Generator
         let definition = require_mapping(definition, "input definition")?;
         for (field, value) in definition {
             let field = mapping_key(field, "input definition")?;
-            if field.eq_ignore_ascii_case("default")
-                || field.eq_ignore_ascii_case("deprecationMessage")
+            if runner_ordinal_ignore_case_eq(field, "default")
+                || runner_ordinal_ignore_case_eq(field, "deprecationMessage")
             {
                 require_string(value, &format!("inputs.{field}"), false)?;
             }
@@ -966,7 +1181,7 @@ fn validate_outputs(value: &serde_yaml::Value) -> Result<(), crate::s2::Generato
         let definition = require_mapping(definition, "output definition")?;
         for (field, value) in definition {
             let field = mapping_key(field, "output definition")?;
-            if field.eq_ignore_ascii_case("description") || field.eq_ignore_ascii_case("value") {
+            if field == "description" || field == "value" {
                 require_string(value, &format!("outputs.{field}"), false)?;
             } else {
                 return Err(crate::s2::GeneratorError::usage(format!(
@@ -994,6 +1209,11 @@ fn validate_runs(value: &serde_yaml::Value) -> Result<(), crate::s2::GeneratorEr
     })?;
     require_string(using, "runs.using", true)?;
     let using = using.as_str().unwrap_or_default().to_ascii_lowercase();
+    if using == "composite" && mapping_value(runs, "steps").is_none() {
+        return Err(crate::s2::GeneratorError::usage(
+            "GitHub composite action metadata must declare runs.steps",
+        ));
+    }
     let allowed_fields: &[&str] = match using.as_str() {
         "composite" => &["using", "steps"],
         "docker" => &[
@@ -1145,6 +1365,10 @@ fn validate_mapping(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "runner metadata validation keeps composite, JavaScript, and Docker branches together"
+)]
 fn local_references(
     root: &Path,
     runs: &ActionRuns,
@@ -1155,7 +1379,7 @@ fn local_references(
     let mut references = BTreeSet::new();
     match using.as_str() {
         "composite" => {
-            for step in &runs.steps {
+            for step in runs.steps.as_deref().unwrap_or_default() {
                 validate_composite_step(step)?;
                 if step.run.is_none() && step.uses.is_none() {
                     return Err(crate::s2::GeneratorError::usage(
@@ -1241,6 +1465,10 @@ fn local_references(
             }
             if is_dockerfile_reference(image) {
                 add_local_reference(&mut references, image, action_root, root, files)?;
+            } else if !is_docker_image_reference(image) {
+                return Err(crate::s2::GeneratorError::usage(format!(
+                    "GitHub Docker action metadata `runs.image` must be a Dockerfile path or docker:// image reference, got `{image}`"
+                )));
             }
             // Docker action entrypoints are resolved inside the image. They
             // are not host files and must not be mistaken for local scripts.
@@ -1290,6 +1518,13 @@ fn is_dockerfile_reference(value: &str) -> bool {
     basename == "dockerfile"
         || basename.starts_with("dockerfile.")
         || basename.ends_with("dockerfile")
+}
+
+fn is_docker_image_reference(value: &str) -> bool {
+    let value = value.trim();
+    value.get("docker://".len()..).is_some_and(|image| {
+        value[.."docker://".len()].eq_ignore_ascii_case("docker://") && !image.is_empty()
+    })
 }
 
 /// Resolve the one host-local expression actions/runner makes available to a
@@ -1837,6 +2072,10 @@ mod tests {
                 "inputs:\n  bad:\n    default: null\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
             ),
             (
+                "input-deprecation-message-case-insensitive-wrong-type",
+                "inputs:\n  good:\n    DEPRECATIONMESSAGE: []\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
+            ),
+            (
                 "inputs-empty-key",
                 "inputs:\n  \"\":\n    description: empty key\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
             ),
@@ -1861,6 +2100,14 @@ mod tests {
                 "outputs:\n  good:\n    false: unknown property\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
             ),
             (
+                "output-description-wrong-case",
+                "outputs:\n  good:\n    DESCRIPTION: wrong-case property\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
+            ),
+            (
+                "output-value-wrong-case",
+                "outputs:\n  good:\n    VALUE: wrong-case property\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
+            ),
+            (
                 "output-definition-empty-key",
                 "outputs:\n  good:\n    \"\": empty property\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
             ),
@@ -1874,27 +2121,27 @@ mod tests {
             ),
             (
                 "docker-args-shape",
-                "runs:\n  using: docker\n  image: ubuntu\n  args: {}\n",
+                "runs:\n  using: docker\n  image: docker://ubuntu\n  args: {}\n",
             ),
             (
                 "docker-args-null",
-                "runs:\n  using: docker\n  image: ubuntu\n  args: null\n",
+                "runs:\n  using: docker\n  image: docker://ubuntu\n  args: null\n",
             ),
             (
                 "docker-env-shape",
-                "runs:\n  using: docker\n  image: ubuntu\n  env: []\n",
+                "runs:\n  using: docker\n  image: docker://ubuntu\n  env: []\n",
             ),
             (
                 "docker-env-value-null",
-                "runs:\n  using: docker\n  image: ubuntu\n  env:\n    BAD: null\n",
+                "runs:\n  using: docker\n  image: docker://ubuntu\n  env:\n    BAD: null\n",
             ),
             (
                 "docker-condition-shape",
-                "runs:\n  using: docker\n  image: ubuntu\n  pre-if: []\n",
+                "runs:\n  using: docker\n  image: docker://ubuntu\n  pre-if: []\n",
             ),
             (
                 "runs-unknown-key",
-                "runs:\n  using: docker\n  image: ubuntu\n  1: unexpected\n",
+                "runs:\n  using: docker\n  image: docker://ubuntu\n  1: unexpected\n",
             ),
             (
                 "node-runtime-disallows-container-args",
@@ -1902,7 +2149,7 @@ mod tests {
             ),
             (
                 "runs-env-empty-key",
-                "runs:\n  using: docker\n  image: ubuntu\n  env:\n    \"\": unexpected\n",
+                "runs:\n  using: docker\n  image: docker://ubuntu\n  env:\n    \"\": unexpected\n",
             ),
             (
                 "composite-step-unknown-key",
@@ -1998,6 +2245,57 @@ mod tests {
     }
 
     #[test]
+    fn runner_yaml_rejects_duplicate_keys_before_value_coercion() {
+        let cases = [
+            ("exact-block", "name: first\nname: second\n"),
+            ("ascii-case", "name: first\nNAME: second\n"),
+            ("unicode-case", "É: first\né: second\n"),
+            ("scalar-equivalent", "1: first\n\"1\": second\n"),
+            ("null-empty-equivalent", "null: first\n\"\": second\n"),
+            ("tagged-scalar-equivalent", "!!str 1: first\n\"1\": second\n"),
+            ("flow-map", "{name: first, NAME: second}\n"),
+            (
+                "nested-any-map",
+                "inputs:\n  good:\n    custom: {name: first, NAME: second}\nruns:\n  using: composite\n  steps: []\n",
+            ),
+        ];
+        for (name, contents) in cases {
+            let error =
+                super::validate_runner_yaml_syntax(contents, std::path::Path::new("action.yml"))
+                    .err()
+                    .unwrap_or_else(|| {
+                        panic!("Runner duplicate mapping keys passed preflight: {name}")
+                    });
+            let message = error.to_string();
+            match name {
+                "scalar-equivalent" => assert!(
+                    message.contains("non-empty strings")
+                        || message
+                            .contains("distinct mapping keys collide after string conversion"),
+                    "unexpected scalar-key error for {name}: {message}"
+                ),
+                "null-empty-equivalent" => assert!(
+                    message.contains("non-empty strings"),
+                    "unexpected scalar-key error for {name}: {message}"
+                ),
+                "tagged-scalar-equivalent" => assert!(
+                    message.contains("non-empty strings")
+                        || message.contains(
+                            "duplicate YAML mapping key after Runner case-insensitive matching"
+                        ),
+                    "unexpected scalar-key error for {name}: {message}"
+                ),
+                _ => assert!(
+                    message.contains(
+                        "duplicate YAML mapping key after Runner case-insensitive matching"
+                    ),
+                    "unexpected duplicate-key error for {name}: {message}"
+                ),
+            }
+        }
+    }
+
+    #[test]
     fn runner_scalar_mapping_keys_fail_closed_before_schema_coercion() {
         let cases = [
             (
@@ -2013,10 +2311,6 @@ mod tests {
                 "true: unknown root metadata\nruns:\n  using: composite\n  steps: []\n",
             ),
             (
-                "root-null-key",
-                "null: unknown root metadata\nruns:\n  using: composite\n  steps: []\n",
-            ),
-            (
                 "input-numeric-key",
                 "inputs:\n  1:\n    default: numeric input name\nruns:\n  using: composite\n  steps: []\n",
             ),
@@ -2025,12 +2319,12 @@ mod tests {
                 "inputs:\n  true:\n    default: boolean input name\nruns:\n  using: composite\n  steps: []\n",
             ),
             (
-                "input-null-key",
-                "inputs:\n  null:\n    default: nullable input name\nruns:\n  using: composite\n  steps: []\n",
-            ),
-            (
                 "empty-key-in-any-value",
                 "inputs:\n  good:\n    custom:\n      \"\": allowed\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "null-key-in-any-value",
+                "inputs:\n  good:\n    custom:\n      null: allowed\nruns:\n  using: composite\n  steps: []\n",
             ),
         ];
         for (name, metadata) in cases {
@@ -2041,13 +2335,157 @@ mod tests {
             );
             let error = super::super::scan_shape(&root, &providers(), "main", &[])
                 .err()
-                .unwrap_or_else(|| panic!("Runner accepted malformed scalar-key metadata: {name}"));
+                .unwrap_or_else(|| {
+                    panic!("Runner-incompatible scalar-key metadata passed: {name}")
+                });
             assert!(
-                error.to_string().contains("mapping keys"),
+                error.to_string().contains("non-empty strings"),
                 "unexpected scalar-key error for {name}: {error}"
             );
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn runner_string_mapping_keys_preserve_ordinal_case_rules() {
+        for (name, metadata) in [
+            (
+                "case-insensitive-input-deprecation-message",
+                "inputs:\n  good:\n    DePreCaTiOnMeSsAgE: available\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "long-s-remains-ordinal-distinct",
+                "s: first\nſ: second\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "dotless-i-remains-ordinal-distinct",
+                "I: first\nı: second\nruns:\n  using: composite\n  steps: []\n",
+            ),
+        ] {
+            let root = fixture(name);
+            must(
+                fs::write(root.join("action.yml"), metadata),
+                "write Runner string-key action metadata",
+            );
+            super::super::scan_shape(&root, &providers(), "main", &[])
+                .unwrap_or_else(|error| panic!("Runner string-key metadata was rejected ({name}): {error}"));
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn runner_scalar_mapping_keys_enforce_schema_and_duplicate_rules() {
+        let cases = [
+            (
+                "root-null-key",
+                "null: unknown root metadata\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "input-null-key",
+                "inputs:\n  null:\n    default: nullable input name\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "input-definition-null-key",
+                "inputs:\n  good:\n    null: ignored property\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "output-null-key",
+                "outputs:\n  null:\n    description: nullable output name\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "output-definition-null-key",
+                "outputs:\n  good:\n    null: ignored property\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "runs-null-key",
+                "runs:\n  using: composite\n  null: ignored property\n  steps: []\n",
+            ),
+            (
+                "runs-env-null-key",
+                "runs:\n  using: docker\n  image: docker://ubuntu\n  env:\n    null: value\n",
+            ),
+            (
+                "composite-step-null-key",
+                "runs:\n  using: composite\n  steps:\n    - null: unknown property\n      shell: bash\n      run: echo ok\n",
+            ),
+            (
+                "composite-step-with-null-key",
+                "runs:\n  using: composite\n  steps:\n    - uses: actions/example@0123456789abcdef0123456789abcdef01234567\n      with:\n        null: value\n",
+            ),
+            (
+                "composite-step-env-null-key",
+                "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n      env:\n        null: value\n",
+            ),
+            (
+                "scalar-coercion-duplicate-key",
+                "1: first\n\"1\": second\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            (
+                "unicode-case-insensitive-duplicate-key",
+                "É: first\né: second\nruns:\n  using: composite\n  steps: []\n",
+            ),
+        ];
+        for (name, metadata) in cases {
+            let root = fixture(name);
+            must(
+                fs::write(root.join("action.yml"), metadata),
+                "write Runner-incompatible scalar-key action metadata",
+            );
+            let error = super::super::scan_shape(&root, &providers(), "main", &[])
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("Runner-incompatible scalar-key metadata passed: {name}")
+                });
+            let message = error.to_string();
+            assert!(
+                message.contains("non-empty strings")
+                    || message.contains("duplicate YAML mapping key")
+                    || message.contains("distinct mapping keys collide after string conversion"),
+                "unexpected scalar-key error for {name}: {message}"
+            );
+            if name.ends_with("null-key") {
+                assert!(
+                    message.contains("non-empty strings"),
+                    "Runner null key did not become an empty schema key for {name}: {message}"
+                );
+            }
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn composite_steps_presence_matches_runner_schema() {
+        let empty = fixture("composite-empty-steps");
+        must(
+            fs::write(
+                empty.join("action.yml"),
+                "runs:\n  using: composite\n  steps: []\n",
+            ),
+            "write explicit empty composite steps",
+        );
+        let shape = must(
+            super::super::scan_shape(&empty, &providers(), "main", &[]),
+            "scan explicit empty composite steps",
+        );
+        assert!(shape
+            .units
+            .iter()
+            .any(|unit| { unit.kind == crate::s2::UnitKind::GithubAction && unit.root == "." }));
+        let _ = fs::remove_dir_all(empty);
+
+        let missing = fixture("composite-missing-steps");
+        must(
+            fs::write(missing.join("action.yml"), "runs:\n  using: composite\n"),
+            "write composite metadata without steps",
+        );
+        let error = super::super::scan_shape(&missing, &providers(), "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("composite action without `steps` passed scan"));
+        assert!(
+            error.to_string().contains("must declare runs.steps"),
+            "unexpected missing composite steps error: {error}"
+        );
+        let _ = fs::remove_dir_all(missing);
     }
 
     #[test]
@@ -2388,7 +2826,7 @@ mod tests {
         must(
             fs::write(
                 root.join("actions/images/action.yml"),
-                "runs:\n  using: docker\n  image: ubuntu\n  entrypoint: /container-entrypoint.sh\n  pre-entrypoint: /container-pre.sh\n  post-entrypoint: /container-post.sh\n",
+                "runs:\n  using: docker\n  image: docker://ubuntu\n  entrypoint: /container-entrypoint.sh\n  pre-entrypoint: /container-pre.sh\n  post-entrypoint: /container-post.sh\n",
             ),
             "write ordinary image metadata",
         );
@@ -2418,6 +2856,25 @@ mod tests {
         assert!(image_action.capabilities.docker);
         assert_eq!(image_action.pr_commands.len(), 1);
         let _ = fs::remove_dir_all(root);
+
+        let plain_image = fixture("plain-docker-image");
+        must(
+            fs::write(
+                plain_image.join("action.yml"),
+                "runs:\n  using: docker\n  image: ubuntu\n",
+            ),
+            "write unsupported plain Docker image metadata",
+        );
+        let error = super::super::scan_shape(&plain_image, &providers, "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("plain Docker image must fail runner-equivalent scan"));
+        assert!(
+            error
+                .to_string()
+                .contains("Dockerfile path or docker:// image reference"),
+            "unexpected plain Docker image error: {error}"
+        );
+        let _ = fs::remove_dir_all(plain_image);
 
         let mutable = fixture("mutable-uses");
         must(

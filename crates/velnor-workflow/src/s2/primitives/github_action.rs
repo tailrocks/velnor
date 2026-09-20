@@ -8,10 +8,16 @@
 //! action consumers: they invoke the scanned action and own the action's
 //! `uses`, input, environment, output, and branch assertions.
 
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use super::{Args, Primitive, RenderCtx, Rendered, ACTION_FIXTURES};
 use crate::s2::{GeneratorError, UnitKind};
+
+/// A checked-in consumer workflow names its action through this marker.  The
+/// primitive replaces it with the scanned unit root, so the emitted job graph
+/// exercises the real local `uses:` edge instead of a standalone shell file.
+const ACTION_PATH_MARKER: &str = "__VELNOR_ACTION_PATH__";
 
 pub(crate) struct GithubActionFixtures;
 
@@ -25,6 +31,7 @@ impl Primitive for GithubActionFixtures {
             "success_fixtures",
             "failure_fixtures",
             "skip_build_fixtures",
+            "consumer_workflows",
         ]
     }
 
@@ -32,7 +39,9 @@ impl Primitive for GithubActionFixtures {
         let success = args.strings("success_fixtures")?.unwrap_or_default();
         let failure = args.strings("failure_fixtures")?.unwrap_or_default();
         let skip_build = args.strings("skip_build_fixtures")?.unwrap_or_default();
+        let consumer_workflows = args.strings("consumer_workflows")?.unwrap_or_default();
         let mut updates = Vec::new();
+        let mut files = std::collections::BTreeMap::new();
         for unit in ctx.units {
             if unit.kind != UnitKind::GithubAction {
                 return Err(GeneratorError::usage(format!(
@@ -57,12 +66,78 @@ impl Primitive for GithubActionFixtures {
             update.watch.sort();
             update.watch.dedup();
             updates.push(update);
+
+            for fixture in &consumer_workflows {
+                let fixture = fixture_path(ctx, fixture)?;
+                let source = fs::read_to_string(ctx.root.join(&fixture)).map_err(|error| {
+                    GeneratorError::usage(format!(
+                        "read github-action-fixtures consumer workflow `{fixture}`: {error}"
+                    ))
+                })?;
+                if !consumer_uses_marker(&source) {
+                    return Err(GeneratorError::usage(format!(
+                        "github-action-fixtures consumer workflow `{fixture}` must contain `uses: {ACTION_PATH_MARKER}`"
+                    )));
+                }
+                let action_path = if unit.root == "." {
+                    "./".to_owned()
+                } else {
+                    format!("./{}", unit.root)
+                };
+                let rendered = source.replace(ACTION_PATH_MARKER, &action_path);
+                if rendered.contains(ACTION_PATH_MARKER) {
+                    return Err(GeneratorError::usage(format!(
+                        "github-action-fixtures consumer workflow `{fixture}` contains an unresolved action path marker"
+                    )));
+                }
+                serde_yaml::from_str::<serde_yaml::Value>(&rendered).map_err(|error| {
+                    GeneratorError::usage(format!(
+                        "parse github-action-fixtures consumer workflow `{fixture}`: {error}"
+                    ))
+                })?;
+                let output = consumer_workflow_path(&unit.id, &fixture);
+                if files.insert(output.clone(), rendered).is_some() {
+                    return Err(GeneratorError::usage(format!(
+                        "github-action-fixtures consumer workflow output collides at {}",
+                        output.display()
+                    )));
+                }
+            }
         }
         Ok(Rendered {
+            files,
             units: updates,
             ..Rendered::default()
         })
     }
+}
+
+fn consumer_uses_marker(source: &str) -> bool {
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        line.strip_prefix("- uses:")
+            .or_else(|| line.strip_prefix("uses:"))
+            .is_some_and(|value| value.contains(ACTION_PATH_MARKER))
+    })
+}
+
+fn consumer_workflow_path(unit_id: &str, fixture: &str) -> PathBuf {
+    let slug = |value: &str| {
+        let mut result = String::new();
+        for character in value.chars() {
+            if character.is_ascii_alphanumeric() {
+                result.push(character.to_ascii_lowercase());
+            } else if !result.ends_with('-') {
+                result.push('-');
+            }
+        }
+        result.trim_matches('-').to_owned()
+    };
+    PathBuf::from(".github/workflows").join(format!(
+        "velnor-action-consumer-{}-{}.yml",
+        slug(unit_id),
+        slug(fixture)
+    ))
 }
 
 fn fixture_path(ctx: &RenderCtx<'_>, fixture: &str) -> Result<String, GeneratorError> {
@@ -207,6 +282,22 @@ mod tests {
     #[test]
     fn configured_consumer_fixtures_append_real_success_and_failure_commands() {
         let root = scratch("commands");
+        let fixture_config = must(
+            crate::s2::config::parse(
+                Path::new(".github-gen/velnor-workflow.toml"),
+                include_bytes!(
+                    "../../../tests/fixtures/github-action-consumer/velnor-workflow.toml"
+                ),
+            ),
+            "parse tracked action consumer generation config",
+        );
+        assert_eq!(
+            fixture_config
+                .declare()
+                .first()
+                .map(crate::s2::config::DeclareRow::primitive),
+            Some("github-action-fixtures")
+        );
         must(
             fs::write(root.join("action.yml"), action_metadata()),
             "write action metadata",
@@ -223,6 +314,18 @@ mod tests {
         must(
             fs::write(root.join("tests/skip-build.sh"), "exit 0\n"),
             "write skip-build fixture",
+        );
+        let consumer_fixture = root.join("tests/fixtures/github-action-consumer");
+        must(
+            fs::create_dir_all(&consumer_fixture),
+            "create tracked consumer workflow fixture directory",
+        );
+        must(
+            fs::write(
+                consumer_fixture.join("workflow.yml"),
+                include_bytes!("../../../tests/fixtures/github-action-consumer/workflow.yml"),
+            ),
+            "write tracked consumer workflow fixture",
         );
         let providers: std::collections::BTreeSet<ProviderId> =
             ProviderId::ALL.into_iter().collect();
@@ -254,6 +357,12 @@ mod tests {
             (
                 "skip_build_fixtures".to_owned(),
                 toml::Value::Array(vec![toml::Value::String("tests/skip-build.sh".to_owned())]),
+            ),
+            (
+                "consumer_workflows".to_owned(),
+                toml::Value::Array(vec![toml::Value::String(
+                    "tests/fixtures/github-action-consumer/workflow.yml".to_owned(),
+                )]),
             ),
         ]);
         let args = super::super::Args(&values);
@@ -303,6 +412,39 @@ mod tests {
             .watch
             .iter()
             .any(|path| path == "tests/skip-build.sh"));
+        assert_eq!(rendered.files.len(), 1);
+        let generated_consumer = rendered
+            .files
+            .values()
+            .next()
+            .unwrap_or_else(|| panic!("generated consumer workflow missing"));
+        assert!(generated_consumer.contains("uses: ./"));
+        assert!(generated_consumer.contains("with:"));
+        assert!(generated_consumer.contains("env:"));
+        assert!(generated_consumer.contains("steps.action.outputs.result"));
+        assert!(generated_consumer.contains("steps.action.outcome"));
+        assert!(!generated_consumer.contains(super::ACTION_PATH_MARKER));
+        let surface = must(
+            super::super::generate(&root, &shape, &config, Some(&fixture_config)),
+            "generate action consumer surface",
+        );
+        let mut generated_config = config.clone();
+        generated_config.units.clone_from(&surface.units);
+        for file in &surface.added_files {
+            if !generated_config.workflow_files.contains(file) {
+                generated_config.workflow_files.push(file.clone());
+            }
+        }
+        let generated = must(
+            super::super::super::generated_files_with_surface(&generated_config, Some(&surface)),
+            "render action consumer surface",
+        );
+        assert!(
+            generated
+                .keys()
+                .any(|path| path == Path::new(".github/workflows/velnor-action-consumer-github-action-tests-fixtures-github-action-consumer-workflow-yml.yml")),
+            "generated action consumer workflow must be part of the emitted surface"
+        );
         let success = update
             .pr_commands
             .iter()
@@ -514,6 +656,15 @@ runs:
         step_id: &str,
         metadata_contents: &str,
     ) -> Vec<velnor_runner::action_contract::CompositeActionInvocation> {
+        expanded_action_with_inputs(root, step_id, metadata_contents, BTreeMap::new())
+    }
+
+    fn expanded_action_with_inputs(
+        root: &Path,
+        step_id: &str,
+        metadata_contents: &str,
+        inputs: BTreeMap<String, String>,
+    ) -> Vec<velnor_runner::action_contract::CompositeActionInvocation> {
         use velnor_runner::action_contract::{
             composite_action_invocations, parse_action_metadata, LocalActionPlan,
         };
@@ -536,7 +687,7 @@ runs:
                 &LocalActionPlan {
                     step_id: step_id.to_owned(),
                     action_dir,
-                    inputs: BTreeMap::new(),
+                    inputs,
                 },
                 &metadata,
                 &root.to_string_lossy(),
@@ -548,18 +699,37 @@ runs:
 
     type ActionStepOutputs = BTreeMap<String, BTreeMap<String, String>>;
     type ActionStepStatuses = BTreeMap<String, velnor_runner::action_contract::ActionStepStatus>;
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct LocalCompositeScope {
+        scope_id: String,
+        parent_scope_id: String,
+        invocation_range: std::ops::Range<usize>,
+        step_aliases: BTreeMap<String, String>,
         condition: Option<String>,
-        continue_on_error: bool,
+        continue_on_error: Option<String>,
+        input_defaults: BTreeMap<String, String>,
+        inputs: BTreeMap<String, String>,
+        env: BTreeMap<String, String>,
     }
 
-    type LocalCompositeScopes = BTreeMap<String, LocalCompositeScope>;
+    type LocalCompositeScopes = Vec<LocalCompositeScope>;
+
+    #[derive(Clone, Default)]
+    struct ActionExecutionContext {
+        inputs: BTreeMap<String, String>,
+        env: BTreeMap<String, String>,
+        step_aliases: BTreeMap<String, String>,
+        step_outputs: ActionStepOutputs,
+        step_statuses: ActionStepStatuses,
+    }
 
     #[derive(Default)]
     struct ActionExecutionScope {
         step_outputs: ActionStepOutputs,
         step_statuses: ActionStepStatuses,
+        inputs: BTreeMap<String, String>,
+        env: BTreeMap<String, String>,
+        step_aliases: BTreeMap<String, String>,
     }
 
     struct CompositeExecutionResult {
@@ -583,31 +753,89 @@ runs:
     }
 
     fn condition_runs(condition: Option<&str>, scope: &ActionExecutionScope) -> bool {
-        let Some(condition) = condition else {
-            return must(
-                velnor_runner::action_contract::evaluate_action_condition(
-                    None,
-                    &scope.step_outputs,
-                    &scope.step_statuses,
-                ),
-                "evaluate default runner action condition",
-            );
-        };
+        condition_runs_with_env(condition, scope, &scope.env)
+    }
+
+    fn condition_runs_with_env(
+        condition: Option<&str>,
+        scope: &ActionExecutionScope,
+        env: &BTreeMap<String, String>,
+    ) -> bool {
         must(
-            velnor_runner::action_contract::evaluate_action_condition(
-                Some(condition),
+            velnor_runner::action_contract::evaluate_action_condition_with_step_context(
+                condition,
+                &scope.inputs,
+                env,
                 &scope.step_outputs,
                 &scope.step_statuses,
+                &scope.step_aliases,
             ),
-            "evaluate runner action condition",
+            "evaluate runner action condition with composite context",
         )
     }
 
-    fn render_action_value(value: &str, step_outputs: &ActionStepOutputs) -> String {
+    fn render_action_value(value: &str, scope: &ActionExecutionScope) -> String {
+        render_action_value_with_env(value, scope, &scope.env)
+    }
+
+    fn render_action_value_with_env(
+        value: &str,
+        scope: &ActionExecutionScope,
+        env: &BTreeMap<String, String>,
+    ) -> String {
         must(
-            velnor_runner::action_contract::render_action_expression(value, step_outputs),
+            velnor_runner::action_contract::render_action_expression_with_step_context(
+                value,
+                &scope.inputs,
+                env,
+                &scope.step_outputs,
+                &scope.step_statuses,
+                &scope.step_aliases,
+            ),
             "evaluate runner action expression",
         )
+    }
+
+    fn environment_for_step(
+        scope: &ActionExecutionScope,
+        values: impl IntoIterator<Item = (String, String)>,
+    ) -> BTreeMap<String, String> {
+        let mut env = scope.env.clone();
+        for (name, value) in values {
+            env.insert(
+                name,
+                render_action_value_with_env(&value, scope, &scope.env),
+            );
+        }
+        env
+    }
+
+    fn action_input_defaults(
+        metadata: &velnor_runner::action_contract::ActionMetadata,
+    ) -> BTreeMap<String, String> {
+        metadata
+            .inputs
+            .iter()
+            .filter_map(|(name, input)| {
+                input
+                    .default_value
+                    .as_ref()
+                    .map(|value| (name.to_ascii_lowercase(), value.clone()))
+            })
+            .collect()
+    }
+
+    fn action_inputs(
+        metadata: &velnor_runner::action_contract::ActionMetadata,
+        provided: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        let mut inputs = action_input_defaults(metadata);
+        inputs.extend(
+            provided
+                .iter()
+                .map(|(name, value)| (name.to_ascii_lowercase(), value.clone())),
+        );
+        inputs
     }
 
     fn record_step_outputs(
@@ -636,12 +864,18 @@ runs:
     fn mirror_step_outputs(step_file: &Path, action_output_file: &Path) -> Result<(), String> {
         use std::io::Write;
 
-        let contents = fs::read(step_file).map_err(|error| {
-            format!(
-                "read runner step output file {}: {error}",
-                step_file.display()
-            )
-        })?;
+        let contents = match fs::read(step_file) {
+            Ok(contents) => contents,
+            // FileCommandManager treats a deleted or missing command file as
+            // an empty output set.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(format!(
+                    "read runner step output file {}: {error}",
+                    step_file.display()
+                ));
+            }
+        };
         if contents.is_empty() {
             return Ok(());
         }
@@ -725,16 +959,31 @@ runs:
             .unwrap_or_else(|| format!("{prefix}-{}", index + 1))
     }
 
-    fn collect_local_composite_scopes(
-        workspace: &Path,
-        action_dir: &Path,
+    fn action_step_aliases(
+        metadata: &velnor_runner::action_contract::ActionMetadata,
         scope_prefix: &str,
-        scopes: &mut LocalCompositeScopes,
-    ) {
+    ) -> BTreeMap<String, String> {
+        metadata
+            .runs
+            .steps
+            .iter()
+            .enumerate()
+            .filter_map(|(index, step)| {
+                step.id.as_deref().map(|id| {
+                    (
+                        id.to_owned(),
+                        composite_step_id(scope_prefix, Some(id), index),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn read_action_metadata(action_dir: &Path) -> velnor_runner::action_contract::ActionMetadata {
         use velnor_runner::action_contract::parse_action_metadata;
 
         let metadata_path = action_metadata_path(action_dir);
-        let metadata = must(
+        must(
             fs::read_to_string(&metadata_path)
                 .map_err(|error| format!("{}: {error}", metadata_path.display()))
                 .and_then(|contents| {
@@ -742,59 +991,102 @@ runs:
                         .map_err(|error| format!("{}: {error}", metadata_path.display()))
                 }),
             "read local composite scope metadata",
-        );
+        )
+    }
 
+    fn collect_local_composite_scopes_from_metadata(
+        workspace: &Path,
+        scope_prefix: &str,
+        metadata: &velnor_runner::action_contract::ActionMetadata,
+        scopes: &mut LocalCompositeScopes,
+    ) -> usize {
+        let mut invocation_count = 0;
         for (index, step) in metadata.runs.steps.iter().enumerate() {
+            let step_id = composite_step_id(scope_prefix, step.id.as_deref(), index);
             let Some(uses) = step.uses.as_deref() else {
+                if step.run.is_some() {
+                    invocation_count += 1;
+                }
                 continue;
             };
             if !uses.starts_with('.') {
+                invocation_count += 1;
                 continue;
             }
             let local_path = uses
                 .strip_prefix("./")
                 .or_else(|| uses.strip_prefix(".\\"))
                 .unwrap_or(uses);
-            if local_path.is_empty() {
-                continue;
-            }
 
-            let local_scope_id = composite_step_id(scope_prefix, step.id.as_deref(), index);
-            scopes.insert(
-                local_scope_id.clone(),
-                LocalCompositeScope {
-                    condition: step.condition.clone(),
-                    continue_on_error: step
-                        .continue_on_error
-                        .as_deref()
-                        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true")),
-                },
+            let local_scope_id = step_id;
+            let nested_action_dir = workspace.join(local_path.replace('\\', "/"));
+            let nested_metadata = read_action_metadata(&nested_action_dir);
+            let step_aliases = action_step_aliases(&nested_metadata, &local_scope_id);
+            let invocation_start = invocation_count;
+            let nested_invocation_count = collect_local_composite_scopes_from_metadata(
+                workspace,
+                &local_scope_id,
+                &nested_metadata,
+                scopes,
             );
-            let action_dir = workspace.join(local_path.replace('\\', "/"));
-            collect_local_composite_scopes(workspace, &action_dir, &local_scope_id, scopes);
+            invocation_count += nested_invocation_count;
+            scopes.push(LocalCompositeScope {
+                scope_id: local_scope_id,
+                parent_scope_id: scope_prefix.to_owned(),
+                invocation_range: invocation_start..invocation_count,
+                step_aliases,
+                condition: step.condition.clone(),
+                continue_on_error: step.continue_on_error.clone(),
+                input_defaults: action_input_defaults(&nested_metadata),
+                inputs: step.with.clone(),
+                env: step.env.clone(),
+            });
         }
+        if metadata
+            .outputs
+            .values()
+            .any(|output| output.value.is_some())
+        {
+            invocation_count += 1;
+        }
+        invocation_count
+    }
+
+    fn collect_local_composite_scopes(
+        workspace: &Path,
+        action_dir: &Path,
+        scope_prefix: &str,
+        scopes: &mut LocalCompositeScopes,
+        expected_invocation_count: usize,
+    ) {
+        let metadata = read_action_metadata(action_dir);
+        let invocation_count = collect_local_composite_scopes_from_metadata(
+            workspace,
+            scope_prefix,
+            &metadata,
+            scopes,
+        );
+        assert_eq!(
+            invocation_count, expected_invocation_count,
+            "fixture scope map did not cover the expanded action invocation list"
+        );
     }
 
     fn local_composite_scopes(
         workspace: &Path,
         action_dir: &Path,
         scope_prefix: &str,
+        expected_invocation_count: usize,
     ) -> LocalCompositeScopes {
-        let mut scopes = BTreeMap::new();
-        collect_local_composite_scopes(workspace, action_dir, scope_prefix, &mut scopes);
+        let mut scopes = Vec::new();
+        collect_local_composite_scopes(
+            workspace,
+            action_dir,
+            scope_prefix,
+            &mut scopes,
+            expected_invocation_count,
+        );
         scopes
-    }
-
-    fn invocation_step_id(
-        invocation: &velnor_runner::action_contract::CompositeActionInvocation,
-    ) -> &str {
-        use velnor_runner::action_contract::CompositeActionInvocation;
-
-        match invocation {
-            CompositeActionInvocation::Script(step) => &step.id,
-            CompositeActionInvocation::Repository(plan) => &plan.step_id,
-            CompositeActionInvocation::Outputs(outputs) => &outputs.step_id,
-        }
     }
 
     fn local_scope_segment_at(
@@ -802,34 +1094,17 @@ runs:
         index: usize,
         action_step_id: &str,
         local_scopes: &LocalCompositeScopes,
-    ) -> Option<(String, usize)> {
-        let invocation_id = invocation_step_id(invocations.get(index)?);
-        let scope_id = local_scopes
-            .keys()
-            .filter(|scope_id| scope_id.as_str() != action_step_id)
-            .filter(|scope_id| {
-                invocation_id == scope_id.as_str()
-                    || invocation_id
-                        .strip_prefix(scope_id.as_str())
-                        .is_some_and(|suffix| suffix.starts_with('-'))
-            })
-            .min_by_key(|scope_id| scope_id.len())?
-            .clone();
-
-        let mut end = index;
-        while let Some(invocation) = invocations.get(end) {
-            let invocation_id = invocation_step_id(invocation);
-            if invocation_id == scope_id
-                || invocation_id
-                    .strip_prefix(&scope_id)
-                    .is_some_and(|suffix| suffix.starts_with('-'))
-            {
-                end += 1;
-            } else {
-                break;
-            }
+    ) -> Option<(LocalCompositeScope, usize)> {
+        if index >= invocations.len() {
+            return None;
         }
-        Some((scope_id, end))
+        let scope = local_scopes.iter().find(|scope| {
+            scope.parent_scope_id == action_step_id
+                && scope.invocation_range.start == index
+                && scope.invocation_range.start < scope.invocation_range.end
+        })?;
+        (scope.invocation_range.end <= invocations.len())
+            .then(|| (scope.clone(), scope.invocation_range.end))
     }
 
     fn output_file_for_step(
@@ -865,6 +1140,34 @@ runs:
         output_file.with_file_name(format!("{base_name}.{scope_id}.{step_index}.{step_id}"))
     }
 
+    fn runner_working_directory(root: &Path, container_path: &str) -> PathBuf {
+        let root = must(
+            fs::canonicalize(root),
+            "canonicalize runner consumer workspace",
+        );
+        let candidate = Path::new(container_path);
+        let candidate = if let Some(relative) = container_path.strip_prefix("/__w") {
+            root.join(relative.trim_start_matches('/'))
+        } else if candidate.is_absolute() {
+            candidate.to_owned()
+        } else {
+            root.join(candidate)
+        };
+        let candidate = match fs::canonicalize(&candidate) {
+            Ok(candidate) => candidate,
+            Err(error) => panic!(
+                "resolve runner composite working directory {}: {error}",
+                candidate.display()
+            ),
+        };
+        assert!(
+            candidate.starts_with(&root),
+            "runner composite working directory escaped workspace: {}",
+            candidate.display()
+        );
+        candidate
+    }
+
     fn execute_action_invocations(
         root: &Path,
         action_step_id: &str,
@@ -874,8 +1177,43 @@ runs:
         output_file: &Path,
         step_outputs: &mut ActionStepOutputs,
     ) -> CompositeExecutionResult {
+        execute_action_invocations_with_context(
+            root,
+            action_step_id,
+            invocations,
+            marker,
+            downstream,
+            output_file,
+            &ActionExecutionContext::default(),
+            step_outputs,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "fixture executor keeps the runner action context explicit"
+    )]
+    fn execute_action_invocations_with_context(
+        root: &Path,
+        action_step_id: &str,
+        invocations: &[velnor_runner::action_contract::CompositeActionInvocation],
+        marker: &Path,
+        downstream: &Path,
+        output_file: &Path,
+        provided_context: &ActionExecutionContext,
+        step_outputs: &mut ActionStepOutputs,
+    ) -> CompositeExecutionResult {
         let action_dir = root.join(".github/actions").join(action_step_id);
-        let local_scopes = local_composite_scopes(root, &action_dir, action_step_id);
+        let metadata = read_action_metadata(&action_dir);
+        let action_context = ActionExecutionContext {
+            inputs: action_inputs(&metadata, &provided_context.inputs),
+            env: provided_context.env.clone(),
+            step_aliases: action_step_aliases(&metadata, action_step_id),
+            step_outputs: provided_context.step_outputs.clone(),
+            step_statuses: provided_context.step_statuses.clone(),
+        };
+        let local_scopes =
+            local_composite_scopes(root, &action_dir, action_step_id, invocations.len());
         let mut result = execute_composite_scope(
             root,
             action_step_id,
@@ -884,6 +1222,7 @@ runs:
             downstream,
             output_file,
             &local_scopes,
+            &action_context,
         );
         if let Some(outputs) = result.outputs.take() {
             step_outputs.insert(action_step_id.to_owned(), outputs);
@@ -891,6 +1230,10 @@ runs:
         result
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "fixture executor carries nested action context explicitly"
+    )]
     fn execute_composite_scope(
         root: &Path,
         action_step_id: &str,
@@ -899,37 +1242,64 @@ runs:
         downstream: &Path,
         output_file: &Path,
         local_scopes: &LocalCompositeScopes,
+        action_context: &ActionExecutionContext,
     ) -> CompositeExecutionResult {
         use velnor_runner::action_contract::{
             parse_action_metadata, CompositeActionInvocation, ResolvedAction,
         };
 
-        let mut scope = ActionExecutionScope::default();
+        let mut scope = ActionExecutionScope {
+            inputs: action_context.inputs.clone(),
+            env: action_context.env.clone(),
+            step_aliases: action_context.step_aliases.clone(),
+            step_outputs: action_context.step_outputs.clone(),
+            step_statuses: action_context.step_statuses.clone(),
+        };
         let mut failed_output = None;
         let mut mapped_outputs = None;
         let mut index = 0;
         while index < invocations.len() {
-            if let Some((local_scope_id, end)) =
+            if let Some((local_scope, end)) =
                 local_scope_segment_at(invocations, index, action_step_id, local_scopes)
             {
-                let local_scope = local_scopes
-                    .get(&local_scope_id)
-                    .cloned()
-                    .unwrap_or_default();
-                if !condition_runs(local_scope.condition.as_deref(), &scope) {
+                let local_scope_id = local_scope.scope_id.clone();
+                let local_env = environment_for_step(
+                    &scope,
+                    local_scope
+                        .env
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.clone())),
+                );
+                let continue_on_error =
+                    local_scope
+                        .continue_on_error
+                        .as_deref()
+                        .is_some_and(|value| {
+                            render_action_value_with_env(value, &scope, &local_env)
+                                .eq_ignore_ascii_case("true")
+                        });
+                let mut local_inputs = local_scope.input_defaults.clone();
+                local_inputs.extend(local_scope.inputs.iter().map(|(name, value)| {
+                    (
+                        name.to_ascii_lowercase(),
+                        render_action_value_with_env(value, &scope, &local_env),
+                    )
+                }));
+                if !condition_runs_with_env(local_scope.condition.as_deref(), &scope, &local_env) {
                     scope
                         .step_outputs
                         .insert(local_scope_id.clone(), BTreeMap::new());
-                    record_step_status(
-                        &mut scope,
-                        &local_scope_id,
-                        0,
-                        true,
-                        local_scope.continue_on_error,
-                    );
+                    record_step_status(&mut scope, &local_scope_id, 0, true, continue_on_error);
                     index = end;
                     continue;
                 }
+                let nested_context = ActionExecutionContext {
+                    inputs: local_inputs,
+                    env: local_env,
+                    step_aliases: local_scope.step_aliases.clone(),
+                    step_outputs: scope.step_outputs.clone(),
+                    step_statuses: scope.step_statuses.clone(),
+                };
                 let nested_result = execute_composite_scope(
                     root,
                     &local_scope_id,
@@ -938,10 +1308,10 @@ runs:
                     downstream,
                     output_file,
                     local_scopes,
+                    &nested_context,
                 );
                 let failed = !nested_result.succeeded();
                 let exit_code = nested_result.exit_code();
-                let continue_on_error = local_scope.continue_on_error;
                 scope.step_outputs.insert(
                     local_scope_id.clone(),
                     nested_result.outputs.unwrap_or_default(),
@@ -963,28 +1333,41 @@ runs:
             let invocation = &invocations[index];
             match invocation {
                 CompositeActionInvocation::Script(step) => {
-                    if !condition_runs(step.condition.as_deref(), &scope) {
+                    let step_env = environment_for_step(&scope, step.env.iter().cloned());
+                    if !condition_runs_with_env(step.condition.as_deref(), &scope, &step_env) {
                         record_step_status(&mut scope, &step.id, 0, true, false);
                         index += 1;
                         continue;
                     }
-                    let script = render_action_value(&step.script, &scope.step_outputs);
+                    let script = render_action_value_with_env(&step.script, &scope, &step_env);
                     let step_output_file =
                         output_file_for_step(output_file, action_step_id, &step.id, index);
+                    let step_script_file = step_output_file.with_extension("script");
                     must(
                         fs::write(&step_output_file, ""),
                         "initialize runner output file",
                     );
-                    let mut command = Command::new("bash");
+                    must(
+                        fs::write(&step_script_file, script),
+                        "write runner script step file",
+                    );
+                    let command_args = velnor_runner::action_contract::script_command_args(
+                        step,
+                        &step_script_file.to_string_lossy(),
+                    );
+                    let (program, args) = command_args
+                        .split_first()
+                        .unwrap_or_else(|| panic!("runner returned empty script command"));
+                    let working_directory =
+                        runner_working_directory(root, &step.working_directory_container);
+                    let mut command = Command::new(program);
                     command
-                        .args(["-euo", "pipefail", "-c", script.as_str()])
-                        .current_dir(root)
+                        .args(args)
+                        .current_dir(working_directory)
                         .env("ACTION_MARKER", marker)
                         .env("DOWNSTREAM_MARKER", downstream)
+                        .envs(step_env.iter())
                         .env("GITHUB_OUTPUT", &step_output_file);
-                    for (name, value) in &step.env {
-                        command.env(name, render_action_value(value, &scope.step_outputs));
-                    }
                     let mut output = must(command.output(), "execute runner script step");
                     let output_error =
                         match record_step_outputs(&step_output_file, &step.id, &mut scope) {
@@ -1014,7 +1397,8 @@ runs:
                     }
                 }
                 CompositeActionInvocation::Repository(plan) => {
-                    if !condition_runs(plan.condition.as_deref(), &scope) {
+                    let plan_env = environment_for_step(&scope, plan.env.iter().cloned());
+                    if !condition_runs_with_env(plan.condition.as_deref(), &scope, &plan_env) {
                         record_step_status(&mut scope, &plan.step_id, 0, true, false);
                         index += 1;
                         continue;
@@ -1031,6 +1415,23 @@ runs:
                         "parse runner repository action metadata",
                     );
                     let runtime = must(metadata.runtime(), "classify runner repository action");
+                    let nested_inputs = plan
+                        .inputs
+                        .iter()
+                        .map(|(name, value)| {
+                            (
+                                name.clone(),
+                                render_action_value_with_env(value, &scope, &plan_env),
+                            )
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    let nested_context = ActionExecutionContext {
+                        inputs: action_inputs(&metadata, &nested_inputs),
+                        env: plan_env,
+                        step_aliases: action_step_aliases(&metadata, &plan.step_id),
+                        step_outputs: scope.step_outputs.clone(),
+                        step_statuses: scope.step_statuses.clone(),
+                    };
                     let resolved = ResolvedAction {
                         plan: plan.clone(),
                         metadata_path,
@@ -1042,7 +1443,7 @@ runs:
                         "expand runner repository action",
                     );
                     let nested_local_scopes =
-                        local_composite_scopes(root, &plan.action_dir, &plan.step_id);
+                        local_composite_scopes(root, &plan.action_dir, &plan.step_id, nested.len());
                     let nested_result = execute_composite_scope(
                         root,
                         &plan.step_id,
@@ -1051,6 +1452,7 @@ runs:
                         downstream,
                         output_file,
                         &nested_local_scopes,
+                        &nested_context,
                     );
                     let failed = !nested_result.succeeded();
                     let exit_code = nested_result.exit_code();
@@ -1073,12 +1475,7 @@ runs:
                     let resolved = outputs
                         .outputs
                         .iter()
-                        .map(|(name, value)| {
-                            (
-                                name.clone(),
-                                render_action_value(value, &scope.step_outputs),
-                            )
-                        })
+                        .map(|(name, value)| (name.clone(), render_action_value(value, &scope)))
                         .collect::<BTreeMap<_, _>>();
                     if outputs.step_id == action_step_id {
                         mapped_outputs = Some(resolved);
@@ -1316,6 +1713,107 @@ runs:
     }
 
     #[test]
+    fn deleting_runner_output_file_is_treated_as_empty_output() {
+        let root = scratch("runner-output-file-removed");
+        let metadata = r#"name: output-file-removed
+outputs:
+  result:
+    value: ${{ steps.remove-file.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - id: remove-file
+      shell: bash
+      run: rm "$GITHUB_OUTPUT"
+    - id: after-removal
+      if: success()
+      shell: bash
+      run: printf 'after-removal\n' >> "$ACTION_MARKER"
+"#;
+        let invocations = expanded_action(&root, "output-file-removed", metadata);
+        let marker = root.join("output-file-removed.log");
+        let output_file = root.join("output-file-removed.output");
+        let mut outputs = BTreeMap::new();
+        let result = execute_action_invocations(
+            &root,
+            "output-file-removed",
+            &invocations,
+            &marker,
+            &root.join("output-file-removed.downstream"),
+            &output_file,
+            &mut outputs,
+        );
+
+        assert!(result.succeeded());
+        assert!(
+            must(fs::read_to_string(&marker), "read output removal marker")
+                .contains("after-removal"),
+            "missing output file incorrectly failed the preceding step"
+        );
+        assert!(!output_file.exists());
+        assert_eq!(
+            outputs
+                .get("output-file-removed")
+                .and_then(|action_outputs| action_outputs.get("result"))
+                .map(String::as_str),
+            Some("")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn consumer_simulator_dispatches_declared_shell_and_working_directory() {
+        let root = scratch("runner-shell-working-directory");
+        must(
+            fs::create_dir_all(root.join("subdir")),
+            "create runner working-directory fixture",
+        );
+        let metadata = r#"name: shell-working-directory
+runs:
+  using: composite
+  steps:
+    - id: bash-step
+      shell: bash
+      working-directory: subdir
+      run: printf 'bash-cwd=%s\n' "$PWD" >> "$ACTION_MARKER"
+    - id: sh-step
+      shell: sh
+      working-directory: subdir
+      run: printf 'sh-cwd=%s\n' "$PWD" >> "$ACTION_MARKER"
+"#;
+        let invocations = expanded_action(&root, "shell-working-directory", metadata);
+        let marker = root.join("shell-working-directory.log");
+        let mut outputs = BTreeMap::new();
+        let result = execute_action_invocations(
+            &root,
+            "shell-working-directory",
+            &invocations,
+            &marker,
+            &root.join("shell-working-directory.downstream"),
+            &root.join("shell-working-directory.output"),
+            &mut outputs,
+        );
+
+        assert!(result.succeeded());
+        let log = must(
+            fs::read_to_string(&marker),
+            "read shell working-directory marker",
+        );
+        let expected = must(
+            fs::canonicalize(root.join("subdir")),
+            "canonicalize expected shell working-directory",
+        )
+        .to_string_lossy()
+        .into_owned();
+        assert!(
+            log.contains(&format!("bash-cwd={expected}")),
+            "bash cwd: {log}"
+        );
+        assert!(log.contains(&format!("sh-cwd={expected}")), "sh cwd: {log}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn output_parser_failure_marks_child_failed_and_runs_runner_cleanup() {
         let root = scratch("runner-output-parser-failure");
         let metadata = r#"name: output-parser-failure
@@ -1382,11 +1880,11 @@ runs:
                 r#"name: nested-local
 outputs:
   result:
-    value: ${{ steps.hidden.outputs.result }}
+    value: ${{ steps.after.outputs.result }}
 runs:
   using: composite
   steps:
-    - id: hidden
+    - id: after
       shell: bash
       run: printf 'result=nested-value\n' >> "$GITHUB_OUTPUT"
 "#,
@@ -1402,10 +1900,27 @@ runs:
   steps:
     - id: nested
       uses: ./nested
+    - id: nested-after
+      shell: bash
+      run: printf 'result=sibling-visible\n' >> "$GITHUB_OUTPUT"
+    - id: sibling-output-is-visible
+      if: ${{ steps.nested-after.outputs.result == 'sibling-visible' }}
+      shell: bash
+      run: printf 'sibling-output-visible\n' >> "$ACTION_MARKER"
+    - id: nested-again
+      uses: ./nested
+    - id: repeated-inner-id-output-is-visible
+      if: ${{ steps.nested-again.outputs.result == 'nested-value' }}
+      shell: bash
+      run: printf 'repeated-inner-id-output-visible\n' >> "$ACTION_MARKER"
     - id: child-output-must-stay-private
-      if: ${{ steps.local-scope-nested-hidden.outputs.result == 'nested-value' }}
+      if: ${{ steps.local-scope-nested-after.outputs.result == 'nested-value' }}
       shell: bash
       run: printf 'child-output-leaked\n' >> "$ACTION_MARKER"
+    - id: repeated-child-output-must-stay-private
+      if: ${{ steps.local-scope-nested-again-after.outputs.result == 'nested-value' }}
+      shell: bash
+      run: printf 'repeated-child-output-leaked\n' >> "$ACTION_MARKER"
     - id: wrapper-output-is-visible
       if: ${{ steps.nested.outputs.result == 'nested-value' }}
       shell: bash
@@ -1434,8 +1949,20 @@ runs:
             "nested mapped output did not reach its caller: {log}"
         );
         assert!(
+            log.contains("sibling-output-visible"),
+            "caller step with the same flattened ID as a nested child was captured: {log}"
+        );
+        assert!(
+            log.contains("repeated-inner-id-output-visible"),
+            "repeated inner step ID did not stay isolated to the second wrapper: {log}"
+        );
+        assert!(
             !log.contains("child-output-leaked"),
             "nested child output leaked into its caller's steps scope: {log}"
+        );
+        assert!(
+            !log.contains("repeated-child-output-leaked"),
+            "repeated nested child output leaked into its caller's steps scope: {log}"
         );
         assert_eq!(
             outputs
@@ -1444,6 +1971,105 @@ runs:
                 .map(String::as_str),
             Some("nested-value")
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nested_local_gates_use_caller_inputs_and_environment() {
+        let root = scratch("runner-nested-local-context");
+        let nested_action_dir = root.join("nested-context");
+        must(
+            fs::create_dir_all(&nested_action_dir),
+            "create nested context composite directory",
+        );
+        must(
+            fs::write(
+                nested_action_dir.join("action.yml"),
+                r#"name: nested-context
+inputs:
+  run:
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - id: gated-failure
+      if: ${{ inputs.run == 'true' && env.GATE == 'enabled' && env.NESTED_FLAG == 'true' }}
+      shell: bash
+      run: |
+        printf 'nested-failure-ran\n' >> "$ACTION_MARKER"
+        exit 17
+"#,
+            ),
+            "write nested context composite metadata",
+        );
+        let metadata = r#"name: nested-context-parent
+inputs:
+  run:
+    default: 'false'
+  tolerate:
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - id: before
+      continue-on-error: true
+      shell: bash
+      run: |
+        printf 'flag=true\n' >> "$GITHUB_OUTPUT"
+        exit 9
+    - id: nested
+      if: ${{ steps.before.outputs.flag == 'true' && steps.before.outcome == 'failure' && steps.before.conclusion == 'success' && inputs.run == 'true' && env.GATE == 'enabled' }}
+      continue-on-error: ${{ steps.before.outcome == 'failure' && steps.before.conclusion == 'success' && inputs.tolerate == 'true' }}
+      env:
+        NESTED_FLAG: ${{ steps.before.outputs.flag }}
+      uses: ./nested-context
+      with:
+        run: ${{ steps.before.outputs.flag }}
+    - id: after-tolerated-failure
+      shell: bash
+      run: printf 'after-tolerated-failure\n' >> "$ACTION_MARKER"
+    - id: failure-status-must-stay-success
+      if: failure()
+      shell: bash
+      run: printf 'failure-status\n' >> "$ACTION_MARKER"
+"#;
+        let inputs = BTreeMap::from([
+            ("run".to_owned(), "true".to_owned()),
+            ("tolerate".to_owned(), "true".to_owned()),
+        ]);
+        let invocations =
+            expanded_action_with_inputs(&root, "nested-context-parent", metadata, inputs.clone());
+        let marker = root.join("nested-context.log");
+        let output_file = root.join("nested-context.output");
+        let context = ActionExecutionContext {
+            inputs,
+            env: BTreeMap::from([("GATE".to_owned(), "enabled".to_owned())]),
+            step_aliases: BTreeMap::new(),
+            ..ActionExecutionContext::default()
+        };
+        let mut outputs = BTreeMap::new();
+        let result = execute_action_invocations_with_context(
+            &root,
+            "nested-context-parent",
+            &invocations,
+            &marker,
+            &root.join("nested-context.downstream"),
+            &output_file,
+            &context,
+            &mut outputs,
+        );
+
+        assert!(result.succeeded());
+        let log = must(fs::read_to_string(&marker), "read nested context marker");
+        assert!(
+            log.contains("nested-failure-ran"),
+            "input/env gate skipped: {log}"
+        );
+        assert!(
+            log.contains("after-tolerated-failure"),
+            "expression-valued continue-on-error did not tolerate failure: {log}"
+        );
+        assert!(!log.contains("failure-status"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1543,8 +2169,11 @@ runs:
             ),
             "write downstream output consumer",
         );
-        let consumed =
-            render_action_value("${{ steps.consumer.outputs.result }}", &success_outputs);
+        let success_scope = ActionExecutionScope {
+            step_outputs: success_outputs.clone(),
+            ..ActionExecutionScope::default()
+        };
+        let consumed = render_action_value("${{ steps.consumer.outputs.result }}", &success_scope);
         let downstream_result = must(
             Command::new("bash")
                 .args([
