@@ -2018,7 +2018,7 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
     output = output.replace(
         r#"            tar -czf "product-assets/$archive" -C "$archive_dir" identity.json manifest.json *"#,
         r#"            archive_path="$PWD/product-assets/$archive"
-            (cd "$archive_dir" && tar -czf "$archive_path" -- *)"#,
+            (cd "$archive_dir" && COPYFILE_DISABLE=1 tar -czf "$archive_path" -- *)"#,
     );
     output = output.replace(
         r#"            jq -S -n --arg schema "$archive_manifest_schema""#,
@@ -2112,7 +2112,7 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
             | $source + {components:$components}
           ' "$source_component_contract" > product-component-contract.json
           jq -e --slurpfile source "$source_component_contract" '
-            .schema == $source[0].schema and
+            .schema == $source[0].manifest_schema and
             .product_id == $source[0].product_id and
             .channel == $source[0].channel and
             .manifest_schema == $source[0].manifest_schema and
@@ -2146,7 +2146,7 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
             | $source + {components:$components}
           ' "$source_component_contract" > product-component-contract.json
           jq -e --slurpfile source "$source_component_contract" '
-            .schema == $source[0].schema and
+            .schema == $source[0].manifest_schema and
             .product_id == $source[0].product_id and
             .channel == $source[0].channel and
             .manifest_schema == $source[0].manifest_schema and
@@ -2211,14 +2211,18 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
         "            component_file=\"native-product/components-$target.jsonl\"\n            artifact_file=\"native-product/artifacts-$target.jsonl\"\n",
     );
     output = output.replace(
+        "            done < <(jq -c '.[]' \"$artifact_file\")\n",
+        "            done < <(jq -c '.' \"$artifact_file\")\n",
+    );
+    output = output.replace(
         "            test -s \"$component_file\" && test -s \"$artifact_file\" || { echo \"::error::missing rows for $target\" >&2; exit 1; }\n",
         r#"            test -s "$component_file" && test -s "$artifact_file" || { echo "::error::missing rows for $target" >&2; exit 1; }
-            jq -e --arg target "$target" --slurpfile expected product-component-contract.json '
+            jq -s -e --arg target "$target" --slurpfile expected product-component-contract.json '
               (map({name,crate,binary,version,feature,identity,target}) | sort_by(.name)) ==
               ($expected[0].components | map(. + {target:$target}) | map({name,crate,binary,version,feature,identity,target}) | sort_by(.name))
               and all(.[]; (keys | sort) == ["binary","crate","feature","identity","name","target","version"])
             ' "$component_file" >/dev/null || { echo "::error::native product component rows differ from source contract for $target" >&2; exit 1; }
-            jq -e --arg target "$target" --slurpfile expected product-component-contract.json '
+            jq -s -e --arg target "$target" --slurpfile expected product-component-contract.json '
               (map(.name) | sort) == ($expected[0].components | map(.binary + "-" + $target) | sort)
               and all(.[]; .name as $name |
                 (keys | sort) == ["kind","name","sha256","size","target"] and
@@ -2246,7 +2250,7 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
             .map_or(output.len(), |offset| start + offset);
         output.replace_range(
             start..end,
-            "          actual_components=\"$(jq -s 'sort_by(.name,.target) | group_by(.name) | map(if (map({crate,version,binary,feature,identity}) | unique | length) != 1 then error(\\\"component identity differs across targets\\\") else {name:.[0].name,crate:.[0].crate,feature:.[0].feature,identity:.[0].identity,version:.[0].version,binary:.[0].binary,targets:(map(.target) | sort)} end) | sort_by(.name)' product-component-rows.jsonl)\"\n          jq -e --argjson actual \"$actual_components\" '($actual | map({name,crate,binary,feature,identity,version,targets}) | sort_by(.name)) == (.components | map({name,crate,binary,feature,identity,version,targets}) | sort_by(.name))' product-component-contract.json >/dev/null || { echo '::error::grouped component identity differs from source contract' >&2; exit 1; }",
+            "          actual_components=\"$(jq -s 'sort_by(.name,.target) | group_by(.name) | map(if (map({crate,version,binary,feature,identity}) | unique | length) != 1 then error(\\\"component identity differs across targets\\\") else {name:.[0].name,crate:.[0].crate,feature:.[0].feature,identity:.[0].identity,version:.[0].version,binary:.[0].binary,targets:(map(.target) | sort)} end) | sort_by(.name)' product-component-rows.jsonl)\"\n          jq -e --argjson actual \"$actual_components\" '($actual | map({name,crate,binary,feature,identity,targets:(.targets | sort)}) | sort_by(.name)) == (.components | map({name,crate,binary,feature,identity,targets:(.targets | sort)}) | sort_by(.name))' \"$contract\" >/dev/null || { echo '::error::grouped component identity differs from source contract' >&2; exit 1; }\n          jq -e --argjson actual \"$actual_components\" '($actual | map({name,crate,binary,feature,identity,version,targets:(.targets | sort)}) | sort_by(.name)) == (.components | map({name,crate,binary,feature,identity,version,targets:(.targets | sort)}) | sort_by(.name))' product-component-contract.json >/dev/null || { echo '::error::grouped component identity differs from generated component contract' >&2; exit 1; }",
         );
     }
     output = output.replace(
@@ -2480,6 +2484,10 @@ fn render_native_publish_job(
             "      packages: read\n      id-token: write\n      attestations: write\n    env:",
         );
     }
+    output = output.replace(
+        "          jq -S -n --arg schema \"$manifest_schema\" --arg product_id",
+        "          jq -n --arg schema \"$manifest_schema\" --arg product_id",
+    );
     output
 }
 
@@ -2607,7 +2615,7 @@ fn render_preview_publish_job(
           contract="${contracts[0]}"
           for candidate in "${contracts[@]}"; do cmp -- "$contract" "$candidate" || { echo '::error::native product preview contracts disagree' >&2; exit 1; }; done
           jq -e --slurpfile source "$source_contract" '
-            .schema == $source[0].schema and
+            .schema == $source[0].manifest_schema and
             .product_id == $source[0].product_id and
             .channel == $source[0].channel and
             .manifest_schema == $source[0].manifest_schema and
@@ -5280,10 +5288,12 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
+    use serde_json::{json, Value};
     use sha2::{Digest as _, Sha256};
 
     use super::*;
     use crate::s2::ReleaseCredential;
+    use velnor_runner::product::{ApplicationManifest, NativeProductContract};
 
     /// A fixed generator pin so the pinned render digests below never move
     /// with the commit that builds the test binary.
@@ -5313,6 +5323,15 @@ mod tests {
                 output
             },
         )
+    }
+
+    fn digest_of_bytes(content: &[u8]) -> String {
+        Sha256::digest(content)
+            .iter()
+            .fold(String::with_capacity(64), |mut output, byte| {
+                let _ = write!(output, "{byte:02x}");
+                output
+            })
     }
 
     fn rendered(surface: &super::super::Surface, file: &str) -> String {
@@ -6716,6 +6735,320 @@ mod tests {
             format!("{expected_digest}  product-manifest.json\n")
         );
         fs::remove_dir_all(root).expect("remove sidecar fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rendered_native_product_assembly_produces_runner_and_homebrew_contract_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let config = native_identity_config(&["release.yml", "preview.yml", "native-product.yml"]);
+        let release = config
+            .release
+            .as_ref()
+            .expect("identity fixture must carry a release contract");
+        let workflow = super::render_release(&config, release);
+        let publish = yaml_job(&workflow, "publish");
+        assert!(
+            publish.contains("jq -n --arg schema \"$manifest_schema\" --arg product_id"),
+            "product manifest serializer must preserve runner field order"
+        );
+        let step_marker = "      - name: Assemble canonical native product inventory\n";
+        let step_start = publish
+            .find(step_marker)
+            .expect("rendered publisher must contain canonical assembly");
+        let step_body = &publish[step_start + step_marker.len()..];
+        let run_marker = "        run: |\n";
+        let run_start = step_body
+            .find(run_marker)
+            .expect("canonical assembly must have a shell run step");
+        let script_start = step_start + step_marker.len() + run_start + run_marker.len();
+        let step_tail = &publish[script_start..];
+        let step_end = step_tail
+            .find("\n      - name:")
+            .expect("canonical assembly must end before the next step");
+        let mut assembly = step_tail[..step_end]
+            .lines()
+            .map(|line| line.strip_prefix("          ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assembly.push('\n');
+        let provider_start = assembly
+            .find("provider_release=\"")
+            .expect("assembly must serialize before provider verification");
+        assembly.truncate(provider_start);
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-native-product-assembly-{}",
+            crate::s2::unique_suffix()
+        ));
+        fs::create_dir_all(root.join(".github/ci")).expect("create assembly fixture root");
+        fs::create_dir_all(root.join("native-product")).expect("create native-product fixture");
+        fs::create_dir_all(root.join("artifacts")).expect("create package fixture");
+        fs::write(
+            root.join(".github/ci/native-product-contract.json"),
+            include_str!("../../../../../.github/ci/native-product-contract.json"),
+        )
+        .expect("write source component contract");
+
+        let mut contract: Value = serde_json::from_str(include_str!(
+            "../../../../../.github/ci/native-product-contract.json"
+        ))
+        .expect("parse source component contract");
+        contract["schema"] = json!("velnor.product-manifest/v1");
+        contract["source_repository"] = json!("tailrocks/velnor");
+        contract["source_ref"] = json!("refs/tags/v1.2.3");
+        contract["source_commit"] = json!("0123456789abcdef0123456789abcdef01234567");
+        contract["release_tag"] = json!("v1.2.3");
+        contract["version"] = json!("1.2.3");
+        for component in contract["components"]
+            .as_array_mut()
+            .expect("component contract array")
+        {
+            component["version"] = json!("0.1.0");
+        }
+        let contract_bytes =
+            serde_json::to_vec_pretty(&contract).expect("serialize target contract");
+        for target in contract["targets"]
+            .as_array()
+            .expect("target contract array")
+            .iter()
+            .map(|target| target.as_str().expect("target string"))
+        {
+            fs::write(
+                root.join(format!("native-product/product-contract-{target}.json")),
+                &contract_bytes,
+            )
+            .expect("write target contract");
+        }
+
+        let metadata = json!({
+            "packages": [
+                {"name":"velnor-runner", "version":"0.1.0"},
+                {"name":"velnor-workflow", "version":"0.1.0"},
+                {"name":"velnorctl", "version":"0.1.0"}
+            ]
+        });
+        let metadata_path = root.join("cargo-metadata-fixture.json");
+        fs::write(
+            &metadata_path,
+            serde_json::to_vec(&metadata).expect("serialize metadata fixture"),
+        )
+        .expect("write metadata fixture");
+        let cargo_path = root.join("fake-bin/cargo");
+        fs::create_dir_all(cargo_path.parent().expect("fake bin parent")).expect("create fake bin");
+        fs::write(&cargo_path, "#!/bin/sh\ncat \"$CARGO_METADATA_FIXTURE\"\n")
+            .expect("write metadata command");
+        fs::set_permissions(&cargo_path, fs::Permissions::from_mode(0o755))
+            .expect("make metadata command executable");
+
+        let targets = contract["targets"]
+            .as_array()
+            .expect("target contract array")
+            .iter()
+            .map(|target| target.as_str().expect("target string"))
+            .collect::<Vec<_>>();
+        let components = contract["components"]
+            .as_array()
+            .expect("component contract array")
+            .clone();
+        for target in &targets {
+            let mut component_rows = String::new();
+            let mut artifact_rows = String::new();
+            for component in &components {
+                let binary = component["binary"].as_str().expect("binary string");
+                let mut bytes = match *target {
+                    "x86_64-unknown-linux-gnu" => {
+                        let mut bytes = vec![0_u8; 20];
+                        bytes[..6].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1]);
+                        bytes[18..20].copy_from_slice(&[0x3e, 0]);
+                        bytes
+                    }
+                    "aarch64-unknown-linux-gnu" => {
+                        let mut bytes = vec![0_u8; 20];
+                        bytes[..6].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1]);
+                        bytes[18..20].copy_from_slice(&[0xb7, 0]);
+                        bytes
+                    }
+                    "aarch64-apple-darwin" => {
+                        let mut bytes = vec![0_u8; 8];
+                        bytes[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+                        bytes[4..8].copy_from_slice(&[0x0c, 0, 0, 1]);
+                        bytes
+                    }
+                    "x86_64-apple-darwin" => {
+                        let mut bytes = vec![0_u8; 8];
+                        bytes[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+                        bytes[4..8].copy_from_slice(&[0x07, 0, 0, 1]);
+                        bytes
+                    }
+                    other => panic!("unexpected fixture target: {other}"),
+                };
+                bytes.extend_from_slice(format!("{binary}-{target}").as_bytes());
+                let asset = format!("{binary}-{target}");
+                let digest = digest_of_bytes(&bytes);
+                fs::write(root.join(format!("native-product/{asset}")), &bytes)
+                    .expect("write native sibling");
+                let row = json!({
+                    "name": component["name"],
+                    "crate": component["crate"],
+                    "version": component["version"],
+                    "binary": component["binary"],
+                    "target": target,
+                    "feature": component["feature"],
+                    "identity": component["identity"]
+                });
+                component_rows
+                    .push_str(&serde_json::to_string(&row).expect("serialize component row"));
+                component_rows.push('\n');
+                artifact_rows.push_str(&format!(
+                    "{{\"name\":{},\"target\":{},\"kind\":\"binary\",\"sha256\":{},\"size\":{}}}",
+                    serde_json::to_string(&asset).expect("serialize artifact name"),
+                    serde_json::to_string(target).expect("serialize artifact target"),
+                    serde_json::to_string(&digest).expect("serialize artifact digest"),
+                    bytes.len()
+                ));
+                artifact_rows.push('\n');
+            }
+            fs::write(
+                root.join(format!("native-product/components-{target}.jsonl")),
+                component_rows,
+            )
+            .expect("write component rows");
+            fs::write(
+                root.join(format!("native-product/artifacts-{target}.jsonl")),
+                artifact_rows,
+            )
+            .expect("write artifact rows");
+        }
+        let package = release.package.clone();
+        for arch in ["amd64", "arm64"] {
+            fs::write(
+                root.join(format!("artifacts/{package}-1.2.3-{arch}.deb")),
+                format!("fixture-deb-{arch}"),
+            )
+            .expect("write Debian fixture");
+        }
+
+        let mut path = format!(
+            "{}:",
+            cargo_path.parent().expect("fake bin parent").display()
+        );
+        path.push_str(&std::env::var("PATH").expect("PATH"));
+        let product_contract_path = "native-product/product-contract-x86_64-unknown-linux-gnu.json";
+        let result = Command::new("bash")
+            .current_dir(&root)
+            .args(["-eu", "-o", "pipefail", "-c", assembly.as_str()])
+            .env("PATH", path)
+            .env("CARGO_METADATA_FIXTURE", &metadata_path)
+            .env("PRODUCT_RELEASE_ID", "12345")
+            .env("PRODUCT_CONTRACT", product_contract_path)
+            .env("VERSION", "1.2.3")
+            .env("GITHUB_REPOSITORY", "tailrocks/velnor")
+            .output()
+            .expect("run rendered canonical assembly");
+        assert!(
+            result.status.success(),
+            "rendered assembly failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+
+        let manifest_path = root.join("product-assets/product-manifest.json");
+        let manifest_bytes = fs::read(&manifest_path).expect("read assembled manifest");
+        let checksum = fs::read_to_string(root.join("product-assets/product-manifest.json.sha256"))
+            .expect("read assembled manifest checksum");
+        let checksum = checksum
+            .split_whitespace()
+            .next()
+            .expect("manifest checksum token");
+        let manifest = match ApplicationManifest::verify_bytes(&manifest_bytes, checksum) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                let parsed: ApplicationManifest =
+                    serde_json::from_slice(&manifest_bytes).expect("assembled manifest JSON");
+                panic!(
+                    "runner rejected assembled manifest: {error:?}\nactual:\n{}\ncanonical:\n{}",
+                    String::from_utf8_lossy(&manifest_bytes),
+                    parsed.to_canonical_json()
+                );
+            }
+        };
+        let component_contract = NativeProductContract::from_bytes(
+            &fs::read(root.join("product-component-contract.json"))
+                .expect("read component contract"),
+        )
+        .expect("runner must accept generated component contract");
+        manifest
+            .verify_typed_profile(&component_contract)
+            .expect("runner must bind assembled component identities");
+        let payload = root.join("product-payload");
+        fs::create_dir_all(&payload).expect("create runner payload");
+        for artifact in &manifest.artifacts {
+            fs::copy(
+                root.join("product-assets").join(&artifact.name),
+                payload.join(&artifact.name),
+            )
+            .expect("stage runner payload artifact");
+        }
+        manifest
+            .verify_artifacts_with_contract(&payload, Some(&component_contract))
+            .expect("runner must verify assembled payload and archives");
+
+        let homebrew_archive =
+            root.join("product-assets/velnorctl-1.2.3-aarch64-apple-darwin.tar.gz");
+        let members = Command::new("tar")
+            .args(["-tzf", homebrew_archive.to_str().expect("archive path")])
+            .output()
+            .expect("list Homebrew archive");
+        assert!(members.status.success(), "tar must list Homebrew archive");
+        let mut actual_members = String::from_utf8_lossy(&members.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        actual_members.sort();
+        assert_eq!(
+            actual_members,
+            vec![
+                "identity.json".to_owned(),
+                "manifest.json".to_owned(),
+                "velnor-runner".to_owned(),
+                "velnor-workflow".to_owned(),
+                "velnorctl".to_owned()
+            ]
+        );
+        let archive_manifest = Command::new("tar")
+            .args([
+                "-xOzf",
+                homebrew_archive.to_str().expect("archive path"),
+                "manifest.json",
+            ])
+            .output()
+            .expect("read Homebrew archive manifest");
+        assert!(archive_manifest.status.success());
+        let archive_manifest: Value =
+            serde_json::from_slice(&archive_manifest.stdout).expect("parse archive manifest");
+        let mut archive_fields = archive_manifest["components"][0]
+            .as_object()
+            .expect("archive component object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        archive_fields.sort();
+        assert_eq!(
+            archive_fields,
+            vec![
+                "binary_sha256".to_owned(),
+                "crate".to_owned(),
+                "crate_version".to_owned(),
+                "feature".to_owned(),
+                "identity".to_owned(),
+                "name".to_owned(),
+                "release_version".to_owned(),
+                "source_commit".to_owned()
+            ]
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
