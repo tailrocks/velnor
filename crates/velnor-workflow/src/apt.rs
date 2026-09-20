@@ -76,6 +76,10 @@ const PRODUCT_TARGETS: [&str; 4] = [
     "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
 ];
+/// The canonical component census shared by the native producer and both
+/// distribution projections. A projection may filter artifact rows, but it
+/// cannot silently publish a different product sibling set.
+const PRODUCT_COMPONENTS: [&str; 3] = ["velnor-runner", "velnor-workflow", "velnorctl"];
 /// The stable suite identity.
 pub(crate) const STABLE_SUITE: &str = "stable";
 /// The preview suite identity.
@@ -973,6 +977,31 @@ fn sidecar_digest_bytes(bytes: &[u8], path: &Path) -> Result<String, GeneratorEr
     Ok(digest.to_owned())
 }
 
+/// Parse the canonical product-manifest sidecar shared with Homebrew. The
+/// producer emits one GNU checksum row: digest plus the basename, never a
+/// consumer-local path and never a digest-only shorthand.
+fn product_manifest_sidecar_digest_bytes(
+    bytes: &[u8],
+    path: &Path,
+) -> Result<String, GeneratorError> {
+    let text = String::from_utf8(bytes.to_owned())
+        .map_err(|_| GeneratorError::usage(format!("{} is not UTF-8", path.display())))?;
+    let fields = text.split_whitespace().collect::<Vec<_>>();
+    if fields.len() != 2 || fields[1] != PRODUCT_MANIFEST_ASSET || !valid_digest(fields[0]) {
+        return Err(GeneratorError::usage(format!(
+            "{} must contain one digest row for {}",
+            path.display(),
+            PRODUCT_MANIFEST_ASSET
+        )));
+    }
+    Ok(fields[0].to_owned())
+}
+
+fn product_manifest_sidecar_digest(path: &Path) -> Result<String, GeneratorError> {
+    let bytes = read_regular_file(path)?;
+    product_manifest_sidecar_digest_bytes(&bytes, path)
+}
+
 /// Require a coherence input to exist.
 fn require_file(path: &Path) -> Result<(), GeneratorError> {
     let _ = open_regular_file(path)?;
@@ -1836,17 +1865,16 @@ impl DiscoverySelection {
     }
 }
 
-/// Producer release IDs are opaque, but must remain portable and may not
-/// carry shell or URL syntax outside the shared grammar.
+/// The provider release ID is serialized as a canonical positive decimal
+/// string in the producer manifest. This is shared with Homebrew: leading
+/// zeroes, slashes, and alternate provider namespaces are not equivalent
+/// release identities.
 pub(crate) fn valid_release_id(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphanumeric())
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-')
-        })
+    value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_digit() && *byte != b'0')
+        && value.bytes().skip(1).all(|byte| byte.is_ascii_digit())
 }
 
 fn valid_discovery_asset_name(value: &str) -> bool {
@@ -1947,12 +1975,18 @@ fn validate_product_manifest_selection(
     for component in components {
         exact_object_keys(
             component,
-            &["binary", "crate", "name", "targets", "version"],
+            &[
+                "binary", "crate", "feature", "identity", "name", "targets", "version",
+            ],
             "discovery product component",
         )?;
         let name = field(component, "name")?;
         let crate_name = field(component, "crate")?;
         let binary = field(component, "binary")?;
+        let feature = component
+            .get("feature")
+            .ok_or_else(|| GeneratorError::usage("discovery component feature is missing"))?;
+        let identity = field(component, "identity")?;
         let version = field(component, "version")?;
         let targets = component
             .get("targets")
@@ -1963,6 +1997,8 @@ fn validate_product_manifest_selection(
             || !valid_binary_name(binary)
             || name != crate_name
             || name != binary
+            || !(feature.is_null() || feature.as_str() == Some("release-build"))
+            || !matches!(identity, "version" | "revision")
             || !is_bare_version(version)
             || targets.len() != PRODUCT_TARGETS.len()
             || !component_names.insert(name)
@@ -1994,6 +2030,11 @@ fn validate_product_manifest_selection(
                 "discovery component target census is incomplete",
             ));
         }
+    }
+    if component_names != PRODUCT_COMPONENTS.iter().copied().collect() {
+        return Err(GeneratorError::usage(
+            "discovery product component census differs from the canonical product",
+        ));
     }
     let artifacts = manifest
         .get("artifacts")
@@ -2365,6 +2406,14 @@ fn parse_discovery_selection(
         ));
     }
     let provider_release_id = positive_field(document, "provider_release_id")?;
+    let parsed_release_id = release_id.parse::<u64>().map_err(|_| {
+        GeneratorError::usage("discovery release_id does not fit the provider ID type")
+    })?;
+    if parsed_release_id != provider_release_id {
+        return Err(GeneratorError::usage(
+            "discovery release_id differs from provider_release_id",
+        ));
+    }
     let expected_release_url = format!("https://github.com/{source_repository}/releases/tag/{tag}");
     if field(document, "release_url")? != expected_release_url {
         return Err(GeneratorError::usage(
@@ -2852,7 +2901,7 @@ pub(crate) fn verify_discovery_incoming(
         ));
     }
     let manifest_sidecar = incoming.join(format!("{}.sha256", selection.manifest_asset));
-    if sidecar_digest(&manifest_sidecar)? != selection.manifest_sha256 {
+    if product_manifest_sidecar_digest(&manifest_sidecar)? != selection.manifest_sha256 {
         return Err(GeneratorError::usage(
             "canonical product manifest sidecar differs from discovery",
         ));
@@ -4325,7 +4374,7 @@ fn verify_snapshot_selection(
         ));
     }
     let manifest_sidecar = format!("{}.sha256", selection.manifest_asset);
-    if sidecar_digest_bytes(
+    if product_manifest_sidecar_digest_bytes(
         files.get(&manifest_sidecar).ok_or_else(|| {
             GeneratorError::usage("publication incoming is missing manifest sidecar")
         })?,
@@ -5821,7 +5870,7 @@ fn check_stable_pointer_shape(pointer: &serde_json::Value) -> Result<(), Generat
             "publish: coherent previous pointer is malformed",
         ));
     }
-    if !valid_digest(field(&pointer, "source_record_sha256")?) {
+    if !valid_digest(field(pointer, "source_record_sha256")?) {
         return Err(GeneratorError::usage(
             "publish: coherent previous pointer is malformed",
         ));
@@ -5837,7 +5886,7 @@ fn check_stable_pointer(
     rollback_tag: &str,
 ) -> Result<(), GeneratorError> {
     check_stable_pointer_shape(pointer)?;
-    if field(&pointer, "tag")? != rollback_tag {
+    if field(pointer, "tag")? != rollback_tag {
         return Err(GeneratorError::usage(
             "publish: previous pointer disagrees with retained rollback version",
         ));
@@ -6632,6 +6681,8 @@ mod tests {
                 "crate": "velnorctl",
                 "version": base_version,
                 "binary": "velnorctl",
+                "feature": "release-build",
+                "identity": "version",
                 "targets": PRODUCT_TARGETS
             },
             {
@@ -6639,6 +6690,8 @@ mod tests {
                 "crate": "velnor-runner",
                 "version": base_version,
                 "binary": "velnor-runner",
+                "feature": "release-build",
+                "identity": "version",
                 "targets": PRODUCT_TARGETS
             },
             {
@@ -6646,6 +6699,8 @@ mod tests {
                 "crate": "velnor-workflow",
                 "version": base_version,
                 "binary": "velnor-workflow",
+                "feature": null,
+                "identity": "revision",
                 "targets": PRODUCT_TARGETS
             }
         ]);
@@ -6987,6 +7042,8 @@ mod tests {
                 "crate": "velnorctl",
                 "version": "0.1.0",
                 "binary": "velnorctl",
+                "feature": "release-build",
+                "identity": "version",
                 "targets": PRODUCT_TARGETS
             },
             {
@@ -6994,6 +7051,8 @@ mod tests {
                 "crate": "velnor-runner",
                 "version": "0.1.0",
                 "binary": "velnor-runner",
+                "feature": "release-build",
+                "identity": "version",
                 "targets": PRODUCT_TARGETS
             },
             {
@@ -7001,6 +7060,8 @@ mod tests {
                 "crate": "velnor-workflow",
                 "version": "0.1.0",
                 "binary": "velnor-workflow",
+                "feature": null,
+                "identity": "revision",
                 "targets": PRODUCT_TARGETS
             }
         ]);
@@ -7061,7 +7122,7 @@ mod tests {
             "source_ref": "refs/tags/v1.2.3",
             "source_commit": FIXTURE_COMMIT,
             "release_tag": "v1.2.3",
-            "release_id": "provider/123",
+            "release_id": "123",
             "artifacts": artifact_values,
             "components": components
         });
@@ -7079,7 +7140,7 @@ mod tests {
         );
         let package_bytes = must(
             serde_json::to_vec(&serde_json::json!({
-                "parent_manifest_id": "provider/123",
+                "parent_manifest_id": "123",
                 "schema": "velnor.package-release.v1"
             })),
             "serialize fixture package record",
@@ -7164,7 +7225,7 @@ mod tests {
             "provider_release_id": 123,
             "published_at": "2026-09-20T00:00:00Z",
             "release_assets": release_assets,
-            "release_id": "provider/123",
+            "release_id": "123",
             "release_tag": "v1.2.3",
             "release_url": format!("https://github.com/{FIXTURE_SOURCE}/releases/tag/v1.2.3"),
             "source_commit": FIXTURE_COMMIT,
@@ -7591,6 +7652,36 @@ mod tests {
         assert!(error.contains("release_id"), "{error}");
 
         tampered = fixture.document.clone();
+        tampered["release_id"] = serde_json::json!("0123");
+        write_bytes(
+            &fixture.selection_path,
+            &must(
+                serde_json::to_vec(&tampered),
+                "serialize leading-zero release ID tamper",
+            ),
+        );
+        let error = must_fail(
+            read_discovery_selection(&fixture.selection_path),
+            "reject leading-zero release ID",
+        );
+        assert!(error.contains("release_id"), "{error}");
+
+        tampered = fixture.document.clone();
+        tampered["release_id"] = serde_json::json!("124");
+        write_bytes(
+            &fixture.selection_path,
+            &must(
+                serde_json::to_vec(&tampered),
+                "serialize mismatched release ID tamper",
+            ),
+        );
+        let error = must_fail(
+            read_discovery_selection(&fixture.selection_path),
+            "reject mismatched provider release ID",
+        );
+        assert!(error.contains("provider_release_id"), "{error}");
+
+        tampered = fixture.document.clone();
         tampered["source_ref"] = serde_json::json!("refs/tags/v9.9.9");
         write_bytes(
             &fixture.selection_path,
@@ -7692,6 +7783,27 @@ mod tests {
             error.contains("differs from the selected release"),
             "{error}"
         );
+        let _ = std::fs::remove_dir_all(&fixture.root);
+    }
+
+    #[test]
+    fn discovery_manifest_sidecar_requires_canonical_basename() {
+        let fixture = discovery_fixture("discovery-manifest-sidecar");
+        let manifest_digest =
+            field(&fixture.document, "manifest_sha256").expect("fixture manifest digest");
+        let sidecar = fixture.incoming.join("product-manifest.json.sha256");
+        for contents in [
+            format!("{manifest_digest}\n"),
+            format!("{manifest_digest}  product-assets/product-manifest.json\n"),
+            format!("{manifest_digest}  product-manifest.json\nextra\n"),
+        ] {
+            write_bytes(&sidecar, contents.as_bytes());
+            let error = must_fail(
+                product_manifest_sidecar_digest(&sidecar),
+                "reject noncanonical product manifest sidecar",
+            );
+            assert!(error.contains("digest row"), "{error}");
+        }
         let _ = std::fs::remove_dir_all(&fixture.root);
     }
 
