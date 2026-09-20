@@ -5,7 +5,8 @@
 //! caller must still supply reviewed model/workload bindings before it can be
 //! presented as authoritative G0 evidence.
 
-use super::live_collector::{collect_live, collect_live_sample};
+use super::live_collector::{collect_live_sample, collect_live_with_progress};
+use super::live_progress::{LiveProgressFile, REQUEST_PROGRESS_FILE};
 use super::live_transport::GithubHttpTransport;
 use super::raw_store::RawObjectFileStore;
 use super::AuthIdentity;
@@ -63,6 +64,8 @@ struct CaptureMetadata<'a> {
     read_only: bool,
     collection_file: &'a str,
     raw_store_directory: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_progress_file: Option<&'static str>,
 }
 
 pub async fn run(args: G0LiveCollectArgs) -> Result<()> {
@@ -82,28 +85,49 @@ pub async fn run(args: G0LiveCollectArgs) -> Result<()> {
     let (transport, auth) = authenticated_transport()?;
     let mut store = RawObjectFileStore::new(args.evidence_dir.join("raw"))
         .with_context(|| format!("create raw store below {}", args.evidence_dir.display()))?;
-    let collection = collect_live(
+    let mut progress = LiveProgressFile::create(&args.evidence_dir)?;
+    let collection = match collect_live_with_progress(
         &transport,
         &mut store,
         auth,
         &manifest,
         args.snapshot_id.clone(),
+        Some(&mut progress),
     )
     .await
-    .context("collect complete read-only GitHub inventory")?;
+    {
+        Ok(collection) => collection,
+        Err(error) => {
+            return fail_with_checkpoint(
+                &mut progress,
+                error,
+                "collect complete read-only GitHub inventory",
+            )
+        }
+    };
 
-    let bindings = super::binding_producer::capture_bindings(
+    let bindings = match super::binding_producer::capture_bindings(
         &mut store,
         &collection,
         &manifest,
         &args.model_session_config,
         &collection.observed_at_utc,
-    )
-    .context("capture producer-owned model/workload bindings")?;
-    write_json_new(
+    ) {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            return fail_with_checkpoint(
+                &mut progress,
+                error,
+                "capture producer-owned model/workload bindings",
+            )
+        }
+    };
+    if let Err(error) = write_json_new(
         &args.evidence_dir.join("binding-capture.json"),
         &bindings.report,
-    )?;
+    ) {
+        return fail_with_checkpoint(&mut progress, error, "write binding capture");
+    }
 
     let metadata = CaptureMetadata {
         schema_version: 1,
@@ -113,9 +137,17 @@ pub async fn run(args: G0LiveCollectArgs) -> Result<()> {
         read_only: true,
         collection_file: "live-collection.json",
         raw_store_directory: "raw",
+        request_progress_file: Some(REQUEST_PROGRESS_FILE),
     };
-    write_json_new(&args.evidence_dir.join("live-collection.json"), &collection)?;
-    write_json_new(&args.evidence_dir.join("capture-metadata.json"), &metadata)?;
+    if let Err(error) = write_json_new(&args.evidence_dir.join("live-collection.json"), &collection)
+    {
+        return fail_with_checkpoint(&mut progress, error, "write live collection");
+    }
+    progress.mark_complete()?;
+    if let Err(error) = write_json_new(&args.evidence_dir.join("capture-metadata.json"), &metadata)
+    {
+        return Err(error).context("write capture metadata after collection completion");
+    }
     println!(
         "captured {} repositories, {} requests, {} API raw objects and {} local binding raw objects into {}",
         collection.repositories.len(),
@@ -157,6 +189,7 @@ pub async fn run_sample(args: G0LiveSampleArgs) -> Result<()> {
         read_only: true,
         collection_file: "live-sample.json",
         raw_store_directory: "raw",
+        request_progress_file: None,
     };
     write_json_new(&args.evidence_dir.join("live-sample.json"), &sample)?;
     write_json_new(&args.evidence_dir.join("capture-metadata.json"), &metadata)?;
@@ -168,6 +201,17 @@ pub async fn run_sample(args: G0LiveSampleArgs) -> Result<()> {
         args.evidence_dir.display()
     );
     Ok(())
+}
+
+fn fail_with_checkpoint(
+    progress: &mut LiveProgressFile,
+    error: anyhow::Error,
+    context: &'static str,
+) -> Result<()> {
+    progress
+        .mark_failed()
+        .context("persist terminal collection failure checkpoint")?;
+    Err(error).context(context)
 }
 
 fn authenticated_transport() -> Result<(GithubHttpTransport, AuthIdentity)> {
@@ -204,6 +248,7 @@ mod tests {
             read_only: true,
             collection_file: "live-collection.json",
             raw_store_directory: "raw",
+            request_progress_file: None,
         })?;
         let text = value.to_string();
         assert!(!text.contains("token"));

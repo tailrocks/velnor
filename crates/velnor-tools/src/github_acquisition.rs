@@ -42,6 +42,10 @@ pub mod raw_store;
 #[path = "github_live_collector.rs"]
 pub mod live_collector;
 
+/// Append-only request progress and terminal status for a live capture.
+#[path = "github_live_progress.rs"]
+pub mod live_progress;
+
 /// Adapter from the live observation ledger to the strict checker-owned G0
 /// types.  It never fills missing provider identities with synthetic IDs.
 #[path = "g0_live_mapping.rs"]
