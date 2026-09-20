@@ -62,9 +62,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9
+          rev: 5939604042ae5191b1b6d742e19e0db2c163ea1d
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=5939604042ae5191b1b6d742e19e0db2c163ea1d" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -82,7 +82,7 @@ jobs:
       - name: Prepare Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9
+          EXPECTED_REVISION: 5939604042ae5191b1b6d742e19e0db2c163ea1d
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/velnor-workflow-runtime"
@@ -101,7 +101,7 @@ jobs:
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-5939604042ae5191b1b6d742e19e0db2c163ea1d-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/velnor-workflow-runtime
           if-no-files-found: error
           retention-days: 7
