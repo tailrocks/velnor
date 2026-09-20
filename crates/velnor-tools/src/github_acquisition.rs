@@ -3238,6 +3238,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn binary_response_retains_archive_bytes_and_typed_kind() {
+        let body = b"zip archive bytes".to_vec();
+        let transport = FixtureTransport::new(vec![Ok(raw_response(
+            200,
+            &[("content-type", "application/zip")],
+            body.clone(),
+            "https://api.github.com/repos/acme/project/actions/artifacts/7/zip",
+        ))]);
+        let mut store = MemoryStore::default();
+        let request = RestCollectionRequest::new(
+            "artifact-7",
+            "/repos/acme/project/actions/artifacts/7/zip",
+            None::<String>,
+            "workflow_artifacts",
+        )
+        .with_per_page(1);
+        let result = collect_binary(&transport, &mut store, &auth(), request)
+            .await
+            .unwrap();
+        assert!(result.complete);
+        assert_eq!(result.raw_objects.len(), 1);
+        assert_eq!(result.raw_objects[0].object_kind, "workflow_artifacts");
+        assert_eq!(result.raw_objects[0].sha256, sha256_digest(&body));
+        assert_eq!(
+            result.requests[0].response_raw_ref.as_deref(),
+            Some("artifact-7-0001-response")
+        );
+        assert_eq!(transport.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn binary_transport_failure_is_typed_incomplete_not_empty_success() {
+        let transport = FixtureTransport::new(vec![Err(TransportFailure::PermissionDenied)]);
+        let mut store = MemoryStore::default();
+        let request = RestCollectionRequest::new(
+            "artifact-7",
+            "/repos/acme/project/actions/artifacts/7/zip",
+            None::<String>,
+            "workflow_artifacts",
+        );
+        let result = collect_binary(&transport, &mut store, &auth(), request)
+            .await
+            .unwrap();
+        assert!(!result.complete);
+        assert_eq!(result.state, AcquisitionState::Forbidden);
+        assert!(result.items.is_empty());
+        assert!(result.raw_objects.is_empty());
+        assert_eq!(result.requests[0].state, AcquisitionState::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn binary_effective_redirect_origin_is_rejected_before_storage() {
+        let transport = FixtureTransport::new(vec![Ok(raw_response(
+            200,
+            &[],
+            b"zip".to_vec(),
+            "https://evil.example/repos/acme/project/actions/artifacts/7/zip",
+        ))]);
+        let mut store = MemoryStore::default();
+        let request = RestCollectionRequest::new(
+            "artifact-7",
+            "/repos/acme/project/actions/artifacts/7/zip",
+            None::<String>,
+            "workflow_artifacts",
+        );
+        let error = collect_binary(&transport, &mut store, &auth(), request)
+            .await
+            .unwrap_err();
+        assert_eq!(error, AcquisitionError::EndpointViolation);
+        assert!(store.refs.is_empty());
+    }
+
+    #[tokio::test]
     async fn check_runs_request_forces_all_attempts() {
         let transport = FixtureTransport::new(vec![Ok(response(
             200,
