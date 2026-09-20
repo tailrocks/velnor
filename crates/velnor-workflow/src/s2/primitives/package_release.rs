@@ -3116,9 +3116,18 @@ concurrency_group = "package-release-preview"
         let group_end = script
             .find("\n} | LC_ALL=C sort > \"$expected_assets\"")
             .expect("expected asset group terminator");
-        assert!(script.find("verify_asset_bytes()") < Some(group_start));
-        assert!(script.find("publication_lock_branch=") < Some(group_start));
-        assert!(script.find("printf 'VELNOR_PUBLICATION_LOCK_SHA=") < Some(group_start));
+        let verify_helper = script
+            .find("verify_asset_bytes()")
+            .expect("verify asset helper");
+        let lock_helper = script
+            .find("publication_lock_branch=")
+            .expect("publication lock initialization");
+        let handoff = script
+            .find("printf 'VELNOR_PUBLICATION_LOCK_SHA=")
+            .expect("publication lock handoff");
+        assert!(verify_helper < group_start);
+        assert!(lock_helper < group_start);
+        assert!(handoff < group_start);
 
         let asset_group = &script[group_start..group_end];
         assert_eq!(
