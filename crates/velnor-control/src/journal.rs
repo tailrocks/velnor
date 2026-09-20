@@ -5,7 +5,7 @@
 //! row survives until a remote acknowledgement (or observed terminal) is
 //! itself committed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -30,7 +30,7 @@ pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 /// the current version onto an older journal *before* any event may be
 /// written, so a binary that predates the bump refuses the file outright
 /// instead of decoding it with an incomplete event vocabulary.
-pub const JOURNAL_SCHEMA_VERSION: u32 = 8;
+pub const JOURNAL_SCHEMA_VERSION: u32 = 14;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_RETRIES: u32 = 5;
@@ -47,21 +47,22 @@ pub const MAX_COMPLETION_ATTEMPTS: u32 = 8;
 /// hostage buys nothing.
 pub const COMPLETION_RESOLUTION_SECONDS: u64 = 6 * 60 * 60;
 
-/// Durable probes a provisional acquisition may burn before it is abandoned.
+/// Durable probes allowed for one provisional acquisition.
 ///
 /// Each probe is one full `renewjob` call, made once per slot startup, so this
 /// is a count of restarts and not of HTTP requests. Eight is the completion
-/// budget: past that many restarts the node, not the run service, is what is
-/// broken, and every further probe renews a lease for a job this node has
-/// repeatedly failed to make progress on.
+/// budget: past that many restarts no further renewal is attempted. The row
+/// and its exact native permit remain fenced until authoritative terminal
+/// evidence arrives; exhausting a local retry budget does not prove the
+/// remote assignment ended.
 pub const MAX_ACQUISITION_PROBES: u32 = 8;
 
 /// Wall-clock budget for resolving one provisional acquisition, from the
 /// moment the intent became durable.
 ///
-/// The same six hours the completion budget uses, for the same reason: GitHub's
-/// default job timeout is six hours, so a lease renewed past it buys nothing
-/// that the run service will still honour, and holding the slot costs capacity.
+/// The same six hours the completion budget uses. This stops further renewal
+/// attempts after the likely job lifetime; it is not terminal evidence and
+/// cannot by itself release the permit or remove the provisional row.
 pub const ACQUISITION_RESOLUTION_SECONDS: u64 = 6 * 60 * 60;
 
 const SCHEMA: &str = "
@@ -99,7 +100,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     plan_id TEXT NOT NULL DEFAULT '',
     run_service_url TEXT NOT NULL DEFAULT '',
     probe_attempts INTEGER NOT NULL DEFAULT 0,
-    probe_deadline_unix INTEGER NOT NULL DEFAULT 0
+    probe_deadline_unix INTEGER NOT NULL DEFAULT 0,
+    runner_request_id TEXT NOT NULL DEFAULT '',
+    permit_lease TEXT
 );
 CREATE TABLE IF NOT EXISTS outbox (
     job_id TEXT PRIMARY KEY,
@@ -121,8 +124,75 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 ";
 
+const JOURNAL_WRITE_GATE_SCHEMA: &str = "
+CREATE TABLE journal_write_gate (
+    id INTEGER PRIMARY KEY CHECK (id = 1)
+);
+CREATE TRIGGER journal_write_gate_events_insert
+BEFORE INSERT ON events
+WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+CREATE TRIGGER journal_write_gate_events_update
+BEFORE UPDATE ON events
+WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+CREATE TRIGGER journal_write_gate_events_delete
+BEFORE DELETE ON events
+WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+CREATE TRIGGER journal_write_gate_slots_insert
+BEFORE INSERT ON slots
+WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+CREATE TRIGGER journal_write_gate_slots_update
+BEFORE UPDATE ON slots
+WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+CREATE TRIGGER journal_write_gate_slots_delete
+BEFORE DELETE ON slots
+WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+CREATE TRIGGER journal_write_gate_jobs_insert
+BEFORE INSERT ON jobs
+WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+CREATE TRIGGER journal_write_gate_jobs_update
+BEFORE UPDATE ON jobs
+WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+CREATE TRIGGER journal_write_gate_jobs_delete
+BEFORE DELETE ON jobs
+WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+CREATE TRIGGER journal_write_gate_outbox_insert
+BEFORE INSERT ON outbox
+WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+CREATE TRIGGER journal_write_gate_outbox_update
+BEFORE UPDATE ON outbox
+WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+CREATE TRIGGER journal_write_gate_outbox_delete
+BEFORE DELETE ON outbox
+WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+CREATE TRIGGER journal_write_gate_meta_insert
+BEFORE INSERT ON meta
+WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+CREATE TRIGGER journal_write_gate_meta_update
+BEFORE UPDATE ON meta
+WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+CREATE TRIGGER journal_write_gate_meta_delete
+BEFORE DELETE ON meta
+WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+";
+
 /// Fleet materialization the reducer reads and writes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FleetState {
     pub control_live: bool,
     pub journal_writable: bool,
@@ -271,6 +341,13 @@ fn fleet_admission_blocked(state: &FleetState) -> bool {
     state.admission_blocked || state.drain_active
 }
 
+fn job_has_acquired_identity(job: &JobRecord) -> bool {
+    !job.job_id.0.is_empty()
+        && !job.plan_id.is_empty()
+        && !job.run_service_url.is_empty()
+        && !job.runner_request_id.is_empty()
+}
+
 fn outbox_owner_is_proven(state: &FleetState, row: &OutboxRecord) -> bool {
     state
         .slots
@@ -280,6 +357,7 @@ fn outbox_owner_is_proven(state: &FleetState, row: &OutboxRecord) -> bool {
             job.job_id == row.job_id
                 && job.slot_id == row.slot_id
                 && job.generation == row.generation
+                && job_has_acquired_identity(job)
                 // A provisional row records an *intent* to acquire. Treating it
                 // as ownership would let a runner that never received a 200
                 // publish a terminal completion for a job another runner owns.
@@ -339,11 +417,11 @@ fn oldest_queued_job_seconds(jobs: &[JobRecord]) -> u64 {
         .unwrap_or(0)
 }
 
-fn stamp_event(event: &mut Event) {
+fn stamp_event(event: &mut Event, recorded_unix: u64) {
     if let Event::JobOwned { accepted_unix, .. } = event
         && *accepted_unix == 0
     {
-        *accepted_unix = unix_now();
+        *accepted_unix = recorded_unix;
     }
 }
 
@@ -434,10 +512,56 @@ pub struct JobRecord {
     /// broker message, so it is durable from the intent onward and recovery
     /// never has to guess where to probe.
     pub run_service_url: String,
+    /// Stable broker request identity that first occupied this slot. It is
+    /// retained when the run-service job ID replaces the provisional row, so
+    /// permit ownership remains correlated across restart and redelivery.
+    #[serde(default)]
+    pub runner_request_id: String,
+    /// Exact host permit acquired before the run-service request. Provisional
+    /// recovery must retain this immutable lease identity until remote
+    /// ownership or terminal release is proven.
+    #[serde(default)]
+    pub permit_lease: Option<NativePermitLease>,
+    /// A pre-v12 loss event carried no typed remote/lease proof. Replay keeps
+    /// that provisional holder permanently fenced until later exact terminal
+    /// proof arrives; later ownership or worker-loss events cannot erase the
+    /// ambiguity.
+    #[serde(default)]
+    pub acquisition_loss_unproven: bool,
     /// Durable count of spent recovery probes. Only the reducer moves it.
     pub probe_attempts: u32,
     /// Wall-clock instant past which this provisional row is unresolvable.
     pub probe_deadline_unix: u64,
+}
+
+/// Exact ledger lease backing one native run-service acquisition.
+///
+/// `generation` is immutable lease identity, not the ledger's current host
+/// epoch. Recovery may release only this exact holder from this exact ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativePermitLease {
+    pub holder: String,
+    pub ledger_path: String,
+    pub generation: u64,
+}
+
+/// Run-service terminal evidence that permits a provisional acquisition to
+/// be forgotten after its exact host permit lease is released.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcquisitionLossSource {
+    /// The typed acquire-job response proves the request is no longer live.
+    AcquireJobNotFound,
+    /// `renewjob` proves this runner does not own the acquired job.
+    RenewJobNotOurs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcquisitionLossProof {
+    pub source: AcquisitionLossSource,
+    pub permit_lease: NativePermitLease,
 }
 
 impl JobRecord {
@@ -445,8 +569,9 @@ impl JobRecord {
     ///
     /// Mirrors `OutboxRecord::budget_exhausted`, and exists for the same
     /// reason: `renewjob` extends the lease as a side effect, so a job this
-    /// node owns but can never execute must not be probed forever. The
-    /// reducer, not the caller, decides when the row may be abandoned.
+    /// node owns but can never execute must not be probed forever. An exhausted
+    /// budget stops future renewals; only authoritative terminal evidence may
+    /// remove the row and release its exact permit.
     #[must_use]
     pub fn probe_budget_exhausted(&self, now: u64) -> bool {
         self.probe_attempts >= MAX_ACQUISITION_PROBES
@@ -497,7 +622,7 @@ impl OutboxRecord {
 
 /// Intent events. The reducer never performs I/O.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
     ControlLive,
     JournalWritable,
@@ -552,6 +677,10 @@ pub enum Event {
         job_id: JobId,
         generation: Generation,
         message_id: String,
+        /// Explicit broker request identity. Older events omit it; their
+        /// provisional key is the only safe historical fallback.
+        #[serde(default)]
+        runner_request_id: Option<String>,
         /// Where the acquisition was addressed. Carried from the broker message
         /// so recovery knows which run service to probe without re-deriving it.
         run_service_url: String,
@@ -560,8 +689,21 @@ pub enum Event {
         /// `JobOwned` stamps `accepted_unix`.
         intended_unix: u64,
     },
+    /// Native acquisition intent with the exact permit lease already held by
+    /// this request. Kept as a distinct event so older writers cannot silently
+    /// deserialize and discard the lease fields.
+    JobAcquisitionIntendedWithPermit {
+        slot_id: SlotId,
+        job_id: JobId,
+        generation: Generation,
+        message_id: String,
+        runner_request_id: String,
+        run_service_url: String,
+        intended_unix: u64,
+        permit_lease: NativePermitLease,
+    },
     /// The acquire reply came back and named the job. Retargets the provisional
-    /// row from the broker message identity onto the run-service identity, and
+    /// row from the runner request identity onto the run-service identity, and
     /// records the plan so `renewjob` becomes possible.
     ///
     /// One event, because the alternative is two: drop the message-keyed row
@@ -577,6 +719,47 @@ pub enum Event {
         acquired_job_id: JobId,
         plan_id: String,
         generation: Generation,
+        /// Explicit broker request identity. Older resolve events do not
+        /// carry this; distinct provisional-to-acquired transitions can
+        /// recover it from the provisional row, while old self-to-self
+        /// rebuilds remain unknown and must fail closed on redelivery.
+        #[serde(default)]
+        runner_request_id: Option<String>,
+        /// When present, the resolver must still see this exact immutable
+        /// permit identity on the provisional row before retargeting it.
+        /// Older events omit it and can only preserve the association already
+        /// present in their row.
+        #[serde(default)]
+        permit_lease: Option<NativePermitLease>,
+    },
+    /// Rebuild an acquisition that the run service already confirmed with a
+    /// 200, when the pre-call intent is missing. One event carries all fields
+    /// required for a durable recovery probe; an intent-then-resolve pair
+    /// would leave a planless row that startup can mistake for an unowned job.
+    /// This records existing ownership evidence, so admission fences do not
+    /// reject it, but the recorded slot generation and all current claims must
+    /// still match exactly.
+    JobAcquisitionRebuilt {
+        slot_id: SlotId,
+        job_id: JobId,
+        generation: Generation,
+        runner_request_id: String,
+        plan_id: String,
+        run_service_url: String,
+        probe_deadline_unix: u64,
+    },
+    /// v11 form of the confirmed-acquisition rebuild. It carries the exact
+    /// permit lease from the active guard, so later provisional recovery never
+    /// has to infer a holder, ledger, or lease generation.
+    JobAcquisitionRebuiltWithPermit {
+        slot_id: SlotId,
+        job_id: JobId,
+        generation: Generation,
+        runner_request_id: String,
+        plan_id: String,
+        run_service_url: String,
+        probe_deadline_unix: u64,
+        permit_lease: NativePermitLease,
     },
     /// One recovery probe was spent without reaching a verdict. Charged to the
     /// row's durable budget so an unreachable run service cannot make this node
@@ -585,12 +768,17 @@ pub enum Event {
         job_id: JobId,
         generation: Generation,
     },
-    /// The provisional row could not be resolved to ownership: `acquirejob`
-    /// reported the message gone, or the probe proved another runner holds it.
+    /// The provisional row could not be resolved to ownership. The reducer
+    /// drops it only when `proof` records authoritative run-service evidence
+    /// and the exact native permit lease has already been durably released.
     JobAcquisitionLost {
         job_id: JobId,
         generation: Generation,
         reason: String,
+        /// Missing on pre-v12 events. Those histories are ambiguous and keep
+        /// their provisional row; a human-readable reason is not proof.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proof: Option<AcquisitionLossProof>,
     },
     JobOwned {
         job_id: JobId,
@@ -749,9 +937,551 @@ pub struct ReduceOutcome {
     pub rejected: bool,
 }
 
+/// Commands and rejection status for one committed journal event.
+///
+/// Unlike [`ReduceOutcome`], this does not copy the fleet snapshot into every
+/// per-event result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplySummary {
+    pub commands: Vec<SideEffect>,
+    pub rejected: bool,
+}
+
+struct ObservationReduction {
+    commands: Vec<SideEffect>,
+    rejected: bool,
+    changed: bool,
+    created_slot: bool,
+}
+
+#[derive(Clone, Copy)]
+enum SlotProof {
+    Executor,
+    Session,
+}
+
+fn reduce_slot_proof(
+    state: &mut FleetState,
+    slot_id: &SlotId,
+    generation: Generation,
+    proof: SlotProof,
+) -> ObservationReduction {
+    let created_slot = !state.slots.iter().any(|slot| slot.slot_id == *slot_id);
+    let slot = state.slot_mut(slot_id);
+    if generation != slot.generation || slot.phase == SlotPhase2::Fenced {
+        return ObservationReduction {
+            commands: Vec::new(),
+            rejected: true,
+            changed: false,
+            created_slot,
+        };
+    }
+
+    let changed = match proof {
+        SlotProof::Executor => {
+            let changed = !slot.executor_proven;
+            slot.executor_proven = true;
+            changed
+        }
+        SlotProof::Session => {
+            let changed = !slot.session_live;
+            slot.session_live = true;
+            changed
+        }
+    };
+    ObservationReduction {
+        commands: Vec::new(),
+        rejected: false,
+        changed,
+        created_slot,
+    }
+}
+
+fn reduce_slot_heartbeat(
+    state: &mut FleetState,
+    slot_id: &SlotId,
+    generation: Generation,
+    pid: u32,
+    recorded_unix: u64,
+) -> ObservationReduction {
+    let created_slot = !state.slots.iter().any(|slot| slot.slot_id == *slot_id);
+    let slot = state.slot_mut(slot_id);
+    if generation != slot.generation || slot.phase == SlotPhase2::Fenced {
+        return ObservationReduction {
+            commands: Vec::new(),
+            rejected: true,
+            changed: false,
+            created_slot,
+        };
+    }
+
+    let changed = slot.pid != Some(pid) || slot.heartbeat_unix != recorded_unix;
+    slot.pid = Some(pid);
+    slot.heartbeat_unix = recorded_unix;
+    ObservationReduction {
+        commands: Vec::new(),
+        rejected: false,
+        changed,
+        created_slot,
+    }
+}
+
+fn reduce_registration_intended(
+    state: &mut FleetState,
+    slot_id: &SlotId,
+    generation: Generation,
+) -> ObservationReduction {
+    let slot_admission_blocked = slot_has_active_job(state, slot_id)
+        || pending_outbox_blocks_admission(state, slot_id, generation);
+    let fleet_blocked = fleet_admission_blocked(state);
+    let created_slot = !state.slots.iter().any(|slot| slot.slot_id == *slot_id);
+    let slot = state.slot_mut(slot_id);
+    if generation != slot.generation
+        || slot.phase == SlotPhase2::Fenced
+        || slot_admission_blocked
+        || fleet_blocked
+        || slot.ready_proof().is_err()
+    {
+        return ObservationReduction {
+            commands: Vec::new(),
+            rejected: true,
+            changed: false,
+            created_slot,
+        };
+    }
+
+    ObservationReduction {
+        commands: vec![SideEffect::RegisterRunner {
+            slot_id: slot_id.clone(),
+            generation,
+        }],
+        rejected: false,
+        changed: false,
+        created_slot,
+    }
+}
+
+fn reduce_job_acquisition_intended(
+    state: &mut FleetState,
+    slot_id: SlotId,
+    job_id: JobId,
+    generation: Generation,
+    runner_request_id: Option<String>,
+    run_service_url: String,
+    intended_unix: u64,
+    permit_lease: Option<NativePermitLease>,
+) -> bool {
+    // Occupy the slot before calling the run service, so a crash in the
+    // acquire window leaves evidence. A permit-bound event records the exact
+    // lease identity in the same durable transition.
+    let runner_request_id = runner_request_id.unwrap_or_else(|| job_id.0.clone());
+    let invalid_permit_lease = permit_lease
+        .as_ref()
+        .is_some_and(|permit| !native_permit_lease_is_valid(permit));
+    let admission_blocked = fleet_admission_blocked(state);
+    let slot_index = state.slots.iter().position(|slot| slot.slot_id == slot_id);
+    let slot_ready = slot_index.is_some_and(|index| {
+        state.slots[index].generation == generation && state.slots[index].phase == SlotPhase2::Ready
+    });
+    if job_id.0.is_empty()
+        || runner_request_id.is_empty()
+        || run_service_url.is_empty()
+        || !slot_ready
+        || admission_blocked
+        || invalid_permit_lease
+        || state_has_unknown_request_identity(state)
+        || acquisition_identity_conflicts(
+            &state.jobs,
+            &job_id,
+            &runner_request_id,
+            permit_lease.as_ref(),
+            None,
+        )
+    {
+        return true;
+    }
+
+    let Some(slot_index) = slot_index else {
+        return true;
+    };
+    state.slots[slot_index].phase = SlotPhase2::Assigned;
+    state.jobs.push(JobRecord {
+        job_id,
+        slot_id,
+        generation,
+        attempt: 0,
+        worker: String::new(),
+        phase: JobPhase2::Assigned,
+        accepted_unix: 0,
+        terminal_conclusion: None,
+        provisional: true,
+        plan_id: String::new(),
+        run_service_url,
+        runner_request_id,
+        permit_lease,
+        acquisition_loss_unproven: false,
+        probe_attempts: 0,
+        probe_deadline_unix: intended_unix.saturating_add(ACQUISITION_RESOLUTION_SECONDS),
+    });
+    false
+}
+
+fn reduce_job_acquisition_rebuilt(
+    state: &mut FleetState,
+    slot_id: SlotId,
+    job_id: JobId,
+    generation: Generation,
+    runner_request_id: String,
+    plan_id: String,
+    run_service_url: String,
+    probe_deadline_unix: u64,
+    permit_lease: Option<NativePermitLease>,
+) -> bool {
+    let slot_index = state.slots.iter().position(|slot| slot.slot_id == slot_id);
+    let outbox_blocks = pending_outbox_blocks_admission(state, &slot_id, generation);
+    let slot_ready = slot_index.is_some_and(|index| {
+        let slot = &state.slots[index];
+        slot.generation == generation && slot.phase == SlotPhase2::Ready
+    });
+    let invalid_permit_lease = permit_lease
+        .as_ref()
+        .is_some_and(|permit| !native_permit_lease_is_valid(permit));
+    if runner_request_id.is_empty()
+        || job_id.0.is_empty()
+        || plan_id.is_empty()
+        || run_service_url.is_empty()
+        || invalid_permit_lease
+        || state_has_unknown_request_identity(state)
+        || acquisition_identity_conflicts(
+            &state.jobs,
+            &job_id,
+            &runner_request_id,
+            permit_lease.as_ref(),
+            None,
+        )
+        || !slot_ready
+        || slot_has_active_job(state, &slot_id)
+        || outbox_blocks
+    {
+        return true;
+    }
+    let Some(slot_index) = slot_index else {
+        return true;
+    };
+
+    // This event records a run-service 200 already received. It must survive a
+    // drain/cordon that arrived after that call, but cannot replace a stale
+    // generation or conflicting claim.
+    state.slots[slot_index].phase = SlotPhase2::Assigned;
+    state.jobs.push(JobRecord {
+        job_id,
+        slot_id,
+        generation,
+        attempt: 0,
+        worker: String::new(),
+        phase: JobPhase2::Assigned,
+        accepted_unix: 0,
+        terminal_conclusion: None,
+        provisional: true,
+        plan_id,
+        run_service_url,
+        runner_request_id,
+        permit_lease,
+        acquisition_loss_unproven: false,
+        probe_attempts: 0,
+        probe_deadline_unix,
+    });
+    false
+}
+
+fn native_permit_lease_is_valid(permit: &NativePermitLease) -> bool {
+    !permit.holder.is_empty() && Path::new(&permit.ledger_path).is_absolute()
+}
+
+/// An empty request ID is retained only as unknown historical evidence. It
+/// cannot establish that a new broker request is distinct from that holder,
+/// so any such row closes acquisition admission until explicit recovery.
+fn state_has_unknown_request_identity(state: &FleetState) -> bool {
+    state
+        .jobs
+        .iter()
+        .any(|job| job.runner_request_id.is_empty())
+}
+
+fn acquisition_identity_conflicts(
+    jobs: &[JobRecord],
+    job_id: &JobId,
+    runner_request_id: &str,
+    permit_lease: Option<&NativePermitLease>,
+    except_index: Option<usize>,
+) -> bool {
+    jobs.iter().enumerate().any(|(index, job)| {
+        if except_index == Some(index) {
+            return false;
+        }
+        job.job_id == *job_id
+            || (!runner_request_id.is_empty() && job.job_id.0 == runner_request_id)
+            || (!job.runner_request_id.is_empty() && job.runner_request_id == runner_request_id)
+            || (!job.runner_request_id.is_empty() && job.runner_request_id == job_id.0)
+            || permit_lease.is_some_and(|lease| job.permit_lease.as_ref() == Some(lease))
+    })
+}
+
+fn validate_job_identity_uniqueness(jobs: &[JobRecord]) -> StoreResult<()> {
+    let mut job_ids = HashSet::with_capacity(jobs.len());
+    let mut request_ids = HashSet::with_capacity(jobs.len());
+    let mut permit_leases = HashSet::with_capacity(jobs.len());
+    for job in jobs {
+        if !job.runner_request_id.is_empty()
+            && (request_ids.contains(job.job_id.0.as_str())
+                || job_ids.contains(job.runner_request_id.as_str()))
+        {
+            return Err(invalid_materialized(
+                "job identity",
+                &format!("job ID {} aliases another runner request ID", job.job_id.0),
+            ));
+        }
+        if job.job_id.0.is_empty() || !job_ids.insert(job.job_id.0.as_str()) {
+            return Err(invalid_materialized(
+                "job identity",
+                &format!("empty or duplicate job ID {}", job.job_id.0),
+            ));
+        }
+        if !job.runner_request_id.is_empty() && !request_ids.insert(job.runner_request_id.as_str())
+        {
+            return Err(invalid_materialized(
+                "job runner request ID",
+                &format!("duplicate runner request ID {}", job.runner_request_id),
+            ));
+        }
+        if let Some(lease) = &job.permit_lease {
+            let identity = (
+                lease.holder.as_str(),
+                lease.ledger_path.as_str(),
+                lease.generation,
+            );
+            if !permit_leases.insert(identity) {
+                return Err(invalid_materialized(
+                    "job permit lease",
+                    &format!("duplicate permit holder {}", lease.holder),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reduce_job_acquisition_resolved(
+    state: &mut FleetState,
+    provisional_job_id: JobId,
+    acquired_job_id: JobId,
+    plan_id: String,
+    generation: Generation,
+    runner_request_id: Option<String>,
+    permit_lease: Option<NativePermitLease>,
+) -> bool {
+    let matches: Vec<_> = state
+        .jobs
+        .iter()
+        .enumerate()
+        .filter(|(_, job)| {
+            job.job_id == provisional_job_id && job.generation == generation && job.provisional
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let [index] = matches.as_slice() else {
+        return true;
+    };
+    let index = *index;
+    let row = &state.jobs[index];
+
+    let ambiguous_self_resolve =
+        provisional_job_id == acquired_job_id && runner_request_id.is_none();
+    let resolved_request_id = match runner_request_id.as_deref() {
+        Some(request_id) if !request_id.is_empty() => Some(request_id.to_owned()),
+        Some(_) => None,
+        None if provisional_job_id != acquired_job_id && !row.runner_request_id.is_empty() => {
+            Some(row.runner_request_id.clone())
+        }
+        None => None,
+    };
+    let invalid = row.acquisition_loss_unproven
+        || state_has_unknown_request_identity(state)
+        || acquired_job_id.0.is_empty()
+        || plan_id.is_empty()
+        || row.run_service_url.is_empty()
+        || ambiguous_self_resolve
+        || resolved_request_id.as_deref().is_none_or(str::is_empty)
+        || resolved_request_id
+            .as_deref()
+            .is_some_and(|request_id| row.runner_request_id != request_id)
+        || permit_lease
+            .as_ref()
+            .is_some_and(|expected| row.permit_lease.as_ref() != Some(expected))
+        || row
+            .permit_lease
+            .as_ref()
+            .is_some_and(|lease| !native_permit_lease_is_valid(lease))
+        || acquisition_identity_conflicts(
+            &state.jobs,
+            &acquired_job_id,
+            resolved_request_id.as_deref().unwrap_or_default(),
+            row.permit_lease.as_ref(),
+            Some(index),
+        );
+
+    if invalid {
+        // Replayed old self-to-self rebuilds and malformed/conflicting resolves
+        // leave an occupied, explicitly uncertain row. The new empty-plan
+        // compatibility exception was unsafe: neither a plan nor an exact
+        // request ID could be recovered from it.
+        state.jobs[index].acquisition_loss_unproven = true;
+        if ambiguous_self_resolve {
+            state.jobs[index].runner_request_id.clear();
+        }
+        return true;
+    }
+
+    let row = &mut state.jobs[index];
+    row.job_id = acquired_job_id;
+    row.plan_id = plan_id;
+    row.runner_request_id = resolved_request_id.unwrap_or_default();
+    false
+}
+
+fn reduce_job_owned(
+    state: &mut FleetState,
+    job_id: JobId,
+    slot_id: SlotId,
+    attempt: u32,
+    generation: Generation,
+    worker: String,
+    accepted_unix: u64,
+) -> bool {
+    let slot_matches = state
+        .slots
+        .iter()
+        .find(|slot| slot.slot_id == slot_id)
+        .is_some_and(|slot| slot.generation == generation && slot.phase == SlotPhase2::Assigned);
+    let source_indices: Vec<_> = state
+        .jobs
+        .iter()
+        .enumerate()
+        .filter(|(_, job)| job.job_id == job_id && job.generation == generation)
+        .map(|(index, _)| index)
+        .collect();
+    let other_generation = state
+        .jobs
+        .iter()
+        .any(|job| job.job_id == job_id && job.generation != generation);
+    let other_live = state
+        .jobs
+        .iter()
+        .any(|job| job.slot_id == slot_id && job.job_id != job_id && job.phase.occupies_slot());
+    if job_id.0.is_empty()
+        || !slot_matches
+        || other_generation
+        || other_live
+        || source_indices.len() > 1
+    {
+        return true;
+    }
+
+    let source_index = source_indices.first().copied();
+    let (plan_id, run_service_url, runner_request_id, permit_lease, unknown_identity) =
+        match source_index {
+            Some(index) => {
+                let source = &state.jobs[index];
+                if !source.provisional
+                    || source.acquisition_loss_unproven
+                    || source.slot_id != slot_id
+                {
+                    if source.slot_id != slot_id {
+                        state.jobs[index].acquisition_loss_unproven = true;
+                    }
+                    return true;
+                }
+                if source.plan_id.is_empty()
+                    || source.run_service_url.is_empty()
+                    || source.runner_request_id.is_empty()
+                {
+                    state.jobs[index].acquisition_loss_unproven = true;
+                    return true;
+                }
+                (
+                    source.plan_id.clone(),
+                    source.run_service_url.clone(),
+                    source.runner_request_id.clone(),
+                    source.permit_lease.clone(),
+                    source.runner_request_id.is_empty(),
+                )
+            }
+            None => (String::new(), String::new(), String::new(), None, true),
+        };
+    let unknown_identity_elsewhere = state
+        .jobs
+        .iter()
+        .enumerate()
+        .any(|(index, job)| Some(index) != source_index && job.runner_request_id.is_empty());
+    if unknown_identity_elsewhere {
+        if let Some(index) = source_index {
+            state.jobs[index].acquisition_loss_unproven = true;
+        }
+        return true;
+    }
+    let updated = JobRecord {
+        job_id: job_id.clone(),
+        slot_id,
+        generation,
+        attempt,
+        worker,
+        phase: JobPhase2::Assigned,
+        accepted_unix,
+        terminal_conclusion: None,
+        provisional: false,
+        plan_id,
+        run_service_url,
+        runner_request_id,
+        permit_lease,
+        // Old histories without an exact acquisition correlation are kept as
+        // occupied forensic rows. They cannot be started, completed, or freed
+        // by a worker-loss event under the current vocabulary.
+        acquisition_loss_unproven: unknown_identity,
+        probe_attempts: 0,
+        probe_deadline_unix: 0,
+    };
+    if acquisition_identity_conflicts(
+        &state.jobs,
+        &updated.job_id,
+        &updated.runner_request_id,
+        updated.permit_lease.as_ref(),
+        source_index,
+    ) {
+        if let Some(index) = source_index {
+            state.jobs[index].acquisition_loss_unproven = true;
+        }
+        return true;
+    }
+
+    if let Some(index) = source_index {
+        state.jobs[index] = updated;
+    } else {
+        state.jobs.push(updated);
+    }
+    false
+}
+
 /// Pure `State + Event -> New State + Commands`. No I/O.
 #[must_use]
-pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
+pub fn reduce(state: FleetState, event: Event) -> ReduceOutcome {
+    reduce_at(state, event, unix_now())
+}
+
+/// Reduce an event using the timestamp captured when its durable row was
+/// written. Event history must not re-read wall clock: doing so changes
+/// heartbeat ages and completion deadlines every time the journal replays.
+#[must_use]
+fn reduce_at(mut state: FleetState, event: Event, recorded_unix: u64) -> ReduceOutcome {
     let mut commands = Vec::new();
     let mut rejected = false;
     match event {
@@ -819,45 +1549,25 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             slot_id,
             generation,
         } => {
-            let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation || slot.phase == SlotPhase2::Fenced {
-                rejected = true;
-            } else {
-                slot.executor_proven = true;
-            }
+            let outcome = reduce_slot_proof(&mut state, &slot_id, generation, SlotProof::Executor);
+            commands = outcome.commands;
+            rejected = outcome.rejected;
         }
         Event::SessionLive {
             slot_id,
             generation,
         } => {
-            let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation || slot.phase == SlotPhase2::Fenced {
-                rejected = true;
-            } else {
-                slot.session_live = true;
-            }
+            let outcome = reduce_slot_proof(&mut state, &slot_id, generation, SlotProof::Session);
+            commands = outcome.commands;
+            rejected = outcome.rejected;
         }
         Event::RegistrationIntended {
             slot_id,
             generation,
         } => {
-            let slot_admission_blocked = slot_has_active_job(&state, &slot_id)
-                || pending_outbox_blocks_admission(&state, &slot_id, generation);
-            let fleet_blocked = fleet_admission_blocked(&state);
-            let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation
-                || slot.phase == SlotPhase2::Fenced
-                || slot_admission_blocked
-                || fleet_blocked
-                || slot.ready_proof().is_err()
-            {
-                rejected = true;
-            } else {
-                commands.push(SideEffect::RegisterRunner {
-                    slot_id,
-                    generation,
-                });
-            }
+            let outcome = reduce_registration_intended(&mut state, &slot_id, generation);
+            commands = outcome.commands;
+            rejected = outcome.rejected;
         }
         Event::Registered {
             slot_id,
@@ -938,70 +1648,59 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             job_id,
             generation,
             message_id: _,
+            runner_request_id,
             run_service_url,
             intended_unix,
         } => {
-            // Occupy the slot before calling GitHub, so a crash in the acquire
-            // window leaves evidence. This is the only transition that moves a
-            // slot to `Assigned` — the slot must be `Assigned` for `JobOwned`
-            // to be accepted — while the job row it creates is deliberately
-            // provisional: it is not proof of ownership and cannot back a
-            // completion.
-            // A drain or cordon stops new acquisitions, never in-flight work:
-            // an already-intended job still resolves, owns, and completes.
-            // Deliberately unconditional: fail-closed like the permit arm.
-            let admission_blocked = fleet_admission_blocked(&state);
-            let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation
-                || slot.phase != SlotPhase2::Ready
-                || admission_blocked
-                || state.jobs.iter().any(|job| job.job_id == job_id)
-            {
-                rejected = true;
-            } else {
-                state.slot_mut(&slot_id).phase = SlotPhase2::Assigned;
-                state.jobs.push(JobRecord {
-                    job_id,
-                    slot_id,
-                    generation,
-                    attempt: 0,
-                    worker: String::new(),
-                    phase: JobPhase2::Assigned,
-                    accepted_unix: 0,
-                    terminal_conclusion: None,
-                    provisional: true,
-                    // No plan id exists yet: the broker message that opens an
-                    // acquisition names none, and only the acquire reply does.
-                    plan_id: String::new(),
-                    run_service_url,
-                    probe_attempts: 0,
-                    probe_deadline_unix: intended_unix
-                        .saturating_add(ACQUISITION_RESOLUTION_SECONDS),
-                });
-            }
+            rejected = reduce_job_acquisition_intended(
+                &mut state,
+                slot_id,
+                job_id,
+                generation,
+                runner_request_id,
+                run_service_url,
+                intended_unix,
+                None,
+            );
+        }
+        Event::JobAcquisitionIntendedWithPermit {
+            slot_id,
+            job_id,
+            generation,
+            message_id: _,
+            runner_request_id,
+            run_service_url,
+            intended_unix,
+            permit_lease,
+        } => {
+            rejected = reduce_job_acquisition_intended(
+                &mut state,
+                slot_id,
+                job_id,
+                generation,
+                Some(runner_request_id),
+                run_service_url,
+                intended_unix,
+                Some(permit_lease),
+            );
         }
         Event::JobAcquisitionResolved {
             provisional_job_id,
             acquired_job_id,
             plan_id,
             generation,
+            runner_request_id,
+            permit_lease,
         } => {
-            // Only a provisional row may be retargeted, and only onto an
-            // identity nothing else already holds. Rewriting an owned row's
-            // identity would silently move a job that may already have a
-            // terminal result or an outbox payload attached to it.
-            let target_taken = acquired_job_id != provisional_job_id
-                && state.jobs.iter().any(|job| job.job_id == acquired_job_id);
-            let row = state.jobs.iter_mut().find(|job| {
-                job.job_id == provisional_job_id && job.generation == generation && job.provisional
-            });
-            match row {
-                Some(row) if !target_taken => {
-                    row.job_id = acquired_job_id;
-                    row.plan_id = plan_id;
-                }
-                _ => rejected = true,
-            }
+            rejected = reduce_job_acquisition_resolved(
+                &mut state,
+                provisional_job_id,
+                acquired_job_id,
+                plan_id,
+                generation,
+                runner_request_id,
+                permit_lease,
+            );
         }
         Event::AcquisitionProbeFailed { job_id, generation } => {
             let row = state.jobs.iter_mut().find(|job| {
@@ -1016,18 +1715,45 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             job_id,
             generation,
             reason: _,
+            proof,
         } => {
-            // Only a provisional row may be dropped this way. Once ownership is
-            // proven the job has to reach a terminal state through completion,
-            // never by being forgotten.
-            let droppable = state
+            // A diagnostic reason and exhausted local retry budget are not
+            // terminal proof. Drop only after an authoritative run-service
+            // verdict and a generation-fenced release of this exact lease.
+            let matches: Vec<_> = state
                 .jobs
                 .iter()
-                .any(|job| job.job_id == job_id && job.generation == generation && job.provisional);
-            if droppable {
-                restore_slot_after_job_removal(&mut state, &mut commands, &job_id);
-            } else {
+                .enumerate()
+                .filter(|(_, job)| job.job_id == job_id && job.generation == generation)
+                .map(|(index, _)| index)
+                .collect();
+            if matches.len() != 1 {
                 rejected = true;
+            } else {
+                let index = matches[0];
+                let proof_matches = state.jobs[index].provisional
+                    && proof.as_ref().is_some_and(|proof| {
+                        state.jobs[index].permit_lease.as_ref() == Some(&proof.permit_lease)
+                            && state
+                                .jobs
+                                .iter()
+                                .filter(|job| {
+                                    job.permit_lease.as_ref() == Some(&proof.permit_lease)
+                                })
+                                .count()
+                                == 1
+                    });
+                if proof_matches {
+                    restore_slot_after_job_removal(&mut state, &mut commands, &job_id);
+                } else {
+                    // This branch is reachable during replay of a v11 history:
+                    // its reason-only event used to delete the row. Preserve
+                    // the exact lease and sticky ambiguity so later
+                    // same-ID intent/owned/worker-lost events cannot make that
+                    // deletion appear valid under the v12 vocabulary.
+                    state.jobs[index].acquisition_loss_unproven = true;
+                    rejected = true;
+                }
             }
         }
         Event::JobOwned {
@@ -1038,55 +1764,23 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             worker,
             accepted_unix,
         } => {
-            let slot = state.slots.iter().find(|slot| slot.slot_id == slot_id);
-            let slot_generation = slot.map(|slot| slot.generation);
-            let slot_phase = slot.map(|slot| slot.phase);
-            let newer_job = state
-                .jobs
-                .iter()
-                .any(|job| job.job_id == job_id && job.generation > generation);
-            let other_live = state.jobs.iter().any(|job| {
-                job.slot_id == slot_id && job.job_id != job_id && job.phase.occupies_slot()
-            });
-            if newer_job
-                || slot_generation != Some(generation)
-                || slot_phase != Some(SlotPhase2::Assigned)
-                || other_live
-            {
-                rejected = true;
-            } else {
-                // Carry the acquisition's addressing across the promotion.
-                // Losing it here would leave an owned row that recovery can no
-                // longer probe if the process dies before the job starts.
-                let acquisition = state
-                    .jobs
-                    .iter()
-                    .find(|job| job.job_id == job_id)
-                    .map(|job| (job.plan_id.clone(), job.run_service_url.clone()));
-                let (plan_id, run_service_url) = acquisition.unwrap_or_default();
-                state.jobs.retain(|job| job.job_id != job_id);
-                state.jobs.push(JobRecord {
-                    job_id: job_id.clone(),
-                    slot_id,
-                    generation,
-                    attempt,
-                    worker,
-                    phase: JobPhase2::Assigned,
-                    accepted_unix,
-                    terminal_conclusion: None,
-                    // A 200 came back: this row is now proof of ownership.
-                    provisional: false,
-                    plan_id,
-                    run_service_url,
-                    // The row is no longer provisional, so nothing probes it.
-                    probe_attempts: 0,
-                    probe_deadline_unix: 0,
-                });
-            }
+            rejected = reduce_job_owned(
+                &mut state,
+                job_id,
+                slot_id,
+                attempt,
+                generation,
+                worker,
+                accepted_unix,
+            );
         }
         Event::JobStarted { job_id, generation } => {
             if let Some(job) = state.jobs.iter_mut().find(|job| job.job_id == job_id) {
-                if job.generation != generation {
+                if job.generation != generation
+                    || job.provisional
+                    || job.acquisition_loss_unproven
+                    || !job_has_acquired_identity(job)
+                {
                     rejected = true;
                 } else {
                     job.phase = JobPhase2::Running;
@@ -1115,6 +1809,9 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             match state.jobs.iter_mut().find(|job| job.job_id == job_id) {
                 Some(job)
                     if job.generation == generation
+                        && !job.provisional
+                        && !job.acquisition_loss_unproven
+                        && job_has_acquired_identity(job)
                         && slot_generation == Some(generation)
                         && job.phase.occupies_slot()
                         // A terminal result is written once. A second, different
@@ -1149,6 +1846,8 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 // when a row already exists — the *first* intent would otherwise
                 // create one against a job this runner may not own.
                 if job.provisional
+                    || job.acquisition_loss_unproven
+                    || !job_has_acquired_identity(job)
                     || job.generation != generation
                     || slot_generation != Some(generation)
                 {
@@ -1171,7 +1870,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                         state.jobs[job_index].phase = JobPhase2::Completing;
                     }
                 } else {
-                    let created = unix_now();
+                    let created = recorded_unix;
                     state.jobs[job_index].phase = JobPhase2::Completing;
                     state.outbox.push(OutboxRecord {
                         job_id: job_id.clone(),
@@ -1276,7 +1975,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                         // The budget must already be spent in durable state.
                         // Recovery is bounded because the budget only ever
                         // shrinks, never because a caller says it is done.
-                        && row.budget_exhausted(unix_now())
+                        && row.budget_exhausted(recorded_unix)
                 };
                 if valid {
                     // `remote_acked` deliberately stays false and the send
@@ -1338,7 +2037,12 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
         Event::JobWorkerLost { job_id, generation } => {
             let job = state.jobs.iter().find(|job| job.job_id == job_id);
             match job {
-                Some(job) if job.generation == generation => {
+                Some(job)
+                    if job.generation == generation
+                        && !job.provisional
+                        && !job.acquisition_loss_unproven
+                        && job_has_acquired_identity(job) =>
+                {
                     // A completing job may still have an outbox payload to
                     // send; preserve its slot ownership until remote
                     // terminal acknowledgement supplies the second proof.
@@ -1376,13 +2080,10 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             generation,
             pid,
         } => {
-            let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation || slot.phase == SlotPhase2::Fenced {
-                rejected = true;
-            } else {
-                slot.pid = Some(pid);
-                slot.heartbeat_unix = unix_now();
-            }
+            let outcome =
+                reduce_slot_heartbeat(&mut state, &slot_id, generation, pid, recorded_unix);
+            commands = outcome.commands;
+            rejected = outcome.rejected;
         }
         Event::SlotStale {
             slot_id,
@@ -1417,6 +2118,49 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 state.package_apt_version.clear();
             }
         }
+        Event::JobAcquisitionRebuilt {
+            slot_id,
+            job_id,
+            generation,
+            runner_request_id,
+            plan_id,
+            run_service_url,
+            probe_deadline_unix,
+        } => {
+            rejected = reduce_job_acquisition_rebuilt(
+                &mut state,
+                slot_id,
+                job_id,
+                generation,
+                runner_request_id,
+                plan_id,
+                run_service_url,
+                probe_deadline_unix,
+                None,
+            );
+        }
+        Event::JobAcquisitionRebuiltWithPermit {
+            slot_id,
+            job_id,
+            generation,
+            runner_request_id,
+            plan_id,
+            run_service_url,
+            probe_deadline_unix,
+            permit_lease,
+        } => {
+            rejected = reduce_job_acquisition_rebuilt(
+                &mut state,
+                slot_id,
+                job_id,
+                generation,
+                runner_request_id,
+                plan_id,
+                run_service_url,
+                probe_deadline_unix,
+                Some(permit_lease),
+            );
+        }
     }
     ReduceOutcome {
         state,
@@ -1430,6 +2174,37 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
 pub struct Journal {
     conn: Connection,
     path: PathBuf,
+}
+
+fn insert_event_row(
+    tx: &rusqlite::Transaction<'_>,
+    generation: Generation,
+    kind: &str,
+    payload: &str,
+    recorded_unix: i64,
+) -> StoreResult<()> {
+    let generation_sql = generation_to_sql(generation)?;
+    tx.execute(
+        "INSERT INTO events (generation, kind, payload, checksum, recorded_unix)
+         VALUES (?1, ?2, ?3, '', ?4)",
+        params![generation_sql, kind, payload, recorded_unix],
+    )?;
+    let id = tx.last_insert_rowid();
+    let checksum = event_row_checksum(id, generation_sql, kind, payload, recorded_unix)?;
+    let changed = tx.execute(
+        "UPDATE events SET checksum = ?1 WHERE id = ?2",
+        params![checksum, id],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.event.insert.incomplete",
+        )
+        .with_remediation(
+            "event identity or checksum changed during the gated journal transaction",
+        ));
+    }
+    Ok(())
 }
 
 impl Journal {
@@ -1533,6 +2308,116 @@ impl Journal {
             .expect("one event must produce one reduction outcome"))
     }
 
+    /// Persist a controller observation batch without cloning the fleet state
+    /// for every heartbeat, proof, and registration intent.
+    ///
+    /// Only `SlotHeartbeat`, `ExecutorProven`, `SessionLive`, and
+    /// `RegistrationIntended` are accepted. Results stay in input order and
+    /// contain only commands and rejection status. Commands are returned only
+    /// after the event log and materialized state commit.
+    ///
+    /// # Errors
+    /// SQLite or payload encode failures, invalid materialized state, or an
+    /// event outside the controller-observation set.
+    pub fn apply_observation_batch<I>(&mut self, events: I) -> StoreResult<Vec<ApplySummary>>
+    where
+        I: IntoIterator<Item = Event>,
+    {
+        let mut events = events.into_iter();
+        let Some(first_event) = events.next() else {
+            return Ok(Vec::new());
+        };
+
+        // Lock before loading state so another journal writer cannot commit
+        // between this snapshot and our materialized-state rewrite.
+        let transaction = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut state = load_materialized_state(&transaction)?;
+        if state.capacity_invalid {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.capacity.invalid",
+            )
+            .with_remediation(
+                "preserve the legacy journal for forensics and perform an explicit verified migration before writing capacity state",
+            ));
+        }
+
+        let mut summaries = Vec::new();
+        let mut pending = Vec::new();
+        for event in std::iter::once(first_event).chain(events) {
+            let recorded_unix = unix_now();
+            let outcome = match &event {
+                Event::SlotHeartbeat {
+                    slot_id,
+                    generation,
+                    pid,
+                } => reduce_slot_heartbeat(&mut state, slot_id, *generation, *pid, recorded_unix),
+                Event::ExecutorProven {
+                    slot_id,
+                    generation,
+                } => reduce_slot_proof(&mut state, slot_id, *generation, SlotProof::Executor),
+                Event::SessionLive {
+                    slot_id,
+                    generation,
+                } => reduce_slot_proof(&mut state, slot_id, *generation, SlotProof::Session),
+                Event::RegistrationIntended {
+                    slot_id,
+                    generation,
+                } => reduce_registration_intended(&mut state, slot_id, *generation),
+                _ => {
+                    return Err(StoreError::new(
+                        velnor_model::ExitClass::Usage,
+                        "journal.observation.event.invalid",
+                    )
+                    .with_remediation(
+                        "controller observation batches accept only slot_heartbeat, executor_proven, session_live, and registration_intended events",
+                    ));
+                }
+            };
+
+            // The normal reducer materializes a default slot before rejecting
+            // a mismatched generation, but `apply_many` discards that rejected
+            // state. Undo that append here without copying the whole snapshot.
+            if outcome.rejected && outcome.created_slot {
+                let _ = state.slots.pop();
+            }
+
+            if !outcome.rejected && (outcome.changed || !outcome.commands.is_empty()) {
+                generation_to_sql(event_generation(&event))?;
+                let payload = serde_json::to_string(&event).map_err(|error| {
+                    StoreError::new(velnor_model::ExitClass::Operation, "journal.encode.failed")
+                        .with_remediation(error.to_string())
+                })?;
+                pending.push((
+                    event_generation(&event),
+                    event_kind(&event),
+                    payload,
+                    timestamp_to_sql(recorded_unix, "event recorded_unix")?,
+                ));
+            }
+            summaries.push(ApplySummary {
+                commands: outcome.commands,
+                rejected: outcome.rejected,
+            });
+        }
+
+        if pending.is_empty() {
+            return Ok(summaries);
+        }
+
+        let tx = transaction;
+        open_journal_write_gate(&tx)?;
+        for (generation, kind, payload, recorded_unix) in pending {
+            insert_event_row(&tx, generation, kind, &payload, recorded_unix)?;
+        }
+        persist_state(&tx, &state)?;
+        close_journal_write_gate(&tx)?;
+        tx.commit()?;
+        Ok(summaries)
+    }
+
     /// Persist several events atomically after reducing them in order. This
     /// keeps controller-owned heartbeat ingestion to one replay and one
     /// materialization transaction per reconciliation cycle.
@@ -1567,18 +2452,25 @@ impl Journal {
         let mut outcomes = Vec::new();
         let mut pending = Vec::new();
         for mut event in std::iter::once(first_event).chain(events) {
-            stamp_event(&mut event);
-            let outcome = reduce(state.clone(), event.clone());
+            let recorded_unix = unix_now();
+            stamp_event(&mut event, recorded_unix);
+            let outcome = reduce_at(state.clone(), event.clone(), recorded_unix);
             if !outcome.rejected {
                 let unchanged_without_commands =
                     outcome.commands.is_empty() && outcome.state == state;
                 state = outcome.state.clone();
                 if !unchanged_without_commands {
+                    generation_to_sql(event_generation(&event))?;
                     let payload = serde_json::to_string(&event).map_err(|error| {
                         StoreError::new(velnor_model::ExitClass::Operation, "journal.encode.failed")
                             .with_remediation(error.to_string())
                     })?;
-                    pending.push((event_generation(&event), event_kind(&event), payload));
+                    pending.push((
+                        event_generation(&event),
+                        event_kind(&event),
+                        payload,
+                        timestamp_to_sql(recorded_unix, "event recorded_unix")?,
+                    ));
                 }
             }
             outcomes.push(outcome);
@@ -1588,14 +2480,12 @@ impl Journal {
         }
 
         let tx = transaction;
-        for (generation, kind, payload) in pending {
-            let checksum = sha256_hex(payload.as_bytes());
-            tx.execute(
-                "INSERT INTO events (generation, kind, payload, checksum) VALUES (?1, ?2, ?3, ?4)",
-                params![generation.0 as i64, kind, payload, checksum],
-            )?;
+        open_journal_write_gate(&tx)?;
+        for (generation, kind, payload, recorded_unix) in pending {
+            insert_event_row(&tx, generation, kind, &payload, recorded_unix)?;
         }
         persist_state(&tx, &state)?;
+        close_journal_write_gate(&tx)?;
         tx.commit()?;
         Ok(outcomes)
     }
@@ -1605,7 +2495,7 @@ impl Journal {
     /// # Errors
     /// SQLite or payload decode failures.
     pub fn load_state(&self) -> StoreResult<FleetState> {
-        load_state_from_conn(&self.conn)
+        load_current_state_checked(&self.conn)
     }
 
     /// Check durable terminal acknowledgement evidence without replaying the
@@ -1616,8 +2506,9 @@ impl Journal {
         job_id: &JobId,
         generation: Generation,
     ) -> StoreResult<bool> {
+        let generation_sql = generation_to_sql(generation)?;
         let mut statement = self.conn.prepare(
-            "SELECT payload, checksum
+            "SELECT id, generation, kind, payload, checksum, recorded_unix
              FROM events
              WHERE generation = ?1
                AND kind IN ('remote_acked', 'remote_observed_terminal')
@@ -1625,8 +2516,17 @@ impl Journal {
              LIMIT ?2",
         )?;
         let rows = statement.query_map(
-            params![generation.0 as i64, MAX_TERMINAL_ACK_SCAN_ROWS + 1],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            params![generation_sql, MAX_TERMINAL_ACK_SCAN_ROWS + 1],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
         )?;
         let mut scanned = 0;
         for row in rows {
@@ -1640,8 +2540,10 @@ impl Journal {
                     "the terminal acknowledgement history exceeded the bounded recovery scan; preserve the journal and compact it through the retention path",
                 ));
             }
-            let (payload, checksum) = row?;
-            if sha256_hex(payload.as_bytes()) != checksum {
+            let (id, event_generation_sql, kind, payload, checksum, recorded_unix) = row?;
+            let expected =
+                event_row_checksum(id, event_generation_sql, &kind, &payload, recorded_unix)?;
+            if recorded_unix < 0 || expected != checksum {
                 return Err(StoreError::new(
                     velnor_model::ExitClass::Conflict,
                     "journal.checksum.mismatch",
@@ -1654,6 +2556,14 @@ impl Journal {
                 StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.invalid")
                     .with_remediation("the terminal acknowledgement event could not be decoded")
             })?;
+            if kind != event_kind(&event)
+                || i64_u64(event_generation_sql, "event generation")? != event_generation(&event).0
+            {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.event.generation.mismatch",
+                ));
+            }
             if matches!(
                 event,
                 Event::RemoteAcked {
@@ -1698,19 +2608,27 @@ impl Journal {
     /// SQLite reads, checksum mismatch, or an undecodable event.
     pub fn unresolvable_completions(&self) -> StoreResult<Vec<UnresolvableCompletion>> {
         let mut statement = self.conn.prepare(
-            "SELECT payload, checksum
+            "SELECT id, generation, kind, payload, checksum, recorded_unix
              FROM events
              WHERE kind IN ('completion_unresolvable', 'completion_payload_lost')
              ORDER BY id DESC
              LIMIT ?1",
         )?;
         let rows = statement.query_map(params![MAX_TERMINAL_ACK_SCAN_ROWS], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
         })?;
         let mut found = Vec::new();
         for row in rows {
-            let (payload, checksum) = row?;
-            if sha256_hex(payload.as_bytes()) != checksum {
+            let (id, generation, kind, payload, checksum, recorded_unix) = row?;
+            let expected = event_row_checksum(id, generation, &kind, &payload, recorded_unix)?;
+            if recorded_unix < 0 || expected != checksum {
                 return Err(StoreError::new(
                     velnor_model::ExitClass::Conflict,
                     "journal.checksum.mismatch",
@@ -1721,6 +2639,14 @@ impl Journal {
                 StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.invalid")
                     .with_remediation("an abandoned completion event could not be decoded")
             })?;
+            if kind != event_kind(&event)
+                || i64_u64(generation, "event generation")? != event_generation(&event).0
+            {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.event.generation.mismatch",
+                ));
+            }
             match event {
                 Event::CompletionUnresolvable {
                     job_id,
@@ -1784,11 +2710,13 @@ impl Journal {
             transaction.commit()?;
             return Ok(false);
         }
+        open_journal_write_gate(&transaction)?;
         transaction.execute(
             "INSERT INTO meta (key, value) VALUES ('drain', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![value],
         )?;
+        close_journal_write_gate(&transaction)?;
         transaction.commit()?;
         Ok(true)
     }
@@ -1804,7 +2732,9 @@ impl Journal {
         let transaction = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        open_journal_write_gate(&transaction)?;
         let removed = transaction.execute("DELETE FROM meta WHERE key = 'drain'", [])? > 0;
+        close_journal_write_gate(&transaction)?;
         transaction.commit()?;
         Ok(removed)
     }
@@ -1840,11 +2770,13 @@ impl Journal {
             transaction.commit()?;
             return Ok(false);
         }
+        open_journal_write_gate(&transaction)?;
         transaction.execute(
             "INSERT INTO meta (key, value) VALUES ('admission', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![value],
         )?;
+        close_journal_write_gate(&transaction)?;
         transaction.commit()?;
         Ok(true)
     }
@@ -1866,11 +2798,13 @@ impl Journal {
         let transaction = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        open_journal_write_gate(&transaction)?;
         let expected = format!("blocked:{expected_version}");
         let removed = transaction.execute(
             "DELETE FROM meta WHERE key = 'admission' AND value = ?1",
             params![expected],
         )? > 0;
+        close_journal_write_gate(&transaction)?;
         transaction.commit()?;
         Ok(removed)
     }
@@ -1985,27 +2919,31 @@ fn is_transient_contention(error: &StoreError) -> bool {
 /// Run the complete cold-start setup once. The caller retries only SQLite
 /// contention; schema, WAL, and integrity errors remain fail-closed.
 fn setup_journal(conn: &mut Connection) -> StoreResult<()> {
-    // Inspect before enabling WAL or mutating schema. This transaction is
-    // read-only and preserves future, legacy, and malformed journals.
-    preflight_schema(conn)?;
-    let wal: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
-    if !wal.eq_ignore_ascii_case("wal") {
-        return Err(StoreError::new(
-            velnor_model::ExitClass::Operation,
-            "journal.wal.unavailable",
-        )
-        .with_remediation("the filesystem must support WAL journaling"));
-    }
+    // Read version, physical shape, event history, and the materialized
+    // snapshot from one read-only SQLite snapshot. This check preserves
+    // future, legacy, and malformed journals without changing journal mode.
+    let preflight = conn.unchecked_transaction()?;
+    let (stored, _) = preflight_schema_snapshot(&preflight)?;
+    verify_pending_migration_integrity_before_wal(&preflight, stored)?;
+    assert_sqlite_version(&preflight)?;
+    preflight.commit()?;
     conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
-    assert_sqlite_version(conn)?;
     // One immediate transaction owns the complete setup sequence. The
     // physical DDL and every version stamp become visible together, so a
     // concurrent opener cannot combine an old user_version with a newer
-    // table shape. The second preflight is inside that write transaction:
-    // another opener may have completed setup after the first read-only
-    // preflight, and its current state is the only state we may migrate.
+    // table shape. The second preflight is inside that write transaction and
+    // preserves the source's existing journal mode. A writer that races the
+    // initial snapshot is therefore refused before this setup changes the WAL
+    // header or creates sidecars.
     let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let (stored, outbox_shape) = preflight_schema_snapshot(&transaction)?;
+    verify_pending_migration_integrity_before_wal(&transaction, stored)?;
+    let initially_fresh = stored == 0;
+    let had_journal_tables = ["events", "slots", "jobs", "outbox", "meta"]
+        .iter()
+        .try_fold(false, |found, table| {
+            Ok::<_, StoreError>(found || table_exists(&transaction, table)?)
+        })?;
     repair_historic_jobs_shape(&transaction, stored)?;
     transaction.execute_batch(SCHEMA)?;
     if matches!(outbox_shape, OutboxSchema::V2) {
@@ -2020,8 +2958,660 @@ fn setup_journal(conn: &mut Connection) -> StoreResult<()> {
     migrate_v5_to_v6(&transaction)?;
     migrate_v6_to_v7(&transaction)?;
     migrate_v7_to_v8(&transaction)?;
+    migrate_v8_to_v9(&transaction)?;
+    migrate_v9_to_v10(&transaction)?;
+    migrate_v10_to_v11(&transaction, initially_fresh)?;
+    migrate_v11_to_v12(&transaction, stored)?;
+    migrate_v12_to_v13(&transaction, stored)?;
+    migrate_v13_to_v14(&transaction, stored)?;
+    if stored < JOURNAL_SCHEMA_VERSION && (had_journal_tables || initially_fresh) {
+        install_replay_baseline(&transaction)?;
+    }
     transaction.commit()?;
+
+    // Only switch mode after the locked validation and all migrations commit.
+    // A refusal from either preflight leaves a racing legacy database in its
+    // original DELETE mode. If WAL is unavailable, the migrated journal is
+    // still a valid current-schema DELETE database and the next open can retry.
+    let wal: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+    if !wal.eq_ignore_ascii_case("wal") {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Operation,
+            "journal.wal.unavailable",
+        )
+        .with_remediation("the filesystem must support WAL journaling"));
+    }
+    conn.execute_batch("PRAGMA synchronous=FULL;")?;
     Ok(())
+}
+
+/// Verify source history before `PRAGMA journal_mode=WAL`, which mutates the
+/// database header and can create sidecar files. The locked setup transaction
+/// repeats this check to cover changes between the read-only preflight and the
+/// schema lock.
+fn verify_pending_migration_integrity_before_wal(
+    conn: &Connection,
+    stored: u32,
+) -> StoreResult<()> {
+    if stored == 0
+        && !["events", "slots", "jobs", "outbox", "meta"]
+            .iter()
+            .try_fold(false, |found, table| {
+                Ok::<_, StoreError>(found || table_exists(conn, table)?)
+            })?
+    {
+        // Empty v0 is a genuinely fresh SQLite file. It has no phase rows or
+        // event history to inspect; `SCHEMA` creates those tables only after
+        // this read-only preflight and the WAL switch.
+        return Ok(());
+    }
+
+    // v4 derives each completion deadline from the v2/v3 creation timestamp.
+    // Check the full source range before enabling WAL; otherwise an overflowing
+    // value would fail only after the database header and sidecars changed.
+    verify_v3_deadline_backfill_before_wal(conn, stored)?;
+
+    let events_exist = table_exists(conn, "events")?;
+    let mut has_pre_v12_proofless_loss = false;
+    if events_exist {
+        let select = if stored >= 13 {
+            "SELECT id, generation, kind, payload, checksum, recorded_unix FROM events ORDER BY id"
+        } else {
+            "SELECT id, generation, kind, payload, checksum, 0 FROM events ORDER BY id"
+        };
+        let mut statement = conn.prepare(select)?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, generation, kind, payload, checksum, recorded_unix) = row?;
+            if recorded_unix < 0 {
+                return Err(invalid_materialized(
+                    "event recorded_unix",
+                    &recorded_unix.to_string(),
+                ));
+            }
+            let expected_checksum = if stored >= 14 {
+                event_row_checksum(id, generation, &kind, &payload, recorded_unix)?
+            } else {
+                // v13 stored reducer timestamps but did not bind them into the
+                // event checksum. Its migration rederives timestamps from the
+                // event log and materialized evidence before stamping v14.
+                sha256_hex(payload.as_bytes())
+            };
+            if expected_checksum != checksum {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.checksum.mismatch",
+                )
+                .with_remediation(format!(
+                    "preserve the schema-v{stored} journal unchanged; event integrity verification failed before setup"
+                )));
+            }
+            let event = decode_event_for_schema(&payload, stored)?;
+            has_pre_v12_proofless_loss |=
+                stored < 12 && matches!(&event, Event::JobAcquisitionLost { proof: None, .. });
+            if kind != event_kind(&event) {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.event.unknown",
+                )
+                .with_remediation(format!(
+                    "preserve the schema-v{stored} journal unchanged; event kind does not match its payload"
+                )));
+            }
+            let recorded_generation = Generation(i64_u64(generation, "event generation")?);
+            if recorded_generation != event_generation(&event) {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.event.generation.mismatch",
+                )
+                .with_remediation(format!(
+                    "preserve the schema-v{stored} journal unchanged; stored event generation does not match its checksummed payload"
+                )));
+            }
+        }
+    }
+    if stored < 8 {
+        verify_v7_phase_split(conn, stored)?;
+    }
+    if stored < 11 && has_pre_v12_proofless_loss {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.migration.acquisition_loss.ambiguous",
+        )
+        .with_remediation(format!(
+            "preserve the schema-v{stored} journal unchanged; its proofless acquisition-loss history predates durable native permit correlation and cannot be safely replayed before migration"
+        )));
+    }
+    // Decode all present materialized values before WAL or sidecars are
+    // created. Historical jobs/outbox columns absent from older supported
+    // shapes are projected to their migration defaults by the version-aware
+    // loader; malformed meta, negative timestamps/generations, invalid bools,
+    // and bad lease JSON fail here without changing the file.
+    let current_materialized = load_materialized_state(conn)?;
+    if stored == JOURNAL_SCHEMA_VERSION {
+        if load_replay_baseline(conn)?.is_none() {
+            return Err(replay_baseline_error(
+                "current-schema journal has no committed event-tail watermark",
+            ));
+        }
+    } else if table_exists(conn, "meta")?
+        && conn
+            .query_row(
+                "SELECT 1 FROM meta WHERE key = 'replay_baseline'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+    {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.schema.mismatch",
+        )
+        .with_remediation(format!(
+            "preserve the schema-v{stored} journal unchanged; replay baseline is only valid in schema v{JOURNAL_SCHEMA_VERSION}"
+        )));
+    }
+    if stored == 11 || stored == 12 {
+        // The upcoming vocabulary migrations validate and rewrite materialized
+        // state. Prove that deterministic replay retains existing owner,
+        // heartbeat, and outbox identities before WAL.
+        let replayed = load_state_from_conn(conn)?;
+        ensure_v11_replay_preserves_materialized_evidence(&current_materialized, &replayed)?;
+    }
+    Ok(())
+}
+
+fn verify_v3_deadline_backfill_before_wal(conn: &Connection, stored: u32) -> StoreResult<()> {
+    if stored >= 4
+        || !table_exists(conn, "outbox")?
+        || !table_has_column(conn, "outbox", "created_unix")?
+    {
+        return Ok(());
+    }
+
+    let mut statement = conn.prepare("SELECT job_id, created_unix FROM outbox ORDER BY job_id")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for row in rows {
+        let (job_id, created_unix) = row?;
+        completion_deadline_from_created(created_unix, &job_id)?;
+    }
+    Ok(())
+}
+
+fn completion_deadline_from_created(created_unix: i64, job_id: &str) -> StoreResult<i64> {
+    if created_unix < 0 {
+        return Err(invalid_materialized(
+            "outbox created_unix",
+            &created_unix.to_string(),
+        ));
+    }
+    let resolution = i64::try_from(COMPLETION_RESOLUTION_SECONDS).map_err(|_| {
+        StoreError::new(
+            velnor_model::ExitClass::Operation,
+            "journal.timestamp.range",
+        )
+        .with_remediation("the completion resolution window must fit SQLite's INTEGER range")
+    })?;
+    created_unix.checked_add(resolution).ok_or_else(|| {
+        StoreError::new(velnor_model::ExitClass::Conflict, "journal.timestamp.range")
+            .with_remediation(format!(
+                "preserve the journal unchanged; outbox creation time for {job_id} cannot fit its v4 completion deadline in SQLite INTEGER"
+            ))
+    })
+}
+
+fn ensure_v11_replay_preserves_materialized_evidence(
+    current_materialized: &FleetState,
+    replayed: &FleetState,
+) -> StoreResult<()> {
+    // `persist_state` materializes only pending outbox rows. Terminal-acked
+    // and abandoned rows remain in event history as proof but are deliberately
+    // absent from the table, so compare only the projection a rewrite keeps.
+    let current_pending_outbox: Vec<_> = current_materialized
+        .outbox
+        .iter()
+        .filter(|row| row.is_pending())
+        .collect();
+    let replayed_pending_outbox: Vec<_> = replayed
+        .outbox
+        .iter()
+        .filter(|row| row.is_pending())
+        .collect();
+    if replayed_pending_outbox.len() != current_pending_outbox.len() {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.migration.outbox.inconsistent",
+        )
+        .with_remediation(
+            "preserve the schema-v11 journal unchanged; replay and materialized pending outbox identities differ",
+        ));
+    }
+    for current in current_pending_outbox {
+        let Some(replayed) = replayed_pending_outbox.iter().find(|replayed| {
+            replayed.job_id == current.job_id && replayed.generation == current.generation
+        }) else {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.migration.outbox.inconsistent",
+            )
+            .with_remediation(format!(
+                "preserve the schema-v11 journal unchanged; replay would drop outbox evidence for job {} generation {}",
+                current.job_id.0, current.generation.0
+            )));
+        };
+        // CompletionIntended does not record a creation instant, so replay
+        // necessarily generates new timestamps and deadlines. Compare every
+        // event-derived field exactly while treating those two materialized
+        // timestamps as snapshot-owned data.
+        let mut comparable = (*replayed).clone();
+        comparable.created_unix = current.created_unix;
+        comparable.deadline_unix = current.deadline_unix;
+        if comparable != *current {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.migration.outbox.inconsistent",
+            )
+            .with_remediation(format!(
+                "preserve the schema-v11 journal unchanged; replay would rewrite outbox evidence for job {} generation {}",
+                current.job_id.0, current.generation.0
+            )));
+        }
+    }
+
+    for current in &current_materialized.jobs {
+        if !replayed.jobs.iter().any(|row| row == current) {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.migration.job.inconsistent",
+            )
+            .with_remediation(format!(
+                "preserve the schema-v11 journal unchanged; strict replay would drop or rewrite job evidence for {} generation {}",
+                current.job_id.0, current.generation.0
+            )));
+        }
+    }
+    for replayed_job in &replayed.jobs {
+        if !current_materialized
+            .jobs
+            .iter()
+            .any(|row| row == replayed_job)
+            && (!replayed_job.provisional || !replayed_job.acquisition_loss_unproven)
+        {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.migration.job.inconsistent",
+            )
+            .with_remediation(format!(
+                "preserve the schema-v11 journal unchanged; strict replay adds non-quarantined job evidence for {} generation {}",
+                replayed_job.job_id.0, replayed_job.generation.0
+            )));
+        }
+    }
+
+    // An ambiguous provisional row may conservatively keep a same-generation
+    // slot Assigned after v11 had restored it to an earlier admission phase.
+    // Every other slot field and every existing slot identity must survive
+    // unchanged; in particular, a later generation, PID, or registration
+    // proof cannot be silently replaced by replay that rejects a later job.
+    if !(current_materialized.capacity_invalid || replayed.capacity_invalid) {
+        if replayed.slots.len() != current_materialized.slots.len() {
+            return Err(journal_migration_slot_evidence_inconsistent());
+        }
+        for current in &current_materialized.slots {
+            let Some(replayed_slot) = replayed
+                .slots
+                .iter()
+                .find(|slot| slot.slot_id == current.slot_id)
+            else {
+                return Err(journal_migration_slot_evidence_inconsistent());
+            };
+            let mut comparable = replayed_slot.clone();
+            if comparable.phase != current.phase {
+                let replay_is_more_restrictive = comparable.phase == SlotPhase2::Assigned
+                    && matches!(
+                        current.phase,
+                        SlotPhase2::Provisioning | SlotPhase2::Registered | SlotPhase2::Ready
+                    );
+                if !replay_is_more_restrictive {
+                    return Err(journal_migration_slot_evidence_inconsistent());
+                }
+                comparable.phase = current.phase;
+            }
+            if comparable != *current {
+                return Err(journal_migration_slot_evidence_inconsistent());
+            }
+        }
+    }
+
+    if current_materialized.capacity_invalid || replayed.capacity_invalid {
+        // The migration deliberately avoids a full `persist_state` rewrite
+        // when either source says capacity is invalid, so its fallback is to
+        // preserve the current materialized rows and latch the invalid marker.
+        // That fallback is safe only when strict replay needs no additional
+        // row changes. Otherwise the migration would either discard replayed
+        // permit/owner evidence or overwrite forensic materialized rows.
+        if current_materialized.jobs.len() != replayed.jobs.len()
+            || current_materialized
+                .jobs
+                .iter()
+                .any(|current| !replayed.jobs.contains(current))
+        {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.migration.job.inconsistent",
+            )
+            .with_remediation(
+                "preserve the schema-v11 journal unchanged; capacity-invalid materialization cannot be rewritten without losing current or replayed job evidence",
+            ));
+        }
+    }
+
+    if current_materialized.control_live != replayed.control_live
+        || current_materialized.journal_writable != replayed.journal_writable
+        || current_materialized.github_reachable != replayed.github_reachable
+        || current_materialized.routing_valid != replayed.routing_valid
+        || current_materialized.runner_group_valid != replayed.runner_group_valid
+        || current_materialized.desired_ready != replayed.desired_ready
+        || current_materialized.canary != replayed.canary
+        || current_materialized.package_generation != replayed.package_generation
+        || current_materialized.package_apt_version != replayed.package_apt_version
+        || current_materialized.execution_backend != replayed.execution_backend
+        || current_materialized.capacity_declared != replayed.capacity_declared
+    {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.migration.materialized.inconsistent",
+        )
+        .with_remediation(
+            "preserve the schema-v11 journal unchanged; strict replay would rewrite materialized control evidence",
+        ));
+    }
+    Ok(())
+}
+
+fn preserve_v11_outbox_timestamps(
+    current: &FleetState,
+    replayed: &mut FleetState,
+) -> StoreResult<()> {
+    for replayed_row in replayed.outbox.iter_mut().filter(|row| row.is_pending()) {
+        let Some(current_row) = current.outbox.iter().find(|row| {
+            row.is_pending()
+                && row.job_id == replayed_row.job_id
+                && row.generation == replayed_row.generation
+        }) else {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.migration.outbox.inconsistent",
+            )
+            .with_remediation(
+                "preserve the schema-v11 journal unchanged; replay has no materialized timestamp source for a pending completion",
+            ));
+        };
+        replayed_row.created_unix = current_row.created_unix;
+        replayed_row.deadline_unix = current_row.deadline_unix;
+    }
+    Ok(())
+}
+
+fn journal_migration_slot_evidence_inconsistent() -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.migration.slot.inconsistent",
+    )
+    .with_remediation(
+        "preserve the schema-v11 journal unchanged; strict replay would drop or rewrite slot evidence",
+    )
+}
+
+fn verify_v7_phase_split(conn: &Connection, stored: u32) -> StoreResult<()> {
+    if table_exists(conn, "slots")? {
+        let mut statement = conn.prepare("SELECT phase FROM slots")?;
+        for phase in statement.query_map([], |row| row.get::<_, String>(0))? {
+            parse_slot_phase(&phase?)?;
+        }
+    }
+
+    if table_exists(conn, "jobs")? {
+        let mut statement = conn.prepare("SELECT phase FROM jobs")?;
+        for phase in statement.query_map([], |row| row.get::<_, String>(0))? {
+            parse_job_phase(&phase?)?;
+        }
+    }
+    let _ = stored;
+    Ok(())
+}
+
+/// Decode a migration event only after inspecting the raw object for fields
+/// introduced by later schemas. Serde ignores unknown object members by
+/// default, so typed decoding alone cannot protect older journals from a newer
+/// writer that stamped a checksummed optional field onto an existing variant.
+fn decode_event_for_schema(payload: &str, stored: u32) -> StoreResult<Event> {
+    let raw: serde_json::Value = serde_json::from_str(payload).map_err(|error| {
+        StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.unknown")
+            .with_remediation(format!(
+                "preserve the schema-v{stored} journal unchanged; event validation failed before migration: {error}"
+            ))
+    })?;
+    let event_type = raw.get("type").and_then(serde_json::Value::as_str);
+    let newer_variant = (stored < 7 && event_type == Some("completion_payload_lost"))
+        || (stored < 10 && event_type == Some("job_acquisition_rebuilt"))
+        || (stored < 11
+            && matches!(
+                event_type,
+                Some("job_acquisition_intended_with_permit")
+                    | Some("job_acquisition_rebuilt_with_permit")
+            ));
+    let has_v11_field = raw.as_object().is_some_and(|object| match event_type {
+        Some("job_acquisition_intended") => object.contains_key("runner_request_id"),
+        Some("job_acquisition_resolved") => {
+            object.contains_key("runner_request_id") || object.contains_key("permit_lease")
+        }
+        _ => false,
+    });
+    let has_v12_field = raw.as_object().is_some_and(|object| {
+        event_type == Some("job_acquisition_lost") && object.contains_key("proof")
+    });
+    if newer_variant || (stored < 11 && has_v11_field) || (stored < 12 && has_v12_field) {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.event.unknown",
+        )
+        .with_remediation(format!(
+            "preserve the schema-v{stored} journal unchanged; event contains a variant or field from a newer journal vocabulary"
+        )));
+    }
+    serde_json::from_value(raw).map_err(|error| {
+        StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.unknown")
+            .with_remediation(format!(
+                "preserve the schema-v{stored} journal unchanged; event validation failed before migration: {error}"
+            ))
+    })
+}
+
+/// Validate SQLite's schema namespace before switching journal mode or
+/// running any shape migration. SQLite identifiers are case-insensitive, and
+/// `CREATE ... IF NOT EXISTS` can silently accept a conflicting name or skip
+/// the canonical index. Unknown views/triggers and foreign keys crossing the
+/// journal boundary can also make later DDL or full-table rewrites fail or
+/// cascade-delete evidence after WAL has already changed the file.
+fn validate_schema_catalog_before_migration(conn: &Connection, stored: u32) -> StoreResult<()> {
+    let mut statement = conn.prepare(
+        "SELECT type, name, tbl_name, sql
+         FROM sqlite_master
+         WHERE substr(name, 1, 7) COLLATE NOCASE <> 'sqlite_'
+         ORDER BY type, name",
+    )?;
+    let objects = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    let core_tables = ["events", "slots", "jobs", "outbox", "meta"];
+    let mut gate_triggers = Vec::with_capacity(15);
+    for table in core_tables {
+        for operation in ["insert", "update", "delete"] {
+            gate_triggers.push((
+                format!("journal_write_gate_{table}_{operation}"),
+                table.to_owned(),
+            ));
+        }
+    }
+
+    for (kind, name, table, sql) in &objects {
+        if kind.eq_ignore_ascii_case("view") {
+            return Err(journal_schema_catalog_mismatch(
+                stored,
+                &format!("unsupported view {name}"),
+            ));
+        }
+        if kind.eq_ignore_ascii_case("trigger") && stored < 12 {
+            return Err(journal_schema_catalog_mismatch(
+                stored,
+                &format!("unexpected trigger {name}"),
+            ));
+        }
+
+        if let Some(expected_table) = core_tables
+            .iter()
+            .find(|expected| name.eq_ignore_ascii_case(expected))
+        {
+            if !kind.eq_ignore_ascii_case("table") || name != expected_table {
+                return Err(journal_schema_catalog_mismatch(
+                    stored,
+                    &format!("noncanonical object {name}"),
+                ));
+            }
+        }
+
+        if name.eq_ignore_ascii_case("journal_write_gate") {
+            if stored < 12 || !kind.eq_ignore_ascii_case("table") || name != "journal_write_gate" {
+                return Err(journal_schema_catalog_mismatch(
+                    stored,
+                    "reserved write-gate name is occupied before its migration",
+                ));
+            }
+        }
+
+        if let Some((expected_name, expected_table)) = gate_triggers
+            .iter()
+            .find(|(expected_name, _)| name.eq_ignore_ascii_case(expected_name))
+        {
+            if stored < 12
+                || !kind.eq_ignore_ascii_case("trigger")
+                || name != expected_name
+                || table != expected_table
+            {
+                return Err(journal_schema_catalog_mismatch(
+                    stored,
+                    &format!("reserved write-gate trigger name {name} is occupied"),
+                ));
+            }
+        }
+
+        if name.eq_ignore_ascii_case("outbox_v3") {
+            return Err(journal_schema_catalog_mismatch(
+                stored,
+                "reserved v2 outbox rebuild name is occupied",
+            ));
+        }
+
+        if name.eq_ignore_ascii_case("events_generation_kind_id_idx") {
+            let expected_sql = normalize_schema_sql(
+                "CREATE INDEX events_generation_kind_id_idx
+                 ON events (generation, kind, id DESC)",
+            );
+            if !kind.eq_ignore_ascii_case("index")
+                || name != "events_generation_kind_id_idx"
+                || table != "events"
+                || !sql
+                    .as_deref()
+                    .is_some_and(|actual| normalize_schema_sql(actual) == expected_sql)
+            {
+                return Err(journal_schema_catalog_mismatch(
+                    stored,
+                    "reserved events index name has a noncanonical definition",
+                ));
+            }
+        }
+    }
+
+    // No schema-side trigger may intercept a v2-v11 migration. For v12, the
+    // exact fifteen gate triggers are validated by
+    // `journal_write_gate_schema_matches`; checking the full catalog there
+    // also rejects triggers attached to extension tables.
+    if stored >= 12 {
+        let trigger_count = objects
+            .iter()
+            .filter(|(kind, _, _, _)| kind.eq_ignore_ascii_case("trigger"))
+            .count();
+        if trigger_count != gate_triggers.len() {
+            return Err(journal_schema_catalog_mismatch(
+                stored,
+                "unexpected trigger outside the canonical write gate",
+            ));
+        }
+    }
+
+    // Journal writes replace materialized tables and the v2 outbox migration
+    // drops/rebuilds `outbox`. No external table may observe those operations
+    // through SQLite foreign-key actions.
+    let tables: Vec<_> = objects
+        .iter()
+        .filter(|(kind, _, _, _)| kind.eq_ignore_ascii_case("table"))
+        .map(|(_, name, _, _)| name.clone())
+        .collect();
+    let is_journal_table = |name: &str| {
+        core_tables
+            .iter()
+            .any(|table| name.eq_ignore_ascii_case(table))
+            || name.eq_ignore_ascii_case("journal_write_gate")
+            // The v2→v3 migration creates this staging table, inserts the
+            // replacement outbox, then drops the old table before renaming
+            // the stage. An extension FK to this reserved target could be
+            // retargeted or cascade during that sequence even though the
+            // table does not exist in the source schema yet.
+            || name.eq_ignore_ascii_case("outbox_v3")
+    };
+    for child in &tables {
+        let mut statement = conn.prepare("SELECT \"table\" FROM pragma_foreign_key_list(?1)")?;
+        let targets = statement
+            .query_map([child], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if (is_journal_table(child) && !targets.is_empty())
+            || targets.iter().any(|target| is_journal_table(target))
+        {
+            return Err(journal_schema_catalog_mismatch(
+                stored,
+                &format!("foreign-key dependency crosses journal table {child}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn journal_schema_catalog_mismatch(version: u32, detail: &str) -> StoreError {
+    StoreError::new(velnor_model::ExitClass::Conflict, "journal.schema.mismatch").with_remediation(
+        format!("preserve the schema-v{version} journal unchanged; {detail}"),
+    )
 }
 
 /// Validate the journal's recorded version and physical migration shape.
@@ -2029,22 +3619,17 @@ fn setup_journal(conn: &mut Connection) -> StoreResult<()> {
 /// The caller must serialize this read against schema setup. Keeping all
 /// observations in one helper prevents a future caller from accidentally
 /// reintroducing a version/shape race between independent reads.
-fn preflight_schema(conn: &Connection) -> StoreResult<(u32, OutboxSchema)> {
-    let transaction = conn.unchecked_transaction()?;
-    let result = preflight_schema_snapshot(&transaction);
-    if result.is_ok() {
-        transaction.commit()?;
-    }
-    result
-}
-
 fn preflight_schema_snapshot(conn: &Connection) -> StoreResult<(u32, OutboxSchema)> {
     // A v1 database is still owned by the retired capacity model. Inspect it
     // before enabling WAL, creating missing tables, or starting a migration
     // transaction: contaminated evidence must remain byte stable and must
     // never reach `persist_state`.
-    let stored: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let stored = u32::try_from(stored).unwrap_or(0);
+    let stored_raw: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if stored_raw < 0 {
+        return Err(journal_schema_version_invalid(stored_raw));
+    }
+    let stored =
+        u32::try_from(stored_raw).map_err(|_| journal_schema_version_invalid(stored_raw))?;
     let outbox_shape = outbox_schema_shape(conn)?;
     if stored == 1 {
         return Err(StoreError::new(
@@ -2058,73 +3643,757 @@ fn preflight_schema_snapshot(conn: &Connection) -> StoreResult<(u32, OutboxSchem
     if stored > JOURNAL_SCHEMA_VERSION {
         return Err(journal_schema_newer());
     }
+    validate_schema_catalog_before_migration(conn, stored)?;
+    let has_write_gate = table_exists(conn, "journal_write_gate")?;
+    if stored >= 12 {
+        if !journal_write_gate_schema_matches(conn)? || journal_write_gate_has_open_row(conn)? {
+            return Err(journal_write_gate_schema_mismatch(stored));
+        }
+    } else if has_write_gate || journal_data_table_triggers_exist(conn)? {
+        return Err(journal_write_gate_schema_mismatch(stored));
+    }
     // Physical shape ahead of the recorded version means a writer mutated
     // the tables without stamping `PRAGMA user_version`. Refuse rather than
     // guess which vocabulary wrote the events.
     if outbox_shape_rank(outbox_shape) > version_outbox_rank(stored) {
         return Err(outbox_schema_mismatch(stored, outbox_shape));
     }
-    // The same rule for v5, whose shape change is in `jobs` rather than
-    // `outbox`, so the outbox-only check above cannot see it.
-    //
-    // Scoped to exactly a v4 stamp, written as the literal 4. Older stamps
-    // are not evidence of a mutated shape: a v2 or v3 file opened here may
-    // legitimately carry the current `jobs` shape, because `SCHEMA` creates
-    // that table at the current definition and their own migrations stamp
-    // explicitly. Only the v4-to-v5 step can be silently re-stamped, so only
-    // it needs guarding.
-    //
-    // This was `JOURNAL_SCHEMA_VERSION - 1`, which is the same defect that
-    // bricked every journal on the v5 bump: raising the constant silently
-    // re-aimed the check at a different transition. Version comparisons name
-    // their own version.
-    if stored == 4 && table_has_column(conn, "jobs", "provisional")? {
-        return Err(outbox_schema_mismatch(stored, outbox_shape));
+    if outbox_shape == OutboxSchema::V2
+        && table_exists(conn, "jobs")?
+        && table_exists(conn, "slots")?
+    {
+        // Preserve the specific ownership failure before generic column-shape
+        // refusal. This also proves the rebuild will not synthesize or drop a
+        // v2 outbox owner before its migration transaction begins.
+        validate_v2_outbox_owners(conn)?;
     }
-    // And again for v6, whose shape change is also in `jobs`.
-    if stored == 5 && table_has_column(conn, "jobs", "plan_id")? {
-        return Err(outbox_schema_mismatch(stored, outbox_shape));
+    validate_recorded_migration_shape(conn, stored, outbox_shape)?;
+    // `validate_recorded_migration_shape` owns every stamped jobs shape,
+    // including the two narrowly repairable v5/v6 poison shapes. Keep all
+    // version-to-shape rules there so preflight cannot accept a hybrid based
+    // on a second, drifting set of column checks.
+    // v9 added durable runner-request correlation. A positively stamped
+    // schema below v9 cannot already have that column without skipping its
+    // migration. Version 0 is the explicit unversioned shape-discovery path;
+    // its columns are validated by the later migration shape checks before a
+    // current stamp is committed.
+    if stored > 0 && stored < 9 && table_has_column(conn, "jobs", "runner_request_id")? {
+        return Err(jobs_column_schema_mismatch(stored, "runner_request_id"));
+    }
+    // v9 made request correlation mandatory in the physical jobs shape. The
+    // migration intentionally returns early once the version stamp is 9, so
+    // a missing column must be caught here before load/persist can query it.
+    if stored >= 9 && !table_has_column(conn, "jobs", "runner_request_id")? {
+        return Err(jobs_column_schema_mismatch(
+            stored,
+            "runner_request_id is missing",
+        ));
+    }
+    if stored < 11 && table_has_column(conn, "jobs", "permit_lease")? {
+        return Err(jobs_column_schema_mismatch(
+            stored,
+            "permit_lease is present before the v11 migration",
+        ));
+    }
+    if stored < 12 && table_has_column(conn, "jobs", "acquisition_loss_unproven")? {
+        return Err(jobs_column_schema_mismatch(
+            stored,
+            "acquisition_loss_unproven is present before the v12 migration",
+        ));
+    }
+    if stored == 11 && !jobs_v11_shape_matches(conn)? {
+        return Err(jobs_schema_mismatch(stored));
+    }
+    if stored >= 12 && !jobs_v12_shape_matches(conn)? {
+        return Err(jobs_schema_mismatch(stored));
     }
     Ok((stored, outbox_shape))
 }
 
+fn validate_recorded_migration_shape(
+    conn: &Connection,
+    stored: u32,
+    outbox_shape: OutboxSchema,
+) -> StoreResult<()> {
+    let mut has_any_journal_table = false;
+    for table in ["events", "slots", "jobs", "outbox", "meta"] {
+        has_any_journal_table |= table_exists(conn, table)?;
+    }
+    if stored == 0 && !has_any_journal_table {
+        // Explicit fresh-file exception: a new empty SQLite database has no
+        // historical shape to inspect and receives the current schema inside
+        // the locked setup transaction.
+        return Ok(());
+    }
+
+    if stored == 0 {
+        // The only supported populated-unversioned shape is the historical
+        // v2 physical layout, which setup can identify without guessing. A
+        // current or partial schema with its version erased is ambiguous.
+        if outbox_shape != OutboxSchema::V2 || !jobs_shape_matches_version(conn, 2)? {
+            return Err(jobs_schema_mismatch(stored));
+        }
+    } else {
+        let expected_outbox = match stored {
+            2 => OutboxSchema::V2,
+            3 => OutboxSchema::V3,
+            _ => OutboxSchema::V4,
+        };
+        if outbox_shape != expected_outbox {
+            return Err(outbox_schema_mismatch(stored, outbox_shape));
+        }
+
+        let jobs_match = match stored {
+            2 | 3 => jobs_shape_matches_version(conn, 3)?,
+            4 => jobs_shape_matches_version(conn, 4)?,
+            5 => jobs_shape_matches_version(conn, 5)? || jobs_shape_matches_version(conn, 4)?,
+            6 => jobs_shape_matches_version(conn, 6)? || jobs_v6_repair_shape_matches(conn)?,
+            7 | 8 => jobs_shape_matches_version(conn, 8)?,
+            9 | 10 => jobs_shape_matches_version(conn, 10)?,
+            11 => jobs_v11_shape_matches(conn)?,
+            12 | 13 | 14 => jobs_v12_shape_matches(conn)?,
+            _ => false,
+        };
+        if !jobs_match {
+            return Err(jobs_schema_mismatch(stored));
+        }
+    }
+
+    if !event_schema_matches(conn, stored)?
+        || !slots_schema_matches(conn)?
+        || !meta_schema_matches(conn)?
+    {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.schema.mismatch",
+        )
+        .with_remediation(format!(
+            "preserve the schema-v{stored} journal unchanged; an event, slot, or meta table does not match its supported physical shape"
+        )));
+    }
+
+    if outbox_shape == OutboxSchema::V2 {
+        validate_v2_outbox_owners(conn)?;
+    }
+    Ok(())
+}
+
+fn load_current_state_checked(conn: &Connection) -> StoreResult<FleetState> {
+    let replayed = load_state_from_conn_with_policy(conn, true)?;
+    let stored_raw: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let stored =
+        u32::try_from(stored_raw).map_err(|_| journal_schema_version_invalid(stored_raw))?;
+    if stored != JOURNAL_SCHEMA_VERSION {
+        return Ok(replayed);
+    }
+
+    let materialized = load_materialized_state(conn)?;
+    let mut projected = replayed;
+    // Drain and admission are deliberately meta-only controls. They are not
+    // events and must survive replay from the event log.
+    projected.drain_active = materialized.drain_active;
+    projected.drain_version = materialized.drain_version;
+    projected.admission_blocked = materialized.admission_blocked;
+    projected.admission_version = materialized.admission_version;
+
+    let mismatches = current_projection_mismatch_fields(&projected, &materialized);
+    if !mismatches.is_empty() {
+        if explicit_capacity_invalid_marker(conn)? {
+            // Migration can preserve a forensic snapshot that the stricter
+            // reducer cannot reconstruct. Keep that snapshot quarantined and
+            // block writes; never replace it with a replay projection.
+            return Ok(materialized);
+        }
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.materialized.replay.mismatch",
+        )
+        .with_remediation(format!(
+            "preserve the journal unchanged; materialized projection differs from accepted event history in {}",
+            mismatches.join(", ")
+        )));
+    }
+    Ok(projected)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayBaseline {
+    /// Number of historical rows included in the projection snapshot.
+    event_count: i64,
+    /// Historical log boundary included in the projection snapshot.
+    through_event_id: i64,
+    /// Number of event rows observed by the last committed current writer.
+    latest_event_count: i64,
+    /// Event ID observed by the last committed current writer.
+    latest_event_id: i64,
+    /// Digest of every baseline field except this digest itself.
+    integrity_checksum: String,
+    state: FleetState,
+}
+
+fn replay_baseline_error(detail: impl Into<String>) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.replay.baseline.invalid",
+    )
+    .with_remediation(format!(
+        "preserve the journal unchanged; committed replay baseline or event-tail watermark is invalid: {}",
+        detail.into()
+    ))
+}
+
+fn replay_baseline_integrity_checksum(baseline: &ReplayBaseline) -> StoreResult<String> {
+    let mut unsigned = baseline.clone();
+    unsigned.integrity_checksum.clear();
+    let encoded = serde_json::to_vec(&unsigned).map_err(|error| {
+        StoreError::new(
+            velnor_model::ExitClass::Operation,
+            "journal.replay.baseline.encode",
+        )
+        .with_remediation(error.to_string())
+    })?;
+    Ok(sha256_hex(&encoded))
+}
+
+fn decode_replay_baseline(conn: &Connection) -> StoreResult<Option<ReplayBaseline>> {
+    if !table_exists(conn, "meta")? {
+        return Ok(None);
+    }
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'replay_baseline'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let baseline: ReplayBaseline =
+        serde_json::from_str(&value).map_err(|error| replay_baseline_error(error.to_string()))?;
+    if replay_baseline_integrity_checksum(&baseline)? != baseline.integrity_checksum {
+        return Err(replay_baseline_error(
+            "baseline fields do not match their committed integrity checksum",
+        ));
+    }
+    if baseline.event_count < 0
+        || baseline.through_event_id < 0
+        || (baseline.event_count == 0) != (baseline.through_event_id == 0)
+        || baseline.latest_event_count < baseline.event_count
+        || baseline.latest_event_id < baseline.through_event_id
+        || (baseline.latest_event_count == 0) != (baseline.latest_event_id == 0)
+        || baseline.latest_event_count > baseline.latest_event_id
+        || !baseline.state.journal_writable
+        || baseline.state.drain_active
+        || baseline.state.drain_version != 0
+        || baseline.state.admission_blocked
+        || baseline.state.admission_version != 0
+    {
+        return Err(replay_baseline_error(
+            "invalid boundary or projection fields",
+        ));
+    }
+    validate_job_identity_uniqueness(&baseline.state.jobs)
+        .map_err(|error| replay_baseline_error(error.to_string()))?;
+    let (actual_count, actual_high_water): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM events WHERE id <= ?1",
+        [baseline.through_event_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if actual_count != baseline.event_count || actual_high_water != baseline.through_event_id {
+        return Err(replay_baseline_error(format!(
+            "committed event boundary expected {} rows through {}, found {actual_count} through {actual_high_water}",
+            baseline.event_count, baseline.through_event_id
+        )));
+    }
+    Ok(Some(baseline))
+}
+
+fn load_replay_baseline(conn: &Connection) -> StoreResult<Option<ReplayBaseline>> {
+    let Some(baseline) = decode_replay_baseline(conn)? else {
+        return Ok(None);
+    };
+    let (actual_count, actual_high_water): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM events",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if actual_count != baseline.latest_event_count || actual_high_water != baseline.latest_event_id
+    {
+        return Err(replay_baseline_error(format!(
+            "committed log tail expected {} rows through {}, found {actual_count} through {actual_high_water}",
+            baseline.latest_event_count, baseline.latest_event_id
+        )));
+    }
+    Ok(Some(baseline))
+}
+
+fn refresh_replay_baseline_tail(
+    conn: &Connection,
+    baseline: &mut ReplayBaseline,
+) -> StoreResult<()> {
+    let (prior_count, prior_high_water): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM events WHERE id <= ?1",
+        [baseline.latest_event_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if prior_count != baseline.latest_event_count || prior_high_water != baseline.latest_event_id {
+        return Err(replay_baseline_error(format!(
+            "previous writer boundary expected {} rows through {}, found {prior_count} through {prior_high_water}",
+            baseline.latest_event_count, baseline.latest_event_id
+        )));
+    }
+    let (latest_count, latest_id): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM events",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let inserted_count = latest_count - prior_count;
+    let inserted_id_span = latest_id - prior_high_water;
+    if inserted_count < 0 || inserted_id_span != inserted_count {
+        return Err(replay_baseline_error(format!(
+            "new event rows are not a contiguous append after {}, found {inserted_count} rows through {latest_id}",
+            baseline.latest_event_id
+        )));
+    }
+    baseline.latest_event_count = latest_count;
+    baseline.latest_event_id = latest_id;
+    baseline.integrity_checksum = replay_baseline_integrity_checksum(baseline)?;
+    Ok(())
+}
+
+fn explicit_capacity_invalid_marker(conn: &Connection) -> StoreResult<bool> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'capacity_invalid'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let mut meta = HashMap::new();
+    if let Some(value) = value {
+        meta.insert("capacity_invalid".to_owned(), value);
+    }
+    meta_bool(&meta, "capacity_invalid")
+}
+
+fn install_replay_baseline(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let (event_count, through_event_id): (i64, i64) = tx.query_row(
+        "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM events",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let mut state = load_materialized_state(tx)?;
+    let event_projection = load_state_from_conn(tx)?;
+    let materialized_pending = sorted_pending_outbox(&state);
+    let event_pending = sorted_pending_outbox(&event_projection);
+    if event_pending
+        .iter()
+        .any(|row| !materialized_pending.contains(row))
+    {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.materialized.replay.mismatch",
+        )
+        .with_remediation(
+            "preserve the journal unchanged; checksummed history has pending outbox evidence missing from the materialized snapshot",
+        ));
+    }
+    // Terminal and abandoned outbox rows are intentionally absent from the
+    // materialized table after their durable event. Keep those event-derived
+    // records in the snapshot so current-schema replay preserves the API's
+    // terminal evidence while the pending rows still come from the validated
+    // materialized projection.
+    let mut archived_outbox: Vec<_> = event_projection
+        .outbox
+        .into_iter()
+        .filter(|row| !row.is_pending())
+        .collect();
+    archived_outbox.extend(state.outbox);
+    archived_outbox.sort_by(|left, right| {
+        left.job_id
+            .0
+            .cmp(&right.job_id.0)
+            .then_with(|| left.generation.0.cmp(&right.generation.0))
+    });
+    state.outbox = archived_outbox;
+    // These latches are direct meta writes, so they are copied from the live
+    // snapshot on each comparison rather than frozen into the event baseline.
+    state.drain_active = false;
+    state.drain_version = 0;
+    state.admission_blocked = false;
+    state.admission_version = 0;
+    state.journal_writable = true;
+    let mut baseline = ReplayBaseline {
+        event_count,
+        through_event_id,
+        latest_event_count: event_count,
+        latest_event_id: through_event_id,
+        integrity_checksum: String::new(),
+        state,
+    };
+    baseline.integrity_checksum = replay_baseline_integrity_checksum(&baseline)?;
+    let value = serde_json::to_string(&baseline).map_err(|error| {
+        StoreError::new(
+            velnor_model::ExitClass::Operation,
+            "journal.replay.baseline.encode",
+        )
+        .with_remediation(error.to_string())
+    })?;
+    open_journal_write_gate(tx)?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES ('replay_baseline', ?1)",
+        [value],
+    )?;
+    close_journal_write_gate(tx)?;
+    Ok(())
+}
+
+fn current_projection_mismatch_fields(
+    replayed: &FleetState,
+    materialized: &FleetState,
+) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    if replayed.control_live != materialized.control_live {
+        fields.push("control_live");
+    }
+    if replayed.journal_writable != materialized.journal_writable {
+        fields.push("journal_writable");
+    }
+    if replayed.github_reachable != materialized.github_reachable {
+        fields.push("github_reachable");
+    }
+    if replayed.routing_valid != materialized.routing_valid {
+        fields.push("routing_valid");
+    }
+    if replayed.runner_group_valid != materialized.runner_group_valid {
+        fields.push("runner_group_valid");
+    }
+    if replayed.drain_active != materialized.drain_active
+        || replayed.drain_version != materialized.drain_version
+    {
+        fields.push("drain");
+    }
+    if replayed.admission_blocked != materialized.admission_blocked
+        || replayed.admission_version != materialized.admission_version
+    {
+        fields.push("admission");
+    }
+    if replayed.desired_ready != materialized.desired_ready
+        || replayed.capacity_declared != materialized.capacity_declared
+    {
+        fields.push("capacity");
+    }
+    if replayed.canary != materialized.canary {
+        fields.push("canary");
+    }
+    if replayed.package_generation != materialized.package_generation
+        || replayed.package_apt_version != materialized.package_apt_version
+    {
+        fields.push("package");
+    }
+    if replayed.execution_backend != materialized.execution_backend {
+        fields.push("execution_backend");
+    }
+    if replayed.capacity_invalid != materialized.capacity_invalid {
+        fields.push("capacity_invalid");
+    }
+    if replayed.slots != materialized.slots {
+        fields.push("slots");
+    }
+    if replayed.jobs != materialized.jobs {
+        fields.push("jobs");
+    }
+    if sorted_pending_outbox(replayed) != sorted_pending_outbox(materialized) {
+        fields.push("outbox");
+    }
+    fields
+}
+
+fn sorted_pending_outbox(state: &FleetState) -> Vec<OutboxRecord> {
+    let mut pending: Vec<_> = state
+        .outbox
+        .iter()
+        .filter(|row| row.is_pending())
+        .cloned()
+        .collect();
+    pending.sort_by(|left, right| {
+        left.job_id
+            .0
+            .cmp(&right.job_id.0)
+            .then_with(|| left.generation.0.cmp(&right.generation.0))
+    });
+    pending
+}
+
 fn load_state_from_conn(conn: &Connection) -> StoreResult<FleetState> {
+    load_state_from_conn_with_policy(conn, false)
+}
+
+fn load_state_from_conn_with_policy(
+    conn: &Connection,
+    reject_current_replay_events: bool,
+) -> StoreResult<FleetState> {
     // Journal open succeeded, so the file is writable unless a later apply
     // fails; recovery treats an opened journal as writable.
-    let mut state = FleetState {
-        journal_writable: true,
-        ..FleetState::default()
+    let materialized = load_materialized_state(conn)?;
+    let stored_raw: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let stored =
+        u32::try_from(stored_raw).map_err(|_| journal_schema_version_invalid(stored_raw))?;
+    let replay_baseline = if stored == JOURNAL_SCHEMA_VERSION {
+        let baseline = load_replay_baseline(conn)?;
+        if reject_current_replay_events && baseline.is_none() {
+            return Err(replay_baseline_error(
+                "current-schema journal has no committed event-tail watermark",
+            ));
+        }
+        baseline
+    } else {
+        None
     };
-    let mut stmt = conn.prepare("SELECT payload, checksum FROM events ORDER BY id ASC")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    let has_recorded_unix = table_has_column(conn, "events", "recorded_unix")?;
+    let mut state = if has_recorded_unix {
+        let mut state = replay_baseline
+            .as_ref()
+            .map(|baseline| baseline.state.clone())
+            .unwrap_or(FleetState {
+                journal_writable: true,
+                ..FleetState::default()
+            });
+        let mut expected_current_id = replay_baseline
+            .as_ref()
+            .map_or(1, |baseline| baseline.through_event_id.saturating_add(1));
+        let mut stmt = conn.prepare(
+            "SELECT id, generation, kind, payload, checksum, recorded_unix
+             FROM events ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, generation, kind, payload, checksum, recorded_unix) = row?;
+            if reject_current_replay_events && stored == JOURNAL_SCHEMA_VERSION && id <= 0 {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.event.id.invalid",
+                )
+                .with_remediation(
+                    "preserve the journal unchanged; current event row IDs must be positive",
+                ));
+            }
+            if recorded_unix < 0 {
+                return Err(invalid_materialized(
+                    "event recorded_unix",
+                    &recorded_unix.to_string(),
+                ));
+            }
+            let expected_checksum = if stored >= 14 {
+                event_row_checksum(id, generation, &kind, &payload, recorded_unix)?
+            } else {
+                sha256_hex(payload.as_bytes())
+            };
+            if expected_checksum != checksum {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.checksum.mismatch",
+                )
+                .with_remediation("the event log failed integrity verification"));
+            }
+            let recorded_unix = i64_u64(recorded_unix, "event recorded_unix")?;
+            let event = decode_current_event(&payload)?;
+            if kind != event_kind(&event)
+                || i64_u64(generation, "event generation")? != event_generation(&event).0
+            {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.event.generation.mismatch",
+                ));
+            }
+            if replay_baseline
+                .as_ref()
+                .is_some_and(|baseline| id <= baseline.through_event_id)
+            {
+                continue;
+            }
+            if reject_current_replay_events && stored == JOURNAL_SCHEMA_VERSION {
+                if id != expected_current_id {
+                    return Err(StoreError::new(
+                        velnor_model::ExitClass::Conflict,
+                        "journal.event.sequence.gap",
+                    )
+                    .with_remediation(format!(
+                        "preserve the journal unchanged; expected current event row {expected_current_id}, found {id}"
+                    )));
+                }
+                expected_current_id = expected_current_id.saturating_add(1);
+            }
+            let outcome = reduce_at(state, event, recorded_unix);
+            if reject_current_replay_events && stored == JOURNAL_SCHEMA_VERSION && outcome.rejected
+            {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.event.replay.rejected",
+                )
+                .with_remediation(format!(
+                    "preserve the journal unchanged; current-schema event at row {id} was rejected by the reducer"
+                )));
+            }
+            state = outcome.state;
+        }
+        state
+    } else {
+        // Only setup/migration can reach this path. Legacy event rows did not
+        // persist reducer time; reconstruct the minimum deterministic times
+        // from their materialized snapshot and committed timeout event. The
+        // v13 migration writes these values durably before the journal opens
+        // for normal use.
+        replay_legacy_events(conn, &materialized)?.1
+    };
+    state.capacity_invalid |= materialized.capacity_invalid;
+    state.capacity_invalid |= state_capacity_invalid(&state) || legacy_slots_schema(conn)?;
+    Ok(state)
+}
+
+fn decode_current_event(payload: &str) -> StoreResult<Event> {
+    serde_json::from_str(payload).map_err(|error| {
+        StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.unknown")
+            .with_remediation(format!(
+                "event could not be decoded by schema version {JOURNAL_SCHEMA_VERSION}; preserve the journal and reopen it with the binary that wrote it: {error}"
+            ))
+    })
+}
+
+/// Deterministically replay a pre-v13 history and produce the timestamp each
+/// event must receive during v13 migration. The old schema omitted reducer
+/// time. Pending completion and current heartbeat timestamps survive in the
+/// materialized snapshot; a committed `CompletionUnresolvable` event itself
+/// is the historical timeout proof, so its replay time is the recorded row's
+/// deadline rather than today's wall clock.
+fn replay_legacy_events(
+    conn: &Connection,
+    materialized: &FleetState,
+) -> StoreResult<(HashMap<i64, u64>, FleetState)> {
+    let mut statement = conn.prepare("SELECT id, payload, checksum FROM events ORDER BY id ASC")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
     })?;
+    let mut decoded = Vec::new();
     for row in rows {
-        let (payload, checksum) = row?;
+        let (id, payload, checksum) = row?;
         if sha256_hex(payload.as_bytes()) != checksum {
             return Err(StoreError::new(
                 velnor_model::ExitClass::Conflict,
                 "journal.checksum.mismatch",
             )
-            .with_remediation("the event log failed integrity verification"));
+            .with_remediation(
+                "the legacy event log failed integrity verification before timestamp migration",
+            ));
         }
-        // The version gate in `open` already refused a journal newer than this
-        // binary and stamped the current version onto an older one, so every
-        // event in a journal we accepted must decode. An envelope that does
-        // not is a writer that changed the vocabulary without bumping
-        // `JOURNAL_SCHEMA_VERSION`; skipping it would silently drop terminal
-        // state and re-drive a completion that was already resolved.
-        let event: Event = serde_json::from_str(&payload).map_err(|error| {
-            StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.unknown")
-                .with_remediation(format!(
-                    "event could not be decoded by schema version {JOURNAL_SCHEMA_VERSION}; preserve the journal and reopen it with the binary that wrote it: {error}"
-                ))
-        })?;
-        let outcome = reduce(state, event);
-        state = outcome.state;
+        decoded.push((id, decode_current_event(&payload)?));
     }
-    state.capacity_invalid = state_capacity_invalid(&state) || legacy_slots_schema(conn)?;
-    Ok(state)
+    drop(statement);
+
+    let mut latest_heartbeat = HashMap::<(String, u64), i64>::new();
+    let mut accepted_by_job = HashMap::<(String, u64), u64>::new();
+    for (id, event) in &decoded {
+        match event {
+            Event::SlotHeartbeat {
+                slot_id,
+                generation,
+                ..
+            } => {
+                latest_heartbeat.insert((slot_id.0.clone(), generation.0), *id);
+            }
+            Event::JobOwned {
+                job_id,
+                generation,
+                accepted_unix,
+                ..
+            } => {
+                accepted_by_job.insert((job_id.0.clone(), generation.0), *accepted_unix);
+            }
+            _ => {}
+        }
+    }
+
+    let mut recorded_by_id = HashMap::with_capacity(decoded.len());
+    let mut state = FleetState {
+        journal_writable: true,
+        ..FleetState::default()
+    };
+    for (id, event) in decoded {
+        let recorded_unix = match &event {
+            Event::SlotHeartbeat {
+                slot_id,
+                generation,
+                ..
+            } if latest_heartbeat.get(&(slot_id.0.clone(), generation.0)) == Some(&id) => {
+                materialized
+                    .slots
+                    .iter()
+                    .find(|slot| slot.slot_id == *slot_id && slot.generation == *generation)
+                    .map(|slot| slot.heartbeat_unix)
+                    .unwrap_or(0)
+            }
+            Event::CompletionIntended {
+                job_id, generation, ..
+            } => materialized
+                .outbox
+                .iter()
+                .find(|row| row.job_id == *job_id && row.generation == *generation)
+                .map(|row| row.created_unix)
+                // A terminal history no longer has its outbox row, and the
+                // pre-v13 event did not record when the intent was written.
+                // Use the durable accepted timestamp as a stable lower bound;
+                // never substitute migration/replay wall clock. The paired
+                // timeout event below then receives the derived deadline.
+                .or_else(|| {
+                    accepted_by_job
+                        .get(&(job_id.0.clone(), generation.0))
+                        .copied()
+                })
+                .unwrap_or(0),
+            Event::CompletionUnresolvable {
+                job_id, generation, ..
+            } => state
+                .outbox
+                .iter()
+                .find(|row| row.job_id == *job_id && row.generation == *generation)
+                .map(|row| row.deadline_unix)
+                .unwrap_or(0),
+            _ => 0,
+        };
+        recorded_by_id.insert(id, recorded_unix);
+        state = reduce_at(state, event, recorded_unix).state;
+    }
+    state.capacity_invalid |= materialized.capacity_invalid;
+    state.capacity_invalid |= state_capacity_invalid(&state) || legacy_slots_schema(conn)?;
+    Ok((recorded_by_id, state))
+}
+
+fn materialized_column_projection(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    historical_default: &str,
+) -> StoreResult<String> {
+    if table_has_column(conn, table, column)? {
+        Ok(column.to_owned())
+    } else {
+        Ok(format!("{historical_default} AS {column}"))
+    }
 }
 
 fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
@@ -2242,12 +4511,30 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
     state.capacity_invalid =
         state.capacity_invalid || state_capacity_invalid(&state) || legacy_slots_schema(conn)?;
 
-    let mut statement = conn.prepare(
+    // Materialized validation also runs before WAL setup on historical
+    // schemas. Project fields absent from those supported physical shapes to
+    // their migration defaults so every stored numeric, bool, phase, and JSON
+    // value is validated before the file can be mutated.
+    let terminal_conclusion =
+        materialized_column_projection(conn, "jobs", "terminal_conclusion", "NULL")?;
+    let provisional = materialized_column_projection(conn, "jobs", "provisional", "0")?;
+    let plan_id = materialized_column_projection(conn, "jobs", "plan_id", "''")?;
+    let run_service_url = materialized_column_projection(conn, "jobs", "run_service_url", "''")?;
+    let probe_attempts = materialized_column_projection(conn, "jobs", "probe_attempts", "0")?;
+    let probe_deadline_unix =
+        materialized_column_projection(conn, "jobs", "probe_deadline_unix", "0")?;
+    let runner_request_id =
+        materialized_column_projection(conn, "jobs", "runner_request_id", "''")?;
+    let permit_lease = materialized_column_projection(conn, "jobs", "permit_lease", "NULL")?;
+    let loss_flag_projection =
+        materialized_column_projection(conn, "jobs", "acquisition_loss_unproven", "0")?;
+    let mut statement = conn.prepare(&format!(
         "SELECT job_id, slot_id, generation, attempt, worker, phase, accepted_unix,
-                terminal_conclusion, provisional, plan_id, run_service_url,
-                probe_attempts, probe_deadline_unix
-         FROM jobs ORDER BY rowid",
-    )?;
+                {terminal_conclusion}, {provisional}, {plan_id}, {run_service_url},
+                {probe_attempts}, {probe_deadline_unix}, {runner_request_id}, {permit_lease},
+                {loss_flag_projection}
+         FROM jobs ORDER BY rowid"
+    ))?;
     let rows = statement.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -2258,11 +4545,14 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             row.get::<_, String>(5)?,
             row.get::<_, i64>(6)?,
             row.get::<_, Option<String>>(7)?,
-            row.get::<_, i64>(8)? != 0,
+            row.get::<_, i64>(8)?,
             row.get::<_, String>(9)?,
             row.get::<_, String>(10)?,
             row.get::<_, i64>(11)?,
             row.get::<_, i64>(12)?,
+            row.get::<_, String>(13)?,
+            row.get::<_, Option<String>>(14)?,
+            row.get::<_, i64>(15)?,
         ))
     })?;
     for row in rows {
@@ -2280,7 +4570,16 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             run_service_url,
             probe_attempts,
             probe_deadline_unix,
+            runner_request_id,
+            permit_lease,
+            acquisition_loss_unproven,
         ) = row?;
+        let permit_lease = permit_lease
+            .map(|value| {
+                serde_json::from_str(&value)
+                    .map_err(|error| invalid_materialized("job permit lease", &error.to_string()))
+            })
+            .transpose()?;
         state.jobs.push(JobRecord {
             job_id: JobId(job_id),
             slot_id: SlotId(slot_id),
@@ -2290,19 +4589,39 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             phase: parse_job_phase(&phase)?,
             accepted_unix: i64_u64(accepted_unix, "job accepted_unix")?,
             terminal_conclusion,
-            provisional,
+            provisional: sqlite_bool(provisional, "job provisional")?,
             plan_id,
             run_service_url,
+            runner_request_id,
+            permit_lease,
+            acquisition_loss_unproven: sqlite_bool(
+                acquisition_loss_unproven,
+                "job acquisition_loss_unproven",
+            )?,
             probe_attempts: i64_u32(probe_attempts, "job probe_attempts")?,
             probe_deadline_unix: i64_u64(probe_deadline_unix, "job probe_deadline_unix")?,
         });
     }
+    validate_job_identity_uniqueness(&state.jobs)?;
 
-    let mut statement = conn.prepare(
-        "SELECT job_id, slot_id, generation, payload_sha256, intended, send_started,
-                remote_acked, created_unix, attempts, deadline_unix, permanent, abandoned
-         FROM outbox ORDER BY rowid",
-    )?;
+    let outbox_slot_id = if table_has_column(conn, "outbox", "slot_id")? {
+        "slot_id".to_owned()
+    } else {
+        "(SELECT jobs.slot_id FROM jobs
+          WHERE jobs.job_id = outbox.job_id AND jobs.generation = outbox.generation) AS slot_id"
+            .to_owned()
+    };
+    let outbox_attempts = materialized_column_projection(conn, "outbox", "attempts", "0")?;
+    let outbox_deadline_unix =
+        materialized_column_projection(conn, "outbox", "deadline_unix", "0")?;
+    let outbox_permanent = materialized_column_projection(conn, "outbox", "permanent", "0")?;
+    let outbox_abandoned = materialized_column_projection(conn, "outbox", "abandoned", "0")?;
+    let mut statement = conn.prepare(&format!(
+        "SELECT job_id, {outbox_slot_id}, generation, payload_sha256, intended, send_started,
+                remote_acked, created_unix, {outbox_attempts}, {outbox_deadline_unix},
+                {outbox_permanent}, {outbox_abandoned}
+         FROM outbox ORDER BY rowid"
+    ))?;
     let rows = statement.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -2429,6 +4748,21 @@ fn i64_u64(value: i64, field: &str) -> StoreResult<u64> {
     u64::try_from(value).map_err(|_| invalid_materialized(field, &value.to_string()))
 }
 
+fn generation_to_sql(generation: Generation) -> StoreResult<i64> {
+    i64::try_from(generation.0).map_err(|_| {
+        StoreError::new(velnor_model::ExitClass::Usage, "journal.generation.range")
+            .with_remediation("journal generations must fit SQLite's signed 64-bit INTEGER range")
+    })
+}
+
+fn timestamp_to_sql(timestamp: u64, field: &str) -> StoreResult<i64> {
+    i64::try_from(timestamp).map_err(|_| {
+        StoreError::new(velnor_model::ExitClass::Usage, "journal.timestamp.range").with_remediation(
+            format!("journal timestamp {field} must fit SQLite's signed 64-bit INTEGER range"),
+        )
+    })
+}
+
 fn invalid_materialized(field: &str, value: &str) -> StoreError {
     StoreError::new(
         velnor_model::ExitClass::Conflict,
@@ -2449,12 +4783,82 @@ fn outbox_owner_unknown(job_id: &str, generation: i64) -> StoreError {
     ))
 }
 
+fn open_journal_write_gate(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    // A long-lived Journal handle may outlive another connection that changed
+    // the schema. Validate the complete FK/trigger boundary again under this
+    // IMMEDIATE write lock, before event, materialized, or meta writes begin.
+    validate_schema_catalog_before_migration(tx, JOURNAL_SCHEMA_VERSION)?;
+    if !journal_write_gate_schema_matches(tx)? || journal_write_gate_has_open_row(tx)? {
+        return Err(journal_write_gate_schema_mismatch(JOURNAL_SCHEMA_VERSION));
+    }
+    let inserted = tx.execute("INSERT INTO journal_write_gate (id) VALUES (1)", [])?;
+    if inserted != 1 || !journal_write_gate_has_open_row(tx)? {
+        return Err(journal_write_gate_schema_mismatch(JOURNAL_SCHEMA_VERSION));
+    }
+    Ok(())
+}
+
+fn close_journal_write_gate(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let deleted = tx.execute("DELETE FROM journal_write_gate WHERE id = 1", [])?;
+    if deleted != 1 || journal_write_gate_has_open_row(tx)? {
+        return Err(journal_write_gate_schema_mismatch(JOURNAL_SCHEMA_VERSION));
+    }
+    Ok(())
+}
+
 fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreResult<()> {
+    // Reject invalid identifiers and out-of-range integers before deleting
+    // any current materialized evidence. The surrounding transaction would
+    // roll back too, but prevalidation keeps the write path structurally safe
+    // and prevents casts or partial row rewrites from ever beginning.
+    validate_job_identity_uniqueness(&state.jobs)?;
+    let stored_raw: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let stored =
+        u32::try_from(stored_raw).map_err(|_| journal_schema_version_invalid(stored_raw))?;
+    let replay_baseline = decode_replay_baseline(tx)?;
+    if stored == JOURNAL_SCHEMA_VERSION && replay_baseline.is_none() {
+        return Err(replay_baseline_error(
+            "current-schema write has no committed event-tail watermark",
+        ));
+    }
+    let slot_sql = state
+        .slots
+        .iter()
+        .map(|slot| {
+            Ok((
+                generation_to_sql(slot.generation)?,
+                timestamp_to_sql(slot.heartbeat_unix, "slot heartbeat_unix")?,
+            ))
+        })
+        .collect::<StoreResult<Vec<_>>>()?;
+    let job_sql = state
+        .jobs
+        .iter()
+        .map(|job| {
+            Ok((
+                generation_to_sql(job.generation)?,
+                timestamp_to_sql(job.accepted_unix, "job accepted_unix")?,
+                timestamp_to_sql(job.probe_deadline_unix, "job probe_deadline_unix")?,
+            ))
+        })
+        .collect::<StoreResult<Vec<_>>>()?;
+    let outbox_sql = state
+        .outbox
+        .iter()
+        .filter(|row| row.is_pending())
+        .map(|row| {
+            Ok((
+                generation_to_sql(row.generation)?,
+                timestamp_to_sql(row.created_unix, "outbox created_unix")?,
+                timestamp_to_sql(row.deadline_unix, "outbox deadline_unix")?,
+            ))
+        })
+        .collect::<StoreResult<Vec<_>>>()?;
     tx.execute("DELETE FROM slots", [])?;
     tx.execute("DELETE FROM jobs", [])?;
     tx.execute("DELETE FROM outbox", [])?;
     tx.execute("DELETE FROM meta", [])?;
-    for slot in &state.slots {
+    for (slot, (generation, heartbeat_unix)) in state.slots.iter().zip(slot_sql) {
         tx.execute(
             "INSERT INTO slots (
                 slot_id, generation, phase, permit_held, routing_valid, session_live,
@@ -2462,7 +4866,7 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 slot.slot_id.0,
-                slot.generation.0 as i64,
+                generation,
                 slot.phase.as_str(),
                 slot.permit_held as i64,
                 slot.routing_valid as i64,
@@ -2470,41 +4874,54 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
                 slot.executor_proven as i64,
                 slot.registered as i64,
                 slot.pid.map(i64::from),
-                slot.heartbeat_unix as i64,
+                heartbeat_unix,
             ],
         )?;
     }
-    for job in &state.jobs {
+    for (job, (generation, accepted_unix, probe_deadline_unix)) in state.jobs.iter().zip(job_sql) {
         tx.execute(
             "INSERT INTO jobs (
                 job_id, slot_id, generation, attempt, worker, phase, accepted_unix,
                 terminal_conclusion, provisional, plan_id, run_service_url,
-                probe_attempts, probe_deadline_unix
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                probe_attempts, probe_deadline_unix, runner_request_id, permit_lease,
+                acquisition_loss_unproven
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 job.job_id.0,
                 job.slot_id.0,
-                job.generation.0 as i64,
+                generation,
                 job.attempt as i64,
                 job.worker,
                 job.phase.as_str(),
-                job.accepted_unix as i64,
+                accepted_unix,
                 job.terminal_conclusion.as_deref(),
                 job.provisional as i64,
                 job.plan_id,
                 job.run_service_url,
                 job.probe_attempts as i64,
-                job.probe_deadline_unix as i64,
+                probe_deadline_unix,
+                job.runner_request_id,
+                job.permit_lease
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(|error| {
+                        StoreError::new(
+                            velnor_model::ExitClass::Operation,
+                            "journal.materialized.serialize",
+                        )
+                        .with_remediation(format!("could not serialize permit lease: {error}"))
+                    })?,
+                job.acquisition_loss_unproven as i64,
             ],
         )?;
     }
-    for row in &state.outbox {
-        // Acknowledged and abandoned rows are both terminal: the immutable
-        // event log keeps their evidence, and dropping them here is what lets
-        // GitHub redeliver the same job id on a later attempt.
-        if row.remote_acked || row.abandoned {
-            continue;
-        }
+    for (row, (generation, created_unix, deadline_unix)) in state
+        .outbox
+        .iter()
+        .filter(|row| row.is_pending())
+        .zip(outbox_sql)
+    {
         tx.execute(
             "INSERT INTO outbox (
                 job_id, slot_id, generation, payload_sha256, intended, send_started,
@@ -2513,14 +4930,14 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
             params![
                 row.job_id.0,
                 row.slot_id.0,
-                row.generation.0 as i64,
+                generation,
                 row.payload_sha256,
                 row.intended as i64,
                 row.send_started as i64,
                 row.remote_acked as i64,
-                row.created_unix as i64,
+                created_unix,
                 row.attempts as i64,
-                row.deadline_unix as i64,
+                deadline_unix,
                 row.permanent as i64,
                 row.abandoned as i64,
             ],
@@ -2572,6 +4989,20 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
         tx.execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)",
             params![key, value],
+        )?;
+    }
+    if let Some(mut baseline) = replay_baseline {
+        refresh_replay_baseline_tail(tx, &mut baseline)?;
+        let value = serde_json::to_string(&baseline).map_err(|error| {
+            StoreError::new(
+                velnor_model::ExitClass::Operation,
+                "journal.replay.baseline.encode",
+            )
+            .with_remediation(error.to_string())
+        })?;
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('replay_baseline', ?1)",
+            [value],
         )?;
     }
     Ok(())
@@ -2627,6 +5058,11 @@ fn outbox_schema_shape(conn: &Connection) -> StoreResult<OutboxSchema> {
         .collect::<Result<Vec<_>, _>>()?;
     if columns.is_empty() {
         return Ok(OutboxSchema::Missing);
+    }
+    if table_definition_has_explicit_collation(conn, "outbox")?
+        || !table_indexes_use_binary_collation(conn, "outbox")?
+    {
+        return Err(outbox_schema_invalid("collation"));
     }
 
     let v4_columns = [
@@ -2733,13 +5169,20 @@ fn outbox_schema_mismatch(version: u32, shape: OutboxSchema) -> StoreError {
         ))
 }
 
+fn jobs_column_schema_mismatch(version: u32, column: &str) -> StoreError {
+    StoreError::new(velnor_model::ExitClass::Conflict, "journal.schema.mismatch")
+        .with_remediation(format!(
+            "preserve the journal unchanged: PRAGMA user_version={version} is incompatible with jobs column {column}"
+        ))
+}
+
 /// Upgrade a v2 materialized outbox without inventing ownership. Every row is
 /// backfilled from exactly one matching job and exactly one matching slot into
 /// a rebuilt table whose `slot_id` is NOT NULL. Owner mismatches fail before
 /// any schema mutation; the transaction is retryable if the process dies
 /// mid-upgrade.
-fn migrate_v2_to_v3(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
-    let inconsistent_owner: Option<(String, i64)> = tx
+fn validate_v2_outbox_owners(conn: &Connection) -> StoreResult<()> {
+    let inconsistent_owner: Option<(String, i64)> = conn
         .query_row(
             "SELECT outbox.job_id, outbox.generation
              FROM outbox
@@ -2762,6 +5205,11 @@ fn migrate_v2_to_v3(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
     if let Some((job_id, generation)) = inconsistent_owner {
         return Err(outbox_owner_inconsistent(&job_id, generation));
     }
+    Ok(())
+}
+
+fn migrate_v2_to_v3(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    validate_v2_outbox_owners(tx)?;
     tx.execute_batch(
         "CREATE TABLE outbox_v3 (
              job_id TEXT PRIMARY KEY,
@@ -2823,10 +5271,21 @@ fn migrate_v3_to_v4(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
              ALTER TABLE outbox ADD COLUMN abandoned INTEGER NOT NULL DEFAULT 0;",
         )?;
     }
-    tx.execute(
-        "UPDATE outbox SET deadline_unix = created_unix + ?1 WHERE deadline_unix = 0",
-        params![COMPLETION_RESOLUTION_SECONDS as i64],
+    let mut statement = tx.prepare(
+        "SELECT job_id, created_unix FROM outbox WHERE deadline_unix = 0 ORDER BY job_id",
     )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let deadlines = rows.collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for (job_id, created_unix) in deadlines {
+        let deadline_unix = completion_deadline_from_created(created_unix, &job_id)?;
+        tx.execute(
+            "UPDATE outbox SET deadline_unix = ?1 WHERE job_id = ?2 AND deadline_unix = 0",
+            params![deadline_unix, job_id],
+        )?;
+    }
     if !table_has_column(tx, "jobs", "terminal_conclusion")? {
         tx.execute_batch("ALTER TABLE jobs ADD COLUMN terminal_conclusion TEXT;")?;
     }
@@ -2928,6 +5387,648 @@ fn migrate_v7_to_v8(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
     Ok(())
 }
 
+/// v9 preserves the original runner request ID after acquisition retargets a
+/// provisional row to the run-service job ID. This is the durable permit
+/// correlation key used by restart recovery and redelivery handling.
+fn migrate_v8_to_v9(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) >= 9 {
+        return Ok(());
+    }
+
+    // Verify integrity before changing either the jobs shape or the version
+    // stamp. Decoding JSON alone is not enough: valid but modified payloads
+    // must not become the basis for durable request/permit correlation.
+    let mut statement = tx.prepare("SELECT payload, checksum FROM events ORDER BY id")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut verified_payloads = Vec::new();
+    for row in rows {
+        let (payload, checksum) = row?;
+        if sha256_hex(payload.as_bytes()) != checksum {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.checksum.mismatch",
+            )
+            .with_remediation(
+                "preserve the schema-v8 journal unchanged; event integrity verification failed before the v9 migration",
+            ));
+        }
+        verified_payloads.push(payload);
+    }
+    drop(statement);
+
+    if !table_has_column(tx, "jobs", "runner_request_id")? {
+        tx.execute_batch(
+            "ALTER TABLE jobs ADD COLUMN runner_request_id TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
+
+    // Reconstruct correlation from the immutable acquisition events. At the
+    // intent boundary the provisional job ID is the runner request ID; the
+    // resolve event records the acquired job ID that replaced it.
+    let mut request_ids = HashMap::<(String, u64), String>::new();
+    for payload in verified_payloads {
+        let event = decode_event_for_schema(&payload, 8)?;
+        match event {
+            Event::JobAcquisitionIntended {
+                job_id, generation, ..
+            } => {
+                request_ids.insert((job_id.0.clone(), generation.0), job_id.0);
+            }
+            Event::JobAcquisitionResolved {
+                provisional_job_id,
+                acquired_job_id,
+                generation,
+                ..
+            } => {
+                if provisional_job_id == acquired_job_id {
+                    // v8's self-to-self rebuild event did not store the
+                    // original runner request ID. Leave the materialized
+                    // value empty instead of guessing from the acquired ID.
+                    request_ids.remove(&(provisional_job_id.0, generation.0));
+                    continue;
+                }
+                let request_id = request_ids
+                    .remove(&(provisional_job_id.0.clone(), generation.0))
+                    .unwrap_or_else(|| provisional_job_id.0.clone());
+                request_ids.insert((acquired_job_id.0, generation.0), request_id);
+            }
+            Event::JobAcquisitionLost {
+                job_id,
+                generation,
+                proof,
+                ..
+            } => {
+                if proof.is_some() {
+                    request_ids.remove(&(job_id.0, generation.0));
+                }
+            }
+            _ => {}
+        }
+    }
+    for ((job_id, generation), request_id) in request_ids {
+        tx.execute(
+            "UPDATE jobs SET runner_request_id = ?1
+             WHERE job_id = ?2 AND generation = ?3 AND runner_request_id = ''",
+            params![
+                request_id,
+                job_id,
+                generation_to_sql(Generation(generation))?
+            ],
+        )?;
+    }
+    tx.pragma_update(None, "user_version", 9u32)?;
+    Ok(())
+}
+
+/// v10 adds the atomic, probeable event used when repairing a confirmed
+/// run-service acquisition whose pre-call intent is absent. Older writers do
+/// not know this event vocabulary, so stamp before they can append to the log.
+/// Verify existing checksums before changing the compatibility stamp.
+fn migrate_v9_to_v10(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) >= 10 {
+        return Ok(());
+    }
+
+    let mut statement = tx.prepare("SELECT payload, checksum FROM events ORDER BY id")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (payload, checksum) = row?;
+        if sha256_hex(payload.as_bytes()) != checksum {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.checksum.mismatch",
+            )
+            .with_remediation(
+                "preserve the schema-v9 journal unchanged; event integrity verification failed before the v10 vocabulary stamp",
+            ));
+        }
+        decode_event_for_schema(&payload, 9)?;
+    }
+    drop(statement);
+
+    tx.pragma_update(None, "user_version", 10u32)?;
+    Ok(())
+}
+
+/// v11 binds provisional acquisition rows to the exact native permit lease.
+/// The event vocabulary is also bumped so older writers cannot ignore those
+/// fields and rewrite the materialized rows without them.
+fn migrate_v10_to_v11(tx: &rusqlite::Transaction<'_>, initially_fresh: bool) -> StoreResult<()> {
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) >= 11 {
+        return Ok(());
+    }
+    if stored != 10 {
+        return Err(jobs_schema_mismatch(u32::try_from(stored).unwrap_or(0)));
+    }
+
+    let mut statement = tx.prepare("SELECT payload, checksum FROM events ORDER BY id")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (payload, checksum) = row?;
+        if sha256_hex(payload.as_bytes()) != checksum {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.checksum.mismatch",
+            )
+            .with_remediation(
+                "preserve the schema-v10 journal unchanged; event integrity verification failed before the v11 migration",
+            ));
+        }
+        decode_event_for_schema(&payload, 10)?;
+    }
+    drop(statement);
+
+    if table_has_column(tx, "jobs", "permit_lease")? {
+        if !initially_fresh || !jobs_v11_shape_matches(tx)? {
+            return Err(jobs_schema_mismatch(10));
+        }
+    } else {
+        if !jobs_v10_shape_matches(tx)? {
+            return Err(jobs_schema_mismatch(10));
+        }
+        tx.execute_batch("ALTER TABLE jobs ADD COLUMN permit_lease TEXT;")?;
+    }
+
+    tx.pragma_update(None, "user_version", 11u32)?;
+    Ok(())
+}
+
+/// v12 requires typed run-service loss proof bound to the exact released
+/// native permit lease. A v11 writer could otherwise append a proofless event
+/// that looks terminal by its reason string and frees occupied capacity.
+fn migrate_v11_to_v12(tx: &rusqlite::Transaction<'_>, source_version: u32) -> StoreResult<()> {
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) >= 12 {
+        return Ok(());
+    }
+    if stored != 11 {
+        return Err(jobs_schema_mismatch(u32::try_from(stored).unwrap_or(0)));
+    }
+    if !jobs_v11_shape_matches(tx)? {
+        return Err(jobs_schema_mismatch(11));
+    }
+
+    let mut statement = tx.prepare("SELECT payload, checksum FROM events ORDER BY id")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (payload, checksum) = row?;
+        if sha256_hex(payload.as_bytes()) != checksum {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.checksum.mismatch",
+            )
+            .with_remediation(
+                "preserve the schema-v11 journal unchanged; event integrity verification failed before the v12 migration",
+            ));
+        }
+        decode_event_for_schema(&payload, 11)?;
+    }
+    drop(statement);
+
+    let current_materialized = load_materialized_state(tx)?;
+    // Direct v11 upgrades must prove the existing materialized owner identity
+    // against replay before any rewrite. Older source schemas run their
+    // version-specific migrations first; those historical transformations
+    // preserve their own materialized projections and are not reinterpreted as
+    // if they had been authored by the v11 reducer.
+    let mut replayed = if source_version == 11 {
+        let mut replayed = load_state_from_conn(tx)?;
+        ensure_v11_replay_preserves_materialized_evidence(&current_materialized, &replayed)?;
+        preserve_v11_outbox_timestamps(&current_materialized, &mut replayed)?;
+        Some(replayed)
+    } else {
+        None
+    };
+
+    // Retain whether replay crosses a pre-v12 reason-only loss event. The
+    // added bit prevents a later `JobOwned`/`JobWorkerLost` pair in the old
+    // event history from laundering that ambiguity into a normal owner and
+    // freeing its permit.
+    tx.execute_batch(
+        "ALTER TABLE jobs ADD COLUMN acquisition_loss_unproven INTEGER NOT NULL DEFAULT 0;",
+    )?;
+    // Earlier self-to-self rebuilds could lose the broker request identity,
+    // and old reducers could materialize ownership without a plan. Empty
+    // correlation/endpoint data is unknown, not a safe default; a non-
+    // provisional row also needs a plan to prove acquired ownership. Keep
+    // these rows and their exact permits as occupied evidence through the
+    // vocabulary migration.
+    tx.execute(
+        "UPDATE jobs
+         SET acquisition_loss_unproven = 1
+         WHERE runner_request_id = ''
+            OR run_service_url = ''
+            OR (provisional = 0 AND plan_id = '')",
+        [],
+    )?;
+
+    // v11's reason-only loss events previously removed provisional rows.
+    // Under v12 they are ambiguous and must retain their permit correlation.
+    // Rebuild materialization from the now-safe reducer before stamping v12,
+    // preserving the meta-only drain/admission latches that do not appear in
+    // the event log.
+    if current_materialized.capacity_invalid
+        || replayed
+            .as_ref()
+            .is_some_and(|state| state.capacity_invalid)
+    {
+        // Preserve the current rows as forensic evidence. Replay may expose
+        // invalid capacity that the old snapshot did not record; latch the
+        // fail-closed marker without rewriting any materialized rows.
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('capacity_invalid', '1')
+                 ON CONFLICT(key) DO UPDATE SET value = '1'",
+            [],
+        )?;
+    } else if let Some(replayed) = replayed.as_mut() {
+        replayed.drain_active = current_materialized.drain_active;
+        replayed.drain_version = current_materialized.drain_version;
+        replayed.admission_blocked = current_materialized.admission_blocked;
+        replayed.admission_version = current_materialized.admission_version;
+        persist_state(tx, replayed)?;
+    }
+
+    // Install the write gate only after migration writes have completed.
+    // From this commit onward every data-table mutation requires an explicit
+    // transaction-local gate row, which older open connections cannot create.
+    tx.execute_batch(JOURNAL_WRITE_GATE_SCHEMA)?;
+
+    tx.pragma_update(None, "user_version", 12u32)?;
+    Ok(())
+}
+
+/// v13 persists the wall-clock instant used by reducer decisions alongside
+/// each event row. Older schemas omitted that instant, so replay could reset
+/// heartbeat timestamps and completion deadlines on every load. The backfill
+/// derives pending completion/heartbeat times from the materialized snapshot;
+/// a committed timeout event uses its prior row deadline as its deterministic
+/// proof time because legacy payloads did not record the observation instant.
+fn migrate_v12_to_v13(tx: &rusqlite::Transaction<'_>, source_version: u32) -> StoreResult<()> {
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) >= 13 {
+        return Ok(());
+    }
+    if stored != 12 {
+        return Err(journal_schema_version_invalid(stored));
+    }
+    if !event_schema_matches(tx, 12)? || table_has_column(tx, "events", "recorded_unix")? {
+        return Err(journal_schema_catalog_mismatch(
+            12,
+            "event timestamp column is not in its v12 source shape",
+        ));
+    }
+
+    let current_materialized = load_materialized_state(tx)?;
+    let (recorded_by_id, replayed) = replay_legacy_events(tx, &current_materialized)?;
+    if source_version >= 11 {
+        ensure_v11_replay_preserves_materialized_evidence(&current_materialized, &replayed)?;
+    }
+
+    tx.execute_batch(
+        "ALTER TABLE events
+         ADD COLUMN recorded_unix INTEGER NOT NULL DEFAULT 0;",
+    )?;
+    open_journal_write_gate(tx)?;
+    for (id, recorded_unix) in recorded_by_id {
+        let changed = tx.execute(
+            "UPDATE events SET recorded_unix = ?1 WHERE id = ?2",
+            params![timestamp_to_sql(recorded_unix, "event recorded_unix")?, id],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.migration.event.timestamp.missing",
+            )
+            .with_remediation(
+                "preserve the schema-v12 journal unchanged; an event row disappeared during timestamp backfill",
+            ));
+        }
+    }
+    close_journal_write_gate(tx)?;
+
+    if source_version >= 11 {
+        let replayed_after = load_state_from_conn(tx)?;
+        ensure_v11_replay_preserves_materialized_evidence(&current_materialized, &replayed_after)?;
+    }
+    tx.pragma_update(None, "user_version", 13u32)?;
+    Ok(())
+}
+
+/// v14 binds reducer time into each event checksum. v13 stored the timestamp
+/// beside the payload but did not authenticate it, so its migration ignores
+/// that column and deterministically rebuilds timestamps from the checksummed
+/// event log and materialized heartbeat/outbox evidence before installing the
+/// new checksum format.
+fn migrate_v13_to_v14(tx: &rusqlite::Transaction<'_>, source_version: u32) -> StoreResult<()> {
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) >= 14 {
+        return Ok(());
+    }
+    if stored != 13 {
+        return Err(journal_schema_version_invalid(stored));
+    }
+    if !event_schema_matches(tx, 13)? {
+        return Err(journal_schema_catalog_mismatch(
+            13,
+            "event timestamp column is not in its v13 source shape",
+        ));
+    }
+
+    let current_materialized = load_materialized_state(tx)?;
+    let (recorded_by_id, replayed) = replay_legacy_events(tx, &current_materialized)?;
+    if source_version >= 11 {
+        ensure_v11_replay_preserves_materialized_evidence(&current_materialized, &replayed)?;
+    }
+
+    let mut statement =
+        tx.prepare("SELECT id, generation, kind, payload FROM events ORDER BY id")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut payloads = Vec::new();
+    for row in rows {
+        payloads.push(row?);
+    }
+    drop(statement);
+    let payload_count = payloads.len();
+
+    open_journal_write_gate(tx)?;
+    for (id, generation, kind, payload) in payloads {
+        let recorded_unix = *recorded_by_id.get(&id).ok_or_else(|| {
+            StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.migration.event.timestamp.missing",
+            )
+            .with_remediation(
+                "preserve the schema-v13 journal unchanged; deterministic timestamp replay omitted an event row",
+            )
+        })?;
+        let recorded_unix_sql = timestamp_to_sql(recorded_unix, "event recorded_unix")?;
+        let checksum = event_row_checksum(id, generation, &kind, &payload, recorded_unix_sql)?;
+        let changed = tx.execute(
+            "UPDATE events SET recorded_unix = ?1, checksum = ?2 WHERE id = ?3",
+            params![recorded_unix_sql, checksum, id],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.migration.event.timestamp.missing",
+            )
+            .with_remediation(
+                "preserve the schema-v13 journal unchanged; an event row disappeared during integrity migration",
+            ));
+        }
+    }
+    if recorded_by_id.len() != payload_count {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.migration.event.timestamp.missing",
+        )
+        .with_remediation(
+            "preserve the schema-v13 journal unchanged; event and timestamp replay row counts differ",
+        ));
+    }
+    close_journal_write_gate(tx)?;
+
+    // The v14 stamp is transaction-local until setup commits. It selects the
+    // timestamp-bound checksum verifier used by the post-migration replay;
+    // any later error rolls back both the stamp and rewritten rows.
+    tx.pragma_update(None, "user_version", 14u32)?;
+    let replayed_after = load_state_from_conn(tx)?;
+    if source_version >= 11 {
+        ensure_v11_replay_preserves_materialized_evidence(&current_materialized, &replayed_after)?;
+    }
+    Ok(())
+}
+
+fn jobs_v10_shape_matches(conn: &Connection) -> StoreResult<bool> {
+    jobs_shape_matches_version(conn, 10)
+}
+
+fn jobs_v11_shape_matches(conn: &Connection) -> StoreResult<bool> {
+    jobs_shape_matches_version(conn, 11)
+}
+
+fn jobs_v12_shape_matches(conn: &Connection) -> StoreResult<bool> {
+    jobs_shape_matches_version(conn, 12)
+}
+
+fn jobs_shape_matches_version(conn: &Connection, version: u32) -> StoreResult<bool> {
+    let mut expected = vec![
+        ("job_id", "TEXT", 0, None, 1),
+        ("slot_id", "TEXT", 1, None, 0),
+        ("generation", "INTEGER", 1, None, 0),
+        ("attempt", "INTEGER", 1, None, 0),
+        ("worker", "TEXT", 1, None, 0),
+        ("phase", "TEXT", 1, None, 0),
+        ("accepted_unix", "INTEGER", 1, Some("0"), 0),
+    ];
+    if version >= 4 {
+        expected.push(("terminal_conclusion", "TEXT", 0, None, 0));
+    }
+    if version >= 5 {
+        expected.push(("provisional", "INTEGER", 1, Some("0"), 0));
+    }
+    if version >= 6 {
+        expected.extend([
+            ("plan_id", "TEXT", 1, Some("''"), 0),
+            ("run_service_url", "TEXT", 1, Some("''"), 0),
+            ("probe_attempts", "INTEGER", 1, Some("0"), 0),
+            ("probe_deadline_unix", "INTEGER", 1, Some("0"), 0),
+        ]);
+    }
+    if version >= 9 {
+        expected.push(("runner_request_id", "TEXT", 1, Some("''"), 0));
+    }
+    if version >= 11 {
+        expected.push(("permit_lease", "TEXT", 0, None, 0));
+    }
+    if version >= 12 {
+        expected.push(("acquisition_loss_unproven", "INTEGER", 1, Some("0"), 0));
+    }
+    job_columns_match(conn, &expected)
+}
+
+fn jobs_v6_repair_shape_matches(conn: &Connection) -> StoreResult<bool> {
+    let expected = vec![
+        ("job_id", "TEXT", 0, None, 1),
+        ("slot_id", "TEXT", 1, None, 0),
+        ("generation", "INTEGER", 1, None, 0),
+        ("attempt", "INTEGER", 1, None, 0),
+        ("worker", "TEXT", 1, None, 0),
+        ("phase", "TEXT", 1, None, 0),
+        ("accepted_unix", "INTEGER", 1, Some("0"), 0),
+        ("terminal_conclusion", "TEXT", 0, None, 0),
+        ("plan_id", "TEXT", 1, Some("''"), 0),
+        ("run_service_url", "TEXT", 1, Some("''"), 0),
+        ("probe_attempts", "INTEGER", 1, Some("0"), 0),
+        ("probe_deadline_unix", "INTEGER", 1, Some("0"), 0),
+    ];
+    // v6's known poisoned shape is the v6 fields without the v5 provisional
+    // bit; no other partially migrated combination is repairable.
+    job_columns_match(conn, &expected)
+}
+
+fn job_columns_match(
+    conn: &Connection,
+    expected: &[(&str, &str, i64, Option<&str>, i64)],
+) -> StoreResult<bool> {
+    if table_definition_has_explicit_collation(conn, "jobs")?
+        || !table_indexes_use_binary_collation(conn, "jobs")?
+    {
+        return Ok(false);
+    }
+    let columns = table_schema_columns(conn, "jobs")?;
+    // SQLite appends columns when repairing a known historical shape. Column
+    // order has no meaning to the named queries and inserts in this module;
+    // validate the complete definitions by name instead of rejecting a
+    // semantically identical table solely because ALTER TABLE appended one.
+    Ok(columns.len() == expected.len()
+        && expected.iter().all(|expected| {
+            columns.iter().any(|actual| {
+                let (name, ty, not_null, default, pk) = actual;
+                let (expected_name, expected_ty, expected_not_null, expected_default, expected_pk) =
+                    expected;
+                name.eq_ignore_ascii_case(expected_name)
+                    && ty.eq_ignore_ascii_case(expected_ty)
+                    && *not_null == *expected_not_null
+                    && default.as_deref() == *expected_default
+                    && *pk == *expected_pk
+            })
+        }))
+}
+
+fn event_schema_matches(conn: &Connection, version: u32) -> StoreResult<bool> {
+    let mut expected = vec![
+        ("id", "INTEGER", 0, None, 1),
+        ("generation", "INTEGER", 1, None, 0),
+        ("kind", "TEXT", 1, None, 0),
+        ("payload", "TEXT", 1, None, 0),
+        ("checksum", "TEXT", 1, None, 0),
+    ];
+    if version >= 13 {
+        expected.push(("recorded_unix", "INTEGER", 1, Some("0"), 0));
+    }
+    table_columns_match(conn, "events", &expected)
+}
+
+fn slots_schema_matches(conn: &Connection) -> StoreResult<bool> {
+    table_columns_match(
+        conn,
+        "slots",
+        &[
+            ("slot_id", "TEXT", 0, None, 1),
+            ("generation", "INTEGER", 1, None, 0),
+            ("phase", "TEXT", 1, None, 0),
+            ("permit_held", "INTEGER", 1, Some("0"), 0),
+            ("routing_valid", "INTEGER", 1, Some("0"), 0),
+            ("session_live", "INTEGER", 1, Some("0"), 0),
+            ("executor_proven", "INTEGER", 1, Some("0"), 0),
+            ("registered", "INTEGER", 1, Some("0"), 0),
+            ("pid", "INTEGER", 0, None, 0),
+            ("heartbeat_unix", "INTEGER", 1, Some("0"), 0),
+        ],
+    )
+}
+
+fn meta_schema_matches(conn: &Connection) -> StoreResult<bool> {
+    table_columns_match(
+        conn,
+        "meta",
+        &[("key", "TEXT", 0, None, 1), ("value", "TEXT", 1, None, 0)],
+    )
+}
+
+fn table_columns_match(
+    conn: &Connection,
+    table: &str,
+    expected: &[(&str, &str, i64, Option<&str>, i64)],
+) -> StoreResult<bool> {
+    if table_definition_has_explicit_collation(conn, table)?
+        || !table_indexes_use_binary_collation(conn, table)?
+    {
+        return Ok(false);
+    }
+    let columns = table_schema_columns(conn, table)?;
+    Ok(columns.len() == expected.len()
+        && expected.iter().all(|expected| {
+            columns.iter().any(|actual| {
+                let (name, ty, not_null, default, pk) = actual;
+                let (expected_name, expected_ty, expected_not_null, expected_default, expected_pk) =
+                    expected;
+                name.eq_ignore_ascii_case(expected_name)
+                    && ty.eq_ignore_ascii_case(expected_ty)
+                    && *not_null == *expected_not_null
+                    && default.as_deref() == *expected_default
+                    && *pk == *expected_pk
+            })
+        }))
+}
+
+/// All journal table declarations use SQLite's default BINARY collation.
+/// `PRAGMA table_info` omits collations, so a `COLLATE NOCASE` primary key can
+/// otherwise pass the column-shape checks while changing job/slot identity
+/// equality. Fail closed on any explicit table-level collation.
+fn table_definition_has_explicit_collation(conn: &Connection, table: &str) -> StoreResult<bool> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'table' AND name = ?1 COLLATE NOCASE",
+            [table],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(sql.is_some_and(|sql| {
+        sql.split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .any(|token| token.eq_ignore_ascii_case("collate"))
+    }))
+}
+
+/// Reject non-BINARY collations on every indexed key column. This also
+/// covers explicit index collations, which are not recorded in table_info.
+fn table_indexes_use_binary_collation(conn: &Connection, table: &str) -> StoreResult<bool> {
+    let mut statement = conn.prepare(&format!("PRAGMA index_list({table})"))?;
+    let indexes = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    for index in indexes {
+        let mut statement =
+            conn.prepare("SELECT coll, \"key\" FROM pragma_index_xinfo(?1) ORDER BY seqno")?;
+        let rows = statement.query_map([index], |row| {
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (collation, key) = row?;
+            if key != 0
+                && !collation
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("BINARY"))
+            {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 /// Repair the one historical migration poison that can pass the version gate.
 ///
 /// The v5 bump once stamped a v4 `jobs` table as version 5. A later opener
@@ -2991,7 +6092,11 @@ fn repair_historic_jobs_shape(tx: &rusqlite::Transaction<'_>, stored: u32) -> St
 type TableColumn = (String, String, i64, Option<String>, i64);
 
 fn job_schema_columns(conn: &Connection) -> StoreResult<Vec<TableColumn>> {
-    let mut statement = conn.prepare("PRAGMA table_info(jobs)")?;
+    table_schema_columns(conn, "jobs")
+}
+
+fn table_schema_columns(conn: &Connection, table: &str) -> StoreResult<Vec<TableColumn>> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     Ok(statement
         .query_map([], |row| {
             Ok((
@@ -3014,10 +6119,146 @@ fn table_has_column(conn: &Connection, table: &str, column: &str) -> StoreResult
     }))
 }
 
+fn table_exists(conn: &Connection, table: &str) -> StoreResult<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = ?1 COLLATE NOCASE
+         )",
+        [table],
+        |row| row.get(0),
+    )?)
+}
+
+fn journal_write_gate_schema_matches(conn: &Connection) -> StoreResult<bool> {
+    if !table_exists(conn, "journal_write_gate")? {
+        return Ok(false);
+    }
+    let mut statement = conn.prepare("PRAGMA table_info(journal_write_gate)")?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if columns != vec![("id".to_owned(), "INTEGER".to_owned(), 0, None, 1)] {
+        return Ok(false);
+    }
+    let gate_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'table' AND name = 'journal_write_gate' COLLATE NOCASE",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let expected_gate_sql = normalize_schema_sql(
+        "CREATE TABLE journal_write_gate (
+             id INTEGER PRIMARY KEY CHECK (id = 1)
+         )",
+    );
+    if !gate_sql.is_some_and(|sql| normalize_schema_sql(&sql) == expected_gate_sql) {
+        return Ok(false);
+    }
+
+    let mut expected = Vec::with_capacity(15);
+    for table in ["events", "slots", "jobs", "outbox", "meta"] {
+        for operation in ["insert", "update", "delete"] {
+            expected.push((
+                format!("journal_write_gate_{table}_{operation}"),
+                table.to_owned(),
+                operation.to_owned(),
+            ));
+        }
+    }
+    for (name, expected_table, operation) in &expected {
+        let trigger: Option<(String, String)> = conn
+            .query_row(
+                "SELECT tbl_name, sql FROM sqlite_master
+                 WHERE type = 'trigger' AND name = ?1 COLLATE NOCASE",
+                [name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((table, sql)) = trigger else {
+            return Ok(false);
+        };
+        let expected_sql = normalize_schema_sql(&format!(
+            "CREATE TRIGGER {name}
+             BEFORE {operation} ON {expected_table}
+             WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+             BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END",
+        ));
+        if !table.eq_ignore_ascii_case(expected_table) || normalize_schema_sql(&sql) != expected_sql
+        {
+            return Ok(false);
+        }
+    }
+    let trigger_count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM sqlite_master
+         WHERE type = 'trigger'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(trigger_count == i64::try_from(expected.len()).unwrap_or(i64::MAX))
+}
+
+fn journal_data_table_triggers_exist(conn: &Connection) -> StoreResult<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM sqlite_master
+         WHERE type = 'trigger'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count != 0)
+}
+
+fn normalize_schema_sql(sql: &str) -> String {
+    sql.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_end_matches(';')
+        .to_ascii_lowercase()
+}
+
+fn journal_write_gate_has_open_row(conn: &Connection) -> StoreResult<bool> {
+    if !table_exists(conn, "journal_write_gate")? {
+        return Ok(false);
+    }
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM journal_write_gate", [], |row| {
+        row.get(0)
+    })?;
+    Ok(count != 0)
+}
+
 fn jobs_schema_mismatch(version: u32) -> StoreError {
     StoreError::new(velnor_model::ExitClass::Conflict, "journal.schema.mismatch")
         .with_remediation(format!(
             "preserve the journal unchanged: PRAGMA user_version={version} carries an unrecognized jobs shape"
+        ))
+}
+
+fn journal_schema_version_invalid(version: i64) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.schema.version.invalid",
+    )
+    .with_remediation(format!(
+        "preserve the journal unchanged: PRAGMA user_version={version} is outside the supported nonnegative range"
+    ))
+}
+
+fn journal_write_gate_schema_mismatch(version: u32) -> StoreError {
+    StoreError::new(velnor_model::ExitClass::Conflict, "journal.schema.mismatch")
+        .with_remediation(format!(
+            "preserve the journal unchanged: PRAGMA user_version={version} has an incomplete or open write gate"
         ))
 }
 
@@ -3061,6 +6302,13 @@ fn event_generation(event: &Event) -> Generation {
         | Event::Registered { generation, .. }
         | Event::RegistrationLost { generation, .. }
         | Event::ReadyAttempt { generation, .. }
+        | Event::JobAcquisitionIntended { generation, .. }
+        | Event::JobAcquisitionIntendedWithPermit { generation, .. }
+        | Event::JobAcquisitionResolved { generation, .. }
+        | Event::AcquisitionProbeFailed { generation, .. }
+        | Event::JobAcquisitionLost { generation, .. }
+        | Event::JobAcquisitionRebuilt { generation, .. }
+        | Event::JobAcquisitionRebuiltWithPermit { generation, .. }
         | Event::JobOwned { generation, .. }
         | Event::JobStarted { generation, .. }
         | Event::JobTerminalResult { generation, .. }
@@ -3086,7 +6334,10 @@ fn event_kind(event: &Event) -> &'static str {
         Event::ControlLive => "control_live",
         Event::JournalWritable => "journal_writable",
         Event::JobAcquisitionIntended { .. } => "job_acquisition_intended",
+        Event::JobAcquisitionIntendedWithPermit { .. } => "job_acquisition_intended_with_permit",
         Event::JobAcquisitionResolved { .. } => "job_acquisition_resolved",
+        Event::JobAcquisitionRebuilt { .. } => "job_acquisition_rebuilt",
+        Event::JobAcquisitionRebuiltWithPermit { .. } => "job_acquisition_rebuilt_with_permit",
         Event::AcquisitionProbeFailed { .. } => "acquisition_probe_failed",
         Event::JobAcquisitionLost { .. } => "job_acquisition_lost",
         Event::Dependency { .. } => "dependency",
@@ -3127,6 +6378,38 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn event_row_checksum(
+    id: i64,
+    generation: i64,
+    kind: &str,
+    payload: &str,
+    recorded_unix: i64,
+) -> StoreResult<String> {
+    let domain = b"velnor-journal-event-v14\0";
+    let kind_len = u64::try_from(kind.len()).map_err(|_| {
+        StoreError::new(
+            velnor_model::ExitClass::Operation,
+            "journal.checksum.input.range",
+        )
+    })?;
+    let payload_len = u64::try_from(payload.len()).map_err(|_| {
+        StoreError::new(
+            velnor_model::ExitClass::Operation,
+            "journal.checksum.input.range",
+        )
+    })?;
+    let mut bytes = Vec::with_capacity(domain.len() + 32 + kind.len() + payload.len());
+    bytes.extend_from_slice(domain);
+    bytes.extend_from_slice(&id.to_be_bytes());
+    bytes.extend_from_slice(&generation.to_be_bytes());
+    bytes.extend_from_slice(&kind_len.to_be_bytes());
+    bytes.extend_from_slice(kind.as_bytes());
+    bytes.extend_from_slice(&recorded_unix.to_be_bytes());
+    bytes.extend_from_slice(&payload_len.to_be_bytes());
+    bytes.extend_from_slice(payload.as_bytes());
+    Ok(sha256_hex(&bytes))
 }
 
 fn assert_sqlite_version(conn: &Connection) -> StoreResult<()> {
@@ -3193,6 +6476,632 @@ mod tests {
     }
 
     #[test]
+    fn fresh_empty_database_initializes_before_historical_phase_checks() {
+        let nanos = unix_now();
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-journal-fresh-empty-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.db");
+
+        let journal = Journal::open(&path).unwrap();
+        let version: i64 = journal
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+        assert!(journal.materialized_state().unwrap().slots.is_empty());
+        let baseline: ReplayBaseline = serde_json::from_str(
+            &journal
+                .conn
+                .query_row(
+                    "SELECT value FROM meta WHERE key = 'replay_baseline'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(baseline.event_count, 0);
+        assert_eq!(baseline.through_event_id, 0);
+        assert_eq!(baseline.latest_event_count, 0);
+        assert_eq!(baseline.latest_event_id, 0);
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn drop_jobs_columns(conn: &Connection, columns: &[&str]) {
+        for column in columns {
+            if table_has_column(conn, "jobs", column).unwrap() {
+                conn.execute_batch(&format!("ALTER TABLE jobs DROP COLUMN {column};"))
+                    .unwrap();
+            }
+        }
+    }
+
+    fn open_fixture_write_gate(conn: &Connection) {
+        if table_exists(conn, "journal_write_gate").unwrap() {
+            conn.execute("INSERT INTO journal_write_gate (id) VALUES (1)", [])
+                .unwrap();
+        }
+    }
+
+    fn close_fixture_write_gate(conn: &Connection) {
+        if table_exists(conn, "journal_write_gate").unwrap() {
+            conn.execute("DELETE FROM journal_write_gate WHERE id = 1", [])
+                .unwrap();
+        }
+    }
+
+    /// Keep test-only raw event appends paired with the same tail watermark
+    /// that a production transaction updates alongside `persist_state`.
+    fn refresh_fixture_replay_baseline_tail(conn: &Connection) {
+        if !table_exists(conn, "meta").unwrap() {
+            return;
+        }
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'replay_baseline'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        let Some(raw) = raw else {
+            return;
+        };
+        let mut baseline: ReplayBaseline = serde_json::from_str(&raw).unwrap();
+        let (event_count, event_id): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        baseline.latest_event_count = event_count;
+        baseline.latest_event_id = event_id;
+        let checksum = replay_baseline_integrity_checksum(&baseline).unwrap();
+        baseline.integrity_checksum = checksum;
+        conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'replay_baseline'",
+            [serde_json::to_string(&baseline).unwrap()],
+        )
+        .unwrap();
+    }
+
+    fn append_fixture_event(conn: &Connection, event: &Event) {
+        append_fixture_event_omitting_fields(conn, event, &[]);
+    }
+
+    fn append_fixture_event_omitting_fields(
+        conn: &Connection,
+        event: &Event,
+        omitted_fields: &[&str],
+    ) {
+        let mut value = serde_json::to_value(event).unwrap();
+        if let Some(object) = value.as_object_mut() {
+            for field in omitted_fields {
+                object.remove(*field);
+            }
+        }
+        let payload = serde_json::to_string(&value).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let checksum = if version >= 14 {
+            String::new()
+        } else {
+            sha256_hex(payload.as_bytes())
+        };
+        open_fixture_write_gate(conn);
+        conn.execute(
+            "INSERT INTO events (generation, kind, payload, checksum)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                event_generation(event).0 as i64,
+                event_kind(event),
+                payload,
+                checksum,
+            ],
+        )
+        .unwrap();
+        if version >= 14 {
+            let id = conn.last_insert_rowid();
+            let generation_sql = generation_to_sql(event_generation(event)).unwrap();
+            let checksum =
+                event_row_checksum(id, generation_sql, event_kind(event), &payload, 0).unwrap();
+            conn.execute(
+                "UPDATE events SET checksum = ?1 WHERE id = ?2",
+                params![checksum, id],
+            )
+            .unwrap();
+            refresh_fixture_replay_baseline_tail(conn);
+        }
+        close_fixture_write_gate(conn);
+    }
+
+    fn assert_bad_write_gate_fails_before_wal(label: &str, schema_edit: &str) {
+        let (dir, journal) = open_tmp(label);
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(schema_edit).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "delete");
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists(), "preflight starts without a WAL sidecar");
+        assert!(!shm.exists(), "preflight starts without an SHM sidecar");
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !wal.exists(),
+            "pre-WAL refusal must not create a WAL sidecar"
+        );
+        assert!(
+            !shm.exists(),
+            "pre-WAL refusal must not create an SHM sidecar"
+        );
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+        let mode: String = check
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(check);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn assert_v11_schema_edit_fails_before_wal(label: &str, schema_edit: &str) {
+        let (dir, journal) = open_tmp(label);
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&conn, 11);
+        conn.execute_batch(schema_edit).unwrap();
+        conn.pragma_update(None, "user_version", 11u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !wal.exists(),
+            "pre-WAL refusal must not create a WAL sidecar"
+        );
+        assert!(
+            !shm.exists(),
+            "pre-WAL refusal must not create an SHM sidecar"
+        );
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 11);
+        let mode: String = check
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(check);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn assert_v10_materialized_edit_fails_before_wal(label: &str, materialized_edit: &str) {
+        let path = make_v10_acquisition_journal(label);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(materialized_edit).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.materialized.invalid");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !wal.exists(),
+            "pre-WAL refusal must not create a WAL sidecar"
+        );
+        assert!(
+            !shm.exists(),
+            "pre-WAL refusal must not create an SHM sidecar"
+        );
+
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 10);
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    fn assert_v11_materialized_edit_fails_before_wal(label: &str, materialized_edit: &str) {
+        let (dir, mut journal) = open_tmp(label);
+        prime_ready(&mut journal, "scope-1");
+        let permit_lease = NativePermitLease {
+            holder: "native/v1/scope/request-1".to_owned(),
+            ledger_path: "/var/lib/velnor/permit-ledger.db".to_owned(),
+            generation: 31,
+        };
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntendedWithPermit {
+                    slot_id: slot("scope-1"),
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    message_id: "message-1".to_owned(),
+                    runner_request_id: "request-1".to_owned(),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                    permit_lease,
+                })
+                .unwrap()
+                .rejected
+        );
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&conn, 11);
+        conn.pragma_update(None, "user_version", 11u32).unwrap();
+        conn.execute_batch(materialized_edit).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.materialized.invalid");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !wal.exists(),
+            "pre-WAL refusal must not create a WAL sidecar"
+        );
+        assert!(
+            !shm.exists(),
+            "pre-WAL refusal must not create an SHM sidecar"
+        );
+
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 11);
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn assert_v2_schema_edit_fails_before_wal(label: &str, schema_edit: &str) {
+        let (dir, journal) = open_tmp(label);
+        let path = dir.join("journal.db");
+        drop(journal);
+        seed_v2_outbox(&path, 2);
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(schema_edit).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !wal.exists(),
+            "pre-WAL refusal must not create a WAL sidecar"
+        );
+        assert!(
+            !shm.exists(),
+            "pre-WAL refusal must not create an SHM sidecar"
+        );
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        let mode: String = check
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(check);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn assert_bad_collation_fails_before_wal(label: &str, schema_edit: &str) {
+        let (dir, journal) = open_tmp(label);
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_journal_write_gate(&conn);
+        conn.execute_batch(schema_edit).unwrap();
+        conn.execute_batch(JOURNAL_WRITE_GATE_SCHEMA).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "delete");
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists(), "preflight starts without a WAL sidecar");
+        assert!(!shm.exists(), "preflight starts without an SHM sidecar");
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !wal.exists(),
+            "pre-WAL refusal must not create a WAL sidecar"
+        );
+        assert!(
+            !shm.exists(),
+            "pre-WAL refusal must not create an SHM sidecar"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn drop_journal_write_gate(conn: &Connection) {
+        for table in ["events", "slots", "jobs", "outbox", "meta"] {
+            for operation in ["insert", "update", "delete"] {
+                let name = format!("journal_write_gate_{table}_{operation}");
+                conn.execute_batch(&format!("DROP TRIGGER IF EXISTS {name};"))
+                    .unwrap();
+            }
+        }
+        conn.execute_batch("DROP TABLE IF EXISTS journal_write_gate;")
+            .unwrap();
+    }
+
+    /// Make a current-schema fixture carry the jobs shape that existed at the
+    /// requested schema version. Migration tests must not pair an old stamp
+    /// with columns introduced by later migrations: open() rejects that as a
+    /// downgrade/partial-write shape before the migration under test runs.
+    fn drop_jobs_columns_added_after_version(conn: &Connection, version: u32) {
+        if version < 14 && table_exists(conn, "meta").unwrap() {
+            let has_baseline = conn
+                .query_row(
+                    "SELECT 1 FROM meta WHERE key = 'replay_baseline'",
+                    [],
+                    |_| Ok(()),
+                )
+                .optional()
+                .unwrap()
+                .is_some();
+            if has_baseline {
+                open_fixture_write_gate(conn);
+                conn.execute("DELETE FROM meta WHERE key = 'replay_baseline'", [])
+                    .unwrap();
+                close_fixture_write_gate(conn);
+            }
+        }
+        if version < 12 {
+            drop_journal_write_gate(conn);
+        }
+        if version < 13 && table_has_column(conn, "events", "recorded_unix").unwrap() {
+            conn.execute_batch("ALTER TABLE events DROP COLUMN recorded_unix;")
+                .unwrap();
+        }
+        for (introduced, column) in [
+            (4, "terminal_conclusion"),
+            (5, "provisional"),
+            (6, "plan_id"),
+            (6, "run_service_url"),
+            (6, "probe_attempts"),
+            (6, "probe_deadline_unix"),
+            (9, "runner_request_id"),
+            (11, "permit_lease"),
+            (12, "acquisition_loss_unproven"),
+        ] {
+            if introduced > version && table_has_column(conn, "jobs", column).unwrap() {
+                conn.execute_batch(&format!("ALTER TABLE jobs DROP COLUMN {column};"))
+                    .unwrap();
+            }
+        }
+        if version < 14 {
+            let mut statement = conn
+                .prepare("SELECT id, payload FROM events ORDER BY id")
+                .unwrap();
+            let rows: Vec<(i64, String)> = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            drop(statement);
+            open_fixture_write_gate(conn);
+            for (id, payload) in rows {
+                conn.execute(
+                    "UPDATE events SET checksum = ?1 WHERE id = ?2",
+                    params![sha256_hex(payload.as_bytes()), id],
+                )
+                .unwrap();
+            }
+            close_fixture_write_gate(conn);
+        }
+    }
+
+    fn make_v13_migrated_fixture(label: &str) -> (PathBuf, PathBuf) {
+        let (dir, mut journal) = open_tmp(label);
+        assert!(!journal.apply(Event::ControlLive).unwrap().rejected);
+        assert!(
+            !journal
+                .apply(Event::Dependency {
+                    github_reachable: true,
+                })
+                .unwrap()
+                .rejected
+        );
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&conn, 13);
+        conn.pragma_update(None, "user_version", 13u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let migrated = Journal::open(&path).expect("v13 fixture migrates to v14");
+        assert!(migrated
+            .conn
+            .query_row(
+                "SELECT 1 FROM meta WHERE key = 'replay_baseline'",
+                [],
+                |_| Ok(())
+            )
+            .optional()
+            .unwrap()
+            .is_some());
+        drop(migrated);
+        (dir, path)
+    }
+
+    fn strip_v11_event_fields(conn: &Connection) {
+        let mut statement = conn
+            .prepare("SELECT id, payload FROM events ORDER BY id")
+            .unwrap();
+        let rows: Vec<(i64, String)> = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        drop(statement);
+
+        for (event_id, original) in rows {
+            let mut value: serde_json::Value = serde_json::from_str(&original).unwrap();
+            let event_type = value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let Some(object) = value.as_object_mut() else {
+                continue;
+            };
+            let fields = match event_type.as_deref() {
+                Some("job_acquisition_intended") => &["runner_request_id"][..],
+                Some("job_acquisition_resolved") => &["runner_request_id", "permit_lease"][..],
+                _ => &[],
+            };
+            let changed = fields.iter().fold(false, |changed, field| {
+                object.remove(*field).is_some() || changed
+            });
+            if changed {
+                let payload = serde_json::to_string(&value).unwrap();
+                let checksum = sha256_hex(payload.as_bytes());
+                open_fixture_write_gate(conn);
+                conn.execute(
+                    "UPDATE events SET payload = ?1, checksum = ?2 WHERE id = ?3",
+                    params![payload, checksum, event_id],
+                )
+                .unwrap();
+                close_fixture_write_gate(conn);
+            }
+        }
+    }
+
+    fn add_v11_event_field(
+        conn: &Connection,
+        event_type: &str,
+        field: &str,
+        field_value: serde_json::Value,
+    ) -> i64 {
+        let mut statement = conn
+            .prepare("SELECT id, payload FROM events ORDER BY id")
+            .unwrap();
+        let rows: Vec<(i64, String)> = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        drop(statement);
+        let (event_id, original) = rows
+            .into_iter()
+            .find(|(_, payload)| {
+                serde_json::from_str::<serde_json::Value>(payload)
+                    .unwrap()
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(event_type)
+            })
+            .unwrap_or_else(|| panic!("event {event_type} missing from fixture"));
+        let mut value: serde_json::Value = serde_json::from_str(&original).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert(field.to_owned(), field_value);
+        let payload = serde_json::to_string(&value).unwrap();
+        let checksum = sha256_hex(payload.as_bytes());
+        open_fixture_write_gate(conn);
+        conn.execute(
+            "UPDATE events SET payload = ?1, checksum = ?2 WHERE id = ?3",
+            params![payload, checksum, event_id],
+        )
+        .unwrap();
+        close_fixture_write_gate(conn);
+        event_id
+    }
+
+    #[test]
     fn concurrent_fresh_openers_converge_on_one_schema() {
         let nanos = unix_now();
         let dir = std::env::temp_dir().join(format!(
@@ -3231,6 +7140,34 @@ mod tests {
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
             .unwrap();
         assert_eq!(integrity, "ok");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn empty_version_zero_file_migrates_from_no_tables() {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-journal-empty-v0-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.db");
+        drop(Connection::open(&path).unwrap());
+
+        let journal = Journal::open(&path).expect("an empty version-0 database is a fresh journal");
+        assert_eq!(
+            journal.materialized_state().unwrap(),
+            FleetState {
+                journal_writable: true,
+                ..FleetState::default()
+            }
+        );
+        let version: i64 = journal
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+        drop(journal);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3288,8 +7225,9 @@ mod tests {
                 generation: g,
             },
         ] {
+            let event_label = format!("{event:?}");
             let outcome = journal.apply(event).unwrap();
-            assert!(!outcome.rejected);
+            assert!(!outcome.rejected, "unexpectedly rejected {event_label}");
         }
         assert!(
             !journal
@@ -3299,6 +7237,81 @@ mod tests {
                 })
                 .unwrap()
                 .rejected
+        );
+    }
+
+    fn prime_ready_in_existing_capacity(journal: &mut Journal, id: &str) {
+        let s = slot(id);
+        let g = r#gen();
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        for event in [
+            Event::PermitReserved {
+                slot_id: s.clone(),
+                generation: g,
+            },
+            Event::ExecutorProven {
+                slot_id: s.clone(),
+                generation: g,
+            },
+            Event::SessionLive {
+                slot_id: s.clone(),
+                generation: g,
+            },
+            Event::RegistrationIntended {
+                slot_id: s.clone(),
+                generation: g,
+            },
+            Event::Registered {
+                slot_id: s.clone(),
+                generation: g,
+            },
+        ] {
+            let event_label = format!("{event:?}");
+            let outcome = journal.apply(event).unwrap();
+            assert!(!outcome.rejected, "unexpectedly rejected {event_label}");
+        }
+        let ready = journal
+            .apply(Event::ReadyAttempt {
+                slot_id: s,
+                generation: g,
+            })
+            .unwrap();
+        assert!(!ready.rejected, "ReadyAttempt rejected: {ready:?}");
+    }
+
+    fn resolve_test_acquisition(
+        journal: &mut Journal,
+        provisional_job_id: &str,
+        acquired_job_id: &str,
+        runner_request_id: &str,
+        generation: Generation,
+        permit_lease: Option<NativePermitLease>,
+    ) {
+        let outcome = journal
+            .apply(Event::JobAcquisitionResolved {
+                provisional_job_id: job(provisional_job_id),
+                acquired_job_id: job(acquired_job_id),
+                plan_id: "plan-1".to_owned(),
+                generation,
+                runner_request_id: Some(runner_request_id.to_owned()),
+                permit_lease,
+            })
+            .unwrap();
+        assert!(
+            !outcome.rejected,
+            "test acquisition resolution was rejected: {outcome:?}"
         );
     }
 
@@ -3317,8 +7330,17 @@ mod tests {
                 job_id: job(job_name),
                 generation: g,
                 message_id: "msg-1".into(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
+            },
+            Event::JobAcquisitionResolved {
+                provisional_job_id: job(job_name),
+                acquired_job_id: job(job_name),
+                plan_id: "plan-1".into(),
+                generation: g,
+                runner_request_id: Some(job_name.to_owned()),
+                permit_lease: None,
             },
             Event::JobOwned {
                 job_id: job(job_name),
@@ -3336,6 +7358,350 @@ mod tests {
             assert!(!journal.apply(event).unwrap().rejected);
         }
         g
+    }
+
+    fn make_v8_acquisition_journal(label: &str) -> PathBuf {
+        let (dir, mut journal) = open_tmp(label);
+        let slot_id = slot("scope-1");
+        let request_id = job("request-1");
+        let acquired_job_id = job("job-1");
+        let generation = r#gen();
+        prime_ready(&mut journal, &slot_id.0);
+        for event in [
+            Event::JobAcquisitionIntended {
+                slot_id: slot_id.clone(),
+                job_id: request_id.clone(),
+                generation,
+                message_id: "broker-message-1".to_owned(),
+                runner_request_id: None,
+                run_service_url: "https://run.example/run".to_owned(),
+                intended_unix: 1_000,
+            },
+            Event::JobAcquisitionResolved {
+                provisional_job_id: request_id,
+                acquired_job_id: acquired_job_id.clone(),
+                plan_id: "plan-1".to_owned(),
+                generation,
+                runner_request_id: None,
+                permit_lease: None,
+            },
+            Event::JobOwned {
+                job_id: acquired_job_id,
+                slot_id,
+                attempt: 1,
+                generation,
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1_001,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        drop(journal);
+
+        let path = dir.join("journal.db");
+        let conn = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&conn, 8);
+        strip_v11_event_fields(&conn);
+        conn.pragma_update(None, "user_version", 8u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+        path
+    }
+
+    fn make_v9_acquisition_journal(label: &str) -> PathBuf {
+        let path = make_v8_acquisition_journal(label);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE jobs ADD COLUMN runner_request_id TEXT NOT NULL DEFAULT '';",
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE jobs SET runner_request_id = 'request-1' WHERE job_id = 'job-1'",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 9u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+        path
+    }
+
+    fn make_v8_self_resolved_journal(label: &str) -> PathBuf {
+        let path = make_v8_acquisition_journal(label);
+        let conn = Connection::open(&path).unwrap();
+        let mut statement = conn
+            .prepare("SELECT id, payload FROM events ORDER BY id")
+            .unwrap();
+        let mut rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap();
+        let mut updates = Vec::new();
+        while let Some(row) = rows.next() {
+            let (id, payload) = row.unwrap();
+            let mut event: Event = serde_json::from_str(&payload).unwrap();
+            let changed = match &mut event {
+                Event::JobAcquisitionIntended {
+                    job_id, message_id, ..
+                } => {
+                    *job_id = job("job-1");
+                    *message_id = "request-1".to_owned();
+                    true
+                }
+                Event::JobAcquisitionResolved {
+                    provisional_job_id,
+                    acquired_job_id,
+                    runner_request_id,
+                    ..
+                } => {
+                    *provisional_job_id = job("job-1");
+                    *acquired_job_id = job("job-1");
+                    *runner_request_id = None;
+                    true
+                }
+                _ => false,
+            };
+            if changed {
+                updates.push((id, event));
+            }
+        }
+        drop(rows);
+        drop(statement);
+        for (id, event) in updates {
+            let payload = serde_json::to_string(&event).unwrap();
+            let checksum = sha256_hex(payload.as_bytes());
+            conn.execute(
+                "UPDATE events SET payload = ?1, checksum = ?2 WHERE id = ?3",
+                params![payload, checksum, id],
+            )
+            .unwrap();
+        }
+        strip_v11_event_fields(&conn);
+        drop(conn);
+        path
+    }
+
+    fn make_v10_acquisition_journal(label: &str) -> PathBuf {
+        let (dir, mut journal) = open_tmp(label);
+        let generation = r#gen();
+        let slot_id = slot("scope-1");
+        let request_id = job("request-1");
+        let acquired_job_id = job("job-1");
+        prime_ready(&mut journal, &slot_id.0);
+        for event in [
+            Event::JobAcquisitionIntended {
+                slot_id: slot_id.clone(),
+                job_id: request_id.clone(),
+                generation,
+                message_id: "broker-message-1".to_owned(),
+                runner_request_id: None,
+                run_service_url: "https://run.example/run".to_owned(),
+                intended_unix: 1_000,
+            },
+            Event::JobAcquisitionResolved {
+                provisional_job_id: request_id,
+                acquired_job_id: acquired_job_id.clone(),
+                plan_id: "plan-1".to_owned(),
+                generation,
+                runner_request_id: None,
+                permit_lease: None,
+            },
+            Event::JobOwned {
+                job_id: acquired_job_id,
+                slot_id,
+                attempt: 1,
+                generation,
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1_001,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        let rebuilt_slot = slot("scope-2");
+        let rebuilt_generation = r#gen();
+        assert!(
+            !journal
+                .apply(Event::DesiredCapacity { ready: 2 })
+                .unwrap()
+                .rejected
+        );
+        prime_ready_in_existing_capacity(&mut journal, &rebuilt_slot.0);
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionRebuilt {
+                    slot_id: rebuilt_slot,
+                    job_id: job("job-rebuilt-1"),
+                    generation: rebuilt_generation,
+                    runner_request_id: "request-rebuilt-1".to_owned(),
+                    plan_id: "plan-rebuilt-1".to_owned(),
+                    run_service_url: "https://run.example/rebuilt-run".to_owned(),
+                    probe_deadline_unix: 22_000,
+                })
+                .unwrap()
+                .rejected
+        );
+        drop(journal);
+
+        let path = dir.join("journal.db");
+        let conn = Connection::open(&path).unwrap();
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "delete");
+        drop_jobs_columns_added_after_version(&conn, 10);
+        strip_v11_event_fields(&conn);
+        conn.pragma_update(None, "user_version", 10u32).unwrap();
+        drop(conn);
+        path
+    }
+
+    fn make_v10_proofless_loss_journal(label: &str) -> PathBuf {
+        let (dir, mut journal) = open_tmp(label);
+        let slot_id = slot("scope-1");
+        let generation = r#gen();
+        prime_ready(&mut journal, &slot_id.0);
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot_id.clone(),
+                    job_id: job("request-1"),
+                    generation,
+                    message_id: "message-1".to_owned(),
+                    runner_request_id: None,
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                })
+                .unwrap()
+                .rejected
+        );
+        drop(journal);
+
+        let path = dir.join("journal.db");
+        let conn = Connection::open(&path).unwrap();
+        append_fixture_event_omitting_fields(
+            &conn,
+            &Event::JobAcquisitionLost {
+                job_id: job("request-1"),
+                generation,
+                reason: "legacy probe budget exhausted".to_owned(),
+                proof: None,
+            },
+            &["proof"],
+        );
+        open_fixture_write_gate(&conn);
+        conn.execute("DELETE FROM jobs", []).unwrap();
+        conn.execute(
+            "UPDATE slots SET phase = 'ready' WHERE slot_id = ?1",
+            [slot_id.0],
+        )
+        .unwrap();
+        close_fixture_write_gate(&conn);
+        drop_jobs_columns_added_after_version(&conn, 10);
+        strip_v11_event_fields(&conn);
+        conn.pragma_update(None, "user_version", 10u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+        path
+    }
+
+    fn make_v11_proofless_loss_journal(label: &str) -> (PathBuf, NativePermitLease) {
+        let (dir, mut journal) = open_tmp(label);
+        let slot_id = slot("scope-1");
+        let generation = r#gen();
+        let permit_lease = NativePermitLease {
+            holder: "native/v1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/request-1"
+                .to_owned(),
+            ledger_path: "/tmp/permit-ledger.db".to_owned(),
+            generation: 41,
+        };
+        prime_ready(&mut journal, &slot_id.0);
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntendedWithPermit {
+                    slot_id: slot_id.clone(),
+                    job_id: job("request-1"),
+                    generation,
+                    message_id: "message-1".to_owned(),
+                    runner_request_id: "request-1".to_owned(),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                    permit_lease: permit_lease.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(journal.set_drain(7).unwrap());
+        assert!(journal.set_admission_blocked(9).unwrap());
+        drop(journal);
+
+        let path = dir.join("journal.db");
+        let conn = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&conn, 11);
+        conn.pragma_update(None, "user_version", 11u32).unwrap();
+        append_fixture_event(
+            &conn,
+            &Event::JobAcquisitionLost {
+                job_id: job("request-1"),
+                generation,
+                reason: "probe budget spent".to_owned(),
+                proof: None,
+            },
+        );
+        append_fixture_event(
+            &conn,
+            &Event::JobAcquisitionIntendedWithPermit {
+                slot_id: slot_id.clone(),
+                job_id: job("request-1"),
+                generation,
+                message_id: "message-1-replayed".to_owned(),
+                runner_request_id: "request-1".to_owned(),
+                run_service_url: "https://run.example/run".to_owned(),
+                intended_unix: 1_001,
+                permit_lease: permit_lease.clone(),
+            },
+        );
+        append_fixture_event(
+            &conn,
+            &Event::JobOwned {
+                job_id: job("request-1"),
+                slot_id: slot_id.clone(),
+                attempt: 1,
+                generation,
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1_002,
+            },
+        );
+        append_fixture_event(
+            &conn,
+            &Event::JobWorkerLost {
+                job_id: job("request-1"),
+                generation,
+            },
+        );
+
+        // Model the v11 materialization after its reason-only loss and later
+        // worker teardown have already removed the row. v12 must reconstruct
+        // the retained permit holder from the checksummed history.
+        conn.execute("DELETE FROM jobs", []).unwrap();
+        conn.execute(
+            "UPDATE slots SET phase = 'ready' WHERE slot_id = ?1",
+            [slot_id.0],
+        )
+        .unwrap();
+        drop(conn);
+        (path, permit_lease)
     }
 
     fn outbox_row(journal: &Journal, job_name: &str) -> Option<OutboxRecord> {
@@ -3409,6 +7775,7 @@ mod tests {
                     job_id: job("blocked-job"),
                     generation: r#gen(),
                     message_id: "msg-1".into(),
+                    runner_request_id: None,
                     run_service_url: "https://run.example/run".into(),
                     intended_unix: 1_000,
                 })
@@ -3426,6 +7793,7 @@ mod tests {
                     job_id: job("released-job"),
                     generation: r#gen(),
                     message_id: "msg-2".into(),
+                    runner_request_id: None,
                     run_service_url: "https://run.example/run".into(),
                     intended_unix: 1_000,
                 })
@@ -3456,6 +7824,7 @@ mod tests {
     #[test]
     fn materialized_state_tolerates_unknown_meta_keys_and_rejects_malformed_drain() {
         let (dir, journal) = open_tmp("drain-meta-tolerance");
+        open_fixture_write_gate(&journal.conn);
         journal
             .conn
             .execute(
@@ -3463,9 +7832,11 @@ mod tests {
                 [],
             )
             .unwrap();
+        close_fixture_write_gate(&journal.conn);
         let state = journal.materialized_state().unwrap();
         assert!(!state.drain_active);
 
+        open_fixture_write_gate(&journal.conn);
         journal
             .conn
             .execute(
@@ -3474,6 +7845,7 @@ mod tests {
                 [],
             )
             .unwrap();
+        close_fixture_write_gate(&journal.conn);
         let error = journal.materialized_state().unwrap_err();
         assert_eq!(error.envelope.reason, "journal.materialized.invalid");
         std::fs::remove_dir_all(dir).unwrap();
@@ -3482,6 +7854,7 @@ mod tests {
     #[test]
     fn persist_state_drops_unknown_meta_keys_on_apply() {
         let (dir, mut journal) = open_tmp("drain-meta-apply-drops");
+        open_fixture_write_gate(&journal.conn);
         journal
             .conn
             .execute(
@@ -3489,6 +7862,7 @@ mod tests {
                 [],
             )
             .unwrap();
+        close_fixture_write_gate(&journal.conn);
         journal.apply(Event::ControlLive).unwrap();
         let raw: Option<String> = journal
             .conn
@@ -3514,39 +7888,427 @@ mod tests {
     }
 
     #[test]
-    fn pre_drain_binary_write_clears_the_drain_marker() {
+    fn stale_pre_drain_connection_cannot_write_after_v12_migration() {
         let (dir, mut journal) = open_tmp("drain-old-writer");
-        assert!(journal.set_drain(7).unwrap());
-        // A pre-drain binary's `persist_state` (see base 97281ce7) rewrites
-        // every `meta` row it knows and drops the drain key it cannot know.
-        // Replay that exact shape: keep all known rows, omit the marker.
-        let kept: Vec<(String, String)> = {
-            let mut statement = journal
-                .conn
-                .prepare("SELECT key, value FROM meta WHERE key != 'drain'")
-                .unwrap();
-            statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        let generation = prime_running_job(&mut journal, "scope-1", "job-1");
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: job("job-1"),
+                    generation,
+                    payload_sha256: payload_checksum(b"done"),
+                })
                 .unwrap()
-                .map(|row| row.unwrap())
-                .collect()
-        };
-        journal.conn.execute("DELETE FROM meta", []).unwrap();
-        for (key, value) in &kept {
-            journal
-                .conn
-                .execute(
-                    "INSERT INTO meta (key, value) VALUES (?1, ?2)",
-                    params![key.as_str(), value.as_str()],
-                )
-                .unwrap();
+                .rejected
+        );
+        assert!(journal.set_drain(7).unwrap());
+        drop(journal);
+
+        let path = dir.join("journal.db");
+        let downgrade = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&downgrade, 11);
+        downgrade
+            .pragma_update(None, "user_version", 11u32)
+            .unwrap();
+        downgrade
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(downgrade);
+
+        // This handle was opened by the old writer before migration. Its
+        // prepared table operations must encounter the persistent triggers
+        // after v12 setup installs them.
+        let stale = Connection::open(&path).unwrap();
+        let mut migrated = Journal::open(&path).unwrap();
+        let before_events = event_count(&migrated);
+        let event = Event::JournalWritable;
+        let payload = serde_json::to_string(&event).unwrap();
+        let insert = stale.execute(
+            "INSERT INTO events (generation, kind, payload, checksum)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                event_generation(&event).0 as i64,
+                event_kind(&event),
+                payload,
+                sha256_hex(payload.as_bytes()),
+            ],
+        );
+        assert!(insert.is_err(), "stale event append must be fenced");
+        assert!(
+            stale
+                .execute("UPDATE events SET checksum = checksum WHERE id = 1", [])
+                .is_err(),
+            "stale event rewrite must be fenced"
+        );
+        assert!(
+            stale
+                .execute("UPDATE slots SET heartbeat_unix = 99", [])
+                .is_err(),
+            "stale slot rewrite must be fenced"
+        );
+        assert!(
+            stale
+                .execute("UPDATE jobs SET phase = 'running'", [])
+                .is_err(),
+            "stale job rewrite must be fenced"
+        );
+        assert!(
+            stale
+                .execute("UPDATE outbox SET attempts = attempts + 1", [])
+                .is_err(),
+            "stale outbox rewrite must be fenced"
+        );
+        let delete = stale.execute("DELETE FROM meta WHERE key = 'drain'", []);
+        assert!(delete.is_err(), "stale meta rewrite must be fenced");
+
+        let state = migrated.materialized_state().unwrap();
+        assert!(state.drain_active);
+        assert_eq!(state.drain_version, 7);
+        assert!(state.control_live);
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.outbox.len(), 1);
+        assert_eq!(state.outbox[0].attempts, 0);
+        assert_eq!(event_count(&migrated), before_events);
+        assert!(migrated.set_drain(8).unwrap());
+        assert_eq!(
+            read_drain_state(&path),
+            Ok(Some(DrainState {
+                active: true,
+                version: 8,
+            }))
+        );
+        drop(stale);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn inverted_write_gate_predicate_is_refused_before_wal_or_sidecars() {
+        assert_bad_write_gate_fails_before_wal(
+            "write-gate-inverted-predicate",
+            "DROP TRIGGER journal_write_gate_events_insert;
+             CREATE TRIGGER journal_write_gate_events_insert
+             BEFORE INSERT ON events
+             WHEN EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+             BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;",
+        );
+    }
+
+    #[test]
+    fn extra_triggers_on_guarded_tables_or_gate_are_refused_before_wal() {
+        for (label, schema_edit) in [
+            (
+                "write-gate-extra-table-trigger",
+                "CREATE TRIGGER rogue_after_event_delete
+                 AFTER DELETE ON events BEGIN SELECT 1; END;",
+            ),
+            (
+                "write-gate-extra-gate-trigger",
+                "CREATE TRIGGER rogue_gate_reopen
+                 AFTER DELETE ON journal_write_gate
+                 BEGIN INSERT INTO journal_write_gate (id) VALUES (1); END;",
+            ),
+        ] {
+            assert_bad_write_gate_fails_before_wal(label, schema_edit);
         }
-        // The marker is gone although no drain-clear path ran: mixed-version
-        // fleets sharing one journal can unlatch a drain mid-flight.
+    }
+
+    #[test]
+    fn foreign_key_to_write_gate_is_refused_before_wal() {
+        assert_bad_write_gate_fails_before_wal(
+            "write-gate-foreign-key",
+            "CREATE TABLE extension_gate_rows (
+                 gate_id INTEGER REFERENCES journal_write_gate(id) ON DELETE CASCADE
+             );",
+        );
+    }
+
+    #[test]
+    fn explicit_nonbinary_table_and_index_collations_are_refused_before_wal() {
+        assert_bad_collation_fails_before_wal(
+            "journal-jobs-nocase-collation",
+            "DROP TABLE jobs;
+             CREATE TABLE jobs (
+                 job_id TEXT PRIMARY KEY,
+                 slot_id TEXT COLLATE NOCASE NOT NULL,
+                 generation INTEGER NOT NULL,
+                 attempt INTEGER NOT NULL,
+                 worker TEXT NOT NULL,
+                 phase TEXT NOT NULL,
+                 accepted_unix INTEGER NOT NULL DEFAULT 0,
+                 terminal_conclusion TEXT,
+                 provisional INTEGER NOT NULL DEFAULT 0,
+                 plan_id TEXT NOT NULL DEFAULT '',
+                 run_service_url TEXT NOT NULL DEFAULT '',
+                 probe_attempts INTEGER NOT NULL DEFAULT 0,
+                 probe_deadline_unix INTEGER NOT NULL DEFAULT 0,
+                 runner_request_id TEXT NOT NULL DEFAULT '',
+                 permit_lease TEXT,
+                 acquisition_loss_unproven INTEGER NOT NULL DEFAULT 0
+             );",
+        );
+        assert_bad_collation_fails_before_wal(
+            "journal-events-index-nocase-collation",
+            "DROP INDEX events_generation_kind_id_idx;
+             CREATE INDEX events_generation_kind_id_idx
+                 ON events (generation, kind COLLATE NOCASE, id DESC);",
+        );
+    }
+
+    #[test]
+    fn a_write_that_reopens_the_gate_aborts_before_commit() {
+        let (dir, mut journal) = open_tmp("write-gate-close-reopen");
+        let path = dir.join("journal.db");
+        let before_events = event_count(&journal);
+        let schema = Connection::open(&path).unwrap();
+        schema
+            .execute_batch(
+                "CREATE TRIGGER rogue_gate_reopen
+                 AFTER DELETE ON journal_write_gate
+                 BEGIN INSERT INTO journal_write_gate (id) VALUES (1); END;",
+            )
+            .unwrap();
+        drop(schema);
+
+        let error = journal.apply(Event::ControlLive).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(event_count(&journal), before_events);
+        assert!(!journal.materialized_state().unwrap().control_live);
+        assert!(!journal_write_gate_has_open_row(&journal.conn).unwrap());
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_generation_outside_sqlite_integer_range_is_rejected_without_writing() {
+        let (dir, mut journal) = open_tmp("generation-sqlite-range");
+        let before_events = event_count(&journal);
+        let error = journal
+            .apply(Event::PermitReserved {
+                slot_id: slot("scope-1"),
+                generation: Generation(i64::MAX as u64 + 1),
+            })
+            .unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.generation.range");
+        assert_eq!(event_count(&journal), before_events);
+        assert!(journal.materialized_state().unwrap().slots.is_empty());
+        assert!(!journal_write_gate_has_open_row(&journal.conn).unwrap());
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_overflowing_generation_in_a_later_batch_event_commits_nothing() {
+        let (dir, mut journal) = open_tmp("generation-sqlite-range-batch");
+        let before_events = event_count(&journal);
+        let error = journal
+            .apply_many([
+                Event::ControlLive,
+                Event::PackageActivated {
+                    apt_version: "candidate".to_owned(),
+                    generation: i64::MAX as u64 + 1,
+                },
+            ])
+            .unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.generation.range");
+        assert_eq!(event_count(&journal), before_events);
         let state = journal.materialized_state().unwrap();
-        assert!(!state.drain_active);
-        assert_eq!(state.drain_version, 0);
-        assert_eq!(read_drain_state(&dir.join("journal.db")), Ok(None));
+        assert!(!state.control_live);
+        assert_eq!(state.package_generation, 0);
+        assert!(!journal_write_gate_has_open_row(&journal.conn).unwrap());
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn materialized_generation_outside_sqlite_range_rolls_back_all_rows() {
+        let (dir, mut journal) = open_tmp("materialized-generation-sqlite-range");
+        prime_ready(&mut journal, "scope-1");
+        let before = journal.materialized_state().unwrap();
+        let before_events = event_count(&journal);
+        let mut invalid = before.clone();
+        invalid.slots[0].generation = Generation(i64::MAX as u64 + 1);
+
+        let error = {
+            let transaction = journal
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            open_journal_write_gate(&transaction).unwrap();
+            persist_state(&transaction, &invalid).unwrap_err()
+        };
+
+        assert_eq!(error.envelope.reason, "journal.generation.range");
+        assert_eq!(event_count(&journal), before_events);
+        assert_eq!(journal.materialized_state().unwrap(), before);
+        assert!(!journal_write_gate_has_open_row(&journal.conn).unwrap());
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn job_and_outbox_generation_overflow_is_rejected_before_materialized_delete() {
+        let (dir, mut journal) = open_tmp("job-outbox-generation-sqlite-range");
+        prime_ready(&mut journal, "scope-1");
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot("scope-1"),
+                    job_id: job("job-1"),
+                    generation: r#gen(),
+                    message_id: "message-1".to_owned(),
+                    runner_request_id: Some("request-1".to_owned()),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                })
+                .unwrap()
+                .rejected
+        );
+        resolve_test_acquisition(&mut journal, "job-1", "job-1", "request-1", r#gen(), None);
+        assert!(
+            !journal
+                .apply(Event::JobOwned {
+                    job_id: job("job-1"),
+                    slot_id: slot("scope-1"),
+                    attempt: 1,
+                    generation: r#gen(),
+                    worker: "worker-1".to_owned(),
+                    accepted_unix: 1_001,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: job("job-1"),
+                    generation: r#gen(),
+                    payload_sha256: payload_checksum(b"ok"),
+                })
+                .unwrap()
+                .rejected
+        );
+        let before = journal.materialized_state().unwrap();
+
+        for mutate in [0_u8, 1_u8] {
+            let mut invalid = before.clone();
+            if mutate == 0 {
+                invalid.jobs[0].generation = Generation(i64::MAX as u64 + 1);
+            } else {
+                invalid.outbox[0].generation = Generation(i64::MAX as u64 + 1);
+            }
+            let error = {
+                let transaction = journal
+                    .conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .unwrap();
+                open_journal_write_gate(&transaction).unwrap();
+                persist_state(&transaction, &invalid).unwrap_err()
+            };
+            assert_eq!(error.envelope.reason, "journal.generation.range");
+            assert_eq!(journal.materialized_state().unwrap(), before);
+            assert!(!journal_write_gate_has_open_row(&journal.conn).unwrap());
+        }
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn every_persisted_timestamp_must_fit_sqlite_before_materialized_delete() {
+        let (dir, mut journal) = open_tmp("materialized-timestamp-sqlite-range");
+        prime_ready(&mut journal, "scope-1");
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot("scope-1"),
+                    job_id: job("job-1"),
+                    generation: r#gen(),
+                    message_id: "message-1".to_owned(),
+                    runner_request_id: Some("request-1".to_owned()),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                })
+                .unwrap()
+                .rejected
+        );
+        resolve_test_acquisition(&mut journal, "job-1", "job-1", "request-1", r#gen(), None);
+        assert!(
+            !journal
+                .apply(Event::JobOwned {
+                    job_id: job("job-1"),
+                    slot_id: slot("scope-1"),
+                    attempt: 1,
+                    generation: r#gen(),
+                    worker: "worker-1".to_owned(),
+                    accepted_unix: 1_001,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: job("job-1"),
+                    generation: r#gen(),
+                    payload_sha256: payload_checksum(b"ok"),
+                })
+                .unwrap()
+                .rejected
+        );
+        let before = journal.materialized_state().unwrap();
+        let before_events = event_count(&journal);
+
+        let overflow_timestamp: [fn(&mut FleetState); 5] = [
+            |state| state.slots[0].heartbeat_unix = u64::MAX,
+            |state| state.jobs[0].accepted_unix = u64::MAX,
+            |state| state.jobs[0].probe_deadline_unix = u64::MAX,
+            |state| state.outbox[0].created_unix = u64::MAX,
+            |state| state.outbox[0].deadline_unix = u64::MAX,
+        ];
+        for mutate in overflow_timestamp {
+            let mut invalid = before.clone();
+            mutate(&mut invalid);
+            let error = {
+                let transaction = journal
+                    .conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .unwrap();
+                open_journal_write_gate(&transaction).unwrap();
+                persist_state(&transaction, &invalid).unwrap_err()
+            };
+            assert_eq!(error.envelope.reason, "journal.timestamp.range");
+            assert_eq!(event_count(&journal), before_events);
+            assert_eq!(journal.materialized_state().unwrap(), before);
+            assert!(!journal_write_gate_has_open_row(&journal.conn).unwrap());
+        }
+
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn overflowing_acquisition_deadline_rolls_back_event_and_state() {
+        let (dir, mut journal) = open_tmp("acquisition-timestamp-sqlite-range");
+        prime_ready(&mut journal, "scope-1");
+        let before = journal.materialized_state().unwrap();
+        let before_events = event_count(&journal);
+
+        let error = journal
+            .apply(Event::JobAcquisitionIntended {
+                slot_id: slot("scope-1"),
+                job_id: job("request-1"),
+                generation: r#gen(),
+                message_id: "message-1".to_owned(),
+                runner_request_id: None,
+                run_service_url: "https://run.example/run".to_owned(),
+                intended_unix: u64::MAX,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.envelope.reason, "journal.timestamp.range");
+        assert_eq!(event_count(&journal), before_events);
+        assert_eq!(journal.materialized_state().unwrap(), before);
+        assert!(!journal_write_gate_has_open_row(&journal.conn).unwrap());
+        drop(journal);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3611,6 +8373,7 @@ mod tests {
         ));
         let malformed = dir.join("malformed.db");
         let malformed_journal = Journal::open(&malformed).unwrap();
+        open_fixture_write_gate(&malformed_journal.conn);
         malformed_journal
             .conn
             .execute(
@@ -3618,6 +8381,7 @@ mod tests {
                 [],
             )
             .unwrap();
+        close_fixture_write_gate(&malformed_journal.conn);
         assert!(matches!(
             read_drain_state(&malformed),
             Err(DrainStateReadError::Malformed)
@@ -3635,6 +8399,7 @@ mod tests {
             read_admission_state(&path).unwrap(),
             Some(AdmissionState { version: 5 })
         );
+        open_fixture_write_gate(&journal.conn);
         journal
             .conn
             .execute(
@@ -3642,6 +8407,7 @@ mod tests {
                 [],
             )
             .unwrap();
+        close_fixture_write_gate(&journal.conn);
         assert_eq!(
             read_admission_state(&path),
             Err(AdmissionStateReadError::Malformed)
@@ -3708,6 +8474,7 @@ mod tests {
                     job_id: job("job-1"),
                     generation: g,
                     message_id: "msg-1".into(),
+                    runner_request_id: None,
                     run_service_url: "https://run.example/run".into(),
                     intended_unix: 1_000,
                 })
@@ -3734,6 +8501,7 @@ mod tests {
                     job_id: job("job-2"),
                     generation: g,
                     message_id: "msg-2".into(),
+                    runner_request_id: None,
                     run_service_url: "https://run.example/run".into(),
                     intended_unix: 1_000,
                 })
@@ -3747,6 +8515,8 @@ mod tests {
                     acquired_job_id: job("job-1-real"),
                     plan_id: "plan-1".into(),
                     generation: g,
+                    runner_request_id: None,
+                    permit_lease: None,
                 })
                 .unwrap()
                 .rejected
@@ -3899,6 +8669,75 @@ mod tests {
         assert!(row.is_pending());
         assert!(!row.budget_exhausted(row.created_unix));
         assert!(row.budget_exhausted(row.deadline_unix));
+    }
+
+    #[test]
+    fn recorded_event_time_drives_heartbeat_and_completion_replay() {
+        let (dir, mut journal) = open_tmp("recorded-event-time-replay");
+        let generation = prime_running_job(&mut journal, "scope-1", "job-1");
+        assert!(
+            !journal
+                .apply(Event::SlotHeartbeat {
+                    slot_id: slot("scope-1"),
+                    generation,
+                    pid: 1234,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: job("job-1"),
+                    generation,
+                    payload_sha256: payload_checksum(b"terminal"),
+                })
+                .unwrap()
+                .rejected
+        );
+
+        let heartbeat_time: i64 = journal
+            .conn
+            .query_row(
+                "SELECT recorded_unix FROM events WHERE kind = 'slot_heartbeat' ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let completion_time: i64 = journal
+            .conn
+            .query_row(
+                "SELECT recorded_unix FROM events WHERE kind = 'completion_intended' ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let materialized = journal.materialized_state().unwrap();
+        let replayed = journal.load_state().unwrap();
+        assert_eq!(replayed, materialized);
+        assert_eq!(
+            replayed.slots[0].heartbeat_unix,
+            i64_u64(heartbeat_time, "test heartbeat time").unwrap()
+        );
+        let outbox = replayed
+            .outbox
+            .iter()
+            .find(|row| row.job_id == job("job-1"))
+            .unwrap();
+        assert_eq!(
+            outbox.created_unix,
+            i64_u64(completion_time, "test completion time").unwrap()
+        );
+        assert_eq!(
+            outbox.deadline_unix,
+            outbox.created_unix + COMPLETION_RESOLUTION_SECONDS
+        );
+
+        drop(journal);
+        let reopened = Journal::open(dir.join("journal.db")).unwrap();
+        assert_eq!(reopened.load_state().unwrap(), materialized);
+        drop(reopened);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -4148,6 +8987,7 @@ mod tests {
         let path = dir.join("journal.db");
         drop(journal);
         let conn = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&conn, 6);
         conn.pragma_update(None, "user_version", 6u32).unwrap();
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
             .unwrap();
@@ -4242,6 +9082,7 @@ mod tests {
                     job_id: job("job-2"),
                     generation: g,
                     message_id: "msg-1".into(),
+                    runner_request_id: None,
                     run_service_url: "https://run.example/run".into(),
                     intended_unix: 1_000,
                 })
@@ -4286,8 +9127,17 @@ mod tests {
                 job_id: job("job-1"),
                 generation: g,
                 message_id: "msg-1".into(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
+            },
+            Event::JobAcquisitionResolved {
+                provisional_job_id: job("job-1"),
+                acquired_job_id: job("job-1"),
+                plan_id: "plan-1".into(),
+                generation: g,
+                runner_request_id: Some("job-1".into()),
+                permit_lease: None,
             },
             Event::JobOwned {
                 job_id: job("job-1"),
@@ -4326,6 +9176,7 @@ mod tests {
         // This specifically guards the v5-to-v6 physical-shape transition;
         // v6-to-v7 changes only the event vocabulary and is intentionally
         // compatible with the current materialized tables.
+        drop_jobs_columns_added_after_version(&conn, 6);
         conn.pragma_update(None, "user_version", 5u32).unwrap();
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
             .unwrap();
@@ -4363,6 +9214,7 @@ mod tests {
         let path = dir.join("journal.db");
         drop(journal);
         let conn = Connection::open(&path).unwrap();
+        drop_journal_write_gate(&conn);
         conn.execute_batch(
             "DROP TABLE outbox;
              CREATE TABLE outbox (
@@ -4378,10 +9230,10 @@ mod tests {
              INSERT INTO outbox (
                  job_id, slot_id, generation, payload_sha256, intended,
                  send_started, remote_acked, created_unix
-             ) VALUES ('job-1', 'scope-1', 1, 'sum', 1, 1, 0, 1000);
-             ALTER TABLE jobs DROP COLUMN terminal_conclusion;",
+             ) VALUES ('job-1', 'scope-1', 1, 'sum', 1, 1, 0, 1000);",
         )
         .unwrap();
+        drop_jobs_columns_added_after_version(&conn, 3);
         conn.pragma_update(None, "user_version", 3u32).unwrap();
         drop(conn);
 
@@ -4400,6 +9252,69 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+    }
+
+    #[test]
+    fn v3_deadline_overflow_is_refused_before_wal() {
+        let (dir, journal) = open_tmp("v3-deadline-overflow-prewal");
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&conn, 3);
+        conn.execute_batch(
+            "DROP TABLE outbox;
+             CREATE TABLE outbox (
+                 job_id TEXT PRIMARY KEY,
+                 slot_id TEXT NOT NULL,
+                 generation INTEGER NOT NULL,
+                 payload_sha256 TEXT NOT NULL,
+                 intended INTEGER NOT NULL DEFAULT 0,
+                 send_started INTEGER NOT NULL DEFAULT 0,
+                 remote_acked INTEGER NOT NULL DEFAULT 0,
+                 created_unix INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO outbox (
+                 job_id, slot_id, generation, payload_sha256, intended,
+                 send_started, remote_acked, created_unix
+             ) VALUES ('job-1', 'scope-1', 1, 'sum', 1, 0, 0, ?1)",
+            [i64::MAX],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 3u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.timestamp.range");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!wal.exists(), "overflow must fail before WAL");
+        assert!(!shm.exists(), "overflow must fail before WAL");
+
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+        let mode: String = check
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(check);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -4479,6 +9394,142 @@ mod tests {
     }
 
     #[test]
+    fn observation_batch_matches_full_reducer_state_and_ordered_summaries() {
+        let (_expected_dir, mut expected_journal) = open_tmp("observation-reference");
+        let (_batched_dir, mut batched_journal) = open_tmp("observation-batched");
+        let generation = Generation(2);
+        let seed = [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 2 },
+            Event::PermitReserved {
+                slot_id: slot("scope-a"),
+                generation,
+            },
+            Event::PermitReserved {
+                slot_id: slot("scope-b"),
+                generation,
+            },
+        ];
+        expected_journal.apply_many(seed.clone()).unwrap();
+        batched_journal.apply_many(seed).unwrap();
+
+        let events = vec![
+            Event::SlotHeartbeat {
+                slot_id: slot("scope-a"),
+                generation,
+                pid: 101,
+            },
+            Event::ExecutorProven {
+                slot_id: slot("scope-a"),
+                generation,
+            },
+            Event::SessionLive {
+                slot_id: slot("scope-a"),
+                generation,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot("scope-a"),
+                generation,
+            },
+            Event::ExecutorProven {
+                slot_id: slot("scope-a"),
+                generation,
+            },
+            Event::SessionLive {
+                slot_id: slot("scope-a"),
+                generation,
+            },
+            Event::SlotHeartbeat {
+                slot_id: slot("scope-b"),
+                generation,
+                pid: 202,
+            },
+            Event::SessionLive {
+                slot_id: slot("scope-b"),
+                generation,
+            },
+            Event::ExecutorProven {
+                slot_id: slot("scope-b"),
+                generation,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot("scope-b"),
+                generation,
+            },
+            Event::ExecutorProven {
+                slot_id: slot("scope-a"),
+                generation: Generation(1),
+            },
+            Event::SlotHeartbeat {
+                slot_id: slot("scope-b"),
+                generation: Generation(1),
+                pid: 303,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot("scope-b"),
+                generation: Generation(1),
+            },
+        ];
+
+        let expected_outcomes = expected_journal.apply_many(events.clone()).unwrap();
+        let expected_summaries = expected_outcomes
+            .into_iter()
+            .map(|outcome| ApplySummary {
+                commands: outcome.commands,
+                rejected: outcome.rejected,
+            })
+            .collect::<Vec<_>>();
+        let summaries = batched_journal.apply_observation_batch(events).unwrap();
+
+        assert_eq!(summaries, expected_summaries);
+        assert!(summaries[..10].iter().all(|summary| !summary.rejected));
+        assert!(summaries[10..].iter().all(|summary| summary.rejected));
+        assert_eq!(
+            summaries[3].commands,
+            vec![SideEffect::RegisterRunner {
+                slot_id: slot("scope-a"),
+                generation,
+            }]
+        );
+        assert_eq!(
+            summaries[9].commands,
+            vec![SideEffect::RegisterRunner {
+                slot_id: slot("scope-b"),
+                generation,
+            }]
+        );
+        assert!(summaries
+            .iter()
+            .enumerate()
+            .all(|(index, summary)| matches!(index, 3 | 9) || summary.commands.is_empty()));
+
+        let mut expected_state = expected_journal.materialized_state().unwrap();
+        let mut batched_state = batched_journal.materialized_state().unwrap();
+        for slot in expected_state
+            .slots
+            .iter_mut()
+            .chain(&mut batched_state.slots)
+        {
+            // Clock reads occur in separate transactions; compare the durable
+            // heartbeat value's other semantics without assuming one second.
+            slot.heartbeat_unix = 0;
+        }
+        assert_eq!(batched_state, expected_state);
+        assert_eq!(
+            event_count(&batched_journal),
+            event_count(&expected_journal)
+        );
+    }
+
+    #[test]
     fn health_distinguishes_active_jobs_from_ready_slots() {
         let (_dir, mut journal) = open_tmp("health-capacity");
         prime_ready(&mut journal, "scope-1");
@@ -4500,6 +9551,7 @@ mod tests {
                     job_id: job("job-1"),
                     generation: r#gen(),
                     message_id: "msg-1".into(),
+                    runner_request_id: None,
                     run_service_url: "https://run.example/run".into(),
                     intended_unix: 1_000,
                 })
@@ -4510,22 +9562,21 @@ mod tests {
         assert_eq!(intended.health().actual_ready_slots, 0);
         assert_eq!(intended.jobs.len(), 1);
         assert!(intended.jobs[0].provisional);
-        assert!(
-            !journal
-                .apply(Event::JobOwned {
-                    job_id: job("job-1"),
-                    slot_id,
-                    attempt: 1,
-                    generation: r#gen(),
-                    worker: "worker-1".to_owned(),
-                    accepted_unix: 1,
-                })
-                .unwrap()
-                .rejected
-        );
-        let owned = journal.load_state().unwrap();
-        assert_eq!(owned.health().actual_ready_slots, 0);
-        assert_eq!(owned.jobs.len(), 1);
+        let ownership = journal
+            .apply(Event::JobOwned {
+                job_id: job("job-1"),
+                slot_id,
+                attempt: 1,
+                generation: r#gen(),
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1,
+            })
+            .unwrap();
+        assert!(ownership.rejected);
+        let after_rejected_promotion = journal.load_state().unwrap();
+        assert_eq!(after_rejected_promotion.health().actual_ready_slots, 0);
+        assert_eq!(after_rejected_promotion.jobs.len(), 1);
+        assert!(after_rejected_promotion.jobs[0].provisional);
     }
 
     #[test]
@@ -4639,6 +9690,7 @@ mod tests {
         // Journal::apply must reject this state. Seed the intentionally stale
         // N+1 materialization directly so the test exercises forensic safety.
         let seed = Connection::open(&path).unwrap();
+        open_fixture_write_gate(&seed);
         seed.execute_batch(
             "DROP TABLE outbox;
              CREATE TABLE outbox (
@@ -4660,7 +9712,8 @@ mod tests {
                  ('package_generation', '1'),
                  ('package_apt_version', '0.1.215'),
                  ('capacity_invalid', '0'),
-                 ('capacity_declared', '1');
+                 ('capacity_declared', '1')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value;
              INSERT INTO slots (
                  slot_id, generation, phase, permit_held, routing_valid,
                  session_live, executor_proven, registered, pid, heartbeat_unix
@@ -4681,10 +9734,12 @@ mod tests {
         let fixture_payload = r#"{"type":"control_live"}"#;
         seed.execute(
             "INSERT INTO events (generation, kind, payload, checksum)
-             VALUES (1, 'control_live', ?1, ?2)",
+             VALUES (0, 'control_live', ?1, ?2)",
             params![fixture_payload, sha256_hex(fixture_payload.as_bytes())],
         )
         .unwrap();
+        close_fixture_write_gate(&seed);
+        drop_jobs_columns_added_after_version(&seed, 2);
         seed.execute("PRAGMA user_version = 2", []).unwrap();
         drop(seed);
 
@@ -4780,14 +9835,12 @@ mod tests {
 
         for _ in 0..2 {
             let mut reopened = Journal::open(&path).unwrap();
-            // This fixture intentionally corrupts only the materialized
-            // tables. Event replay is an integrity/recovery view and must
-            // not infer materialized-only rows; the controller's hot path
-            // uses materialized_state(), which is the authoritative view for
-            // capacity safety and must detect the stale N+1 slot.
+            // The migration baseline retains the validated forensic
+            // projection while its explicit capacity-invalid marker keeps
+            // status and writes fenced.
             let replayed = reopened.load_state().unwrap();
-            assert!(!replayed.capacity_invalid);
-            assert!(replayed.slots.is_empty());
+            assert!(replayed.capacity_invalid);
+            assert_eq!(replayed.slots.len(), 3);
 
             let state = reopened.materialized_state().unwrap();
             assert!(state.capacity_invalid);
@@ -4819,6 +9872,7 @@ mod tests {
 
     fn seed_v2_outbox(path: &Path, version: i64) {
         let conn = Connection::open(path).unwrap();
+        drop_journal_write_gate(&conn);
         conn.execute_batch(
             "DROP TABLE outbox;
              CREATE TABLE outbox (
@@ -4843,6 +9897,9 @@ mod tests {
              ) VALUES ('job-1', 1, 'payload', 1, 0, 0, 1);",
         )
         .unwrap();
+        if version == 0 || version == 2 {
+            drop_jobs_columns_added_after_version(&conn, 2);
+        }
         conn.pragma_update(None, "user_version", version).unwrap();
     }
 
@@ -4876,6 +9933,21 @@ mod tests {
         let path = dir.join("journal.db");
         drop(journal);
         let conn = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&conn, 3);
+        conn.execute_batch(
+            "DROP TABLE outbox;
+             CREATE TABLE outbox (
+                 job_id TEXT PRIMARY KEY,
+                 slot_id TEXT NOT NULL,
+                 generation INTEGER NOT NULL,
+                 payload_sha256 TEXT NOT NULL,
+                 intended INTEGER NOT NULL DEFAULT 0,
+                 send_started INTEGER NOT NULL DEFAULT 0,
+                 remote_acked INTEGER NOT NULL DEFAULT 0,
+                 created_unix INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
         conn.pragma_update(None, "user_version", 2u32).unwrap();
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
             .unwrap();
@@ -4925,6 +9997,7 @@ mod tests {
         let path = dir.join("journal.db");
         drop(journal);
         let conn = Connection::open(&path).unwrap();
+        drop_journal_write_gate(&conn);
         conn.execute_batch(
             "DROP TABLE outbox;
              CREATE TABLE outbox (
@@ -5052,6 +10125,7 @@ mod tests {
         drop(journal);
 
         let seed = Connection::open(&path).unwrap();
+        open_fixture_write_gate(&seed);
         seed.execute(
             "INSERT INTO slots (
                  slot_id, generation, phase, permit_held, routing_valid,
@@ -5060,27 +10134,17 @@ mod tests {
             [],
         )
         .unwrap();
+        close_fixture_write_gate(&seed);
         seed.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
             .unwrap();
         drop(seed);
 
         let before = std::fs::read(&path).unwrap();
-        let mut reopened = Journal::open(&path).unwrap();
-        let state = reopened.materialized_state().unwrap();
-        assert!(state.capacity_invalid);
-        assert_eq!(state.slots.len(), 3);
-        assert_eq!(state.advertised_capacity(), 0);
-        assert_eq!(state.health().state, FleetHealthState::NotReady);
-
-        let error = reopened
-            .apply(Event::SlotHeartbeat {
-                slot_id: slot("scope-extra"),
-                generation: r#gen(),
-                pid: 123,
-            })
-            .unwrap_err();
-        assert_eq!(error.envelope.reason, "journal.capacity.invalid");
-        drop(reopened);
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(
+            error.envelope.reason,
+            "journal.materialized.replay.mismatch"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), before);
 
         let forensic = Connection::open(&path).unwrap();
@@ -5121,6 +10185,7 @@ mod tests {
 
         let path = dir.join("journal.db");
         let conn = Connection::open(&path).unwrap();
+        drop_journal_write_gate(&conn);
         conn.execute(
             "ALTER TABLE slots ADD COLUMN surge INTEGER NOT NULL DEFAULT 0",
             [],
@@ -5181,11 +10246,20 @@ mod tests {
                     job_id: job_id.clone(),
                     generation: r#gen(),
                     message_id: "msg-1".into(),
+                    runner_request_id: None,
                     run_service_url: "https://run.example/run".into(),
                     intended_unix: 1_000,
                 })
                 .unwrap()
                 .rejected
+        );
+        resolve_test_acquisition(
+            &mut journal,
+            "worker-1",
+            "worker-1",
+            "worker-1",
+            r#gen(),
+            None,
         );
         assert!(
             !journal
@@ -5204,6 +10278,7 @@ mod tests {
 
         let path = dir.join("journal.db");
         let conn = Connection::open(&path).unwrap();
+        drop_journal_write_gate(&conn);
         conn.execute_batch(
             "ALTER TABLE jobs RENAME TO jobs_v2;
              CREATE TABLE jobs (
@@ -5415,6 +10490,9 @@ mod tests {
                     provisional: false,
                     plan_id: String::new(),
                     run_service_url: String::new(),
+                    runner_request_id: String::new(),
+                    permit_lease: None,
+                    acquisition_loss_unproven: false,
                     probe_attempts: 0,
                     probe_deadline_unix: 0,
                 }],
@@ -5476,12 +10554,14 @@ mod tests {
                     job_id: job("job-1"),
                     generation,
                     message_id: "msg-1".into(),
+                    runner_request_id: None,
                     run_service_url: "https://run.example/run".into(),
                     intended_unix: 1_000,
                 })
                 .unwrap()
                 .rejected
         );
+        resolve_test_acquisition(&mut journal, "job-1", "job-1", "job-1", generation, None);
         assert!(
             !journal
                 .apply(Event::JobOwned {
@@ -5540,12 +10620,14 @@ mod tests {
                     job_id: job_id.clone(),
                     generation: r#gen(),
                     message_id: "msg-1".into(),
+                    runner_request_id: None,
                     run_service_url: "https://run.example/run".into(),
                     intended_unix: 1_000,
                 })
                 .unwrap()
                 .rejected
         );
+        resolve_test_acquisition(&mut journal, "job-1", "job-1", "job-1", r#gen(), None);
         assert!(
             !journal
                 .apply(Event::JobOwned {
@@ -5669,8 +10751,17 @@ mod tests {
                 job_id: job_id.clone(),
                 generation,
                 message_id: "msg-1".into(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
+            },
+            Event::JobAcquisitionResolved {
+                provisional_job_id: job_id.clone(),
+                acquired_job_id: job_id.clone(),
+                plan_id: "plan-1".into(),
+                generation,
+                runner_request_id: Some(job_id.0.clone()),
+                permit_lease: None,
             },
             Event::JobOwned {
                 job_id: job_id.clone(),
@@ -5963,10 +11054,12 @@ mod tests {
                 job_id: job("job-1"),
                 generation: r#gen(),
                 message_id: "msg-1".into(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
             })
             .unwrap();
+        resolve_test_acquisition(&mut journal, "job-1", "job-1", "job-1", r#gen(), None);
         let outcome = journal
             .apply(Event::JobOwned {
                 job_id: job("job-1"),
@@ -6007,10 +11100,12 @@ mod tests {
                 job_id: job("job-1"),
                 generation: r#gen(),
                 message_id: "msg-1".into(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
             })
             .unwrap();
+        resolve_test_acquisition(&mut journal, "job-1", "job-1", "job-1", r#gen(), None);
         journal
             .apply(Event::JobOwned {
                 job_id: job("job-1"),
@@ -6089,10 +11184,12 @@ mod tests {
                 job_id: job("job-1"),
                 generation: r#gen(),
                 message_id: "msg-1".into(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
             })
             .unwrap();
+        resolve_test_acquisition(&mut journal, "job-1", "job-1", "job-1", r#gen(), None);
         journal
             .apply(Event::JobOwned {
                 job_id: job("job-1"),
@@ -6139,6 +11236,135 @@ mod tests {
     }
 
     #[test]
+    fn worker_lost_cannot_remove_a_provisional_acquisition() {
+        let (dir, mut journal) = open_tmp("worker-lost-provisional");
+        prime_ready(&mut journal, "scope-1");
+        let permit_lease = NativePermitLease {
+            holder: "native/v1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/request-1"
+                .to_owned(),
+            ledger_path: "/tmp/permit-ledger.db".to_owned(),
+            generation: 41,
+        };
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntendedWithPermit {
+                    slot_id: slot("scope-1"),
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    message_id: "message-1".to_owned(),
+                    runner_request_id: "request-1".to_owned(),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                    permit_lease: permit_lease.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let before_events = event_count(&journal);
+
+        let promoted = journal
+            .apply(Event::JobOwned {
+                job_id: job("request-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: r#gen(),
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1_001,
+            })
+            .unwrap();
+        assert!(
+            promoted.rejected,
+            "a planless acquire intent is not ownership"
+        );
+        let started = journal
+            .apply(Event::JobStarted {
+                job_id: job("request-1"),
+                generation: r#gen(),
+            })
+            .unwrap();
+        assert!(
+            started.rejected,
+            "an unresolved acquire intent cannot start"
+        );
+        assert_eq!(event_count(&journal), before_events);
+
+        let lost = journal
+            .apply(Event::JobWorkerLost {
+                job_id: job("request-1"),
+                generation: r#gen(),
+            })
+            .unwrap();
+
+        assert!(lost.rejected);
+        assert_eq!(event_count(&journal), before_events);
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert!(state.jobs[0].provisional);
+        assert_eq!(state.jobs[0].permit_lease, Some(permit_lease));
+        assert!(!state.jobs[0].acquisition_loss_unproven);
+        assert_eq!(state.slots[0].phase, SlotPhase2::Assigned);
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn acquisition_loss_proof_cannot_release_a_lease_claimed_by_two_rows() {
+        let (dir, mut journal) = open_tmp("acquisition-loss-duplicate-lease-proof");
+        prime_ready(&mut journal, "scope-1");
+        let permit_lease = NativePermitLease {
+            holder: "native/v1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/request-1"
+                .to_owned(),
+            ledger_path: "/tmp/permit-ledger.db".to_owned(),
+            generation: 41,
+        };
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntendedWithPermit {
+                    slot_id: slot("scope-1"),
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    message_id: "message-1".to_owned(),
+                    runner_request_id: "request-1".to_owned(),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                    permit_lease: permit_lease.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+
+        let mut state = journal.materialized_state().unwrap();
+        let mut duplicate = state.jobs[0].clone();
+        duplicate.job_id = job("request-duplicate");
+        duplicate.runner_request_id = "request-duplicate".to_owned();
+        duplicate.slot_id = slot("scope-duplicate");
+        state.jobs.push(duplicate);
+        let outcome = reduce(
+            state,
+            Event::JobAcquisitionLost {
+                job_id: job("request-1"),
+                generation: r#gen(),
+                reason: "renewjob says not ours".to_owned(),
+                proof: Some(AcquisitionLossProof {
+                    source: AcquisitionLossSource::RenewJobNotOurs,
+                    permit_lease: permit_lease.clone(),
+                }),
+            },
+        );
+        assert!(outcome.rejected);
+        assert_eq!(outcome.state.jobs.len(), 2);
+        assert!(outcome.state.jobs[0].acquisition_loss_unproven);
+        assert!(outcome
+            .state
+            .jobs
+            .iter()
+            .all(|job| job.permit_lease.as_ref() == Some(&permit_lease)));
+        assert_eq!(outcome.state.slots[0].phase, SlotPhase2::Assigned);
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn stale_generation_cannot_complete_or_cleanup() {
         let (_dir, mut journal) = open_tmp("stale");
         prime_ready(&mut journal, "scope-1");
@@ -6154,10 +11380,12 @@ mod tests {
                 job_id: job("job-1"),
                 generation: r#gen(),
                 message_id: "msg-1".into(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
             })
             .unwrap();
+        resolve_test_acquisition(&mut journal, "job-1", "job-1", "job-1", r#gen(), None);
         journal
             .apply(Event::JobOwned {
                 job_id: job("job-1"),
@@ -6239,6 +11467,175 @@ mod tests {
     }
 
     #[test]
+    fn negative_user_version_is_not_treated_as_unversioned() {
+        let (dir, journal) = open_tmp("negative-user-version");
+        let path = dir.join("journal.db");
+        drop(journal);
+        seed_v2_outbox(&path, 2);
+
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", -1i64).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.version.invalid");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!wal.exists(), "negative version must fail before WAL setup");
+        assert!(!shm.exists(), "negative version must fail before WAL setup");
+
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, -1);
+        let mode: String = check
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(check);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn mixed_case_events_table_is_rejected_before_wal_setup() {
+        let (dir, journal) = open_tmp("mixed-case-events-checksum");
+        let path = dir.join("journal.db");
+        drop(journal);
+        seed_v2_outbox(&path, 2);
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE events;
+             CREATE TABLE EVENTS (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 generation INTEGER NOT NULL,
+                 kind TEXT NOT NULL,
+                 payload TEXT NOT NULL,
+                 checksum TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO EVENTS (generation, kind, payload, checksum)
+             VALUES (0, 'control_live', '{\"type\":\"control_live\"}', 'stale-checksum')",
+            [],
+        )
+        .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !wal.exists(),
+            "case-insensitive event lookup must run pre-WAL"
+        );
+        assert!(
+            !shm.exists(),
+            "case-insensitive event lookup must run pre-WAL"
+        );
+
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        let mode: String = check
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(check);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn mixed_case_event_trigger_target_is_seen_before_wal_setup() {
+        let (dir, mut journal) = open_tmp("mixed-case-events-trigger");
+        assert!(!journal.apply(Event::ControlLive).unwrap().rejected);
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&conn, 11);
+        conn.execute_batch(
+            "DROP TABLE events;
+             CREATE TABLE EVENTS (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 generation INTEGER NOT NULL,
+                 kind TEXT NOT NULL,
+                 payload TEXT NOT NULL,
+                 checksum TEXT NOT NULL
+             );
+             CREATE TRIGGER rogue_uppercase_events_delete
+             AFTER DELETE ON EVENTS BEGIN SELECT 1; END;
+             PRAGMA user_version = 11;",
+        )
+        .unwrap();
+        let trigger_table: String = conn
+            .query_row(
+                "SELECT tbl_name FROM sqlite_master
+                 WHERE type = 'trigger' AND name = 'rogue_uppercase_events_delete'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(trigger_table, "EVENTS");
+        let payload = r#"{"type":"control_live"}"#;
+        conn.execute(
+            "INSERT INTO EVENTS (generation, kind, payload, checksum) VALUES (0, 'control_live', ?1, ?2)",
+            params![payload, sha256_hex(payload.as_bytes())],
+        )
+        .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !wal.exists(),
+            "case-insensitive trigger target must fail pre-WAL"
+        );
+        assert!(
+            !shm.exists(),
+            "case-insensitive trigger target must fail pre-WAL"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn unknown_event_kind_is_a_hard_error_not_a_skip() {
         let (dir, mut journal) = open_tmp("unk");
         journal.apply(Event::ControlLive).unwrap();
@@ -6246,12 +11643,21 @@ mod tests {
         let path = dir.join("journal.db");
         let conn = Connection::open(&path).unwrap();
         let payload = r#"{"type":"future_envelope","x":1}"#;
-        let checksum = payload_checksum(payload.as_bytes());
+        open_fixture_write_gate(&conn);
         conn.execute(
             "INSERT INTO events (generation, kind, payload, checksum) VALUES (0, 'future_envelope', ?1, ?2)",
-            params![payload, checksum],
+            params![payload, ""],
         )
         .unwrap();
+        let id = conn.last_insert_rowid();
+        let checksum = event_row_checksum(id, 0, "future_envelope", payload, 0).unwrap();
+        conn.execute(
+            "UPDATE events SET checksum = ?1 WHERE id = ?2",
+            params![checksum, id],
+        )
+        .unwrap();
+        refresh_fixture_replay_baseline_tail(&conn);
+        close_fixture_write_gate(&conn);
         drop(conn);
         // Skipping it would drop terminal state and re-drive a completion the
         // writer had already resolved. The version gate is what keeps an
@@ -6278,12 +11684,14 @@ mod tests {
                     job_id: job("guid-1"),
                     generation: r#gen(),
                     message_id: "msg-1".into(),
+                    runner_request_id: None,
                     run_service_url: "https://run.example/run".into(),
                     intended_unix: 1_000,
                 })
                 .unwrap()
                 .rejected
         );
+        resolve_test_acquisition(&mut journal, "guid-1", "guid-1", "guid-1", r#gen(), None);
         assert!(
             !journal
                 .apply(Event::JobOwned {
@@ -6330,10 +11738,12 @@ mod tests {
                 job_id: job("guid-1"),
                 generation: r#gen(),
                 message_id: "msg-1".into(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
             })
             .unwrap();
+        resolve_test_acquisition(&mut journal, "guid-1", "guid-1", "guid-1", r#gen(), None);
         journal
             .apply(Event::JobOwned {
                 job_id: job("guid-1"),
@@ -6374,10 +11784,12 @@ mod tests {
                 job_id: job("guid-1"),
                 generation: r#gen(),
                 message_id: "msg-1".into(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
             })
             .unwrap();
+        resolve_test_acquisition(&mut journal, "guid-1", "guid-1", "guid-1", r#gen(), None);
         journal
             .apply(Event::JobOwned {
                 job_id: job("guid-1"),
@@ -6431,42 +11843,83 @@ mod tests {
             let path = dir.join("journal.db");
             drop(journal);
 
-            // Rewind the stamp to simulate a file written by an older binary.
-            // The shape is current, which is exactly the case a real upgrade
-            // hits after `CREATE TABLE IF NOT EXISTS` has run.
+            if stamped == 2 {
+                seed_v2_outbox(&path, 2);
+            } else {
+                // Build a real historical table shape instead of rewinding a
+                // current schema stamp, which should be refused as ambiguous.
+                let conn = Connection::open(&path).unwrap();
+                drop_jobs_columns_added_after_version(&conn, stamped);
+                conn.execute("DELETE FROM meta", []).unwrap();
+                if stamped == 3 {
+                    conn.execute_batch(
+                        "DROP TABLE outbox;
+                         CREATE TABLE outbox (
+                             job_id TEXT PRIMARY KEY,
+                             slot_id TEXT NOT NULL,
+                             generation INTEGER NOT NULL,
+                             payload_sha256 TEXT NOT NULL,
+                             intended INTEGER NOT NULL DEFAULT 0,
+                             send_started INTEGER NOT NULL DEFAULT 0,
+                             remote_acked INTEGER NOT NULL DEFAULT 0,
+                             created_unix INTEGER NOT NULL
+                         );",
+                    )
+                    .unwrap();
+                }
+                conn.pragma_update(None, "user_version", stamped).unwrap();
+                conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+                    .unwrap();
+            }
+
+            // Assert the fixture is physically historical before opening it.
+            // A current jobs shape under an old stamp is a downgrade-shaped
+            // hybrid, not migration coverage.
             let conn = Connection::open(&path).unwrap();
-            conn.pragma_update(None, "user_version", stamped).unwrap();
-            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
-                .unwrap();
+            let expected_jobs_version = match stamped {
+                2 | 3 => 3,
+                4 => 4,
+                5 => 5,
+                6 => 6,
+                _ => unreachable!(),
+            };
+            assert!(
+                jobs_shape_matches_version(&conn, expected_jobs_version).unwrap(),
+                "v{stamped} fixture must have its historical jobs columns"
+            );
+            let expected_outbox = match stamped {
+                2 => OutboxSchema::V2,
+                3 => OutboxSchema::V3,
+                _ => OutboxSchema::V4,
+            };
+            assert_eq!(
+                outbox_schema_shape(&conn).unwrap(),
+                expected_outbox,
+                "v{stamped} fixture must have its historical outbox columns"
+            );
             drop(conn);
 
-            match Journal::open(&path) {
-                Ok(journal) => {
-                    // Opening is not proof: materialization is where a missing
-                    // column actually surfaces.
-                    journal.load_state().unwrap_or_else(|error| {
-                        panic!("v{stamped} upgrade cannot materialize: {error:?}")
-                    });
-                    let conn = Connection::open(&path).unwrap();
-                    let version: i64 = conn
-                        .query_row("PRAGMA user_version", [], |row| row.get(0))
-                        .unwrap();
-                    assert_eq!(
-                        u32::try_from(version).unwrap(),
-                        JOURNAL_SCHEMA_VERSION,
-                        "v{stamped} upgrade must land on the current version"
-                    );
-                }
-                Err(error) => {
-                    // Refusing is acceptable only for the shape-ahead-of-stamp
-                    // guard, which must leave the file untouched. Silently
-                    // stamping a shape it does not have is not.
-                    assert_eq!(
-                        error.envelope.reason, "journal.schema.mismatch",
-                        "v{stamped} upgrade failed for an unexpected reason"
-                    );
-                }
+            let journal = Journal::open(&path)
+                .unwrap_or_else(|error| panic!("v{stamped} upgrade failed: {error:?}"));
+            journal
+                .load_state()
+                .unwrap_or_else(|error| panic!("v{stamped} upgrade cannot materialize: {error:?}"));
+            journal.materialized_state().unwrap_or_else(|error| {
+                panic!("v{stamped} upgrade cannot read materialization: {error:?}")
+            });
+            let version: i64 = journal
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(
+                u32::try_from(version).unwrap(),
+                JOURNAL_SCHEMA_VERSION,
+                "v{stamped} upgrade must land on the current version"
+            );
+            if stamped == 2 {
+                assert_eq!(journal.materialized_state().unwrap().outbox.len(), 1);
             }
+            drop(journal);
             std::fs::remove_dir_all(dir).ok();
         }
     }
@@ -6495,6 +11948,7 @@ mod tests {
             conn.execute_batch(&format!("ALTER TABLE jobs DROP COLUMN {column};"))
                 .unwrap();
         }
+        drop_jobs_columns_added_after_version(&conn, 5);
         conn.pragma_update(None, "user_version", 5u32).unwrap();
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
             .unwrap();
@@ -6514,7 +11968,7 @@ mod tests {
             .unwrap();
         assert_eq!(u32::try_from(version).unwrap(), JOURNAL_SCHEMA_VERSION);
         assert_eq!(
-            JOURNAL_SCHEMA_VERSION, 8,
+            JOURNAL_SCHEMA_VERSION, 14,
             "this test pins the current upgrade"
         );
         for column in [
@@ -6534,10 +11988,8 @@ mod tests {
 
     fn stamp_historic_jobs_shape(path: &Path, version: u32, drop_columns: &[&str]) {
         let conn = Connection::open(path).unwrap();
-        for column in drop_columns {
-            conn.execute_batch(&format!("ALTER TABLE jobs DROP COLUMN {column};"))
-                .unwrap();
-        }
+        drop_jobs_columns(&conn, drop_columns);
+        drop_jobs_columns_added_after_version(&conn, version);
         conn.pragma_update(None, "user_version", version).unwrap();
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
             .unwrap();
@@ -6642,6 +12094,7 @@ mod tests {
                 job_id: job(message_job),
                 generation: r#gen(),
                 message_id: message_job.into(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
             })
@@ -6663,6 +12116,8 @@ mod tests {
                 acquired_job_id: job("run-service-job-1"),
                 plan_id: "plan-1".into(),
                 generation: r#gen(),
+                runner_request_id: Some("request-1".into()),
+                permit_lease: None,
             })
             .unwrap();
         assert!(!resolved.rejected);
@@ -6703,6 +12158,76 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[test]
+    fn native_acquisition_retarget_requires_the_same_exact_permit_lease() {
+        let (dir, mut journal) = open_tmp("acquisition-retarget-permit-identity");
+        prime_ready(&mut journal, "scope-1");
+        assert!(
+            !journal
+                .apply(Event::ReadyAttempt {
+                    slot_id: slot("scope-1"),
+                    generation: r#gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let lease = NativePermitLease {
+            holder: "native/v1/scope/request-1".to_owned(),
+            ledger_path: "/var/lib/velnor/permit-ledger.db".to_owned(),
+            generation: 31,
+        };
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntendedWithPermit {
+                    slot_id: slot("scope-1"),
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    message_id: "message-1".to_owned(),
+                    runner_request_id: "request-1".to_owned(),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                    permit_lease: lease.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+
+        let mut wrong_lease = lease.clone();
+        wrong_lease.generation += 1;
+        let mismatched = journal
+            .apply(Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-1"),
+                acquired_job_id: job("run-service-job-1"),
+                plan_id: "plan-1".to_owned(),
+                generation: r#gen(),
+                runner_request_id: Some("request-1".to_owned()),
+                permit_lease: Some(wrong_lease),
+            })
+            .unwrap();
+        assert!(mismatched.rejected);
+        let state = journal.load_state().unwrap();
+        assert_eq!(state.jobs[0].job_id, job("request-1"));
+        assert!(state.jobs[0].plan_id.is_empty());
+        assert_eq!(state.jobs[0].permit_lease.as_ref(), Some(&lease));
+
+        let matched = journal
+            .apply(Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-1"),
+                acquired_job_id: job("run-service-job-1"),
+                plan_id: "plan-1".to_owned(),
+                generation: r#gen(),
+                runner_request_id: Some("request-1".to_owned()),
+                permit_lease: Some(lease.clone()),
+            })
+            .unwrap();
+        assert!(!matched.rejected);
+        let state = journal.load_state().unwrap();
+        assert_eq!(state.jobs[0].job_id, job("run-service-job-1"));
+        assert_eq!(state.jobs[0].runner_request_id, "request-1");
+        assert_eq!(state.jobs[0].permit_lease.as_ref(), Some(&lease));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     /// Retargeting is scoped to provisional rows and to free identities.
     /// Rewriting an owned row's identity would move a job that may already
     /// carry a terminal result or an outbox payload.
@@ -6710,6 +12235,23 @@ mod tests {
     fn only_a_provisional_row_may_be_retargeted_onto_a_free_identity() {
         let (dir, mut journal) = open_tmp("acquisition-retarget-refusals");
         prime_provisional(&mut journal, "scope-1", "request-1");
+
+        // A planless row already owns this request identity. Resolving it
+        // under a different request must not overwrite the permit mapping.
+        let mismatched_request = journal
+            .apply(Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-1"),
+                acquired_job_id: job("request-1"),
+                plan_id: "plan-1".into(),
+                generation: r#gen(),
+                runner_request_id: Some("request-2".into()),
+                permit_lease: None,
+            })
+            .unwrap();
+        assert!(mismatched_request.rejected);
+        let untouched = journal.load_state().unwrap();
+        assert_eq!(untouched.jobs[0].runner_request_id, "request-1");
+        assert!(untouched.jobs[0].plan_id.is_empty());
 
         // Wrong generation.
         assert!(
@@ -6719,6 +12261,8 @@ mod tests {
                     acquired_job_id: job("run-service-job-1"),
                     plan_id: "plan-1".into(),
                     generation: Generation(r#gen().0 + 1),
+                    runner_request_id: Some("request-1".into()),
+                    permit_lease: None,
                 })
                 .unwrap()
                 .rejected
@@ -6732,6 +12276,8 @@ mod tests {
                     acquired_job_id: job("run-service-job-1"),
                     plan_id: "plan-1".into(),
                     generation: r#gen(),
+                    runner_request_id: Some("request-absent".into()),
+                    permit_lease: None,
                 })
                 .unwrap()
                 .rejected
@@ -6743,6 +12289,8 @@ mod tests {
                 acquired_job_id: job("run-service-job-1"),
                 plan_id: "plan-1".into(),
                 generation: r#gen(),
+                runner_request_id: Some("request-1".into()),
+                permit_lease: None,
             })
             .unwrap();
         journal
@@ -6764,6 +12312,8 @@ mod tests {
                     acquired_job_id: job("run-service-job-2"),
                     plan_id: "plan-2".into(),
                     generation: r#gen(),
+                    runner_request_id: Some("request-1".into()),
+                    permit_lease: None,
                 })
                 .unwrap()
                 .rejected
@@ -6771,6 +12321,59 @@ mod tests {
         assert_eq!(
             journal.load_state().unwrap().jobs[0].job_id,
             job("run-service-job-1")
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn ambiguous_legacy_correlation_cannot_be_filled_by_a_later_resolve() {
+        let (dir, mut journal) = open_tmp("ambiguous-legacy-correlation");
+        prime_provisional(&mut journal, "scope-1", "request-1");
+
+        // Historical self-to-self resolve events did not carry the request
+        // identity. Replay must retain it as unknown instead of accepting the
+        // old empty-plan compatibility behavior or guessing from the acquired
+        // job ID.
+        let legacy = reduce(
+            journal.materialized_state().unwrap(),
+            Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-1"),
+                acquired_job_id: job("request-1"),
+                plan_id: String::new(),
+                generation: r#gen(),
+                runner_request_id: None,
+                permit_lease: None,
+            },
+        );
+        assert!(legacy.rejected);
+        assert!(legacy.state.jobs[0].acquisition_loss_unproven);
+        assert_eq!(legacy.state.jobs[0].runner_request_id, "");
+
+        let guessed = reduce(
+            legacy.state,
+            Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-1"),
+                acquired_job_id: job("request-1"),
+                plan_id: "plan-1".into(),
+                generation: r#gen(),
+                runner_request_id: Some("request-1".into()),
+                permit_lease: None,
+            },
+        );
+        assert!(guessed.rejected);
+        let state = guessed.state;
+        assert_eq!(state.jobs[0].runner_request_id, "");
+        assert_eq!(state.jobs[0].plan_id, "");
+        assert!(state.jobs[0].acquisition_loss_unproven);
+        assert!(
+            reduce(
+                state,
+                Event::JobStarted {
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                },
+            )
+            .rejected
         );
         std::fs::remove_dir_all(dir).ok();
     }
@@ -6806,16 +12409,21 @@ mod tests {
         }
         assert!(journal.load_state().unwrap().jobs[0].probe_budget_exhausted(1_000));
 
-        // The bound is what lets the row terminate and the slot come back.
+        // Exhausting a local probe budget stops future renewals; it is not
+        // remote terminal evidence and cannot free this slot or its permit.
         let lost = journal
             .apply(Event::JobAcquisitionLost {
                 job_id: job("request-1"),
                 generation: r#gen(),
                 reason: "probe budget spent".into(),
+                proof: None,
             })
             .unwrap();
-        assert!(!lost.rejected);
-        assert!(journal.load_state().unwrap().jobs.is_empty());
+        assert!(lost.rejected);
+        let state = journal.load_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].probe_attempts, MAX_ACQUISITION_PROBES);
+        assert_eq!(state.slots[0].phase, SlotPhase2::Assigned);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -6826,6 +12434,14 @@ mod tests {
     fn a_probe_failure_is_refused_for_a_row_that_is_not_provisional() {
         let (dir, mut journal) = open_tmp("acquisition-probe-owned");
         prime_provisional(&mut journal, "scope-1", "request-1");
+        resolve_test_acquisition(
+            &mut journal,
+            "request-1",
+            "request-1",
+            "request-1",
+            r#gen(),
+            None,
+        );
         journal
             .apply(Event::JobOwned {
                 job_id: job("request-1"),
@@ -6864,6 +12480,7 @@ mod tests {
                 job_id: job("guid-1"),
                 generation: r#gen(),
                 message_id: "msg-1".into(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
             })
@@ -6887,7 +12504,19 @@ mod tests {
         );
         assert!(journal.load_state().unwrap().outbox.is_empty());
 
-        // A 200 promotes it, and the same intent is then accepted.
+        // A run-service 200 records its exact plan/request identity before the
+        // acquisition row may become an owned worker.
+        let resolved = journal
+            .apply(Event::JobAcquisitionResolved {
+                provisional_job_id: job("guid-1"),
+                acquired_job_id: job("guid-1"),
+                plan_id: "plan-1".into(),
+                generation: r#gen(),
+                runner_request_id: Some("guid-1".into()),
+                permit_lease: None,
+            })
+            .unwrap();
+        assert!(!resolved.rejected);
         journal
             .apply(Event::JobOwned {
                 job_id: job("guid-1"),
@@ -6911,11 +12540,11 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    /// A provisional row can be dropped when the probe proves the job is not
-    /// ours. An owned row cannot: once ownership is proven the job has to reach
-    /// a terminal state through completion, never by being forgotten.
+    /// Only typed run-service evidence plus a matching released permit lease
+    /// can drop a provisional row. Neither arbitrary reasons nor a valid proof
+    /// can forget an already-owned row.
     #[test]
-    fn only_a_provisional_row_may_be_abandoned_by_acquisition_loss() {
+    fn acquisition_loss_requires_typed_proof_for_the_exact_permit_lease() {
         let (dir, mut journal) = open_tmp("provisional-loss");
         prime_ready(&mut journal, "scope-1");
         journal
@@ -6924,14 +12553,23 @@ mod tests {
                 generation: r#gen(),
             })
             .unwrap();
+        let permit_lease = NativePermitLease {
+            holder:
+                "native/v1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/guid-1"
+                    .to_owned(),
+            ledger_path: "/tmp/permit-ledger.db".to_owned(),
+            generation: 41,
+        };
         journal
-            .apply(Event::JobAcquisitionIntended {
+            .apply(Event::JobAcquisitionIntendedWithPermit {
                 slot_id: slot("scope-1"),
                 job_id: job("guid-1"),
                 generation: r#gen(),
                 message_id: "msg-1".into(),
+                runner_request_id: "guid-1".into(),
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
+                permit_lease: permit_lease.clone(),
             })
             .unwrap();
         let lost = journal
@@ -6939,6 +12577,41 @@ mod tests {
                 job_id: job("guid-1"),
                 generation: r#gen(),
                 reason: "another runner holds the lease".into(),
+                proof: None,
+            })
+            .unwrap();
+        assert!(lost.rejected, "a reason string alone is not terminal proof");
+        assert_eq!(journal.load_state().unwrap().jobs.len(), 1);
+
+        let wrong_lease = NativePermitLease {
+            generation: permit_lease.generation + 1,
+            ..permit_lease.clone()
+        };
+        let mismatched = journal
+            .apply(Event::JobAcquisitionLost {
+                job_id: job("guid-1"),
+                generation: r#gen(),
+                reason: "another runner holds the lease".into(),
+                proof: Some(AcquisitionLossProof {
+                    source: AcquisitionLossSource::RenewJobNotOurs,
+                    permit_lease: wrong_lease,
+                }),
+            })
+            .unwrap();
+        assert!(
+            mismatched.rejected,
+            "a different lease cannot free this row"
+        );
+
+        let lost = journal
+            .apply(Event::JobAcquisitionLost {
+                job_id: job("guid-1"),
+                generation: r#gen(),
+                reason: "renewjob proved this runner does not own the job".into(),
+                proof: Some(AcquisitionLossProof {
+                    source: AcquisitionLossSource::RenewJobNotOurs,
+                    permit_lease: permit_lease.clone(),
+                }),
             })
             .unwrap();
         assert!(!lost.rejected);
@@ -6952,17 +12625,34 @@ mod tests {
         assert_eq!(state.advertised_capacity(), 1);
 
         // Now prove ownership and try again: it must be refused.
+        let second_permit_lease = NativePermitLease {
+            holder:
+                "native/v1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/guid-2"
+                    .to_owned(),
+            ledger_path: "/tmp/permit-ledger.db".to_owned(),
+            generation: 42,
+        };
         let reacquire = journal
-            .apply(Event::JobAcquisitionIntended {
+            .apply(Event::JobAcquisitionIntendedWithPermit {
                 slot_id: slot("scope-1"),
                 job_id: job("guid-2"),
                 generation: r#gen(),
                 message_id: "msg-2".into(),
+                runner_request_id: "guid-2".into(),
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
+                permit_lease: second_permit_lease.clone(),
             })
             .unwrap();
         assert!(!reacquire.rejected);
+        resolve_test_acquisition(
+            &mut journal,
+            "guid-2",
+            "guid-2",
+            "guid-2",
+            r#gen(),
+            Some(second_permit_lease.clone()),
+        );
         let owned = journal
             .apply(Event::JobOwned {
                 job_id: job("guid-2"),
@@ -6979,6 +12669,10 @@ mod tests {
                 job_id: job("guid-2"),
                 generation: r#gen(),
                 reason: "should not be allowed".into(),
+                proof: Some(AcquisitionLossProof {
+                    source: AcquisitionLossSource::RenewJobNotOurs,
+                    permit_lease: second_permit_lease,
+                }),
             })
             .unwrap();
         assert!(lost.rejected, "an owned job cannot be forgotten");
@@ -7002,10 +12696,12 @@ mod tests {
                 job_id: job("guid-1"),
                 generation: r#gen(),
                 message_id: "msg-1".into(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
             })
             .unwrap();
+        resolve_test_acquisition(&mut journal, "guid-1", "guid-1", "guid-1", r#gen(), None);
         journal
             .apply(Event::JobOwned {
                 job_id: job("guid-1"),
@@ -7069,6 +12765,7 @@ mod tests {
                 job_id: job("job-1"),
                 generation: r#gen(),
                 message_id: "msg-1".into(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
             })
@@ -7080,11 +12777,624 @@ mod tests {
                 job_id: job("job-2"),
                 generation: r#gen(),
                 message_id: "msg-1".into(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
             })
             .unwrap();
         assert!(second.rejected);
+    }
+
+    #[test]
+    fn acquisition_intents_reject_empty_urls_and_cross_slot_identity_collisions() {
+        let (dir, mut journal) = open_tmp("acquisition-identity-collisions");
+        prime_ready(&mut journal, "scope-1");
+        assert!(
+            !journal
+                .apply(Event::DesiredCapacity { ready: 3 })
+                .unwrap()
+                .rejected
+        );
+        prime_ready_in_existing_capacity(&mut journal, "scope-2");
+        prime_ready_in_existing_capacity(&mut journal, "scope-3");
+
+        let empty_url = journal
+            .apply(Event::JobAcquisitionIntended {
+                slot_id: slot("scope-1"),
+                job_id: job("bad-url-job"),
+                generation: r#gen(),
+                message_id: "message-bad-url".to_owned(),
+                runner_request_id: Some("request-bad-url".to_owned()),
+                run_service_url: String::new(),
+                intended_unix: 1_000,
+            })
+            .unwrap();
+        assert!(empty_url.rejected);
+
+        let lease = NativePermitLease {
+            holder: "native/v1/scope/request-1".to_owned(),
+            ledger_path: "/var/lib/velnor/permit-ledger.db".to_owned(),
+            generation: 31,
+        };
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntendedWithPermit {
+                    slot_id: slot("scope-1"),
+                    job_id: job("job-1"),
+                    generation: r#gen(),
+                    message_id: "message-1".to_owned(),
+                    runner_request_id: "request-1".to_owned(),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_001,
+                    permit_lease: lease.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+
+        let duplicate_request = journal
+            .apply(Event::JobAcquisitionIntended {
+                slot_id: slot("scope-2"),
+                job_id: job("job-2"),
+                generation: r#gen(),
+                message_id: "message-2".to_owned(),
+                runner_request_id: Some("request-1".to_owned()),
+                run_service_url: "https://run.example/run".to_owned(),
+                intended_unix: 1_002,
+            })
+            .unwrap();
+        assert!(duplicate_request.rejected);
+
+        let duplicate_job = journal
+            .apply(Event::JobAcquisitionIntended {
+                slot_id: slot("scope-2"),
+                job_id: job("job-1"),
+                generation: r#gen(),
+                message_id: "message-duplicate-job".to_owned(),
+                runner_request_id: Some("request-distinct".to_owned()),
+                run_service_url: "https://run.example/run".to_owned(),
+                intended_unix: 1_003,
+            })
+            .unwrap();
+        assert!(duplicate_job.rejected);
+
+        let duplicate_lease = journal
+            .apply(Event::JobAcquisitionIntendedWithPermit {
+                slot_id: slot("scope-3"),
+                job_id: job("job-3"),
+                generation: r#gen(),
+                message_id: "message-3".to_owned(),
+                runner_request_id: "request-3".to_owned(),
+                run_service_url: "https://run.example/run".to_owned(),
+                intended_unix: 1_003,
+                permit_lease: lease,
+            })
+            .unwrap();
+        assert!(duplicate_lease.rejected);
+
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].job_id, job("job-1"));
+        assert!(state
+            .slots
+            .iter()
+            .filter(|record| record.slot_id != slot("scope-1"))
+            .all(|slot| slot.phase == SlotPhase2::Ready));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn job_owned_must_match_its_source_slot_and_generation() {
+        let (dir, mut journal) = open_tmp("job-owned-source-identity");
+        prime_ready(&mut journal, "scope-1");
+        assert!(
+            !journal
+                .apply(Event::DesiredCapacity { ready: 2 })
+                .unwrap()
+                .rejected
+        );
+        prime_ready_in_existing_capacity(&mut journal, "scope-2");
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot("scope-1"),
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    message_id: "message-request-1".to_owned(),
+                    runner_request_id: Some("request-1".to_owned()),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                })
+                .unwrap()
+                .rejected
+        );
+        resolve_test_acquisition(
+            &mut journal,
+            "request-1",
+            "request-1",
+            "request-1",
+            r#gen(),
+            None,
+        );
+
+        let wrong_slot = journal
+            .apply(Event::JobOwned {
+                job_id: job("request-1"),
+                slot_id: slot("scope-2"),
+                attempt: 1,
+                generation: r#gen(),
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1_001,
+            })
+            .unwrap();
+        assert!(wrong_slot.rejected);
+
+        let wrong_generation = journal
+            .apply(Event::JobOwned {
+                job_id: job("request-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: Generation(r#gen().0 + 1),
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1_002,
+            })
+            .unwrap();
+        assert!(wrong_generation.rejected);
+
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert!(state.jobs[0].provisional);
+        assert_eq!(state.slots.len(), 2);
+        assert_eq!(state.slots[0].phase, SlotPhase2::Assigned);
+        assert_eq!(state.slots[1].phase, SlotPhase2::Ready);
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rebuilt_acquisition_rejects_a_duplicate_permit_lease() {
+        let (dir, mut journal) = open_tmp("rebuilt-acquisition-lease-collision");
+        prime_ready(&mut journal, "scope-1");
+        assert!(
+            !journal
+                .apply(Event::DesiredCapacity { ready: 4 })
+                .unwrap()
+                .rejected
+        );
+        for scope in ["scope-2", "scope-3", "scope-4"] {
+            prime_ready_in_existing_capacity(&mut journal, scope);
+        }
+        let lease = NativePermitLease {
+            holder: "native/v1/scope/request-1".to_owned(),
+            ledger_path: "/var/lib/velnor/permit-ledger.db".to_owned(),
+            generation: 31,
+        };
+
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionRebuiltWithPermit {
+                    slot_id: slot("scope-1"),
+                    job_id: job("job-1"),
+                    generation: r#gen(),
+                    runner_request_id: "request-1".to_owned(),
+                    plan_id: "plan-1".to_owned(),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    probe_deadline_unix: 2_000,
+                    permit_lease: lease.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+
+        // The runner correlates a job against either durable identity. A new
+        // job ID may not alias another holder's request ID, and a new request
+        // ID may not alias another holder's acquired job ID.
+        for (job_id, runner_request_id) in [("request-1", "request-2"), ("job-2", "job-1")] {
+            let alias = journal
+                .apply(Event::JobAcquisitionRebuilt {
+                    slot_id: slot("scope-2"),
+                    job_id: job(job_id),
+                    generation: r#gen(),
+                    runner_request_id: runner_request_id.to_owned(),
+                    plan_id: "plan-alias".to_owned(),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    probe_deadline_unix: 2_001,
+                })
+                .unwrap();
+            assert!(
+                alias.rejected,
+                "identity alias {job_id}/{runner_request_id}"
+            );
+        }
+
+        let duplicate_job_id = journal
+            .apply(Event::JobAcquisitionRebuilt {
+                slot_id: slot("scope-2"),
+                job_id: job("job-1"),
+                generation: r#gen(),
+                runner_request_id: "request-2".to_owned(),
+                plan_id: "plan-2".to_owned(),
+                run_service_url: "https://run.example/run".to_owned(),
+                probe_deadline_unix: 2_001,
+            })
+            .unwrap();
+        assert!(duplicate_job_id.rejected);
+
+        let duplicate_request_id = journal
+            .apply(Event::JobAcquisitionRebuilt {
+                slot_id: slot("scope-3"),
+                job_id: job("job-3"),
+                generation: r#gen(),
+                runner_request_id: "request-1".to_owned(),
+                plan_id: "plan-3".to_owned(),
+                run_service_url: "https://run.example/run".to_owned(),
+                probe_deadline_unix: 2_002,
+            })
+            .unwrap();
+        assert!(duplicate_request_id.rejected);
+
+        let duplicate = journal
+            .apply(Event::JobAcquisitionRebuiltWithPermit {
+                slot_id: slot("scope-4"),
+                job_id: job("job-4"),
+                generation: r#gen(),
+                runner_request_id: "request-4".to_owned(),
+                plan_id: "plan-4".to_owned(),
+                run_service_url: "https://run.example/run".to_owned(),
+                probe_deadline_unix: 2_003,
+                permit_lease: lease,
+            })
+            .unwrap();
+        assert!(duplicate.rejected);
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+
+        let mut cross_role_aliases = Vec::new();
+        for (job_id, runner_request_id) in [("job-2", "job-1"), ("request-1", "request-2")] {
+            let mut alias = state.jobs[0].clone();
+            alias.job_id = job(job_id);
+            alias.runner_request_id = runner_request_id.to_owned();
+            alias.permit_lease = None;
+            cross_role_aliases.push(alias);
+        }
+        for alias in cross_role_aliases {
+            let mut jobs = state.jobs.clone();
+            jobs.push(alias);
+            assert_eq!(
+                validate_job_identity_uniqueness(&jobs)
+                    .unwrap_err()
+                    .envelope
+                    .reason,
+                "journal.materialized.invalid",
+                "materialized validation rejects cross-role identity aliases"
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn resolved_acquisition_rejects_empty_plan_and_identity_aliases() {
+        let (dir, mut journal) = open_tmp("resolved-acquisition-identity-aliases");
+        assert!(
+            !journal
+                .apply(Event::DesiredCapacity { ready: 3 })
+                .unwrap()
+                .rejected
+        );
+        prime_ready_in_existing_capacity(&mut journal, "scope-1");
+        prime_ready_in_existing_capacity(&mut journal, "scope-2");
+        prime_ready_in_existing_capacity(&mut journal, "scope-3");
+        for (scope, request) in [("scope-1", "request-1"), ("scope-2", "request-2")] {
+            assert!(
+                !journal
+                    .apply(Event::JobAcquisitionIntended {
+                        slot_id: slot(scope),
+                        job_id: job(request),
+                        generation: r#gen(),
+                        message_id: format!("message-{request}"),
+                        runner_request_id: Some(request.to_owned()),
+                        run_service_url: "https://run.example/run".to_owned(),
+                        intended_unix: 1_000,
+                    })
+                    .unwrap()
+                    .rejected
+            );
+        }
+
+        let empty_plan = reduce(
+            journal.materialized_state().unwrap(),
+            Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-1"),
+                acquired_job_id: job("run-service-job-1"),
+                plan_id: String::new(),
+                generation: r#gen(),
+                runner_request_id: Some("request-1".to_owned()),
+                permit_lease: None,
+            },
+        );
+        assert!(empty_plan.rejected);
+        assert!(empty_plan.state.jobs[0].acquisition_loss_unproven);
+        assert_eq!(empty_plan.state.jobs[0].job_id, job("request-1"));
+
+        let first_resolve = journal
+            .apply(Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-1"),
+                acquired_job_id: job("run-service-job-1"),
+                plan_id: "plan-1".to_owned(),
+                generation: r#gen(),
+                runner_request_id: Some("request-1".to_owned()),
+                permit_lease: None,
+            })
+            .unwrap();
+        assert!(!first_resolve.rejected);
+
+        let request_id_alias = journal
+            .apply(Event::JobAcquisitionIntended {
+                slot_id: slot("scope-3"),
+                job_id: job("new-request"),
+                generation: r#gen(),
+                message_id: "message-new-request".to_owned(),
+                runner_request_id: Some("run-service-job-1".to_owned()),
+                run_service_url: "https://run.example/run".to_owned(),
+                intended_unix: 1_001,
+            })
+            .unwrap();
+        assert!(
+            request_id_alias.rejected,
+            "a new request ID cannot retarget an acquired job ID"
+        );
+
+        let acquired_id_alias = journal
+            .apply(Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-2"),
+                acquired_job_id: job("request-1"),
+                plan_id: "plan-2".to_owned(),
+                generation: r#gen(),
+                runner_request_id: Some("request-2".to_owned()),
+                permit_lease: None,
+            })
+            .unwrap();
+        assert!(
+            acquired_id_alias.rejected,
+            "an acquired job ID cannot retarget another request ID"
+        );
+
+        let duplicate_job_id = journal
+            .apply(Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-2"),
+                acquired_job_id: job("run-service-job-1"),
+                plan_id: "plan-2".to_owned(),
+                generation: r#gen(),
+                runner_request_id: Some("request-2".to_owned()),
+                permit_lease: None,
+            })
+            .unwrap();
+        assert!(duplicate_job_id.rejected);
+
+        let duplicate_request_id = journal
+            .apply(Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-2"),
+                acquired_job_id: job("run-service-job-2"),
+                plan_id: "plan-2".to_owned(),
+                generation: r#gen(),
+                runner_request_id: Some("request-1".to_owned()),
+                permit_lease: None,
+            })
+            .unwrap();
+        assert!(duplicate_request_id.rejected);
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 2);
+        assert_eq!(state.jobs[0].job_id, job("run-service-job-1"));
+        assert_eq!(state.jobs[1].job_id, job("request-2"));
+        assert_eq!(state.jobs[1].runner_request_id, "request-2");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unknown_request_identity_blocks_resolving_another_slot() {
+        let (dir, mut journal) = open_tmp("unknown-request-blocks-resolve");
+        assert!(
+            !journal
+                .apply(Event::DesiredCapacity { ready: 2 })
+                .unwrap()
+                .rejected
+        );
+        prime_ready_in_existing_capacity(&mut journal, "scope-1");
+        prime_ready_in_existing_capacity(&mut journal, "scope-2");
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot("scope-2"),
+                    job_id: job("request-2"),
+                    generation: r#gen(),
+                    message_id: "message-2".to_owned(),
+                    runner_request_id: Some("request-2".to_owned()),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                })
+                .unwrap()
+                .rejected
+        );
+
+        let mut state = journal.materialized_state().unwrap();
+        state.slots[0].phase = SlotPhase2::Assigned;
+        state.jobs.push(JobRecord {
+            job_id: job("legacy-unknown-job"),
+            slot_id: slot("scope-1"),
+            generation: r#gen(),
+            attempt: 1,
+            worker: "legacy-worker".to_owned(),
+            phase: JobPhase2::Assigned,
+            accepted_unix: 0,
+            terminal_conclusion: None,
+            provisional: false,
+            plan_id: String::new(),
+            run_service_url: String::new(),
+            runner_request_id: String::new(),
+            permit_lease: None,
+            acquisition_loss_unproven: true,
+            probe_attempts: 0,
+            probe_deadline_unix: 0,
+        });
+
+        let outcome = reduce(
+            state,
+            Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-2"),
+                acquired_job_id: job("run-service-job-2"),
+                plan_id: "plan-2".to_owned(),
+                generation: r#gen(),
+                runner_request_id: Some("request-2".to_owned()),
+                permit_lease: None,
+            },
+        );
+        assert!(outcome.rejected);
+        assert_eq!(outcome.state.jobs.len(), 2);
+        let provisional = outcome
+            .state
+            .jobs
+            .iter()
+            .find(|row| row.job_id == job("request-2"))
+            .unwrap();
+        assert!(provisional.provisional);
+        assert!(provisional.acquisition_loss_unproven);
+        assert_eq!(provisional.runner_request_id, "request-2");
+        assert!(outcome.state.jobs.iter().any(|row| {
+            row.job_id == job("legacy-unknown-job") && row.runner_request_id.is_empty()
+        }));
+        assert_eq!(outcome.state.slots[1].phase, SlotPhase2::Assigned);
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn resolved_acquisition_rejects_a_permit_lease_already_claimed_elsewhere() {
+        let (dir, mut journal) = open_tmp("resolved-acquisition-lease-collision");
+        assert!(
+            !journal
+                .apply(Event::DesiredCapacity { ready: 2 })
+                .unwrap()
+                .rejected
+        );
+        prime_ready_in_existing_capacity(&mut journal, "scope-1");
+        prime_ready_in_existing_capacity(&mut journal, "scope-2");
+        for (scope, request_id) in [("scope-1", "request-1"), ("scope-2", "request-2")] {
+            assert!(
+                !journal
+                    .apply(Event::JobAcquisitionIntended {
+                        slot_id: slot(scope),
+                        job_id: job(request_id),
+                        generation: r#gen(),
+                        message_id: format!("message-{request_id}"),
+                        runner_request_id: Some(request_id.to_owned()),
+                        run_service_url: "https://run.example/run".to_owned(),
+                        intended_unix: 1_000,
+                    })
+                    .unwrap()
+                    .rejected
+            );
+        }
+        let lease = NativePermitLease {
+            holder: "native/v1/scope/request-1".to_owned(),
+            ledger_path: "/var/lib/velnor/permit-ledger.db".to_owned(),
+            generation: 31,
+        };
+        let mut state = journal.materialized_state().unwrap();
+        state.jobs[0].permit_lease = Some(lease.clone());
+        state.jobs[1].permit_lease = Some(lease.clone());
+
+        let outcome = reduce(
+            state,
+            Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-2"),
+                acquired_job_id: job("run-service-job-2"),
+                plan_id: "plan-2".to_owned(),
+                generation: r#gen(),
+                runner_request_id: Some("request-2".to_owned()),
+                permit_lease: Some(lease.clone()),
+            },
+        );
+        assert!(outcome.rejected);
+        assert_eq!(outcome.state.jobs.len(), 2);
+        assert!(outcome.state.jobs.iter().all(|row| row.provisional));
+        assert!(outcome
+            .state
+            .jobs
+            .iter()
+            .all(|row| row.permit_lease.as_ref() == Some(&lease)));
+        assert_eq!(outcome.state.slots[0].phase, SlotPhase2::Assigned);
+        assert_eq!(outcome.state.slots[1].phase, SlotPhase2::Assigned);
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn materialized_jobs_reject_duplicate_request_ids_and_permit_leases() {
+        for duplicate_request in [true, false] {
+            let label = if duplicate_request {
+                "materialized-duplicate-request"
+            } else {
+                "materialized-duplicate-permit"
+            };
+            let (dir, mut journal) = open_tmp(label);
+            prime_ready(&mut journal, "scope-1");
+            let lease = NativePermitLease {
+                holder: "native/v1/scope/request-1".to_owned(),
+                ledger_path: "/var/lib/velnor/permit-ledger.db".to_owned(),
+                generation: 31,
+            };
+            assert!(
+                !journal
+                    .apply(Event::JobAcquisitionIntendedWithPermit {
+                        slot_id: slot("scope-1"),
+                        job_id: job("job-1"),
+                        generation: r#gen(),
+                        message_id: "message-1".to_owned(),
+                        runner_request_id: "request-1".to_owned(),
+                        run_service_url: "https://run.example/run".to_owned(),
+                        intended_unix: 1_000,
+                        permit_lease: lease.clone(),
+                    })
+                    .unwrap()
+                    .rejected
+            );
+            let duplicate_lease = if duplicate_request {
+                None
+            } else {
+                Some(serde_json::to_string(&lease).unwrap())
+            };
+            open_fixture_write_gate(&journal.conn);
+            journal
+                .conn
+                .execute(
+                    "INSERT INTO jobs (
+                         job_id, slot_id, generation, attempt, worker, phase,
+                         accepted_unix, terminal_conclusion, provisional,
+                         plan_id, run_service_url, probe_attempts,
+                         probe_deadline_unix, runner_request_id, permit_lease,
+                         acquisition_loss_unproven
+                     ) VALUES (
+                         'job-2', 'scope-1', 1, 0, '', 'assigned', 0,
+                         NULL, 1, '', 'https://run.example/run', 0, 0,
+                         ?1, ?2, 0
+                     )",
+                    params![
+                        if duplicate_request {
+                            "request-1"
+                        } else {
+                            "request-2"
+                        },
+                        duplicate_lease,
+                    ],
+                )
+                .unwrap();
+            close_fixture_write_gate(&journal.conn);
+
+            let error = journal.materialized_state().unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.materialized.invalid");
+            drop(journal);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]
@@ -7103,6 +13413,7 @@ mod tests {
                 job_id: job("job-1"),
                 generation: r#gen(),
                 message_id: "msg-1".into(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
             })
@@ -7177,6 +13488,8 @@ mod tests {
         let g = prime_running_job(&mut journal, "scope-1", "job-1");
         drop(journal);
         let conn = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&conn, 7);
+        strip_v11_event_fields(&conn);
         conn.pragma_update(None, "user_version", 7u32).unwrap();
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
             .unwrap();
@@ -7195,12 +13508,2576 @@ mod tests {
     }
 
     #[test]
+    fn v7_stamp_with_v9_request_column_fails_without_mutation() {
+        let (dir, journal) = open_tmp("v7-with-v9-request-column");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        drop_journal_write_gate(&conn);
+        drop_jobs_columns(&conn, &["permit_lease", "acquisition_loss_unproven"]);
+        conn.pragma_update(None, "user_version", 7u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 7);
+        assert!(table_has_column(&check, "jobs", "runner_request_id").unwrap());
+        assert!(!table_has_column(&check, "jobs", "permit_lease").unwrap());
+        drop(check);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v8_journal_migrates_active_acquisition_request_correlation() {
+        let path = make_v8_acquisition_journal("v8-to-v9-correlation");
+        let reopened = Journal::open(&path).unwrap();
+        let version: i64 = reopened
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+        let state = reopened.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].job_id, job("job-1"));
+        assert_eq!(state.jobs[0].runner_request_id, "request-1");
+        assert_eq!(state.jobs[0].plan_id, "plan-1");
+        assert_eq!(state.jobs[0].phase, JobPhase2::Assigned);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn v8_self_resolved_history_migrates_with_unknown_request_correlation() {
+        let path = make_v8_self_resolved_journal("v8-self-resolved-unknown-correlation");
+        let reopened = Journal::open(&path).unwrap();
+        let state = reopened.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].job_id, job("job-1"));
+        assert_eq!(state.jobs[0].runner_request_id, "");
+        assert!(
+            state.jobs[0].acquisition_loss_unproven,
+            "old self-to-self history has no provable runner request identity"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn v8_to_v9_refuses_valid_json_with_a_stale_checksum_before_schema_change() {
+        let path = make_v8_acquisition_journal("v8-to-v9-checksum");
+        let conn = Connection::open(&path).unwrap();
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "delete");
+        let (event_id, payload): (i64, String) = conn
+            .query_row(
+                "SELECT id, payload FROM events WHERE kind = 'job_acquisition_intended' LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let tampered = payload.replace("broker-message-1", "broker-message-2");
+        assert_ne!(payload, tampered);
+        conn.execute(
+            "UPDATE events SET payload = ?1 WHERE id = ?2",
+            params![tampered, event_id],
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.checksum.mismatch");
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 8);
+        assert!(!table_has_column(&conn, "jobs", "runner_request_id").unwrap());
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            journal_mode, "delete",
+            "failed migration must not mutate a non-WAL journal before checksum validation"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn v9_to_v10_refuses_a_stale_checksum_before_vocabulary_stamp() {
+        let (dir, mut journal) = open_tmp("v9-to-v10-checksum");
+        journal.apply(Event::ControlLive).unwrap();
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&conn, 9);
+        let (event_id, checksum): (i64, String) = conn
+            .query_row(
+                "SELECT id, checksum FROM events ORDER BY id LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        conn.execute(
+            "UPDATE events SET payload = '{\"ControlLive\":{}}' WHERE id = ?1",
+            [event_id],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 9u32).unwrap();
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.checksum.mismatch");
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 9, "failed v10 stamp must preserve v9");
+        assert!(table_has_column(&conn, "jobs", "runner_request_id").unwrap());
+        let preserved_checksum: String = conn
+            .query_row(
+                "SELECT checksum FROM events WHERE id = ?1",
+                [event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved_checksum, checksum);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v10_journal_migrates_historical_acquisition_events_to_v11() {
+        let path = make_v10_acquisition_journal("v10-to-v11-acquisition");
+        let old = Connection::open(&path).unwrap();
+        let version: i64 = old
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 10);
+        assert!(!table_has_column(&old, "jobs", "permit_lease").unwrap());
+        drop(old);
+
+        let migrated = Journal::open(&path).expect("valid v10 history must migrate");
+        let version: i64 = migrated
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+        assert!(table_has_column(&migrated.conn, "jobs", "permit_lease").unwrap());
+        let state = migrated.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 2);
+        assert_eq!(state.jobs[0].job_id, job("job-1"));
+        assert_eq!(state.jobs[0].runner_request_id, "request-1");
+        assert_eq!(state.jobs[0].permit_lease, None);
+        let rebuilt = state
+            .jobs
+            .iter()
+            .find(|record| record.job_id == job("job-rebuilt-1"))
+            .expect("the v10 rebuild event must survive migration");
+        assert_eq!(rebuilt.runner_request_id, "request-rebuilt-1");
+        assert_eq!(rebuilt.plan_id, "plan-rebuilt-1");
+        assert_eq!(rebuilt.run_service_url, "https://run.example/rebuilt-run");
+        assert_eq!(rebuilt.probe_deadline_unix, 22_000);
+        drop(migrated);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn v10_malformed_meta_is_refused_before_wal_or_schema_mutation() {
+        assert_v10_materialized_edit_fails_before_wal(
+            "v10-malformed-meta-prewal",
+            "UPDATE meta SET value = 'not-a-bool' WHERE key = 'control_live';",
+        );
+    }
+
+    #[test]
+    fn v10_negative_materialized_generation_is_refused_before_wal_or_schema_mutation() {
+        assert_v10_materialized_edit_fails_before_wal(
+            "v10-negative-materialized-generation-prewal",
+            "UPDATE jobs SET generation = -1 WHERE job_id = 'job-1';",
+        );
+    }
+
+    #[test]
+    fn v11_malformed_materialized_meta_is_refused_before_wal() {
+        assert_v11_materialized_edit_fails_before_wal(
+            "v11-malformed-meta-prewal",
+            "UPDATE meta SET value = 'not-a-bool' WHERE key = 'control_live';",
+        );
+    }
+
+    #[test]
+    fn v11_malformed_permit_json_is_refused_before_wal() {
+        assert_v11_materialized_edit_fails_before_wal(
+            "v11-malformed-permit-json-prewal",
+            "UPDATE jobs SET permit_lease = 'not-json' WHERE job_id = 'request-1';",
+        );
+    }
+
+    #[test]
+    fn v11_migration_replays_proofless_loss_and_retains_exact_permit() {
+        let (path, permit_lease) = make_v11_proofless_loss_journal("v11-v12-proofless-loss-replay");
+        let old = Connection::open(&path).unwrap();
+        let old_version: i64 = old
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(old_version, 11);
+        assert_eq!(
+            old.query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "the v11 loss and worker teardown already erased its snapshot"
+        );
+        let proofless: String = old
+            .query_row(
+                "SELECT payload FROM events WHERE kind = 'job_acquisition_lost'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!serde_json::from_str::<serde_json::Value>(&proofless)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("proof"));
+        drop(old);
+
+        let mut migrated = Journal::open(&path).expect("valid v11 history must migrate");
+        let version: i64 = migrated
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+
+        let state = migrated.materialized_state().unwrap();
+        let mut replayed = migrated.load_state().unwrap();
+        // Drain and admission fences are meta-only and intentionally survive
+        // migration outside the event replay.
+        replayed.drain_active = state.drain_active;
+        replayed.drain_version = state.drain_version;
+        replayed.admission_blocked = state.admission_blocked;
+        replayed.admission_version = state.admission_version;
+        assert_eq!(state, replayed);
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].job_id, job("request-1"));
+        assert!(state.jobs[0].provisional);
+        assert!(state.jobs[0].acquisition_loss_unproven);
+        assert_eq!(state.jobs[0].runner_request_id, "request-1");
+        assert_eq!(state.jobs[0].permit_lease, Some(permit_lease.clone()));
+        assert_eq!(state.slots[0].phase, SlotPhase2::Assigned);
+        assert!(state.drain_active);
+        assert_eq!(state.drain_version, 7);
+        assert!(state.admission_blocked);
+        assert_eq!(state.admission_version, 9);
+
+        let owned = migrated
+            .apply(Event::JobOwned {
+                job_id: job("request-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: r#gen(),
+                worker: "stale-worker".to_owned(),
+                accepted_unix: 1_100,
+            })
+            .unwrap();
+        assert!(
+            owned.rejected,
+            "old ownership cannot launder loss ambiguity"
+        );
+        let worker_lost = migrated
+            .apply(Event::JobWorkerLost {
+                job_id: job("request-1"),
+                generation: r#gen(),
+            })
+            .unwrap();
+        assert!(
+            worker_lost.rejected,
+            "a provisional row is not a worker owner"
+        );
+        assert_eq!(
+            migrated.materialized_state().unwrap().jobs[0].permit_lease,
+            Some(permit_lease.clone())
+        );
+
+        let released = migrated
+            .apply(Event::JobAcquisitionLost {
+                job_id: job("request-1"),
+                generation: r#gen(),
+                reason: "renewjob returned typed not-owned evidence".to_owned(),
+                proof: Some(AcquisitionLossProof {
+                    source: AcquisitionLossSource::RenewJobNotOurs,
+                    permit_lease,
+                }),
+            })
+            .unwrap();
+        assert!(!released.rejected);
+        let final_state = migrated.materialized_state().unwrap();
+        assert!(final_state.jobs.is_empty());
+        assert_eq!(final_state.slots[0].phase, SlotPhase2::Ready);
+        assert!(final_state.drain_active);
+        assert!(final_state.admission_blocked);
+        drop(migrated);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn v11_pending_outbox_migration_preserves_snapshot_timestamps_and_events() {
+        let (dir, mut journal) = open_tmp("v11-pending-outbox-timestamps");
+        prime_ready(&mut journal, "scope-1");
+        let generation = r#gen();
+        let permit_lease = NativePermitLease {
+            holder: "native/v1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/request-1"
+                .to_owned(),
+            ledger_path: "/tmp/permit-ledger.db".to_owned(),
+            generation: 71,
+        };
+        for event in [
+            Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation,
+            },
+            Event::JobAcquisitionIntendedWithPermit {
+                slot_id: slot("scope-1"),
+                job_id: job("request-1"),
+                generation,
+                message_id: "message-1".to_owned(),
+                runner_request_id: "request-1".to_owned(),
+                run_service_url: "https://run.example/run".to_owned(),
+                intended_unix: 1_000,
+                permit_lease: permit_lease.clone(),
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        resolve_test_acquisition(
+            &mut journal,
+            "request-1",
+            "job-1",
+            "request-1",
+            generation,
+            Some(permit_lease),
+        );
+        for event in [
+            Event::JobOwned {
+                job_id: job("job-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation,
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1_001,
+            },
+            Event::JobStarted {
+                job_id: job("job-1"),
+                generation,
+            },
+            Event::JobTerminalResult {
+                job_id: job("job-1"),
+                generation,
+                conclusion: "success".to_owned(),
+            },
+            Event::CompletionIntended {
+                job_id: job("job-1"),
+                generation,
+                payload_sha256: payload_checksum(b"terminal"),
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        let before_outbox = outbox_row(&journal, "job-1").unwrap();
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        let before_events = {
+            let mut statement = conn
+                .prepare("SELECT id, generation, kind, payload FROM events ORDER BY id")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        drop_jobs_columns_added_after_version(&conn, 11);
+        conn.pragma_update(None, "user_version", 11u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let migrated = Journal::open(&path).expect("consistent v11 pending outbox migrates");
+        let after_outbox = outbox_row(&migrated, "job-1").unwrap();
+        assert_eq!(after_outbox, before_outbox);
+        let after_events = {
+            let mut statement = migrated
+                .conn
+                .prepare("SELECT id, generation, kind, payload FROM events ORDER BY id")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(after_events, before_events);
+        drop(migrated);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v11_timeout_abandonment_migrates_with_stable_recorded_deadline() {
+        let (dir, mut journal) = open_tmp("v11-timeout-abandonment-timestamps");
+        prime_ready(&mut journal, "scope-1");
+        let generation = r#gen();
+        for event in [
+            Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation,
+            },
+            Event::JobAcquisitionIntended {
+                slot_id: slot("scope-1"),
+                job_id: job("request-1"),
+                generation,
+                message_id: "message-1".to_owned(),
+                runner_request_id: Some("request-1".to_owned()),
+                run_service_url: "https://run.example/run".to_owned(),
+                intended_unix: 1_000,
+            },
+            Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-1"),
+                acquired_job_id: job("job-1"),
+                plan_id: "plan-1".to_owned(),
+                generation,
+                runner_request_id: Some("request-1".to_owned()),
+                permit_lease: None,
+            },
+            Event::JobOwned {
+                job_id: job("job-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation,
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1_001,
+            },
+            Event::JobStarted {
+                job_id: job("job-1"),
+                generation,
+            },
+            Event::JobTerminalResult {
+                job_id: job("job-1"),
+                generation,
+                conclusion: "success".to_owned(),
+            },
+            Event::CompletionIntended {
+                job_id: job("job-1"),
+                generation,
+                payload_sha256: payload_checksum(b"terminal"),
+            },
+            Event::CompletionSendStarted {
+                job_id: job("job-1"),
+                generation,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        open_fixture_write_gate(&journal.conn);
+        journal
+            .conn
+            .execute(
+                "UPDATE outbox SET deadline_unix = 1 WHERE job_id = 'job-1'",
+                [],
+            )
+            .unwrap();
+        close_fixture_write_gate(&journal.conn);
+        let abandoned = journal
+            .apply(Event::CompletionUnresolvable {
+                job_id: job("job-1"),
+                generation,
+                reason: "completion deadline elapsed".to_owned(),
+            })
+            .unwrap();
+        assert!(!abandoned.rejected);
+        let before_state = journal.materialized_state().unwrap();
+        assert!(before_state.jobs.is_empty());
+        assert!(before_state.outbox.is_empty());
+        assert_eq!(before_state.slots[0].phase, SlotPhase2::Ready);
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&conn, 11);
+        strip_v11_event_fields(&conn);
+        conn.pragma_update(None, "user_version", 11u32).unwrap();
+        let before_events = {
+            let mut statement = conn
+                .prepare("SELECT id, generation, kind, payload FROM events ORDER BY id")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let migrated = Journal::open(&path).expect("valid v11 timeout proof migrates");
+        assert_eq!(migrated.materialized_state().unwrap(), before_state);
+        let replayed = migrated.load_state().unwrap();
+        assert!(replayed.jobs.is_empty());
+        assert!(replayed.outbox[0].abandoned);
+        assert!(!replayed.outbox[0].remote_acked);
+        assert_eq!(replayed.outbox[0].created_unix, 1_001);
+        assert_eq!(
+            replayed.outbox[0].deadline_unix,
+            1_001 + COMPLETION_RESOLUTION_SECONDS
+        );
+        let after_events = {
+            let mut statement = migrated
+                .conn
+                .prepare("SELECT id, generation, kind, payload FROM events ORDER BY id")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            after_events, before_events,
+            "migration retains event identity"
+        );
+
+        let intended_time: i64 = migrated
+            .conn
+            .query_row(
+                "SELECT recorded_unix FROM events WHERE kind = 'completion_intended'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let unresolvable_time: i64 = migrated
+            .conn
+            .query_row(
+                "SELECT recorded_unix FROM events WHERE kind = 'completion_unresolvable'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(intended_time, 1_001);
+        assert_eq!(
+            unresolvable_time,
+            i64::try_from(1_001 + COMPLETION_RESOLUTION_SECONDS).unwrap(),
+            "legacy timeout replay uses the deterministic deadline derived from durable accepted time"
+        );
+        drop(migrated);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v13_migration_rederives_unchecked_time_and_v14_checksum_binds_it() {
+        let (dir, mut journal) = open_tmp("v13-event-time-integrity");
+        let generation = prime_running_job(&mut journal, "scope-1", "job-1");
+        let completion = journal
+            .apply(Event::CompletionIntended {
+                job_id: job("job-1"),
+                generation,
+                payload_sha256: payload_checksum(b"timestamp integrity"),
+            })
+            .unwrap();
+        assert!(!completion.rejected);
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        let (event_id, original_time): (i64, i64) = conn
+            .query_row(
+                "SELECT id, recorded_unix FROM events WHERE kind = 'completion_intended'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        drop_jobs_columns_added_after_version(&conn, 13);
+        conn.pragma_update(None, "user_version", 13u32).unwrap();
+        open_fixture_write_gate(&conn);
+        conn.execute(
+            "UPDATE events SET recorded_unix = ?1 WHERE id = ?2",
+            params![original_time + 600, event_id],
+        )
+        .unwrap();
+        close_fixture_write_gate(&conn);
+        drop(conn);
+
+        let migrated = Journal::open(&path).expect("v13 timestamps are rebuilt before v14");
+        let migrated_time: i64 = migrated
+            .conn
+            .query_row(
+                "SELECT recorded_unix FROM events WHERE id = ?1",
+                [event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let (payload, checksum): (String, String) = migrated
+            .conn
+            .query_row(
+                "SELECT payload, checksum FROM events WHERE id = ?1",
+                [event_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(migrated_time, original_time);
+        let generation_sql: i64 = migrated
+            .conn
+            .query_row(
+                "SELECT generation FROM events WHERE id = ?1",
+                [event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let kind: String = migrated
+            .conn
+            .query_row("SELECT kind FROM events WHERE id = ?1", [event_id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            checksum,
+            event_row_checksum(event_id, generation_sql, &kind, &payload, migrated_time).unwrap()
+        );
+        let version: i64 = migrated
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 14);
+        drop(migrated);
+
+        let conn = Connection::open(&path).unwrap();
+        open_fixture_write_gate(&conn);
+        conn.execute(
+            "UPDATE events SET recorded_unix = ?1 WHERE id = ?2",
+            params![migrated_time + 1, event_id],
+        )
+        .unwrap();
+        close_fixture_write_gate(&conn);
+        drop(conn);
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.checksum.mismatch");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn current_event_checksum_binds_replay_order_and_row_metadata() {
+        let edits = [
+            (
+                "id-reorder",
+                "UPDATE events SET id = id + 100 WHERE id = (SELECT MIN(id) FROM events)",
+            ),
+            (
+                "generation",
+                "UPDATE events SET generation = generation + 1 WHERE id = (SELECT MIN(id) FROM events)",
+            ),
+            (
+                "kind",
+                "UPDATE events SET kind = 'tampered_kind' WHERE id = (SELECT MIN(id) FROM events)",
+            ),
+            (
+                "recorded-time",
+                "UPDATE events SET recorded_unix = recorded_unix + 1 WHERE id = (SELECT MIN(id) FROM events)",
+            ),
+            (
+                "payload",
+                "UPDATE events SET payload = payload || ' ' WHERE id = (SELECT MIN(id) FROM events)",
+            ),
+        ];
+
+        for (label, edit) in edits {
+            let (dir, mut journal) = open_tmp(&format!("event-checksum-{label}"));
+            assert!(!journal.apply(Event::ControlLive).unwrap().rejected);
+            assert!(
+                !journal
+                    .apply(Event::Dependency {
+                        github_reachable: true,
+                    })
+                    .unwrap()
+                    .rejected
+            );
+            let path = dir.join("journal.db");
+            drop(journal);
+
+            let conn = Connection::open(&path).unwrap();
+            open_fixture_write_gate(&conn);
+            conn.execute_batch(edit).unwrap();
+            close_fixture_write_gate(&conn);
+            drop(conn);
+
+            let error = Journal::open(&path).unwrap_err();
+            assert_eq!(
+                error.envelope.reason, "journal.checksum.mismatch",
+                "{label} edits must invalidate journal integrity evidence"
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn current_open_rejects_reducer_rejected_event_rows() {
+        let (dir, journal) = open_tmp("current-replay-rejected-event");
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        append_fixture_event(
+            &conn,
+            &Event::JobOwned {
+                job_id: job("missing-job"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: r#gen(),
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1_000,
+            },
+        );
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.replay.rejected");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn current_open_rejects_materialized_slot_phase_drift_before_a_write() {
+        let (dir, mut journal) = open_tmp("current-materialized-slot-drift");
+        prime_ready(&mut journal, "scope-1");
+        let acquired = journal
+            .apply(Event::JobAcquisitionIntended {
+                slot_id: slot("scope-1"),
+                job_id: job("request-1"),
+                generation: r#gen(),
+                message_id: "message-1".to_owned(),
+                runner_request_id: Some("request-1".to_owned()),
+                run_service_url: "https://run.example/run".to_owned(),
+                intended_unix: 1_000,
+            })
+            .unwrap();
+        assert!(!acquired.rejected);
+        assert_eq!(
+            journal.materialized_state().unwrap().slots[0].phase,
+            SlotPhase2::Assigned
+        );
+        let path = dir.join("journal.db");
+        let original_event_count = event_count(&journal);
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        open_fixture_write_gate(&conn);
+        conn.execute(
+            "UPDATE slots SET phase = 'ready' WHERE slot_id = 'scope-1'",
+            [],
+        )
+        .unwrap();
+        close_fixture_write_gate(&conn);
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(
+            error.envelope.reason,
+            "journal.materialized.replay.mismatch"
+        );
+        let conn = Connection::open(&path).unwrap();
+        let retained_event_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        let retained_phase: String = conn
+            .query_row(
+                "SELECT phase FROM slots WHERE slot_id = 'scope-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained_event_count, original_event_count);
+        assert_eq!(retained_phase, "ready");
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn current_open_rejects_deleted_event_when_materialized_snapshot_keeps_its_effect() {
+        let (dir, mut journal) = open_tmp("current-deleted-event-drift");
+        assert!(!journal.apply(Event::ControlLive).unwrap().rejected);
+        assert!(
+            !journal
+                .apply(Event::Dependency {
+                    github_reachable: true,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(journal.materialized_state().unwrap().github_reachable);
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        open_fixture_write_gate(&conn);
+        conn.execute("DELETE FROM events WHERE kind = 'dependency'", [])
+            .unwrap();
+        close_fixture_write_gate(&conn);
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.invalid");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn current_v14_open_requires_a_committed_event_tail_watermark() {
+        let (dir, journal) = open_tmp("current-v14-missing-tail-watermark");
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        open_fixture_write_gate(&conn);
+        assert_eq!(
+            conn.execute("DELETE FROM meta WHERE key = 'replay_baseline'", [],)
+                .unwrap(),
+            1
+        );
+        close_fixture_write_gate(&conn);
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.invalid");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn current_writer_cannot_commit_after_its_tail_watermark_disappears() {
+        let (dir, mut journal) = open_tmp("current-v14-writer-missing-tail-watermark");
+        let path = dir.join("journal.db");
+        let before_state = journal.materialized_state().unwrap();
+        let before_events = event_count(&journal);
+
+        // A handle can outlive another SQLite writer. Removing its anchor
+        // after open must fail before materialized rows or events commit.
+        let conn = Connection::open(&path).unwrap();
+        open_fixture_write_gate(&conn);
+        assert_eq!(
+            conn.execute("DELETE FROM meta WHERE key = 'replay_baseline'", [],)
+                .unwrap(),
+            1
+        );
+        close_fixture_write_gate(&conn);
+        drop(conn);
+
+        let error = journal.apply(Event::ControlLive).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.invalid");
+        assert_eq!(event_count(&journal), before_events);
+        assert_eq!(journal.materialized_state().unwrap(), before_state);
+        assert_eq!(
+            journal
+                .conn
+                .query_row("SELECT COUNT(*) FROM journal_write_gate", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0,
+            "failed append rolls back its transaction-local gate"
+        );
+        drop(journal);
+
+        let reopen_error = Journal::open(&path).unwrap_err();
+        assert_eq!(
+            reopen_error.envelope.reason,
+            "journal.replay.baseline.invalid"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fresh_v14_archive_only_suffix_deletion_fails_the_transactional_tail_watermark() {
+        let (dir, mut journal) = open_tmp("fresh-v14-archive-suffix-deleted");
+        prime_ready(&mut journal, "scope-1");
+        let before = journal.materialized_state().unwrap();
+        let through_event_id: i64 = journal
+            .conn
+            .query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        // This event emits capacity but leaves the Ready projection intact.
+        // The suffix below then acquires and completes a job, returning the
+        // same materialized slot/job/pending-outbox projection while adding an
+        // archived RemoteAcked record that is not stored in the outbox table.
+        assert!(
+            !journal
+                .apply(Event::ReadyAttempt {
+                    slot_id: slot("scope-1"),
+                    generation: r#gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot("scope-1"),
+                    job_id: job("guid-1"),
+                    generation: r#gen(),
+                    message_id: "message-1".to_owned(),
+                    runner_request_id: Some("request-1".to_owned()),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                })
+                .unwrap()
+                .rejected
+        );
+        resolve_test_acquisition(&mut journal, "guid-1", "guid-1", "request-1", r#gen(), None);
+        assert!(
+            !journal
+                .apply(Event::JobOwned {
+                    job_id: job("guid-1"),
+                    slot_id: slot("scope-1"),
+                    attempt: 1,
+                    generation: r#gen(),
+                    worker: "worker-1".to_owned(),
+                    accepted_unix: 1_001,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobStarted {
+                    job_id: job("guid-1"),
+                    generation: r#gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobTerminalResult {
+                    job_id: job("guid-1"),
+                    generation: r#gen(),
+                    conclusion: "success".to_owned(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: job("guid-1"),
+                    generation: r#gen(),
+                    payload_sha256: payload_checksum(b"done"),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::CompletionSendStarted {
+                    job_id: job("guid-1"),
+                    generation: r#gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::RemoteAcked {
+                    job_id: job("guid-1"),
+                    generation: r#gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let replayed = journal.load_state().unwrap();
+        assert!(replayed.outbox.iter().any(|row| {
+            row.job_id == job("guid-1") && row.generation == r#gen() && row.remote_acked
+        }));
+        assert_eq!(
+            current_projection_mismatch_fields(&replayed, &journal.materialized_state().unwrap()),
+            Vec::<&str>::new()
+        );
+        assert_eq!(journal.materialized_state().unwrap(), before);
+        assert!(journal.materialized_state().unwrap().outbox.is_empty());
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        let original_baseline: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'replay_baseline'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        open_fixture_write_gate(&conn);
+        let removed = conn
+            .execute("DELETE FROM events WHERE id > ?1", [through_event_id])
+            .unwrap();
+        assert!(removed > 0);
+        // Temporarily remove the anchor to prove the deleted event suffix is
+        // projection-neutral apart from its archived ack evidence. Restore it
+        // before the actual open assertion below.
+        conn.execute("DELETE FROM meta WHERE key = 'replay_baseline'", [])
+            .unwrap();
+        close_fixture_write_gate(&conn);
+        let replay_without_suffix = load_state_from_conn(&conn).unwrap();
+        let materialized = load_materialized_state(&conn).unwrap();
+        assert_eq!(
+            current_projection_mismatch_fields(&replay_without_suffix, &materialized),
+            Vec::<&str>::new()
+        );
+        assert!(!replay_without_suffix
+            .outbox
+            .iter()
+            .any(|row| row.job_id == job("guid-1") && row.remote_acked));
+        open_fixture_write_gate(&conn);
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('replay_baseline', ?1)",
+            [original_baseline],
+        )
+        .unwrap();
+        close_fixture_write_gate(&conn);
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.invalid");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrated_replay_baseline_tampering_is_rejected() {
+        let (dir, path) = make_v13_migrated_fixture("replay-baseline-tampered");
+        let conn = Connection::open(&path).unwrap();
+        let raw: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'replay_baseline'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut baseline: ReplayBaseline = serde_json::from_str(&raw).unwrap();
+        assert!(baseline.state.control_live);
+        baseline.state.control_live = false;
+        let checksum = replay_baseline_integrity_checksum(&baseline).unwrap();
+        baseline.integrity_checksum = checksum;
+        open_fixture_write_gate(&conn);
+        conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'replay_baseline'",
+            [serde_json::to_string(&baseline).unwrap()],
+        )
+        .unwrap();
+        close_fixture_write_gate(&conn);
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(
+            error.envelope.reason,
+            "journal.materialized.replay.mismatch"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrated_baseline_archive_checksum_rejects_outbox_row_tampering() {
+        let (dir, mut journal) = open_tmp("replay-baseline-archive-tampered");
+        let generation = prime_running_job(&mut journal, "scope-1", "job-1");
+        for event in [
+            Event::JobTerminalResult {
+                job_id: job("job-1"),
+                generation,
+                conclusion: "success".to_owned(),
+            },
+            Event::CompletionIntended {
+                job_id: job("job-1"),
+                generation,
+                payload_sha256: payload_checksum(b"archive payload"),
+            },
+            Event::CompletionSendStarted {
+                job_id: job("job-1"),
+                generation,
+            },
+            Event::RemoteAcked {
+                job_id: job("job-1"),
+                generation,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        let current_history = journal.load_state().unwrap();
+        assert!(current_history
+            .outbox
+            .iter()
+            .any(|row| { row.job_id == job("job-1") && row.remote_acked && !row.is_pending() }));
+        assert!(journal.materialized_state().unwrap().outbox.is_empty());
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        // Convert this valid history to its pre-v14 representation. The v13
+        // migration must place the terminal outbox record in its replay
+        // checkpoint because materialized outbox only retains pending rows.
+        let conn = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&conn, 13);
+        conn.pragma_update(None, "user_version", 13u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA journal_mode=DELETE", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            "delete"
+        );
+        drop(conn);
+
+        let migrated = Journal::open(&path).unwrap();
+        let migrated_state = migrated.load_state().unwrap();
+        let archived = migrated_state
+            .outbox
+            .iter()
+            .find(|row| row.job_id == job("job-1"))
+            .expect("migration baseline retains acknowledged outbox history");
+        assert!(archived.remote_acked && !archived.is_pending());
+        drop(migrated);
+
+        let conn = Connection::open(&path).unwrap();
+        let raw: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'replay_baseline'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut baseline: ReplayBaseline = serde_json::from_str(&raw).unwrap();
+        let archived = baseline
+            .state
+            .outbox
+            .iter_mut()
+            .find(|row| row.job_id == job("job-1"))
+            .expect("checkpoint includes the acknowledged row");
+        assert!(archived.remote_acked && !archived.is_pending());
+        archived.attempts += 1;
+        open_fixture_write_gate(&conn);
+        conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'replay_baseline'",
+            [serde_json::to_string(&baseline).unwrap()],
+        )
+        .unwrap();
+        close_fixture_write_gate(&conn);
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.invalid");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn deleting_event_inside_migration_baseline_is_rejected() {
+        let (dir, path) = make_v13_migrated_fixture("replay-baseline-missing-event");
+        let conn = Connection::open(&path).unwrap();
+        let raw: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'replay_baseline'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let baseline: ReplayBaseline = serde_json::from_str(&raw).unwrap();
+        assert_eq!(baseline.latest_event_id, baseline.through_event_id);
+        open_fixture_write_gate(&conn);
+        let removed = conn
+            .execute(
+                "DELETE FROM events WHERE id = ?1",
+                [baseline.through_event_id],
+            )
+            .unwrap();
+        close_fixture_write_gate(&conn);
+        assert_eq!(removed, 1);
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.invalid");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn deleting_latest_post_baseline_event_is_rejected() {
+        let (dir, path) = make_v13_migrated_fixture("replay-baseline-latest-event");
+        let mut journal = Journal::open(&path).unwrap();
+        assert!(
+            !journal
+                .apply(Event::Routing {
+                    valid: true,
+                    group_valid: true,
+                })
+                .unwrap()
+                .rejected
+        );
+        let latest_id: i64 = journal
+            .conn
+            .query_row("SELECT MAX(id) FROM events", [], |row| row.get(0))
+            .unwrap();
+        let baseline_raw: String = journal
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'replay_baseline'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let baseline: ReplayBaseline = serde_json::from_str(&baseline_raw).unwrap();
+        assert_eq!(latest_id, baseline.latest_event_id);
+        assert_eq!(baseline.latest_event_count, event_count(&journal));
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        open_fixture_write_gate(&conn);
+        let removed = conn
+            .execute("DELETE FROM events WHERE id = ?1", [latest_id])
+            .unwrap();
+        close_fixture_write_gate(&conn);
+        assert_eq!(removed, 1);
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.invalid");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v11_incomplete_owned_identity_divergence_is_refused_before_wal() {
+        let (dir, mut journal) = open_tmp("v11-incomplete-owned-identity");
+        prime_ready(&mut journal, "scope-1");
+        let permit_lease = NativePermitLease {
+            holder: "native/v1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/request-1"
+                .to_owned(),
+            ledger_path: "/tmp/permit-ledger.db".to_owned(),
+            generation: 51,
+        };
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntendedWithPermit {
+                    slot_id: slot("scope-1"),
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    message_id: "message-1".to_owned(),
+                    runner_request_id: "request-1".to_owned(),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                    permit_lease: permit_lease.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        append_fixture_event(
+            &conn,
+            &Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-1"),
+                acquired_job_id: job("run-service-job-1"),
+                plan_id: String::new(),
+                generation: r#gen(),
+                runner_request_id: Some("request-1".to_owned()),
+                permit_lease: Some(permit_lease.clone()),
+            },
+        );
+        append_fixture_event(
+            &conn,
+            &Event::JobOwned {
+                job_id: job("run-service-job-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: r#gen(),
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1_002,
+            },
+        );
+        open_fixture_write_gate(&conn);
+        assert_eq!(
+            conn.execute(
+                "UPDATE jobs
+                 SET job_id = 'run-service-job-1', attempt = 1, worker = 'worker-1',
+                     phase = 'assigned', accepted_unix = 1002, provisional = 0,
+                     plan_id = ''
+                 WHERE job_id = 'request-1'",
+                [],
+            )
+            .unwrap(),
+            1
+        );
+        close_fixture_write_gate(&conn);
+        drop_jobs_columns_added_after_version(&conn, 11);
+        conn.pragma_update(None, "user_version", 11u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+        let old = Connection::open(&path).unwrap();
+        let materialized = load_materialized_state(&old).unwrap();
+        let replayed = load_state_from_conn(&old).unwrap();
+        assert_eq!(materialized.jobs[0].job_id, job("run-service-job-1"));
+        assert!(!materialized.jobs[0].provisional);
+        assert_eq!(
+            materialized.jobs[0].permit_lease,
+            Some(permit_lease.clone())
+        );
+        assert_eq!(replayed.jobs[0].job_id, job("request-1"));
+        assert!(replayed.jobs[0].provisional);
+        drop(old);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.migration.job.inconsistent");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!wal.exists(), "identity mismatch must fail before WAL");
+        assert!(!shm.exists(), "identity mismatch must fail before WAL");
+
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 11);
+        assert!(!table_has_column(&check, "jobs", "acquisition_loss_unproven").unwrap());
+        let mode: String = check
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        let retained = load_materialized_state(&check).unwrap();
+        assert_eq!(retained.jobs.len(), 1);
+        assert_eq!(retained.jobs[0].job_id, job("run-service-job-1"));
+        assert_eq!(retained.jobs[0].runner_request_id, "request-1");
+        assert_eq!(retained.jobs[0].permit_lease, Some(permit_lease));
+        drop(check);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v10_proofless_loss_is_refused_before_wal_or_migration() {
+        let path = make_v10_proofless_loss_journal("v10-proofless-loss-prewal-refusal");
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(
+            error.envelope.reason,
+            "journal.migration.acquisition_loss.ambiguous"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!wal.exists(), "ambiguous v10 history must fail before WAL");
+        assert!(!shm.exists(), "ambiguous v10 history must not create SHM");
+
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 10);
+        assert_eq!(
+            conn.query_row(
+                "SELECT phase FROM slots WHERE slot_id = 'scope-1'",
+                [],
+                |row| { row.get::<_, String>(0) }
+            )
+            .unwrap(),
+            "ready",
+            "the v10 materialization remains available for recovery"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(conn);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn v11_migration_ignores_terminal_outbox_rows_dropped_by_projection() {
+        let (path, _) = make_v11_proofless_loss_journal("v11-v12-terminal-outbox-projection");
+        let conn = Connection::open(&path).unwrap();
+        let generation = r#gen();
+        let completed_job = job("job-2");
+        let permit_lease = NativePermitLease {
+            holder: "native/v1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/request-2"
+                .to_owned(),
+            ledger_path: "/tmp/permit-ledger.db".to_owned(),
+            generation: 42,
+        };
+        let payload_sha256 = payload_checksum(b"completed historical outbox");
+        for event in [
+            Event::JobAcquisitionRebuiltWithPermit {
+                slot_id: slot("scope-1"),
+                job_id: completed_job.clone(),
+                generation,
+                runner_request_id: "request-2".to_owned(),
+                plan_id: "plan-2".to_owned(),
+                run_service_url: "https://run.example/run".to_owned(),
+                probe_deadline_unix: 20_000,
+                permit_lease,
+            },
+            Event::JobOwned {
+                job_id: completed_job.clone(),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation,
+                worker: "worker-2".to_owned(),
+                accepted_unix: 2_001,
+            },
+            Event::JobStarted {
+                job_id: completed_job.clone(),
+                generation,
+            },
+            Event::JobTerminalResult {
+                job_id: completed_job.clone(),
+                generation,
+                conclusion: "success".to_owned(),
+            },
+            Event::CompletionIntended {
+                job_id: completed_job.clone(),
+                generation,
+                payload_sha256,
+            },
+            Event::CompletionSendStarted {
+                job_id: completed_job.clone(),
+                generation,
+            },
+            Event::RemoteAcked {
+                job_id: completed_job,
+                generation,
+            },
+        ] {
+            append_fixture_event(&conn, &event);
+        }
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM outbox", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "the current materialized projection contains no terminal outbox row"
+        );
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let migrated = Journal::open(&path)
+            .expect("terminal historical outbox is omitted by both materialized projections");
+        assert_eq!(
+            migrated
+                .materialized_state()
+                .unwrap()
+                .outbox
+                .iter()
+                .filter(|row| row.is_pending())
+                .count(),
+            0
+        );
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM events WHERE kind = 'remote_acked'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+            "terminal acknowledgement remains in the immutable event history"
+        );
+        drop(conn);
+        drop(migrated);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn v11_capacity_invalid_marker_blocks_lossy_proofless_replay() {
+        let (dir, mut journal) = open_tmp("v11-capacity-invalid-proofless-loss");
+        prime_ready(&mut journal, "scope-1");
+        assert!(
+            !journal
+                .apply(Event::DesiredCapacity { ready: 3 })
+                .unwrap()
+                .rejected
+        );
+        prime_ready_in_existing_capacity(&mut journal, "scope-2");
+        prime_ready_in_existing_capacity(&mut journal, "scope-3");
+        let permit_lease = NativePermitLease {
+            holder: "native/v1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/request-1"
+                .to_owned(),
+            ledger_path: "/tmp/permit-ledger.db".to_owned(),
+            generation: 41,
+        };
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntendedWithPermit {
+                    slot_id: slot("scope-1"),
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    message_id: "message-1".to_owned(),
+                    runner_request_id: "request-1".to_owned(),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                    permit_lease,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::DesiredCapacity { ready: 2 })
+                .unwrap()
+                .rejected
+        );
+        drop(journal);
+
+        let path = dir.join("journal.db");
+        let conn = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&conn, 11);
+        conn.pragma_update(None, "user_version", 11u32).unwrap();
+        append_fixture_event(
+            &conn,
+            &Event::JobAcquisitionLost {
+                job_id: job("request-1"),
+                generation: r#gen(),
+                reason: "probe budget spent".to_owned(),
+                proof: None,
+            },
+        );
+        // This is the v11 projection after the reason-only event removed the
+        // job. The three durable slot rows still exceed the desired capacity,
+        // so v12 must preserve the capacity-invalid marker and refuse a replay
+        // that would recreate a holder row while skipping materialized writes.
+        conn.execute("DELETE FROM jobs", []).unwrap();
+        conn.execute(
+            "UPDATE slots SET phase = 'ready' WHERE slot_id = 'scope-1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('capacity_invalid', '1')
+             ON CONFLICT(key) DO UPDATE SET value = '1'",
+            [],
+        )
+        .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.migration.job.inconsistent");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!wal.exists(), "unsafe replay must stop before WAL");
+        assert!(!shm.exists(), "unsafe replay must not create SHM");
+
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 11);
+        let invalid_marker: String = check
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'capacity_invalid'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(invalid_marker, "1", "forensic fence must remain intact");
+        assert_eq!(
+            check
+                .query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "the original materialized job projection remains intact"
+        );
+        assert_eq!(
+            check
+                .query_row("SELECT COUNT(*) FROM slots", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            3,
+            "all overcapacity forensic slot rows remain intact"
+        );
+        assert_eq!(
+            check
+                .query_row(
+                    "SELECT phase FROM slots WHERE slot_id = 'scope-1'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "ready",
+            "the original slot projection remains intact"
+        );
+        drop(check);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v11_migration_refuses_to_drop_a_later_pending_outbox() {
+        let (path, _) = make_v11_proofless_loss_journal("v11-v12-pending-outbox-preserve");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("DELETE FROM meta WHERE key IN ('drain', 'admission')", [])
+            .unwrap();
+        let request_id = job("request-2");
+        let acquired_job_id = job("job-2");
+        let generation = r#gen();
+        let permit_lease = NativePermitLease {
+            holder: "native/v1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/request-2"
+                .to_owned(),
+            ledger_path: "/tmp/permit-ledger.db".to_owned(),
+            generation: 42,
+        };
+        let payload_sha256 = payload_checksum(b"job-2-completion");
+        for event in [
+            Event::JobAcquisitionIntendedWithPermit {
+                slot_id: slot("scope-1"),
+                job_id: request_id.clone(),
+                generation,
+                message_id: "message-2".to_owned(),
+                runner_request_id: request_id.0.clone(),
+                run_service_url: "https://run.example/run".to_owned(),
+                intended_unix: 2_000,
+                permit_lease: permit_lease.clone(),
+            },
+            Event::JobAcquisitionResolved {
+                provisional_job_id: request_id,
+                acquired_job_id: acquired_job_id.clone(),
+                plan_id: "plan-2".to_owned(),
+                generation,
+                runner_request_id: Some("request-2".to_owned()),
+                permit_lease: Some(permit_lease.clone()),
+            },
+            Event::JobOwned {
+                job_id: acquired_job_id.clone(),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation,
+                worker: "worker-2".to_owned(),
+                accepted_unix: 2_001,
+            },
+            Event::JobStarted {
+                job_id: acquired_job_id.clone(),
+                generation,
+            },
+            Event::JobTerminalResult {
+                job_id: acquired_job_id.clone(),
+                generation,
+                conclusion: "success".to_owned(),
+            },
+            Event::CompletionIntended {
+                job_id: acquired_job_id.clone(),
+                generation,
+                payload_sha256: payload_sha256.clone(),
+            },
+        ] {
+            append_fixture_event(&conn, &event);
+        }
+
+        // This is the valid v11 materialization after those later events.
+        // Strict v12 replay keeps the earlier ambiguous acquisition and cannot
+        // reconstruct this completed owner's outbox row, so migration must
+        // stop before replacing the durable snapshot.
+        let lease_json = serde_json::to_string(&permit_lease).unwrap();
+        conn.execute(
+            "UPDATE slots SET phase = 'assigned' WHERE slot_id = 'scope-1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO jobs (
+                 job_id, slot_id, generation, attempt, worker, phase, accepted_unix,
+                 terminal_conclusion, provisional, plan_id, run_service_url,
+                 probe_attempts, probe_deadline_unix, runner_request_id, permit_lease
+             ) VALUES (?1, 'scope-1', 1, 1, 'worker-2', 'completing', 2001,
+                       'success', 0, 'plan-2', 'https://run.example/run',
+                       0, 0, 'request-2', ?2)",
+            params![acquired_job_id.0, lease_json],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO outbox (
+                 job_id, slot_id, generation, payload_sha256, intended, send_started,
+                 remote_acked, created_unix, attempts, deadline_unix, permanent, abandoned
+             ) VALUES (?1, 'scope-1', 1, ?2, 1, 0, 0, 2002, 0, ?3, 0, 0)",
+            params![
+                acquired_job_id.0,
+                payload_sha256,
+                2_002 + COMPLETION_RESOLUTION_SECONDS as i64
+            ],
+        )
+        .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(
+            error.envelope.reason,
+            "journal.migration.outbox.inconsistent"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!wal.exists(), "ambiguous outbox must be refused before WAL");
+        assert!(!shm.exists(), "ambiguous outbox must be refused before WAL");
+
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 11);
+        assert_eq!(
+            check
+                .query_row(
+                    "SELECT COUNT(*) FROM outbox WHERE job_id = 'job-2'",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .unwrap(),
+            1,
+            "the old pending outbox row remains available for recovery"
+        );
+        assert_eq!(
+            check
+                .query_row(
+                    "SELECT COUNT(*) FROM jobs WHERE job_id = 'job-2'",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .unwrap(),
+            1
+        );
+        drop(check);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn v11_migration_refuses_to_drop_a_later_owned_job_without_outbox() {
+        let (path, _) = make_v11_proofless_loss_journal("v11-v12-owned-job-preserve");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("DELETE FROM meta WHERE key IN ('drain', 'admission')", [])
+            .unwrap();
+        let request_id = job("request-2");
+        let acquired_job_id = job("job-2");
+        let generation = r#gen();
+        let permit_lease = NativePermitLease {
+            holder: "native/v1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/request-2"
+                .to_owned(),
+            ledger_path: "/tmp/permit-ledger.db".to_owned(),
+            generation: 42,
+        };
+        for event in [
+            Event::JobAcquisitionIntendedWithPermit {
+                slot_id: slot("scope-1"),
+                job_id: request_id.clone(),
+                generation,
+                message_id: "message-2".to_owned(),
+                runner_request_id: request_id.0.clone(),
+                run_service_url: "https://run.example/run".to_owned(),
+                intended_unix: 2_000,
+                permit_lease: permit_lease.clone(),
+            },
+            Event::JobAcquisitionResolved {
+                provisional_job_id: request_id,
+                acquired_job_id: acquired_job_id.clone(),
+                plan_id: "plan-2".to_owned(),
+                generation,
+                runner_request_id: Some("request-2".to_owned()),
+                permit_lease: Some(permit_lease.clone()),
+            },
+            Event::JobOwned {
+                job_id: acquired_job_id.clone(),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation,
+                worker: "worker-2".to_owned(),
+                accepted_unix: 2_001,
+            },
+        ] {
+            append_fixture_event(&conn, &event);
+        }
+
+        // v11 accepted and materialized this later owner after its reason-only
+        // loss event freed the slot. Strict v12 replay cannot prove that the
+        // later owner is safe, so it must refuse the migration before WAL
+        // rather than erasing the current owner's only durable row.
+        let lease_json = serde_json::to_string(&permit_lease).unwrap();
+        conn.execute(
+            "UPDATE slots SET phase = 'assigned' WHERE slot_id = 'scope-1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO jobs (
+                 job_id, slot_id, generation, attempt, worker, phase, accepted_unix,
+                 terminal_conclusion, provisional, plan_id, run_service_url,
+                 probe_attempts, probe_deadline_unix, runner_request_id, permit_lease
+             ) VALUES (?1, 'scope-1', 1, 1, 'worker-2', 'assigned', 2001,
+                       NULL, 0, 'plan-2', 'https://run.example/run',
+                       0, 0, 'request-2', ?2)",
+            params![acquired_job_id.0, lease_json],
+        )
+        .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.migration.job.inconsistent");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !wal.exists(),
+            "ambiguous owned job must be refused before WAL"
+        );
+        assert!(
+            !shm.exists(),
+            "ambiguous owned job must be refused before WAL"
+        );
+
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 11);
+        assert_eq!(
+            check
+                .query_row(
+                    "SELECT COUNT(*) FROM jobs WHERE job_id = 'job-2'",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .unwrap(),
+            1,
+            "the later owned-job row remains available for recovery"
+        );
+        drop(check);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn v11_migration_preserves_materialized_overcapacity_forensics() {
+        let (dir, mut journal) = open_tmp("v11-v12-overcapacity-preserve");
+        assert!(
+            !journal
+                .apply(Event::DesiredCapacity { ready: 2 })
+                .unwrap()
+                .rejected
+        );
+        for scope in ["scope-1", "scope-2"] {
+            prime_ready_in_existing_capacity(&mut journal, scope);
+        }
+        drop(journal);
+
+        let path = dir.join("journal.db");
+        let conn = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&conn, 11);
+        conn.execute(
+            "INSERT INTO slots (
+                 slot_id, generation, phase, permit_held, routing_valid,
+                 session_live, executor_proven, registered, pid, heartbeat_unix
+             ) VALUES ('scope-forensic', 1, 'provisioning', 0, 0, 0, 0, 0, NULL, 0)",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 11u32).unwrap();
+        drop(conn);
+
+        let mut migrated =
+            Journal::open(&path).expect("migration must preserve and fence invalid rows");
+        let version: i64 = migrated
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+        let state = migrated.materialized_state().unwrap();
+        assert!(state.capacity_invalid);
+        assert!(
+            migrated.load_state().unwrap().capacity_invalid,
+            "event replay must retain the durable forensic capacity fence"
+        );
+        assert_eq!(state.slots.len(), 3);
+        assert_eq!(
+            migrated
+                .conn
+                .query_row("SELECT COUNT(*) FROM slots", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            3,
+            "v12 must preserve the materialized-only forensic slot"
+        );
+        let invalid_marker: String = migrated
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'capacity_invalid'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(invalid_marker, "1", "v12 must persist the forensic fence");
+        let error = migrated
+            .apply(Event::DesiredCapacity { ready: 2 })
+            .unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.capacity.invalid");
+        drop(migrated);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn malformed_v11_meta_is_refused_before_wal_or_sidecars() {
+        let (dir, mut journal) = open_tmp("v11-malformed-meta-pre-wal");
+        assert!(!journal.apply(Event::ControlLive).unwrap().rejected);
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop_jobs_columns_added_after_version(&conn, 11);
+        conn.execute(
+            "UPDATE meta SET value = 'not-a-bool' WHERE key = 'control_live'",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 11u32).unwrap();
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.materialized.invalid");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !wal.exists(),
+            "pre-WAL refusal must not create a WAL sidecar"
+        );
+        assert!(
+            !shm.exists(),
+            "pre-WAL refusal must not create an SHM sidecar"
+        );
+
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 11);
+        assert!(!table_has_column(&check, "jobs", "acquisition_loss_unproven").unwrap());
+        let mode: String = check
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(check);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unrecognized_v11_trigger_is_refused_before_wal_or_sidecars() {
+        let (dir, mut journal) = open_tmp("v11-extra-trigger-pre-wal");
+        assert!(!journal.apply(Event::ControlLive).unwrap().rejected);
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop_jobs_columns_added_after_version(&conn, 11);
+        conn.execute_batch(
+            "CREATE TRIGGER rogue_job_delete
+             AFTER DELETE ON jobs BEGIN SELECT 1; END;",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 11u32).unwrap();
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !wal.exists(),
+            "pre-WAL refusal must not create a WAL sidecar"
+        );
+        assert!(
+            !shm.exists(),
+            "pre-WAL refusal must not create an SHM sidecar"
+        );
+
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 11);
+        assert!(table_has_column(&check, "jobs", "permit_lease").unwrap());
+        assert!(!table_has_column(&check, "jobs", "acquisition_loss_unproven").unwrap());
+        let mode: String = check
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(check);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v11_reserved_views_and_foreign_trigger_names_are_refused_before_wal() {
+        for (label, edit) in [
+            (
+                "v11-write-gate-view-collision",
+                "CREATE VIEW journal_write_gate AS SELECT 1 AS id;",
+            ),
+            (
+                "v11-jobs-view-collision",
+                "DROP TABLE jobs;
+                 CREATE VIEW jobs AS SELECT 'job-1' AS job_id;",
+            ),
+            (
+                "v11-core-name-non-table-collision",
+                "DROP TABLE events;
+                 CREATE INDEX events ON jobs (job_id);",
+            ),
+            (
+                "v11-foreign-trigger-reserved-name",
+                "CREATE TABLE extension_records (id INTEGER PRIMARY KEY);
+                 CREATE TRIGGER journal_write_gate_events_insert
+                 BEFORE INSERT ON extension_records BEGIN SELECT 1; END;",
+            ),
+        ] {
+            assert_v11_schema_edit_fails_before_wal(label, edit);
+        }
+    }
+
+    #[test]
+    fn v2_rebuild_name_collision_is_refused_before_wal() {
+        assert_v2_schema_edit_fails_before_wal(
+            "v2-outbox-v3-name-collision",
+            "CREATE VIEW outbox_v3 AS SELECT 1 AS job_id;",
+        );
+    }
+
+    #[test]
+    fn v2_rebuild_refuses_foreign_key_cascade_into_extension_rows() {
+        let (dir, journal) = open_tmp("v2-outbox-foreign-key-cascade");
+        let path = dir.join("journal.db");
+        drop(journal);
+        seed_v2_outbox(&path, 2);
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sqliteX_extension_records (
+                 job_id TEXT REFERENCES outbox(job_id) ON DELETE CASCADE
+             );
+             INSERT INTO sqliteX_extension_records (job_id) VALUES ('job-1');",
+        )
+        .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !wal.exists(),
+            "pre-WAL refusal must not create a WAL sidecar"
+        );
+        assert!(
+            !shm.exists(),
+            "pre-WAL refusal must not create an SHM sidecar"
+        );
+
+        let check = Connection::open(&path).unwrap();
+        assert_eq!(
+            check
+                .query_row(
+                    "SELECT COUNT(*) FROM sqliteX_extension_records",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1,
+            "legacy extension evidence remains intact"
+        );
+        drop(check);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v2_rebuild_refuses_foreign_keys_to_staging_and_from_outbox() {
+        assert_v2_schema_edit_fails_before_wal(
+            "v2-fk-target-outbox-v3",
+            "CREATE TABLE extension_rows (
+                 job_id TEXT REFERENCES outbox_v3(job_id) ON DELETE CASCADE
+             );",
+        );
+        assert_v2_schema_edit_fails_before_wal(
+            "v2-outbox-outbound-fk",
+            "CREATE TABLE extension_roots (id TEXT PRIMARY KEY);
+             INSERT INTO extension_roots (id) VALUES ('job-1');
+             DROP TABLE outbox;
+             CREATE TABLE outbox (
+                 job_id TEXT PRIMARY KEY REFERENCES extension_roots(id) ON DELETE CASCADE,
+                 generation INTEGER NOT NULL,
+                 payload_sha256 TEXT NOT NULL,
+                 intended INTEGER NOT NULL DEFAULT 0,
+                 send_started INTEGER NOT NULL DEFAULT 0,
+                 remote_acked INTEGER NOT NULL DEFAULT 0,
+                 created_unix INTEGER NOT NULL
+             );
+             INSERT INTO outbox (
+                 job_id, generation, payload_sha256, intended,
+                 send_started, remote_acked, created_unix
+             ) VALUES ('job-1', 1, 'payload', 1, 0, 0, 1);",
+        );
+    }
+
+    #[test]
+    fn current_schema_rejects_external_cascade_before_rewrite() {
+        let (dir, mut journal) = open_tmp("current-external-fk-cascade");
+        prime_ready(&mut journal, "scope-1");
+        let before_events = event_count(&journal);
+        let path = dir.join("journal.db");
+        let extension = Connection::open(&path).unwrap();
+        extension
+            .execute_batch(
+                "CREATE TABLE extension_rows (
+                     slot_id TEXT REFERENCES slots(slot_id) ON DELETE CASCADE
+                 );
+                 INSERT INTO extension_rows (slot_id) VALUES ('scope-1');",
+            )
+            .unwrap();
+        drop(extension);
+
+        let error = journal
+            .apply(Event::Dependency {
+                github_reachable: false,
+            })
+            .unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(event_count(&journal), before_events);
+        let state = journal.materialized_state().unwrap();
+        assert!(state.github_reachable);
+        assert_eq!(state.slots.len(), 1);
+        assert_eq!(state.slots[0].slot_id, slot("scope-1"));
+
+        let extension = Connection::open(&path).unwrap();
+        assert_eq!(
+            extension
+                .query_row("SELECT COUNT(*) FROM extension_rows", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1,
+            "a concurrent schema extension cannot be cascade-deleted by persist_state"
+        );
+        drop(extension);
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn current_schema_rejects_outbox_outbound_fk_before_rewrite() {
+        let (dir, mut journal) = open_tmp("current-outbox-outbound-fk");
+        let before = journal.materialized_state().unwrap();
+        let before_events = event_count(&journal);
+        let path = dir.join("journal.db");
+
+        let extension = Connection::open(&path).unwrap();
+        extension
+            .execute_batch(
+                "CREATE TABLE extension_roots (
+                     id TEXT PRIMARY KEY
+                 );
+                 INSERT INTO extension_roots (id) VALUES ('root-1');
+                 DROP TRIGGER journal_write_gate_outbox_insert;
+                 DROP TRIGGER journal_write_gate_outbox_update;
+                 DROP TRIGGER journal_write_gate_outbox_delete;
+                 DROP TABLE outbox;
+                 CREATE TABLE outbox (
+                     job_id TEXT PRIMARY KEY REFERENCES extension_roots(id) ON DELETE CASCADE,
+                     slot_id TEXT NOT NULL,
+                     generation INTEGER NOT NULL,
+                     payload_sha256 TEXT NOT NULL,
+                     intended INTEGER NOT NULL DEFAULT 0,
+                     send_started INTEGER NOT NULL DEFAULT 0,
+                     remote_acked INTEGER NOT NULL DEFAULT 0,
+                     created_unix INTEGER NOT NULL,
+                     attempts INTEGER NOT NULL DEFAULT 0,
+                     deadline_unix INTEGER NOT NULL DEFAULT 0,
+                     permanent INTEGER NOT NULL DEFAULT 0,
+                     abandoned INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TRIGGER journal_write_gate_outbox_insert
+                 BEFORE INSERT ON outbox
+                 WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+                 BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+                 CREATE TRIGGER journal_write_gate_outbox_update
+                 BEFORE UPDATE ON outbox
+                 WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+                 BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;
+                 CREATE TRIGGER journal_write_gate_outbox_delete
+                 BEFORE DELETE ON outbox
+                 WHEN NOT EXISTS (SELECT 1 FROM journal_write_gate WHERE id = 1)
+                 BEGIN SELECT RAISE(ABORT, 'journal write gate closed'); END;",
+            )
+            .unwrap();
+        drop(extension);
+
+        let error = journal
+            .apply(Event::Dependency {
+                github_reachable: true,
+            })
+            .unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(journal.materialized_state().unwrap(), before);
+        assert_eq!(event_count(&journal), before_events);
+
+        let extension = Connection::open(&path).unwrap();
+        assert_eq!(
+            extension
+                .query_row("SELECT COUNT(*) FROM extension_roots", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1,
+            "the external parent sentinel remains intact"
+        );
+        assert_eq!(
+            extension
+                .query_row(
+                    "SELECT \"table\" FROM pragma_foreign_key_list('outbox')",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "extension_roots",
+            "the rejected schema edge remains intact"
+        );
+        drop(extension);
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v10_stamp_refuses_checksummed_v11_fields_before_schema_change() {
+        let fields = [
+            (
+                "job_acquisition_intended",
+                "runner_request_id",
+                serde_json::Value::Null,
+            ),
+            (
+                "job_acquisition_resolved",
+                "runner_request_id",
+                serde_json::json!("request-1"),
+            ),
+            (
+                "job_acquisition_resolved",
+                "permit_lease",
+                serde_json::json!({
+                    "holder": "native/request-1",
+                    "ledger_path": "/tmp/permit-ledger.db",
+                    "generation": 1
+                }),
+            ),
+        ];
+
+        for (index, (event_type, field, field_value)) in fields.into_iter().enumerate() {
+            let path = make_v10_acquisition_journal(&format!("v10-v11-field-{index}"));
+            let conn = Connection::open(&path).unwrap();
+            let event_id = add_v11_event_field(&conn, event_type, field, field_value);
+            let (payload, checksum): (String, String) = conn
+                .query_row(
+                    "SELECT payload, checksum FROM events WHERE id = ?1",
+                    [event_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(sha256_hex(payload.as_bytes()), checksum);
+            drop(conn);
+
+            let before = std::fs::read(&path).unwrap();
+            let error = Journal::open(&path).unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.event.unknown");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+
+            let check = Connection::open(&path).unwrap();
+            let version: i64 = check
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 10);
+            assert!(!table_has_column(&check, "jobs", "permit_lease").unwrap());
+            let journal_mode: String = check
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(journal_mode, "delete");
+            drop(check);
+            std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn v8_to_v9_migration_rolls_back_and_retries_after_bad_event() {
+        let path = make_v8_acquisition_journal("v8-to-v9-retry");
+        let conn = Connection::open(&path).unwrap();
+        let (event_id, payload, checksum): (i64, String, String) = conn
+            .query_row(
+                "SELECT id, payload, checksum FROM events ORDER BY id LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let malformed_checksum = sha256_hex(b"{");
+        conn.execute(
+            "UPDATE events SET payload = '{', checksum = ?1 WHERE id = ?2",
+            params![malformed_checksum, event_id],
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.unknown");
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 8);
+        assert!(!table_has_column(&conn, "jobs", "runner_request_id").unwrap());
+        conn.execute(
+            "UPDATE events SET payload = ?1, checksum = ?2 WHERE id = ?3",
+            params![payload, checksum, event_id],
+        )
+        .unwrap();
+        drop(conn);
+
+        let reopened = Journal::open(&path).unwrap();
+        assert_eq!(
+            reopened.materialized_state().unwrap().jobs[0].runner_request_id,
+            "request-1"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn v9_journal_migrates_valid_acquisition_history() {
+        let path = make_v9_acquisition_journal("v9-to-v10-valid-acquisition");
+        let old = Connection::open(&path).unwrap();
+        let old_version: i64 = old
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(old_version, 9);
+        assert!(table_has_column(&old, "jobs", "runner_request_id").unwrap());
+        assert!(!table_has_column(&old, "jobs", "permit_lease").unwrap());
+        let mode: String = old
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(old);
+
+        let migrated = Journal::open(&path).expect("valid v9 history must migrate");
+        let version: i64 = migrated
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+        assert!(table_has_column(&migrated.conn, "jobs", "permit_lease").unwrap());
+        let state = migrated.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].job_id, job("job-1"));
+        assert_eq!(state.jobs[0].runner_request_id, "request-1");
+        assert_eq!(state.jobs[0].plan_id, "plan-1");
+        assert_eq!(state.jobs[0].phase, JobPhase2::Assigned);
+        drop(migrated);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn concurrent_v8_openers_converge_on_one_correlation_schema() {
+        let path = make_v8_acquisition_journal("concurrent-v8-to-v9");
+        let path = Arc::new(path);
+        let start = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let path = Arc::clone(&path);
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    start.wait();
+                    Journal::open(path.as_path()).and_then(|journal| {
+                        let state = journal.materialized_state()?;
+                        if state.jobs.len() == 1 && state.jobs[0].runner_request_id == "request-1" {
+                            Ok(())
+                        } else {
+                            Err(StoreError::new(
+                                velnor_model::ExitClass::Conflict,
+                                "journal.test.correlation.lost",
+                            ))
+                        }
+                    })
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle
+                .join()
+                .expect("concurrent v8 opener panicked")
+                .expect("concurrent v8 opener failed");
+        }
+        let conn = Connection::open(path.as_path()).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+        assert!(table_has_column(&conn, "jobs", "runner_request_id").unwrap());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn v9_stamp_without_request_correlation_column_fails_before_load() {
+        let (dir, journal) = open_tmp("v9-missing-correlation-column");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        drop_journal_write_gate(&conn);
+        drop_jobs_columns(
+            &conn,
+            &[
+                "runner_request_id",
+                "permit_lease",
+                "acquisition_loss_unproven",
+            ],
+        );
+        conn.pragma_update(None, "user_version", 9u32).unwrap();
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 9, "failed preflight must preserve the stamp");
+        assert!(
+            !table_has_column(&conn, "jobs", "runner_request_id").unwrap(),
+            "failed preflight must not invent a replacement column"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn v7_migration_fails_closed_on_cross_type_phase_rows() {
         let (dir, mut journal) = open_tmp("v7-to-v8-poison");
         let path = dir.join("journal.db");
         prime_running_job(&mut journal, "scope-1", "job-1");
         drop(journal);
         let conn = Connection::open(&path).unwrap();
+        drop_jobs_columns_added_after_version(&conn, 7);
+        strip_v11_event_fields(&conn);
         conn.execute("UPDATE slots SET phase = 'running'", [])
             .unwrap();
         conn.pragma_update(None, "user_version", 7u32).unwrap();
