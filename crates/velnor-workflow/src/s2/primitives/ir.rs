@@ -77,6 +77,7 @@ mod tests {
         provider_input, unit_owns_workflow_crate, GraphNode, Pins, ProviderAdmission, ProviderId,
         ProviderSet, RustNeeds, Unit, UnitKind, WorkflowIr, WorkflowKind,
     };
+    use crate::s2::reuse::REQUIRED_CHECK;
     use crate::s2::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
         workflow_setup_action_repository,
@@ -231,6 +232,165 @@ mod tests {
             mise_lock_keys: BTreeSet::new(),
             declared_ruleset_contexts: String::new(),
         }
+    }
+
+    #[test]
+    fn required_gate_binds_full_and_affected_plan_contract() {
+        let ir = owner_test_ir("example/required-contract", vec![rust_unit("rust", ".")]);
+        let nodes = vec![GraphNode::Unit {
+            unit_id: "rust".to_owned(),
+            job_id: "github-rust".to_owned(),
+            name: "Rust".to_owned(),
+            file: nested_unit_workflow_file(&ir.units[0]),
+        }];
+        let mut output = String::new();
+        ir.render_nodes_required(&nodes, None, &mut output, true, REQUIRED_CHECK, false);
+        assert!(output.contains("needs.plan.outputs.planned_no_work"));
+        assert!(output.contains("needs.plan.outputs.planned_no_work_base_sha"));
+        assert!(output.contains("needs.plan.outputs.planned_no_work_head_sha"));
+        assert!(output.contains("EXPECTED_FULL_UNITS: \",rust,\""));
+        assert!(output.contains("plan emitted malformed or duplicate expected workloads"));
+        assert!(output.contains("full CI plan omitted or added expected workloads"));
+        assert!(output.contains("empty affected CI plan lacks an explicit no-work proof"));
+    }
+
+    #[cfg(unix)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one executable fixture covers full and affected aggregate verdicts"
+    )]
+    #[test]
+    fn required_gate_shell_rejects_empty_full_and_alias_no_work_plans() {
+        let ir = owner_test_ir("example/required-shell", vec![rust_unit("rust", ".")]);
+        let nodes = vec![GraphNode::Unit {
+            unit_id: "rust".to_owned(),
+            job_id: "github-rust".to_owned(),
+            name: "Rust".to_owned(),
+            file: nested_unit_workflow_file(&ir.units[0]),
+        }];
+        let callers = ir.required_callers(&nodes, None);
+        let mut success_needs = serde_json::Map::from_iter([
+            ("plan".to_owned(), serde_json::json!({"result": "success"})),
+            (
+                "policy".to_owned(),
+                serde_json::json!({"result": "success"}),
+            ),
+        ]);
+        let mut skipped_needs = success_needs.clone();
+        let mut admission_names = BTreeSet::new();
+        for caller in callers {
+            success_needs.insert(
+                caller.job_id.clone(),
+                serde_json::json!({"result": "success"}),
+            );
+            skipped_needs.insert(caller.job_id, serde_json::json!({"result": "skipped"}));
+            admission_names.insert(caller.admission.env_name());
+        }
+        let success_needs = serde_json::Value::Object(success_needs).to_string();
+        let skipped_needs = serde_json::Value::Object(skipped_needs).to_string();
+        let providers = ProviderId::ALL
+            .into_iter()
+            .map(|provider| provider.as_str())
+            .collect::<Vec<_>>();
+        let selected_json =
+            serde_json::json!([{"unit_id": "rust", "providers": providers}]).to_string();
+        let empty_json = "[]";
+        let same_sha = "c".repeat(40);
+        let base_sha = "a".repeat(40);
+        let head_sha = "b".repeat(40);
+        let mut rendered = String::new();
+        ir.render_nodes_required(&nodes, None, &mut rendered, true, REQUIRED_CHECK, false);
+        let script = rendered
+            .split_once("        run: |\n")
+            .and_then(|(_, body)| body.split_once("\n  required:\n"))
+            .map(|(body, _)| body);
+        let script = must_some(script, "required shell renders")
+            .lines()
+            .map(|line| must_some(line.strip_prefix("          "), "shell indentation"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let run = |scope: &str,
+                   selected: &str,
+                   full_units: &str,
+                   no_work: &str,
+                   base: &str,
+                   head: &str,
+                   needs: &str,
+                   result_should_succeed: bool| {
+            let mut command = std::process::Command::new("bash");
+            command
+                .arg("-c")
+                .arg(&script)
+                .env("NEEDS_JSON", needs)
+                .env("SELECTED_UNITS", selected)
+                .env("PLAN_SCOPE", scope)
+                .env("PLAN_BASE_SHA", base)
+                .env("PLAN_HEAD_SHA", head)
+                .env("PLAN_FULL_UNITS", full_units)
+                .env("PLAN_NO_WORK", no_work)
+                .env("EXPECTED_FULL_UNITS", ",rust,")
+                .env("PLAN_DIGEST", "digest");
+            for admission in &admission_names {
+                command.env(admission, "true");
+            }
+            let output = must_ok(command.output(), "run required shell");
+            assert_eq!(
+                output.status.success(),
+                result_should_succeed,
+                "required shell output: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(
+            "full",
+            &selected_json,
+            "rust",
+            "false",
+            "base",
+            "head",
+            &success_needs,
+            true,
+        );
+        run(
+            "full",
+            empty_json,
+            "",
+            "true",
+            "base",
+            "head",
+            &skipped_needs,
+            false,
+        );
+        run(
+            "full",
+            &selected_json,
+            "",
+            "false",
+            "base",
+            "head",
+            &success_needs,
+            false,
+        );
+        run(
+            "affected",
+            empty_json,
+            "",
+            "true",
+            same_sha.as_str(),
+            same_sha.as_str(),
+            &skipped_needs,
+            false,
+        );
+        run(
+            "affected",
+            empty_json,
+            "",
+            "true",
+            base_sha.as_str(),
+            head_sha.as_str(),
+            &skipped_needs,
+            true,
+        );
     }
 
     #[test]
@@ -4078,11 +4238,37 @@ impl WorkflowIr {
         let selected_units = github_expression("needs.plan.outputs.units");
         let plan_digest = github_expression("needs.plan.outputs.plan_digest");
         let excluded = github_expression("needs.plan.outputs.excluded");
+        let plan_scope = github_expression("needs.plan.outputs.scope");
+        // The aggregate's base/head proof must use the planner's resolved
+        // object IDs, never the user-controlled revision expressions.
+        let plan_base_sha = github_expression("needs.plan.outputs.planned_no_work_base_sha");
+        let plan_head_sha = github_expression("needs.plan.outputs.planned_no_work_head_sha");
+        let plan_full_units = github_expression("needs.plan.outputs.full_units");
+        let plan_no_work = github_expression("needs.plan.outputs.planned_no_work");
+        let expected_full_units = callers
+            .iter()
+            .filter(|caller| !caller.prerequisite)
+            .flat_map(|caller| caller.selected_by.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let expected_full_units = if expected_full_units.is_empty() {
+            ",__generator_missing_expected_units__,".to_owned()
+        } else {
+            format!(
+                ",{},",
+                expected_full_units
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
         let _ = write!(
             output,
-            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n{}",
+            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_SCOPE: {plan_scope}\n          PLAN_BASE_SHA: {plan_base_sha}\n          PLAN_HEAD_SHA: {plan_head_sha}\n          PLAN_FULL_UNITS: {plan_full_units}\n          PLAN_NO_WORK: {plan_no_work}\n          EXPECTED_FULL_UNITS: {}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n{}",
             needs.join(", "),
             self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
+            yaml_scalar(&expected_full_units),
             render_required_admission_env(self, &callers),
         );
         if simulate_failure {
@@ -4097,6 +4283,9 @@ impl WorkflowIr {
         }
         output.push_str(
             "          if [[ -z \"$PLAN_DIGEST\" ]]; then\n            echo \"plan did not freeze a plan digest: the expected set has no identity\" >&2\n            exit 1\n          fi\n          echo \"verdict binds plan digest $PLAN_DIGEST\"\n          result_for_job() {\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }\n          plan_expects() {\n            [[ \"$(jq -r --arg unit \"$1\" --arg provider \"$2\" '[.[] | select(.unit_id == $unit) | .providers[] | select(. == $provider)] | length' <<<\"$SELECTED_UNITS\")\" -gt 0 ]]\n          }\n",
+        );
+        output.push_str(
+            "          selected_count=\"$(jq -er 'if type == \"array\" then length else error(\"plan units must be an array\") end' <<<\"$SELECTED_UNITS\")\"\n          jq -e 'type == \"array\" and all(.[]; (.unit_id | type) == \"string\" and (.unit_id | length) > 0 and (.providers | type) == \"array\" and (.providers | length) > 0) and ([.[].unit_id] | length == (unique | length))' <<<\"$SELECTED_UNITS\" >/dev/null || { echo \"plan emitted malformed or duplicate expected workloads\" >&2; exit 1; }\n          actual_units=\"$(jq -r '.[].unit_id' <<<\"$SELECTED_UNITS\" | sort -u | paste -sd, -)\"\n          selected=\",$actual_units,\"\n          case \"$PLAN_SCOPE\" in\n            full)\n              [[ \"$PLAN_NO_WORK\" == false ]] || { echo \"full CI plan cannot declare no-work\" >&2; exit 1; }\n              (( selected_count > 0 )) || { echo \"full CI plan selected no workloads\" >&2; exit 1; }\n              [[ \"$selected\" == \"$EXPECTED_FULL_UNITS\" ]] || { echo \"full CI plan omitted or added expected workloads: selected=$selected expected=$EXPECTED_FULL_UNITS\" >&2; exit 1; }\n              [[ \",$PLAN_FULL_UNITS,\" == \"$EXPECTED_FULL_UNITS\" ]] || { echo \"full CI plan has an incomplete full baseline: full_units=,$PLAN_FULL_UNITS, expected=$EXPECTED_FULL_UNITS\" >&2; exit 1; }\n              ;;\n            affected)\n              if (( selected_count == 0 )); then\n                [[ \"$PLAN_NO_WORK\" == true ]] || { echo \"empty affected CI plan lacks an explicit no-work proof\" >&2; exit 1; }\n                [[ -n \"$PLAN_BASE_SHA\" && \"$PLAN_BASE_SHA\" != \"$PLAN_HEAD_SHA\" ]] || { echo \"empty affected CI plan lacks distinct resolved revisions\" >&2; exit 1; }\n              else\n                [[ \"$PLAN_NO_WORK\" == false ]] || { echo \"nonempty affected CI plan carries a contradictory no-work proof\" >&2; exit 1; }\n              fi\n              ;;\n            *)\n              echo \"unsupported CI plan scope: $PLAN_SCOPE\" >&2\n              exit 1\n              ;;\n          esac\n",
         );
         // The prerequisite trigger: the unit is expected on any local
         // provider, whose stores the prerequisite warms. The local set is
@@ -5289,6 +5478,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             "      units: ${{ steps.plan.outputs.units }}".to_owned(),
             "      unit_ids: ${{ steps.plan.outputs.unit_ids }}".to_owned(),
             "      full_units: ${{ steps.plan.outputs.full_units }}".to_owned(),
+            "      planned_no_work: ${{ steps.plan.outputs.planned_no_work }}".to_owned(),
+            "      planned_no_work_base_sha: ${{ steps.plan.outputs.planned_no_work_base_sha }}"
+                .to_owned(),
+            "      planned_no_work_head_sha: ${{ steps.plan.outputs.planned_no_work_head_sha }}"
+                .to_owned(),
             "      plan_digest: ${{ steps.plan.outputs.plan_digest }}".to_owned(),
             "      excluded: ${{ steps.plan.outputs.excluded }}".to_owned(),
         ];

@@ -4980,7 +4980,7 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     let owner = !repository.is_empty() && repository == workflow_setup_action_repository();
     let ruleset_step = if hosted {
         format!(
-            "      - name: Resolve required status checks\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          DEFAULT_BRANCH: {default_branch}\n          DECLARED_RULESET_CONTEXTS: {declared_ruleset_contexts}\n        run: |\n          set -euo pipefail\n          stderr=\"$(mktemp)\"\n          trap 'rm -f \"$stderr\"' EXIT\n          if contexts=\"$(gh api \"repos/$GITHUB_REPOSITORY/rulesets?includes_parents=true\" 2>\"$stderr\" \\\n            | jq -r '.[] | select(.target == \"branch\" and .enforcement == \"active\") | .id' \\\n            | while read -r id; do gh api \"repos/$GITHUB_REPOSITORY/rulesets/$id\"; done \\\n            | jq -r --arg branch \"refs/heads/$DEFAULT_BRANCH\" 'select(.conditions.ref_name.include | any(. == \"~DEFAULT_BRANCH\" or . == \"~ALL\" or . == $branch)) | .rules[] | select(.type == \"required_status_checks\") | .parameters.required_status_checks[].context' \\\n            | sort -u | paste -sd, -)\"; then\n            :\n          elif grep -qE '(HTTP 403|Upgrade to GitHub Team)' \"$stderr\"; then\n            echo \"::warning::rulesets API returned 403; falling back to declared contexts [$DECLARED_RULESET_CONTEXTS]\"\n            contexts=\"$DECLARED_RULESET_CONTEXTS\"\n          else\n            cat \"$stderr\" >&2\n            exit 1\n          fi\n          echo \"RULESET_CONTEXTS=$contexts\" >> \"$GITHUB_ENV\"\n"
+            "      - name: Resolve required status checks\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          DEFAULT_BRANCH: {default_branch}\n          DECLARED_RULESET_CONTEXTS: {declared_ruleset_contexts}\n        run: |\n          set -euo pipefail\n          stderr=\"$(mktemp)\"\n          ruleset_pages=\"$RUNNER_TEMP/velnor-rulesets.json\"\n          ruleset_details=\"$RUNNER_TEMP/velnor-ruleset-details.jsonl\"\n          trap 'rm -f \"$stderr\" \"$ruleset_pages\" \"$ruleset_details\"' EXIT\n          contexts=\"\"\n          if gh api --paginate --slurp \"repos/$GITHUB_REPOSITORY/rulesets?includes_parents=true&per_page=100\" >\"$ruleset_pages\" 2>\"$stderr\"; then\n            if ! rule_ids=\"$(jq -er '\n              if type != \"array\" then error(\"rulesets response is not a page list\")\n              elif any(.[]; type != \"array\") then error(\"rulesets pagination returned a malformed page\")\n              elif ([.[][]] | length) == 0 then error(\"rulesets pagination returned no rulesets\")\n              else .[][] | if type != \"object\" then error(\"rulesets page contains a non-object\") elif (.id | type) != \"number\" then error(\"ruleset id is not numeric\") else .id end end\n            ' \"$ruleset_pages\")\"; then\n              cat \"$stderr\" >&2\n              echo \"::error::rulesets API returned malformed or incomplete pagination\" >&2\n              exit 1\n            fi\n            : >\"$ruleset_details\"\n            while IFS= read -r id; do\n              if ! gh api \"repos/$GITHUB_REPOSITORY/rulesets/$id\" >>\"$ruleset_details\" 2>>\"$stderr\"; then\n                cat \"$stderr\" >&2\n                echo \"::error::ruleset detail lookup failed for $id\" >&2\n                exit 1\n              fi\n            done <<<\"$rule_ids\"\n            if ! jq -se 'if length == 0 then error(\"ruleset detail response is empty\") elif any(.[]; type != \"object\" or (.conditions | type) != \"object\" or (.conditions.ref_name | type) != \"object\" or (.conditions.ref_name.include | type) != \"array\" or (.rules | type) != \"array\") then error(\"ruleset detail response is malformed\") else true end' \"$ruleset_details\" >/dev/null; then\n              cat \"$stderr\" >&2\n              echo \"::error::ruleset detail response was malformed or truncated\" >&2\n              exit 1\n            fi\n            contexts=\"$(jq -sr --arg branch \"refs/heads/$DEFAULT_BRANCH\" '[.[] | select(.target == \"branch\" and .enforcement == \"active\") | select(any(.conditions.ref_name.include[]; . == \"~DEFAULT_BRANCH\" or . == \"~ALL\" or . == $branch)) | .rules[] | if .type != \"required_status_checks\" then empty elif (.parameters.required_status_checks | type) != \"array\" then error(\"required-status rule has malformed parameters\") else .parameters.required_status_checks[] | if (.context | type) != \"string\" or (.context | length) == 0 then error(\"required-status rule has an invalid context\") else .context end end] | unique | join(\",\")' \"$ruleset_details\")\"\n            [[ -n \"$contexts\" ]] || {{ echo \"::error::no active required-status contexts matched the default branch\" >&2; exit 1; }}\n          elif grep -qE '(HTTP 403|Upgrade to GitHub Team)' \"$stderr\"; then\n            [[ -n \"$DECLARED_RULESET_CONTEXTS\" ]] || {{ echo \"::error::rulesets API is unavailable and no declared context authority exists\" >&2; exit 1; }}\n            echo \"::warning::rulesets API returned 403; using the explicitly declared context authority [$DECLARED_RULESET_CONTEXTS]\"\n            contexts=\"$DECLARED_RULESET_CONTEXTS\"\n          else\n            cat \"$stderr\" >&2\n            exit 1\n          fi\n          echo \"RULESET_CONTEXTS=$contexts\" >> \"$GITHUB_ENV\"\n"
         )
     } else {
         String::new()
@@ -14403,7 +14403,7 @@ channel = "stable"
             1,
             "legacy required check must preserve the plan selection output"
         );
-        assert!(workflows[0].contains("selected=\",$SELECTED_UNITS,\""));
+        assert!(workflows[0].contains("actual_units=\"$(printf"));
 
         // Per-unit lane callers keep selection matching on SELECTED_UNITS.
         for workflow in &workflows[1..] {
@@ -14414,7 +14414,7 @@ channel = "stable"
                 1,
                 "nested required check must preserve the plan selection output"
             );
-            assert!(workflow.contains("selected=\",$SELECTED_UNITS,\""));
+            assert!(workflow.contains("actual_units=\"$(printf"));
         }
 
         assert!(workflows[2].contains("SIMULATE_FAILURE: ${{ inputs.simulate_failure }}"));
@@ -14462,7 +14462,7 @@ channel = "stable"
             1
         );
         assert!(required_block.contains("SELECTED_UNITS:"));
-        assert!(required_script.contains("selected=\",$SELECTED_UNITS,\""));
+        assert!(required_script.contains("actual_units=\"$(printf"));
         assert!(required_block.contains("result=\"$(result_for_job plan)\""));
         assert!(required_block.contains("result=\"$(result_for_job policy)\""));
     }
@@ -15682,7 +15682,7 @@ channel = "stable"
             "{hosted}"
         );
         assert!(
-            hosted.contains("gh api \"repos/$GITHUB_REPOSITORY/rulesets?includes_parents=true\""),
+            hosted.contains("gh api --paginate --slurp \"repos/$GITHUB_REPOSITORY/rulesets?includes_parents=true&per_page=100\""),
             "{hosted}"
         );
         assert!(
@@ -15694,9 +15694,109 @@ channel = "stable"
             "{hosted}"
         );
         assert!(
-            hosted.contains("falling back to declared contexts"),
+            hosted.contains("using the explicitly declared context authority"),
             "{hosted}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hosted_ruleset_acquisition_fails_closed_on_incomplete_or_unknown_api_results() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = temporary_directory("ruleset-contract");
+        let bin = root.join("bin");
+        let runner_temp = root.join("runner-temp");
+        let env_file = root.join("github-env");
+        must(fs::create_dir_all(&bin), "create ruleset stub bin");
+        must(
+            fs::create_dir_all(&runner_temp),
+            "create ruleset runner temp",
+        );
+        let gh = bin.join("gh");
+        must(
+            fs::write(
+                &gh,
+                r#"#!/bin/sh
+if printf '%s' "$*" | grep -q 'rulesets?'; then
+  case "$RULESET_FIXTURE" in
+    valid) printf '%s\n' '[[{"id":1}]]'; exit 0 ;;
+    malformed) printf '%s\n' '[{"id":1}]'; exit 0 ;;
+  esac
+fi
+case "$RULESET_FIXTURE" in
+  valid) printf '%s\n' '{"target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"]}},"rules":[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci-required"}]}}]}'; exit 0 ;;
+  forbidden) echo 'HTTP 403' >&2; exit 1 ;;
+  failure) echo 'HTTP 500' >&2; exit 1 ;;
+esac
+exit 1
+"#,
+            ),
+            "write ruleset gh stub",
+        );
+        must(
+            fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)),
+            "mark ruleset gh stub executable",
+        );
+        let path = must_some(env::var_os("PATH"), "PATH renders");
+        let script = hosted_policy_job("revision");
+        let script = must_some(
+            script
+                .split_once("      - name: Resolve required status checks\n")
+                .and_then(|(_, step)| step.split_once("        run: |\n"))
+                .map(|(_, body)| body)
+                .and_then(|body| body.split_once("      - name: Enforce workflow policy"))
+                .map(|(body, _)| body),
+            "extract ruleset script",
+        )
+        .lines()
+        .map(|line| {
+            must_some(
+                line.strip_prefix("          "),
+                "ruleset script indentation",
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+        for (fixture, expected_success, expected_contexts) in [
+            ("valid", true, Some("ci-required")),
+            ("malformed", false, None),
+            ("forbidden", true, Some("ci-required,DCO,Policy")),
+            ("failure", false, None),
+        ] {
+            let _ = fs::remove_file(&env_file);
+            let output = must(
+                Command::new("bash")
+                    .arg("-c")
+                    .arg(&script)
+                    .env(
+                        "PATH",
+                        format!("{}:{}", bin.display(), path.to_string_lossy()),
+                    )
+                    .env("RULESET_FIXTURE", fixture)
+                    .env("GITHUB_REPOSITORY", "example/project")
+                    .env("RUNNER_TEMP", &runner_temp)
+                    .env("GITHUB_ENV", &env_file)
+                    .env("DEFAULT_BRANCH", "main")
+                    .env("DECLARED_RULESET_CONTEXTS", "ci-required,DCO,Policy")
+                    .output(),
+                "execute ruleset script",
+            );
+            assert_eq!(
+                output.status.success(),
+                expected_success,
+                "ruleset fixture {fixture}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if let Some(expected) = expected_contexts {
+                let env_output = must(fs::read_to_string(&env_file), "read ruleset env");
+                assert!(
+                    env_output.contains(&format!("RULESET_CONTEXTS={expected}")),
+                    "ruleset fixture {fixture} writes explicit contexts: {env_output}"
+                );
+            }
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -77,6 +77,7 @@ mod tests {
         LaneAdmission, Pins, RunnerMode, Unit, UnitKind, VelnorPullRequest, VelnorRustNeeds,
         WorkflowIr, WorkflowKind,
     };
+    use crate::reuse::REQUIRED_CHECK;
     use crate::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
         workflow_setup_action_repository,
@@ -214,6 +215,110 @@ mod tests {
             mise_lock_keys: BTreeSet::new(),
             declared_ruleset_contexts: String::new(),
         }
+    }
+
+    #[test]
+    fn required_gate_binds_full_and_affected_plan_contract() {
+        let ir = owner_test_ir("example/required-contract", vec![rust_unit("rust", ".")]);
+        let nodes = vec![GraphNode::Unit {
+            unit_id: "rust".to_owned(),
+            job_id: "github-rust".to_owned(),
+            name: "Rust".to_owned(),
+            file: nested_unit_workflow_file(&ir.units[0]),
+        }];
+        let mut output = String::new();
+        ir.render_nodes_required(&nodes, None, &mut output, true, REQUIRED_CHECK, false);
+        assert!(output.contains("needs.plan.outputs.planned_no_work"));
+        assert!(output.contains("needs.plan.outputs.planned_no_work_base_sha"));
+        assert!(output.contains("needs.plan.outputs.planned_no_work_head_sha"));
+        assert!(output.contains("EXPECTED_FULL_UNITS: \",rust,\""));
+        assert!(output.contains("actual_units=\"$(printf"));
+        assert!(output.contains("full CI plan omitted or added expected workloads"));
+        assert!(output.contains("empty affected CI plan lacks an explicit no-work proof"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn required_gate_shell_rejects_empty_full_and_alias_no_work_plans() {
+        let mut ir = owner_test_ir("example/required-shell", vec![rust_unit("rust", ".")]);
+        ir.runners = RunnerMode::Github;
+        let nodes = vec![GraphNode::Unit {
+            unit_id: "rust".to_owned(),
+            job_id: "github-rust".to_owned(),
+            name: "Rust".to_owned(),
+            file: nested_unit_workflow_file(&ir.units[0]),
+        }];
+        let mut rendered = String::new();
+        ir.render_nodes_required(&nodes, None, &mut rendered, true, REQUIRED_CHECK, false);
+        let script = rendered
+            .split_once("        run: |\n")
+            .and_then(|(_, body)| body.split_once("\n  required:\n"))
+            .map(|(body, _)| body);
+        let script = must_some(script, "required shell renders")
+            .lines()
+            .map(|line| must_some(line.strip_prefix("          "), "shell indentation"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let needs = serde_json::json!({
+            "plan": {"result": "success"},
+            "policy": {"result": "success"},
+            "github-rust": {"result": "success"}
+        })
+        .to_string();
+        let same_sha = "c".repeat(40);
+        let base_sha = "a".repeat(40);
+        let head_sha = "b".repeat(40);
+        let run = |scope: &str,
+                   selected: &str,
+                   full_units: &str,
+                   no_work: &str,
+                   base: &str,
+                   head: &str,
+                   result_should_succeed: bool| {
+            let output = must_ok(
+                std::process::Command::new("bash")
+                    .arg("-c")
+                    .arg(&script)
+                    .env("NEEDS_JSON", &needs)
+                    .env("SELECTED_UNITS", selected)
+                    .env("PLAN_SCOPE", scope)
+                    .env("PLAN_BASE_SHA", base)
+                    .env("PLAN_HEAD_SHA", head)
+                    .env("PLAN_FULL_UNITS", full_units)
+                    .env("PLAN_NO_WORK", no_work)
+                    .env("EXPECTED_FULL_UNITS", ",rust,")
+                    .env("LANE_ADMITTED_GITHUB", "true")
+                    .output(),
+                "run required shell",
+            );
+            assert_eq!(
+                output.status.success(),
+                result_should_succeed,
+                "required shell output: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run("full", "rust", "rust", "false", "base", "head", true);
+        run("full", "", "", "true", "base", "head", false);
+        run("full", "rust", "", "false", "base", "head", false);
+        run(
+            "affected",
+            "",
+            "",
+            "true",
+            same_sha.as_str(),
+            same_sha.as_str(),
+            false,
+        );
+        run(
+            "affected",
+            "",
+            "",
+            "true",
+            base_sha.as_str(),
+            head_sha.as_str(),
+            true,
+        );
     }
 
     #[test]
@@ -4125,11 +4230,37 @@ impl WorkflowIr {
         };
         let needs_json = github_expression("toJSON(needs)");
         let selected_units = github_expression("needs.plan.outputs.units");
+        let plan_scope = github_expression("needs.plan.outputs.scope");
+        // The aggregate's base/head proof must use planner-resolved object
+        // IDs, never user-controlled revision expressions.
+        let plan_base_sha = github_expression("needs.plan.outputs.planned_no_work_base_sha");
+        let plan_head_sha = github_expression("needs.plan.outputs.planned_no_work_head_sha");
+        let plan_full_units = github_expression("needs.plan.outputs.full_units");
+        let plan_no_work = github_expression("needs.plan.outputs.planned_no_work");
+        let expected_full_units = callers
+            .iter()
+            .filter(|caller| !caller.prerequisite)
+            .flat_map(|caller| caller.selected_by.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let expected_full_units = if expected_full_units.is_empty() {
+            ",__generator_missing_expected_units__,".to_owned()
+        } else {
+            format!(
+                ",{},",
+                expected_full_units
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
         let _ = write!(
             output,
-            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n{}",
+            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_SCOPE: {plan_scope}\n          PLAN_BASE_SHA: {plan_base_sha}\n          PLAN_HEAD_SHA: {plan_head_sha}\n          PLAN_FULL_UNITS: {plan_full_units}\n          PLAN_NO_WORK: {plan_no_work}\n          EXPECTED_FULL_UNITS: {}\n{}",
             needs.join(", "),
             self.runner_for(self.control_plane_lane()),
+            yaml_scalar(&expected_full_units),
             render_required_admission_env(self, &callers),
         );
         if simulate_failure {
@@ -4159,7 +4290,10 @@ impl WorkflowIr {
                 "          result=\"$(result_for_job velnor-lane-admission)\"\n          case \"$result\" in\n            success|skipped) ;;\n            *) echo \"required CI prerequisite velnor-lane-admission did not pass: $result\" >&2; exit 1 ;;\n          esac\n",
             );
         }
-        output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
+        output.push_str("          actual_units=\"$(printf '%s\\n' \"$SELECTED_UNITS\" | tr ',' '\\n' | sed '/^$/d' | sort -u | paste -sd, -)\"\n          selected=\",$actual_units,\"\n");
+        output.push_str(
+            "          case \"$PLAN_SCOPE\" in\n            full)\n              [[ \"$PLAN_NO_WORK\" == false ]] || { echo \"full CI plan cannot declare no-work\" >&2; exit 1; }\n              [[ \"$PLAN_FULL_UNITS\" != \"\" ]] || { echo \"full CI plan selected no workloads\" >&2; exit 1; }\n              [[ \"$selected\" == \"$EXPECTED_FULL_UNITS\" ]] || { echo \"full CI plan omitted or added expected workloads: selected=$selected expected=$EXPECTED_FULL_UNITS\" >&2; exit 1; }\n              [[ \",$PLAN_FULL_UNITS,\" == \"$EXPECTED_FULL_UNITS\" ]] || { echo \"full CI plan has an incomplete full baseline: full_units=,$PLAN_FULL_UNITS, expected=$EXPECTED_FULL_UNITS\" >&2; exit 1; }\n              ;;\n            affected)\n              if [[ \"$SELECTED_UNITS\" == \"\" ]]; then\n                [[ \"$PLAN_NO_WORK\" == true ]] || { echo \"empty affected CI plan lacks an explicit no-work proof\" >&2; exit 1; }\n                [[ -n \"$PLAN_BASE_SHA\" && \"$PLAN_BASE_SHA\" != \"$PLAN_HEAD_SHA\" ]] || { echo \"empty affected CI plan lacks distinct resolved revisions\" >&2; exit 1; }\n              else\n                [[ \"$PLAN_NO_WORK\" == false ]] || { echo \"nonempty affected CI plan carries a contradictory no-work proof\" >&2; exit 1; }\n              fi\n              ;;\n            *)\n              echo \"unsupported CI plan scope: $PLAN_SCOPE\" >&2\n              exit 1\n              ;;\n          esac\n",
+        );
         render_required_caller_verdicts(output, &callers);
         if check_name == REQUIRED_CHECK {
             let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
@@ -5694,6 +5828,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             "      head_sha: ${{ steps.plan.outputs.head_sha }}".to_owned(),
             "      units: ${{ steps.plan.outputs.units }}".to_owned(),
             "      full_units: ${{ steps.plan.outputs.full_units }}".to_owned(),
+            "      planned_no_work: ${{ steps.plan.outputs.planned_no_work }}".to_owned(),
+            "      planned_no_work_base_sha: ${{ steps.plan.outputs.planned_no_work_base_sha }}"
+                .to_owned(),
+            "      planned_no_work_head_sha: ${{ steps.plan.outputs.planned_no_work_head_sha }}"
+                .to_owned(),
         ];
         let mut matrices = BTreeSet::new();
         for unit in &self.units {
@@ -6564,11 +6703,37 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         };
         let needs_json = github_expression("toJSON(needs)");
         let selected_units = github_expression("needs.plan.outputs.units");
+        let plan_scope = github_expression("needs.plan.outputs.scope");
+        // The aggregate's base/head proof must use planner-resolved object
+        // IDs, never user-controlled revision expressions.
+        let plan_base_sha = github_expression("needs.plan.outputs.planned_no_work_base_sha");
+        let plan_head_sha = github_expression("needs.plan.outputs.planned_no_work_head_sha");
+        let plan_full_units = github_expression("needs.plan.outputs.full_units");
+        let plan_no_work = github_expression("needs.plan.outputs.planned_no_work");
+        let expected_full_units = callers
+            .iter()
+            .filter(|caller| !caller.prerequisite)
+            .flat_map(|caller| caller.selected_by.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let expected_full_units = if expected_full_units.is_empty() {
+            ",__generator_missing_expected_units__,".to_owned()
+        } else {
+            format!(
+                ",{},",
+                expected_full_units
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
         let _ = writeln!(
             output,
-            "  ci-required:\n    name: {display_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n{}        shell: bash\n        run: |\n          set -euo pipefail\n          result_for_job() {{\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }}",
+            "  ci-required:\n    name: {display_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_SCOPE: {plan_scope}\n          PLAN_BASE_SHA: {plan_base_sha}\n          PLAN_HEAD_SHA: {plan_head_sha}\n          PLAN_FULL_UNITS: {plan_full_units}\n          PLAN_NO_WORK: {plan_no_work}\n          EXPECTED_FULL_UNITS: {}\n{}        shell: bash\n        run: |\n          set -euo pipefail\n          result_for_job() {{\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }}",
             needs.join(", "),
             self.runner_for(self.control_plane_lane()),
+            yaml_scalar(&expected_full_units),
             render_required_admission_env(self, &callers),
         );
         for job in needs
@@ -6585,7 +6750,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 "          result=\"$(result_for_job velnor-lane-admission)\"\n          case \"$result\" in\n            success|skipped) ;;\n            *) echo \"required CI prerequisite velnor-lane-admission did not pass: $result\" >&2; exit 1 ;;\n          esac\n",
             );
         }
-        output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
+        output.push_str("          actual_units=\"$(printf '%s\\n' \"$SELECTED_UNITS\" | tr ',' '\\n' | sed '/^$/d' | sort -u | paste -sd, -)\"\n          selected=\",$actual_units,\"\n");
+        output.push_str(
+            "          case \"$PLAN_SCOPE\" in\n            full)\n              [[ \"$PLAN_NO_WORK\" == false ]] || { echo \"full CI plan cannot declare no-work\" >&2; exit 1; }\n              [[ \"$PLAN_FULL_UNITS\" != \"\" ]] || { echo \"full CI plan selected no workloads\" >&2; exit 1; }\n              [[ \"$selected\" == \"$EXPECTED_FULL_UNITS\" ]] || { echo \"full CI plan omitted or added expected workloads: selected=$selected expected=$EXPECTED_FULL_UNITS\" >&2; exit 1; }\n              [[ \",$PLAN_FULL_UNITS,\" == \"$EXPECTED_FULL_UNITS\" ]] || { echo \"full CI plan has an incomplete full baseline: full_units=,$PLAN_FULL_UNITS, expected=$EXPECTED_FULL_UNITS\" >&2; exit 1; }\n              ;;\n            affected)\n              if [[ \"$SELECTED_UNITS\" == \"\" ]]; then\n                [[ \"$PLAN_NO_WORK\" == true ]] || { echo \"empty affected CI plan lacks an explicit no-work proof\" >&2; exit 1; }\n                [[ -n \"$PLAN_BASE_SHA\" && \"$PLAN_BASE_SHA\" != \"$PLAN_HEAD_SHA\" ]] || { echo \"empty affected CI plan lacks distinct resolved revisions\" >&2; exit 1; }\n              else\n                [[ \"$PLAN_NO_WORK\" == false ]] || { echo \"nonempty affected CI plan carries a contradictory no-work proof\" >&2; exit 1; }\n              fi\n              ;;\n            *)\n              echo \"unsupported CI plan scope: $PLAN_SCOPE\" >&2\n              exit 1\n              ;;\n          esac\n",
+        );
         render_required_caller_verdicts(output, &callers);
         let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
             format!("always() && ({})", self.velnor_control_plane_expression())

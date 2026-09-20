@@ -1506,6 +1506,17 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
     let effective = plan_providers(&universe)?;
     let event_trusted = event_is_trusted();
     let selection = selection_for_diff(&root, &config, scope, &base, &head)?;
+    // An affected plan may be empty only when the resolved base and head are
+    // distinct commits whose diff was actually read. `selection_for_diff`
+    // promotes same-object refs (for example BASE_SHA=HEAD on dispatch) to a
+    // full baseline, so this marker cannot be self-selected by an identical
+    // manual ref pair.
+    let no_work_revisions = if scope == Scope::Affected && selection.units.is_empty() {
+        distinct_changed_revisions(&root, &base, &head)?
+    } else {
+        None
+    };
+    let planned_no_work = no_work_revisions.is_some();
     let selected: BTreeSet<&str> = selection
         .units
         .iter()
@@ -1652,6 +1663,21 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
             ("units", units_json.clone()),
             ("unit_ids", unit_ids.clone()),
             ("full_units", full_units.clone()),
+            ("planned_no_work", planned_no_work.to_string()),
+            (
+                "planned_no_work_base_sha",
+                no_work_revisions
+                    .as_ref()
+                    .map_or("", |(base, _)| base.as_str())
+                    .to_owned(),
+            ),
+            (
+                "planned_no_work_head_sha",
+                no_work_revisions
+                    .as_ref()
+                    .map_or("", |(_, head)| head.as_str())
+                    .to_owned(),
+            ),
             ("plan_digest", digest.clone()),
             ("excluded", excluded_json.clone()),
         ] {
@@ -2339,6 +2365,14 @@ fn selection_for_diff<'a>(
         return full_selection(config);
     };
     if changed.is_empty() {
+        // `git diff BASE...HEAD` is also empty when both names resolve to the
+        // same commit. That is not evidence that no workload is applicable:
+        // a manual affected dispatch can otherwise self-select this state.
+        // Resolve both objects before admitting the explicit no-work case;
+        // inability to prove distinct commits falls back to the full set.
+        if git_revisions_same(root, base, head)? {
+            return full_selection(config);
+        }
         return Ok(UnitSelection {
             units: Vec::new(),
             full_units: BTreeSet::new(),
@@ -2570,6 +2604,55 @@ fn git_changed_files(
             .map(ToOwned::to_owned)
             .collect(),
     ))
+}
+
+/// Whether two revisions resolve to the same commit object. A failed or
+/// malformed resolution is treated as equal so affected planning falls back
+/// to the full baseline rather than asserting unproven no-work.
+fn git_revisions_same(root: &Path, base: &str, head: &str) -> Result<bool, GeneratorError> {
+    let (Some(base), Some(head)) = (
+        resolve_git_revision(root, base)?,
+        resolve_git_revision(root, head)?,
+    ) else {
+        return Ok(true);
+    };
+    Ok(base == head)
+}
+
+fn distinct_changed_revisions(
+    root: &Path,
+    base: &str,
+    head: &str,
+) -> Result<Option<(String, String)>, GeneratorError> {
+    if git_changed_files(root, base, head)?.is_none() {
+        return Ok(None);
+    }
+    match (
+        resolve_git_revision(root, base)?,
+        resolve_git_revision(root, head)?,
+    ) {
+        (Some(base), Some(head)) if base != head => Ok(Some((base, head))),
+        _ => Ok(None),
+    }
+}
+
+fn resolve_git_revision(root: &Path, revision: &str) -> Result<Option<String>, GeneratorError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--verify"])
+        .arg(format!("{revision}^{{commit}}"))
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("resolve git revision: {error}")))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
 }
 
 fn ordered_units<'a>(
@@ -5370,8 +5453,29 @@ workspace_check = true
             );
             std::fs::remove_dir_all(root)?;
         }
-        let (root, base, _) = selection_git_fixture("slice-c-empty", "crates/base/src/lib.rs")?;
-        let runtime_selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        let (root, _, head) = selection_git_fixture("slice-c-empty", "crates/base/src/lib.rs")?;
+        let same_object = selection_for_diff(&root, &config, Scope::Affected, &head, &head)?;
+        assert_eq!(
+            selected_ids(same_object.units),
+            vec!["base", "app", "consumer", "docs"]
+        );
+        assert_eq!(same_object.full_units.len(), 4);
+        let status = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["commit", "--allow-empty", "-qm", "empty diff"])
+            .status()?;
+        assert!(status.success(), "empty fixture commit failed");
+        let no_op_head = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+        let runtime_selection =
+            selection_for_diff(&root, &config, Scope::Affected, &head, &no_op_head)?;
         let model = crate::s2::reuse::select_affected(
             &watched,
             &[],
@@ -5400,10 +5504,31 @@ workspace_check = true
     }
 
     #[test]
-    fn affected_selection_is_empty_for_an_empty_diff() -> Result<(), Box<dyn Error>> {
-        let (root, base, _) = selection_git_fixture("empty", "crates/base/src/lib.rs")?;
+    fn affected_selection_is_empty_only_for_distinct_empty_revisions() -> Result<(), Box<dyn Error>>
+    {
+        let (root, _, head) = selection_git_fixture("empty", "crates/base/src/lib.rs")?;
         let config = selection_config();
-        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        let same_object = selection_for_diff(&root, &config, Scope::Affected, &head, &head)?;
+        assert_eq!(
+            selected_ids(same_object.units),
+            vec!["base", "app", "consumer", "docs"]
+        );
+        assert_eq!(same_object.full_units.len(), 4);
+        let status = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["commit", "--allow-empty", "-qm", "empty diff"])
+            .status()?;
+        assert!(status.success(), "empty fixture commit failed");
+        let no_op_head = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &head, &no_op_head)?;
         assert!(selection.units.is_empty());
         assert!(selection.full_units.is_empty());
         std::fs::remove_dir_all(root)?;
