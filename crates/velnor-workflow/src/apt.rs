@@ -1653,149 +1653,6 @@ fn tool_present(program: &str, path_overlay: Option<&Path>) -> bool {
     })
 }
 
-/// The public git URL derived from a validated source slug. The host is a
-/// code constant; configuration contributes only the validated slug.
-pub(crate) fn source_git_url(source_repo: &str) -> Result<String, GeneratorError> {
-    if !valid_repository_slug(source_repo) {
-        return Err(GeneratorError::usage(
-            "source repository must be `owner/name`",
-        ));
-    }
-    Ok(format!("https://github.com/{source_repo}.git"))
-}
-
-/// The fixed `git ls-remote` argument vector resolving a tag. The peeled
-/// `^{}` ref is tried first so annotated tags resolve to their commit.
-pub(crate) fn resolve_commit_argv(source_git: &str, tag: &str, peeled: bool) -> Vec<String> {
-    let reference = if peeled {
-        format!("refs/tags/{tag}^{{}}")
-    } else {
-        format!("refs/tags/{tag}")
-    };
-    vec!["ls-remote".to_owned(), source_git.to_owned(), reference]
-}
-
-/// Independently resolve a stable tag to its commit through the public git
-/// remote. Never trusts the record; previews refuse — the caller supplies
-/// their commit.
-pub(crate) fn run_resolve_commit(
-    source_repo: &str,
-    tag: &str,
-    path_overlay: Option<&Path>,
-) -> Result<String, GeneratorError> {
-    parse_stable_tag(tag)?;
-    let source_git = source_git_url(source_repo)?;
-    for peeled in [true, false] {
-        let argv = resolve_commit_argv(&source_git, tag, peeled);
-        let Ok(stdout) = run_fixed("git", &argv, None, path_overlay) else {
-            continue;
-        };
-        let text = String::from_utf8_lossy(&stdout);
-        if let Some(commit) = text.split_whitespace().next()
-            && valid_commit(commit)
-        {
-            return Ok(commit.to_owned());
-        }
-    }
-    Err(GeneratorError::usage(format!(
-        "could not resolve {tag} to a commit on {source_repo}"
-    )))
-}
-
-/// The exact download allowlist for a suite: code constants parameterized
-/// only by package, version, and arch. Configuration can never add a pattern.
-pub(crate) fn download_patterns(
-    suite: Suite,
-    package: &str,
-    version: &str,
-) -> Result<Vec<String>, GeneratorError> {
-    if !valid_package_name(package) {
-        return Err(GeneratorError::usage("download needs a safe package name"));
-    }
-    let mut patterns = Vec::new();
-    match suite {
-        Suite::Stable => {
-            let tag = parse_stable_tag(version)?;
-            patterns.push(RECORD_FILE.to_owned());
-            patterns.push(RECORD_SIDECAR.to_owned());
-            patterns.push(MANIFEST_FILE.to_owned());
-            patterns.push(MANIFEST_SIDECAR.to_owned());
-            for arch in REQUIRED_ARCHES {
-                let deb = format!("{package}-{}-{arch}.deb", tag.version);
-                patterns.push(format!("{deb}.sha256"));
-                patterns.push(deb);
-            }
-        }
-        Suite::Preview => {
-            let parsed = parse_preview_version(version)?;
-            let dotted = dotted_asset_version(&parsed.version);
-            patterns.push(PREVIEW_MANIFEST_FILE.to_owned());
-            patterns.push(SHA256SUMS_FILE.to_owned());
-            for arch in REQUIRED_ARCHES {
-                let deb = format!("{package}-preview-{dotted}-{arch}.deb");
-                patterns.push(format!("{deb}.sha256"));
-                patterns.push(deb);
-            }
-        }
-    }
-    patterns.sort();
-    Ok(patterns)
-}
-
-/// The fixed `gh release download` argument vector for coherence inputs only.
-pub(crate) fn gh_download_argv(
-    tag: &str,
-    source_repo: &str,
-    dir: &Path,
-    patterns: &[String],
-) -> Result<Vec<String>, GeneratorError> {
-    if !valid_repository_slug(source_repo) {
-        return Err(GeneratorError::usage(
-            "download needs an `owner/name` source repository",
-        ));
-    }
-    let Some(dir) = dir.to_str() else {
-        return Err(GeneratorError::usage("download directory is not UTF-8"));
-    };
-    let mut argv = vec![
-        "release".to_owned(),
-        "download".to_owned(),
-        tag.to_owned(),
-        "--repo".to_owned(),
-        source_repo.to_owned(),
-        "--dir".to_owned(),
-        dir.to_owned(),
-    ];
-    for pattern in patterns {
-        argv.push("--pattern".to_owned());
-        argv.push(pattern.clone());
-    }
-    Ok(argv)
-}
-
-/// Fetch exactly the coherence inputs for a suite into `dir`.
-pub(crate) fn run_fetch(
-    suite: Suite,
-    source_repo: &str,
-    package: &str,
-    version: &str,
-    dir: &Path,
-    path_overlay: Option<&Path>,
-) -> Result<(), GeneratorError> {
-    let tag = match suite {
-        Suite::Stable => parse_stable_tag(version)?.tag,
-        Suite::Preview => {
-            parse_preview_version(version)?;
-            PREVIEW_TAG.to_owned()
-        }
-    };
-    let patterns = download_patterns(suite, package, version)?;
-    std::fs::create_dir_all(dir).map_err(|error| GeneratorError::io("create", dir, &error))?;
-    let argv = gh_download_argv(&tag, source_repo, dir, &patterns)?;
-    run_fixed("gh", &argv, None, path_overlay)?;
-    Ok(())
-}
-
 /// One immutable GitHub release asset carried by the discovery result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DiscoveryAsset {
@@ -3506,27 +3363,21 @@ pub(crate) fn deb_extract_data(
     result
 }
 
-/// Inputs to suite verification. `commit` is `None` for a stable run that
-/// resolves the tag commit itself; previews always carry the caller-supplied
-/// commit.
+/// Inputs to suite verification. The producer-owned discovery selection is
+/// mandatory and supplies source repository, package, version, and commit.
+/// Keeping those identities in one typed value prevents a caller from mixing
+/// a verified incoming selection with independently supplied release fields.
 pub(crate) struct VerifyInputs<'a> {
     /// The suite under verification.
     pub(crate) suite: Suite,
-    /// The source repository the coherence inputs must name.
-    pub(crate) source_repo: String,
-    /// The package under verification.
-    pub(crate) package: String,
+    /// The immutable producer-owned application selection.
+    pub(crate) selection: &'a DiscoverySelection,
     /// The daemon binary the extracted-identity check hashes.
     pub(crate) binary: String,
     /// The expected consumer release-manifest schema URN (preview suite).
     pub(crate) manifest_schema: String,
     /// The packaged-identity directory inside the deb.
     pub(crate) identity_dir: String,
-    /// The candidate version: a `vX.Y.Z` tag for stable, the tilde version
-    /// for preview.
-    pub(crate) version: String,
-    /// The resolved (stable) or caller-supplied (preview) 40-hex commit.
-    pub(crate) commit: Option<String>,
     /// The fetched coherence inputs.
     pub(crate) incoming: &'a Path,
     /// The live signing-key fingerprint read from the keyring.
@@ -3545,12 +3396,17 @@ pub(crate) struct VerifyInputs<'a> {
 /// read-only; the sentinel write is the only effect, and it lands only after
 /// every check passes — so any rejection leaves the trusted state intact.
 pub(crate) fn verify_suite(inputs: &VerifyInputs<'_>) -> Result<(), GeneratorError> {
-    if !valid_repository_slug(&inputs.source_repo) {
+    if inputs.selection.suite()? != inputs.suite {
+        return Err(GeneratorError::usage(
+            "verify selection channel does not match the requested suite",
+        ));
+    }
+    if !valid_repository_slug(&inputs.selection.source_repository) {
         return Err(GeneratorError::usage(
             "verify needs an `owner/name` source repository",
         ));
     }
-    if !valid_package_name(&inputs.package) {
+    if !valid_package_name(&inputs.selection.package) {
         return Err(GeneratorError::usage("verify needs a safe package name"));
     }
     if !valid_binary_name(&inputs.binary) {
@@ -3613,18 +3469,9 @@ fn record_arch_row<'a>(
 
 /// Verify the stable suite: the tagged release-record flow.
 fn verify_stable(inputs: &VerifyInputs<'_>) -> Result<(), GeneratorError> {
-    let tag = parse_stable_tag(&inputs.version)?;
-    let commit = match &inputs.commit {
-        Some(commit) if !commit.is_empty() => {
-            if !valid_commit(commit) {
-                return Err(GeneratorError::usage(
-                    "resolved commit is not 40 lowercase hex characters",
-                ));
-            }
-            commit.clone()
-        }
-        _ => run_resolve_commit(&inputs.source_repo, &tag.tag, inputs.path_overlay)?,
-    };
+    let version = inputs.selection.apt_version()?;
+    let tag = parse_stable_tag(&version)?;
+    let commit = inputs.selection.source_commit.clone();
     let incoming = inputs.incoming;
     let record_path = incoming.join(RECORD_FILE);
     let record_sum_path = incoming.join(RECORD_SIDECAR);
@@ -3635,7 +3482,7 @@ fn verify_stable(inputs: &VerifyInputs<'_>) -> Result<(), GeneratorError> {
     require_file(&manifest_path)?;
     require_file(&manifest_sum_path)?;
 
-    let deb_prefix = format!("{}-", inputs.package);
+    let deb_prefix = format!("{}-", inputs.selection.package);
     let debs: Vec<String> = dir_names(incoming)?
         .into_iter()
         .filter(|name| name.starts_with(&deb_prefix) && is_deb_file(name))
@@ -3662,7 +3509,7 @@ fn verify_stable(inputs: &VerifyInputs<'_>) -> Result<(), GeneratorError> {
 
     let record = read_json(&record_path)?;
     let (record_manifest_hash, record_manifest_version) =
-        verify_stable_record(&record, &tag, &commit, &inputs.source_repo)?;
+        verify_stable_record(&record, &tag, &commit, &inputs.selection.source_repository)?;
     verify_stable_manifest(
         &manifest_path,
         &tag,
@@ -3676,7 +3523,7 @@ fn verify_stable(inputs: &VerifyInputs<'_>) -> Result<(), GeneratorError> {
         &record,
         &tag.version,
         &commit,
-        &inputs.source_repo,
+        &inputs.selection.source_repository,
         record_manifest_hash,
     )?;
     if inputs.verify_oci {
@@ -3729,7 +3576,7 @@ fn verify_stable_record<'a>(
     }
     if field(build, "commit")? != commit {
         return Err(GeneratorError::usage(
-            "record commit does not match the independently resolved tag commit",
+            "record commit does not match the producer-selected source commit",
         ));
     }
     let record_manifest_hash = field(build, "manifest_sha256")?;
@@ -3762,7 +3609,7 @@ fn verify_stable_manifest(
     let manifest = read_json(manifest_path)?;
     if field(&manifest, "source_sha")? != commit {
         return Err(GeneratorError::usage(
-            "manifest source_sha != resolved commit",
+            "manifest source_sha != producer-selected source commit",
         ));
     }
     if field(&manifest, "crate_version")? != tag.version {
@@ -4004,7 +3851,7 @@ fn verify_stable_arch(
     manifest_hash: &str,
     arch: &str,
 ) -> Result<(), GeneratorError> {
-    let deb_name = format!("{}-{version}-{arch}.deb", inputs.package);
+    let deb_name = format!("{}-{version}-{arch}.deb", inputs.selection.package);
     let deb = inputs.incoming.join(&deb_name);
     let deb_sum = inputs.incoming.join(format!("{deb_name}.sha256"));
     require_file(&deb)?;
@@ -4088,7 +3935,7 @@ fn verify_stable_extracted(
     Ok(())
 }
 
-/// Verify the preview suite: the caller-supplied commit plus the
+/// Verify the preview suite: the producer-selected commit plus the
 /// source-owned release manifest carry the coherence chain — there is no tag
 /// and no release record here.
 fn verify_preview(inputs: &VerifyInputs<'_>) -> Result<(), GeneratorError> {
@@ -4097,17 +3944,8 @@ fn verify_preview(inputs: &VerifyInputs<'_>) -> Result<(), GeneratorError> {
             "verify: --verify-oci does not apply to the preview suite (previews ship no OCI record)",
         ));
     }
-    let Some(commit) = inputs.commit.as_deref().filter(|commit| !commit.is_empty()) else {
-        return Err(GeneratorError::usage(
-            "verify: --commit is required for the preview suite (a preview has no tag to resolve)",
-        ));
-    };
-    if !valid_commit(commit) {
-        return Err(GeneratorError::usage(
-            "preview commit is not 40 lowercase hex characters",
-        ));
-    }
-    let parsed = parse_preview_version(&inputs.version)?;
+    let commit = inputs.selection.source_commit.as_str();
+    let parsed = parse_preview_version(&inputs.selection.apt_version()?)?;
     if parsed.sha != commit[..7] {
         return Err(GeneratorError::usage(format!(
             "preview version suffix {} does not match the source commit",
@@ -4126,7 +3964,7 @@ fn verify_preview(inputs: &VerifyInputs<'_>) -> Result<(), GeneratorError> {
     require_file(&sums_path)?;
 
     let dotted = dotted_asset_version(&parsed.version);
-    let deb_prefix = format!("{}-", inputs.package);
+    let deb_prefix = format!("{}-", inputs.selection.package);
     let debs: Vec<String> = dir_names(incoming)?
         .into_iter()
         .filter(|name| name.starts_with(&deb_prefix) && is_deb_file(name))
@@ -4140,7 +3978,7 @@ fn verify_preview(inputs: &VerifyInputs<'_>) -> Result<(), GeneratorError> {
         )));
     }
     for arch in REQUIRED_ARCHES {
-        let expected = format!("{}-preview-{dotted}-{arch}.deb", inputs.package);
+        let expected = format!("{}-preview-{dotted}-{arch}.deb", inputs.selection.package);
         require_file(&incoming.join(&expected))?;
     }
 
@@ -4148,7 +3986,7 @@ fn verify_preview(inputs: &VerifyInputs<'_>) -> Result<(), GeneratorError> {
     if field(&manifest, "schema")? != inputs.manifest_schema {
         return Err(GeneratorError::usage("release-manifest schema mismatch"));
     }
-    if field(&manifest, "source_repository")? != inputs.source_repo {
+    if field(&manifest, "source_repository")? != inputs.selection.source_repository {
         return Err(GeneratorError::usage(
             "release-manifest repository mismatch",
         ));
@@ -4160,7 +3998,7 @@ fn verify_preview(inputs: &VerifyInputs<'_>) -> Result<(), GeneratorError> {
     }
     if field(&manifest, "source_commit")? != commit {
         return Err(GeneratorError::usage(
-            "release-manifest source_commit does not match the caller-supplied commit",
+            "release-manifest source_commit does not match the producer-selected commit",
         ));
     }
     if field(&manifest, "version")? != parsed.version {
@@ -4203,8 +4041,11 @@ fn verify_preview_arch(
 ) -> Result<(), GeneratorError> {
     let incoming = inputs.incoming;
     let dotted = dotted_asset_version(&parsed.version);
-    let deb_name = format!("{}-preview-{dotted}-{arch}.deb", inputs.package);
-    let release_name = format!("{}-preview-{}-{arch}.deb", inputs.package, parsed.version);
+    let deb_name = format!("{}-preview-{dotted}-{arch}.deb", inputs.selection.package);
+    let release_name = format!(
+        "{}-preview-{}-{arch}.deb",
+        inputs.selection.package, parsed.version
+    );
     let deb = incoming.join(&deb_name);
     let deb_sum = incoming.join(format!("{deb_name}.sha256"));
     require_file(&deb_sum)?;
@@ -4261,10 +4102,12 @@ fn verify_preview_arch(
             "{arch} preview deb hash != release-manifest asset sha256"
         )));
     }
-    if deb_control_field(&deb, "Package", inputs.backend, inputs.path_overlay)? != inputs.package {
+    if deb_control_field(&deb, "Package", inputs.backend, inputs.path_overlay)?
+        != inputs.selection.package
+    {
         return Err(GeneratorError::usage(format!(
             "{arch} preview deb Package is not {}",
-            inputs.package
+            inputs.selection.package
         )));
     }
     if deb_control_field(&deb, "Version", inputs.backend, inputs.path_overlay)? != parsed.version {
@@ -4637,11 +4480,14 @@ pub(crate) struct PublishInputs<'a> {
     /// Test-only `PATH` overlay resolving fixed tool names.
     pub(crate) path_overlay: Option<&'a Path>,
     /// The immutable application selection which produced these inputs.
-    pub(crate) selection: Option<&'a DiscoverySelection>,
+    ///
+    /// This is mandatory: a publication input without a typed producer
+    /// selection would recreate the removed legacy direct-publisher route.
+    pub(crate) selection: &'a DiscoverySelection,
     /// The source selection path. Schema-2 publication re-reads and compares
     /// it immediately before staging so a changed handoff cannot cross the
     /// verify-to-publish boundary.
-    pub(crate) selection_path: Option<&'a Path>,
+    pub(crate) selection_path: &'a Path,
 }
 
 /// The complete publication control snapshot. Incoming release bytes,
@@ -4769,13 +4615,8 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
             "publish: refusing — verify has not armed the reprepro sentinel: {error}"
         ))
     })?;
-    let (Some(selection_path), Some(expected_selection)) =
-        (inputs.selection_path, inputs.selection)
-    else {
-        return Err(GeneratorError::usage(
-            "publish: schema-2 discovery selection and source path are required",
-        ));
-    };
+    let selection_path = inputs.selection_path;
+    let expected_selection = inputs.selection;
     let current = read_discovery_selection(selection_path)?;
     if &current != expected_selection {
         return Err(GeneratorError::usage(
@@ -9329,138 +9170,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fetch_patterns_are_fixed_allowists_per_suite() {
-        let stable = must(
-            download_patterns(Suite::Stable, "example", "v1.2.3"),
-            "stable patterns",
-        );
-        assert_eq!(
-            stable,
-            vec![
-                "example-1.2.3-amd64.deb",
-                "example-1.2.3-amd64.deb.sha256",
-                "example-1.2.3-arm64.deb",
-                "example-1.2.3-arm64.deb.sha256",
-                "manifest.json",
-                "manifest.json.sha256",
-                "release-record.json",
-                "release-record.json.sha256",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
-        );
-        let preview = must(
-            download_patterns(Suite::Preview, "example", "1.2.3~preview.41+0123456"),
-            "preview patterns",
-        );
-        assert_eq!(preview.len(), 6);
-        assert!(preview.contains(&"release-manifest.json".to_owned()));
-        assert!(preview.contains(&"SHA256SUMS".to_owned()));
-        assert!(preview.contains(&"example-preview-1.2.3.preview.41+0123456-amd64.deb".to_owned()));
-        assert!(preview
-            .contains(&"example-preview-1.2.3.preview.41+0123456-arm64.deb.sha256".to_owned()));
-        for (suite, version) in [
-            (Suite::Stable, "1.2.3"),
-            (Suite::Preview, "v1.2.3~preview.1+abcdef0"),
-        ] {
-            let error = must_fail(download_patterns(suite, "example", version), "bad version");
-            assert!(!error.is_empty());
-        }
-        let error = must_fail(
-            download_patterns(Suite::Stable, "has space", "v1.2.3"),
-            "bad package",
-        );
-        assert!(error.contains("package"), "{error}");
-    }
-
-    #[test]
-    fn fetch_argv_is_fixed_and_slug_validated() {
-        let argv = must(
-            gh_download_argv(
-                "v1.2.3",
-                "example/app",
-                Path::new("incoming"),
-                &["a".to_owned()],
-            ),
-            "gh argv",
-        );
-        assert_eq!(
-            argv,
-            vec![
-                "release",
-                "download",
-                "v1.2.3",
-                "--repo",
-                "example/app",
-                "--dir",
-                "incoming",
-                "--pattern",
-                "a",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
-        );
-        let error = must_fail(
-            gh_download_argv("v1.2.3", "not-a-slug", Path::new("incoming"), &[]),
-            "bad slug",
-        );
-        assert!(error.contains("owner/name"), "{error}");
-        assert_eq!(
-            resolve_commit_argv("https://github.com/example/app.git", "v1.2.3", true),
-            vec![
-                "ls-remote",
-                "https://github.com/example/app.git",
-                "refs/tags/v1.2.3^{}"
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            must(source_git_url("example/app"), "source git"),
-            "https://github.com/example/app.git"
-        );
-        let error = must_fail(source_git_url("https://evil.example/x"), "evil slug");
-        assert!(error.contains("owner/name"), "{error}");
-    }
-
-    #[test]
-    fn resolve_commit_invokes_git_ls_remote() {
-        // The resolver must hand git the full fixed argv — `ls-remote` first.
-        // Slicing the subcommand off makes git read the URL as its command,
-        // so every scheduled and empty-commit discovery fails closed while
-        // the explicit-commit path (which never calls the resolver) works.
-        let dir = fixture_dir("resolve-commit-git");
-        let bin = dir.join("bin");
-        must(std::fs::create_dir_all(&bin), "stub bin");
-        write_bytes(
-            &bin.join("git"),
-            format!(
-                "#!/bin/sh\n[ \"$1\" = \"ls-remote\" ] || exit 1\nprintf '%s\\n' \"git $*\" >> \"{}/git.log\"\nprintf '{FIXTURE_COMMIT}\\trefs/tags/v1.2.3^{{}}'\\n",
-                dir.display()
-            )
-            .as_bytes(),
-        );
-        make_executable(&bin.join("git"));
-        let commit = must(
-            run_resolve_commit(FIXTURE_SOURCE, "v1.2.3", Some(&bin)),
-            "resolve the tag commit",
-        );
-        assert_eq!(commit, FIXTURE_COMMIT);
-        let log = must(
-            std::fs::read_to_string(dir.join("git.log")),
-            "read the git log",
-        );
-        assert!(
-            log.contains("git ls-remote https://github.com/example/app.git refs/tags/v1.2.3^{}"),
-            "{log}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// Craft a minimal but valid `.deb` with portable `ar`/`tar`/`gzip` so
     /// the fixture is readable both by `dpkg-deb` (where present) and by the
     /// `ar`+`tar` fallback.
@@ -9614,8 +9323,7 @@ mod tests {
 
     struct StableIncoming {
         dir: PathBuf,
-        tag: String,
-        commit: String,
+        selection: DiscoverySelection,
     }
 
     /// Build a coherent stable incoming directory for the default fixture
@@ -9685,19 +9393,20 @@ mod tests {
         attach_product_selection(
             &dir, "stable", source, package, binary, identity, &version, &commit, &tag,
         );
-        StableIncoming { dir, tag, commit }
+        let selection = must(
+            read_discovery_selection(&dir.join(DISCOVERY_SELECTION_FILE)),
+            "read stable fixture selection",
+        );
+        StableIncoming { dir, selection }
     }
 
     fn stable_verify_inputs(incoming: &StableIncoming) -> VerifyInputs<'_> {
         VerifyInputs {
             suite: Suite::Stable,
-            source_repo: FIXTURE_SOURCE.to_owned(),
-            package: FIXTURE_PACKAGE.to_owned(),
+            selection: &incoming.selection,
             binary: FIXTURE_BINARY.to_owned(),
             manifest_schema: FIXTURE_SCHEMA.to_owned(),
             identity_dir: FIXTURE_IDENTITY.to_owned(),
-            version: incoming.tag.clone(),
-            commit: Some(incoming.commit.clone()),
             incoming: &incoming.dir,
             signer_live: FIXTURE_FPR.to_owned(),
             signer_pinned: FIXTURE_FPR.to_owned(),
@@ -9898,16 +9607,6 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(&incoming.dir);
         }
-        // A commit that disagrees with the resolved tag commit.
-        let incoming = stable_incoming("stable-commit");
-        let inputs = VerifyInputs {
-            commit: Some("f".repeat(40)),
-            ..stable_verify_inputs(&incoming)
-        };
-        let error = must_fail(verify_suite(&inputs), "commit disagreement");
-        assert!(error.contains("resolved tag commit"), "{error}");
-        assert!(!incoming.dir.join(SENTINEL_FILE).exists());
-        let _ = std::fs::remove_dir_all(&incoming.dir);
     }
 
     #[test]
@@ -10150,58 +9849,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&incoming.dir);
     }
 
-    #[test]
-    fn stable_verify_resolves_the_tag_commit_through_a_git_stub() {
-        let incoming = stable_incoming("stable-resolve");
-        let bin = fixture_dir("git-stub");
-        let log = bin.join("argv.log");
-        write_bytes(
-            &bin.join("git"),
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [ \"$3\" = \"refs/tags/v1.2.3^{{}}\" ]; then\n  printf '{}\\trefs/tags/v1.2.3^{{}}\\n'\nelse\n  printf '{}\\trefs/tags/v1.2.3\\n'\nfi\n",
-                log.display(),
-                FIXTURE_COMMIT,
-                FIXTURE_COMMIT,
-            )
-            .as_bytes(),
-        );
-        must(
-            std::process::Command::new("chmod")
-                .args(["+x"])
-                .arg(bin.join("git"))
-                .status(),
-            "chmod git stub",
-        );
-        let mut inputs = stable_verify_inputs(&incoming);
-        inputs.commit = None;
-        inputs.path_overlay = Some(&bin);
-        must(verify_suite(&inputs), "verify with resolved commit");
-        let argv = must(std::fs::read_to_string(&log), "read argv log");
-        let first = argv.lines().next().unwrap_or_default();
-        assert!(
-            first.contains("refs/tags/v1.2.3^{}"),
-            "peeled ref resolves first: {argv}"
-        );
-        let _ = std::fs::remove_dir_all(&incoming.dir);
-        let _ = std::fs::remove_dir_all(&bin);
-    }
-
-    #[test]
-    fn stable_verify_rejects_a_malformed_commit_before_any_fetch() {
-        let incoming = stable_incoming("stable-bad-commit");
-        let inputs = VerifyInputs {
-            commit: Some("not-hex".to_owned()),
-            ..stable_verify_inputs(&incoming)
-        };
-        let error = must_fail(verify_suite(&inputs), "malformed commit");
-        assert!(error.contains("40 lowercase hex"), "{error}");
-        let _ = std::fs::remove_dir_all(&incoming.dir);
-    }
-
     struct PreviewIncoming {
         dir: PathBuf,
-        version: String,
-        commit: String,
+        selection: DiscoverySelection,
     }
 
     /// Build a coherent preview incoming directory for the default fixture
@@ -10278,23 +9928,20 @@ mod tests {
             &commit,
             &format!("preview-{commit}"),
         );
-        PreviewIncoming {
-            dir,
-            version,
-            commit,
-        }
+        let selection = must(
+            read_discovery_selection(&dir.join(DISCOVERY_SELECTION_FILE)),
+            "read preview fixture selection",
+        );
+        PreviewIncoming { dir, selection }
     }
 
     fn preview_verify_inputs(incoming: &PreviewIncoming) -> VerifyInputs<'_> {
         VerifyInputs {
             suite: Suite::Preview,
-            source_repo: FIXTURE_SOURCE.to_owned(),
-            package: FIXTURE_PACKAGE.to_owned(),
+            selection: &incoming.selection,
             binary: FIXTURE_BINARY.to_owned(),
             manifest_schema: FIXTURE_SCHEMA.to_owned(),
             identity_dir: FIXTURE_IDENTITY.to_owned(),
-            version: incoming.version.clone(),
-            commit: Some(incoming.commit.clone()),
             incoming: &incoming.dir,
             signer_live: FIXTURE_FPR.to_owned(),
             signer_pinned: FIXTURE_FPR.to_owned(),
@@ -10318,40 +9965,6 @@ mod tests {
 
     #[test]
     fn preview_verify_rejects_identity_and_grammar_defects() {
-        // Missing commit.
-        let incoming = preview_incoming("preview-no-commit");
-        let inputs = VerifyInputs {
-            commit: None,
-            ..preview_verify_inputs(&incoming)
-        };
-        let error = must_fail(verify_suite(&inputs), "missing commit");
-        assert!(error.contains("--commit is required"), "{error}");
-        assert!(!incoming.dir.join(SENTINEL_FILE).exists());
-        let _ = std::fs::remove_dir_all(&incoming.dir);
-
-        // Suffix that does not match the commit.
-        let incoming = preview_incoming("preview-suffix");
-        let inputs = VerifyInputs {
-            commit: Some(format!("fffffff{}", &FIXTURE_COMMIT[7..])),
-            ..preview_verify_inputs(&incoming)
-        };
-        let error = must_fail(verify_suite(&inputs), "suffix mismatch");
-        assert!(
-            error.contains("does not match the source commit"),
-            "{error}"
-        );
-        let _ = std::fs::remove_dir_all(&incoming.dir);
-
-        // Grammar violation.
-        let incoming = preview_incoming("preview-grammar");
-        let inputs = VerifyInputs {
-            version: "v1.2.3~preview.41+0123456".to_owned(),
-            ..preview_verify_inputs(&incoming)
-        };
-        let error = must_fail(verify_suite(&inputs), "grammar");
-        assert!(error.contains("X.Y.Z~preview.N"), "{error}");
-        let _ = std::fs::remove_dir_all(&incoming.dir);
-
         // Manifest version/source/commit mismatches.
         for (pointer, replacement, want) in [
             (
@@ -10542,8 +10155,6 @@ mod tests {
             "wident",
         );
         let inputs = VerifyInputs {
-            source_repo: "acme/widget".to_owned(),
-            package: "widget".to_owned(),
             binary: "widgetd".to_owned(),
             identity_dir: "wident".to_owned(),
             ..stable_verify_inputs(&incoming)
@@ -10560,8 +10171,6 @@ mod tests {
             "wident",
         );
         let inputs = VerifyInputs {
-            source_repo: "acme/widget".to_owned(),
-            package: "widget".to_owned(),
             binary: "widgetd".to_owned(),
             identity_dir: "wident".to_owned(),
             ..preview_verify_inputs(&incoming)
@@ -11193,37 +10802,9 @@ mod tests {
             key_material: Some("fixture-key-material".to_owned()),
             backend: DebBackend::Auto,
             path_overlay,
-            selection: Some(selection),
-            selection_path: Some(selection_path),
+            selection,
+            selection_path,
         }
-    }
-
-    #[test]
-    fn publication_requires_bound_schema2_selection() {
-        let incoming = stable_incoming("publish-selection-binding");
-        must(
-            verify_suite(&stable_verify_inputs(&incoming)),
-            "verify selection-binding incoming",
-        );
-        let mut inputs = publish_inputs(
-            Suite::Stable,
-            apt_contract(),
-            "v1.2.3",
-            &incoming.dir,
-            None,
-            Path::new("missing-previous-pointer.json"),
-            Path::new("public"),
-            false,
-            None,
-        );
-        inputs.selection = None;
-        inputs.selection_path = None;
-        let error = must_fail(
-            publish_suite(&inputs),
-            "reject publisher without external schema-2 selection",
-        );
-        assert!(error.contains("schema-2 discovery selection"), "{error}");
-        let _ = std::fs::remove_dir_all(incoming.dir);
     }
 
     #[test]

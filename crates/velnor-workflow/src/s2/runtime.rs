@@ -3894,24 +3894,19 @@ fn apt_verify(arguments: &[OsString]) -> Result<(), GeneratorError> {
             "verify-oci",
         ],
     )?;
-    let selection = apt_result(crate::apt::read_discovery_selection(selection_path(
-        &options,
-    )?))?;
-    let suite = selection_context(&options, &selection)?;
+    let selection_path = selection_path(&options)?;
     let incoming = Path::new(required_option(&options, "incoming")?);
-    apt_result(crate::apt::verify_discovery_incoming(
-        selection_path(&options)?,
+    let selection = apt_result(crate::apt::verify_discovery_incoming(
+        selection_path,
         incoming,
     ))?;
+    let suite = selection_context(&options, &selection)?;
     let inputs = crate::apt::VerifyInputs {
         suite,
-        source_repo: selection.source_repository.clone(),
-        package: selection.package.clone(),
+        selection: &selection,
         binary: required_option(&options, "binary")?.to_owned(),
         manifest_schema: required_option(&options, "manifest-schema")?.to_owned(),
         identity_dir: required_option(&options, "identity-dir")?.to_owned(),
-        version: apt_result(selection.apt_version())?,
-        commit: Some(selection.source_commit.clone()),
         incoming,
         signer_live: required_option(&options, "signer")?.to_owned(),
         signer_pinned: required_option(&options, "expect-signer")?.to_owned(),
@@ -3957,13 +3952,12 @@ fn apt_publish(arguments: &[OsString]) -> Result<(), GeneratorError> {
         ],
     )?;
     let selection_path = selection_path(&options)?;
-    let selection = apt_result(crate::apt::read_discovery_selection(selection_path))?;
-    let suite = selection_context(&options, &selection)?;
     let incoming = Path::new(required_option(&options, "incoming")?);
-    apt_result(crate::apt::verify_discovery_incoming(
+    let selection = apt_result(crate::apt::verify_discovery_incoming(
         selection_path,
         incoming,
     ))?;
+    let suite = selection_context(&options, &selection)?;
     let spec = s2_apt_spec(&options, &selection)?;
     assert_selection_contract(&selection, &spec)?;
     let contract = apt_result(crate::apt::AptContract::resolve_s2(&spec))?;
@@ -3994,8 +3988,8 @@ fn apt_publish(arguments: &[OsString]) -> Result<(), GeneratorError> {
         key_material,
         backend: crate::apt::DebBackend::Auto,
         path_overlay: None,
-        selection: Some(&selection),
-        selection_path: Some(selection_path),
+        selection: &selection,
+        selection_path,
     };
     apt_result(crate::apt::publish_suite(&inputs))?;
     println!("{} suite staged", inputs.suite.as_str());
@@ -4140,13 +4134,12 @@ fn apt_channel_update(arguments: &[OsString]) -> Result<(), GeneratorError> {
         ],
     )?;
     let selection_path = selection_path(&options)?;
-    let selection = apt_result(crate::apt::read_discovery_selection(selection_path))?;
-    let suite = selection_context(&options, &selection)?;
     let incoming = Path::new(required_option(&options, "incoming")?);
-    apt_result(crate::apt::verify_discovery_incoming(
+    let selection = apt_result(crate::apt::verify_discovery_incoming(
         selection_path,
         incoming,
     ))?;
+    let suite = selection_context(&options, &selection)?;
     let inputs = crate::apt::ChannelUpdateInputs {
         suite,
         source_repo: selection.source_repository.clone(),
