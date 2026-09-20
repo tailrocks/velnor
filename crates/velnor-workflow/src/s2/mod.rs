@@ -4650,7 +4650,9 @@ fn candidate_namespace_scan_script() -> String {
           job_pattern = re.compile(r"  ([A-Za-z0-9_-]+):\s*$")
           step_pattern = re.compile(r"^( +)- name:\s*")
           upload_pattern = re.compile(r"^\s+uses:\s*actions/upload-artifact@")
+          local_workflow_pattern = re.compile(r"^\s+uses:\s+\./(.github/workflows/[^ #]+)")
           uploads = []
+          local_workflow_edges = {}
           for archive_name in sys.argv[1:]:
               with tarfile.open(archive_name, "r:") as archive:
                   for member in archive.getmembers():
@@ -4660,6 +4662,12 @@ fn candidate_namespace_scan_script() -> String {
                       if stream is None:
                           raise SystemExit("workflow archive member is unreadable")
                       lines = stream.read().decode("utf-8").splitlines()
+                      local_workflow_edges[member.name] = [
+                          match.group(1)
+                          for line in lines
+                          for match in [local_workflow_pattern.match(line)]
+                          if match is not None
+                      ]
                       job = None
                       for index, line in enumerate(lines):
                           matched_job = job_pattern.fullmatch(line)
@@ -4688,6 +4696,15 @@ fn candidate_namespace_scan_script() -> String {
                           step_id = ids[0] if len(ids) == 1 else ""
                           uploads.append((archive_name, member.name, job, step_id, name))
 
+          reachable = {".github/workflows/ci-pr.yml"}
+          pending = list(reachable)
+          while pending:
+              workflow = pending.pop()
+              for dependency in local_workflow_edges.get(workflow, []):
+                  if dependency not in reachable:
+                      reachable.add(dependency)
+                      pending.append(dependency)
+
           for archive_name in sys.argv[1:]:
               found = [row for row in uploads if row[0] == archive_name and row[4] == candidate]
               if len(found) != 1:
@@ -4703,8 +4720,8 @@ fn candidate_namespace_scan_script() -> String {
                   raise SystemExit(f"{path}: candidate producer has a second or non-static uploader")
               if candidate_like and name not in allowed:
                   raise SystemExit(f"{path}: candidate-like uploader name is not a fixed transport namespace")
-              if dynamic_marker in name and (path == ".github/workflows/ci-pr.yml" and not name.startswith("velnor-workflow-runtime-")):
-                  raise SystemExit(f"{path}: candidate workflow has an untrusted dynamic artifact namespace")
+              if dynamic_marker in name and path in reachable and not (path == ".github/workflows/ci-pr.yml" and name.startswith("velnor-workflow-runtime-")):
+                  raise SystemExit(f"{path}: candidate workflow graph has an untrusted dynamic artifact namespace")
               if dynamic_marker in name and candidate_like:
                   raise SystemExit(f"{path}: candidate namespace is computed dynamically")
           PY
