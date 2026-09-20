@@ -23,6 +23,7 @@ mod providers;
 mod regen;
 pub(crate) mod release;
 pub(crate) mod renovate;
+pub(crate) mod runtime_bootstrap;
 pub(crate) mod runtime_products;
 pub(crate) mod snapshot;
 pub(crate) mod watch;

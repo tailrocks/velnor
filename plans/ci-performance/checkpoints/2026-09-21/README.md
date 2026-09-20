@@ -25,3 +25,18 @@ unavailable; draft/conflicted PRs do not prove that behavior.
 Runtime publication design remains open: workflow_run uses the downstream
 default-branch SHA for provenance. Preserve exact source identity before
 implementing a successful-CI publication gate.
+
+## Concurrent remote work preserved
+
+The follow-up merge incorporates remote commits through 4d3e55d9, including
+source bootstrap, release mapping, protocol fixtures, and staged hook work.
+The preceding hook-incomplete statement describes this session before that
+merge; the incoming hook implementation has not been independently verified
+here. Both implementation histories remain recoverable in the merge parents.
+
+Inventory scripts are included. The filtered Jackin collector completed
+2026-03-31 through 2026-05-20; its next-day checkpoint is 2026-05-21.
+Collection is partial and resumable. The older unfiltered 40,000-row API
+ceiling does not establish the retained-history boundary. Python syntax
+checks pass for all four included scripts; full evidence collection is not
+complete. Raw API pages remain in the local evidence directory.

@@ -745,9 +745,10 @@ fn release_trigger_block(release: &ReleaseSpec) -> String {
 
 /// The `release.yml` trigger header: the workflow name plus the tag-filtered
 /// push trigger, through the control-plane verify job's step list.
-fn release_trigger_header(release: &ReleaseSpec) -> String {
+fn release_trigger_header(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    let runtime_needs = runtime_needs(config);
     format!(
-        "name: Release\nrun-name: Release · ${{{{ github.ref_name }}}}\n\n{trigger}\nconcurrency:\n  group: release-${{{{ github.ref }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  verify:\n    name: Control / Verify release\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    steps:\n",
+        "name: Release\nrun-name: Release · ${{{{ github.ref_name }}}}\n\n{trigger}\nconcurrency:\n  group: release-${{{{ github.ref }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  verify:\n    name: Control / Verify release\n{runtime_needs}    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    steps:\n",
         trigger = release_trigger_block(release),
     )
 }
@@ -1269,7 +1270,8 @@ fn render_debian_job(config: &ProjectConfig, release: &ReleaseSpec, guest: bool)
     let download = ActionPin::DownloadArtifact.reference();
     let attest = ActionPin::Attest.reference();
     let upload = ActionPin::UploadArtifact.reference();
-    let mut setup = workflow_runtime_setup_for_config(config);
+    let mut setup = workflow_runtime_consumer_setup(config);
+    setup.push_str(&native_arm64_toolchain_steps(config));
     let workflow = WorkflowIr::from_config(config);
     if let Some(unit) = rust_package_unit(config, &release.package) {
         workflow.render_tool_provisioning(&mut setup, ProviderId::GithubHosted, unit, false);
@@ -1326,9 +1328,9 @@ fn render_debian_job(config: &ProjectConfig, release: &ReleaseSpec, guest: bool)
 
 /// The identity metadata job: one host-native release-build binary exports
 /// the acyclic identity files (`build-identity.json`, `manifest.json`) the
-/// deb lanes ship, plus itself as the record-emitting release tool. The
-/// cross-compiling deb jobs can never execute their target binary, so they
-/// copy this artifact instead of exporting it.
+/// deb lanes ship, plus itself as the record-emitting release tool for
+/// publication and cross-compiling lanes. Native Debian lanes execute their
+/// own verified runner binary while preserving this canonical metadata pair.
 fn render_release_metadata_job(
     config: &ProjectConfig,
     release: &ReleaseSpec,
@@ -1338,7 +1340,7 @@ fn render_release_metadata_job(
     let binary = yaml_scalar(&release.binary);
     let checkout = ActionPin::Checkout.reference();
     let upload = ActionPin::UploadArtifact.reference();
-    let mut setup = workflow_runtime_setup_for_config(config);
+    let mut setup = workflow_runtime_consumer_setup(config);
     let workflow = WorkflowIr::from_config(config);
     let cargo_cmd = if let Some(unit) = rust_package_unit(config, &release.package) {
         workflow.render_tool_provisioning(&mut setup, ProviderId::GithubHosted, unit, false);
@@ -1417,18 +1419,25 @@ fn debian_sibling_build_steps(cargo_cmd: &str, package: &str) -> String {
 fn debian_identity_steps(
     release_dir: &str,
     binary: &str,
-    repository: &str,
+    config: &ProjectConfig,
     kind: &str,
     crate_expr: &str,
     preview: bool,
     metadata_dir: &str,
 ) -> String {
     let release_dir = shell_quote(release_dir);
-    let repository = shell_quote(repository);
+    let repository = shell_quote(&config.repository);
     // Artifact downloads are untracked workspace files. Keep them under the
     // runner's temp directory so release-build's clean-tree identity gate
     // observes only the checked-out source, never its input artifacts.
-    let tool = format!("\"$metadata_dir/{binary}-release-tool\"");
+    // Hosted Debian matrices now build each GNU target on its native host.
+    // Execute the exact packaged binary, not the metadata producer's X64 tool.
+    // Local cross-compiling lanes retain the host-native metadata tool.
+    let tool = if release_provider(config) == ProviderId::GithubHosted {
+        "\"$binary\"".to_owned()
+    } else {
+        format!("\"$metadata_dir/{binary}-release-tool\"")
+    };
     let source_check = if preview {
         "          jq -e --arg sha \"$SOURCE_COMMIT\" '.source_sha == $sha' \"$metadata_dir/build-identity.json\" >/dev/null \\\n            || { echo \"::error::build identity source_sha != preview source commit $SOURCE_COMMIT\" >&2; exit 1; }\n"
     } else {
@@ -1447,7 +1456,7 @@ fn debian_identity_steps(
         String::new()
     };
     format!(
-        "      - name: Stage acyclic identity files packaged into the deb\n        run: |\n          set -euo pipefail\n          metadata_dir=\"{metadata_dir}\"\n          test -s \"$metadata_dir/build-identity.json\" || {{ echo \"::error::release metadata missing build-identity.json\" >&2; exit 1; }}\n          test -s \"$metadata_dir/manifest.json\" || {{ echo \"::error::release metadata missing manifest.json\" >&2; exit 1; }}\n          jq -e '.source_sha and .crate_version' \"$metadata_dir/build-identity.json\" >/dev/null\n          jq -e 'type == \"object\"' \"$metadata_dir/manifest.json\" >/dev/null\n{source_check}          mkdir -p {release_dir}\n          cp \"$metadata_dir/build-identity.json\" \"$metadata_dir/manifest.json\" {release_dir}/\n      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n          metadata_dir=\"{metadata_dir}\"\n          chmod +x {tool}\n          binary=\"target/$TARGET/release/{binary}\"\n          test -s \"$binary\" || {{ echo \"::error::missing cross-built runner binary\" >&2; exit 1; }}\n          binary_sha256=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n          manifest_sha256=\"$(sha256sum \"$metadata_dir/manifest.json\" | awk '{{print $1}}')\"\n          manifest_version=\"$(jq -er '.version | numbers' \"$metadata_dir/manifest.json\")\"\n          source_sha={commit_value}\n          jq -n \\\n            --arg schema \"velnor.package-record/v1\" \\\n            --arg repo {repository} \\\n            --arg kind \"{kind}\" \\\n            --arg commit \"$source_sha\" \\\n            --arg crate {crate_expr} \\\n            --arg debian \"$VERSION\" \\\n            --argjson mv \"$manifest_version\" \\\n            --arg mhash \"$manifest_sha256\" \\\n            --arg arch \"${{{{ matrix.arch }}}}\" \\\n            --arg target \"$TARGET\" \\\n            --arg binary \"$binary_sha256\" \\\n            '{{\n              schema: $schema,\n              build: {{ repository: $repo, kind: $kind, commit: $commit,\n                       crate_version: $crate, debian_version: $debian,\n                       manifest_version: $mv, manifest_sha256: $mhash }},\n              architecture: {{ arch: $arch, target: $target, binary_sha256: $binary }}\n            }}' > package-record.candidate.json\n          {tool} release emit \\\n            --record package-record.candidate.json \\\n            --binary \"$binary\" \\\n            --out {release_dir}/package-record.json\n{record_check}"
+        "      - name: Stage acyclic identity files packaged into the deb\n        run: |\n          set -euo pipefail\n          metadata_dir=\"{metadata_dir}\"\n          test -s \"$metadata_dir/build-identity.json\" || {{ echo \"::error::release metadata missing build-identity.json\" >&2; exit 1; }}\n          test -s \"$metadata_dir/manifest.json\" || {{ echo \"::error::release metadata missing manifest.json\" >&2; exit 1; }}\n          jq -e '.source_sha and .crate_version' \"$metadata_dir/build-identity.json\" >/dev/null\n          jq -e 'type == \"object\"' \"$metadata_dir/manifest.json\" >/dev/null\n{source_check}          mkdir -p {release_dir}\n          cp \"$metadata_dir/build-identity.json\" \"$metadata_dir/manifest.json\" {release_dir}/\n      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n          metadata_dir=\"{metadata_dir}\"\n          binary=\"target/$TARGET/release/{binary}\"\n          chmod +x {tool}\n          test -s \"$binary\" || {{ echo \"::error::missing cross-built runner binary\" >&2; exit 1; }}\n          binary_sha256=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n          manifest_sha256=\"$(sha256sum \"$metadata_dir/manifest.json\" | awk '{{print $1}}')\"\n          manifest_version=\"$(jq -er '.version | numbers' \"$metadata_dir/manifest.json\")\"\n          source_sha={commit_value}\n          jq -n \\\n            --arg schema \"velnor.package-record/v1\" \\\n            --arg repo {repository} \\\n            --arg kind \"{kind}\" \\\n            --arg commit \"$source_sha\" \\\n            --arg crate {crate_expr} \\\n            --arg debian \"$VERSION\" \\\n            --argjson mv \"$manifest_version\" \\\n            --arg mhash \"$manifest_sha256\" \\\n            --arg arch \"${{{{ matrix.arch }}}}\" \\\n            --arg target \"$TARGET\" \\\n            --arg binary \"$binary_sha256\" \\\n            '{{\n              schema: $schema,\n              build: {{ repository: $repo, kind: $kind, commit: $commit,\n                       crate_version: $crate, debian_version: $debian,\n                       manifest_version: $mv, manifest_sha256: $mhash }},\n              architecture: {{ arch: $arch, target: $target, binary_sha256: $binary }}\n            }}' > package-record.candidate.json\n          {tool} release emit \\\n            --record package-record.candidate.json \\\n            --binary \"$binary\" \\\n            --out {release_dir}/package-record.json\n{record_check}"
     )
 }
 
@@ -1555,7 +1564,8 @@ fn render_identity_debian_job(
     let download = ActionPin::DownloadArtifact.reference();
     let upload = ActionPin::UploadArtifact.reference();
     let sccache = ActionPin::Sccache.reference();
-    let mut setup = workflow_runtime_setup_for_config(config);
+    let mut setup = workflow_runtime_consumer_setup(config);
+    setup.push_str(&native_arm64_toolchain_steps(config));
     let workflow = WorkflowIr::from_config(config);
     let cargo_cmd = if let Some(unit) = rust_package_unit(config, &release.package) {
         workflow.render_tool_provisioning(&mut setup, ProviderId::GithubHosted, unit, false);
@@ -1624,7 +1634,7 @@ fn render_identity_debian_job(
     steps.push_str(&debian_identity_steps(
         &release_package_dir(config, &release.package),
         &release.binary,
-        &config.repository,
+        config,
         kind,
         crate_expr,
         preview,
@@ -2035,11 +2045,20 @@ fn render_preview_identity_job(config: &ProjectConfig, release: &ReleaseSpec) ->
     let checkout = ActionPin::Checkout.reference();
     // The identity job below always runs on the hosted github runner, so its
     // runtime install is keyed to that placement — never to the repo lane.
-    let setup = workflow_runtime_setup(
-        ProviderId::GithubHosted,
-        &config.repository,
-        &config.workflow_revision,
-    );
+    let setup = if super::runtime_bootstrap::owns_runtime(&config.repository) {
+        workflow_runtime_consumer_setup(config)
+    } else {
+        workflow_runtime_setup(
+            ProviderId::GithubHosted,
+            &config.repository,
+            &config.workflow_revision,
+        )
+    };
+    let runtime_needs = if has_producer_binding(release) {
+        ""
+    } else {
+        runtime_needs(config)
+    };
     let manifest = match rust_package_unit(config, &release.package) {
         Some(unit) if unit.root == "." || unit.root.is_empty() => "Cargo.toml".to_owned(),
         Some(unit) => format!("{}/Cargo.toml", unit.root.trim_end_matches('/')),
@@ -2047,7 +2066,7 @@ fn render_preview_identity_job(config: &ProjectConfig, release: &ReleaseSpec) ->
     };
     let manifest = shell_quote(&manifest);
     format!(
-        "  identity:\n    name: Resolve preview identity\n    if: ${{{{ github.ref == 'refs/heads/{}' }}}}\n    timeout-minutes: 10\n    runs-on: {runner}\n    outputs:\n      version: ${{{{ steps.identity.outputs.version }}}}\n      crate_version: ${{{{ steps.identity.outputs.crate_version }}}}\n      name: ${{{{ steps.identity.outputs.name }}}}\n      commit: ${{{{ steps.identity.outputs.commit }}}}\n      short_commit: ${{{{ steps.identity.outputs.short_commit }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n{POLICY_CHECKOUT_WITH}{setup}{policy}      - name: Resolve the preview version from the crate manifest\n        id: identity\n        env:\n          EVENT_SHA: ${{{{ github.sha }}}}\n          RUN_NUMBER: ${{{{ github.run_number }}}}\n        run: |\n          set -euo pipefail\n          commit=\"$(git rev-parse HEAD)\"\n          case \"$commit\" in\n            *[!0-9a-f]*|'') echo \"::error::HEAD did not resolve to lowercase hex\" >&2; exit 1 ;;\n          esac\n          [ \"${{#commit}}\" -eq 40 ] || {{ echo \"::error::HEAD is not a 40-hex commit\" >&2; exit 1; }}\n          [ \"$commit\" = \"$EVENT_SHA\" ] || {{ echo \"::error::checkout $commit != event commit $EVENT_SHA\" >&2; exit 1; }}\n          case \"$RUN_NUMBER\" in\n            ''|*[!0-9]*) echo \"::error::invalid workflow run number $RUN_NUMBER\" >&2; exit 1 ;;\n          esac\n          [ \"$RUN_NUMBER\" -gt 0 ] || {{ echo \"::error::run number must be positive\" >&2; exit 1; }}\n          crate=\"$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' {manifest} | head -n1)\"\n          case \"$crate\" in\n            ''|*[!0-9.]*) echo \"::error::crate version $crate is not an X.Y.Z version\" >&2; exit 1 ;;\n          esac\n          [[ \"$crate\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] \\\n            || {{ echo \"::error::crate version $crate is not an X.Y.Z version\" >&2; exit 1; }}\n          short_commit=\"${{commit:0:7}}\"\n          version=\"${{crate}}~preview.${{RUN_NUMBER}}+${{short_commit}}\"\n          [[ \"$version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+~preview\\.[0-9]+\\+[0-9a-f]{{7}}$ ]] \\\n            || {{ echo \"::error::preview version $version violates the preview contract\" >&2; exit 1; }}\n          {{\n            echo \"version=$version\"\n            echo \"crate_version=$crate\"\n            echo \"name=Preview $version\"\n            echo \"commit=$commit\"\n            echo \"short_commit=$short_commit\"\n          }} >> \"$GITHUB_OUTPUT\"\n",
+        "  identity:\n    name: Resolve preview identity\n{runtime_needs}    if: ${{{{ github.ref == 'refs/heads/{}' }}}}\n    timeout-minutes: 10\n    runs-on: {runner}\n    outputs:\n      version: ${{{{ steps.identity.outputs.version }}}}\n      crate_version: ${{{{ steps.identity.outputs.crate_version }}}}\n      name: ${{{{ steps.identity.outputs.name }}}}\n      commit: ${{{{ steps.identity.outputs.commit }}}}\n      short_commit: ${{{{ steps.identity.outputs.short_commit }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n{POLICY_CHECKOUT_WITH}{setup}{policy}      - name: Resolve the preview version from the crate manifest\n        id: identity\n        env:\n          EVENT_SHA: ${{{{ github.sha }}}}\n          RUN_NUMBER: ${{{{ github.run_number }}}}\n        run: |\n          set -euo pipefail\n          commit=\"$(git rev-parse HEAD)\"\n          case \"$commit\" in\n            *[!0-9a-f]*|'') echo \"::error::HEAD did not resolve to lowercase hex\" >&2; exit 1 ;;\n          esac\n          [ \"${{#commit}}\" -eq 40 ] || {{ echo \"::error::HEAD is not a 40-hex commit\" >&2; exit 1; }}\n          [ \"$commit\" = \"$EVENT_SHA\" ] || {{ echo \"::error::checkout $commit != event commit $EVENT_SHA\" >&2; exit 1; }}\n          case \"$RUN_NUMBER\" in\n            ''|*[!0-9]*) echo \"::error::invalid workflow run number $RUN_NUMBER\" >&2; exit 1 ;;\n          esac\n          [ \"$RUN_NUMBER\" -gt 0 ] || {{ echo \"::error::run number must be positive\" >&2; exit 1; }}\n          crate=\"$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' {manifest} | head -n1)\"\n          case \"$crate\" in\n            ''|*[!0-9.]*) echo \"::error::crate version $crate is not an X.Y.Z version\" >&2; exit 1 ;;\n          esac\n          [[ \"$crate\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] \\\n            || {{ echo \"::error::crate version $crate is not an X.Y.Z version\" >&2; exit 1; }}\n          short_commit=\"${{commit:0:7}}\"\n          version=\"${{crate}}~preview.${{RUN_NUMBER}}+${{short_commit}}\"\n          [[ \"$version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+~preview\\.[0-9]+\\+[0-9a-f]{{7}}$ ]] \\\n            || {{ echo \"::error::preview version $version violates the preview contract\" >&2; exit 1; }}\n          {{\n            echo \"version=$version\"\n            echo \"crate_version=$crate\"\n            echo \"name=Preview $version\"\n            echo \"commit=$commit\"\n            echo \"short_commit=$short_commit\"\n          }} >> \"$GITHUB_OUTPUT\"\n",
         config.default_branch,
         runner = hosted_selector_runs_on(config),
         policy = policy_enforcement_step(),
@@ -2248,9 +2267,44 @@ fn inject_native_preview_bindings(
     output
 }
 
+fn native_arm64_toolchain_steps(config: &ProjectConfig) -> String {
+    if release_provider(config) != ProviderId::GithubHosted {
+        return String::new();
+    }
+    r#"      - name: Verify native arm64 compiler
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == aarch64 ]] || { echo '::error::aarch64 release target requires a native arm64 runner' >&2; exit 1; }
+          cc="$(command -v cc)"
+          cxx="$(command -v c++)"
+          ar="$(command -v ar)"
+          case "$("$cc" -dumpmachine)" in
+            aarch64-*|arm64-*) ;;
+            *) echo '::error::compiler target differs from native arm64' >&2; exit 1 ;;
+          esac
+          "$cc" -x c -o "$RUNNER_TEMP/velnor-native-compiler-check" - <<'EOF'
+          int main(void) { return 0; }
+          EOF
+          "$RUNNER_TEMP/velnor-native-compiler-check"
+          {
+            printf 'CC_aarch64_unknown_linux_gnu=%s\n' "$cc"
+            printf 'CXX_aarch64_unknown_linux_gnu=%s\n' "$cxx"
+            printf 'AR_aarch64_unknown_linux_gnu=%s\n' "$ar"
+            printf 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=%s\n' "$cc"
+            printf 'CROSS_COMPILE=\n'
+          } >> "$GITHUB_ENV"
+"#.to_owned()
+}
+
 fn release_runner(config: &ProjectConfig, target: &str) -> String {
     if target.ends_with("-apple-darwin") {
         yaml_scalar(MACOS_HOSTED_RUNS_ON)
+    } else if release_provider(config) != ProviderId::GithubHosted {
+        selected_runner(config)
+    } else if target == "aarch64-unknown-linux-gnu" {
+        "ubuntu-24.04-arm".to_owned()
     } else {
         hosted_selector_runs_on(config)
     }
@@ -2278,7 +2332,15 @@ fn selected_runner(config: &ProjectConfig) -> String {
 }
 
 fn workflow_runtime_setup_for_config(config: &ProjectConfig) -> String {
-    if release_provider(config) == ProviderId::GithubHosted {
+    if super::runtime_bootstrap::owns_runtime(&config.repository) {
+        crate::s2::workflow_runtime_download_at(
+            ProviderId::GithubHosted,
+            &config.workflow_revision,
+            ".",
+            true,
+            true,
+        )
+    } else if release_provider(config) == ProviderId::GithubHosted {
         workflow_runtime_setup(
             ProviderId::GithubHosted,
             &config.repository,
@@ -2286,6 +2348,71 @@ fn workflow_runtime_setup_for_config(config: &ProjectConfig) -> String {
         )
     } else {
         String::new()
+    }
+}
+
+fn workflow_runtime_root_setup(config: &ProjectConfig) -> String {
+    workflow_runtime_consumer_setup(config)
+}
+
+fn runtime_root(config: &ProjectConfig, targets: &[String], verification_units: bool) -> String {
+    use crate::s2::provider::Platform;
+    if !super::runtime_bootstrap::owns_runtime(&config.repository) {
+        return String::new();
+    }
+    let mut platforms = BTreeSet::new();
+    if let Some(platform) = super::runtime_bootstrap::control_platform(config) {
+        platforms.insert(platform);
+    }
+    if release_provider(config).is_local() {
+        platforms.extend(crate::s2::provider::provider_caps(release_provider(config)).platforms);
+    }
+    for target in targets {
+        if target.ends_with("-apple-darwin") {
+            platforms.insert(Platform::MacosArm64);
+        } else if target == "aarch64-unknown-linux-gnu"
+            && release_provider(config) == ProviderId::GithubHosted
+        {
+            platforms.insert(Platform::LinuxArm64);
+        }
+    }
+    if verification_units {
+        for unit in &config.units {
+            if config
+                .providers
+                .iter()
+                .any(|provider| provider_supports_unit(*provider, unit))
+            {
+                platforms.insert(unit.platform);
+            }
+        }
+    }
+    super::runtime_bootstrap::render_root_job(
+        &config.repository,
+        &config.workflow_revision,
+        &platforms,
+    )
+}
+
+fn runtime_needs(config: &ProjectConfig) -> &'static str {
+    if super::runtime_bootstrap::owns_runtime(&config.repository) {
+        "    needs: [runtime]\n"
+    } else {
+        ""
+    }
+}
+
+fn workflow_runtime_consumer_setup(config: &ProjectConfig) -> String {
+    if super::runtime_bootstrap::owns_runtime(&config.repository) {
+        crate::s2::workflow_runtime_download_at(
+            ProviderId::GithubHosted,
+            &config.workflow_revision,
+            ".",
+            true,
+            true,
+        )
+    } else {
+        workflow_runtime_setup_for_config(config)
     }
 }
 
@@ -2424,9 +2551,14 @@ fn inject_dispatch_modes(output: &str, release: &ReleaseSpec) -> String {
 /// `workflow_run` event builds the producer run's head SHA, every other
 /// event builds its own SHA; the runtime refuses anything else.
 fn render_binding_source_job(config: &ProjectConfig) -> String {
-    let setup = workflow_runtime_setup_for_config(config);
+    let setup = if super::runtime_bootstrap::owns_runtime(&config.repository) {
+        format!("      - name: Checkout release source\n        uses: {}\n        with:\n          ref: ${{{{ github.event.workflow_run.head_sha || github.sha }}}}\n          fetch-depth: 0\n          persist-credentials: false\n{}", ActionPin::Checkout.reference(), workflow_runtime_consumer_setup(config))
+    } else {
+        workflow_runtime_setup_for_config(config)
+    };
+    let runtime_needs = runtime_needs(config);
     format!(
-        "  source:\n    name: Resolve release source\n    runs-on: {}\n    timeout-minutes: 5\n    outputs:\n      sha: ${{{{ steps.resolve.outputs.sha }}}}\n    steps:\n{setup}      - name: Resolve source revision\n        id: resolve\n        env:\n          EVENT: ${{{{ github.event_name }}}}\n          SHA: ${{{{ github.sha }}}}\n          RUN_SHA: ${{{{ github.event.workflow_run.head_sha }}}}\n        run: |\n          set -euo pipefail\n          sha=\"$(velnor-workflow release resolve-source --event \"$EVENT\" --sha \"$SHA\" --run-sha \"$RUN_SHA\")\"\n          echo \"sha=$sha\" >> \"$GITHUB_OUTPUT\"\n",
+        "  source:\n{runtime_needs}    name: Resolve release source\n    runs-on: {}\n    timeout-minutes: 5\n    outputs:\n      sha: ${{{{ steps.resolve.outputs.sha }}}}\n    steps:\n{setup}      - name: Resolve source revision\n        id: resolve\n        env:\n          EVENT: ${{{{ github.event_name }}}}\n          SHA: ${{{{ github.sha }}}}\n          RUN_SHA: ${{{{ github.event.workflow_run.head_sha }}}}\n        run: |\n          set -euo pipefail\n          sha=\"$(velnor-workflow release resolve-source --event \"$EVENT\" --sha \"$SHA\" --run-sha \"$RUN_SHA\")\"\n          echo \"sha=$sha\" >> \"$GITHUB_OUTPUT\"\n",
         selected_runner(config),
     )
 }
@@ -2437,7 +2569,11 @@ fn render_binding_source_job(config: &ProjectConfig) -> String {
 /// without waiting for default-branch CI — the gate resolves, never polls,
 /// so no wait loop can strand a feature branch.
 fn render_binding_gate_job(config: &ProjectConfig, release: &ReleaseSpec) -> String {
-    let setup = workflow_runtime_setup_for_config(config);
+    let setup = if super::runtime_bootstrap::owns_runtime(&config.repository) {
+        format!("      - name: Checkout release source\n        uses: {}\n        with:\n          ref: ${{{{ needs.source.outputs.sha }}}}\n          fetch-depth: 0\n          persist-credentials: false\n{}", ActionPin::Checkout.reference(), workflow_runtime_consumer_setup(config))
+    } else {
+        workflow_runtime_setup_for_config(config)
+    };
     format!(
         "  publish-gate:\n    name: Admit rolling publish\n    needs: source\n    runs-on: {}\n    timeout-minutes: 10\n    outputs:\n      admitted: ${{{{ steps.admit.outputs.admitted }}}}\n      mode: ${{{{ steps.admit.outputs.mode }}}}\n      sha: ${{{{ needs.source.outputs.sha }}}}\n    steps:\n{setup}      - name: Admit producer or resolve drill mode\n        id: admit\n        env:\n          EVENT: ${{{{ github.event_name }}}}\n          REF: ${{{{ github.ref }}}}\n          PRODUCER: ${{{{ github.event.workflow_run.name }}}}\n          CONCLUSION: ${{{{ github.event.workflow_run.conclusion }}}}\n          MODE_INPUT: ${{{{ github.event_name == 'workflow_dispatch' && inputs.mode || '' }}}}\n          EXPECTED: {}\n          BRANCH: {}\n        run: |\n          set -euo pipefail\n          if [ \"$EVENT\" = \"workflow_run\" ]; then\n            velnor-workflow release admit-producer --producer \"$PRODUCER\" --expected \"$EXPECTED\" --conclusion \"$CONCLUSION\"\n            mode=publish\n          elif [ \"$EVENT\" = \"workflow_dispatch\" ]; then\n            mode=\"$(velnor-workflow release resolve-mode --event \"$EVENT\" --input \"${{MODE_INPUT:-validate}}\")\"\n          elif [ \"$EVENT\" = \"push\" ]; then\n            mode=\"$(velnor-workflow release resolve-mode --event push --ref \"$REF\" --rolling true --branch \"$BRANCH\")\"\n          else\n            echo \"::error::unsupported rolling event '$EVENT'\" >&2\n            exit 1\n          fi\n          {{\n            echo \"admitted=true\"\n            echo \"mode=$mode\"\n          }} >> \"$GITHUB_OUTPUT\"\n",
         selected_runner(config),
@@ -2619,12 +2755,25 @@ fn inject_archive_retention(output: &str, release: &ReleaseSpec) -> String {
 }
 
 fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> String {
+    let output = render_preview_body(config, release);
+    match release.filter(|release| matches!(release.kind.as_str(), "rust-binary" | "native")) {
+        Some(release) => format!("{output}{}", runtime_root(config, &release.targets, false)),
+        None => output,
+    }
+}
+
+fn render_preview_body(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> String {
     let Some(release) =
         release.filter(|release| matches!(release.kind.as_str(), "rust-binary" | "native"))
     else {
         return format!(
             "{GENERATED_HEADER}# Preview is omitted: no complete Rust binary release contract.\n"
         );
+    };
+    let runtime_needs = if has_producer_binding(release) {
+        ""
+    } else {
+        runtime_needs(config)
     };
     // The scan refuses a Rust repository without a pin, so this is only
     // unreachable for hand-built configs; without the pin there is no
@@ -2639,7 +2788,7 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
     }
     // The build jobs run only from trusted pushes to the default branch, so
     // that — and nothing broader — is what may save the toolchain cache.
-    let mut toolchain_steps = String::new();
+    let mut toolchain_steps = native_arm64_toolchain_steps(config);
     render_pinned_toolchain_steps(
         &mut toolchain_steps,
         ActionPin::CacheRestore.reference(),
@@ -2662,7 +2811,7 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
     }
     let matrix_runner = release_matrix_runner(config, &release.targets);
     let mut output = format!(
-        r#"{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: true\n\npermissions:\n  contents: read\n\njobs:\n  build:\n    name: Preview / ${{{{ matrix.target }}}}\n    runs-on: {matrix_runner}\n    timeout-minutes: 75\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Build preview binary\n        env:\n          CARGO_INCREMENTAL: "0"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target "${{{{ matrix.target }}}}"\n      - name: Package preview binary\n        run: velnor-workflow release package-binary --target "${{{{ matrix.target }}}}" --version preview --package {} --binary {}\n      - name: Attest preview artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload preview artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 1\n\n  publish:\n    name: Publish rolling preview\n    needs: build\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    permissions:\n      contents: write\n    steps:\n      - name: Download preview artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Replace rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title "Rolling preview"\n          gh release edit preview --target "${{{{ github.sha }}}}" --prerelease\n          gh release upload preview dist/* --clobber\n"#,
+        r#"{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: true\n\npermissions:\n  contents: read\n\njobs:\n  build:\n    name: Preview / ${{{{ matrix.target }}}}\n{runtime_needs}    runs-on: {matrix_runner}\n    timeout-minutes: 75\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Build preview binary\n        env:\n          CARGO_INCREMENTAL: "0"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target "${{{{ matrix.target }}}}"\n      - name: Package preview binary\n        run: velnor-workflow release package-binary --target "${{{{ matrix.target }}}}" --version preview --package {} --binary {}\n      - name: Attest preview artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload preview artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 1\n\n  publish:\n    name: Publish rolling preview\n    needs: build\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    permissions:\n      contents: write\n    steps:\n      - name: Download preview artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Replace rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title "Rolling preview"\n          gh release edit preview --target "${{{{ github.sha }}}}" --prerelease\n          gh release upload preview dist/* --clobber\n"#,
         yaml_scalar(&config.default_branch),
         ActionPin::Checkout.reference(),
         ActionPin::Sccache.reference(),
@@ -2723,7 +2872,7 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         "      - name: Enforce workflow policy\n",
         &format!(
             "{}      - name: Enforce workflow policy\n",
-            workflow_runtime_setup_for_config(config)
+            workflow_runtime_consumer_setup(config)
         ),
     )
     .replacen(
@@ -2830,7 +2979,7 @@ fn inject_tarball_preview_bindings(
                 "      - name: Replace rolling preview\n",
                 &format!(
                     "{}      - name: Assemble release manifest\n        run: |\n          set -euo pipefail\n          velnor-workflow release assemble-manifest --dir dist --subjects \"{subjects}\" --schema {} --repository \"${{{{ github.repository }}}}\" --ref \"${{{{ github.ref }}}}\" --commit \"{commit}\" --version preview\n      - name: Replace rolling preview\n",
-                    workflow_runtime_setup_for_config(config),
+                    workflow_runtime_consumer_setup(config),
                     shell_quote(&release.manifest_schema),
                 ),
                 1,
@@ -3116,13 +3265,14 @@ fn render_version_gate_job(config: &ProjectConfig, spec: &VersionedToolSpec) -> 
 /// The version job: one manifest version plus the runner-configs the build
 /// matrix fans out to, resolved from the dispatch providers input.
 fn render_versioned_tool_version_job(config: &ProjectConfig, spec: &VersionedToolSpec) -> String {
+    let runtime_needs = runtime_needs(config);
     let mut provider_arms = String::new();
     for provider in versioned_tool_providers(config) {
         let configs = shell_quote(&versioned_tool_provider_configs(config, provider));
         let _ = writeln!(provider_arms, "          {provider}) configs={configs} ;;");
     }
     format!(
-        "  version:\n    name: Resolve tool version\n    runs-on: {}\n    timeout-minutes: 10\n    outputs:\n      version: ${{{{ steps.resolve.outputs.version }}}}\n      runner-configs: ${{{{ steps.resolve.outputs.runner-configs }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{}{}      - name: Resolve the tool version from the manifest\n        id: resolve\n        env:\n          PROVIDERS: ${{{{ github.event_name == 'workflow_dispatch' && inputs.providers || '{}' }}}}\n          MANIFEST: {}\n        run: |\n          set -euo pipefail\n          version=\"$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' \"$MANIFEST\" | head -n1)\"\n          case \"$version\" in\n            ''|*[!0-9.]*) echo \"::error::tool version $version is not an X.Y.Z version\" >&2; exit 1 ;;\n          esac\n          [[ \"$version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] \\\n            || {{ echo \"::error::tool version $version is not an X.Y.Z version\" >&2; exit 1; }}\n          case \"$PROVIDERS\" in\n{}            *) echo \"::error::unknown providers '$PROVIDERS'\" >&2; exit 1 ;;\n          esac\n          {{\n            echo \"version=$version\"\n            echo \"runner-configs=$configs\"\n          }} >> \"$GITHUB_OUTPUT\"\n",
+        "  version:\n    name: Resolve tool version\n{runtime_needs}    runs-on: {}\n    timeout-minutes: 10\n    outputs:\n      version: ${{{{ steps.resolve.outputs.version }}}}\n      runner-configs: ${{{{ steps.resolve.outputs.runner-configs }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{}{}      - name: Resolve the tool version from the manifest\n        id: resolve\n        env:\n          PROVIDERS: ${{{{ github.event_name == 'workflow_dispatch' && inputs.providers || '{}' }}}}\n          MANIFEST: {}\n        run: |\n          set -euo pipefail\n          version=\"$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' \"$MANIFEST\" | head -n1)\"\n          case \"$version\" in\n            ''|*[!0-9.]*) echo \"::error::tool version $version is not an X.Y.Z version\" >&2; exit 1 ;;\n          esac\n          [[ \"$version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] \\\n            || {{ echo \"::error::tool version $version is not an X.Y.Z version\" >&2; exit 1; }}\n          case \"$PROVIDERS\" in\n{}            *) echo \"::error::unknown providers '$PROVIDERS'\" >&2; exit 1 ;;\n          esac\n          {{\n            echo \"version=$version\"\n            echo \"runner-configs=$configs\"\n          }} >> \"$GITHUB_OUTPUT\"\n",
         selected_runner(config),
         ActionPin::Checkout.reference(),
         workflow_runtime_setup_for_config(config),
@@ -3223,7 +3373,7 @@ fn render_versioned_tool_release(config: &ProjectConfig, spec: &VersionedToolSpe
     for path in &spec.pull_request_paths {
         let _ = writeln!(pull_request_paths, "      - {}", yaml_scalar(path));
     }
-    format!(
+    let output = format!(
         "{GENERATED_HEADER}name: {}\nrun-name: {}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{}  pull_request:\n    paths:\n{}  workflow_dispatch:\n    inputs:\n      providers:\n        description: Build providers (all builds every provider)\n        required: false\n        default: {}\n        type: choice\n        options:\n{}concurrency:\n  group: ${{{{ github.workflow }}}}-${{{{ github.ref }}}}\n  cancel-in-progress: ${{{{ github.event_name == 'pull_request' }}}}\n\npermissions:\n  contents: read\n\njobs:\n{}{}{}{}{}",
         yaml_scalar(&spec.name),
         yaml_scalar(&format!(
@@ -3240,7 +3390,8 @@ fn render_versioned_tool_release(config: &ProjectConfig, spec: &VersionedToolSpe
         render_versioned_tool_assert_job(config, spec),
         render_versioned_tool_build_job(config, spec),
         render_versioned_tool_publish_job(config, spec),
-    )
+    );
+    format!("{output}{}", runtime_root(config, &spec.targets, false))
 }
 
 pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
@@ -3259,7 +3410,7 @@ pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> S
             "{GENERATED_HEADER}# Release omitted: producer bindings, dispatch modes, archive contracts, and credential pairings render only for the `rust-binary` and `native` publishers (`tasks` renders dispatch modes only).\n"
         );
     }
-    match release.kind.as_str() {
+    let output = match release.kind.as_str() {
         "crates" => render_crates_release(config, release),
         "rust-binary" => render_binary_release(config, release),
         "native" => render_native_release(config, release),
@@ -3271,10 +3422,44 @@ pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> S
         _ => format!(
             "{GENERATED_HEADER}# Release omitted: this publisher requires a separately verified contract.\n"
         ),
+    };
+    if matches!(
+        release.kind.as_str(),
+        "crates" | "rust-binary" | "native" | "docker" | "pages" | "homebrew" | "apt"
+    ) {
+        format!("{output}{}", runtime_root(config, &release.targets, true))
+    } else {
+        output
     }
 }
 
 /// One release unit job for `(provider, unit)`; returns its job id.
+fn render_release_runtime(
+    output: &mut String,
+    config: &ProjectConfig,
+    workflow: &WorkflowIr,
+    provider: ProviderId,
+    unit: &Unit,
+) {
+    if super::runtime_bootstrap::owns_runtime(&config.repository) {
+        output.push_str(&workflow_runtime_consumer_setup(config));
+        return;
+    }
+    workflow.render_workflow_runtime_setup(output, provider);
+    // The generator's own unit runs `--plain --check` with the network
+    // restricted, so its D19 guard needs the pinned policy binary before the
+    // first command. Hosted release jobs already acquire the runtime product
+    // at the pin (the guard finds it on PATH by closure); local providers
+    // run the packaged fleet runtime and provision the pinned product into
+    // the host's persistent executable store instead.
+    if provider.is_local() && super::ir::unit_runs_workflow_plain_check(unit) {
+        output.push_str(&crate::s2::workflow_pinned_policy_runtime_local(
+            &workflow.workflow_revision,
+            "${{ github.workspace }}",
+        ));
+    }
+}
+
 fn render_release_unit_job(
     output: &mut String,
     config: &ProjectConfig,
@@ -3315,19 +3500,7 @@ fn render_release_unit_job(
         "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
         ActionPin::Checkout.reference()
     );
-    workflow.render_workflow_runtime_setup(output, provider);
-    // The generator's own unit runs `--plain --check` with the network
-    // restricted, so its D19 guard needs the pinned policy binary before the
-    // first command. Hosted release jobs already acquire the runtime product
-    // at the pin (the guard finds it on PATH by closure); local providers
-    // run the packaged fleet runtime and provision the pinned product into
-    // the host's persistent executable store instead.
-    if provider.is_local() && super::ir::unit_runs_workflow_plain_check(unit) {
-        output.push_str(&crate::s2::workflow_pinned_policy_runtime_local(
-            &workflow.workflow_revision,
-            "${{ github.workspace }}",
-        ));
-    }
+    render_release_runtime(output, config, workflow, provider, unit);
     workflow.render_tool_provisioning(output, provider, unit, false);
     let cargo_offline = checks_env(unit);
     let cargo_cache_restored = CacheBackend::Detected
@@ -3479,7 +3652,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
 
 fn render_crates_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let mut output = String::from(GENERATED_HEADER);
-    output.push_str(&release_trigger_header(release));
+    output.push_str(&release_trigger_header(config, release));
     let _ = writeln!(
         output,
         "      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Verify tag\n        run: velnor-workflow release verify-tag\n      - name: Run full CI\n        run: velnor-workflow run --config .github/ci/project.toml --scope full\n      - name: Package declared crates\n        run: cargo package --workspace --locked\n\n  publish:\n    name: Publish crates.io packages\n    needs: verify\n    runs-on: ubuntu-24.04\n    timeout-minutes: 45\n    environment: crates.io\n    permissions:\n      contents: read\n      id-token: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Authenticate to crates.io\n        id: auth\n        uses: {}\n      - name: Publish in dependency order\n        env:\n          CARGO_REGISTRY_TOKEN: {}\n        run: |\n          set -euo pipefail\n",
@@ -3530,7 +3703,7 @@ fn render_crates_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         "      - name: Set up sccache\n",
         &format!(
             "{}{}      - name: Set up sccache\n",
-            workflow_runtime_setup_for_config(config),
+            workflow_runtime_root_setup(config),
             policy_enforcement_step()
         ),
     );
@@ -3642,7 +3815,7 @@ fn native_release_build_gate(
 
 fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let mut output = String::from(GENERATED_HEADER);
-    output.push_str(&release_trigger_header(release));
+    output.push_str(&release_trigger_header(config, release));
     let _ = writeln!(
         output,
         "      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Verify tag\n        run: velnor-workflow release verify-tag\n      - name: Run full CI\n        run: velnor-workflow run --config .github/ci/project.toml --scope full\n",
@@ -3665,7 +3838,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         "      - name: Set up sccache\n",
         &format!(
             "{}{}      - name: Set up sccache\n",
-            workflow_runtime_setup_for_config(config),
+            workflow_runtime_root_setup(config),
             policy_enforcement_step()
         ),
     );
@@ -3723,8 +3896,9 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         let build = build.replace(
             "      - name: Set up sccache\n",
             &format!(
-                "{}      - name: Set up sccache\n",
-                workflow_runtime_setup_for_config(config)
+                "{}{}      - name: Set up sccache\n",
+                workflow_runtime_consumer_setup(config),
+                native_arm64_toolchain_steps(config)
             ),
         );
         // A declared rehearse drill finishes its declared work on the
@@ -3845,7 +4019,7 @@ fn inject_binary_bindings(output: &str, config: &ProjectConfig, release: &Releas
                 "      - name: Publish immutable GitHub release\n",
                 &format!(
                     "{}      - name: Assemble release manifest\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release assemble-manifest --dir dist --subjects \"{subjects}\" --schema {} --repository \"${{{{ github.repository }}}}\" --ref \"${{{{ github.ref }}}}\" --commit \"${{{{ github.sha }}}}\" --version \"${{VERSION#v}}\"\n      - name: Publish immutable GitHub release\n",
-                    workflow_runtime_setup_for_config(config),
+                    workflow_runtime_consumer_setup(config),
                     shell_quote(&release.manifest_schema),
                 ),
                 1,
@@ -4095,16 +4269,21 @@ fn render_docker_admit_job(config: &ProjectConfig) -> String {
 /// `verify-tag`, without a Cargo package: the `docker` publisher has none),
 /// and one resolved version flows to every downstream job.
 fn render_docker_verify_job(config: &ProjectConfig) -> String {
+    let runtime_needs = runtime_needs(config);
     let checkout = ActionPin::Checkout.reference();
     // The verify job always runs on the hosted selector, so its runtime
     // install is keyed to that placement — never to the release provider.
-    let setup = workflow_runtime_setup(
-        ProviderId::GithubHosted,
-        &config.repository,
-        &config.workflow_revision,
-    );
+    let setup = if super::runtime_bootstrap::owns_runtime(&config.repository) {
+        workflow_runtime_consumer_setup(config)
+    } else {
+        workflow_runtime_setup(
+            ProviderId::GithubHosted,
+            &config.repository,
+            &config.workflow_revision,
+        )
+    };
     format!(
-        "  verify:\n    name: Control / Verify release\n    runs-on: {runner}\n    timeout-minutes: 30\n    outputs:\n      version: ${{{{ steps.version.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n{POLICY_CHECKOUT_WITH}{setup}{policy}      - name: Verify tag\n        run: velnor-workflow release verify-tag --branch {branch}\n      - name: Resolve release version\n        id: version\n        env:\n          TAG: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          case \"$TAG\" in\n            v[0-9]*) ;;\n            *) echo \"::error::release tag $TAG must match v[0-9]*\" >&2; exit 1 ;;\n          esac\n          version=\"${{TAG#v}}\"\n          case \"$version\" in\n            ''|*['/ ']*) echo \"::error::release version is not portable: $version\" >&2; exit 1 ;;\n          esac\n          echo \"version=$version\" >> \"$GITHUB_OUTPUT\"\n",
+        "  verify:\n    name: Control / Verify release\n{runtime_needs}    runs-on: {runner}\n    timeout-minutes: 30\n    outputs:\n      version: ${{{{ steps.version.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n{POLICY_CHECKOUT_WITH}{setup}{policy}      - name: Verify tag\n        run: velnor-workflow release verify-tag --branch {branch}\n      - name: Resolve release version\n        id: version\n        env:\n          TAG: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          case \"$TAG\" in\n            v[0-9]*) ;;\n            *) echo \"::error::release tag $TAG must match v[0-9]*\" >&2; exit 1 ;;\n          esac\n          version=\"${{TAG#v}}\"\n          case \"$version\" in\n            ''|*['/ ']*) echo \"::error::release version is not portable: $version\" >&2; exit 1 ;;\n          esac\n          echo \"version=$version\" >> \"$GITHUB_OUTPUT\"\n",
         runner = hosted_selector_runs_on(config),
         policy = policy_enforcement_step(),
         branch = shell_quote(&config.default_branch),
@@ -4164,11 +4343,15 @@ fn render_docker_manifest_job(
     let buildx = ActionPin::DockerBuildx.reference();
     // The manifest job always runs on the hosted selector, so its runtime
     // install is keyed to that placement — never to the release provider.
-    let setup = workflow_runtime_setup(
-        ProviderId::GithubHosted,
-        &config.repository,
-        &config.workflow_revision,
-    );
+    let setup = if super::runtime_bootstrap::owns_runtime(&config.repository) {
+        workflow_runtime_consumer_setup(config)
+    } else {
+        workflow_runtime_setup(
+            ProviderId::GithubHosted,
+            &config.repository,
+            &config.workflow_revision,
+        )
+    };
     let arches = docker_platform_arches(release);
     let mut reads = String::new();
     let mut sources = Vec::new();
@@ -4368,11 +4551,17 @@ fn render_package_feed(
     package: &str,
     coordinate: &str,
 ) -> String {
+    let runtime_dependency = if super::runtime_bootstrap::owns_runtime(&config.repository) {
+        ", runtime"
+    } else {
+        ""
+    };
+    let runtime_setup = workflow_runtime_setup_for_config(config);
     let runner = hosted_selector_runs_on(config);
     let package = yaml_scalar(package);
     let coordinate = yaml_scalar(coordinate);
     format!(
-        "{GENERATED_HEADER}name: Package feed\nrun-name: Package feed · {kind} · ${{{{ github.event_name }}}}\n\non:\n  schedule:\n    - cron: '17 4 * * *'\n  workflow_dispatch:\n    inputs:\n      providers:\n        description: Comma-separated provider subset (release publishes from github-hosted)\n        required: false\n        default: github-hosted\n        type: string\n      channel:\n        description: Package channel\n        required: false\n        default: stable\n        type: choice\n        options:\n          - stable\n          - preview\n\nconcurrency:\n  group: package-feed-{kind}-${{{{ github.repository }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  admit-provider:\n    name: Admit feed provider\n    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject Velnor-only feed mutation\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers != '' && !contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,') }}}}\n        run: |\n          echo '{kind} feed mutation publishes from GitHub only' >&2\n          exit 1\n  verify:\n    name: Verify {kind} feed\n    needs: [admit-provider]\n    runs-on: {runner}\n    timeout-minutes: 30\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n{POLICY_CHECKOUT_WITH}{policy}      - name: Verify feed inputs\n        run: velnor-workflow release verify-feed --kind {kind} --package {package} --coordinate {coordinate}\n  mutate:\n    name: Update {kind} feed\n    needs: [admit-provider, verify]\n    if: ${{{{ github.ref == 'refs/heads/{branch}' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.event.inputs.providers == '' || contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,')) }}}}\n    runs-on: {runner}\n    timeout-minutes: 30\n    environment: package-feed\n    permissions:\n      contents: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Update feed\n        env:\n          CHANNEL: ${{{{ github.event.inputs.channel || 'stable' }}}}\n        run: velnor-workflow release update-feed --kind {kind} --package {package} --coordinate {coordinate} --channel \"$CHANNEL\"\n",
+        "{GENERATED_HEADER}name: Package feed\nrun-name: Package feed · {kind} · ${{{{ github.event_name }}}}\n\non:\n  schedule:\n    - cron: '17 4 * * *'\n  workflow_dispatch:\n    inputs:\n      providers:\n        description: Comma-separated provider subset (release publishes from github-hosted)\n        required: false\n        default: github-hosted\n        type: string\n      channel:\n        description: Package channel\n        required: false\n        default: stable\n        type: choice\n        options:\n          - stable\n          - preview\n\nconcurrency:\n  group: package-feed-{kind}-${{{{ github.repository }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  admit-provider:\n    name: Admit feed provider\n    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject Velnor-only feed mutation\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers != '' && !contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,') }}}}\n        run: |\n          echo '{kind} feed mutation publishes from GitHub only' >&2\n          exit 1\n  verify:\n    name: Verify {kind} feed\n    needs: [admit-provider{runtime_dependency}]\n    runs-on: {runner}\n    timeout-minutes: 30\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n{POLICY_CHECKOUT_WITH}{runtime_setup}{policy}      - name: Verify feed inputs\n        run: velnor-workflow release verify-feed --kind {kind} --package {package} --coordinate {coordinate}\n  mutate:\n    name: Update {kind} feed\n    needs: [admit-provider, verify]\n    if: ${{{{ github.ref == 'refs/heads/{branch}' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.event.inputs.providers == '' || contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,')) }}}}\n    runs-on: {runner}\n    timeout-minutes: 30\n    environment: package-feed\n    permissions:\n      contents: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n{runtime_setup}      - name: Update feed\n        env:\n          CHANNEL: ${{{{ github.event.inputs.channel || 'stable' }}}}\n        run: velnor-workflow release update-feed --kind {kind} --package {package} --coordinate {coordinate} --channel \"$CHANNEL\"\n",
         ActionPin::Checkout.reference(),
         ActionPin::Checkout.reference(),
         branch = config.default_branch,
@@ -4381,6 +4570,7 @@ fn render_package_feed(
 }
 
 fn render_pages_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    let runtime_needs = runtime_needs(config);
     let mut output = String::from(GENERATED_HEADER);
     let _ = writeln!(
         output,
@@ -4395,7 +4585,7 @@ fn render_pages_release(config: &ProjectConfig, release: &ReleaseSpec) -> String
         ActionPin::DeployPages.reference(),
     );
     let verify = format!(
-        "  verify:\n    name: Verify documentation release\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    steps:\n      - name: Checkout workflow data\n        uses: {}\n        with:\n{POLICY_CHECKOUT_WITH}{}",
+        "  verify:\n    name: Verify documentation release\n{runtime_needs}    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    steps:\n      - name: Checkout workflow data\n        uses: {}\n        with:\n{POLICY_CHECKOUT_WITH}{}",
         ActionPin::Checkout.reference(),
         policy_enforcement_step(),
     );
@@ -4808,7 +4998,10 @@ fn render_maintenance(config: &ProjectConfig) -> String {
             config.default_branch
         )
     };
-    let setup = if maintenance == ProviderId::GithubHosted {
+    let owner = super::runtime_bootstrap::owns_runtime(&config.repository);
+    let setup = if owner {
+        format!("      - name: Checkout trusted maintenance source\n        uses: {}\n        with:\n          ref: refs/heads/${{{{ github.event.repository.default_branch }}}}\n          fetch-depth: 0\n          persist-credentials: false\n{}", ActionPin::Checkout.reference(), crate::s2::workflow_runtime_download_at(ProviderId::GithubHosted, &config.workflow_revision, ".", true, true))
+    } else if maintenance == ProviderId::GithubHosted {
         let mut setup = workflow_runtime_setup_with_install_rev(
             ProviderId::GithubHosted,
             &config.repository,
@@ -4839,8 +5032,9 @@ fn render_maintenance(config: &ProjectConfig) -> String {
         .map(selector_runs_on_yaml)
         .unwrap_or_default();
 
-    MAINTENANCE_WORKFLOW
+    let output = MAINTENANCE_WORKFLOW
         .replace("VELNOR_RUNTIME_SETUP_STEPS", &setup)
+        .replace("  cache-budget:\n", &format!("  cache-budget:\n{}", if owner { "    needs: [runtime]\n" } else { "" }))
         .replace(
             "__MAINTENANCE_SCHEDULE__",
             &yaml_scalar(&config.maintenance.schedule),
@@ -4872,7 +5066,26 @@ fn render_maintenance(config: &ProjectConfig) -> String {
         .replace(
             "if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}",
             &format!("if: ${{{{ {cache_gate} }}}}"),
+        );
+    if owner {
+        format!(
+            "{output}{}",
+            super::runtime_bootstrap::render_protected_root_job(
+                &config.repository,
+                &config.workflow_revision,
+                if maintenance.is_local() {
+                    crate::s2::provider::provider_caps(maintenance)
+                        .platforms
+                        .first()
+                        .copied()
+                } else {
+                    super::runtime_bootstrap::control_platform(config)
+                },
+            )
         )
+    } else {
+        output
+    }
 }
 
 #[cfg(test)]
@@ -5000,15 +5213,20 @@ cp "$record" "$out"
             );
         }
         initialize_emitted_checkout(&checkout);
-        let target = checkout.join("target/x86_64-unknown-linux-gnu/release");
-        must(fs::create_dir_all(&target), "create emitted-stage target");
-        must(
-            fs::write(target.join("example"), b"release binary fixture\n"),
-            "write emitted-stage binary",
-        );
+        for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] {
+            let target = checkout.join(format!("target/{target}/release"));
+            must(fs::create_dir_all(&target), "create emitted-stage target");
+            must(
+                fs::write(target.join("example"), EMITTED_RELEASE_TOOL_STUB),
+                "write emitted-stage binary",
+            );
+        }
         let release_tool = metadata.join("example-release-tool");
         must(
-            fs::write(&release_tool, EMITTED_RELEASE_TOOL_STUB),
+            fs::write(
+                &release_tool,
+                "#!/bin/sh\nexit 99 # foreign-architecture metadata tool must never execute\n",
+            ),
             "write emitted-stage release tool",
         );
         make_emitted_tool_executable(&release_tool);
@@ -5045,12 +5263,19 @@ cp "$record" "$out"
             !checkout.join("release-metadata").exists(),
             "{label} metadata must remain outside the source checkout"
         );
-        let record_stage = record_stage.replace("${{ matrix.arch }}", "amd64");
-        let status = execute_emitted_stage(&record_stage, &checkout, &runner_temp, source_sha);
-        assert!(
-            status.success(),
-            "{label} emitted package-record stage failed: {status}"
-        );
+        for (arch, target) in [
+            ("amd64", "x86_64-unknown-linux-gnu"),
+            ("arm64", "aarch64-unknown-linux-gnu"),
+        ] {
+            let record_stage = record_stage
+                .replace("${{ matrix.arch }}", arch)
+                .replace("$TARGET", target);
+            let status = execute_emitted_stage(&record_stage, &checkout, &runner_temp, source_sha);
+            assert!(
+                status.success(),
+                "{label}/{arch} must execute native packaged binary, not foreign metadata tool: {status}"
+            );
+        }
         let record = checkout.join("release/package-record.json");
         assert!(record.is_file(), "{label} emitted record is missing");
         let record = must(fs::read_to_string(record), "read emitted package record");
@@ -5212,9 +5437,13 @@ cp "$record" "$out"
             .filter(|line| line.trim_start().starts_with("runs-on:"))
             .map(str::trim)
             .collect();
+        let mut expected = vec![hosted.as_str(), hosted.as_str()];
+        if super::super::runtime_bootstrap::owns_runtime(&config.repository) {
+            expected.push("runs-on: ${{ matrix.runner }}");
+        }
         assert_eq!(
             runs_on.as_slice(),
-            [hosted.as_str(), hosted.as_str()],
+            expected.as_slice(),
             "both maintenance jobs must stay GitHub-hosted: {workflow}"
         );
         assert!(
@@ -5554,8 +5783,251 @@ cp "$record" "$out"
         }
     }
 
+    fn depends_on(jobs: &serde_yaml::Value, job: &str, dependency: &str) -> bool {
+        if job == dependency {
+            return true;
+        }
+        let Some(needs) = jobs.get(job).and_then(|job| job.get("needs")) else {
+            return false;
+        };
+        let parents = if let Some(parent) = needs.as_str() {
+            vec![parent]
+        } else {
+            needs
+                .as_sequence()
+                .map(|needs| needs.iter().filter_map(serde_yaml::Value::as_str).collect())
+                .unwrap_or_default()
+        };
+        parents
+            .into_iter()
+            .any(|parent| depends_on(jobs, parent, dependency))
+    }
+
     /// The native config with the scan's `release-build` marker for the
     /// release package, the only input that arms the identity lane.
+    #[test]
+    fn source_bootstrap_precedes_each_native_release_consumer(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for bound in [false, true] {
+            let mut config = native_identity_config(&["release.yml", "preview.yml"]);
+            config.repository = crate::s2::workflow_setup_action_repository().to_owned();
+            if bound {
+                config
+                    .release
+                    .as_mut()
+                    .ok_or("missing release")?
+                    .producer_workflow = "CI".to_owned();
+            }
+            let release = config.release.as_ref().ok_or("missing release")?;
+            for text in [
+                super::render_preview(&config, Some(release)),
+                super::render_release(&config, release),
+            ] {
+                let yaml: serde_yaml::Value = serde_yaml::from_str(&text)?;
+                let jobs = &yaml["jobs"];
+                assert!(jobs["runtime"].is_mapping(), "missing runtime: {text}");
+                let platforms = jobs["runtime"]["strategy"]["matrix"]["runner"]
+                    .as_sequence()
+                    .ok_or("missing platforms")?;
+                assert!(
+                    platforms
+                        .iter()
+                        .any(|runner| runner.as_str() == Some("ubuntu-24.04-arm")),
+                    "native ARM consumers require an ARM runtime product"
+                );
+                for (id, job) in jobs.as_mapping().ok_or("missing jobs")? {
+                    let id = id.as_str();
+                    for step in job
+                        .get("steps")
+                        .and_then(serde_yaml::Value::as_sequence)
+                        .into_iter()
+                        .flatten()
+                    {
+                        if step["name"].as_str() == Some("Verify Velnor workflow runtime") {
+                            assert!(
+                                depends_on(jobs, id, "runtime"),
+                                "{id} has no runtime dependency (bound={bound})"
+                            );
+                        }
+                        if step["name"].as_str() == Some("Build exact renderer source") {
+                            assert_eq!(
+                                id, "runtime",
+                                "source compilation must stay in its read-only root"
+                            );
+                        }
+                    }
+                }
+                assert_eq!(
+                    jobs["runtime"]["permissions"]["contents"].as_str(),
+                    Some("read")
+                );
+                assert_eq!(
+                    jobs["runtime"]["permissions"]
+                        .as_mapping()
+                        .map(serde_yaml::Mapping::len),
+                    Some(1)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn source_bootstrap_precedes_generic_release_and_maintenance_consumers(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = native_identity_config(&["release.yml"]);
+        config.repository = crate::s2::workflow_setup_action_repository().to_owned();
+        let mut workflows = Vec::new();
+        for kind in [
+            "crates",
+            "rust-binary",
+            "pages",
+            "homebrew",
+            "apt",
+            "docker",
+        ] {
+            let mut spec = if kind == "docker" {
+                docker_spec()
+            } else {
+                binary_spec()
+            };
+            spec.kind = kind.to_owned();
+            spec.packages = vec!["example".to_owned()];
+            spec.artifact_path = "dist".to_owned();
+            spec.source_repository = "example/source".to_owned();
+            spec.consumer_repository = "example/consumer".to_owned();
+            workflows.push((kind, super::render_release(&config, &spec)));
+        }
+        workflows.push(("maintenance", super::render_maintenance(&config)));
+        for (kind, text) in workflows {
+            let yaml: serde_yaml::Value = serde_yaml::from_str(&text)?;
+            let jobs = &yaml["jobs"];
+            assert!(jobs["runtime"].is_mapping(), "{kind}: missing runtime");
+            let mut consumers = 0;
+            for (id, job) in jobs.as_mapping().ok_or("jobs")? {
+                let id = id.as_str();
+                for step in job
+                    .get("steps")
+                    .and_then(serde_yaml::Value::as_sequence)
+                    .into_iter()
+                    .flatten()
+                {
+                    if step["name"].as_str() == Some("Verify Velnor workflow runtime") {
+                        consumers += 1;
+                        assert!(
+                            depends_on(jobs, id, "runtime"),
+                            "{kind}/{id}: missing root dependency"
+                        );
+                    }
+                    if step["name"].as_str() == Some("Build exact renderer source") {
+                        assert_eq!(id, "runtime", "{kind}: compile outside readonly root");
+                    }
+                }
+            }
+            assert!(consumers > 0, "{kind}: expected runtime consumer");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn source_bootstrap_control_platform_follows_explicit_selector_contract() {
+        use crate::s2::provider::{Platform, ProviderSelector};
+        let mut config = config(&["maintenance.yml"], None);
+        config.repository = crate::s2::workflow_setup_action_repository().to_owned();
+        for (labels, expected) in [
+            (vec!["ubuntu-24.04"], Some(Platform::LinuxX64)),
+            (vec!["ubuntu-24.04-arm"], Some(Platform::LinuxArm64)),
+            (vec!["macos-26"], Some(Platform::MacosArm64)),
+            (vec!["custom", "Linux", "ARM64"], Some(Platform::LinuxArm64)),
+            (vec!["custom"], None),
+            (vec!["Linux", "ARM64", "X64"], None),
+        ] {
+            config.selectors.insert(
+                ProviderId::GithubHosted,
+                ProviderSelector {
+                    runs_on: labels.into_iter().map(str::to_owned).collect(),
+                },
+            );
+            assert_eq!(
+                super::super::runtime_bootstrap::control_platform(&config),
+                expected
+            );
+            assert_eq!(
+                super::super::runtime_bootstrap::validate_control_platform(&config).is_ok(),
+                expected.is_some()
+            );
+            if let Some(platform) = expected {
+                let workflow = super::render_maintenance(&config);
+                let expected_runner = match platform {
+                    Platform::LinuxX64 => "runner: [ubuntu-24.04]",
+                    Platform::LinuxArm64 => "runner: [ubuntu-24.04-arm]",
+                    Platform::MacosArm64 => "runner: [macos-26]",
+                };
+                assert!(workflow.contains(expected_runner));
+                assert!(
+                    workflow.contains(&format!("runs-on: {}", hosted_selector_runs_on(&config)))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_bootstrap_preserves_opaque_local_only_modes() {
+        let mut config = config(&["maintenance.yml"], None);
+        config.repository = crate::s2::workflow_setup_action_repository().to_owned();
+        for provider in [ProviderId::Velnor, ProviderId::GithubSelfHosted] {
+            config.providers = BTreeSet::from([provider]);
+            must_some(config.selectors.get_mut(&provider), "local selector").runs_on =
+                vec!["opaque-local-route".to_owned()];
+            for hosted_selector in [Some(vec!["ubuntu-24.04-arm".to_owned()]), None] {
+                if let Some(runs_on) = hosted_selector {
+                    config.selectors.insert(
+                        ProviderId::GithubHosted,
+                        crate::s2::provider::ProviderSelector { runs_on },
+                    );
+                    assert_eq!(
+                        super::super::runtime_bootstrap::control_platform(&config),
+                        Some(crate::s2::provider::Platform::LinuxArm64)
+                    );
+                    assert_eq!(crate::s2::control_plane_runner(&config), "ubuntu-24.04-arm");
+                } else {
+                    config.selectors.remove(&ProviderId::GithubHosted);
+                    assert_eq!(
+                        super::super::runtime_bootstrap::control_platform(&config),
+                        Some(crate::s2::provider::Platform::LinuxX64)
+                    );
+                    assert_eq!(crate::s2::control_plane_runner(&config), "ubuntu-24.04");
+                }
+                assert!(
+                    super::super::runtime_bootstrap::validate_control_platform(&config).is_ok()
+                );
+                let maintenance = super::render_maintenance(&config);
+                assert!(maintenance.contains("runs-on: opaque-local-route"));
+                assert!(maintenance.contains("runner: [ubuntu-24.04]"));
+            }
+        }
+    }
+
+    #[test]
+    fn arm_release_targets_use_native_hosted_runners() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        assert_eq!(
+            super::release_runner(&config, "aarch64-unknown-linux-gnu"),
+            "ubuntu-24.04-arm"
+        );
+        let matrix = super::release_matrix_runner(
+            &config,
+            &[
+                "x86_64-unknown-linux-gnu".to_owned(),
+                "aarch64-unknown-linux-gnu".to_owned(),
+            ],
+        );
+        assert_eq!(matrix, "${{ matrix.runner }}");
+        let step = super::native_arm64_toolchain_steps(&config);
+        assert!(step.contains("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="));
+        assert!(step.contains("CC_aarch64_unknown_linux_gnu="));
+    }
+
     fn native_identity_config(workflow_files: &[&str]) -> ProjectConfig {
         let mut config = config(workflow_files, Some(native_spec()));
         config.analysis.detected = vec!["release-build:example".to_owned()];
@@ -5681,15 +6153,15 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "9bac3040c77b0dc9fb9acf31cabb426f20a8da419f86f976d34819b0c1bc5e75",
+                "af27b09c5eab21de76124f23999835bf6b74667b9eefc4dcfea95f005dd4c4e6",
             ),
             (
                 "preview.yml",
-                "4c47335678cafe07eeb3dfd7f2aacdc8e57535f80fec2a1a9f8fcea7a1336afc",
+                "8cc4016d49a5da1c59395abe2ec1650d1e74a6b8abe1b335f391a26088d6f132",
             ),
             (
                 "maintenance.yml",
-                "3725b27e2f9fe196c7a5694f8e1255feef011f7b88ad52e214c47300809c0328",
+                "881a6d5797cbb89894b8e1ca7bcb4d7f441fa1dbb6e5ac5593938944ceba9f17",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -5802,11 +6274,11 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "084a34fb4f212c89ce2e09912961d4e7cb8ab47a1ad0ea16583d9dbd88e5ee95",
+                "18ec711b4192c768de27b432228881e137ff42a357c62d33a4049c4077e7308e",
             ),
             (
                 "preview.yml",
-                "310361c6c2868ae9e039fca375dfd2c6acea5801ec0e8d1a869619fd61d6bb94",
+                "4eaf335d75ae5e51f66cf6e0c7619672a167cf8289ae325e77f4d218b4fc71be",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -5972,8 +6444,8 @@ cp "$record" "$out"
                 "apple builders use the fixed GitHub-owned macos image: {workflow}"
             );
             assert!(
-                !workflow.contains("ubuntu-24.04-arm"),
-                "no hardcoded arm label may survive: {workflow}"
+                workflow.contains("runner: ubuntu-24.04-arm"),
+                "ARM targets require their native hosted runner: {workflow}"
             );
         }
     }
@@ -6006,8 +6478,8 @@ cp "$record" "$out"
                 "release-side artifact matrices must not carry a dynamic Velnor runner: {workflow}"
             );
             assert!(
-                !workflow.contains("runs-on: ${{ matrix.runner }}"),
-                "hosted-only release-side matrices must use a literal runner: {workflow}"
+                workflow.contains("runs-on: ${{ matrix.runner }}"),
+                "native hosted target matrices must select their architecture runner: {workflow}"
             );
             assert!(
                 workflow.contains("runs-on: ubuntu-24.04"),

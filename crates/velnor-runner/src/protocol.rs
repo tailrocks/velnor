@@ -7739,6 +7739,107 @@ fn download_artifacts_blocking_in_temp_dir(
 mod tests {
     use super::*;
 
+    // These one-request-per-connection fixtures must drain the declared body
+    // before replying: closing a socket with unread upload bytes can reset it.
+    #[cfg(feature = "test-support")]
+    fn read_mock_http_request(reader: &mut impl std::io::Read) -> std::io::Result<Vec<u8>> {
+        use std::io::{BufRead, BufReader, Error, ErrorKind, Read};
+
+        let mut reader = BufReader::new(reader);
+        let mut request = Vec::new();
+        loop {
+            if reader.read_until(b'\n', &mut request)? == 0 {
+                return Err(Error::new(
+                    ErrorKind::UnexpectedEof,
+                    "truncated HTTP headers",
+                ));
+            }
+            if request.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let headers = std::str::from_utf8(&request)
+            .map_err(|error| Error::new(ErrorKind::InvalidData, error))?;
+        let mut content_length = None;
+        for line in headers.lines().skip(1).filter(|line| !line.is_empty()) {
+            let (name, value) = line
+                .split_once(':')
+                .ok_or_else(|| Error::new(ErrorKind::InvalidData, "invalid HTTP header"))?;
+            if name.eq_ignore_ascii_case("transfer-encoding") {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "mock expects Content-Length framing",
+                ));
+            }
+            if name.eq_ignore_ascii_case("content-length") {
+                let length = value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|error| Error::new(ErrorKind::InvalidData, error))?;
+                if content_length.is_some_and(|previous| previous != length) {
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
+                        "conflicting body lengths",
+                    ));
+                }
+                content_length = Some(length);
+            }
+        }
+        let headers_end = request.len();
+        let request_length = headers_end
+            .checked_add(content_length.unwrap_or(0))
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "HTTP request length overflow"))?;
+        request.resize(request_length, 0);
+        reader.read_exact(&mut request[headers_end..])?;
+        Ok(request)
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn mock_http_request_drains_fragmented_body_with_case_insensitive_length() {
+        use std::io::Read;
+
+        let body = vec![b'x'; 256 * 1024];
+        for field in ["Content-Length", "content-length", "cOnTeNt-LeNgTh"] {
+            let headers = format!("PUT /upload HTTP/1.1\r\n{field}: {}\r\n\r\n", body.len());
+            // Separate readers force a read boundary inside the header and
+            // between headers and body, regardless of socket scheduling.
+            let mut reader = headers.as_bytes()[..9]
+                .chain(&headers.as_bytes()[9..])
+                .chain(body.as_slice());
+            let request = read_mock_http_request(&mut reader).unwrap();
+            assert_eq!(&request[..headers.len()], headers.as_bytes());
+            assert_eq!(&request[headers.len()..], body);
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn mock_http_request_rejects_truncated_headers_and_body() {
+        for request in [
+            b"POST / HTTP/1.1\r\nContent-Length: 4\r\n".as_slice(),
+            b"POST / HTTP/1.1\r\ncontent-length: 4\r\n\r\nabc".as_slice(),
+        ] {
+            let error = read_mock_http_request(&mut &request[..]).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn mock_http_request_handles_bodyless_requests_and_rejects_invalid_framing() {
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        assert_eq!(read_mock_http_request(&mut &request[..]).unwrap(), request);
+        for request in [
+            "POST / HTTP/1.1\r\nContent-Length: invalid\r\n\r\n",
+            "POST / HTTP/1.1\r\nContent-Length: 1\r\ncontent-length: 2\r\n\r\nxx",
+            "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        ] {
+            let error = read_mock_http_request(&mut request.as_bytes()).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        }
+    }
+
     #[test]
     fn github_http_transport_accepts_only_explicit_values() {
         assert_eq!(parse_github_http_transport("native").unwrap(), "native");
@@ -7815,7 +7916,7 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn contents_request_types_native_and_curl_failures() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -7835,8 +7936,7 @@ mod tests {
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
-                let mut request = [0_u8; 4096];
-                let _ = stream.read(&mut request).unwrap();
+                read_mock_http_request(&mut stream).unwrap();
                 let reason = match status {
                     200 => "OK",
                     503 => "Service Unavailable",
@@ -8461,31 +8561,7 @@ mod tests {
             let mut requests = Vec::new();
             for index in 0..3 {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 4096];
-                loop {
-                    let count = stream.read(&mut buffer).unwrap();
-                    if count == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buffer[..count]);
-                    let Some(headers_end) =
-                        request.windows(4).position(|window| window == b"\r\n\r\n")
-                    else {
-                        continue;
-                    };
-                    let headers_end = headers_end + 4;
-                    let content_length = String::from_utf8_lossy(&request[..headers_end])
-                        .lines()
-                        .find_map(|line| {
-                            line.strip_prefix("Content-Length:")
-                                .and_then(|value| value.trim().parse::<usize>().ok())
-                        })
-                        .unwrap_or(0);
-                    if request.len() >= headers_end + content_length {
-                        break;
-                    }
-                }
+                let request = read_mock_http_request(&mut stream).unwrap();
                 requests.push(request);
                 let (status, body) = match index {
                     0 => (
@@ -8681,7 +8757,7 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn artifact_upload_preparation_failure_sends_no_create_request() {
-        use std::io::{ErrorKind, Read, Write};
+        use std::io::{ErrorKind, Write};
         use std::net::TcpListener;
         use std::sync::mpsc;
         use std::time::Duration;
@@ -8697,8 +8773,7 @@ mod tests {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         requests += 1;
-                        let mut request = [0_u8; 4096];
-                        let _ = stream.read(&mut request);
+                        let _ = read_mock_http_request(&mut stream);
                         let body = serde_json::json!({
                             "ok": true,
                             "signed_upload_url": format!("{server_base}/upload")
@@ -8857,7 +8932,7 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn artifact_download_rejects_non_200_signed_responses_through_request_path() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         for status in [
@@ -8871,8 +8946,7 @@ mod tests {
             let server = std::thread::spawn(move || {
                 for index in 0..3 {
                     let (mut stream, _) = listener.accept().unwrap();
-                    let mut request = [0_u8; 4096];
-                    let _ = stream.read(&mut request).unwrap();
+                    read_mock_http_request(&mut stream).unwrap();
                     let body = match index {
                         0 => serde_json::json!({
                             "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "consumer", "database_id": 1, "size": 4, "digest": format!("sha256:{}", sha2::Sha256::digest(b"x").iter().map(|b| format!("{b:02x}")).collect::<String>())}]
@@ -8908,7 +8982,7 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn results_service_listing_keeps_rows_from_any_backend_id() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         // Rows are consumed as the server returns them, whatever backend IDs
@@ -8951,18 +9025,7 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 4096];
-            loop {
-                let count = stream.read(&mut buffer).unwrap();
-                if count == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buffer[..count]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
+            let request = read_mock_http_request(&mut stream).unwrap();
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{listing}",
@@ -9007,7 +9070,7 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn results_service_listing_rejects_malformed_rows() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         // Dropping the plan-ID gate keeps structural validation: a row with a
@@ -9027,18 +9090,7 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 4096];
-            loop {
-                let count = stream.read(&mut buffer).unwrap();
-                if count == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buffer[..count]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
+            read_mock_http_request(&mut stream).unwrap();
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{listing}",
@@ -9103,18 +9155,7 @@ mod tests {
             let mut requests = Vec::new();
             for index in 0..3 {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 4096];
-                loop {
-                    let count = stream.read(&mut buffer).unwrap();
-                    if count == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buffer[..count]);
-                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
-                    }
-                }
+                let request = read_mock_http_request(&mut stream).unwrap();
                 requests.push(String::from_utf8_lossy(&request).to_string());
                 let (content_type, body): (&str, Vec<u8>) = match index {
                     0 => (
@@ -9227,18 +9268,7 @@ mod tests {
             let mut requests = Vec::new();
             for index in 0..5 {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 4096];
-                loop {
-                    let count = stream.read(&mut buffer).unwrap();
-                    if count == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buffer[..count]);
-                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
-                    }
-                }
+                let request = read_mock_http_request(&mut stream).unwrap();
                 requests.push(String::from_utf8_lossy(&request).to_string());
                 let (status, body): (&str, String) = match index {
                     0 => ("200 OK", listing.clone()),
@@ -9323,7 +9353,7 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn results_service_download_rejects_zip_path_traversal() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
@@ -9337,8 +9367,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             for index in 0..3 {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0_u8; 4096];
-                let _ = stream.read(&mut request).unwrap();
+                read_mock_http_request(&mut stream).unwrap();
                 let (content_type, body) = match index {
                     0 => (
                         "application/json",
@@ -9376,7 +9405,7 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn results_service_download_cleans_temp_file_after_copy_failure() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -9390,8 +9419,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             for index in 0..3 {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0_u8; 4096];
-                let _ = stream.read(&mut request).unwrap();
+                read_mock_http_request(&mut stream).unwrap();
                 let (content_type, body, content_length) = match index {
                     0 => (
                         "application/json",
@@ -9455,18 +9483,7 @@ mod tests {
             let mut requests = Vec::new();
             for index in 0..3 {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 4096];
-                loop {
-                    let count = stream.read(&mut buffer).unwrap();
-                    if count == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buffer[..count]);
-                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
-                    }
-                }
+                let request = read_mock_http_request(&mut stream).unwrap();
                 let request_text = String::from_utf8_lossy(&request).to_string();
                 requests.push(request_text);
                 let (content_type, body) = match index {
@@ -9539,7 +9556,7 @@ mod tests {
         // download-artifact step. The name filter applies BEFORE any artifact
         // is signed or downloaded, so the server must see exactly one
         // ListArtifacts + one GetSignedArtifactURL + one GET.
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
@@ -9554,18 +9571,7 @@ mod tests {
             let mut requests = Vec::new();
             for index in 0..3 {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 4096];
-                loop {
-                    let count = stream.read(&mut buffer).unwrap();
-                    if count == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buffer[..count]);
-                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
-                    }
-                }
+                let request = read_mock_http_request(&mut stream).unwrap();
                 requests.push(String::from_utf8_lossy(&request).to_string());
                 let (content_type, body) = match index {
                     0 => (
@@ -9659,18 +9665,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             for index in 0..5 {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 4096];
-                loop {
-                    let count = stream.read(&mut buffer).unwrap();
-                    if count == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buffer[..count]);
-                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
-                    }
-                }
+                read_mock_http_request(&mut stream).unwrap();
                 let (content_type, body) = match index {
                     0 => (
                         "application/json",

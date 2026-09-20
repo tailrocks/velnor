@@ -18,6 +18,26 @@ TanStack Start, strict TypeScript, and Bun.
 
 Read the [documentation](/).
 
+For a fresh clone or agent checkout, install the pinned tools and local commit
+checks:
+
+```bash
+mise trust
+mise install
+mise run bootstrap
+```
+
+Normal commits validate the complete staged snapshot with `mise run fmt`, then
+`mise run lint`. Unstaged fixes, helper changes, and untracked dependencies cannot
+make the staged commit pass. The checks do not format or stage files; use
+`mise run fmt-fix`, review the result, and stage it explicitly. Linked worktrees
+share the installed launcher but validate their own indexes. Rerun bootstrap
+after hook tooling changes. Existing foreign hooks are preserved and reported
+for explicit integration rather than overwritten.
+
+See [local validation](plans/ci-performance/local-validation.md) for the tool
+decision, isolation boundaries, regression scenarios, and offline preparation.
+
 ```bash
 bun install
 bun run dev

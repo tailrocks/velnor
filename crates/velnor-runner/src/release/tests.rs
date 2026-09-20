@@ -2026,6 +2026,76 @@ fn emit_package_record_accepts_a_matching_preview_identity() {
     verify_package_record_bytes(bytes.as_bytes(), &Sha256Hex::of_bytes(bytes.as_bytes())).unwrap();
 }
 
+#[test]
+fn emit_package_record_maps_build_kinds_to_package_channels() {
+    let dir = TempDir::new("emit-pkg-channels");
+    let binary = dir.path().join("velnor-runner");
+    std::fs::write(&binary, b"exact-runner-bytes").unwrap();
+    for arch in REQUIRED_ARCHES {
+        for (build_kind, package_kind, tag) in [
+            ("release", PACKAGE_KIND_STABLE, "v0.1.121"),
+            ("preview", PACKAGE_KIND_PREVIEW, "preview"),
+        ] {
+            let identity = EmbeddedIdentity {
+                source_sha: source_sha("commit-seed").as_str().to_string(),
+                tag: tag.into(),
+                kind: build_kind.into(),
+                crate_version: "0.1.121".into(),
+            };
+            for record_kind in [PACKAGE_KIND_STABLE, PACKAGE_KIND_PREVIEW] {
+                let mut record = package_record_for(record_kind, arch);
+                record.architecture.binary_sha256 = Sha256Hex::of_bytes(b"exact-runner-bytes");
+                let result = emit_package_record(PackageRecordEmission {
+                    identity: &identity,
+                    record: &record,
+                    binary: &binary,
+                });
+                if record_kind == package_kind {
+                    result.unwrap();
+                } else {
+                    assert!(result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("does not match this binary's embedded build kind"));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn emit_package_record_rejects_unshippable_build_identities() {
+    let dir = TempDir::new("emit-pkg-unshippable");
+    let binary = dir.path().join("velnor-runner");
+    std::fs::write(&binary, b"exact-runner-bytes").unwrap();
+    for record_kind in [PACKAGE_KIND_STABLE, PACKAGE_KIND_PREVIEW] {
+        let mut record = package_record_for(record_kind, Arch::Amd64);
+        record.architecture.binary_sha256 = Sha256Hex::of_bytes(b"exact-runner-bytes");
+        for (build_kind, source) in [
+            ("development", record.build.commit.as_str()),
+            ("stable", record.build.commit.as_str()),
+            ("unknown", record.build.commit.as_str()),
+            ("release", "development"),
+            ("preview", "development"),
+        ] {
+            let identity = EmbeddedIdentity {
+                source_sha: source.into(),
+                tag: "v0.1.121".into(),
+                kind: build_kind.into(),
+                crate_version: record.build.crate_version.clone(),
+            };
+            assert!(emit_package_record(PackageRecordEmission {
+                identity: &identity,
+                record: &record,
+                binary: &binary,
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("refusing to emit a package record"));
+        }
+    }
+}
+
 /// A record is only ever staged against the bytes it names, from a binary whose
 /// own embedded identity agrees with it.
 #[test]
@@ -2069,7 +2139,7 @@ fn emit_package_record_rejects_every_binding_drift() {
 
     // Kind mismatch: a preview record cannot come from a release-build binary.
     let mut stable_identity = matching.clone();
-    stable_identity.kind = PACKAGE_KIND_STABLE.into();
+    stable_identity.kind = "release".into();
     assert!(emission(&stable_identity, &record)
         .unwrap_err()
         .to_string()
