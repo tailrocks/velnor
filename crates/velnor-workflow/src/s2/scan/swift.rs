@@ -1,7 +1,10 @@
-//! Swift detector: Swift packages and Xcode shared schemes.
+//! Swift detector: Swift packages, Xcode shared schemes, and `XcodeGen` specs.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
+
+use serde_yaml::{Mapping, Value};
 
 use super::file_walk::{
     files_named, join_repo_path, path_prefix, resolve_repo_path, roots_for_manifests,
@@ -164,10 +167,7 @@ fn balanced_group(text: &str) -> Option<(&str, &str)> {
                 index = skip_block_comment(bytes, index)?;
             }
             _ => {
-                let width = text[index..]
-                    .chars()
-                    .next()
-                    .map_or(1, char::len_utf8);
+                let width = text[index..].chars().next().map_or(1, char::len_utf8);
                 index += width;
             }
         }
@@ -256,6 +256,532 @@ fn parse_package_facts(contents: &str) -> PackageFacts {
         tools_version: parse_tools_version(contents),
         has_tests: call_present(contents, ".testTarget"),
         binary_targets: parse_binary_targets(contents),
+    }
+}
+
+/// One `XcodeGen` target: only the facts discovery needs. `target_type` and
+/// `platform` stay optional because partial (included) documents may carry
+/// fragments; the generator itself rejects an invalid final spec loudly.
+struct XcodeGenTarget {
+    name: String,
+    target_type: Option<String>,
+    platform: Option<String>,
+}
+
+/// One declared `XcodeGen` scheme: which targets its build and test actions
+/// cover.
+struct XcodeGenScheme {
+    name: String,
+    build_targets: Vec<String>,
+    test_targets: Vec<String>,
+}
+
+/// A recognized `XcodeGen` specification plus its include closure.
+struct XcodeGenSpec {
+    path: String,
+    name: String,
+    minimum_version: Option<String>,
+    files: Vec<String>,
+    targets: Vec<XcodeGenTarget>,
+    schemes: Vec<XcodeGenScheme>,
+}
+
+/// Bounds for include following: deep or broad chains report a limitation
+/// instead of consuming the scan.
+const XCODEGEN_INCLUDE_DEPTH_LIMIT: usize = 32;
+const XCODEGEN_INCLUDE_FILE_LIMIT: usize = 128;
+
+fn parse_yaml_mapping(contents: &str) -> Option<Mapping> {
+    let config = serde_yaml::ParserConfig::default()
+        .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error);
+    let value: Value = serde_yaml::from_str_with_config(contents, &config).ok()?;
+    value.as_mapping().cloned()
+}
+
+fn mapping_value<'a>(mapping: &'a Mapping, name: &str) -> Option<&'a Value> {
+    mapping
+        .iter()
+        .find_map(|(key, value)| (key.as_str() == name).then_some(value))
+}
+
+fn mapping_text(mapping: &Mapping, name: &str) -> Option<String> {
+    let text = mapping_value(mapping, name)?.as_str()?;
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// Include entries: one path or a list of paths. Anything else is a
+/// limitation, never a silent skip.
+fn include_entries(mapping: &Mapping) -> Result<Vec<String>, &'static str> {
+    let Some(value) = mapping_value(mapping, "include") else {
+        return Ok(Vec::new());
+    };
+    match value {
+        Value::String(path) => Ok(vec![path.clone()]),
+        Value::Sequence(entries) => entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_str()
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_owned)
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or("include entries must be paths"),
+        _ => Err("`include` must be a path or a list of paths"),
+    }
+}
+
+struct SpecClosure<'a> {
+    read: &'a dyn Fn(&str) -> Option<String>,
+    ordered: Vec<(String, Mapping)>,
+    limitations: Vec<String>,
+    visiting: Vec<String>,
+    visited: BTreeSet<String>,
+}
+
+fn visit_spec_file(path: &str, closure: &mut SpecClosure<'_>) {
+    if closure.visited.contains(path) {
+        return;
+    }
+    if closure.visiting.iter().any(|seen| seen == path) {
+        let mut chain = closure.visiting.clone();
+        chain.push(path.to_owned());
+        closure
+            .limitations
+            .push(format!("XcodeGen include cycle: {}.", chain.join(" -> ")));
+        return;
+    }
+    if closure.visiting.len() >= XCODEGEN_INCLUDE_DEPTH_LIMIT {
+        closure.limitations.push(format!(
+            "XcodeGen include chain at `{path}` exceeds {XCODEGEN_INCLUDE_DEPTH_LIMIT} levels; remaining includes are not followed."
+        ));
+        return;
+    }
+    if closure.visited.len() >= XCODEGEN_INCLUDE_FILE_LIMIT {
+        closure.limitations.push(format!(
+            "XcodeGen include closure exceeds {XCODEGEN_INCLUDE_FILE_LIMIT} files at `{path}`; remaining includes are not followed."
+        ));
+        return;
+    }
+    let Some(contents) = (closure.read)(path) else {
+        closure.limitations.push(format!(
+            "XcodeGen include `{path}` matches no tracked file."
+        ));
+        return;
+    };
+    let Some(mapping) = parse_yaml_mapping(&contents) else {
+        closure
+            .limitations
+            .push(format!("XcodeGen include `{path}` is not a YAML mapping."));
+        return;
+    };
+    closure.visiting.push(path.to_owned());
+    match include_entries(&mapping) {
+        Ok(entries) => {
+            let parent = parent_path(path);
+            for entry in entries {
+                match resolve_repo_path(&parent, &entry) {
+                    Some(resolved) => visit_spec_file(&resolved, closure),
+                    None => closure.limitations.push(format!(
+                        "XcodeGen include `{entry}` in `{path}` escapes the repository."
+                    )),
+                }
+            }
+        }
+        Err(problem) => closure.limitations.push(format!(
+            "XcodeGen include in `{path}` is unusable: {problem}."
+        )),
+    }
+    closure.visiting.pop();
+    closure.visited.insert(path.to_owned());
+    closure.ordered.push((path.to_owned(), mapping));
+}
+
+/// Load the include closure in merge order: dependencies first, the entry
+/// last so it wins. The scan only reads these files, never executes them.
+fn load_spec_closure(
+    entry: &str,
+    read: &dyn Fn(&str) -> Option<String>,
+) -> (Vec<(String, Mapping)>, Vec<String>) {
+    let mut closure = SpecClosure {
+        read,
+        ordered: Vec::new(),
+        limitations: Vec::new(),
+        visiting: Vec::new(),
+        visited: BTreeSet::new(),
+    };
+    visit_spec_file(entry, &mut closure);
+    (closure.ordered, closure.limitations)
+}
+
+/// Whether the entry document is an `XcodeGen` spec: a `name` plus a
+/// non-empty `targets` map. Recognition is structural; the filename alone
+/// proves nothing.
+fn is_xcodegen_spec(mapping: &Mapping) -> bool {
+    mapping_text(mapping, "name").is_some()
+        && mapping_value(mapping, "targets")
+            .and_then(Value::as_mapping)
+            .is_some_and(|targets| !targets.is_empty())
+}
+
+fn scheme_build_targets(detail: &Mapping) -> Vec<String> {
+    mapping_value(detail, "build")
+        .and_then(Value::as_mapping)
+        .and_then(|build| mapping_value(build, "targets"))
+        .and_then(Value::as_mapping)
+        .map(|targets| {
+            targets
+                .keys()
+                .map(String::as_str)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn scheme_test_targets(detail: &Mapping) -> Vec<String> {
+    mapping_value(detail, "test")
+        .and_then(Value::as_mapping)
+        .and_then(|test| mapping_value(test, "targets"))
+        .and_then(Value::as_sequence)
+        .map(|targets| {
+            targets
+                .iter()
+                .filter_map(|target| match target {
+                    Value::String(name) => (!name.is_empty()).then(|| name.clone()),
+                    Value::Mapping(detail) => mapping_text(detail, "name"),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn spec_minimum_version(mapping: &Mapping) -> Option<String> {
+    if let Some(version) = mapping_text(mapping, "minimumXcodeGenVersion") {
+        return Some(version);
+    }
+    let options = mapping_value(mapping, "options").and_then(Value::as_mapping)?;
+    mapping_text(options, "minimumXcodeGenVersion")
+}
+
+/// Merge the closure into one spec. Later documents win, so the entry file
+/// overrides its includes. Targets and schemes sort by name for a
+/// deterministic shape.
+fn merge_spec(entry: &str, ordered: &[(String, Mapping)]) -> Option<XcodeGenSpec> {
+    let mut name: Option<String> = None;
+    let mut minimum_version: Option<String> = None;
+    let mut targets: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
+    let mut schemes: BTreeMap<String, XcodeGenScheme> = BTreeMap::new();
+    let mut files = Vec::new();
+    for (path, mapping) in ordered {
+        files.push(path.clone());
+        if let Some(value) = mapping_text(mapping, "name") {
+            name = Some(value);
+        }
+        if let Some(value) = spec_minimum_version(mapping) {
+            minimum_version = Some(value);
+        }
+        if let Some(map) = mapping_value(mapping, "targets").and_then(Value::as_mapping) {
+            for (key, value) in map {
+                let target = key.as_str();
+                let Some(detail) = value.as_mapping() else {
+                    continue;
+                };
+                if target.is_empty() {
+                    continue;
+                }
+                targets.insert(
+                    target.to_owned(),
+                    (
+                        mapping_text(detail, "type"),
+                        mapping_text(detail, "platform"),
+                    ),
+                );
+            }
+        }
+        if let Some(map) = mapping_value(mapping, "schemes").and_then(Value::as_mapping) {
+            for (key, value) in map {
+                let scheme = key.as_str();
+                let Some(detail) = value.as_mapping() else {
+                    continue;
+                };
+                if scheme.is_empty() {
+                    continue;
+                }
+                schemes.insert(
+                    scheme.to_owned(),
+                    XcodeGenScheme {
+                        name: scheme.to_owned(),
+                        build_targets: scheme_build_targets(detail),
+                        test_targets: scheme_test_targets(detail),
+                    },
+                );
+            }
+        }
+    }
+    files.sort();
+    files.dedup();
+    Some(XcodeGenSpec {
+        path: entry.to_owned(),
+        name: name?,
+        minimum_version,
+        files,
+        targets: targets
+            .into_iter()
+            .map(|(name, (target_type, platform))| XcodeGenTarget {
+                name,
+                target_type,
+                platform,
+            })
+            .collect(),
+        schemes: schemes.into_values().collect(),
+    })
+}
+
+/// Build and test destinations mirror the committed-project units: macOS
+/// builds on the host, iOS builds against the generic simulator. Anything
+/// else stays generate-only with a limitation.
+fn xcodegen_destinations(platform: Option<&str>) -> Option<(&'static str, &'static str)> {
+    match platform {
+        Some("macOS") => Some(("", "")),
+        Some("iOS") => Some((
+            " -destination 'generic/platform=iOS Simulator'",
+            " -destination 'platform=iOS Simulator'",
+        )),
+        _ => None,
+    }
+}
+
+/// How the app builds: a chosen scheme plus whether its test action runs,
+/// or generate-only when no scheme can be selected honestly.
+enum SchemePick {
+    Build { scheme: String, testable: bool },
+    GenerateOnly,
+}
+
+/// Select the scheme that builds `app`: a declared scheme merged over the
+/// app's own name wins, else a lone candidate, else the generated
+/// per-target scheme without tests. Several declared candidates stay
+/// generate-only with a note naming them.
+fn select_app_scheme(spec: &XcodeGenSpec, app: &XcodeGenTarget) -> (SchemePick, Option<String>) {
+    let candidates = spec
+        .schemes
+        .iter()
+        .filter(|scheme| {
+            scheme
+                .build_targets
+                .iter()
+                .any(|target| target == &app.name)
+        })
+        .collect::<Vec<_>>();
+    let chosen = candidates
+        .iter()
+        .find(|scheme| scheme.name == app.name)
+        .copied()
+        .or_else(|| {
+            if candidates.len() == 1 {
+                Some(candidates[0])
+            } else {
+                None
+            }
+        });
+    match (chosen, candidates.len()) {
+        (Some(scheme), _) => (
+            SchemePick::Build {
+                scheme: scheme.name.clone(),
+                testable: !scheme.test_targets.is_empty(),
+            },
+            None,
+        ),
+        (None, 0) => (
+            SchemePick::Build {
+                scheme: app.name.clone(),
+                testable: false,
+            },
+            Some(format!(
+                "No declared scheme builds `{}` in `{}`; using the generated per-target scheme while test execution waits on runtime refinement.",
+                app.name, spec.path
+            )),
+        ),
+        (None, _) => {
+            let names = candidates
+                .iter()
+                .map(|scheme| scheme.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            (
+                SchemePick::GenerateOnly,
+                Some(format!(
+                    "Schemes {names} all build `{}` in `{}`; declare the intended scheme to enable the app build.",
+                    app.name, spec.path
+                )),
+            )
+        }
+    }
+}
+
+/// Build the `XcodeGen` unit for one recognized spec: generate the project,
+/// then build (and, for a declared testable scheme, test) the app.
+/// Returns `None` when a committed generated project with shared schemes
+/// already covers the spec, so the two surfaces never double-verify.
+fn xcodegen_unit(spec: &XcodeGenSpec, files: &[String]) -> (Option<Unit>, Vec<String>) {
+    let mut notes = Vec::new();
+    let root = parent_path(&spec.path);
+    let generated = join_repo_path(&root, &format!("{}.xcodeproj", spec.name));
+    let generated_prefix = format!("{generated}/");
+    let covered_by_committed_project = files.iter().any(|file| {
+        file.starts_with(&generated_prefix)
+            && file.contains("/xcshareddata/xcschemes/")
+            && file.ends_with(".xcscheme")
+    });
+    if covered_by_committed_project {
+        notes.push(format!(
+            "Committed `{generated}` covers `{}`; building the committed project while spec drift stays unverified statically.",
+            spec.path
+        ));
+        return (None, notes);
+    }
+    let apps = spec
+        .targets
+        .iter()
+        .filter(|target| target.target_type.as_deref() == Some("application"))
+        .collect::<Vec<_>>();
+    let command_prefix = shell_change_dir(&root);
+    let spec_file = spec.path.rsplit('/').next().unwrap_or(&spec.path);
+    let mut commands = vec![format!(
+        "{command_prefix}xcodegen generate --spec {}",
+        shell_quote(spec_file)
+    )];
+    let mut label = format!("Apple project ({}, XcodeGen generate)", spec.name);
+    let mut id_part = "generate".to_owned();
+    if apps.len() == 1 {
+        let app = apps[0];
+        let Some((build_destination, test_destination)) =
+            xcodegen_destinations(app.platform.as_deref())
+        else {
+            let platform = app.platform.as_deref().map_or_else(
+                || "no declared platform".to_owned(),
+                |platform| format!("`{platform}`"),
+            );
+            notes.push(format!(
+                "App `{}` in `{}` targets {platform}; static discovery builds macOS and iOS apps only.",
+                app.name, spec.path
+            ));
+            return (
+                Some(xcodegen_generate_unit(
+                    spec, &root, spec_file, commands, label, &id_part,
+                )),
+                notes,
+            );
+        };
+        let (pick, note) = select_app_scheme(spec, app);
+        notes.extend(note);
+        if let SchemePick::Build { scheme, testable } = pick {
+            let project = shell_quote(&format!("{}.xcodeproj", spec.name));
+            let scheme_quoted = shell_quote(&scheme);
+            commands.push(format!(
+                "{command_prefix}xcodebuild -project {project} -scheme {scheme_quoted}{build_destination} CODE_SIGNING_ALLOWED=NO build"
+            ));
+            if testable {
+                commands.push(format!(
+                    "{command_prefix}xcodebuild -project {project} -scheme {scheme_quoted}{test_destination} CODE_SIGNING_ALLOWED=NO test"
+                ));
+            }
+            label = format!("Apple app ({scheme}, XcodeGen)");
+            id_part = identifier_suffix(&scheme);
+            if id_part.is_empty() {
+                "app".clone_into(&mut id_part);
+            }
+        }
+    } else if apps.is_empty() {
+        notes.push(format!(
+            "`{}` declares no application target; verifying generation only.",
+            spec.path
+        ));
+    } else {
+        let names = apps
+            .iter()
+            .map(|app| app.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        notes.push(format!(
+            "`{}` declares application targets {names}; declare the intended scheme to enable the app build.",
+            spec.path
+        ));
+    }
+    (
+        Some(xcodegen_generate_unit(
+            spec, &root, spec_file, commands, label, &id_part,
+        )),
+        notes,
+    )
+}
+
+fn xcodegen_generate_unit(
+    spec: &XcodeGenSpec,
+    root: &str,
+    spec_file: &str,
+    commands: Vec<String>,
+    label: String,
+    id_part: &str,
+) -> Unit {
+    let root_part = {
+        let part = identifier_suffix(root);
+        if part.is_empty() {
+            "root".to_owned()
+        } else {
+            part
+        }
+    };
+    let spec_part = identifier_suffix(spec_file);
+    let mut cache_key_files = spec.files.clone();
+    cache_key_files.sort();
+    cache_key_files.dedup();
+    let root_watch = if root == "." {
+        "**".to_owned()
+    } else {
+        format!("{root}/**")
+    };
+    let mut watch = vec![root_watch, "*.xcconfig".to_owned()];
+    watch.extend(spec.files.iter().cloned());
+    watch.sort();
+    watch.dedup();
+    Unit {
+        id: format!("swift-xcodegen-{root_part}-{spec_part}-{id_part}"),
+        label,
+        kind: UnitKind::Swift,
+        root: root.to_owned(),
+        watch,
+        pr_commands: commands.clone(),
+        full_commands: commands,
+        depends_on: Vec::new(),
+        pinned_lockfile: false,
+        cache: Some(CacheSpec {
+            key_files: cache_key_files,
+            paths: vec!["~/Library/Developer/Xcode/DerivedData".to_owned()],
+            purpose: CachePurpose::Generic,
+            mbx_output_cache_justification: None,
+            mutable_mount_seed: false,
+        }),
+        tool_version: spec.minimum_version.clone(),
+        mise_tools: Vec::new(),
+        toolchain: None,
+        services: Vec::new(),
+        trust: crate::s2::provider::TrustReq::UntrustedOk,
+        platform: crate::s2::provider::Platform::MacosArm64,
+        capabilities: crate::s2::provider::Capabilities {
+            native_macos_arm64: true,
+            ..crate::s2::provider::Capabilities::default()
+        },
+        workspace_check: false,
+        products: Vec::new(),
+        prerequisites: Vec::new(),
+        docker_contexts: Vec::new(),
+        env: std::collections::BTreeMap::new(),
+        mbx: None,
+        prepared_tools: Vec::new(),
     }
 }
 
@@ -501,11 +1027,69 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
             "Apple test destinations use platform defaults; review the generated simulator destination when a project requires a named device or OS version.".to_owned(),
         );
     }
+    detect_xcodegen_specs(context, shape);
+}
+
+fn detect_xcodegen_specs(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
+    let mut specs = files_named(context.files, "project.yml");
+    specs.extend(files_named(context.files, "project.yaml"));
+    specs.sort();
+    for spec in &specs {
+        let contents = fs::read_to_string(context.root.join(spec)).unwrap_or_default();
+        let Some(mapping) = parse_yaml_mapping(&contents) else {
+            shape.limitations.push(format!(
+                "Project spec at `{spec}` is not a YAML mapping; no app surface derived."
+            ));
+            continue;
+        };
+        if !is_xcodegen_spec(&mapping) {
+            shape.limitations.push(format!(
+                "Project spec at `{spec}` is not a recognized XcodeGen document; it needs `name` plus a `targets` map."
+            ));
+            continue;
+        }
+        let read = |path: &str| {
+            context
+                .file_set
+                .contains(path)
+                .then(|| fs::read_to_string(context.root.join(path)).ok())
+                .flatten()
+        };
+        let (ordered, closure_notes) = load_spec_closure(spec, &read);
+        shape.limitations.extend(closure_notes);
+        let Some(merged) = merge_spec(spec, &ordered) else {
+            shape.limitations.push(format!(
+                "Project spec at `{spec}` lost its project name while merging includes."
+            ));
+            continue;
+        };
+        shape.detected.push(format!("xcodegen:{}", merged.path));
+        let (unit, unit_notes) = xcodegen_unit(&merged, context.files);
+        shape.limitations.extend(unit_notes);
+        if let Some(unit) = unit {
+            shape.units.push(unit);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_package_facts, PackageFacts};
+    use super::{
+        is_xcodegen_spec, load_spec_closure, merge_spec, parse_package_facts, parse_yaml_mapping,
+        xcodegen_unit, PackageFacts, XcodeGenSpec,
+    };
+    use std::collections::BTreeMap;
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_some<T>(option: Option<T>, context: &str) -> T {
+        match option {
+            Some(value) => value,
+            None => panic!("{context}"),
+        }
+    }
 
     #[test]
     fn tools_version_accepts_dotted_digits_only() {
@@ -604,5 +1188,261 @@ mod tests {
         let facts = parse_package_facts(".binaryTarget(name: \"M\", path: \"\"\"a/b\"\"\")");
         assert_eq!(facts.binary_targets.len(), 1);
         assert_eq!(facts.binary_targets[0].path, None);
+    }
+
+    fn load_merged(
+        entry: &str,
+        files: &BTreeMap<String, String>,
+    ) -> (Option<XcodeGenSpec>, Vec<String>) {
+        let read = |path: &str| files.get(path).cloned();
+        let (ordered, notes) = load_spec_closure(entry, &read);
+        (merge_spec(entry, &ordered), notes)
+    }
+
+    fn spec_files(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(path, contents)| (path.to_string(), contents.to_string()))
+            .collect()
+    }
+
+    const MINIMAL_APP: &str =
+        "name: Widget\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n";
+
+    #[test]
+    fn minimal_spec_yields_generate_plus_build() {
+        let files = spec_files(&[("app/project.yml", MINIMAL_APP)]);
+        let (spec, notes) = load_merged("app/project.yml", &files);
+        assert!(notes.is_empty(), "{notes:?}");
+        let spec = must_some(spec, "spec merges");
+        assert_eq!(spec.name, "Widget");
+        let (unit, notes) = xcodegen_unit(&spec, &[]);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("No declared scheme"), "{}", notes[0]);
+        let unit = must_some(unit, "unit is emitted");
+        assert_eq!(unit.id, "swift-xcodegen-app-project-yml-widgetapp");
+        assert_eq!(unit.label, "Apple app (WidgetApp, XcodeGen)");
+        assert_eq!(unit.pr_commands.len(), 2, "{:?}", unit.pr_commands);
+        assert!(unit.pr_commands[0].contains("xcodegen generate --spec 'project.yml'"));
+        assert!(unit.pr_commands[1].contains("xcodebuild -project 'Widget.xcodeproj'"));
+        assert!(unit.pr_commands[1].contains("-scheme 'WidgetApp'"));
+        assert!(unit.pr_commands[1].contains("CODE_SIGNING_ALLOWED=NO build"));
+    }
+
+    #[test]
+    fn recognition_needs_name_and_targets() {
+        for (name, contents) in [
+            ("no targets", "name: Widget\n"),
+            ("no name", "targets:\n  App:\n    type: application\n"),
+            ("empty targets", "name: Widget\ntargets: {}\n"),
+            ("scalar", "just a string\n"),
+        ] {
+            let mapping = parse_yaml_mapping(contents).unwrap_or_default();
+            assert!(!is_xcodegen_spec(&mapping), "{name} must not classify");
+        }
+        let mapping = must_some(parse_yaml_mapping(MINIMAL_APP), "minimal spec parses");
+        assert!(is_xcodegen_spec(&mapping));
+    }
+
+    #[test]
+    fn duplicate_keys_fail_the_mapping() {
+        assert!(parse_yaml_mapping("name: A\nname: B\ntargets: {}\n").is_none());
+    }
+
+    #[test]
+    fn includes_merge_with_entry_winning() {
+        let files = spec_files(&[
+            (
+                "app/project.yml",
+                "name: Widget\ninclude: base.yml\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n",
+            ),
+            (
+                "app/base.yml",
+                "targets:\n  WidgetApp:\n    type: application\n    platform: iOS\n  WidgetLib:\n    type: framework\n    platform: macOS\n",
+            ),
+        ]);
+        let (spec, notes) = load_merged("app/project.yml", &files);
+        assert!(notes.is_empty(), "{notes:?}");
+        let spec = must_some(spec, "spec merges");
+        assert_eq!(spec.files, vec!["app/base.yml", "app/project.yml"]);
+        let app = must_some(
+            spec.targets
+                .iter()
+                .find(|target| target.name == "WidgetApp"),
+            "app survives the merge",
+        );
+        assert_eq!(app.platform.as_deref(), Some("macOS"));
+        assert!(
+            spec.targets.iter().any(|target| target.name == "WidgetLib"),
+            "included targets join the merge"
+        );
+    }
+
+    #[test]
+    fn include_cycle_reports_a_closed_chain() {
+        let files = spec_files(&[
+            (
+                "a.yml",
+                "name: Widget\ninclude: b.yml\ntargets:\n  App:\n    type: application\n",
+            ),
+            ("b.yml", "include: a.yml\n"),
+        ]);
+        let (spec, notes) = load_merged("a.yml", &files);
+        assert!(spec.is_some(), "the cycle must not drop the spec");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("a.yml -> b.yml -> a.yml"), "{}", notes[0]);
+    }
+
+    #[test]
+    fn escaping_include_is_rejected() {
+        let files = spec_files(&[(
+            "app/project.yml",
+            "name: Widget\ninclude: ../../escape.yml\ntargets:\n  App:\n    type: application\n",
+        )]);
+        let (_, notes) = load_merged("app/project.yml", &files);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("escapes the repository"), "{}", notes[0]);
+    }
+
+    #[test]
+    fn missing_and_malformed_includes_are_reported() {
+        let files = spec_files(&[(
+            "app/project.yml",
+            "name: Widget\ninclude: [gone.yml]\ntargets:\n  App:\n    type: application\n",
+        )]);
+        let (_, notes) = load_merged("app/project.yml", &files);
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("matches no tracked file")),
+            "{notes:?}"
+        );
+        let files = spec_files(&[(
+            "app/project.yml",
+            "name: Widget\ninclude: 42\ntargets:\n  App:\n    type: application\n",
+        )]);
+        let (_, notes) = load_merged("app/project.yml", &files);
+        assert!(
+            notes.iter().any(|note| note.contains("unusable")),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn scheme_selection_prefers_the_app_named_scheme() {
+        let files = spec_files(&[(
+            "app/project.yml",
+            "name: Widget\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n  WidgetAppTests:\n    type: bundle.unit-test\n    platform: macOS\nschemes:\n  Other:\n    build:\n      targets:\n        WidgetApp: all\n  WidgetApp:\n    build:\n      targets:\n        WidgetApp: all\n    test:\n      targets:\n        - WidgetAppTests\n",
+        )]);
+        let (spec, _) = load_merged("app/project.yml", &files);
+        let (unit, notes) = xcodegen_unit(&must_some(spec, "spec merges"), &[]);
+        assert!(notes.is_empty(), "{notes:?}");
+        let unit = must_some(unit, "unit is emitted");
+        assert_eq!(unit.pr_commands.len(), 3, "{:?}", unit.pr_commands);
+        assert!(unit.pr_commands[1].contains("-scheme 'WidgetApp'"));
+        assert!(unit.pr_commands[2].contains("-scheme 'WidgetApp'"));
+        assert!(unit.pr_commands[2].contains("CODE_SIGNING_ALLOWED=NO test"));
+    }
+
+    #[test]
+    fn lone_scheme_candidate_is_picked() {
+        let files = spec_files(&[(
+            "app/project.yml",
+            "name: Widget\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\nschemes:\n  Nightly:\n    build:\n      targets:\n        WidgetApp: all\n",
+        )]);
+        let (spec, _) = load_merged("app/project.yml", &files);
+        let (unit, _) = xcodegen_unit(&must_some(spec, "spec merges"), &[]);
+        let unit = must_some(unit, "unit is emitted");
+        assert!(unit.pr_commands[1].contains("-scheme 'Nightly'"));
+        assert_eq!(
+            unit.pr_commands.len(),
+            2,
+            "a scheme without tests stays build-only"
+        );
+    }
+
+    #[test]
+    fn ambiguous_schemes_stay_generate_only() {
+        let files = spec_files(&[(
+            "app/project.yml",
+            "name: Widget\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\nschemes:\n  Alpha:\n    build:\n      targets:\n        WidgetApp: all\n  Beta:\n    build:\n      targets:\n        WidgetApp: all\n",
+        )]);
+        let (spec, _) = load_merged("app/project.yml", &files);
+        let (unit, notes) = xcodegen_unit(&must_some(spec, "spec merges"), &[]);
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("Alpha") && note.contains("Beta")),
+            "{notes:?}"
+        );
+        assert_eq!(must_some(unit, "unit").pr_commands.len(), 1);
+    }
+
+    #[test]
+    fn multiple_apps_stay_generate_only() {
+        let files = spec_files(&[(
+            "app/project.yml",
+            "name: Widget\ntargets:\n  One:\n    type: application\n    platform: macOS\n  Two:\n    type: application\n    platform: macOS\n",
+        )]);
+        let (spec, _) = load_merged("app/project.yml", &files);
+        let (unit, notes) = xcodegen_unit(&must_some(spec, "spec merges"), &[]);
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("One") && note.contains("Two")),
+            "{notes:?}"
+        );
+        let unit = must_some(unit, "generate-only unit is emitted");
+        assert_eq!(unit.pr_commands.len(), 1);
+        assert!(unit.id.ends_with("-generate"), "{}", unit.id);
+    }
+
+    #[test]
+    fn unsupported_platform_stays_generate_only() {
+        let files = spec_files(&[(
+            "app/project.yml",
+            "name: Widget\ntargets:\n  WidgetApp:\n    type: application\n    platform: tvOS\n",
+        )]);
+        let (spec, _) = load_merged("app/project.yml", &files);
+        let (unit, notes) = xcodegen_unit(&must_some(spec, "spec merges"), &[]);
+        assert!(notes.iter().any(|note| note.contains("tvOS")), "{notes:?}");
+        assert_eq!(must_some(unit, "unit").pr_commands.len(), 1);
+    }
+
+    #[test]
+    fn committed_project_with_schemes_skips_the_unit() {
+        let files = spec_files(&[("app/project.yml", MINIMAL_APP)]);
+        let (spec, _) = load_merged("app/project.yml", &files);
+        let tracked =
+            vec!["app/Widget.xcodeproj/xcshareddata/xcschemes/Widget.xcscheme".to_owned()];
+        let (unit, notes) = xcodegen_unit(&must_some(spec, "spec merges"), &tracked);
+        assert!(unit.is_none());
+        assert!(
+            notes.iter().any(|note| note.contains("Committed")),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn committed_project_without_schemes_keeps_the_unit() {
+        let files = spec_files(&[("app/project.yml", MINIMAL_APP)]);
+        let (spec, _) = load_merged("app/project.yml", &files);
+        let tracked = vec!["app/Widget.xcodeproj/project.pbxproj".to_owned()];
+        let (unit, _) = xcodegen_unit(&must_some(spec, "spec merges"), &tracked);
+        assert!(unit.is_some());
+    }
+
+    #[test]
+    fn minimum_version_lands_on_the_unit() {
+        let files = spec_files(&[(
+            "app/project.yml",
+            "name: Widget\noptions:\n  minimumXcodeGenVersion: 2.46.0\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n",
+        )]);
+        let (spec, _) = load_merged("app/project.yml", &files);
+        let (unit, _) = xcodegen_unit(&must_some(spec, "spec merges"), &[]);
+        assert_eq!(
+            must_some(unit, "unit").tool_version.as_deref(),
+            Some("2.46.0")
+        );
     }
 }

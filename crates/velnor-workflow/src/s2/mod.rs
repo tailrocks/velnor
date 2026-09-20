@@ -9803,6 +9803,166 @@ mod tests {
     }
 
     #[test]
+    fn xcodegen_spec_only_discovers_the_app() {
+        let root = temporary_repository("xcodegen-app");
+        must(
+            fs::create_dir_all(root.join("client")),
+            "create spec directory",
+        );
+        must(
+            fs::write(
+                root.join("client/project.yml"),
+                "name: Widget\noptions:\n  minimumXcodeGenVersion: 2.46.0\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n  WidgetAppTests:\n    type: bundle.unit-test\n    platform: macOS\nschemes:\n  WidgetApp:\n    build:\n      targets:\n        WidgetApp: all\n    test:\n      targets:\n        - WidgetAppTests\n",
+            ),
+            "write project.yml",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan repository",
+        );
+        assert!(
+            config
+                .analysis
+                .detected
+                .iter()
+                .any(|surface| surface == "xcodegen:client/project.yml"),
+            "{:?}",
+            config.analysis.detected
+        );
+        let app = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift && unit.id.contains("xcodegen")),
+            "XcodeGen app unit",
+        );
+        assert_eq!(app.platform, provider::Platform::MacosArm64);
+        assert_eq!(app.tool_version.as_deref(), Some("2.46.0"));
+        assert_eq!(app.pr_commands.len(), 3, "{:?}", app.pr_commands);
+        assert!(app.pr_commands[0].contains("xcodegen generate"));
+        assert!(app.pr_commands[1].contains("CODE_SIGNING_ALLOWED=NO build"));
+        assert!(app.pr_commands[2].contains("CODE_SIGNING_ALLOWED=NO test"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn xcodegen_include_cycle_keeps_the_spec_with_a_diagnostic() {
+        let root = temporary_repository("xcodegen-cycle");
+        must(
+            fs::write(
+                root.join("project.yml"),
+                "name: Widget\ninclude: part.yml\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n",
+            ),
+            "write project.yml",
+        );
+        must(
+            fs::write(root.join("part.yml"), "include: project.yml\n"),
+            "write part.yml",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan repository",
+        );
+        assert!(
+            config.analysis.limitations.iter().any(|limitation| {
+                limitation.contains("project.yml -> part.yml -> project.yml")
+            }),
+            "{:?}",
+            config.analysis.limitations
+        );
+        assert!(
+            config.units.iter().any(|unit| unit.id.contains("xcodegen")),
+            "the cycle must not drop the app unit"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn foreign_project_yml_is_rejected_explicitly() {
+        let root = temporary_repository("foreign-project-yml");
+        must(
+            fs::write(root.join("project.yml"), "version: 1\njobs:\n  test: {}\n"),
+            "write project.yml",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan repository",
+        );
+        assert!(
+            config.analysis.limitations.iter().any(|limitation| {
+                limitation.contains("project.yml")
+                    && limitation.contains("not a recognized XcodeGen document")
+            }),
+            "{:?}",
+            config.analysis.limitations
+        );
+        assert!(
+            !config.units.iter().any(|unit| unit.id.contains("xcodegen")),
+            "a foreign spec must not produce an app unit"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn committed_project_with_schemes_covers_the_spec() {
+        let root = temporary_repository("xcodegen-shadowed");
+        must(
+            fs::create_dir_all(root.join("client/Widget.xcodeproj/xcshareddata/xcschemes")),
+            "create committed schemes",
+        );
+        must(
+            fs::write(
+                root.join("client/Widget.xcodeproj/xcshareddata/xcschemes/Widget.xcscheme"),
+                "<Scheme></Scheme>\n",
+            ),
+            "write scheme",
+        );
+        must(
+            fs::write(
+                root.join("client/project.yml"),
+                "name: Widget\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n",
+            ),
+            "write project.yml",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan repository",
+        );
+        assert!(
+            !config.units.iter().any(|unit| unit.id.contains("xcodegen")),
+            "the committed project must win deduplication"
+        );
+        assert!(
+            config.analysis.limitations.iter().any(|limitation| {
+                limitation.contains("Widget.xcodeproj") && limitation.contains("spec drift")
+            }),
+            "{:?}",
+            config.analysis.limitations
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn xcode_project_units_detect_macos_platform() {
         let root = temporary_repository("xcode-macos");
         let project = root.join("App.xcodeproj");
