@@ -6344,7 +6344,7 @@ cp "$record" "$out"
             "hosted native checks must remain release prerequisites: {stable}"
         );
         assert!(
-            stable.contains("runs-on: macos-15"),
+            stable.contains("runs-on: macos-26"),
             "hosted native checks must retain their native runner: {stable}"
         );
         assert!(
