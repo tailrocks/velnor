@@ -1514,6 +1514,14 @@ fn identity_debian_lane_env(preview: bool, version: &str) -> String {
     }
 }
 
+fn preview_identity_cross_toolchain_steps(preview: bool) -> &'static str {
+    if preview {
+        "      - name: Install Linux arm64 cross toolchain\n        if: matrix.target == 'aarch64-unknown-linux-gnu'\n        run: |\n          set -euo pipefail\n          sudo apt-get update\n          sudo apt-get install -y --no-install-recommends \\\n            gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross\n          command -v aarch64-linux-gnu-gcc\n"
+    } else {
+        ""
+    }
+}
+
 /// The stable deb reuses the build job's release binary instead of building
 /// a second one: one binary feeds the tarball, the record, and the deb,
 /// never two builds that merely should agree. The recorded digest binds the
@@ -1527,6 +1535,10 @@ fn debian_reuse_release_steps(config: &ProjectConfig, release: &ReleaseSpec) -> 
     )
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the release Debian job keeps its ordered packaging steps together"
+)]
 fn render_identity_debian_job(
     config: &ProjectConfig,
     release: &ReleaseSpec,
@@ -1596,14 +1608,9 @@ fn render_identity_debian_job(
     } else {
         "release-metadata"
     };
-    let cross_toolchain = if preview {
-        "      - name: Install Linux arm64 cross toolchain\n        if: matrix.target == 'aarch64-unknown-linux-gnu'\n        run: |\n          set -euo pipefail\n          sudo apt-get update\n          sudo apt-get install -y --no-install-recommends \\\n            gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross\n          command -v aarch64-linux-gnu-gcc\n"
-    } else {
-        ""
-    };
+    let cross_toolchain = preview_identity_cross_toolchain_steps(preview);
     let mut steps = format!(
         "      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}{cross_toolchain}      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Set up sccache\n        uses: {sccache}\n        with:\n          version: v0.16.0\n      - name: Install cargo-deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          cargo install cargo-deb --version 3.7.0 --locked\n          cargo-deb --version\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: {metadata_artifact}\n          path: metadata\n",
-        cross_toolchain = cross_toolchain,
     );
     if preview {
         let _ = writeln!(
