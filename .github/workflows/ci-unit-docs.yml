@@ -102,14 +102,6 @@ on:
         required: false
         type: string
         default: ""
-      policy_runtime:
-        required: false
-        type: boolean
-        default: false
-      candidate_publish:
-        required: false
-        type: boolean
-        default: false
       unit_platform:
         required: false
         type: string
@@ -182,13 +174,10 @@ jobs:
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
-          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$")) and (.policy_binary_sha256 | test("^[0-9a-f]{64}$")) and (.closure | test("^[0-9a-f]{64}$")) and (.policy_closure | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$")) and (.closure | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
           expected="$(jq -er '.binary_sha256' "$manifest")"
           actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
           [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
-          expected="$(jq -er '.policy_binary_sha256' "$manifest")"
-          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{print $1}')"
-          [[ "$actual" == "$expected" ]] || { echo "::error::policy runtime digest mismatch" >&2; exit 1; }
       - name: Add Velnor workflow runtime to PATH
         shell: bash
         env:
@@ -197,12 +186,7 @@ jobs:
           set -euo pipefail
           home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
           install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$home/bin/velnor-workflow"
-          install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy "$home/bin/velnor-workflow-policy"
-          expected_closure="$(jq -er '.policy_closure' .velnor-workflow-runtime/manifest.json)"
-          reported="$("$home/bin/velnor-workflow-policy" --closure)"
-          [[ "$reported" == "$expected_closure" ]] || { echo "::error::policy runtime reports closure $reported, expected $expected_closure" >&2; exit 1; }
           echo "$home/bin" >> "$GITHUB_PATH"
-          echo "VELNOR_WORKFLOW_PINNED_BINARY=$home/bin/velnor-workflow-policy" >> "$GITHUB_ENV"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -357,7 +341,7 @@ jobs:
 
   verify-velnor:
     name: velnor
-    if: ${{ inputs.provider == 'velnor' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ inputs.provider == 'velnor' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && (github.repository == 'tailrocks/velnor' && (false)) }}
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 45
     steps:

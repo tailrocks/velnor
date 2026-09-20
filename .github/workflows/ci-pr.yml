@@ -9,7 +9,7 @@ on:
       providers:
         description: Comma-separated provider subset of [github-hosted, velnor]
         required: false
-        default: github-hosted,velnor
+        default: github-hosted
         type: string
       scope:
         description: Verification scope
@@ -91,13 +91,7 @@ jobs:
           src="$(command -v velnor-workflow)"
           install -m 0755 "$src" "$stage/velnor-workflow"
           digest="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"
-          policy_src="${VELNOR_WORKFLOW_PINNED_BINARY:-$src}"
-          install -m 0755 "$policy_src" "$stage/velnor-workflow-policy"
-          policy_revision="$("$stage/velnor-workflow-policy" --revision)"
-          policy_closure="$("$stage/velnor-workflow-policy" --closure)"
-          [[ "$policy_closure" == "${{ steps.runtime.outputs.closure }}" ]] || { echo "::error::policy runtime reports closure $policy_closure, expected ${{ steps.runtime.outputs.closure }}" >&2; exit 1; }
-          policy_digest="$(sha256sum "$stage/velnor-workflow-policy" | awk '{print $1}')"
-          jq -n --arg repository "$GITHUB_REPOSITORY" --arg revision "$EXPECTED_REVISION" --arg closure "${{ steps.runtime.outputs.closure }}" --arg head_branch "${{ github.ref_name }}" --arg platform "${{ runner.os }}-${{ runner.arch }}" --arg run_id "$GITHUB_RUN_ID" --arg job_id "${{ github.job }}" --arg binary_sha256 "$digest" --arg policy_revision "$policy_revision" --arg policy_closure "$policy_closure" --arg policy_binary_sha256 "$policy_digest" '{repository: $repository, revision: $revision, closure: $closure, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256, policy_revision: $policy_revision, policy_closure: $policy_closure, policy_binary_sha256: $policy_binary_sha256}' > "$stage/manifest.json"
+          jq -n --arg repository "$GITHUB_REPOSITORY" --arg revision "$EXPECTED_REVISION" --arg closure "${{ steps.runtime.outputs.closure }}" --arg head_branch "${{ github.ref_name }}" --arg platform "${{ runner.os }}-${{ runner.arch }}" --arg run_id "$GITHUB_RUN_ID" --arg job_id "${{ github.job }}" --arg binary_sha256 "$digest" '{repository: $repository, revision: $revision, closure: $closure, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}' > "$stage/manifest.json"
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -129,7 +123,7 @@ jobs:
       unit_admission: github-hosted
   velnor-bun-velnor:
     name: "Bun · Bun package (velnor) · velnor — bun-velnor"
-    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"bun-velnor"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"bun-velnor"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-bun.yml
     with:
@@ -177,7 +171,7 @@ jobs:
       unit_admission: github-hosted-trust-gated
   velnor-docker:
     name: "Docker · Docker · velnor — docker"
-    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"docker"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"docker"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-docker.yml
     with:
@@ -218,7 +212,7 @@ jobs:
       unit_admission: github-hosted
   velnor-docs:
     name: "Documentation · Documentation · velnor — docs"
-    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"docs"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"docs"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-docs.yml
     with:
@@ -257,7 +251,7 @@ jobs:
       unit_admission: github-hosted
   velnor-opentofu:
     name: "OpenTofu · OpenTofu · velnor — opentofu"
-    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"opentofu"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"opentofu"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-opentofu.yml
     with:
@@ -276,7 +270,7 @@ jobs:
       unit_admission: velnor-trust-gated
   prepare-cargo:
     name: "Control / Prepare Cargo"
-    if: ${{ always() && needs.plan.result == 'success' && (contains(needs.plan.outputs.units, '"unit_id":"rust-unit-collector"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-bench"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-client"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-control"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-model"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-render"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-runner"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-tools"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow-contract"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnorctl"') || contains(needs.plan.outputs.units, '"unit_id":"rust-production-topology"')) && ((((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))))) }}
+    if: ${{ always() && needs.plan.result == 'success' && (contains(needs.plan.outputs.units, '"unit_id":"rust-unit-collector"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-bench"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-client"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-control"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-model"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-render"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-runner"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-tools"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow-contract"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnorctl"') || contains(needs.plan.outputs.units, '"unit_id":"rust-production-topology"')) && ((github.repository == 'tailrocks/velnor' && (false))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -330,7 +324,7 @@ jobs:
       unit_admission: github-hosted
   velnor-rust-policy:
     name: "Rust · Rust dependency policy · velnor — rust-policy"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-policy"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-policy"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan, prepare-cargo]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -397,7 +391,7 @@ jobs:
       unit_admission: github-hosted
   velnor-rust-unit-collector:
     name: "Rust · unit-collector · velnor — rust-unit-collector"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-unit-collector"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-unit-collector"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan, prepare-cargo]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -518,7 +512,7 @@ jobs:
       unit_admission: github-hosted
   velnor-rust-velnor-bench:
     name: "Rust · velnor-bench · velnor — rust-velnor-bench"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-bench"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-bench"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-model, velnor-rust-velnor-runner]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -592,7 +586,7 @@ jobs:
       unit_admission: github-hosted
   velnor-rust-velnor-client:
     name: "Rust · velnor-client · velnor — rust-velnor-client"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-client"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-client"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-model]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -666,7 +660,7 @@ jobs:
       unit_admission: github-hosted
   velnor-rust-velnor-control:
     name: "Rust · velnor-control · velnor — rust-velnor-control"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-control"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-control"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-model]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -734,7 +728,7 @@ jobs:
       unit_admission: github-hosted
   velnor-rust-velnor-model:
     name: "Rust · velnor-model · velnor — rust-velnor-model"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-model"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-model"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan, prepare-cargo]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -807,7 +801,7 @@ jobs:
       unit_admission: github-hosted
   velnor-rust-velnor-render:
     name: "Rust · velnor-render · velnor — rust-velnor-render"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-render"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-render"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-model]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -924,7 +918,7 @@ jobs:
       unit_admission: github-hosted
   velnor-rust-velnor-runner:
     name: "Rust · velnor-runner · velnor — rust-velnor-runner"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-runner"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-runner"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-control, velnor-rust-velnor-model]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -1005,7 +999,7 @@ jobs:
       unit_admission: github-hosted
   velnor-rust-velnor-tools:
     name: "Rust · velnor-tools · velnor — rust-velnor-tools"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-tools"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-tools"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-client, velnor-rust-velnor-model]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -1043,7 +1037,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: a1e6d261b1d9
+      mbx_compat: d61f3df47ac4
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -1129,14 +1123,13 @@ jobs:
         rust-toolchain
       cargo_root: "crates/velnor-workflow"
       cargo_net_offline: true
-      candidate_publish: true
       unit_platform: linux-x64
       unit_trust: untrusted-ok
       unit_dependencies: rust-velnor-runner
       unit_admission: github-hosted
   velnor-rust-velnor-workflow:
     name: "Rust · velnor-workflow · velnor — rust-velnor-workflow"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-runner]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -1153,7 +1146,6 @@ jobs:
       mbx_enabled: true
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
-      policy_runtime: true
       unit_platform: linux-x64
       unit_trust: untrusted-ok
       unit_dependencies: rust-velnor-runner
@@ -1204,7 +1196,7 @@ jobs:
       unit_admission: github-hosted
   velnor-rust-velnor-workflow-contract:
     name: "Rust · velnor-workflow-contract · velnor — rust-velnor-workflow-contract"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow-contract"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow-contract"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan, prepare-cargo]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -1336,7 +1328,7 @@ jobs:
       unit_admission: github-hosted
   velnor-rust-velnorctl:
     name: "Rust · velnorctl · velnor — rust-velnorctl"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-render.result == 'success' || needs.velnor-rust-velnor-render.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnorctl"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-render.result == 'success' || needs.velnor-rust-velnor-render.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnorctl"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-client, velnor-rust-velnor-control, velnor-rust-velnor-model, velnor-rust-velnor-render, velnor-rust-velnor-runner]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -1399,7 +1391,7 @@ jobs:
       unit_admission: github-hosted
   velnor-rust-production-topology:
     name: "Rust · Rust production topology · velnor — rust-production-topology"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-production-topology"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-production-topology"') && (github.repository == 'tailrocks/velnor' && (false)) }}
     needs: [plan, prepare-cargo]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -1433,8 +1425,8 @@ jobs:
           EXCLUDED: ${{ needs.plan.outputs.excluded }}
           PROVIDER_ADMITTED_GITHUB_HOSTED: ${{ (github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch') }}
           PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED: ${{ ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}
-          PROVIDER_ADMITTED_VELNOR_TRUSTED: ${{ ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}
-          PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED: ${{ (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+          PROVIDER_ADMITTED_VELNOR_TRUSTED: ${{ github.repository == 'tailrocks/velnor' && (false) }}
+          PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED: ${{ (github.repository == 'tailrocks/velnor' && (false)) }}
         shell: bash
         run: |
           set -euo pipefail

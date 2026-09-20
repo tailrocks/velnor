@@ -3,36 +3,34 @@ name: Maintenance
 run-name: Maintenance · ${{ github.event_name }}
 
 on:
-  pull_request:
-    types: [closed]
+  push:
+    branches:
+      - main
   schedule:
     - cron: "31 3 * * *"
-  workflow_dispatch:
-    inputs:
-      pull_request_number:
-        description: Optional closed PR number whose merge cache should be removed
-        required: false
-        type: string
 
 permissions:
-  actions: write
   contents: read
 
 concurrency:
-  group: maintenance-${{ github.repository }}-${{ github.event.pull_request.number || inputs.pull_request_number || github.run_id }}
+  group: maintenance-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   prune-pr-cache:
-    name: Prune closed-PR cache
-    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '') }}
+    name: Prune merged-PR cache
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: read
     steps:
-      - name: Delete merge-ref cache namespace
+      - name: Prune merged-PR merge-ref caches
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request_number }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           delete_cache_id() {
@@ -53,42 +51,69 @@ jobs:
             echo "::error::failed to delete cache id $id after bounded retries" >&2
             return 1
           }
-          ref="refs/pull/$PR_NUMBER/merge"
-          encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
-          listing="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" --jq '.actions_caches[].id')" || {
-            echo "::error::failed to list cache entries for $ref" >&2
+          if [[ ! "$COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::push commit is not a full lowercase SHA" >&2
             exit 1
-          }
-          if [[ -z "$listing" ]]; then
-            echo "No merge-ref cache entries found for $ref"
-            exit 0
           fi
-          mapfile -t cache_ids <<<"$listing"
           deleted=0
           failed=0
-          for id in "${cache_ids[@]}"; do
-            [[ -z "$id" ]] && continue
-            if (( deleted + failed >= 500 )); then
-              echo "::error::maintenance delete bound reached (500 cache deletes); rerun maintenance to continue" >&2
+          pr_listing="$(gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$COMMIT_SHA/pulls" --jq '.[].number')" || {
+            echo "::error::failed to find pull requests associated with pushed commit $COMMIT_SHA" >&2
+            exit 1
+          }
+          if [[ -z "$pr_listing" ]]; then
+            echo "No pull requests are associated with pushed commit $COMMIT_SHA"
+            exit 0
+          fi
+          mapfile -t pr_numbers < <(printf '%s\n' "$pr_listing" | sort -nu)
+          for PR_NUMBER in "${pr_numbers[@]}"; do
+            if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::GitHub returned an invalid pull request number: $PR_NUMBER" >&2
               exit 1
             fi
-            if delete_cache_id "$id"; then
-              deleted=$((deleted + 1))
-            else
-              status=$?
-              if (( status == 2 )); then
+            state="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq .state)" || {
+              echo "::error::failed to check state for pull request $PR_NUMBER" >&2
+              exit 1
+            }
+            if [[ "$state" != "CLOSED" ]]; then
+              echo "Pull request $PR_NUMBER is not closed; leaving its merge-ref caches alone"
+              continue
+            fi
+            ref="refs/pull/$PR_NUMBER/merge"
+            encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
+            listing="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" --jq '.actions_caches[].id')" || {
+              echo "::error::failed to list cache entries for $ref" >&2
+              exit 1
+            }
+            if [[ -z "$listing" ]]; then
+              echo "No merge-ref cache entries found for $ref"
+              continue
+            fi
+            mapfile -t cache_ids <<<"$listing"
+            for id in "${cache_ids[@]}"; do
+              [[ -z "$id" ]] && continue
+              if (( deleted + failed >= 500 )); then
+                echo "::error::maintenance delete bound reached (500 cache deletes); rerun maintenance to continue" >&2
                 exit 1
               fi
-              failed=$((failed + 1))
-            fi
+              if delete_cache_id "$id"; then
+                deleted=$((deleted + 1))
+              else
+                status=$?
+                if (( status == 2 )); then
+                  exit 1
+                fi
+                failed=$((failed + 1))
+              fi
+            done
           done
           if (( failed > 0 )); then
-            echo "::error::$failed closed-PR cache entries could not be deleted; rerun maintenance" >&2
+            echo "::error::$failed merged-PR cache entries could not be deleted; rerun maintenance" >&2
             exit 1
           fi
   cache-budget:
     name: Cache retention
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'schedule' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

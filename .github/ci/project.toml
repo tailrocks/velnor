@@ -6,7 +6,7 @@ verified = true
 default_branch = "main"
 providers = ["github-hosted", "velnor"]
 automatic_providers = ["github-hosted"]
-default_dispatch_providers = ["github-hosted", "velnor"]
+default_dispatch_providers = ["github-hosted"]
 
 [analysis]
 method = "static-filesystem-and-manifest-inspection"
@@ -329,8 +329,8 @@ label = "Rust crate (velnor-workflow)"
 kind = "rust"
 root = "crates/velnor-workflow"
 watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "Dockerfile", "crates/velnor-workflow/**/*.rs", "crates/velnor-workflow/Cargo.toml", "crates/velnor-workflow/README.md", "crates/velnor-workflow/benches/**", "crates/velnor-workflow/build.rs", "crates/velnor-workflow/examples/**", "crates/velnor-workflow/src/**", "crates/velnor-workflow/src/runtime.rs", "crates/velnor-workflow/templates/**", "crates/velnor-workflow/templates/release-package-signer.yml", "crates/velnor-workflow/tests/**", "crates/velnor-workflow/tests/generic_surface_literals.rs", "docker/build-mise.*", "mise.lock", "mise.toml", "rust-toolchain", "rust-toolchain.toml"]
-pr_commands = ["cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../..", "cd -- 'crates/velnor-workflow' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow' && mbx nextest run --locked --all-features --package 'velnor-workflow' --no-tests pass", "cd -- 'crates/velnor-workflow' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnor-workflow' -- -D warnings"]
-full_commands = ["cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../..", "cd -- 'crates/velnor-workflow' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow' && mbx nextest run --locked --all-features --package 'velnor-workflow' --no-tests pass", "cd -- 'crates/velnor-workflow' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnor-workflow' -- -D warnings"]
+pr_commands = ["cd -- 'crates/velnor-workflow' && cargo run --locked -- --plain --check ../..", "cd -- 'crates/velnor-workflow' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow' && mbx nextest run --locked --all-features --package 'velnor-workflow' --no-tests pass", "cd -- 'crates/velnor-workflow' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnor-workflow' -- -D warnings"]
+full_commands = ["cd -- 'crates/velnor-workflow' && cargo run --locked -- --plain --check ../..", "cd -- 'crates/velnor-workflow' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow' && mbx nextest run --locked --all-features --package 'velnor-workflow' --no-tests pass", "cd -- 'crates/velnor-workflow' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnor-workflow' -- -D warnings"]
 depends_on = ["rust-velnor-runner"]
 platform = "linux-x64"
 trust = "untrusted-ok"
