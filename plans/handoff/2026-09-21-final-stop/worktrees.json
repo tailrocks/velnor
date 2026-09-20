@@ -1,0 +1,356 @@
+[
+  {
+    "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/velnor",
+    "HEAD": "ff67693f944d64341dba4225fc0fd5011d4da343",
+    "branch": "refs/heads/codex/rolling-preview-legacy-migration-20260920",
+    "recovery_ref": "refs/handoff/20260921/00"
+  },
+  {
+    "worktree": "/private/tmp/g3-action-review-4f",
+    "HEAD": "4f68c47de2cc246b2a09e154ec2e921d8e378123",
+    "recovery_ref": "refs/handoff/20260921/01"
+  },
+  {
+    "worktree": "/private/tmp/g3-action-review-988",
+    "HEAD": "98808e714b81f11f5258b0f03372a98635bad243",
+    "recovery_ref": "refs/handoff/20260921/02"
+  },
+  {
+    "worktree": "/private/tmp/velnor-284-generate",
+    "HEAD": "311885ea9ff65eadb291760e8ae18129e79b7526",
+    "recovery_ref": "refs/handoff/20260921/03"
+  },
+  {
+    "worktree": "/private/tmp/velnor-966-final-111",
+    "HEAD": "111fb2905e24a7f9f6037b3863d8580433c35b57",
+    "recovery_ref": "refs/handoff/20260921/04"
+  },
+  {
+    "worktree": "/private/tmp/velnor-966-final-5bf",
+    "HEAD": "c364b4b43fb14a069841384cd43829b4c5cd7dd1",
+    "recovery_ref": "refs/handoff/20260921/05"
+  },
+  {
+    "worktree": "/private/tmp/velnor-966-final-review",
+    "HEAD": "60821d8ca267757aedea35792a59145a01b7a1b4",
+    "recovery_ref": "refs/handoff/20260921/06"
+  },
+  {
+    "worktree": "/private/tmp/velnor-966-final2",
+    "HEAD": "26c14b0c3e60c2f226be308a85ec07e4bc96ef09",
+    "recovery_ref": "refs/handoff/20260921/07"
+  },
+  {
+    "worktree": "/private/tmp/velnor-966-race.c6UuGo",
+    "HEAD": "432da51563402fae70e5baed43af331691dfbfa7",
+    "recovery_ref": "refs/handoff/20260921/08"
+  },
+  {
+    "worktree": "/private/tmp/velnor-966-review",
+    "HEAD": "3da71a82c842b6b83f5a61cfa6e8d5a5b41cd58e",
+    "recovery_ref": "refs/handoff/20260921/09"
+  },
+  {
+    "worktree": "/private/tmp/velnor-969",
+    "HEAD": "2445c647dafa43acbc5285c873d3b04174ff75c6",
+    "branch": "refs/heads/fix/per-member-mbx-gating",
+    "recovery_ref": "refs/handoff/20260921/10"
+  },
+  {
+    "worktree": "/private/tmp/velnor-969-review",
+    "HEAD": "2445c647dafa43acbc5285c873d3b04174ff75c6",
+    "recovery_ref": "refs/handoff/20260921/11"
+  },
+  {
+    "worktree": "/private/tmp/velnor-971-sync",
+    "HEAD": "311a3d2658657aabca3183a74bcd300d0a158956",
+    "branch": "refs/heads/sync/velnor-971-main",
+    "recovery_ref": "refs/handoff/20260921/12"
+  },
+  {
+    "worktree": "/private/tmp/velnor-action-review-40dd",
+    "HEAD": "40ddcc02dde1ff07aff538ea2ca95da091379e17",
+    "recovery_ref": "refs/handoff/20260921/13"
+  },
+  {
+    "worktree": "/private/tmp/velnor-action-review-71",
+    "HEAD": "71e9712987de59398dd22b169de308eb972b72d3",
+    "recovery_ref": "refs/handoff/20260921/14"
+  },
+  {
+    "worktree": "/private/tmp/velnor-action-review-9edac5",
+    "HEAD": "9edac5e939ad361277db30ec95d0deb73b0edbed",
+    "recovery_ref": "refs/handoff/20260921/15"
+  },
+  {
+    "worktree": "/private/tmp/velnor-action-review-ab8",
+    "HEAD": "ab8a281277de084e8115653e0d022f805adc1496",
+    "recovery_ref": "refs/handoff/20260921/16"
+  },
+  {
+    "worktree": "/private/tmp/velnor-action-review-b52",
+    "HEAD": "b52d250b4d509c63291d4c857f668aadd5a5d86d",
+    "recovery_ref": "refs/handoff/20260921/17"
+  },
+  {
+    "worktree": "/private/tmp/velnor-action-scanner-runner-parity-20260920",
+    "HEAD": "0d85dfbb3e9515f8a938a40e090a207675f767b7",
+    "branch": "refs/heads/codex/action-scanner-runner-parity-2026-09-20",
+    "recovery_ref": "refs/handoff/20260921/18"
+  },
+  {
+    "worktree": "/private/tmp/velnor-actionlint-e717.IOOP1M",
+    "HEAD": "e717de39b97558117e7e4f55c20216c8a4e4b1fc",
+    "recovery_ref": "refs/handoff/20260921/19"
+  },
+  {
+    "worktree": "/private/tmp/velnor-actionlint-probe.Nod2i0",
+    "HEAD": "9d35469ba484d246ee9e5dad4a8ce8ec8af8fc66",
+    "recovery_ref": "refs/handoff/20260921/20"
+  },
+  {
+    "worktree": "/private/tmp/velnor-c1-20260919",
+    "HEAD": "ded15a449e65dc4aec9d420ef6fbef4387b943d5",
+    "branch": "refs/heads/codex/c1-safe-provisioner-2026-09-19",
+    "recovery_ref": "refs/handoff/20260921/21"
+  },
+  {
+    "worktree": "/private/tmp/velnor-c2-cleanup-recovery-fix-20260920",
+    "HEAD": "f502ef64c821ac157ef05811ae82c48298956934",
+    "branch": "refs/heads/codex/c2-cleanup-recovery-fix-2026-09-20",
+    "recovery_ref": "refs/handoff/20260921/22"
+  },
+  {
+    "worktree": "/private/tmp/velnor-c2-package-cleanup-20260919",
+    "HEAD": "75068c62068642d83fbedd7a36730a35fbef09b6",
+    "branch": "refs/heads/codex/c2-package-cleanup-2026-09-19",
+    "recovery_ref": "refs/handoff/20260921/23"
+  },
+  {
+    "worktree": "/private/tmp/velnor-capacity-20260919",
+    "HEAD": "980b6630c71f7755f3fe8820cac0477f1920d92f",
+    "branch": "refs/heads/codex/global-capacity-2026-09-19",
+    "recovery_ref": "refs/handoff/20260921/24"
+  },
+  {
+    "worktree": "/private/tmp/velnor-checker-proof-authority-20260920",
+    "HEAD": "8301e27649afd054b9665a950bb8496062171b92",
+    "branch": "refs/heads/codex/checker-proof-authority-20260920",
+    "recovery_ref": "refs/handoff/20260921/25"
+  },
+  {
+    "worktree": "/private/tmp/velnor-collector-review-f612",
+    "HEAD": "f61227fbfff027a180c3112ce0bc1a3bed16542e",
+    "recovery_ref": "refs/handoff/20260921/26"
+  },
+  {
+    "worktree": "/private/tmp/velnor-g0-git-env-20260920",
+    "HEAD": "12740bbcd4576d630c09ff2b069c535f4f18e2d8",
+    "branch": "refs/heads/codex/g0-git-environment-fix-20260920",
+    "recovery_ref": "refs/handoff/20260921/28"
+  },
+  {
+    "worktree": "/private/tmp/velnor-g0-remediation-20260920",
+    "HEAD": "e7af6e14034009cdff8eed9c59094264dcd687ab",
+    "branch": "refs/heads/codex/g0-estate-scope-remediation-20260920",
+    "recovery_ref": "refs/handoff/20260921/29"
+  },
+  {
+    "worktree": "/private/tmp/velnor-g3-action-review-exact",
+    "HEAD": "34121c09090b299a4beb531bf445c72c98f00c93",
+    "recovery_ref": "refs/handoff/20260921/30"
+  },
+  {
+    "worktree": "/private/tmp/velnor-generator-20260919",
+    "HEAD": "24f5b6be05fc52c59c45917b02082ab2fe2a9b6b",
+    "branch": "refs/heads/codex/s2-provider-2026-09-19",
+    "recovery_ref": "refs/handoff/20260921/31"
+  },
+  {
+    "worktree": "/private/tmp/velnor-generator-89f82dd8",
+    "HEAD": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+    "recovery_ref": "refs/handoff/20260921/32"
+  },
+  {
+    "worktree": "/private/tmp/velnor-generator-consumer-commit",
+    "HEAD": "9c198d07ea36747bbb4023d4eac072ba1bb6ee3e",
+    "branch": "refs/heads/fix/velnor-generator-consumer-commit",
+    "recovery_ref": "refs/handoff/20260921/33"
+  },
+  {
+    "worktree": "/private/tmp/velnor-lane-compare-failclosed-20260920",
+    "HEAD": "87a645cbf691107a3c4124a79921ddcc843b8385",
+    "branch": "refs/heads/codex/lane-compare-failclosed-fix-20260920",
+    "recovery_ref": "refs/handoff/20260921/34"
+  },
+  {
+    "worktree": "/private/tmp/velnor-package-release-actionlint-20260920",
+    "HEAD": "d9cc46296ff842c006dcccc280cee07dc054b1b0",
+    "branch": "refs/heads/codex/package-release-actionlint-20260920",
+    "recovery_ref": "refs/handoff/20260921/35"
+  },
+  {
+    "worktree": "/private/tmp/velnor-package-release-hardening-20260920",
+    "HEAD": "ee56d8938a222c4bfe1419bee3eee17c00e4c6a7",
+    "branch": "refs/heads/codex/package-release-contract-hardening-20260920",
+    "recovery_ref": "refs/handoff/20260921/36"
+  },
+  {
+    "worktree": "/private/tmp/velnor-pr954-policy-env",
+    "HEAD": "d5a877beb5ea3e84f0eaf75b953154b11882eb02",
+    "branch": "refs/heads/codex/package-release-policy-env",
+    "recovery_ref": "refs/handoff/20260921/37"
+  },
+  {
+    "worktree": "/private/tmp/velnor-pr958-review.occmZS",
+    "HEAD": "43494d4b4d37b9b5dc099fa7bcabdb93483b854a",
+    "recovery_ref": "refs/handoff/20260921/38"
+  },
+  {
+    "worktree": "/private/tmp/velnor-pr964-fix",
+    "HEAD": "aeeb9ae6cffff5d95870de03ab6a44f75e8054d5",
+    "branch": "refs/heads/codex/package-release-verification-hook",
+    "recovery_ref": "refs/handoff/20260921/39"
+  },
+  {
+    "worktree": "/private/tmp/velnor-pr966-325-feasibility.a7OigL/tree",
+    "HEAD": "f4b65e8c087db0c7cc7e4b21ba922d6e5f144f77",
+    "recovery_ref": "refs/handoff/20260921/40"
+  },
+  {
+    "worktree": "/private/tmp/velnor-pr966-325-feasibility.a7OigL/tree-current",
+    "HEAD": "f4b65e8c087db0c7cc7e4b21ba922d6e5f144f77",
+    "recovery_ref": "refs/handoff/20260921/41"
+  },
+  {
+    "worktree": "/private/tmp/velnor-pr966-325-feasibility.a7OigL/tree-pin325",
+    "HEAD": "b1d41a509c74cd00a8af9026e1c23afd356f7aa4",
+    "recovery_ref": "refs/handoff/20260921/42"
+  },
+  {
+    "worktree": "/private/tmp/velnor-pr966-exact-gate-20260920",
+    "HEAD": "77693eb4cbf4297f7fedd03afb7101850e3a2796",
+    "recovery_ref": "refs/handoff/20260921/43"
+  },
+  {
+    "worktree": "/private/tmp/velnor-pr966-exact-gate-284cd-20260920",
+    "HEAD": "284cd33a24cc9bd5ca8ddf3a97c231f4f23d4146",
+    "recovery_ref": "refs/handoff/20260921/44"
+  },
+  {
+    "worktree": "/private/tmp/velnor-pr966-exact-gate-a7a429-20260920",
+    "HEAD": "a7a4298bacc7c8b2c83d853e49d2463e0a962c58",
+    "recovery_ref": "refs/handoff/20260921/45"
+  },
+  {
+    "worktree": "/private/tmp/velnor-pr966-exact-gate-f4b65-20260920",
+    "HEAD": "f4b65e8c087db0c7cc7e4b21ba922d6e5f144f77",
+    "recovery_ref": "refs/handoff/20260921/46"
+  },
+  {
+    "worktree": "/private/tmp/velnor-pr967-integration",
+    "HEAD": "28c0e26b2fa3ddd0656ef9c0cae7e2f36a1d9e6f",
+    "branch": "refs/heads/codex/mr-boxington-directory-cache",
+    "recovery_ref": "refs/handoff/20260921/47"
+  },
+  {
+    "worktree": "/private/tmp/velnor-protocol-20260919",
+    "HEAD": "0e44f29683268bf8db7238788de33ef07533df6c",
+    "branch": "refs/heads/codex/scaleset-protocol-2026-09-19",
+    "recovery_ref": "refs/handoff/20260921/48"
+  },
+  {
+    "worktree": "/private/tmp/velnor-reconcile-2026-09-19",
+    "HEAD": "fa9e475f56e98d182c2ba3c84e129996fcaa4927",
+    "branch": "refs/heads/codex/reconcile-2026-09-19",
+    "recovery_ref": "refs/handoff/20260921/49"
+  },
+  {
+    "worktree": "/private/tmp/velnor-reconcile-lane-base-d36fb16b",
+    "HEAD": "d36fb16b0b61a7853d06aa6ae3a7c54772723eec",
+    "recovery_ref": "refs/handoff/20260921/50"
+  },
+  {
+    "worktree": "/private/tmp/velnor-review-969.UEkYXO",
+    "HEAD": "2445c647dafa43acbc5285c873d3b04174ff75c6",
+    "recovery_ref": "refs/handoff/20260921/51"
+  },
+  {
+    "worktree": "/private/tmp/velnor-review-fba55325",
+    "HEAD": "fba55325e9242986b4e21cef40e84010c87168cc",
+    "recovery_ref": "refs/handoff/20260921/52"
+  },
+  {
+    "worktree": "/private/tmp/velnor-runner-20260919",
+    "HEAD": "66521a0fa57424a6dc527202df1580ecdc846752",
+    "branch": "refs/heads/codex/runner-hardening-2026-09-19",
+    "recovery_ref": "refs/handoff/20260921/53"
+  },
+  {
+    "worktree": "/private/tmp/velnor-runner-diagnostics-dirfd-20260920",
+    "HEAD": "ccb150d10213c26fa905ffe941ee7609a9c9005a",
+    "branch": "refs/heads/codex/runner-diagnostics-dirfd-fix-20260920",
+    "recovery_ref": "refs/handoff/20260921/54"
+  },
+  {
+    "worktree": "/private/tmp/velnor-runner-protocol-fix-20260920",
+    "HEAD": "a3ae37c3e4785bd5f89b2f5d0ec4e9cd6d489e91",
+    "branch": "refs/heads/codex/runner-protocol-classification-fix-2026-09-20",
+    "recovery_ref": "refs/handoff/20260921/55"
+  },
+  {
+    "worktree": "/private/tmp/velnor-runtime-60e4",
+    "HEAD": "58b5c8122bb7aa2c0431dfea64bd7daf50c55624",
+    "recovery_ref": "refs/handoff/20260921/56"
+  },
+  {
+    "worktree": "/private/tmp/velnor-s2-mod-merge",
+    "HEAD": "7726f659ee9e4fd2f3cf4183c086d6e689dd3cea",
+    "recovery_ref": "refs/handoff/20260921/57"
+  },
+  {
+    "worktree": "/private/tmp/velnor-scaleset-20260919",
+    "HEAD": "85da3321b1a2866b3f106b4df6c6c82ce1dbcb05",
+    "branch": "refs/heads/codex/scaleset-lifecycle-2026-09-19",
+    "recovery_ref": "refs/handoff/20260921/58"
+  },
+  {
+    "worktree": "/private/tmp/velnor-scan-integrity-path-hardening-2026-09-20",
+    "HEAD": "11871703a5bed995a06bee09760c302f1d943773",
+    "branch": "refs/heads/codex/scan-integrity-path-hardening-2026-09-20",
+    "recovery_ref": "refs/handoff/20260921/59"
+  },
+  {
+    "worktree": "/private/tmp/velnor-skills-adapter-correctness-fix",
+    "HEAD": "b147479e0a6c0c00d382280f5d94d3549c5f199e",
+    "branch": "refs/heads/codex/skills-adapter-correctness-fix",
+    "recovery_ref": "refs/handoff/20260921/60"
+  },
+  {
+    "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-action-scanner",
+    "HEAD": "ab8a281277de084e8115653e0d022f805adc1496",
+    "branch": "refs/heads/codex/github-first-action-scanner",
+    "recovery_ref": "refs/handoff/20260921/61"
+  },
+  {
+    "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/velnor-bastion-final-plan",
+    "HEAD": "e897ad32dd4c4a6f7640fdd5d8713070c87fb266",
+    "branch": "refs/heads/docs/bastion-final-plan",
+    "recovery_ref": "refs/handoff/20260921/62"
+  },
+  {
+    "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/velnor-bootstrap",
+    "HEAD": "9f40f92925f930ef9359a71805fd386f0378d065",
+    "recovery_ref": "refs/handoff/20260921/63"
+  },
+  {
+    "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/velnor-pr954-followup",
+    "HEAD": "27c800addc7d0e02ba13f49a3615d057479dab30",
+    "recovery_ref": "refs/handoff/20260921/64"
+  },
+  {
+    "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/velnor/.muse/worktrees/subagent-v2-01a0a9e7-d86d-7db3-b1cf-7651b6b10e3d-01a0a9fe-5f36-7bb3-b37f-707443597765",
+    "HEAD": "95c9e26cff7e3ea7fb183e8b4de9e8ad100b746d",
+    "recovery_ref": "refs/handoff/20260921/65"
+  }
+]

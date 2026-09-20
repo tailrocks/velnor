@@ -1,0 +1,187 @@
+[
+  {
+    "path": "/Users/donbeave/Projects/tailrocks/velnor-project/velnor",
+    "head": "f587b89f2eead8c0f9d2aac3f6cf55d9427a5c58",
+    "branch": "refs/heads/codex/rolling-preview-legacy-migration-20260920",
+    "tracked_changes": 117,
+    "untracked": [
+      "crates/velnor-workflow/src/s2/consumer_negatives.rs",
+      "crates/velnor-workflow/src/s2/primitives/release/apt.rs",
+      "crates/velnor-workflow/src/s2/promote.rs",
+      "crates/velnor-workflow/src/s2/renovate_renderer.rs",
+      "crates/velnor-workflow/src/s2/safe_fs.rs",
+      "crates/velnor-workflow/src/s2/safe_fs/pinned_command.rs",
+      "crates/velnor-workflow/tests/s2_contract.rs",
+      "crates/velnor-workflow/tests/schema2_migration.rs",
+      "migrations/generic-workflow-generator/schema2-config.py",
+      "migrations/generic-workflow-generator/schema2-config.sh",
+      "migrations/generic-workflow-generator/tests/__pycache__/test_schema2_config.cpython-314.pyc",
+      "migrations/generic-workflow-generator/tests/fixtures/schema1-legacy.toml",
+      "migrations/generic-workflow-generator/tests/fixtures/schema2-roundtrip.toml",
+      "migrations/generic-workflow-generator/tests/schema2-config-shell.sh",
+      "migrations/generic-workflow-generator/tests/test_schema2_config.py"
+    ],
+    "checkpoint": "ff67693f944d64341dba4225fc0fd5011d4da343"
+  },
+  {
+    "path": "/private/tmp/velnor-966-final-5bf",
+    "head": "5bf3180a04980141f000215a24b9a9ba9f93ce26",
+    "branch": null,
+    "tracked_changes": 1,
+    "untracked": [],
+    "checkpoint": "c364b4b43fb14a069841384cd43829b4c5cd7dd1"
+  },
+  {
+    "path": "/private/tmp/velnor-action-scanner-runner-parity-20260920",
+    "head": "026ecfdc9b2e53aec222a9339ef894f689b2d702",
+    "branch": "refs/heads/codex/action-scanner-runner-parity-2026-09-20",
+    "tracked_changes": 50,
+    "untracked": [
+      "crates/velnor-action-manifest/Cargo.toml",
+      "crates/velnor-action-manifest/src/lib.rs",
+      "crates/velnor-expression/Cargo.toml",
+      "crates/velnor-expression/src/lexer.rs",
+      "crates/velnor-expression/src/lib.rs",
+      "crates/velnor-expression/src/parser.rs",
+      "crates/velnor-expression/src/spans.rs",
+      "crates/velnor-expression/src/value.rs"
+    ],
+    "checkpoint": "0d85dfbb3e9515f8a938a40e090a207675f767b7"
+  },
+  {
+    "path": "/private/tmp/velnor-actionlint-probe.Nod2i0",
+    "head": "e717de39b97558117e7e4f55c20216c8a4e4b1fc",
+    "branch": null,
+    "tracked_changes": 1,
+    "untracked": [],
+    "checkpoint": "9d35469ba484d246ee9e5dad4a8ce8ec8af8fc66"
+  },
+  {
+    "path": "/private/tmp/velnor-c2-cleanup-recovery-fix-20260920",
+    "head": "75068c62068642d83fbedd7a36730a35fbef09b6",
+    "branch": "refs/heads/codex/c2-cleanup-recovery-fix-2026-09-20",
+    "tracked_changes": 17,
+    "untracked": [
+      "crates/velnor-runner/src/docker_lease_protocol_tests.rs",
+      "crates/velnor-runner/src/docker_lease_tls.rs"
+    ],
+    "checkpoint": "f502ef64c821ac157ef05811ae82c48298956934"
+  },
+  {
+    "path": "/private/tmp/velnor-checker-proof-authority-20260920",
+    "head": "ba4d13a8193d262980c9ce18d101f3fa4976e8a0",
+    "branch": "refs/heads/codex/checker-proof-authority-20260920",
+    "tracked_changes": 2,
+    "untracked": [],
+    "checkpoint": "8301e27649afd054b9665a950bb8496062171b92"
+  },
+  {
+    "path": "/private/tmp/velnor-generator-20260919",
+    "head": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+    "branch": "refs/heads/codex/s2-provider-2026-09-19",
+    "tracked_changes": 149,
+    "untracked": [
+      ".github/workflows/ci-unit-bun-github-hosted.yml",
+      ".github/workflows/ci-unit-bun-github-self-hosted.yml",
+      ".github/workflows/ci-unit-bun-velnor.yml",
+      ".github/workflows/ci-unit-docker-github-hosted.yml",
+      ".github/workflows/ci-unit-docker-github-self-hosted.yml",
+      ".github/workflows/ci-unit-docker-velnor.yml",
+      ".github/workflows/ci-unit-docs-github-hosted.yml",
+      ".github/workflows/ci-unit-docs-github-self-hosted.yml",
+      ".github/workflows/ci-unit-docs-velnor.yml",
+      ".github/workflows/ci-unit-opentofu-github-hosted.yml",
+      ".github/workflows/ci-unit-opentofu-github-self-hosted.yml",
+      ".github/workflows/ci-unit-opentofu-velnor.yml",
+      ".github/workflows/ci-unit-rust-github-hosted.yml",
+      ".github/workflows/ci-unit-rust-github-self-hosted.yml",
+      ".github/workflows/ci-unit-rust-prepare-cargo.yml",
+      ".github/workflows/ci-unit-rust-velnor.yml",
+      "crates/velnor-workflow/src/s2/apt.rs",
+      "crates/velnor-workflow/src/s2/config/release_tasks_tests.rs",
+      "crates/velnor-workflow/src/s2/consumer_negatives.rs",
+      "crates/velnor-workflow/src/s2/generic_surface_literals.rs",
+      "crates/velnor-workflow/src/s2/primitives/release_tasks.rs",
+      "crates/velnor-workflow/src/s2/runtime/promote.rs"
+    ],
+    "checkpoint": "24f5b6be05fc52c59c45917b02082ab2fe2a9b6b"
+  },
+  {
+    "path": "/private/tmp/velnor-pr966-325-feasibility.a7OigL/tree-pin325",
+    "head": "f4b65e8c087db0c7cc7e4b21ba922d6e5f144f77",
+    "branch": null,
+    "tracked_changes": 15,
+    "untracked": [],
+    "checkpoint": "b1d41a509c74cd00a8af9026e1c23afd356f7aa4"
+  },
+  {
+    "path": "/private/tmp/velnor-reconcile-2026-09-19",
+    "head": "ad93afcd6425caff94c9c8cf5f6f55bd6b80ea6d",
+    "branch": "refs/heads/codex/reconcile-2026-09-19",
+    "tracked_changes": 93,
+    "untracked": [
+      "crates/velnor-runner/src/scaleset/worker/secure_fs.rs"
+    ],
+    "checkpoint": "fa9e475f56e98d182c2ba3c84e129996fcaa4927"
+  },
+  {
+    "path": "/private/tmp/velnor-runner-diagnostics-dirfd-20260920",
+    "head": "e713841bdb9c33d853b7a9af88ceac924af1b3b6",
+    "branch": "refs/heads/codex/runner-diagnostics-dirfd-fix-20260920",
+    "tracked_changes": 5,
+    "untracked": [
+      "crates/velnor-runner/src/scaleset/worker/secure_fs.rs"
+    ],
+    "checkpoint": "ccb150d10213c26fa905ffe941ee7609a9c9005a"
+  },
+  {
+    "path": "/private/tmp/velnor-s2-mod-merge",
+    "head": "893ac8313004a1b45b29d94589dc2d7b054ddf13",
+    "branch": null,
+    "tracked_changes": 1,
+    "untracked": [],
+    "checkpoint": "7726f659ee9e4fd2f3cf4183c086d6e689dd3cea"
+  },
+  {
+    "path": "/private/tmp/velnor-scan-integrity-path-hardening-2026-09-20",
+    "head": "893ac8313004a1b45b29d94589dc2d7b054ddf13",
+    "branch": "refs/heads/codex/scan-integrity-path-hardening-2026-09-20",
+    "tracked_changes": 49,
+    "untracked": [],
+    "checkpoint": "11871703a5bed995a06bee09760c302f1d943773"
+  },
+  {
+    "path": "/private/tmp/velnor-skills-adapter-correctness-fix",
+    "head": "30927ca1a747f04878a183cf8c7be1d2ad4953c2",
+    "branch": "refs/heads/codex/skills-adapter-correctness-fix",
+    "tracked_changes": 13,
+    "untracked": [
+      "crates/velnor-workflow/src/s2/scan/skills_tests.rs"
+    ],
+    "checkpoint": "b147479e0a6c0c00d382280f5d94d3549c5f199e"
+  },
+  {
+    "path": "/Users/donbeave/Projects/tailrocks/velnor-project/velnor-pr954-followup",
+    "head": "85edab7bbbc72c8c9b81c25cc0f742a81dbf004a",
+    "branch": null,
+    "tracked_changes": 2,
+    "untracked": [
+      "crates/velnor-workflow/tests/fixtures/package-release/preview/identity.json",
+      "crates/velnor-workflow/tests/fixtures/package-release/preview/package.tar.gz",
+      "crates/velnor-workflow/tests/fixtures/package-release/preview/provenance.json",
+      "crates/velnor-workflow/tests/fixtures/package-release/preview/release-manifest.json",
+      "crates/velnor-workflow/tests/fixtures/package-release/stable/identity.json",
+      "crates/velnor-workflow/tests/fixtures/package-release/stable/package.tar.gz",
+      "crates/velnor-workflow/tests/fixtures/package-release/stable/release-manifest.json"
+    ],
+    "checkpoint": "27c800addc7d0e02ba13f49a3615d057479dab30"
+  },
+  {
+    "path": "/Users/donbeave/Projects/tailrocks/velnor-project/velnor/.muse/worktrees/subagent-v2-01a0a9e7-d86d-7db3-b1cf-7651b6b10e3d-01a0a9fe-5f36-7bb3-b37f-707443597765",
+    "head": "cd6ea90d9e04bbca7ad9a25f1f4e37a6f5fa12f7",
+    "branch": null,
+    "tracked_changes": 2,
+    "untracked": [],
+    "checkpoint": "95c9e26cff7e3ea7fb183e8b4de9e8ad100b746d"
+  }
+]
