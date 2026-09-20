@@ -44,12 +44,16 @@ pub(super) type TestPendingRenameHook = Box<dyn FnOnce() + Send + 'static>;
 pub(super) type TestMaterializeRenameHook = Box<dyn FnOnce() + Send + 'static>;
 
 #[cfg(test)]
+pub(super) type TestSuccessfulCleanupHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
 use std::cell::RefCell;
 
 #[cfg(test)]
 thread_local! {
     static TEST_PENDING_RENAME_HOOK: RefCell<Option<TestPendingRenameHook>> = RefCell::new(None);
     static TEST_MATERIALIZE_RENAME_HOOK: RefCell<Option<TestMaterializeRenameHook>> = RefCell::new(None);
+    static TEST_SUCCESSFUL_CLEANUP_HOOK: RefCell<Option<TestSuccessfulCleanupHook>> = RefCell::new(None);
 }
 
 #[cfg(test)]
@@ -60,6 +64,11 @@ pub(super) fn set_test_pending_rename_hook(hook: TestPendingRenameHook) {
 #[cfg(test)]
 pub(super) fn set_test_materialize_rename_hook(hook: TestMaterializeRenameHook) {
     TEST_MATERIALIZE_RENAME_HOOK.with(|hooks| *hooks.borrow_mut() = Some(hook));
+}
+
+#[cfg(test)]
+pub(super) fn set_test_successful_cleanup_hook(hook: TestSuccessfulCleanupHook) {
+    TEST_SUCCESSFUL_CLEANUP_HOOK.with(|hooks| *hooks.borrow_mut() = Some(hook));
 }
 
 #[cfg(test)]
@@ -116,6 +125,14 @@ fn invoke_test_pending_rename_hook() {
 #[cfg(test)]
 fn invoke_test_materialize_rename_hook() {
     let hook = TEST_MATERIALIZE_RENAME_HOOK.with(|hooks| hooks.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn invoke_test_successful_cleanup_hook() {
+    let hook = TEST_SUCCESSFUL_CLEANUP_HOOK.with(|hooks| hooks.borrow_mut().take());
     if let Some(hook) = hook {
         hook();
     }
@@ -462,7 +479,7 @@ impl RawObjectFileStore {
             &scope,
             "refs",
         )?;
-        remove_exact_file(
+        remove_successful_file(
             &self.refs,
             &transaction_name,
             &transaction_bytes,
@@ -1373,7 +1390,7 @@ fn reconcile_namespace(
             remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), &scope, "refs")?;
             continue;
         }
-        remove_exact_file(
+        remove_successful_file(
             refs,
             &name,
             &transaction_payload,
@@ -1701,7 +1718,7 @@ fn remove_private_named(
     if after != before {
         return Ok(());
     }
-    match quarantine_remove(
+    let _ = quarantine_remove(
         directory,
         name,
         before,
@@ -1710,13 +1727,13 @@ fn remove_private_named(
         Some(1),
         scope,
         source_namespace,
-    )? {
-        QuarantineResult::Retained | QuarantineResult::Left => Ok(()),
-    }
+        QuarantineDisposition::Retain,
+    )?;
+    Ok(())
 }
 
 #[cfg(unix)]
-fn remove_exact_file(
+fn remove_successful_file(
     directory: &File,
     name: &CStr,
     expected: &[u8],
@@ -1724,8 +1741,35 @@ fn remove_exact_file(
     scope: &RetentionScope<'_>,
     source_namespace: &str,
 ) -> Result<(), RawStorageError> {
+    match remove_exact_file_with_disposition(
+        directory,
+        name,
+        expected,
+        max_bytes,
+        scope,
+        source_namespace,
+        QuarantineDisposition::DiscardOnVerifiedSuccess,
+    )? {
+        QuarantineResult::Removed => Ok(()),
+        // A successful transaction is discarded only after the moved journal
+        // is revalidated. Any unexpected replacement remains retained as
+        // failure evidence and fails the capture closed.
+        QuarantineResult::Retained | QuarantineResult::Left => Err(RawStorageError::Refused),
+    }
+}
+
+#[cfg(unix)]
+fn remove_exact_file_with_disposition(
+    directory: &File,
+    name: &CStr,
+    expected: &[u8],
+    max_bytes: usize,
+    scope: &RetentionScope<'_>,
+    source_namespace: &str,
+    disposition: QuarantineDisposition,
+) -> Result<QuarantineResult, RawStorageError> {
     let Some(mut file) = open_named(directory, name)? else {
-        return Ok(());
+        return Ok(QuarantineResult::Removed);
     };
     let before = stat_fd(&file).map_err(storage_io)?;
     if !before.is_private_regular_single_link()
@@ -1737,7 +1781,7 @@ fn remove_exact_file(
     if after != before {
         return Err(RawStorageError::Refused);
     }
-    match quarantine_remove(
+    quarantine_remove(
         directory,
         name,
         before,
@@ -1746,22 +1790,27 @@ fn remove_exact_file(
         Some(1),
         scope,
         source_namespace,
-    )? {
-        QuarantineResult::Retained => Ok(()),
-        // A replacement won the atomic move or changed the owned quarantine
-        // entry. It remains quarantined and the caller must fail closed.
-        QuarantineResult::Left => Err(RawStorageError::Refused),
-    }
+        disposition,
+    )
 }
 
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum QuarantineResult {
+    Removed,
     Retained,
     Left,
 }
 
-/// Move a candidate into a fresh, private directory before journal retention.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuarantineDisposition {
+    Retain,
+    DiscardOnVerifiedSuccess,
+}
+
+/// Move a candidate into a fresh, private directory before journal retention
+/// or verified-success discard.
 ///
 /// `unlinkat(directory, name)` after an FD identity check is not an identity
 /// operation: another writer can replace `name` between the check and the
@@ -1773,7 +1822,9 @@ enum QuarantineResult {
 /// by its descriptor and the store writes a separately validated immutable
 /// retention record. This gives crash recovery a durable, descriptor-bound
 /// owner without a final stat-then-unlink race or source-path replacement
-/// window.
+/// window. Successful transaction journals use the discard disposition only
+/// after the moved entry is re-opened and revalidated; every mismatch/error
+/// still takes the retention path.
 #[cfg(unix)]
 #[allow(
     clippy::too_many_arguments,
@@ -1788,13 +1839,23 @@ fn quarantine_remove(
     expected_links: Option<u64>,
     scope: &RetentionScope<'_>,
     source_namespace: &str,
+    disposition: QuarantineDisposition,
 ) -> Result<QuarantineResult, RawStorageError> {
-    quarantine_admission(scope)?;
+    quarantine_admission(scope, disposition)?;
     let (quarantine_name, quarantine) = create_quarantine_directory(directory)?;
     let entry_name = CString::new("entry").map_err(|_| RawStorageError::Refused)?;
     match rename_no_clobber(directory, name, &quarantine, &entry_name) {
         Ok(()) => {}
         Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+            if disposition == QuarantineDisposition::DiscardOnVerifiedSuccess {
+                return discard_quarantine_directory(
+                    directory,
+                    &quarantine_name,
+                    &quarantine,
+                    scope,
+                    source_namespace,
+                );
+            }
             return retain_quarantine_result(
                 directory,
                 &quarantine_name,
@@ -1900,6 +1961,48 @@ fn quarantine_remove(
         );
     }
 
+    if disposition == QuarantineDisposition::DiscardOnVerifiedSuccess {
+        #[cfg(test)]
+        invoke_test_successful_cleanup_hook();
+        match quarantine_entry_matches(
+            &quarantine,
+            &entry_name,
+            expected,
+            max_bytes,
+            expected_bytes,
+            expected_links,
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                return retain_quarantine_result(
+                    directory,
+                    &quarantine_name,
+                    &quarantine,
+                    scope,
+                    source_namespace,
+                )
+            }
+            Err(error) => {
+                let _ = retain_quarantine_result(
+                    directory,
+                    &quarantine_name,
+                    &quarantine,
+                    scope,
+                    source_namespace,
+                );
+                return Err(error);
+            }
+        }
+        return discard_verified_quarantine(
+            directory,
+            &quarantine_name,
+            &quarantine,
+            &entry_name,
+            scope,
+            source_namespace,
+        );
+    }
+
     retain_quarantine_result(
         directory,
         &quarantine_name,
@@ -1910,9 +2013,128 @@ fn quarantine_remove(
 }
 
 #[cfg(unix)]
-fn quarantine_admission(scope: &RetentionScope<'_>) -> Result<(), RawStorageError> {
+fn quarantine_entry_matches(
+    quarantine: &File,
+    entry_name: &CStr,
+    expected: FileIdentity,
+    max_bytes: Option<usize>,
+    expected_bytes: Option<&[u8]>,
+    expected_links: Option<u64>,
+) -> Result<bool, RawStorageError> {
+    let Some(mut file) = (match open_named(quarantine, entry_name) {
+        Ok(file) => file,
+        Err(RawStorageError::Refused) => return Ok(false),
+        Err(error) => return Err(error),
+    }) else {
+        return Ok(false);
+    };
+    let identity = stat_fd(&file).map_err(storage_io)?;
+    if !identity.is_private_regular()
+        || !identity.same_inode(expected)
+        || expected_links.is_some_and(|links| identity.nlink != links)
+    {
+        return Ok(false);
+    }
+    let bytes = if let Some(max_bytes) = max_bytes {
+        Some(read_verified_fd(&mut file, max_bytes)?)
+    } else {
+        None
+    };
+    if expected_bytes.is_some_and(|expected| bytes.as_deref() != Some(expected)) {
+        return Ok(false);
+    }
+    let after = stat_fd(&file).map_err(storage_io)?;
+    Ok(after == identity
+        && after.same_inode(expected)
+        && expected_links.is_none_or(|links| after.nlink == links))
+}
+
+#[cfg(unix)]
+fn discard_verified_quarantine(
+    parent: &File,
+    quarantine_name: &CStr,
+    quarantine: &File,
+    entry_name: &CStr,
+    scope: &RetentionScope<'_>,
+    source_namespace: &str,
+) -> Result<QuarantineResult, RawStorageError> {
+    let result = unsafe { libc::unlinkat(quarantine.as_raw_fd(), entry_name.as_ptr(), 0) };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENOENT) {
+            return retain_quarantine_result(
+                parent,
+                quarantine_name,
+                quarantine,
+                scope,
+                source_namespace,
+            );
+        }
+        let _ =
+            retain_quarantine_result(parent, quarantine_name, quarantine, scope, source_namespace);
+        return Err(storage_io(error));
+    }
+    if let Err(error) = sync_directory(quarantine) {
+        let _ =
+            retain_quarantine_result(parent, quarantine_name, quarantine, scope, source_namespace);
+        return Err(error);
+    }
+    discard_quarantine_directory(parent, quarantine_name, quarantine, scope, source_namespace)
+}
+
+#[cfg(unix)]
+fn discard_quarantine_directory(
+    parent: &File,
+    quarantine_name: &CStr,
+    quarantine: &File,
+    scope: &RetentionScope<'_>,
+    source_namespace: &str,
+) -> Result<QuarantineResult, RawStorageError> {
+    if remove_quarantine_directory(parent, quarantine_name, quarantine)? {
+        sync_directory(parent)?;
+        return Ok(QuarantineResult::Removed);
+    }
+    retain_quarantine_result(parent, quarantine_name, quarantine, scope, source_namespace)
+}
+
+#[cfg(unix)]
+fn remove_quarantine_directory(
+    parent: &File,
+    name: &CStr,
+    quarantine: &File,
+) -> Result<bool, RawStorageError> {
+    let expected = stat_fd(quarantine).map_err(storage_io)?;
+    let named = match stat_at(parent, name) {
+        Ok(identity) => identity,
+        Err(RawStorageError::Unavailable) => return Ok(true),
+        Err(error) => return Err(error),
+    };
+    if !named.same_directory(expected) {
+        return Ok(false);
+    }
+    let result = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(libc::ENOENT)) {
+            return Ok(true);
+        }
+        if matches!(error.raw_os_error(), Some(libc::ENOTEMPTY)) {
+            return Ok(false);
+        }
+        return Err(storage_io(error));
+    }
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn quarantine_admission(
+    scope: &RetentionScope<'_>,
+    disposition: QuarantineDisposition,
+) -> Result<(), RawStorageError> {
     let usage = retention_usage(scope)?;
-    if usage.entries >= MAX_RETAINED_ENTRIES {
+    if usage.entries > MAX_RETAINED_ENTRIES
+        || (disposition == QuarantineDisposition::Retain && usage.entries >= MAX_RETAINED_ENTRIES)
+    {
         return Err(RawStorageError::Refused);
     }
     if usage.reserved_bytes > MAX_RETAINED_BYTES {
@@ -3335,8 +3557,9 @@ impl<'a> TemporaryFile<'a> {
             Some(expected_links),
             self.scope,
             self.source_namespace,
+            QuarantineDisposition::Retain,
         )? {
-            QuarantineResult::Retained => {
+            QuarantineResult::Removed | QuarantineResult::Retained => {
                 self.name_removed = true;
                 Ok(())
             }
@@ -3372,7 +3595,7 @@ impl Drop for TemporaryFile<'_> {
         {
             return;
         }
-        if let Ok(QuarantineResult::Retained) = quarantine_remove(
+        if let Ok(result) = quarantine_remove(
             self.directory,
             &self.name,
             self.identity,
@@ -3381,6 +3604,10 @@ impl Drop for TemporaryFile<'_> {
             Some(named_identity.nlink),
             self.scope,
             self.source_namespace,
+            QuarantineDisposition::Retain,
+        ) && matches!(
+            result,
+            QuarantineResult::Removed | QuarantineResult::Retained
         ) {
             self.name_removed = true;
         }

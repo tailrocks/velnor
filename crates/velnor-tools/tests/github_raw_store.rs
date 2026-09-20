@@ -314,6 +314,16 @@ fn recovers_complete_transaction_and_sweeps_incomplete_bundle() {
     );
     assert!(sidecar.exists());
     assert!(!transaction.exists());
+    assert_eq!(
+        must(
+            fs::read_dir(root.join(".velnor-raw-quarantine")),
+            "read successful recovery retention",
+        )
+        .flatten()
+        .count(),
+        0,
+        "completed transaction recovery must not retain its journal",
+    );
     must(reopened.verify(&reference), "verify recovered bundle");
     drop(reopened);
 
@@ -402,6 +412,194 @@ fn recovers_max_size_valid_compact_transaction_without_payload_duplicate() {
     assert!(sidecar.exists());
     assert!(!transaction.exists());
     must(reopened.verify(&reference), "verify max recovered bundle");
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn successful_transaction_cleanup_releases_retention_capacity() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const SUCCESSFUL_CAPTURES: usize = 130;
+    const RETAINED_FAILURES: usize = 63;
+    let root = fixture("successful-transaction-retention");
+    let store = must(
+        RawObjectFileStore::new(&root),
+        "open successful-transaction retention store",
+    );
+    drop(store);
+
+    // Keep a capture-sized set of real failure/quarantine records.
+    // Successful transaction journals must not displace this evidence while
+    // the bounded store handles a capture-sized run.
+    for index in 0..RETAINED_FAILURES {
+        let failure_quarantine = root
+            .join("sha256")
+            .join(format!(".velnor-raw-quarantine-900-{index}-0"));
+        must(
+            fs::create_dir(&failure_quarantine),
+            "create failure quarantine",
+        );
+        must(
+            fs::set_permissions(&failure_quarantine, fs::Permissions::from_mode(0o700)),
+            "restrict failure quarantine",
+        );
+        let failure_entry = failure_quarantine.join("entry");
+        let evidence = format!("failure-evidence-{index}");
+        must(
+            fs::write(&failure_entry, evidence.as_bytes()),
+            "write failure evidence",
+        );
+        must(
+            fs::set_permissions(&failure_entry, fs::Permissions::from_mode(0o400)),
+            "restrict failure evidence",
+        );
+    }
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "materialize failure evidence",
+    );
+    drop(reopened);
+    assert_eq!(
+        must(
+            fs::read_dir(root.join(".velnor-raw-quarantine")),
+            "read materialized failure evidence",
+        )
+        .flatten()
+        .count(),
+        RETAINED_FAILURES,
+    );
+
+    let mut store = must(
+        RawObjectFileStore::new(&root),
+        "reopen successful-transaction retention store",
+    );
+    for index in 0..SUCCESSFUL_CAPTURES {
+        let raw_id = format!("successful-{index}");
+        store
+            .store(capture(&raw_id, b"capture-source", b"capture-safe"))
+            .unwrap_or_else(|error| panic!("store successful capture {index}: {error:?}"));
+    }
+    drop(store);
+
+    let retention = root.join(".velnor-raw-quarantine");
+    assert_eq!(
+        must(fs::read_dir(&retention), "read retained evidence")
+            .flatten()
+            .count(),
+        RETAINED_FAILURES,
+        "successful transaction journals must not become retained records",
+    );
+    assert_eq!(
+        must(fs::read_dir(root.join("refs")), "read refs after captures")
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "txn"))
+            .count(),
+        0,
+        "successful transaction journals must be removed",
+    );
+    assert_eq!(
+        must(
+            fs::read_dir(root.join("refs")),
+            "read refs quarantine state"
+        )
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".velnor-raw-quarantine-")
+        })
+        .count(),
+        0,
+        "successful cleanup must not leave source quarantine directories",
+    );
+
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "reopen after successful capture run",
+    );
+    drop(reopened);
+    assert_eq!(
+        must(fs::read_dir(&retention), "reread retained evidence")
+            .flatten()
+            .count(),
+        RETAINED_FAILURES,
+    );
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn successful_transaction_cleanup_retains_replacement_evidence() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("successful-transaction-replacement");
+    let mut store = must(
+        RawObjectFileStore::new(&root),
+        "open successful-transaction replacement store",
+    );
+    let refs = root.join("refs");
+    let refs_for_hook = refs.clone();
+    github_raw_store::set_test_successful_cleanup_hook(Box::new(move || {
+        let quarantine = fs::read_dir(&refs_for_hook)
+            .unwrap_or_else(|error| panic!("read cleanup quarantine: {error}"))
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .starts_with(".velnor-raw-quarantine-")
+                })
+            })
+            .unwrap_or_else(|| panic!("successful cleanup quarantine missing"));
+        let entry = quarantine.join("entry");
+        fs::remove_file(&entry)
+            .unwrap_or_else(|error| panic!("remove cleanup journal for replacement: {error}"));
+        fs::write(&entry, b"attacker-replacement")
+            .unwrap_or_else(|error| panic!("write cleanup replacement: {error}"));
+        fs::set_permissions(&entry, fs::Permissions::from_mode(0o400))
+            .unwrap_or_else(|error| panic!("restrict cleanup replacement: {error}"));
+    }));
+
+    assert!(
+        store
+            .store(capture("cleanup-race", b"source", b"safe"))
+            .is_err(),
+        "replacement of a successful journal must fail closed",
+    );
+    let quarantine = must(fs::read_dir(&refs), "read retained cleanup quarantine")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .starts_with(".velnor-raw-quarantine-")
+            })
+        })
+        .unwrap_or_else(|| panic!("cleanup replacement quarantine was removed"));
+    assert_eq!(
+        must(
+            fs::read(quarantine.join("entry")),
+            "read retained replacement"
+        ),
+        b"attacker-replacement",
+    );
+    assert_eq!(
+        must(
+            fs::read_dir(root.join(".velnor-raw-quarantine")),
+            "read retained cleanup record",
+        )
+        .flatten()
+        .count(),
+        1,
+    );
+    drop(store);
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "reopen retained cleanup replacement",
+    );
+    drop(reopened);
     remove_fixture(&root);
 }
 
