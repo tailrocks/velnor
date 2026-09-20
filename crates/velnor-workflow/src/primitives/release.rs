@@ -7669,6 +7669,10 @@ mod tests {
             !debian.contains("Build release runner binary"),
             "stable debian must reuse, never rebuild: {debian}"
         );
+        assert!(
+            debian.contains("path: ${{ runner.temp }}/velnor-release-metadata"),
+            "stable metadata must stay outside the checkout too: {debian}"
+        );
         // The preview lane is record-free by design: it keeps its own
         // build and learns nothing about records or OCI indexes.
         let preview = super::render_preview(&config, Some(release));

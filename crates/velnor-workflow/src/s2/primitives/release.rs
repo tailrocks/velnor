@@ -9443,6 +9443,10 @@ JSON
             "stable Debian builds reuse source-bound binaries and must not add preview-only setup: {debian}"
         );
         assert!(
+            debian.contains("path: ${{ runner.temp }}/velnor-release-metadata"),
+            "stable metadata must stay outside the checkout too: {debian}"
+        );
+        assert!(
             !preview.contains("Reuse the build job's release binary"),
             "{preview}"
         );
