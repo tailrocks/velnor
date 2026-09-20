@@ -52,6 +52,8 @@ pub struct RawObjectFileStore {
     originals: File,
     #[cfg(unix)]
     refs: File,
+    #[cfg(unix)]
+    quarantine: File,
 }
 
 impl fmt::Debug for RawObjectFileStore {
@@ -88,6 +90,8 @@ impl RawObjectFileStore {
             restrict_directory(&originals)?;
             let refs = open_directory_at(&secure_root.file, "refs", true)?;
             restrict_directory(&refs)?;
+            let quarantine = open_directory_at(&secure_root.file, ".velnor-raw-quarantine", true)?;
+            restrict_directory(&quarantine)?;
             let anchor = NamespaceAnchor::new(
                 secure_root.parent,
                 secure_root.name,
@@ -95,12 +99,13 @@ impl RawObjectFileStore {
                 &objects,
                 &originals,
                 &refs,
+                &quarantine,
             )?;
             drop(setup_lock);
             drop(setup_root);
             let _reconcile_lock =
                 NamespaceLock::acquire(&anchor.root).map_err(raw_storage_io_error)?;
-            anchor.reconcile(&objects, &originals, &refs)?;
+            anchor.reconcile(&objects, &originals, &refs, &quarantine)?;
             anchor.root.sync_all()?;
             drop(_reconcile_lock);
             Ok(Self {
@@ -109,6 +114,7 @@ impl RawObjectFileStore {
                 objects,
                 originals,
                 refs,
+                quarantine,
             })
         }
 
@@ -140,7 +146,7 @@ impl RawObjectFileStore {
         // root/children namespace before publication.
         let _publication_lock = NamespaceLock::acquire(&self.anchor.root)?;
         self.anchor
-            .validate(&self.objects, &self.originals, &self.refs)?;
+            .validate(&self.objects, &self.originals, &self.refs, &self.quarantine)?;
         let sidecar_name = raw_id_name(&object.raw_id)?;
         let safe_digest = sha256_digest(&object.bytes);
         let safe_length =
@@ -185,33 +191,38 @@ impl RawObjectFileStore {
             &transaction_name,
             &sidecar_bytes,
             MAX_RAW_SIDECAR_BYTES,
+            &self.quarantine,
         )?;
         publish_if_absent(
             &self.originals,
             &original_object_name,
             &object.original_bytes,
             MAX_RAW_OBJECT_BYTES,
+            &self.quarantine,
         )?;
         publish_if_absent(
             &self.objects,
             &object_name,
             &object.bytes,
             MAX_RAW_OBJECT_BYTES,
+            &self.quarantine,
         )?;
         publish_if_absent(
             &self.refs,
             &sidecar_name,
             &sidecar_bytes,
             MAX_RAW_SIDECAR_BYTES,
+            &self.quarantine,
         )?;
         remove_exact_file(
             &self.refs,
             &transaction_name,
             &sidecar_bytes,
             MAX_RAW_SIDECAR_BYTES,
+            &self.quarantine,
         )?;
         self.anchor
-            .validate(&self.objects, &self.originals, &self.refs)?;
+            .validate(&self.objects, &self.originals, &self.refs, &self.quarantine)?;
         Ok(reference)
     }
 
@@ -219,7 +230,7 @@ impl RawObjectFileStore {
     fn verify_unix(&self, reference: &RawObjectRef) -> Result<(), RawStorageError> {
         let _namespace_lock = NamespaceLock::acquire(&self.anchor.root)?;
         self.anchor
-            .validate(&self.objects, &self.originals, &self.refs)?;
+            .validate(&self.objects, &self.originals, &self.refs, &self.quarantine)?;
         if !valid_digest(&reference.original_sha256)
             || reference.storage_ref != content_addressed_storage_ref(&reference.sha256)
             || reference.original_storage_ref
@@ -257,7 +268,7 @@ impl RawObjectFileStore {
             return Err(RawStorageError::Unbound);
         }
         self.anchor
-            .validate(&self.objects, &self.originals, &self.refs)?;
+            .validate(&self.objects, &self.originals, &self.refs, &self.quarantine)?;
         Ok(())
     }
 }
@@ -394,6 +405,7 @@ struct NamespaceAnchor {
     objects_identity: FileIdentity,
     originals_identity: FileIdentity,
     refs_identity: FileIdentity,
+    quarantine_identity: FileIdentity,
 }
 
 #[cfg(unix)]
@@ -405,16 +417,19 @@ impl NamespaceAnchor {
         objects: &File,
         originals: &File,
         refs: &File,
+        quarantine: &File,
     ) -> io::Result<Self> {
         let root_identity = stat_fd(&root)?;
         let objects_identity = stat_fd(objects)?;
         let originals_identity = stat_fd(originals)?;
         let refs_identity = stat_fd(refs)?;
+        let quarantine_identity = stat_fd(quarantine)?;
         let expected = anchor_bytes([
             root_identity,
             objects_identity,
             originals_identity,
             refs_identity,
+            quarantine_identity,
         ]);
         let marker_name = anchor_marker_name(&root_name)?;
         open_anchor_marker(&parent, &marker_name, &expected)?;
@@ -426,6 +441,7 @@ impl NamespaceAnchor {
             objects_identity,
             originals_identity,
             refs_identity,
+            quarantine_identity,
         })
     }
 
@@ -434,16 +450,19 @@ impl NamespaceAnchor {
         objects: &File,
         originals: &File,
         refs: &File,
+        quarantine: &File,
     ) -> Result<(), RawStorageError> {
         let current_root = stat_fd(&self.root).map_err(storage_io)?;
         let current_objects = stat_fd(objects).map_err(storage_io)?;
         let current_originals = stat_fd(originals).map_err(storage_io)?;
         let current_refs = stat_fd(refs).map_err(storage_io)?;
+        let current_quarantine = stat_fd(quarantine).map_err(storage_io)?;
         let named_root = stat_at(&self.parent, &self.root_name)?;
         let identities_match = current_root.same_directory(self.root_identity)
             && current_objects.same_directory(self.objects_identity)
             && current_originals.same_directory(self.originals_identity)
             && current_refs.same_directory(self.refs_identity)
+            && current_quarantine.same_directory(self.quarantine_identity)
             && named_root.same_directory(self.root_identity);
         if !identities_match {
             return Err(RawStorageError::Unbound);
@@ -452,6 +471,10 @@ impl NamespaceAnchor {
             (b"sha256\0".as_slice(), self.objects_identity),
             (b"original\0".as_slice(), self.originals_identity),
             (b"refs\0".as_slice(), self.refs_identity),
+            (
+                b".velnor-raw-quarantine\0".as_slice(),
+                self.quarantine_identity,
+            ),
         ] {
             let name = CStr::from_bytes_with_nul(name).map_err(|_| RawStorageError::Unbound)?;
             if !stat_at(&self.root, name)?.same_directory(expected) {
@@ -461,8 +484,14 @@ impl NamespaceAnchor {
         Ok(())
     }
 
-    fn reconcile(&self, objects: &File, originals: &File, refs: &File) -> io::Result<()> {
-        reconcile_namespace(objects, originals, refs).map_err(raw_storage_io_error)
+    fn reconcile(
+        &self,
+        objects: &File,
+        originals: &File,
+        refs: &File,
+        quarantine: &File,
+    ) -> io::Result<()> {
+        reconcile_namespace(objects, originals, refs, quarantine).map_err(raw_storage_io_error)
     }
 }
 
@@ -477,8 +506,8 @@ fn anchor_marker_name(root_name: &CStr) -> io::Result<CString> {
 }
 
 #[cfg(unix)]
-fn anchor_bytes(identities: [FileIdentity; 4]) -> Vec<u8> {
-    let mut bytes = b"VLNOR-RAW-ANCHOR-V1\0".to_vec();
+fn anchor_bytes(identities: [FileIdentity; 5]) -> Vec<u8> {
+    let mut bytes = b"VLNOR-RAW-ANCHOR-V2\0".to_vec();
     for identity in identities {
         bytes.extend(identity.device.to_le_bytes());
         bytes.extend(identity.inode.to_le_bytes());
@@ -789,6 +818,30 @@ fn open_named(directory: &File, name: &CStr) -> Result<Option<File>, RawStorageE
 }
 
 #[cfg(unix)]
+fn open_directory_named(directory: &File, name: &CStr) -> Result<Option<File>, RawStorageError> {
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(None);
+        }
+        return Err(storage_io(error));
+    }
+    Ok(Some(unsafe { File::from_raw_fd(fd) }))
+}
+
+#[cfg(unix)]
+fn is_quarantine_name(name: &CStr) -> bool {
+    name.to_bytes().starts_with(b".velnor-raw-quarantine-")
+}
+
+#[cfg(unix)]
 fn read_named(directory: &File, name: &CStr, max_bytes: usize) -> Result<Vec<u8>, RawStorageError> {
     let mut file = open_named(directory, name)?.ok_or(RawStorageError::Unavailable)?;
     read_verified_fd(&mut file, max_bytes)
@@ -844,6 +897,7 @@ fn reconcile_namespace(
     objects: &File,
     originals: &File,
     refs: &File,
+    quarantine: &File,
 ) -> Result<(), RawStorageError> {
     // Recover durable intents before scanning public references. A complete
     // intent can finish publication after a crash; an incomplete one is
@@ -851,34 +905,34 @@ fn reconcile_namespace(
     for name in directory_names(refs)? {
         let bytes = name.as_bytes();
         if bytes.starts_with(b".velnor-raw-") {
-            reconcile_temporary(refs, &name)?;
+            reconcile_temporary(refs, &name, quarantine)?;
             continue;
         }
         let Some(raw_id_bytes) = bytes.strip_suffix(b".txn") else {
             continue;
         };
         let Ok(raw_id) = std::str::from_utf8(raw_id_bytes) else {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine)?;
             continue;
         };
         let Ok(expected_name) = transaction_name(raw_id) else {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine)?;
             continue;
         };
         if expected_name.as_bytes() != name.as_bytes() {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine)?;
             continue;
         }
         let transaction_bytes = read_named(refs, &name, MAX_RAW_SIDECAR_BYTES)?;
         let Some(reference) = parse_reference(raw_id, &transaction_bytes) else {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine)?;
             continue;
         };
         let sidecar_name = raw_id_name(raw_id)?;
         if object_bundle_matches(objects, originals, &reference) {
             let expected_sidecar = sidecar_bytes(&reference)?;
             if transaction_bytes != expected_sidecar {
-                remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+                remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine)?;
                 continue;
             }
             ensure_sidecar_slot(refs, &sidecar_name, &expected_sidecar)?;
@@ -887,9 +941,16 @@ fn reconcile_namespace(
                 &sidecar_name,
                 &expected_sidecar,
                 MAX_RAW_SIDECAR_BYTES,
+                quarantine,
             )?;
         }
-        remove_exact_file(refs, &name, &transaction_bytes, MAX_RAW_SIDECAR_BYTES)?;
+        remove_exact_file(
+            refs,
+            &name,
+            &transaction_bytes,
+            MAX_RAW_SIDECAR_BYTES,
+            quarantine,
+        )?;
     }
 
     let mut safe_names = HashSet::new();
@@ -897,7 +958,7 @@ fn reconcile_namespace(
     for name in directory_names(refs)? {
         let bytes = name.as_bytes();
         if bytes.starts_with(b".velnor-raw-") {
-            reconcile_temporary(refs, &name)?;
+            reconcile_temporary(refs, &name, quarantine)?;
             continue;
         }
         if bytes.ends_with(b".txn") {
@@ -907,15 +968,15 @@ fn reconcile_namespace(
             continue;
         };
         let Ok(raw_id) = std::str::from_utf8(raw_id_bytes) else {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine)?;
             continue;
         };
         let Ok(expected_name) = raw_id_name(raw_id) else {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine)?;
             continue;
         };
         if expected_name.as_bytes() != name.as_bytes() {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine)?;
             continue;
         }
         let valid = parse_reference(raw_id, &read_named(refs, &name, MAX_RAW_SIDECAR_BYTES)?)
@@ -934,14 +995,16 @@ fn reconcile_namespace(
                 true
             });
         if !valid {
-            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES))?;
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), quarantine)?;
         }
     }
-    reconcile_object_directory(objects, &safe_names)?;
-    reconcile_object_directory(originals, &original_names)?;
+    reconcile_object_directory(objects, &safe_names, quarantine)?;
+    reconcile_object_directory(originals, &original_names, quarantine)?;
     sync_directory(objects)?;
     sync_directory(originals)?;
     sync_directory(refs)?;
+    reconcile_retention_directory(quarantine)?;
+    sync_directory(quarantine)?;
     Ok(())
 }
 
@@ -999,6 +1062,7 @@ fn object_matches(
 fn reconcile_object_directory(
     directory: &File,
     referenced: &HashSet<String>,
+    quarantine: &File,
 ) -> Result<(), RawStorageError> {
     for name in directory_names(directory)? {
         let bytes = name.as_bytes();
@@ -1013,12 +1077,13 @@ fn reconcile_object_directory(
             None
         };
         if temporary {
-            reconcile_temporary(directory, &name)?;
+            reconcile_temporary(directory, &name, quarantine)?;
         } else if digest.is_some_and(|digest| !referenced.contains(digest)) {
-            // A final object may be removed only when it is still a private,
-            // single-link regular file. Hardlink/symlink replacements fail
-            // closed and remain untouched.
-            remove_private_named(directory, &name, Some(MAX_RAW_OBJECT_BYTES))?;
+            // A final object may leave its public namespace only when it is
+            // still a private, single-link regular file. Hardlink/symlink
+            // replacements fail closed and remain untouched; accepted or
+            // raced entries move into descriptor-bound retention.
+            remove_private_named(directory, &name, Some(MAX_RAW_OBJECT_BYTES), quarantine)?;
         }
     }
     Ok(())
@@ -1069,6 +1134,7 @@ fn remove_private_named(
     directory: &File,
     name: &CStr,
     max_bytes: Option<usize>,
+    retention: &File,
 ) -> Result<(), RawStorageError> {
     let Some(mut file) = (match open_named(directory, name) {
         Ok(file) => file,
@@ -1092,8 +1158,8 @@ fn remove_private_named(
     if after != before {
         return Ok(());
     }
-    match quarantine_remove(directory, name, before, max_bytes, None, Some(1))? {
-        QuarantineResult::Removed | QuarantineResult::Left => Ok(()),
+    match quarantine_remove(directory, name, before, max_bytes, None, Some(1), retention)? {
+        QuarantineResult::Retained | QuarantineResult::Left => Ok(()),
     }
 }
 
@@ -1103,6 +1169,7 @@ fn remove_exact_file(
     name: &CStr,
     expected: &[u8],
     max_bytes: usize,
+    retention: &File,
 ) -> Result<(), RawStorageError> {
     let Some(mut file) = open_named(directory, name)? else {
         return Ok(());
@@ -1124,10 +1191,11 @@ fn remove_exact_file(
         Some(max_bytes),
         Some(expected),
         Some(1),
+        retention,
     )? {
-        QuarantineResult::Removed => Ok(()),
+        QuarantineResult::Retained => Ok(()),
         // A replacement won the atomic move or changed the owned quarantine
-        // entry.  It remains quarantined and the caller must fail closed.
+        // entry. It remains quarantined and the caller must fail closed.
         QuarantineResult::Left => Err(RawStorageError::Refused),
     }
 }
@@ -1135,21 +1203,22 @@ fn remove_exact_file(
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum QuarantineResult {
-    Removed,
+    Retained,
     Left,
 }
 
-/// Move a candidate into a fresh, private directory before removing it.
+/// Move a candidate into a fresh, private directory before retaining it.
 ///
 /// `unlinkat(directory, name)` after an FD identity check is not an identity
 /// operation: another writer can replace `name` between the check and the
-/// unlink.  The source pathname is therefore never unlinked.  An atomic
+/// unlink. The source pathname is therefore never unlinked. An atomic
 /// no-clobber rename transfers the entry into a directory created by this
-/// process, where the entry is re-opened and re-verified.  A mismatched,
+/// process, where the entry is re-opened and re-verified. A mismatched,
 /// hostile, or otherwise unknown entry is left in that quarantine directory;
-/// it is never deleted by pathname.  The private directory is removed only
-/// after its verified entry has been removed and it is still the directory
-/// created by this operation.
+/// it is never deleted by pathname. The quarantine directory is itself
+/// atomically moved into the store-owned retention namespace. This gives
+/// crash recovery a durable, descriptor-bound owner without a final
+/// stat-then-unlink race.
 #[cfg(unix)]
 fn quarantine_remove(
     directory: &File,
@@ -1158,17 +1227,18 @@ fn quarantine_remove(
     max_bytes: Option<usize>,
     expected_bytes: Option<&[u8]>,
     expected_links: Option<u64>,
+    retention: &File,
 ) -> Result<QuarantineResult, RawStorageError> {
     let (quarantine_name, quarantine) = create_quarantine_directory(directory)?;
     let entry_name = CString::new("entry").map_err(|_| RawStorageError::Refused)?;
     match rename_no_clobber(directory, name, &quarantine, &entry_name) {
         Ok(()) => {}
         Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
-            let _ = remove_quarantine_directory(directory, &quarantine_name, &quarantine);
-            return Ok(QuarantineResult::Removed);
+            return retain_quarantine_result(directory, &quarantine_name, &quarantine, retention);
         }
         Err(error) => {
-            let _ = remove_quarantine_directory(directory, &quarantine_name, &quarantine);
+            let _ =
+                retain_quarantine_directory(directory, &quarantine_name, &quarantine, retention);
             return Err(storage_io(error));
         }
     }
@@ -1177,52 +1247,52 @@ fn quarantine_remove(
         Ok(file) => file,
         // O_NOFOLLOW and O_NONBLOCK make symlink/FIFO replacements safe. Keep
         // the moved entry for operator inspection instead of deleting it.
-        Err(RawStorageError::Refused) => return Ok(QuarantineResult::Left),
-        Err(error) => return Err(error),
+        Err(RawStorageError::Refused) => {
+            return retain_quarantine_result(directory, &quarantine_name, &quarantine, retention)
+        }
+        Err(error) => {
+            let _ =
+                retain_quarantine_directory(directory, &quarantine_name, &quarantine, retention);
+            return Err(error);
+        }
     }) else {
-        return Ok(QuarantineResult::Left);
+        return retain_quarantine_result(directory, &quarantine_name, &quarantine, retention);
     };
     let actual = stat_fd(&file).map_err(storage_io)?;
     if !actual.is_private_regular()
         || !actual.same_inode(expected)
         || expected_links.is_some_and(|links| actual.nlink != links)
     {
-        return Ok(QuarantineResult::Left);
+        return retain_quarantine_result(directory, &quarantine_name, &quarantine, retention);
     }
     let bytes = if let Some(max_bytes) = max_bytes {
-        Some(read_verified_fd(&mut file, max_bytes)?)
+        match read_verified_fd(&mut file, max_bytes) {
+            Ok(bytes) => Some(bytes),
+            Err(error) => {
+                let _ = retain_quarantine_directory(
+                    directory,
+                    &quarantine_name,
+                    &quarantine,
+                    retention,
+                );
+                return Err(error);
+            }
+        }
     } else {
         None
     };
     if expected_bytes.is_some_and(|expected| bytes.as_deref() != Some(expected)) {
-        return Ok(QuarantineResult::Left);
+        return retain_quarantine_result(directory, &quarantine_name, &quarantine, retention);
     }
     let after = stat_fd(&file).map_err(storage_io)?;
     if after != actual
         || !after.same_inode(expected)
         || expected_links.is_some_and(|links| after.nlink != links)
     {
-        return Ok(QuarantineResult::Left);
+        return retain_quarantine_result(directory, &quarantine_name, &quarantine, retention);
     }
 
-    // The only pathname removed here is the entry in the private quarantine
-    // directory, never the attacker-observable source pathname. If a writer
-    // replaced the quarantine entry, the final identity check above leaves
-    // the replacement untouched and retains the quarantine for inspection.
-    let result = unsafe { libc::unlinkat(quarantine.as_raw_fd(), entry_name.as_ptr(), 0) };
-    if result < 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ENOENT) {
-            return Ok(QuarantineResult::Left);
-        }
-        return Err(storage_io(error));
-    }
-    sync_directory(&quarantine)?;
-    if !remove_quarantine_directory(directory, &quarantine_name, &quarantine)? {
-        return Ok(QuarantineResult::Left);
-    }
-    sync_directory(directory)?;
-    Ok(QuarantineResult::Removed)
+    retain_quarantine_result(directory, &quarantine_name, &quarantine, retention)
 }
 
 #[cfg(unix)]
@@ -1243,50 +1313,102 @@ fn create_quarantine_directory(directory: &File) -> Result<(CString, File), RawS
             }
             return Err(storage_io(error));
         }
-        let quarantine =
-            match open_directory_at(directory, OsStr::from_bytes(name.as_bytes()), false) {
-                Ok(file) => file,
-                Err(error) => {
-                    let _ = unsafe {
-                        libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR)
-                    };
-                    return Err(storage_io(error));
-                }
-            };
+        let Some(quarantine) = open_directory_named(directory, &name)? else {
+            return Err(RawStorageError::Unavailable);
+        };
+        let expected = stat_fd(&quarantine).map_err(storage_io)?;
+        let named = stat_at(directory, &name)?;
+        if !named.same_directory(expected) {
+            return Err(RawStorageError::Refused);
+        }
         restrict_directory(&quarantine).map_err(storage_io)?;
+        if !stat_fd(&quarantine)
+            .map_err(storage_io)?
+            .same_directory(expected)
+        {
+            return Err(RawStorageError::Refused);
+        }
         return Ok((name, quarantine));
     }
     Err(RawStorageError::Unavailable)
 }
 
 #[cfg(unix)]
-fn remove_quarantine_directory(
+fn retain_quarantine_result(
     parent: &File,
     name: &CStr,
     quarantine: &File,
+    retention: &File,
+) -> Result<QuarantineResult, RawStorageError> {
+    let retained = retain_quarantine_directory(parent, name, quarantine, retention)?;
+    Ok(if retained {
+        QuarantineResult::Retained
+    } else {
+        QuarantineResult::Left
+    })
+}
+
+#[cfg(unix)]
+fn retain_quarantine_directory(
+    parent: &File,
+    name: &CStr,
+    quarantine: &File,
+    retention: &File,
 ) -> Result<bool, RawStorageError> {
     let expected = stat_fd(quarantine).map_err(storage_io)?;
     let named = match stat_at(parent, name) {
         Ok(identity) => identity,
-        Err(RawStorageError::Unavailable) => return Ok(true),
-        Err(error) => return Err(error),
+        Err(RawStorageError::Unavailable) => return Ok(false),
+        Err(_) => return Ok(false),
     };
     if !named.same_directory(expected) {
         return Ok(false);
     }
-    let result = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
-    if result < 0 {
-        let error = io::Error::last_os_error();
-        if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ENOTEMPTY)) {
-            return Ok(false);
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    let destination_prefix = format!(".velnor-raw-retained-{}-{sequence}", std::process::id());
+    for attempt in 0..64_u32 {
+        let destination = CString::new(format!("{destination_prefix}-{attempt}"))
+            .map_err(|_| RawStorageError::Refused)?;
+        match rename_no_clobber(parent, name, retention, &destination) {
+            Ok(()) => {
+                let Some(retained) = open_directory_named(retention, &destination)? else {
+                    return Ok(false);
+                };
+                let retained_identity = stat_fd(&retained).map_err(storage_io)?;
+                if !retained_identity.same_directory(expected) {
+                    return Ok(false);
+                }
+                sync_directory(retention)?;
+                sync_directory(parent)?;
+                return Ok(true);
+            }
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => continue,
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(false),
+            Err(error) => return Err(storage_io(error)),
         }
-        return Err(storage_io(error));
     }
-    Ok(true)
+    Err(RawStorageError::Unavailable)
 }
 
 #[cfg(unix)]
-fn reconcile_temporary(directory: &File, name: &CStr) -> Result<(), RawStorageError> {
+fn reconcile_temporary(
+    directory: &File,
+    name: &CStr,
+    retention: &File,
+) -> Result<(), RawStorageError> {
+    if is_quarantine_name(name) {
+        let quarantine = match open_directory_named(directory, name) {
+            Ok(Some(quarantine)) => quarantine,
+            // A qname occupied by a symlink, FIFO, regular file, or other
+            // unknown entry is operator-owned. Preserve it and continue
+            // recovery rather than following it or turning startup into a
+            // namespace-denial condition.
+            Ok(None) | Err(_) => return Ok(()),
+        };
+        let _ = retain_quarantine_directory(directory, name, &quarantine, retention)?;
+        return Ok(());
+    }
     let Some(file) = (match open_named(directory, name) {
         Ok(file) => file,
         // Leave symlinks and other non-regular hostile entries in place. The
@@ -1303,7 +1425,33 @@ fn reconcile_temporary(directory: &File, name: &CStr) -> Result<(), RawStorageEr
     // regular file by name.
     let permissions = identity.mode & 0o777;
     if identity.is_private_regular_single_link() && matches!(permissions, 0o400 | 0o600) {
-        remove_private_named(directory, name, None)?;
+        remove_private_named(directory, name, None, retention)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn reconcile_retention_directory(retention: &File) -> Result<(), RawStorageError> {
+    // Retained entries are the durable owner for cleanup work that crossed a
+    // crash or a namespace race. Never delete by pathname here. Validate that
+    // our retained directories remain directories; any unknown replacement is
+    // left untouched for operator inspection.
+    for name in directory_names(retention)? {
+        if !name.to_bytes().starts_with(b".velnor-raw-retained-") {
+            continue;
+        }
+        let retained = match open_directory_named(retention, &name) {
+            Ok(Some(retained)) => retained,
+            Ok(None) | Err(_) => continue,
+        };
+        let expected = stat_fd(&retained).map_err(storage_io)?;
+        let named = match stat_at(retention, &name) {
+            Ok(identity) => identity,
+            Err(_) => continue,
+        };
+        if !named.same_directory(expected) {
+            continue;
+        }
     }
     Ok(())
 }
@@ -1314,6 +1462,7 @@ fn publish_if_absent(
     name: &CStr,
     bytes: &[u8],
     max_bytes: usize,
+    retention: &File,
 ) -> Result<(), RawStorageError> {
     if bytes.len() > max_bytes {
         return Err(RawStorageError::Refused);
@@ -1323,7 +1472,7 @@ fn publish_if_absent(
         Some(_) => return Err(RawStorageError::Refused),
         None => {}
     }
-    let mut temporary = TemporaryFile::create(directory)?;
+    let mut temporary = TemporaryFile::create(directory, retention)?;
     (|| {
         temporary
             .file
@@ -1539,6 +1688,7 @@ impl Drop for NamespaceLock<'_> {
 #[cfg(unix)]
 struct TemporaryFile<'a> {
     directory: &'a File,
+    retention: &'a File,
     name: CString,
     identity: FileIdentity,
     file: File,
@@ -1547,7 +1697,7 @@ struct TemporaryFile<'a> {
 
 #[cfg(unix)]
 impl<'a> TemporaryFile<'a> {
-    fn create(directory: &'a File) -> Result<Self, RawStorageError> {
+    fn create(directory: &'a File, retention: &'a File) -> Result<Self, RawStorageError> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
         for attempt in 0..64_u32 {
@@ -1582,6 +1732,7 @@ impl<'a> TemporaryFile<'a> {
             }
             return Ok(Self {
                 directory,
+                retention,
                 name,
                 identity,
                 file,
@@ -1611,8 +1762,9 @@ impl<'a> TemporaryFile<'a> {
             None,
             None,
             Some(expected_links),
+            self.retention,
         )? {
-            QuarantineResult::Removed => {
+            QuarantineResult::Retained => {
                 self.name_removed = true;
                 Ok(())
             }
@@ -1637,9 +1789,10 @@ impl Drop for TemporaryFile<'_> {
             return;
         };
         // A successful no-clobber install may transiently have two links on
-        // platforms using link-based publication. Never unlink a pathname
+        // platforms using link-based publication. Never remove a pathname
         // after an identity/link-count mismatch; the name may have been
-        // replaced by another writer.
+        // replaced by another writer. Cleanup transfers the entry into the
+        // retention namespace instead of unlinking it.
         if !named_identity.same_inode(self.identity)
             || !current_identity.same_inode(self.identity)
             || named_identity.nlink > 2
@@ -1647,13 +1800,14 @@ impl Drop for TemporaryFile<'_> {
         {
             return;
         }
-        if let Ok(QuarantineResult::Removed) = quarantine_remove(
+        if let Ok(QuarantineResult::Retained) = quarantine_remove(
             self.directory,
             &self.name,
             self.identity,
             None,
             None,
             Some(named_identity.nlink),
+            self.retention,
         ) {
             self.name_removed = true;
         }

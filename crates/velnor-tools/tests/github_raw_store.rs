@@ -370,6 +370,74 @@ fn recovers_private_temporary_files_but_leaves_replaced_public_entry() {
 
 #[cfg(unix)]
 #[test]
+fn reconciles_crash_left_quarantine_into_store_retention() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("crash-left-quarantine");
+    let store = must(
+        RawObjectFileStore::new(&root),
+        "open crash-quarantine store",
+    );
+    drop(store);
+
+    let source_quarantine = root.join("sha256").join(".velnor-raw-quarantine-crashed");
+    must(
+        fs::create_dir(&source_quarantine),
+        "create crash-left quarantine",
+    );
+    must(
+        fs::set_permissions(&source_quarantine, fs::Permissions::from_mode(0o700)),
+        "restrict crash-left quarantine",
+    );
+    let entry = source_quarantine.join("entry");
+    must(
+        fs::write(&entry, b"crash-left-bytes"),
+        "write crash-left entry",
+    );
+    must(
+        fs::set_permissions(&entry, fs::Permissions::from_mode(0o400)),
+        "restrict crash-left entry",
+    );
+
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "reconcile crash-left quarantine",
+    );
+    drop(reopened);
+    assert!(!source_quarantine.exists());
+    let retention = root.join(".velnor-raw-quarantine");
+    let retained = must(fs::read_dir(&retention), "read retained quarantines")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".velnor-raw-retained-"))
+        })
+        .unwrap_or_else(|| panic!("crash-left quarantine was not retained"));
+    assert_eq!(
+        must(
+            fs::read(retained.join("entry")),
+            "read retained crash entry"
+        ),
+        b"crash-left-bytes"
+    );
+
+    let reopened_again = must(
+        RawObjectFileStore::new(&root),
+        "reopen retained crash quarantine",
+    );
+    drop(reopened_again);
+    assert_eq!(
+        must(fs::read_dir(&retention), "read retained quarantines again")
+            .flatten()
+            .count(),
+        1
+    );
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
 fn reconciliation_leaves_fifo_symlink_and_unknown_entries() {
     use std::os::unix::fs::{symlink, FileTypeExt, PermissionsExt};
 
@@ -394,6 +462,11 @@ fn reconciliation_leaves_fifo_symlink_and_unknown_entries() {
     must(
         symlink(&outside, &symlink_path),
         "write hostile temporary symlink",
+    );
+    let quarantine_symlink = object_directory.join(".velnor-raw-quarantine-hostile-link");
+    must(
+        symlink(&outside, &quarantine_symlink),
+        "write hostile quarantine symlink",
     );
 
     let unknown_directory = object_directory.join(".velnor-raw-hostile-directory.tmp");
@@ -422,6 +495,13 @@ fn reconciliation_leaves_fifo_symlink_and_unknown_entries() {
         .is_fifo());
     assert_eq!(
         must(fs::read_link(&symlink_path), "read hostile symlink"),
+        outside
+    );
+    assert_eq!(
+        must(
+            fs::read_link(&quarantine_symlink),
+            "read hostile quarantine symlink",
+        ),
         outside
     );
     assert!(unknown_directory.is_dir());
