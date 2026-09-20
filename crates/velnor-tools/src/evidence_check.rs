@@ -2569,6 +2569,20 @@ fn run_url_matches_repository(value: &str, repository: &str, run_id: u64) -> boo
         && url.path() == format!("/{repository}/actions/runs/{run_id}")
 }
 
+fn check_run_url_matches_repository(value: &str, repository: &str, check_run_id: u64) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str() == Some("github.com")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path() == format!("/{repository}/runs/{check_run_id}")
+}
+
 fn g0_context_pairs(contexts: &[RequiredContext]) -> BTreeSet<(String, String)> {
     contexts
         .iter()
@@ -3708,7 +3722,7 @@ fn check_g0_check_producers(
             || check.event != expectation.event
             || check.status != "completed"
             || check.conclusion != "success"
-            || !g0_repo_source_url(repository, &check.source_url)
+            || !check_run_url_matches_repository(&check.source_url, repository, check.check_run_id)
         {
             finding(
                 findings,
@@ -3934,7 +3948,7 @@ fn check_g0_pull_request(
             || check.event != "pull_request"
             || check.status != "completed"
             || check.conclusion != "success"
-            || !g0_repo_source_url(repository, &check.source_url)
+            || !check_run_url_matches_repository(&check.source_url, repository, check.check_run_id)
             || !pr.workflow_bindings.iter().any(|binding| {
                 binding.run_ids.contains(&check.workflow_run_id)
                     && binding.event == check.event
@@ -8343,6 +8357,18 @@ mod tests {
         findings.clear();
         check_g0_inventory(&manifest, &snapshot, Some(&wrong_artifact), &mut findings);
         assert!(g0_codes(&findings).contains("g0-artifact-identity"));
+
+        let mut wrong_check_url = complete_g0_fixture().2;
+        let check = &mut wrong_check_url.collector_snapshot.repositories[0].main_checks[0];
+        check.source_url = format!(
+            "https://github.com/{}/runs/{}",
+            CANONICAL_REPOSITORIES[0],
+            check.check_run_id + 1
+        );
+        refresh_typed_inventory_bytes(&mut wrong_check_url);
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&wrong_check_url), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-check-producer"));
 
         let mut wrong_artifact_attempt = inventory.clone();
         wrong_artifact_attempt.collector_snapshot.repositories[0].artifacts[0].run_attempt = 2;
