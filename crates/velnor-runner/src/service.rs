@@ -376,7 +376,7 @@ pub struct ReleaseVerifyProductArgs {
     pub artifacts: PathBuf,
     /// External manifest checksum sidecar.
     #[arg(long)]
-    pub checksum: Option<PathBuf>,
+    pub checksum: PathBuf,
     #[arg(long)]
     pub schema: String,
     #[arg(long)]

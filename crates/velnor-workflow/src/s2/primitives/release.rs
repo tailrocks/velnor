@@ -2028,7 +2028,7 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
         output.replace_range(
             start..end,
             r#"            artifact_json="$(jq -s '.' "$artifact_file")"
-            archive_components="$(jq -S --arg target "$target" --arg release_version "$product_version" --arg source_commit "$source_commit" --argjson artifacts "$artifact_json" '[.components[] | select((.targets | index($target)) != null) | . as $component | ($artifacts[] | select(.target == $target and .kind == "binary" and .name == ($component.binary + "-" + $target))) as $artifact | {name:$component.name,crate:$component.crate,crate_version:$component.version,release_version:$release_version,source_commit:$source_commit,binary_sha256:$artifact.sha256,feature:$component.feature,identity:$component.identity}] | sort_by(.name)' product-component-contract.json)""#,
+            archive_components="$(jq -S --arg target "$target" --arg release_version "$product_version" --arg source_commit "$source_commit" --argjson artifacts "$artifact_json" '[.components[] | select((.targets | index($target)) != null) | . as $component | ($artifacts[] | select(.target == $target and .kind == "binary" and .name == ($component.binary + "-" + $target))) as $artifact | {name:$component.name,crate:$component.crate,crate_version:$component.version,release_version:$release_version,source_commit:$source_commit,binary_sha256:$artifact.sha256}] | sort_by(.name)' product-component-contract.json)""#,
         );
     }
     output = output.replace(
@@ -2038,7 +2038,7 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
     let product_verification = {
         let release_tool = format!("artifacts/{package}-release-tool");
         let block = format!(
-        "          sha256sum product-assets/product-manifest.json > product-assets/product-manifest.json.sha256\n\
+        "          sha256sum product-assets/product-manifest.json | awk '{{print $1}}' > product-assets/product-manifest.json.sha256\n\
           rm -rf -- product-payload\n\
           mkdir product-payload\n\
           while IFS= read -r name; do\n\

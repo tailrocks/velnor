@@ -1647,16 +1647,10 @@ pub fn run(args: ReleaseArgs) -> Result<()> {
 fn verify_product_command(args: ReleaseVerifyProductArgs) -> Result<()> {
     let bytes = fs::read(&args.manifest)
         .with_context(|| format!("read product manifest {}", args.manifest.display()))?;
-    let expected_digest = args
-        .checksum
-        .as_deref()
-        .map(|path| read_artifact_checksum(path, "product manifest"))
-        .transpose()?;
-    let manifest = crate::product::ApplicationManifest::verify_bytes(
-        &bytes,
-        expected_digest.as_ref().map(Sha256Hex::as_str),
-    )
-    .map_err(|error| anyhow::anyhow!("verify product manifest: {error}"))?;
+    let expected_digest = read_artifact_checksum(&args.checksum, "product manifest")?;
+    let manifest =
+        crate::product::ApplicationManifest::verify_bytes(&bytes, expected_digest.as_str())
+            .map_err(|error| anyhow::anyhow!("verify product manifest: {error}"))?;
     let component_contract_bytes = fs::read(&args.component_contract).with_context(|| {
         format!(
             "read native product component contract {}",

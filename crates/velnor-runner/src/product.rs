@@ -73,8 +73,6 @@ pub struct ApplicationComponent {
     pub crate_name: String,
     pub version: String,
     pub binary: String,
-    pub feature: Option<String>,
-    pub identity: String,
     pub targets: Vec<String>,
 }
 
@@ -368,11 +366,6 @@ impl ApplicationManifest {
                 || !safe_version(&component.version)
                 || matches!(component.version.as_str(), "development" | "unknown")
                 || !safe_basename(&component.binary)
-                || component
-                    .feature
-                    .as_deref()
-                    .is_some_and(|feature| feature != "release-build")
-                || !matches!(component.identity.as_str(), "version" | "revision")
                 || component.targets.is_empty()
             {
                 return Err(ApplicationManifestError::Field("components"));
@@ -534,9 +527,9 @@ impl ApplicationManifest {
     }
 
     /// Verify the complete source-owned component declaration, including
-    /// crate, binary, component version, identity mode, feature, and target
-    /// coverage.  The name-only profile remains available to non-product
-    /// callers; publication always uses this stronger contract.
+    /// crate, binary, component version, and target coverage.  Feature and
+    /// identity mode remain source-contract concerns and are not duplicated
+    /// in the consumer-facing canonical manifest.
     pub fn verify_typed_profile(
         &self,
         contract: &NativeProductContract,
@@ -569,8 +562,6 @@ impl ApplicationManifest {
             if actual.crate_name != expected.crate_name
                 || actual.binary != expected.binary
                 || actual.version != expected.version
-                || actual.feature != expected.feature
-                || actual.identity != expected.identity
                 || actual
                     .targets
                     .iter()
@@ -588,10 +579,10 @@ impl ApplicationManifest {
         Ok(())
     }
 
-    /// Verify canonical bytes and the optional externally supplied digest.
+    /// Verify canonical bytes and the required externally supplied digest.
     pub fn verify_bytes(
         bytes: &[u8],
-        expected_digest: Option<&str>,
+        expected_digest: &str,
     ) -> Result<Self, ApplicationManifestError> {
         let manifest: Self =
             serde_json::from_slice(bytes).map_err(|_| ApplicationManifestError::NonCanonical)?;
@@ -599,7 +590,7 @@ impl ApplicationManifest {
         if manifest.to_canonical_json().as_bytes() != bytes {
             return Err(ApplicationManifestError::NonCanonical);
         }
-        if expected_digest.is_some_and(|expected| expected != manifest.digest()) {
+        if expected_digest != manifest.digest() {
             return Err(ApplicationManifestError::Digest);
         }
         Ok(manifest)
@@ -715,8 +706,6 @@ struct ArchiveComponent {
     release_version: String,
     source_commit: String,
     binary_sha256: String,
-    feature: Option<String>,
-    identity: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -883,13 +872,20 @@ fn verify_archive_members(
                     (
                         component.crate_name.clone(),
                         component.version.clone(),
-                        component.feature.clone(),
-                        component.identity.clone(),
                         binary_sha256,
                     ),
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        let mut actual_component_names = BTreeSet::new();
+        if archive_manifest.components.len() != expected_components.len()
+            || archive_manifest
+                .components
+                .iter()
+                .any(|component| !actual_component_names.insert(component.name.as_str()))
+        {
+            return Err(ApplicationManifestError::ArchiveUnsafe);
+        }
         let actual_components = archive_manifest
             .components
             .into_iter()
@@ -899,8 +895,6 @@ fn verify_archive_members(
                     (
                         component.crate_name,
                         component.crate_version,
-                        component.feature,
-                        component.identity,
                         Some(component.binary_sha256),
                         component.release_version,
                         component.source_commit,
@@ -910,22 +904,18 @@ fn verify_archive_members(
             .collect::<BTreeMap<_, _>>();
         let expected_components = expected_components
             .into_iter()
-            .map(
-                |(name, (crate_name, version, feature, identity, binary_sha256))| {
+            .map(|(name, (crate_name, version, binary_sha256))| {
+                (
+                    name,
                     (
-                        name,
-                        (
-                            crate_name,
-                            version,
-                            feature,
-                            identity,
-                            binary_sha256,
-                            manifest.version.clone(),
-                            manifest.source_commit.clone(),
-                        ),
-                    )
-                },
-            )
+                        crate_name,
+                        version,
+                        binary_sha256,
+                        manifest.version.clone(),
+                        manifest.source_commit.clone(),
+                    ),
+                )
+            })
             .collect::<BTreeMap<_, _>>();
         if actual_components != expected_components {
             return Err(ApplicationManifestError::ArchiveUnsafe);
@@ -1182,8 +1172,6 @@ mod tests {
                 crate_name: "runner".to_owned(),
                 version: "0.1.0".to_owned(),
                 binary: "runner".to_owned(),
-                feature: None,
-                identity: "version".to_owned(),
                 targets: vec!["x86_64-unknown-linux-gnu".to_owned()],
             }],
         }
@@ -1213,7 +1201,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_component_contract_binds_crate_binary_version_feature_identity_and_targets() {
+    fn typed_component_contract_binds_crate_binary_version_and_targets() {
         let value = manifest();
         let contract = component_contract();
         assert_eq!(value.verify_typed_profile(&contract), Ok(()));
@@ -1230,12 +1218,6 @@ mod tests {
             value.verify_typed_profile(&mismatch),
             Err(ApplicationManifestError::Contract)
         );
-        mismatch = contract;
-        mismatch.components[0].identity = "revision".to_owned();
-        assert_eq!(
-            value.verify_typed_profile(&mismatch),
-            Err(ApplicationManifestError::Contract)
-        );
     }
 
     #[test]
@@ -1244,7 +1226,8 @@ mod tests {
         value.components[0].targets.reverse();
         let bytes = value.to_canonical_json();
         assert!(!bytes.contains("manifest_sha256"));
-        assert!(ApplicationManifest::verify_bytes(bytes.as_bytes(), Some(&value.digest())).is_ok());
+        let digest = value.digest();
+        assert!(ApplicationManifest::verify_bytes(bytes.as_bytes(), &digest).is_ok());
     }
 
     #[test]

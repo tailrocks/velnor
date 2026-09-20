@@ -84,7 +84,7 @@ pub struct ReleaseVerifyRecordArgs {
 pub struct ReleaseVerifyProductArgs {
     pub manifest: PathBuf,
     pub artifacts: PathBuf,
-    pub checksum: Option<PathBuf>,
+    pub checksum: PathBuf,
     pub schema: String,
     pub product_id: String,
     pub channel: String,
