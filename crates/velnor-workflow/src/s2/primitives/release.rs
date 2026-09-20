@@ -3449,6 +3449,58 @@ struct ReleaseUnitJobContext<'a> {
     gate: Option<&'a str>,
 }
 
+/// Each release lane plans its own full selection first: `run` requires the
+/// planned-selection file CI Planning materializes for reusable legs, but
+/// release legs have no Planning job. Full scope short-circuits the diff,
+/// so no history is needed.
+/// The retained-output cache restore step for a cacheable unit.
+fn render_release_unit_cache_restore(
+    output: &mut String,
+    workflow: &WorkflowIr,
+    provider: ProviderId,
+    unit: &Unit,
+    verify_name: &str,
+) {
+    if let Some(cache) = &unit.cache {
+        render_retained_output_cache_note(output, workflow, unit, cache);
+        let (paths, key) = rendered_cache_values(cache);
+        let _ = writeln!(
+            output,
+            "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: ci-release-${{{{ runner.os }}}}-{}-{}-{}-{}-${{{{ hashFiles({key}) }}}}",
+            verify_name,
+            ActionPin::CacheRestore.reference(),
+            provider.as_str(),
+            unit.platform.as_str(),
+            unit.trust.as_str(),
+            unit.id
+        );
+    }
+}
+
+fn render_release_selection_plan_step(output: &mut String, head_sha: &str) {
+    let _ = writeln!(
+        output,
+        "      - name: Plan full release selection\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: {head_sha}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          mkdir -p .velnor-ci-selection\n          velnor-workflow plan --config .github/ci/project.toml\n",
+    );
+}
+
+/// The lane's main step: run the unit's checks over the full scope.
+fn render_release_unit_checks_step(
+    output: &mut String,
+    unit: &Unit,
+    verify_name: &str,
+    head_sha: &str,
+    cargo_offline: &str,
+    token_env: &str,
+) {
+    let _ = writeln!(
+        output,
+        "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: {head_sha}{cargo_offline}{token_env}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
+        yaml_scalar(&unit.id),
+        yaml_scalar(&unit.id),
+    );
+}
+
 fn render_release_unit_job(
     output: &mut String,
     config: &ProjectConfig,
@@ -3537,19 +3589,8 @@ fn render_release_unit_job(
             &cargo_offline,
         );
     }
-    if cargo_cache_restored && let Some(cache) = &unit.cache {
-        render_retained_output_cache_note(output, workflow, unit, cache);
-        let (paths, key) = rendered_cache_values(cache);
-        let _ = writeln!(
-            output,
-            "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: ci-release-${{{{ runner.os }}}}-{}-{}-{}-{}-${{{{ hashFiles({key}) }}}}",
-            verify_name,
-            ActionPin::CacheRestore.reference(),
-            provider.as_str(),
-            unit.platform.as_str(),
-            unit.trust.as_str(),
-            unit.id
-        );
+    if cargo_cache_restored {
+        render_release_unit_cache_restore(output, workflow, provider, unit, &verify_name);
     }
     let skip_when_offline_ready = provider.is_local()
         && unit
@@ -3565,26 +3606,18 @@ fn render_release_unit_job(
         skip_when_offline_ready,
     );
     let token_env = docker_build_token_env_for_members(&[unit]);
-    // `run` requires the planned-selection file CI Planning materializes
-    // for reusable legs; release legs have no Planning job, so each lane
-    // plans its own full selection first (full scope short-circuits the
-    // diff, so no history is needed). Without this step every lane fails
-    // reading the missing selection file.
-    let _ = writeln!(
-        output,
-        "      - name: Plan full release selection\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: {head_sha}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          mkdir -p .velnor-ci-selection\n          velnor-workflow plan --config .github/ci/project.toml\n",
-        head_sha = context.head_sha,
-    );
+    render_release_selection_plan_step(output, context.head_sha);
     // The generator's self-check resolves the D19 pin's closure from local
     // history, but release checkouts are shallow: the hosted leg fetches the
     // pin before the checks, like the unit provider job.
     render_release_pin_fetch(output, provider, unit);
-    let _ = writeln!(
+    render_release_unit_checks_step(
         output,
-        "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: {head_sha}{cargo_offline}{token_env}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
-        yaml_scalar(&unit.id),
-        yaml_scalar(&unit.id),
-        head_sha = context.head_sha,
+        unit,
+        &verify_name,
+        context.head_sha,
+        &cargo_offline,
+        token_env,
     );
     id
 }
