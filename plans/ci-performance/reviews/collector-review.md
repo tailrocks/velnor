@@ -43,6 +43,27 @@ workflow SHA is promoted to a top-level merge SHA.
 
 `rtk cargo test --locked -p unit-collector --test workflow` — 18 passed.
 
+### Independent replay audit
+
+I compared the seven regenerated JSONL files with their `HEAD` versions by
+record identity and field value: 476 rows, all row counts unchanged. Exactly
+three identity fields changed on every row (`source_sha`,
+`source_sha_basis`, and the new `observed_pull_request_head_sha`); no timing,
+job, gate, status, or other measurement field changed. The audit file records
+the same result in
+`/tmp/velnor-collector-identity-replay-audit.json` (`timing_fields_changed:
+false` for all seven).
+
+The three stale live-PR projections are visible in the old rows: runs
+35485817832, 35485891400, and 35486689573 had `source_sha` values different
+from their raw run `head_sha`. The regenerated rows preserve each raw run head,
+set `source_sha=null` with `unknown.pull_request_source_not_proven`, and move
+the live value to `observed_pull_request_head_sha`. Run 35487077663 likewise
+keeps raw head `e1357dd...`, leaves source unknown, and does not emit the live
+PR head `29279ab...` as historical identity. The regenerated measurements are
+safe for timing comparison; source identity remains explicitly unknown for
+these PR cohorts.
+
 ## Source-identity defect and bounded fix (2026-09-20)
 
 **Prior HOLD.** Before this bounded fix, `parse_run` assigned
@@ -121,10 +142,14 @@ Raw run heads stayed intact; no merge SHA or mutable PR source was invented.
 The explicit matching/mismatched-ref regression is retained in the test suite.
 All-target Clippy passed. This is a correctness repair, not a speedup claim.
 
-Seven existing JSONL/CSV observation pairs contain the previous derived source
-basis and require regeneration from their saved raw responses. Git history
-retains the original erroneous derivations; they must not be used for cohort
-comparisons while that audit is pending.
+Seven existing JSONL/CSV observation pairs were regenerated from saved raw
+responses. Independent audit confirmed all 476 rows changed only source
+identity fields; timing, jobs and required-gate results are unchanged. Three
+datasets had attributed source to a later PR head. Exact replay commands and
+before/after JSONL hashes are retained in
+`../observations/collector-identity-replay-audit-20260920.json`. Git history
+retains the original erroneous derivations; use the corrected observations
+for comparisons, with their unresolved checkout identities left unknown.
 
 ## Independent bounded review (2026-09-20)
 
