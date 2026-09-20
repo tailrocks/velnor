@@ -35,6 +35,8 @@
 pub mod dind;
 pub mod ownership;
 pub mod runner;
+#[cfg(unix)]
+mod secure_fs;
 pub mod supervise;
 
 pub use dind::{
@@ -51,7 +53,7 @@ pub use runner::{
 };
 pub use supervise::{CleanupReport, DiagnosticExport, Supervision, SupervisionOutcome};
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use velnor_model::ScaleSetWorkerState;
 
@@ -88,29 +90,79 @@ where
     }
 }
 
-/// Write secret-adjacent bytes with owner-only permissions. The mode is
-/// set at creation (a `0600` open mode can only lose bits to the umask,
-/// never gain group/other) and enforced again after the write so a
-/// pre-existing wider file cannot survive.
-pub(crate) fn write_owner_only(dest: &Path, contents: &[u8]) -> std::io::Result<()> {
+/// Create or replace the worker's stable owner-only JIT env file.
+///
+/// The worker state directory is a writable bind mount inside both DinD
+/// and the runner, so host-only secrets must never be staged inside it.
+/// The private sibling name lets crash recovery find and remove an env
+/// file left behind before Docker returned.
+pub(crate) fn create_owner_only_file_next_to(
+    state_dir: &Path,
+    contents: &[u8],
+) -> std::io::Result<PathBuf> {
     #[cfg(unix)]
     {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(dest)?;
-        file.write_all(contents)?;
-        file.flush()?;
-        drop(file);
-        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o600))?;
-        Ok(())
+        let parent_path = state_dir.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "worker state directory has no parent",
+            )
+        })?;
+        let parent = secure_fs::open_absolute_directory(parent_path)?;
+        secure_fs::verify_host_parent(&parent)?;
+        let directory_name = secure_fs::private_jit_directory_name(state_dir)?;
+        let directory = secure_fs::open_or_create_private_directory_at(&parent, &directory_name)?;
+        let file_name = std::ffi::OsStr::new("jit.env");
+        if let Err(write_error) = secure_fs::write_file_at(&directory, file_name, contents, 0o600) {
+            drop(directory);
+            return match secure_fs::remove_tree_at(&parent, &directory_name) {
+                Ok(()) => Err(write_error),
+                Err(cleanup_error) => Err(std::io::Error::other(format!(
+                    "host-only JIT write failed: {write_error}; cleanup failed: {cleanup_error}"
+                ))),
+            };
+        }
+        Ok(parent_path.join(directory_name).join(file_name))
     }
     #[cfg(not(unix))]
-    std::fs::write(dest, contents)
+    {
+        let _ = (state_dir, contents);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "secure host-owned worker files require descriptor-relative filesystem support",
+        ))
+    }
+}
+
+/// Remove the deterministic private JIT directory, including `jit.env` and
+/// any temporary file left by a process crash during atomic creation.
+pub(crate) fn remove_owner_only_file_next_to(state_dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let parent_path = state_dir.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "worker state directory has no parent",
+            )
+        })?;
+        let parent = secure_fs::open_absolute_directory(parent_path)?;
+        secure_fs::verify_host_parent(&parent)?;
+        let directory_name = secure_fs::private_jit_directory_name(state_dir)?;
+        match secure_fs::open_private_directory_at(&parent, &directory_name) {
+            Ok(directory) => drop(directory),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        secure_fs::remove_tree_at(&parent, &directory_name)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = state_dir;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "secure host-owned worker files require descriptor-relative filesystem support",
+        ))
+    }
 }
 
 /// A recorded lifecycle edge: `from → to` for one ownership id.
@@ -613,11 +665,15 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn provision_runs_verify_network_dind_ready_runner_in_order() {
         let dind_ref = format!("{DIND_REPOSITORY}@{DIND_INDEX_DIGEST}");
         let runner_ref = format!("{RUNNER_REPOSITORY}@{RUNNER_INDEX_DIGEST}");
-        let state = std::env::temp_dir().join(format!("velnor-provision-{}", std::process::id()));
+        let state = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("velnor-provision-{}", uuid::Uuid::new_v4()));
         let plan = ProvisionPlan {
             identity: WorkerIdentity::new(OwnershipId::bind(7, "velnor-set-0007")),
             profile: HomogeneousProfile::for_arch("x86_64").unwrap(),
@@ -683,8 +739,10 @@ mod tests {
     fn provision_fails_closed_when_dind_never_ready() {
         let dind_ref = format!("{DIND_REPOSITORY}@{DIND_INDEX_DIGEST}");
         let runner_ref = format!("{RUNNER_REPOSITORY}@{RUNNER_INDEX_DIGEST}");
-        let state =
-            std::env::temp_dir().join(format!("velnor-provision-noready-{}", std::process::id()));
+        let state = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("velnor-provision-noready-{}", uuid::Uuid::new_v4()));
         let plan = ProvisionPlan {
             identity: WorkerIdentity::new(OwnershipId::bind(7, "velnor-set-0007")),
             profile: HomogeneousProfile::for_arch("x86_64").unwrap(),

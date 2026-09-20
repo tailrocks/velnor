@@ -42,7 +42,7 @@ fn fixture_dir() -> std::path::PathBuf {
 }
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
+    let dir = std::env::temp_dir().canonicalize().unwrap().join(format!(
         "velnor-worker-lane-{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()

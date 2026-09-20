@@ -61,7 +61,7 @@ const REQUEST_ID: i64 = 4244;
 // ---------------------------------------------------------------------------
 
 fn temp_root(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
+    let dir = std::env::temp_dir().canonicalize().unwrap().join(format!(
         "velnor-scaleset-daemon-{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()

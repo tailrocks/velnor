@@ -455,11 +455,6 @@ impl std::fmt::Debug for RunnerSpec {
     }
 }
 
-/// Name of the JIT env file inside the worker state dir. Written `0600`
-/// just before `docker create`, deleted right after: the blob's disk
-/// lifetime is one create call.
-const JIT_ENV_FILE: &str = "jit.env";
-
 impl RunnerSpec {
     /// Derive the spec. The JIT blob travels into the container via a
     /// `0600` `--env-file` deleted right after `docker create`; it never
@@ -496,23 +491,20 @@ impl RunnerSpec {
         &self.state_dir
     }
 
-    /// Write the JIT blob to a `0600` env file for `--env-file`.
+    /// Write the JIT blob to a host-only `0600` env file for `--env-file`.
     ///
     /// The blob is line-oriented secret material: a value containing
     /// `\n` or `\r` fails closed instead of corrupting the file or
-    /// injecting variables. The caller deletes the file immediately
-    /// after `docker create` (see [`ensure_runner`]).
+    /// injecting variables. The file is created in a deterministic
+    /// host-only sibling directory. The caller deletes it immediately after
+    /// `docker create`; crash recovery can find a file left behind.
     pub fn write_env_file(&self, dir: &Path) -> Result<PathBuf> {
         if self.jit_config.bytes().any(|b| b == b'\n' || b == b'\r') {
             anyhow::bail!("JIT config blob must be a single line for --env-file");
         }
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("create JIT env file dir {}", dir.display()))?;
-        let path = dir.join(JIT_ENV_FILE);
         let contents = format!("{JIT_CONFIG_ENV}={}\n", self.jit_config);
-        super::write_owner_only(&path, contents.as_bytes())
-            .with_context(|| format!("write JIT env file {}", path.display()))?;
-        Ok(path)
+        super::create_owner_only_file_next_to(dir, contents.as_bytes())
+            .with_context(|| format!("write host-only JIT env file beside {}", dir.display()))
     }
 
     /// `docker create` argv for the runner container.
@@ -589,6 +581,10 @@ pub(crate) fn ensure_runner(
     runner: &mut dyn WorkerRunner,
     spec: &RunnerSpec,
 ) -> Result<RunnerProvision> {
+    // A prior process may have died after writing the JIT file but before
+    // Docker created the runner. Clear it before any adoption decision.
+    super::remove_owner_only_file_next_to(spec.state_dir())
+        .context("remove stale host-only JIT env file before runner inspect")?;
     let name = spec.identity().runner_container();
     let inspect = runner
         .run(
@@ -605,10 +601,21 @@ pub(crate) fn ensure_runner(
     if inspect.stdout.trim().is_empty() {
         let env_file = spec.write_env_file(spec.state_dir())?;
         let created = runner.run("docker", &spec.create_args_with_env_file(&env_file));
-        // The JIT blob's disk lifetime ends here, whatever `docker
-        // create` decided: a live blob must not survive a failed create.
-        let _ = std::fs::remove_file(&env_file);
-        let created = created.with_context(|| format!("create runner container {name}"))?;
+        // Always attempt removal, including when Docker failed. Surface an
+        // unlink failure because the file contains live JIT credentials.
+        let removed = super::remove_owner_only_file_next_to(spec.state_dir())
+            .context("remove host-only JIT env file after Docker create");
+        let created = match (created, removed) {
+            (Ok(output), Ok(())) => Ok(output),
+            (Err(error), Ok(())) => {
+                Err(error).with_context(|| format!("create runner container {name}"))
+            }
+            (Ok(_), Err(remove_error)) => Err(remove_error),
+            (Err(create_error), Err(remove_error)) => Err(anyhow::anyhow!(
+                "create runner container {name} failed: {create_error:#}; {remove_error:#}"
+            )),
+        };
+        let created = created?;
         if created.code != 0 {
             anyhow::bail!(
                 "create runner container {name} exited {}: {}",
@@ -785,6 +792,39 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    struct BreakJitUnlinkRunner {
+        env_file: Option<PathBuf>,
+        displaced_root: Option<PathBuf>,
+        seen: Vec<Vec<String>>,
+    }
+
+    #[cfg(unix)]
+    impl WorkerRunner for BreakJitUnlinkRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<WorkerOutput> {
+            assert_eq!(program, "docker");
+            self.seen.push(args.to_vec());
+            match args.first().map(String::as_str) {
+                Some("inspect") => Ok(ScriptRunner::ok("")),
+                Some("create") => {
+                    let env_file = args
+                        .windows(2)
+                        .find(|pair| pair[0] == "--env-file")
+                        .map(|pair| PathBuf::from(&pair[1]))
+                        .expect("create argv has --env-file");
+                    let root = env_file.parent().unwrap().parent().unwrap();
+                    let displaced_root = root.with_extension("moved");
+                    std::fs::rename(root, &displaced_root)?;
+                    std::os::unix::fs::symlink(&displaced_root, root)?;
+                    self.env_file = Some(env_file);
+                    self.displaced_root = Some(displaced_root);
+                    Ok(ScriptRunner::ok("container\n"))
+                }
+                other => Err(anyhow::anyhow!("unexpected docker command {other:?}")),
+            }
+        }
+    }
+
     fn identity() -> WorkerIdentity {
         WorkerIdentity::new(super::super::ownership::OwnershipId::bind(
             7,
@@ -793,9 +833,12 @@ mod tests {
     }
 
     fn temp_state(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("velnor-runner-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let root = temp.join(format!("velnor-runner-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let state = root.join("worker");
+        std::fs::create_dir(&state).unwrap();
+        state
     }
 
     #[test]
@@ -943,6 +986,7 @@ mod tests {
         assert!(!rendered.contains("live-jit-blob-bytes"), "{rendered}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn jit_env_file_carries_the_image_input() {
         let state = temp_state("env-file");
@@ -953,7 +997,9 @@ mod tests {
             "live-jit-blob-bytes",
         );
         let env_file = spec.write_env_file(&state).unwrap();
-        assert_eq!(env_file, state.join("jit.env"));
+        assert_eq!(env_file.parent().unwrap().parent(), state.parent());
+        assert_eq!(env_file.file_name().unwrap(), "jit.env");
+        assert_ne!(env_file, state.join("jit.env"));
         assert_eq!(
             std::fs::read_to_string(&env_file).unwrap(),
             format!("{JIT_CONFIG_ENV}=live-jit-blob-bytes\n")
@@ -964,7 +1010,118 @@ mod tests {
             let mode = std::fs::metadata(&env_file).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "JIT env file has mode {mode:o}");
         }
-        std::fs::remove_dir_all(&state).unwrap();
+        std::fs::remove_file(env_file).unwrap();
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn jit_env_file_reuses_stable_path_after_interrupted_create() {
+        let state = temp_state("env-file-retry");
+        let first = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "old-jit-blob",
+        );
+        let first_path = first.write_env_file(&state).unwrap();
+        let retry = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "new-jit-blob",
+        );
+        let retry_path = retry.write_env_file(&state).unwrap();
+
+        assert_eq!(first_path, retry_path);
+        assert_eq!(
+            std::fs::read_to_string(&retry_path).unwrap(),
+            format!("{JIT_CONFIG_ENV}=new-jit-blob\n")
+        );
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn jit_env_cleanup_removes_crash_left_atomic_write_temporary_files() {
+        let state = temp_state("env-file-temp-cleanup");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "private-jit-blob",
+        );
+        let env_file = spec.write_env_file(&state).unwrap();
+        let private_dir = env_file.parent().unwrap();
+        let abandoned_temp = private_dir.join(".velnor-write-crash.tmp");
+        std::fs::write(&abandoned_temp, b"crash-left-jit-secret").unwrap();
+
+        super::super::remove_owner_only_file_next_to(&state).unwrap();
+
+        assert!(!private_dir.exists());
+        assert!(!abandoned_temp.exists());
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn jit_env_file_ignores_worker_precreated_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let state = temp_state("env-file-symlink");
+        let sentinel = state.parent().unwrap().join("sentinel");
+        std::fs::write(&sentinel, b"unchanged").unwrap();
+        symlink(&sentinel, state.join("jit.env")).unwrap();
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "private-jit-blob",
+        );
+
+        let env_file = spec.write_env_file(&state).unwrap();
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"unchanged");
+        assert!(std::fs::symlink_metadata(state.join("jit.env"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!env_file.starts_with(&state));
+        assert_eq!(
+            std::fs::read_to_string(&env_file).unwrap(),
+            format!("{JIT_CONFIG_ENV}=private-jit-blob\n")
+        );
+
+        std::fs::remove_file(env_file).unwrap();
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn jit_env_file_rejects_replaceable_path_ancestor() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let root = temp.join(format!(
+            "velnor-runner-writable-ancestor-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let replaceable = root.join("replaceable");
+        let stable_parent = replaceable.join("stable");
+        std::fs::create_dir_all(&stable_parent).unwrap();
+        std::fs::set_permissions(&replaceable, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let state = stable_parent.join("worker");
+        std::fs::create_dir(&state).unwrap();
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "private-jit-blob",
+        );
+
+        assert!(spec.write_env_file(&state).is_err());
+        assert!(!stable_parent.join(".velnor-jit-worker").exists());
+        std::fs::set_permissions(&replaceable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -979,7 +1136,7 @@ mod tests {
             );
             assert!(spec.write_env_file(&state).is_err());
         }
-        std::fs::remove_dir_all(&state).unwrap();
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -1134,6 +1291,7 @@ mod tests {
         assert!(runner_connection(&mut runner, &identity()).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn runner_provision_creates_then_adopts() {
         let state = temp_state("provision");
@@ -1159,11 +1317,14 @@ mod tests {
             !create.iter().any(|arg| arg.contains("jit-blob")),
             "{create:?}"
         );
-        assert!(
-            create.windows(2).any(|pair| pair[0] == "--env-file"
-                && pair[1] == state.join("jit.env").display().to_string()),
-            "{create:?}"
-        );
+        let env_file = create
+            .windows(2)
+            .find(|pair| pair[0] == "--env-file")
+            .map(|pair| PathBuf::from(&pair[1]))
+            .expect("create argv has --env-file");
+        assert_eq!(env_file.parent().unwrap().parent(), state.parent());
+        assert_eq!(env_file.file_name().unwrap(), "jit.env");
+        assert!(!env_file.exists());
         assert!(!state.join("jit.env").exists());
 
         let mut runner = ScriptRunner::scripted(vec![
@@ -1177,9 +1338,39 @@ mod tests {
         );
         // Adoption writes no env file at all.
         assert!(!state.join("jit.env").exists());
-        std::fs::remove_dir_all(&state).unwrap();
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn runner_provision_surfaces_jit_env_unlink_failure() {
+        let state = temp_state("unlink-failure");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "jit-blob",
+        );
+        let mut runner = BreakJitUnlinkRunner {
+            env_file: None,
+            displaced_root: None,
+            seen: Vec::new(),
+        };
+
+        let error = ensure_runner(&mut runner, &spec).unwrap_err();
+        assert!(error.to_string().contains("remove host-only JIT env file"));
+        assert_eq!(runner.seen.len(), 2, "must not start after unlink failure");
+        let env_file = runner.env_file.expect("create command received env file");
+        assert_eq!(
+            std::fs::read_to_string(&env_file).unwrap(),
+            format!("{JIT_CONFIG_ENV}=jit-blob\n")
+        );
+
+        std::fs::remove_file(state.parent().unwrap()).unwrap();
+        std::fs::remove_dir_all(runner.displaced_root.unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
     #[test]
     fn runner_provision_deletes_the_env_file_when_create_fails() {
         let state = temp_state("provision-fail");
@@ -1195,15 +1386,17 @@ mod tests {
         ]);
         assert!(ensure_runner(&mut runner, &spec).is_err());
         assert!(!state.join("jit.env").exists());
-        std::fs::remove_dir_all(&state).unwrap();
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn runner_provision_rejects_foreign_container() {
+        let state = temp_state("foreign");
         let spec = RunnerSpec::new(
             identity(),
             PinnedImage::parse(RUNNER_REF).unwrap(),
-            Path::new("/tmp/velnor-test-runner-state"),
+            &state,
             "jit-blob",
         );
         let mut runner = ScriptRunner::scripted(vec![
@@ -1212,6 +1405,7 @@ mod tests {
         ]);
         let error = ensure_runner(&mut runner, &spec).unwrap_err();
         assert!(error.to_string().contains("foreign ownership"), "{error}");
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
     }
 
     #[test]
