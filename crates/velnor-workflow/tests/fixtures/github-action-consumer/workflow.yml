@@ -20,10 +20,23 @@ jobs:
           mode: success
           skip-build: 'false'
           marker: action-consumer.log
-      - id: downstream
-        if: ${{ steps.action.outputs.result == 'downloaded' }}
+      - id: action-success
+        if: ${{ always() }}
         shell: bash
-        run: test -s action-consumer.log
+        run: test "${{ steps.action.outcome }}" = success
+      - id: downstream
+        if: ${{ always() }}
+        shell: bash
+        env:
+          ACTION_RESULT: ${{ steps.action.outputs.result }}
+        run: |
+          test "$ACTION_RESULT" = downloaded
+          test -s action-consumer.log
+          grep -Fx hadolint action-consumer.log
+          grep -Fx buildx action-consumer.log
+      - if: ${{ always() }}
+        shell: bash
+        run: test "${{ steps.downstream.outcome }}" = success
 
   expected-download-failure:
     runs-on: ubuntu-latest
@@ -44,9 +57,10 @@ jobs:
         if: ${{ steps.action.outcome == 'success' }}
         shell: bash
         run: exit 97
-      - if: ${{ steps.action.outcome == 'failure' }}
+      - if: ${{ always() }}
         shell: bash
         run: |
+          test "${{ steps.action.outcome }}" = failure
           test -s action-download-failure.log
           test "${{ steps.downstream.outcome }}" = skipped
 
@@ -64,12 +78,23 @@ jobs:
           mode: success
           skip-build: 'true'
           marker: action-skip-build.log
-      - if: ${{ steps.action.outputs.result == 'downloaded' }}
+      - id: action-success
+        if: ${{ always() }}
         shell: bash
+        run: test "${{ steps.action.outcome }}" = success
+      - id: downstream
+        if: ${{ always() }}
+        shell: bash
+        env:
+          ACTION_RESULT: ${{ steps.action.outputs.result }}
         run: |
+          test "$ACTION_RESULT" = downloaded
           test -s action-skip-build.log
           ! grep -Fx hadolint action-skip-build.log
           ! grep -Fx buildx action-skip-build.log
+      - if: ${{ always() }}
+        shell: bash
+        run: test "${{ steps.downstream.outcome }}" = success
 
   expected-validator-failure:
     runs-on: ubuntu-latest
@@ -88,9 +113,10 @@ jobs:
         if: ${{ steps.action.outcome == 'success' }}
         shell: bash
         run: exit 97
-      - if: ${{ steps.action.outcome == 'failure' }}
+      - if: ${{ always() }}
         shell: bash
         run: |
+          test "${{ steps.action.outcome }}" = failure
           test -s action-validator-failure.log
           test "${{ steps.downstream.outcome }}" = skipped
 
@@ -111,9 +137,10 @@ jobs:
         if: ${{ steps.action.outcome == 'success' }}
         shell: bash
         run: exit 97
-      - if: ${{ steps.action.outcome == 'failure' }}
+      - if: ${{ always() }}
         shell: bash
         run: |
+          test "${{ steps.action.outcome }}" = failure
           test -s action-hadolint-failure.log
           test "${{ steps.downstream.outcome }}" = skipped
 
@@ -134,9 +161,10 @@ jobs:
         if: ${{ steps.action.outcome == 'success' }}
         shell: bash
         run: exit 97
-      - if: ${{ steps.action.outcome == 'failure' }}
+      - if: ${{ always() }}
         shell: bash
         run: |
+          test "${{ steps.action.outcome }}" = failure
           test -s action-buildx-failure.log
           test "${{ steps.downstream.outcome }}" = skipped
 
@@ -157,8 +185,9 @@ jobs:
         if: ${{ steps.action.outcome == 'success' }}
         shell: bash
         run: exit 97
-      - if: ${{ steps.action.outcome == 'failure' }}
+      - if: ${{ always() }}
         shell: bash
         run: |
+          test "${{ steps.action.outcome }}" = failure
           test -s action-downstream-failure.log
           test "${{ steps.downstream.outcome }}" = skipped

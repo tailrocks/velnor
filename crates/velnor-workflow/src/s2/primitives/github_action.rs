@@ -136,12 +136,35 @@ fn consumer_uses_marker(source: &str) -> bool {
 }
 
 fn consumer_uses_marker_named(source: &str, marker: &str) -> bool {
-    source.lines().any(|line| {
-        let line = line.trim_start();
-        line.strip_prefix("- uses:")
-            .or_else(|| line.strip_prefix("uses:"))
-            .is_some_and(|value| value.contains(marker))
-    })
+    let Ok(document) = serde_yaml::from_str::<serde_yaml::Value>(source) else {
+        return false;
+    };
+    let mut found = false;
+    visit_consumer_marker(&document, marker, false, &mut found) && found
+}
+
+fn visit_consumer_marker(
+    value: &serde_yaml::Value,
+    marker: &str,
+    is_uses_value: bool,
+    found: &mut bool,
+) -> bool {
+    match value {
+        serde_yaml::Value::Mapping(mapping) => mapping.iter().all(|(key, value)| {
+            visit_consumer_marker(value, marker, key.as_str() == "uses", found)
+        }),
+        serde_yaml::Value::Sequence(sequence) => sequence
+            .iter()
+            .all(|value| visit_consumer_marker(value, marker, false, found)),
+        serde_yaml::Value::String(value) if value.contains(marker) => {
+            if !is_uses_value || value != marker {
+                return false;
+            }
+            *found = true;
+            true
+        }
+        _ => true,
+    }
 }
 
 fn validate_consumer_workflow_graph(
@@ -177,6 +200,7 @@ fn validate_consumer_workflow_graph(
     let checkout_reference = checkout_reference
         .split_once(" #")
         .map_or(checkout_reference, |(reference, _)| reference);
+    let mut local_action_seen = false;
     for (job_name, job) in jobs {
         let steps = job
             .get("steps")
@@ -193,12 +217,20 @@ fn validate_consumer_workflow_graph(
             };
             if uses == checkout_reference {
                 checkout_seen = true;
-            } else if uses.starts_with("./") && !checkout_seen {
-                return Err(GeneratorError::usage(format!(
-                    "github-action-fixtures consumer workflow `{fixture}` job `{job_name:?}` local action at step {index} must follow pinned checkout `{checkout_reference}`"
-                )));
+            } else if uses.starts_with("./") {
+                if !checkout_seen {
+                    return Err(GeneratorError::usage(format!(
+                        "github-action-fixtures consumer workflow `{fixture}` job `{job_name:?}` local action at step {index} must follow pinned checkout `{checkout_reference}`"
+                    )));
+                }
+                local_action_seen = true;
             }
         }
+    }
+    if !local_action_seen {
+        return Err(GeneratorError::usage(format!(
+            "github-action-fixtures consumer workflow `{fixture}` must invoke a local action after pinned checkout `{checkout_reference}`"
+        )));
     }
     Ok(())
 }
@@ -378,6 +410,17 @@ mod tests {
 
     #[test]
     fn generated_consumer_graph_requires_automatic_triggers_and_checkout_order() {
+        let embedded_action_marker = "on:\n  pull_request:\n  push:\njobs:\n  consume:\n    steps:\n      - uses: octo/__VELNOR_ACTION_PATH__\n";
+        assert!(
+            !super::consumer_uses_marker(embedded_action_marker),
+            "an embedded action marker is not a local consumer uses scalar"
+        );
+        let exact_action_marker = "on:\n  pull_request:\n  push:\njobs:\n  consume:\n    steps:\n      - uses: __VELNOR_ACTION_PATH__\n";
+        assert!(
+            super::consumer_uses_marker(exact_action_marker),
+            "the exact action marker is accepted in a uses scalar"
+        );
+
         let missing_trigger = "on: workflow_dispatch\njobs:\n  consume:\n    steps:\n      - uses: actions/checkout@deadbeef\n      - uses: ./\n";
         let error = super::validate_consumer_workflow_graph(
             missing_trigger,
@@ -398,6 +441,19 @@ mod tests {
         .unwrap_or_else(|| panic!("local actions must follow checkout"));
         assert!(
             error.to_string().contains("must follow pinned checkout"),
+            "{error}"
+        );
+
+        let checkout_only = "on:\n  pull_request:\n  push:\njobs:\n  consume:\n    steps:\n      - uses: actions/checkout@deadbeef\n";
+        let error = super::validate_consumer_workflow_graph(
+            checkout_only,
+            "actions/checkout@deadbeef",
+            "fixture.yml",
+        )
+        .err()
+        .unwrap_or_else(|| panic!("consumer graphs must invoke a local action"));
+        assert!(
+            error.to_string().contains("invoke a local action"),
             "{error}"
         );
     }
@@ -506,6 +562,30 @@ mod tests {
             nodes: &nodes,
             contracts: &contracts,
         };
+        let workflow_path = root.join("tests/fixtures/github-action-consumer/workflow.yml");
+        let valid_workflow = must(
+            fs::read_to_string(&workflow_path),
+            "read tracked action consumer workflow",
+        );
+        let invalid_workflow = valid_workflow.replacen(
+            "uses: __VELNOR_ACTION_PATH__",
+            "uses: octo/__VELNOR_ACTION_PATH__",
+            1,
+        );
+        assert_ne!(invalid_workflow, valid_workflow);
+        must(
+            fs::write(&workflow_path, invalid_workflow),
+            "write invalid action marker fixture",
+        );
+        let invalid_render = super::GithubActionFixtures.render(&ctx, &args);
+        assert!(
+            invalid_render.is_err(),
+            "embedded action markers must not generate a consumer workflow"
+        );
+        must(
+            fs::write(&workflow_path, valid_workflow),
+            "restore valid action marker fixture",
+        );
         let rendered = must(
             super::GithubActionFixtures.render(&ctx, &args),
             "render action fixtures",
@@ -552,6 +632,13 @@ mod tests {
         assert!(generated_consumer.contains("env:"));
         assert!(generated_consumer.contains("steps.action.outputs.result"));
         assert!(generated_consumer.contains("steps.action.outcome"));
+        assert!(generated_consumer.contains("grep -Fx hadolint action-consumer.log"));
+        assert!(generated_consumer.contains("grep -Fx buildx action-consumer.log"));
+        assert!(generated_consumer.contains("test \"${{ steps.downstream.outcome }}\" = success"));
+        assert!(generated_consumer.contains("if: ${{ always() }}"));
+        assert!(
+            !generated_consumer.contains("if: ${{ steps.action.outputs.result == 'downloaded' }}")
+        );
         for mode in [
             "validate-failure",
             "hadolint-failure",
