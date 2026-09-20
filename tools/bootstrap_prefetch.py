@@ -1029,11 +1029,10 @@ def validate_bundle(
         _fail("registry source census is not exactly the reviewed crates.io source")
     if manifest["registry_transport"] != REGISTRY_TRANSPORT:
         _fail("registry transport is not the reviewed sparse endpoint")
-    manifest_git = _manifest_git_records(manifest["git_sources"])
     if reviewed_git is None:
-        reviewed_git_set = manifest_git
-    else:
-        reviewed_git_set = _reviewed_git_set(reviewed_git)
+        _fail("reviewed Git source policy is required for bundle validation")
+    manifest_git = _manifest_git_records(manifest["git_sources"])
+    reviewed_git_set = _reviewed_git_set(reviewed_git)
     if manifest_git != reviewed_git_set:
         _fail("manifest git-source census differs from the reviewed set")
     policy = manifest["network_policy"]
@@ -1303,6 +1302,7 @@ def git_census(
     expected = _reviewed_git_set(tuple(reviewed_git))
     if not expected:
         _fail("reviewed Git source set must not be empty")
+    cargo_home = cargo_home.absolute()
     dbs = _direct_directories(cargo_home / "git" / "db", "Cargo git DB root")
     checkouts = _checkout_directories(cargo_home / "git" / "checkouts")
     if len(dbs) != len(expected) or len(checkouts) != len(expected):
