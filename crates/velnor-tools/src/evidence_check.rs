@@ -945,7 +945,9 @@ pub fn check_paths(input: &EvidenceCheckInput) -> Result<CheckReport> {
 pub async fn check_paths_live(input: &EvidenceCheckInput) -> Result<CheckReport> {
     let stage = Stage::parse(&input.stage)?;
     let capture = crate::live_authority::current_collector()
-        .collect_closing(crate::live_authority::ClosingCaptureRequest::from_input(input))
+        .collect_closing(crate::live_authority::ClosingCaptureRequest::from_input(
+            input,
+        ))
         .await?;
     let (manifest, snapshot, evidence, release, raw_store) = capture.into_parts();
     if let Some(inventory) = evidence.g0_inventory.as_ref() {
@@ -1580,7 +1582,8 @@ fn check_manifest_repository(repo: &ManifestRepository, findings: &mut Vec<Findi
                 ),
             ),
             Some((platform, architecture))
-                if (*platform, *architecture) != (job.platform.as_str(), job.architecture.as_str()) =>
+                if (*platform, *architecture)
+                    != (job.platform.as_str(), job.architecture.as_str()) =>
             {
                 finding(
                     findings,
@@ -8950,6 +8953,194 @@ mod tests {
             .findings
             .iter()
             .any(|finding| finding.code == "g0-storage-mismatch"));
+        std::fs::remove_dir_all(directory).expect("remove fixture directory");
+    }
+
+    #[tokio::test]
+    async fn public_evidence_command_rejects_recursive_child_matrix() {
+        let (mut manifest, snapshot, mut inventory) = complete_g0_fixture();
+        let repository = manifest.repositories[0].repository.clone();
+        manifest.repositories[0].expected_jobs[0].child_workflow = Some(ChildWorkflowSpec {
+            repository: repository.clone(),
+            workflow_path: ".github/workflows/reusable.yml".to_owned(),
+            event: "workflow_call".to_owned(),
+        });
+
+        let workflow = &mut inventory.collector_snapshot.repositories[0].workflows[0];
+        let root_yaml = format!(
+            "on: [push]\njobs:\n  scan:\n    uses: ./.github/workflows/reusable.yml@{}\n",
+            sha('a')
+        );
+        workflow.source.bytes_base64 = BASE64.encode(root_yaml.as_bytes());
+        workflow.source.byte_length = root_yaml.len() as u64;
+        workflow.source.sha256 = digest_bytes(root_yaml.as_bytes());
+        workflow.source.storage_ref = format!(
+            "sha256://{}",
+            workflow
+                .source
+                .sha256
+                .strip_prefix("sha256:")
+                .expect("root workflow digest has prefix")
+        );
+        let root_raw_id = workflow.source.raw_object_refs[0].clone();
+        let root_raw = inventory
+            .collector_snapshot
+            .raw_objects
+            .iter_mut()
+            .find(|raw| raw.raw_id == root_raw_id)
+            .expect("complete fixture has workflow raw object");
+        root_raw.bytes_base64 = BASE64.encode(root_yaml.as_bytes());
+        root_raw.byte_length = root_yaml.len() as u64;
+        root_raw.sha256 = digest_bytes(root_yaml.as_bytes());
+        root_raw.storage_ref = format!(
+            "sha256://{}",
+            root_raw
+                .sha256
+                .strip_prefix("sha256:")
+                .expect("root raw digest has prefix")
+        );
+
+        let child_yaml = b"on:\n  workflow_call: {}\njobs:\n  nested:\n    strategy:\n      matrix:\n        os: [ubuntu-24.04, ubuntu-22.04]\n    runs-on: ${{ matrix.os }}\n    steps: []\n";
+        let child_digest = digest_bytes(child_yaml);
+        let child_raw_id = "raw-child-workflow-1".to_owned();
+        let child_request_id = "request-child-workflow-1".to_owned();
+        inventory
+            .collector_snapshot
+            .raw_objects
+            .push(G0RawObjectRef {
+                raw_id: child_raw_id.clone(),
+                request_id: child_request_id.clone(),
+                object_kind: "github-workflow-source".to_owned(),
+                canonicalization: "raw-utf8".to_owned(),
+                sha256: child_digest.clone(),
+                byte_length: child_yaml.len() as u64,
+                bytes_base64: BASE64.encode(child_yaml),
+                media_type: "text/yaml".to_owned(),
+                storage_ref: format!(
+                    "sha256://{}",
+                    child_digest
+                        .strip_prefix("sha256:")
+                        .expect("child digest has prefix")
+                ),
+            });
+        let mut child_request = inventory.collector_snapshot.requests[0].clone();
+        child_request.request_id = child_request_id;
+        child_request.endpoint_or_operation =
+            format!("/repos/{repository}/contents/.github/workflows/reusable.yml");
+        child_request.api_request_id = "api-child-workflow-1".to_owned();
+        child_request.response_raw_ref = child_raw_id.clone();
+        inventory.collector_snapshot.requests.push(child_request);
+
+        workflow.reusable_workflows = vec![G0WorkflowDependency {
+            kind: "reusable_workflow".to_owned(),
+            source: G0WorkflowSource {
+                repository: repository.clone(),
+                path: ".github/workflows/reusable.yml".to_owned(),
+                revision: sha('a'),
+                source_sha: sha('a'),
+                source_url: format!(
+                    "https://github.com/{repository}/blob/{}/.github/workflows/reusable.yml",
+                    sha('a')
+                ),
+                media_type: "text/yaml".to_owned(),
+                canonicalization: "raw-utf8".to_owned(),
+                sha256: child_digest.clone(),
+                storage_ref: format!(
+                    "sha256://{}",
+                    child_digest
+                        .strip_prefix("sha256:")
+                        .expect("child digest has prefix")
+                ),
+                byte_length: child_yaml.len() as u64,
+                bytes_base64: BASE64.encode(child_yaml),
+                raw_object_refs: vec![child_raw_id],
+            },
+        }];
+        refresh_typed_inventory_bytes(&mut inventory);
+
+        let directory = std::fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!("velnor-g0-child-matrix-cli-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(directory.join("store/sha256")).expect("create fixture store");
+        let store_root = directory.join("store");
+        let snapshot_bytes = BASE64
+            .decode(&inventory.collector_snapshot_bytes_base64)
+            .expect("decode snapshot bytes");
+        let snapshot_hex = inventory
+            .collector_snapshot_sha256
+            .strip_prefix("sha256:")
+            .expect("snapshot digest has prefix");
+        std::fs::write(store_root.join("sha256").join(snapshot_hex), snapshot_bytes)
+            .expect("write snapshot object");
+        for raw in &inventory.collector_snapshot.raw_objects {
+            let bytes = BASE64.decode(&raw.bytes_base64).expect("decode raw object");
+            let hex = raw
+                .sha256
+                .strip_prefix("sha256:")
+                .expect("raw digest has prefix");
+            std::fs::write(store_root.join("sha256").join(hex), bytes).expect("write raw object");
+        }
+
+        let manifest_path = directory.join("manifest.json");
+        let snapshot_path = directory.join("snapshot.json");
+        let evidence_path = directory.join("evidence.json");
+        let evidence = EvidenceDocument {
+            schema_version: EVIDENCE_SCHEMA_VERSION,
+            manifest_id: manifest.manifest_id.clone(),
+            snapshot_id: snapshot.snapshot_id.clone(),
+            stage: "G0".to_owned(),
+            records: Vec::new(),
+            reviewer_attestation: None,
+            g0_inventory: Some(inventory),
+        };
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
+        std::fs::write(
+            &snapshot_path,
+            serde_json::to_vec(&snapshot).expect("serialize snapshot"),
+        )
+        .expect("write snapshot");
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_vec(&evidence).expect("serialize evidence"),
+        )
+        .expect("write evidence");
+
+        let input = EvidenceCheckInput {
+            stage: "G0".to_owned(),
+            manifest: manifest_path.clone(),
+            snapshot: snapshot_path.clone(),
+            evidence: evidence_path.clone(),
+            release_manifest: None,
+            live: false,
+            evidence_root: Some(store_root.clone()),
+        };
+        let report = check_paths(&input).expect("public checker parses child matrix fixture");
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.code == "g0-workflow-derivation"
+                    && finding.message.contains("concrete matrix identity")
+            }),
+            "unexpected child-matrix findings: {:?}",
+            report.findings
+        );
+        let command_error = evidence_check(EvidenceCheckArgs {
+            stage: input.stage,
+            manifest: input.manifest,
+            snapshot: input.snapshot,
+            evidence: input.evidence,
+            release_manifest: None,
+            live: false,
+            evidence_root: input.evidence_root,
+            json: true,
+        })
+        .await
+        .expect_err("public evidence command must reject child matrix collapse");
+        assert!(command_error.to_string().contains("evidence gate failed"));
         std::fs::remove_dir_all(directory).expect("remove fixture directory");
     }
 

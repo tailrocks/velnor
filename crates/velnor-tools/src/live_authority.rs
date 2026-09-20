@@ -141,10 +141,11 @@ impl AuthenticatedClosingCollector for UnavailableCollector {
 /// started, and no caller-supplied JSON can register one. Until a producer
 /// installs its adapter, every live invocation reaches the explicit
 /// fail-closed error above.
-#[allow(dead_code, reason = "called by the authenticated producer during CLI setup")]
-pub(crate) fn install_collector(
-    collector: Box<dyn AuthenticatedClosingCollector>,
-) -> Result<()> {
+#[allow(
+    dead_code,
+    reason = "called by the authenticated producer during CLI setup"
+)]
+pub(crate) fn install_collector(collector: Box<dyn AuthenticatedClosingCollector>) -> Result<()> {
     CURRENT_COLLECTOR
         .set(collector)
         .map_err(|_| anyhow::anyhow!("authenticated collector is already installed"))

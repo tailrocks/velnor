@@ -181,6 +181,18 @@ fn derive_source(
                     target.path
                 );
             }
+            let mut child_job_ids = BTreeSet::new();
+            if child_plan
+                .jobs
+                .iter()
+                .any(|child| !child_job_ids.insert(child.job_id.clone()))
+            {
+                bail!(
+                    "reusable workflow {}/{} expands a logical child job into multiple concrete matrix instances; the child graph has no concrete matrix identity",
+                    target.repository,
+                    target.path
+                );
+            }
             let child_job = child_plan.jobs.first().cloned().ok_or_else(|| {
                 anyhow!(
                     "reusable workflow {}/{} has no derived jobs",
@@ -797,6 +809,40 @@ jobs:
         let error = derive_workflow_plan(&root, &dependencies)
             .expect_err("a job-level uses source must be reusable");
         assert!(error.to_string().contains("must declare workflow_call"));
+    }
+
+    #[test]
+    fn reusable_child_matrix_instances_are_rejected_before_representative_selection() {
+        let root_yaml = r#"
+on: [push]
+jobs:
+  child:
+    uses: ./.github/workflows/reusable.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"#;
+        let child_yaml = r#"
+on:
+  workflow_call: {}
+jobs:
+  nested:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps: []
+"#;
+        let root = source("tailrocks/velnor", ".github/workflows/ci.yml", root_yaml);
+        let child = source(
+            "tailrocks/velnor",
+            ".github/workflows/reusable.yml",
+            child_yaml,
+        );
+        let dependencies = vec![G0WorkflowDependency {
+            kind: "reusable_workflow".to_owned(),
+            source: child,
+        }];
+        let error = derive_workflow_plan(&root, &dependencies)
+            .expect_err("child matrix instances cannot be collapsed to the first job");
+        assert!(error.to_string().contains("concrete matrix identity"));
     }
 
     #[test]

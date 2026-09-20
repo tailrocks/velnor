@@ -5,8 +5,8 @@ mod fleet_policy_client;
 mod g0_contract;
 mod g0_workflow;
 mod github_raw_store;
-mod live_authority;
 mod lane_compare;
+mod live_authority;
 mod workflow_monitor;
 
 use anyhow::{bail, Context, Result};
