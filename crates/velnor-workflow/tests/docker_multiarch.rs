@@ -1,5 +1,5 @@
 //! The docker-multiarch end-to-end contract: a repository that owns only a
-//! Dockerfile plus a `[release] kind = "docker"` contract generates a
+//! Dockerfile plus a schema-2 `[release] kind = "docker"` contract generates a
 //! multi-arch publisher — admission, one native builder per platform, and a
 //! single manifest assembly over the complete verified digest set. All
 //! coordinates are fixture-local; nothing about the image is generated.
@@ -53,8 +53,8 @@ fn generate(root: &Path) -> PathBuf {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "github",
+            "--providers",
+            "github-hosted",
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -95,6 +95,7 @@ fn docker_release_generates_the_multi_arch_publisher() {
     assert!(workflow.contains("provenance: true"), "{workflow}");
     assert!(workflow.contains("sbom: true"), "{workflow}");
     assert!(workflow.contains("file: Dockerfile"), "{workflow}");
+    assert!(workflow.contains(r#"context: ".""#), "{workflow}");
     // Admission reconciles absent, resume, and conflict.
     assert!(workflow.contains("existing=false"), "{workflow}");
     assert!(
