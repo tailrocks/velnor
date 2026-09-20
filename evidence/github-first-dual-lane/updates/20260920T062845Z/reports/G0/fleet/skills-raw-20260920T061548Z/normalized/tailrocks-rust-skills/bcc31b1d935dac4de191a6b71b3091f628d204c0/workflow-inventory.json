@@ -1,0 +1,15 @@
+{
+  "complete": true,
+  "repo": "tailrocks-rust-skills",
+  "roles": [
+    {
+      "branch": "main",
+      "role": "default-before"
+    }
+  ],
+  "sha": "bcc31b1d935dac4de191a6b71b3091f628d204c0",
+  "tree_request_id": "00061-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-tree",
+  "tree_truncated": false,
+  "workflow_paths": [],
+  "workflows": []
+}

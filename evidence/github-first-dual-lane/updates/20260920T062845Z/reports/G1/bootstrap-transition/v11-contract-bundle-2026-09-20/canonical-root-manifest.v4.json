@@ -1,0 +1,147 @@
+{
+  "bound_files": [
+    {
+      "path": "build_v11_bundle.py",
+      "role": "reproducible projection generator",
+      "sha256": "c554cdd41c7050536fd8a11382f0b6b73bf18ce6cb03c64ee7520c184e7aee44"
+    },
+    {
+      "path": "v11-canonical-model-source.json",
+      "role": "sole contract model source",
+      "sha256": "ff3d8018bb7707ef540b9be5b6e7b22262b93a1309733b59f9f19a9842dda930"
+    },
+    {
+      "path": "v11-contract-bundle-2026-09-20/adoption.schema.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "652057582f008f589408db30b55495887798cd524173cd6104dfa7876170b9c4"
+    },
+    {
+      "path": "v11-contract-bundle-2026-09-20/negative-fixtures.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "43db58edeab771c9fee4fe40bc3a842e4d2cdc12b20a535550d4537d563f5dd1"
+    },
+    {
+      "path": "v11-contract-bundle-2026-09-20/permanent_binding.schema.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "3e0651ebb8cfe6d055fdf6cfe733901da92decdc9766d73f28a817f53dd04194"
+    },
+    {
+      "normalization": "replace canonical_root_manifest_sha256/canonical_root_sha256 with 64 zeroes before hashing",
+      "path": "v11-contract-bundle-2026-09-20/positive-adoption.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "b4210e40a57fa84cf91cbd1ef688d77130f886a54d128a71414cac96ebcf314f"
+    },
+    {
+      "path": "v11-contract-bundle-2026-09-20/positive-fixture-status.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "fb5add0aeefc96470269bdbc522f0c029bf42c2e3a450984408e1920eca8b2b5"
+    },
+    {
+      "normalization": "replace canonical_root_manifest_sha256/canonical_root_sha256 with 64 zeroes before hashing",
+      "path": "v11-contract-bundle-2026-09-20/positive-full-typed-output-fixture.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "d5da5063731eadf7eb317c3759bb8f5a842cc36ff3999c3487d62026f9f7b431"
+    },
+    {
+      "normalization": "replace canonical_root_manifest_sha256/canonical_root_sha256 with 64 zeroes before hashing",
+      "path": "v11-contract-bundle-2026-09-20/positive-pre-record-transport.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "ab271be22eeca8e37d5f0f2c9ea904c7e89551973488c43ed9de1e4392d9ded1"
+    },
+    {
+      "normalization": "replace canonical_root_manifest_sha256/canonical_root_sha256 with 64 zeroes before hashing",
+      "path": "v11-contract-bundle-2026-09-20/positive-pre-record.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "054320c55584484899a3208d823a9d0c09ad786539e58c28069e1dfe97e2d453"
+    },
+    {
+      "normalization": "replace canonical_root_manifest_sha256/canonical_root_sha256 with 64 zeroes before hashing",
+      "path": "v11-contract-bundle-2026-09-20/positive-provider-result.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "8308e5eaff421e6f2bd74be92c7df87a765b70e9bb52e2852e76b74f136b630d"
+    },
+    {
+      "normalization": "replace canonical_root_manifest_sha256/canonical_root_sha256 with 64 zeroes before hashing",
+      "path": "v11-contract-bundle-2026-09-20/positive-release-manifest.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "64e8434107b309e9c3d42e4106e3790fce0e21f54ca5e95ae442cbb38a55cd86"
+    },
+    {
+      "normalization": "replace canonical_root_manifest_sha256/canonical_root_sha256 with 64 zeroes before hashing",
+      "path": "v11-contract-bundle-2026-09-20/positive-verify-b.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "6bbfee97e9bb152980e744dedf6b2cfd795cbb3f4e21b1d471cc0afb48e3fc1e"
+    },
+    {
+      "path": "v11-contract-bundle-2026-09-20/pre_record.schema.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "ec9386d575eaad10bd905c9da5dd1c3b82d3e109a9a3ca45f8346c9581c0ddd7"
+    },
+    {
+      "path": "v11-contract-bundle-2026-09-20/pre_record_transport.schema.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "3a4efe59209fb46b4230abb932378a6eba712866259283c11362b2a62b2961a2"
+    },
+    {
+      "path": "v11-contract-bundle-2026-09-20/provider_result.schema.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "a5b148edaf4e97ce0a6ebb6ccf5605b3dac17b4e12ca22669a623db6a0ff8dba"
+    },
+    {
+      "path": "v11-contract-bundle-2026-09-20/release_manifest.schema.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "22e47bb630c5766bfda394c1e0772ffd1f028771ef64b9acc6037d4228a61380"
+    },
+    {
+      "path": "v11-contract-bundle-2026-09-20/v11-canonical-field-dag.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "37e3d0cb65b5b793219d94894a672eae50e8181378481dfb846afff1c49e56e7"
+    },
+    {
+      "path": "v11-contract-bundle-2026-09-20/verify_b.schema.json",
+      "role": "generated from canonical v11 model",
+      "sha256": "144b224fa816ec9f2843f006dbed59ec53e0fd1bfca315ed9bf82896620db12b"
+    },
+    {
+      "path": "v9-independent-contract-audit-2026-09-20/canonical-dag/v9-independent-field-dag.json",
+      "role": "historical vocabulary input only",
+      "sha256": "902854e6591687095856fdf507115e933cb4d57ade8437b8875ca19d104303b9"
+    }
+  ],
+  "bound_path_base": "dual-lane-evidence/G1/bootstrap-transition",
+  "candidate_pr_head_is_not_resulting_main": true,
+  "canonical_root": "dual-lane-evidence/G1/bootstrap-transition",
+  "current_main": {
+    "observed_utc": "2026-09-20T03:58:55Z",
+    "parent_sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+    "sha": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+    "tree_sha": "22ccc1daf9d55bd12d9a58e6652fe92cf3cb9416"
+  },
+  "historical_exclusions": [
+    {
+      "path": "G1/bootstrap-transition/v9-independent-contract-audit-2026-09-20/canonical-dag/v9-independent-field-dag.json",
+      "role": "v9 authority input; only vocabulary is imported by v11"
+    }
+  ],
+  "live_status": "no live typed verifier or provider execution; synthetic fixtures are explicitly non-live",
+  "model_source": {
+    "path": "v11-canonical-model-source.json",
+    "sha256": "ff3d8018bb7707ef540b9be5b6e7b22262b93a1309733b59f9f19a9842dda930"
+  },
+  "product_identity": {
+    "application_namespace_reuse": false,
+    "architecture": "x86_64",
+    "asset": "velnor-workflow-policy-validator-Linux-X64",
+    "features": "",
+    "mutable_latest": false,
+    "overwrite": false,
+    "platform": "Linux-X64",
+    "product_id": "velnor-workflow-policy-validator",
+    "release_schema": "velnor.workflow-policy-validator.release-manifest.v1",
+    "release_tag_prefix": "velnor-workflow-policy-validator-v1-",
+    "runner": "ubuntu-24.04",
+    "schema": "velnor.workflow-policy-validator.v1"
+  },
+  "root_digest_rule": "SHA-256 of canonical UTF-8 LF JSON bytes with lexicographically sorted keys and compact separators; this object has no self-digest field",
+  "schema": "velnor.canonical-evidence-root-manifest.v4"
+}

@@ -1,0 +1,95 @@
+{
+  "artifact": {
+    "binary_architecture": "x86_64",
+    "binary_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "binary_size": 1004,
+    "inner_payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "inner_payload_size": 1006,
+    "service_zip_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "service_zip_size": 1008
+  },
+  "binding": {
+    "attestation_digest": "7f7cc9d7579222ca4f80f3d266958442f3182484a98d4d037d685087b6e67047",
+    "attestation_id": 1010,
+    "core_digest": "3872c01730ccb1adcfb0d38e292c9b3783ae24d563b8d42a15f23f9546430856",
+    "final_manifest_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "final_manifest_artifact_id": 1013,
+    "final_manifest_digest": "c31db984f5f84663ee45e15dd977eecd325773cc92c12d9d2440418ca9d0b671",
+    "predicate_path": "attestations/velnor-policy-validator-binding.v1.json",
+    "predicate_type": "https://velnor.dev/attestations/policy-validator-binding/v1",
+    "subject_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "subject_name": "fixture-0017"
+  },
+  "caller_workflow": {
+    "capture_step_id": "fixture-0018",
+    "file_blob_sha": "72e38f09cf5f158521bcb9d0f3b0b049b15a97aa",
+    "path": "fixture-0020",
+    "ref": "fixture-0021",
+    "run_attempt": 1023,
+    "run_id": 1024,
+    "workflow_sha": "be6c2cc263d96c88f7139b6cb0216b798c07fa87"
+  },
+  "canonical_release_schema_sha256": "22e47bb630c5766bfda394c1e0772ffd1f028771ef64b9acc6037d4228a61380",
+  "canonical_root_manifest_sha256": "deb19280afeb9bf17b4c80ca52d808a1115822e7f8d48ff28f204e9a7388c017",
+  "producer": {
+    "check_run_id": 1028,
+    "job_id": 1029,
+    "job_workflow_sha": "bf422f4700174cbc8c626b377b6fca0696e86bda",
+    "run_attempt": 1031,
+    "run_id": 1032,
+    "workflow_file_blob_sha": "d9f77f688e0b2beacbdf4ed387f9c3e509e1c1e6",
+    "workflow_path": "fixture-0033",
+    "workflow_ref": "fixture-0034"
+  },
+  "product": {
+    "architecture": "x86_64",
+    "name": "velnor-workflow-policy-validator",
+    "namespace": "velnor.workflow-policy-validator",
+    "platform": "Linux-X64"
+  },
+  "record_kind": "policy-validator-b-pre-provider",
+  "release": {
+    "asset_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "asset_id": 7102,
+    "manifest_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+    "release_id": 7101,
+    "tag": "velnor-workflow-policy-validator-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "target_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "release_attestation": {
+    "attestation_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+    "attestation_id": 7501,
+    "certificate_identity": "fixture-0048",
+    "certificate_verified": true,
+    "manifest_subject_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "oidc_issuer": "https://token.actions.githubusercontent.com",
+    "oidc_policy_revision_sha256": "1a7ecd585bb7e876092a8c3265d2c2a22b4769a654e3cf6e6d001042ec059f99",
+    "predicate_path": "attestations/velnor-policy-validator-release.v1.json",
+    "predicate_type": "https://velnor.dev/attestations/velnor-policy-validator-release/v1",
+    "signer_repository": "fixture-0055",
+    "signer_source_ref": "refs/heads/main",
+    "signer_workflow": "fixture-0057"
+  },
+  "schema_version": "2",
+  "source": {
+    "closure_digest": "6dbcbadb6418470640fd605a2c2eb5d45ea0aba40c9ba5fb01c105e84a7baa2f",
+    "ref": "fixture-0060",
+    "repository": "fixture-0061",
+    "sha": "dddddddddddddddddddddddddddddddddddddddd",
+    "tree_sha": "cccccccccccccccccccccccccccccccccccccccc"
+  },
+  "verification": {
+    "binding_preimage_sha256": "5fb3c58a9a22047ae6573ae50fa3764888f2676e8dd9e8d2a008c8ddd7320abb",
+    "raw_downloads_equal_digests": true,
+    "release_preimage_sha256": "610f5ef8411e955e9280bba9c50471aba06097a212c67002aa7cb2bccd56c3ac",
+    "required_step_conclusions": {
+      "artifact-verify": "success",
+      "attest-binding": "success",
+      "attest-release": "success",
+      "build-linux-x64": "success",
+      "pre-record-upload": "success",
+      "publish": "success",
+      "reserve-release": "success"
+    }
+  }
+}

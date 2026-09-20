@@ -1,0 +1,36 @@
+{
+  "called_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "called_job_workflow_ref": "tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml@refs/heads/main",
+  "called_job_workflow_sha": "5555555555555555555555555555555555555555",
+  "called_run_attempt": 1,
+  "called_run_id": 7401,
+  "called_workflow_file_blob_sha": "6666666666666666666666666666666666666666",
+  "called_workflow_ref": "refs/heads/main",
+  "called_workflow_sha": "5555555555555555555555555555555555555555",
+  "canonical_release_schema_sha256": "22e47bb630c5766bfda394c1e0772ffd1f028771ef64b9acc6037d4228a61380",
+  "canonical_root_manifest_sha256": "deb19280afeb9bf17b4c80ca52d808a1115822e7f8d48ff28f204e9a7388c017",
+  "policy_check_app_id": 7303,
+  "policy_check_conclusion": "success",
+  "policy_check_context": "Policy-bootstrap-B",
+  "policy_check_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "policy_check_run_id": 7402,
+  "provider_result_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "provider_result_id": "provider-result-v11-fixture",
+  "resulting_main_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "terminal_census_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "terminal_census_id": "terminal-census-v11-fixture",
+  "terminal_census_rows": [
+    {
+      "attempt": 1,
+      "check_run_id": 7404,
+      "conclusion": "success",
+      "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "job_id": 7403,
+      "run_id": 7401,
+      "status": "completed",
+      "workflow_path": ".github/workflows/ci-main.yml",
+      "workflow_sha": "5555555555555555555555555555555555555555"
+    }
+  ],
+  "terminal_census_rows_digest": "9999999999999999999999999999999999999999999999999999999999999999"
+}

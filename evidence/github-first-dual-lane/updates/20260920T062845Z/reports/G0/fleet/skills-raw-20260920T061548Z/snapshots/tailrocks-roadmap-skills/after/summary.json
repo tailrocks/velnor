@@ -1,0 +1,16 @@
+{
+  "captured_at_utc": "2026-09-20T06:16:57.317396Z",
+  "complete": true,
+  "default_branch": "main",
+  "default_sha": "66d9c79f6472ddace0e265335dc8dd36cdeb8a86",
+  "open_prs": [],
+  "raw_requests": {
+    "default_branch": "00092-tailrocks-roadmap-skills-after-default-branch",
+    "open_pr_pages": [
+      "00093-tailrocks-roadmap-skills-after-open-prs-page-1"
+    ],
+    "repository": "00091-tailrocks-roadmap-skills-after-repository"
+  },
+  "repo": "tailrocks-roadmap-skills",
+  "snapshot": "after"
+}

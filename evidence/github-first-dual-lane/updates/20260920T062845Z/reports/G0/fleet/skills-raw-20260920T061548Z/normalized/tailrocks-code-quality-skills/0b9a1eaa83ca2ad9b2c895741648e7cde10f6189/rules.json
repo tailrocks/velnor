@@ -1,0 +1,30 @@
+{
+  "branch_protection": {
+    "branch": "main",
+    "protection_error": "http_404",
+    "protection_payload": {
+      "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-branch-protection",
+      "message": "Branch not protected",
+      "status": "404"
+    },
+    "protection_request_id": "00028-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-branch-protection",
+    "protection_status": 404,
+    "required_contexts": [],
+    "required_error": "http_404",
+    "required_payload": {
+      "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-status-checks-protection",
+      "message": "Branch not protected",
+      "status": "404"
+    },
+    "required_request_id": "00029-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-required-status-checks",
+    "required_status": 404
+  },
+  "repo": "tailrocks-code-quality-skills",
+  "ruleset_detail_requests": [],
+  "ruleset_list_requests": [
+    "00027-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-rulesets-page-1"
+  ],
+  "rulesets": [],
+  "rulesets_complete": true,
+  "sha": "0b9a1eaa83ca2ad9b2c895741648e7cde10f6189"
+}

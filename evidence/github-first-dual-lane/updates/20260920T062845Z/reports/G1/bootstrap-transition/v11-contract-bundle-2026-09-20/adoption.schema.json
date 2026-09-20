@@ -1,0 +1,96 @@
+{
+  "$id": "https://velnor.dev/schemas/v11-validator-pin-adoption.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "base_policy_blob_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "base_policy_workflow_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "canonical_root_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "mode": {
+      "const": "permanent_pin",
+      "type": "string"
+    },
+    "permanent_trust_root": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "pr_base_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "pr_head_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "pr_number": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "provider_result_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "release_manifest_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "resulting_main_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "resulting_main_tree_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "schema_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "source_template_map_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "temporary_authority_removed": {
+      "const": true,
+      "type": "boolean"
+    },
+    "terminal_census_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "validated_utc": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "base_policy_blob_sha",
+    "base_policy_workflow_sha",
+    "canonical_root_sha256",
+    "mode",
+    "permanent_trust_root",
+    "pr_base_sha",
+    "pr_head_sha",
+    "pr_number",
+    "provider_result_digest",
+    "release_manifest_digest",
+    "resulting_main_sha",
+    "resulting_main_tree_sha",
+    "schema_sha256",
+    "source_template_map_digest",
+    "temporary_authority_removed",
+    "terminal_census_digest",
+    "validated_utc"
+  ],
+  "title": "Velnor permanent validator adoption",
+  "type": "object"
+}

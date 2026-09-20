@@ -1,0 +1,343 @@
+{
+  "authority_claim": false,
+  "bundle": "v11-contract-bundle-2026-09-20",
+  "checks": [
+    {
+      "detail": "v10 artifacts remain separate; v11 does not overwrite them",
+      "name": "v10-preserved",
+      "status": "pass"
+    },
+    {
+      "detail": "canonical model is v11",
+      "name": "model-version",
+      "status": "pass"
+    },
+    {
+      "detail": "ff3d8018bb7707ef540b9be5b6e7b22262b93a1309733b59f9f19a9842dda930",
+      "name": "model-hash",
+      "status": "pass"
+    },
+    {
+      "detail": "root manifest has no root_digest field",
+      "name": "root-no-self-digest",
+      "status": "pass"
+    },
+    {
+      "detail": "deb19280afeb9bf17b4c80ca52d808a1115822e7f8d48ff28f204e9a7388c017",
+      "name": "root-digest-plan",
+      "status": "pass"
+    },
+    {
+      "detail": "root-bound bytes and normalized fixture preimages match",
+      "name": "root-bound-normalized-hashes",
+      "status": "pass"
+    },
+    {
+      "detail": "canonical DAG, schemas, fixtures and plan reference one model source",
+      "name": "single-model-output",
+      "status": "pass"
+    },
+    {
+      "detail": "DAG identity equals model identity",
+      "name": "identity-dag",
+      "status": "pass"
+    },
+    {
+      "detail": "{\"architecture\": \"x86_64\", \"platform\": \"Linux-X64\", \"product_name\": \"velnor-workflow-policy-validator\", \"product_namespace\": \"velnor.workflow-policy-validator\", \"schema\": \"velnor.workflow-policy-validator.release-manifest.v1\"}",
+      "name": "release-identity",
+      "status": "pass"
+    },
+    {
+      "detail": "exactly 14 release leaves",
+      "name": "release-leaf-count",
+      "status": "pass"
+    },
+    {
+      "detail": "positive fixture covers every release leaf; status is external sidecar",
+      "name": "release-positive-fixture",
+      "status": "pass"
+    },
+    {
+      "detail": "positive fixture uses canonical identity",
+      "name": "release-positive-identity",
+      "status": "pass"
+    },
+    {
+      "detail": "all six positive instances validate with Draft 2020-12",
+      "name": "strict-json-schema-positive-fixtures",
+      "status": "pass"
+    },
+    {
+      "detail": "non-live status is outside strict instances",
+      "name": "fixture-status-sidecar",
+      "status": "pass"
+    },
+    {
+      "detail": "root and release-schema references equal measured values",
+      "name": "fixture-root-schema-equality",
+      "status": "pass"
+    },
+    {
+      "detail": "release, pre-record, raw/canonical artifact transport, provider, verify-B, and adoption fixtures share one lifecycle",
+      "name": "joined-positive-lifecycle",
+      "status": "pass"
+    },
+    {
+      "detail": "release subject, predicate, OIDC issuer, and certificate state are bound in strict pre-record",
+      "name": "release-attestation-binding",
+      "status": "pass"
+    },
+    {
+      "detail": "303 fields have one producer",
+      "name": "unique-field-producers",
+      "status": "pass"
+    },
+    {
+      "detail": "every canonical field belongs to a declared stage",
+      "name": "stage-field-coverage",
+      "status": "pass"
+    },
+    {
+      "detail": "all edge field IDs resolve",
+      "name": "lineage-field-refs",
+      "status": "pass"
+    },
+    {
+      "detail": "no duplicate producer/consumer/field edge",
+      "name": "lineage-edge-uniqueness",
+      "status": "pass"
+    },
+    {
+      "detail": "all staged fields have a downstream transport edge or persistent adoption sink",
+      "name": "transport-sinks",
+      "status": "pass"
+    },
+    {
+      "detail": "release leaves are in the canonical field registry",
+      "name": "release-leaf-lineage",
+      "status": "pass"
+    },
+    {
+      "detail": "verify-B outputs and caller Policy consumption are explicit DAG edges",
+      "name": "workflow-call-output-transport",
+      "status": "pass"
+    },
+    {
+      "detail": "S4 preimage contains only S0-S3 fields",
+      "name": "S4-no-future",
+      "status": "pass"
+    },
+    {
+      "detail": "S6 preimage contains only S0-S5 fields",
+      "name": "S6-no-future",
+      "status": "pass"
+    },
+    {
+      "detail": "provider result ID/digest and verify-B fields are excluded",
+      "name": "S7-provider-no-self",
+      "status": "pass"
+    },
+    {
+      "detail": "terminal digest uses upstream rows only",
+      "name": "S7-terminal-no-self",
+      "status": "pass"
+    },
+    {
+      "detail": "ordered/excluded field partitions are generated and disjoint",
+      "name": "preimage-exclusions-realized",
+      "status": "pass"
+    },
+    {
+      "detail": "provider result schema has no terminal census",
+      "name": "provider-no-census-cycle",
+      "status": "pass"
+    },
+    {
+      "detail": "303 typed fields",
+      "name": "typed-output-full",
+      "status": "pass"
+    },
+    {
+      "detail": "fixture explicitly non-live",
+      "name": "typed-output-not-live",
+      "status": "pass"
+    },
+    {
+      "detail": "full fixture values match canonical model types",
+      "name": "typed-output-types",
+      "status": "pass"
+    },
+    {
+      "detail": "candidate PR head and resulting main are separate; result is null",
+      "name": "pr-main-separation",
+      "status": "pass"
+    },
+    {
+      "detail": "provider contract requires Checks head_sha/resulting-main equality",
+      "name": "provider-head-binding",
+      "status": "pass"
+    },
+    {
+      "detail": "run/workflow/Contents API equality rules are explicit",
+      "name": "caller-readback",
+      "status": "pass"
+    },
+    {
+      "detail": "caller upper-bound permissions, workflow-call outputs, and secret mapping are explicit",
+      "name": "caller-permission-output-secret-contract",
+      "status": "pass"
+    },
+    {
+      "detail": "Tree-A/Main-B/Tree-B contexts, pin state, and consumer closure are machine-bound",
+      "name": "authority-graph",
+      "status": "pass"
+    },
+    {
+      "detail": "workflow/check/artifact API fields and OIDC/blob distinctions are explicit",
+      "name": "documented-api-fields",
+      "status": "pass"
+    },
+    {
+      "detail": "raw digest prefix, canonical digest, and immutable source/job step mapping are explicit",
+      "name": "artifact-digest-and-step-provenance",
+      "status": "pass"
+    },
+    {
+      "detail": "provider/freeze/live implementation blockers remain unresolved",
+      "name": "external-unresolved",
+      "status": "pass"
+    },
+    {
+      "detail": "16 hostile cases expected reject",
+      "name": "negative-fixture-set",
+      "status": "pass"
+    },
+    {
+      "detail": "hostile mutation rejected by independent structural predicate",
+      "name": "negative-repro:ambiguous_provider_producer",
+      "status": "pass"
+    },
+    {
+      "detail": "hostile mutation rejected by independent structural predicate",
+      "name": "negative-repro:caller_pr_head_used_as_resulting_main",
+      "status": "pass"
+    },
+    {
+      "detail": "hostile mutation rejected by independent structural predicate",
+      "name": "negative-repro:future_stage_field_in_preimage",
+      "status": "pass"
+    },
+    {
+      "detail": "hostile mutation rejected by independent structural predicate",
+      "name": "negative-repro:joined_lifecycle_mismatch",
+      "status": "pass"
+    },
+    {
+      "detail": "hostile mutation rejected by independent structural predicate",
+      "name": "negative-repro:own_digest_field_in_preimage",
+      "status": "pass"
+    },
+    {
+      "detail": "hostile mutation rejected by independent structural predicate",
+      "name": "negative-repro:provider_check_head_not_resulting_main",
+      "status": "pass"
+    },
+    {
+      "detail": "hostile mutation rejected by independent structural predicate",
+      "name": "negative-repro:provider_result_contains_terminal_census",
+      "status": "pass"
+    },
+    {
+      "detail": "hostile mutation rejected by independent structural predicate",
+      "name": "negative-repro:raw_artifact_digest_prefix_mismatch",
+      "status": "pass"
+    },
+    {
+      "detail": "hostile mutation rejected by independent structural predicate",
+      "name": "negative-repro:release_attestation_subject_mismatch",
+      "status": "pass"
+    },
+    {
+      "detail": "hostile mutation rejected by independent structural predicate",
+      "name": "negative-repro:release_identity_mismatch",
+      "status": "pass"
+    },
+    {
+      "detail": "hostile mutation rejected by independent structural predicate",
+      "name": "negative-repro:release_leaf_omitted",
+      "status": "pass"
+    },
+    {
+      "detail": "hostile mutation rejected by independent structural predicate",
+      "name": "negative-repro:source_step_mapping_missing",
+      "status": "pass"
+    },
+    {
+      "detail": "hostile mutation rejected by independent structural predicate",
+      "name": "negative-repro:synthetic_fixture_claims_live",
+      "status": "pass"
+    },
+    {
+      "detail": "hostile mutation rejected by independent structural predicate",
+      "name": "negative-repro:unresolved_provider_claimed_success",
+      "status": "pass"
+    },
+    {
+      "detail": "hostile mutation rejected by independent structural predicate",
+      "name": "negative-repro:unsupported_api_identity_field",
+      "status": "pass"
+    },
+    {
+      "detail": "hostile mutation rejected by independent structural predicate",
+      "name": "negative-repro:workflow_call_output_untransported",
+      "status": "pass"
+    },
+    {
+      "detail": "observed macos-26 remains rejected in current evidence",
+      "name": "forbidden-runner-preserved",
+      "status": "pass"
+    }
+  ],
+  "root_digest": "deb19280afeb9bf17b4c80ca52d808a1115822e7f8d48ff28f204e9a7388c017",
+  "schema": "velnor.authority-transition.v11-audit-results",
+  "status": "proposal_only_external_blocked",
+  "strict_validation": {
+    "positive-adoption.json": {
+      "errors": [],
+      "schema": "adoption",
+      "valid": true
+    },
+    "positive-pre-record-transport.json": {
+      "errors": [],
+      "schema": "pre_record_transport",
+      "valid": true
+    },
+    "positive-pre-record.json": {
+      "errors": [],
+      "schema": "pre_record",
+      "valid": true
+    },
+    "positive-provider-result.json": {
+      "errors": [],
+      "schema": "provider_result",
+      "valid": true
+    },
+    "positive-release-manifest.json": {
+      "errors": [],
+      "schema": "release_manifest",
+      "valid": true
+    },
+    "positive-verify-b.json": {
+      "errors": [],
+      "schema": "verify_b",
+      "valid": true
+    }
+  },
+  "strict_validator": "jsonschema Draft202012Validator with FormatChecker",
+  "summary": {
+    "failed": 0,
+    "passed": 59,
+    "total": 59,
+    "unimplemented": 0
+  }
+}

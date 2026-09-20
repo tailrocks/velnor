@@ -1,0 +1,19 @@
+{
+  "live_binding": false,
+  "live_proof_status": "not_executed",
+  "root_reference_normalization": {
+    "field": "canonical_root_manifest_sha256/canonical_root_sha256",
+    "mode": "root_digest_injected_after_manifest_hash",
+    "zero_value": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "schema": "velnor.authority-transition.fixture-status.v11",
+  "strict_schema_instances": {
+    "positive-adoption.json": "adoption",
+    "positive-pre-record-transport.json": "pre_record_transport",
+    "positive-pre-record.json": "pre_record",
+    "positive-provider-result.json": "provider_result",
+    "positive-release-manifest.json": "release_manifest",
+    "positive-verify-b.json": "verify_b"
+  },
+  "synthetic_values_are_not_evidence": true
+}

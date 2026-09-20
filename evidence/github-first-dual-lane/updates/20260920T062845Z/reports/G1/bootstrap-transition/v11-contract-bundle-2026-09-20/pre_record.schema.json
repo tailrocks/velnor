@@ -1,0 +1,461 @@
+{
+  "$id": "https://velnor.dev/schemas/v11-pre-record.v3.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifact": {
+      "additionalProperties": false,
+      "properties": {
+        "binary_architecture": {
+          "const": "x86_64"
+        },
+        "binary_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "binary_size": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "inner_payload_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "inner_payload_size": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "service_zip_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "service_zip_size": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "binary_architecture",
+        "binary_digest",
+        "binary_size",
+        "inner_payload_digest",
+        "inner_payload_size",
+        "service_zip_digest",
+        "service_zip_size"
+      ],
+      "type": "object"
+    },
+    "binding": {
+      "additionalProperties": false,
+      "properties": {
+        "attestation_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "attestation_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "core_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "final_manifest_artifact_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "final_manifest_artifact_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "final_manifest_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "predicate_path": {
+          "const": "attestations/velnor-policy-validator-binding.v1.json",
+          "type": "string"
+        },
+        "predicate_type": {
+          "const": "https://velnor.dev/attestations/policy-validator-binding/v1",
+          "type": "string"
+        },
+        "subject_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "subject_name": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "attestation_digest",
+        "attestation_id",
+        "core_digest",
+        "final_manifest_artifact_digest",
+        "final_manifest_artifact_id",
+        "final_manifest_digest",
+        "predicate_path",
+        "predicate_type",
+        "subject_digest",
+        "subject_name"
+      ],
+      "type": "object"
+    },
+    "caller_workflow": {
+      "additionalProperties": false,
+      "properties": {
+        "capture_step_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "file_blob_sha": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "ref": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "run_attempt": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "run_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "workflow_sha": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "capture_step_id",
+        "file_blob_sha",
+        "path",
+        "ref",
+        "run_attempt",
+        "run_id",
+        "workflow_sha"
+      ],
+      "type": "object"
+    },
+    "canonical_release_schema_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "canonical_root_manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "producer": {
+      "additionalProperties": false,
+      "properties": {
+        "check_run_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "job_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "job_workflow_sha": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "run_attempt": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "run_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "workflow_file_blob_sha": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "workflow_path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "workflow_ref": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "check_run_id",
+        "job_id",
+        "job_workflow_sha",
+        "run_attempt",
+        "run_id",
+        "workflow_file_blob_sha",
+        "workflow_path",
+        "workflow_ref"
+      ],
+      "type": "object"
+    },
+    "product": {
+      "additionalProperties": false,
+      "properties": {
+        "architecture": {
+          "const": "x86_64",
+          "type": "string"
+        },
+        "name": {
+          "const": "velnor-workflow-policy-validator",
+          "type": "string"
+        },
+        "namespace": {
+          "const": "velnor.workflow-policy-validator",
+          "type": "string"
+        },
+        "platform": {
+          "const": "Linux-X64",
+          "type": "string"
+        }
+      },
+      "required": [
+        "architecture",
+        "name",
+        "namespace",
+        "platform"
+      ],
+      "type": "object"
+    },
+    "record_kind": {
+      "const": "policy-validator-b-pre-provider"
+    },
+    "release": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "asset_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "manifest_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "release_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "tag": {
+          "pattern": "^velnor-workflow-policy-validator-v1-[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "target_sha": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "asset_digest",
+        "asset_id",
+        "manifest_digest",
+        "release_id",
+        "tag",
+        "target_sha"
+      ],
+      "type": "object"
+    },
+    "release_attestation": {
+      "additionalProperties": false,
+      "properties": {
+        "attestation_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "attestation_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "certificate_identity": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "certificate_verified": {
+          "const": true
+        },
+        "manifest_subject_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "oidc_issuer": {
+          "const": "https://token.actions.githubusercontent.com",
+          "type": "string"
+        },
+        "oidc_policy_revision_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "predicate_path": {
+          "const": "attestations/velnor-policy-validator-release.v1.json",
+          "type": "string"
+        },
+        "predicate_type": {
+          "const": "https://velnor.dev/attestations/velnor-policy-validator-release/v1",
+          "type": "string"
+        },
+        "signer_repository": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "signer_source_ref": {
+          "const": "refs/heads/main",
+          "type": "string"
+        },
+        "signer_workflow": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "attestation_digest",
+        "attestation_id",
+        "certificate_identity",
+        "certificate_verified",
+        "manifest_subject_sha256",
+        "oidc_issuer",
+        "oidc_policy_revision_sha256",
+        "predicate_path",
+        "predicate_type",
+        "signer_repository",
+        "signer_source_ref",
+        "signer_workflow"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "2"
+    },
+    "source": {
+      "additionalProperties": false,
+      "properties": {
+        "closure_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "ref": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "repository": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "tree_sha": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "closure_digest",
+        "ref",
+        "repository",
+        "sha",
+        "tree_sha"
+      ],
+      "type": "object"
+    },
+    "verification": {
+      "additionalProperties": false,
+      "properties": {
+        "binding_preimage_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "raw_downloads_equal_digests": {
+          "const": true
+        },
+        "release_preimage_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "required_step_conclusions": {
+          "additionalProperties": false,
+          "properties": {
+            "artifact-verify": {
+              "const": "success",
+              "type": "string"
+            },
+            "attest-binding": {
+              "const": "success",
+              "type": "string"
+            },
+            "attest-release": {
+              "const": "success",
+              "type": "string"
+            },
+            "build-linux-x64": {
+              "const": "success",
+              "type": "string"
+            },
+            "pre-record-upload": {
+              "const": "success",
+              "type": "string"
+            },
+            "publish": {
+              "const": "success",
+              "type": "string"
+            },
+            "reserve-release": {
+              "const": "success",
+              "type": "string"
+            }
+          },
+          "required": [
+            "artifact-verify",
+            "attest-binding",
+            "attest-release",
+            "build-linux-x64",
+            "pre-record-upload",
+            "publish",
+            "reserve-release"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "binding_preimage_sha256",
+        "raw_downloads_equal_digests",
+        "release_preimage_sha256",
+        "required_step_conclusions"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "artifact",
+    "binding",
+    "caller_workflow",
+    "canonical_release_schema_sha256",
+    "canonical_root_manifest_sha256",
+    "producer",
+    "product",
+    "record_kind",
+    "release",
+    "release_attestation",
+    "schema_version",
+    "source",
+    "verification"
+  ],
+  "title": "Velnor pre-provider content record",
+  "type": "object"
+}

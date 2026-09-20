@@ -1,0 +1,2413 @@
+{
+  "$schema": "velnor.external-evidence-update.v1",
+  "attestation": "none",
+  "captured_at_utc": "2026-09-20T06:35:20Z",
+  "new_cutoff_utc": "2026-09-20T06:28:45Z",
+  "prior_cutoff_utc": "2026-09-20T05:32:10Z",
+  "parent_checkpoint_commit": "38269cf0ebe2c6c007f80fa78458fc63d40f76a5",
+  "remote_before_copy": "38269cf0ebe2c6c007f80fa78458fc63d40f76a5",
+  "ref": "refs/heads/evidence/github-first-dual-lane-20260919T181508Z",
+  "repository": "tailrocks/velnor",
+  "publication_owner": "/root",
+  "records_owner": "/root/g0_records",
+  "original_evidence_root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence",
+  "source_base_revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+  "gate_status": "not-evaluated",
+  "gate_statement": "This append-only checkpoint records immutable external review reports, a hash-closed v11 design bundle and independent audits, and bounded raw inventory evidence. It establishes no G0, G1, G2, G3, G4, G5, G6, or G7 success, source admission, authority transition, attestation, publication, or release.",
+  "included_entry_count_before_manifests": 332,
+  "included_file_count_before_manifests": 332,
+  "included_source_bytes": 3615060,
+  "included_groups": {
+    "G0": 290,
+    "G1": 42
+  },
+  "included_paths": [
+    "G0/checker-v2-review/024c5f61-g3-raw-store-lifecycle-review.md",
+    "G0/checker-v2-review/81f6362-g3-checkout-cas-integration-review.md",
+    "G0/evidence-checkpoint-review/38269cf0-packaging-review.md",
+    "G0/fleet/g1-integration-dependency-map-20260920T060811Z.json",
+    "G0/fleet/skills-raw-20260920T061548Z-independent-review.md",
+    "G0/fleet/skills-raw-20260920T061548Z/auth-identity.json",
+    "G0/fleet/skills-raw-20260920T061548Z/capture-summary.md",
+    "G0/fleet/skills-raw-20260920T061548Z/manifest.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/aggregate-status.jsonl",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/branch-protection.jsonl",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/check-runs.jsonl",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/open-prs.jsonl",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/repositories.jsonl",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/requests.jsonl",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/rulesets.jsonl",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/sha-targets.jsonl",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/statuses.jsonl",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-code-quality-skills/0b9a1eaa83ca2ad9b2c895741648e7cde10f6189/checks.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-code-quality-skills/0b9a1eaa83ca2ad9b2c895741648e7cde10f6189/rules.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-code-quality-skills/0b9a1eaa83ca2ad9b2c895741648e7cde10f6189/workflow-inventory.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-macos-skills/1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2/checks.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-macos-skills/1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2/rules.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-macos-skills/1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2/workflow-inventory.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-open-source-skills/6e77a448f9776e837bfc9ab18b833bd5fdc26d3a/checks.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-open-source-skills/6e77a448f9776e837bfc9ab18b833bd5fdc26d3a/rules.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-open-source-skills/6e77a448f9776e837bfc9ab18b833bd5fdc26d3a/workflow-inventory.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-pull-request-skills/2b4f71f49fd27061e64d16b2b7f83d9bd2df5612/checks.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-pull-request-skills/2b4f71f49fd27061e64d16b2b7f83d9bd2df5612/rules.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-pull-request-skills/2b4f71f49fd27061e64d16b2b7f83d9bd2df5612/workflow-inventory.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-roadmap-skills/66d9c79f6472ddace0e265335dc8dd36cdeb8a86/checks.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-roadmap-skills/66d9c79f6472ddace0e265335dc8dd36cdeb8a86/rules.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-roadmap-skills/66d9c79f6472ddace0e265335dc8dd36cdeb8a86/workflow-inventory.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-rust-skills/bcc31b1d935dac4de191a6b71b3091f628d204c0/checks.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-rust-skills/bcc31b1d935dac4de191a6b71b3091f628d204c0/rules.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-rust-skills/bcc31b1d935dac4de191a6b71b3091f628d204c0/workflow-inventory.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-skill-authoring-skills/9e25890fd63f7ca6c587490ba7cc432f5fdd98d6/checks.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-skill-authoring-skills/9e25890fd63f7ca6c587490ba7cc432f5fdd98d6/rules.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-skill-authoring-skills/9e25890fd63f7ca6c587490ba7cc432f5fdd98d6/workflow-inventory.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-typescript-skills/f434715f7c664af431f0be62982aa379400102de/checks.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-typescript-skills/f434715f7c664af431f0be62982aa379400102de/rules.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-typescript-skills/f434715f7c664af431f0be62982aa379400102de/workflow-inventory.json",
+    "G0/fleet/skills-raw-20260920T061548Z/normalized/workflow-files.jsonl",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00001-auth-user.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00001-auth-user.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00002-tailrocks-typescript-skills-before-repository.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00002-tailrocks-typescript-skills-before-repository.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00003-tailrocks-typescript-skills-before-default-branch.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00003-tailrocks-typescript-skills-before-default-branch.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00004-tailrocks-typescript-skills-before-open-prs-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00004-tailrocks-typescript-skills-before-open-prs-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00005-tailrocks-skill-authoring-skills-before-repository.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00005-tailrocks-skill-authoring-skills-before-repository.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00006-tailrocks-skill-authoring-skills-before-default-branch.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00006-tailrocks-skill-authoring-skills-before-default-branch.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00007-tailrocks-skill-authoring-skills-before-open-prs-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00007-tailrocks-skill-authoring-skills-before-open-prs-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00008-tailrocks-rust-skills-before-repository.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00008-tailrocks-rust-skills-before-repository.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00009-tailrocks-rust-skills-before-default-branch.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00009-tailrocks-rust-skills-before-default-branch.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00010-tailrocks-rust-skills-before-open-prs-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00010-tailrocks-rust-skills-before-open-prs-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00011-tailrocks-roadmap-skills-before-repository.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00011-tailrocks-roadmap-skills-before-repository.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00012-tailrocks-roadmap-skills-before-default-branch.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00012-tailrocks-roadmap-skills-before-default-branch.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00013-tailrocks-roadmap-skills-before-open-prs-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00013-tailrocks-roadmap-skills-before-open-prs-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00014-tailrocks-pull-request-skills-before-repository.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00014-tailrocks-pull-request-skills-before-repository.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00015-tailrocks-pull-request-skills-before-default-branch.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00015-tailrocks-pull-request-skills-before-default-branch.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00016-tailrocks-pull-request-skills-before-open-prs-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00016-tailrocks-pull-request-skills-before-open-prs-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00017-tailrocks-open-source-skills-before-repository.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00017-tailrocks-open-source-skills-before-repository.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00018-tailrocks-open-source-skills-before-default-branch.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00018-tailrocks-open-source-skills-before-default-branch.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00019-tailrocks-open-source-skills-before-open-prs-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00019-tailrocks-open-source-skills-before-open-prs-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00020-tailrocks-macos-skills-before-repository.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00020-tailrocks-macos-skills-before-repository.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00021-tailrocks-macos-skills-before-default-branch.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00021-tailrocks-macos-skills-before-default-branch.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00022-tailrocks-macos-skills-before-open-prs-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00022-tailrocks-macos-skills-before-open-prs-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00023-tailrocks-code-quality-skills-before-repository.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00023-tailrocks-code-quality-skills-before-repository.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00024-tailrocks-code-quality-skills-before-default-branch.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00024-tailrocks-code-quality-skills-before-default-branch.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00025-tailrocks-code-quality-skills-before-open-prs-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00025-tailrocks-code-quality-skills-before-open-prs-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00026-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-tree.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00026-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-tree.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00027-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-rulesets-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00027-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-rulesets-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00028-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-branch-protection.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00028-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-branch-protection.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00028-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-branch-protection.stderr",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00029-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-required-status-checks.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00029-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-required-status-checks.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00029-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-required-status-checks.stderr",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00030-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-check-runs-all-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00030-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-check-runs-all-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00031-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-statuses-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00031-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-statuses-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00032-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-status-aggregate.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00032-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-status-aggregate.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00033-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-tree.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00033-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-tree.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00034-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-rulesets-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00034-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-rulesets-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00035-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-branch-protection.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00035-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-branch-protection.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00035-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-branch-protection.stderr",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00036-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-required-status-checks.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00036-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-required-status-checks.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00036-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-required-status-checks.stderr",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00037-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-check-runs-all-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00037-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-check-runs-all-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00038-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-statuses-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00038-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-statuses-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00039-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-status-aggregate.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00039-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-status-aggregate.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00040-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-tree.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00040-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-tree.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00041-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-rulesets-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00041-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-rulesets-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00042-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-branch-protection.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00042-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-branch-protection.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00042-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-branch-protection.stderr",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00043-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-required-status-checks.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00043-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-required-status-checks.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00043-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-required-status-checks.stderr",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00044-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-check-runs-all-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00044-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-check-runs-all-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00045-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-statuses-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00045-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-statuses-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00046-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-status-aggregate.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00046-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-status-aggregate.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00047-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-tree.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00047-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-tree.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00048-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-rulesets-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00048-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-rulesets-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00049-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-branch-protection.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00049-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-branch-protection.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00049-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-branch-protection.stderr",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00050-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-required-status-checks.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00050-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-required-status-checks.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00050-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-required-status-checks.stderr",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00051-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-check-runs-all-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00051-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-check-runs-all-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00052-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-statuses-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00052-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-statuses-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00053-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-status-aggregate.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00053-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-status-aggregate.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00054-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-tree.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00054-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-tree.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00055-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-rulesets-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00055-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-rulesets-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00056-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-branch-protection.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00056-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-branch-protection.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00056-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-branch-protection.stderr",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00057-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-required-status-checks.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00057-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-required-status-checks.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00057-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-required-status-checks.stderr",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00058-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-check-runs-all-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00058-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-check-runs-all-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00059-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-statuses-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00059-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-statuses-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00060-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-status-aggregate.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00060-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-status-aggregate.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00061-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-tree.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00061-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-tree.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00062-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-rulesets-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00062-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-rulesets-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00063-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-branch-protection.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00063-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-branch-protection.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00063-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-branch-protection.stderr",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00064-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-required-status-checks.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00064-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-required-status-checks.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00064-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-required-status-checks.stderr",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00065-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-check-runs-all-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00065-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-check-runs-all-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00066-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-statuses-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00066-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-statuses-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00067-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-status-aggregate.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00067-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-status-aggregate.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00068-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-tree.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00068-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-tree.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00069-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-rulesets-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00069-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-rulesets-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00070-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-branch-protection.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00070-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-branch-protection.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00070-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-branch-protection.stderr",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00071-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-required-status-checks.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00071-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-required-status-checks.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00071-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-required-status-checks.stderr",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00072-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-check-runs-all-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00072-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-check-runs-all-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00073-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-statuses-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00073-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-statuses-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00074-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-status-aggregate.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00074-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-status-aggregate.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00075-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-tree.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00075-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-tree.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00076-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-rulesets-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00076-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-rulesets-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00077-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-branch-protection.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00077-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-branch-protection.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00077-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-branch-protection.stderr",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00078-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-required-status-checks.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00078-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-required-status-checks.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00078-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-required-status-checks.stderr",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00079-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-check-runs-all-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00079-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-check-runs-all-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00080-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-statuses-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00080-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-statuses-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00081-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-status-aggregate.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00081-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-status-aggregate.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00082-tailrocks-typescript-skills-after-repository.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00082-tailrocks-typescript-skills-after-repository.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00083-tailrocks-typescript-skills-after-default-branch.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00083-tailrocks-typescript-skills-after-default-branch.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00084-tailrocks-typescript-skills-after-open-prs-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00084-tailrocks-typescript-skills-after-open-prs-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00085-tailrocks-skill-authoring-skills-after-repository.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00085-tailrocks-skill-authoring-skills-after-repository.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00086-tailrocks-skill-authoring-skills-after-default-branch.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00086-tailrocks-skill-authoring-skills-after-default-branch.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00087-tailrocks-skill-authoring-skills-after-open-prs-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00087-tailrocks-skill-authoring-skills-after-open-prs-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00088-tailrocks-rust-skills-after-repository.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00088-tailrocks-rust-skills-after-repository.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00089-tailrocks-rust-skills-after-default-branch.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00089-tailrocks-rust-skills-after-default-branch.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00090-tailrocks-rust-skills-after-open-prs-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00090-tailrocks-rust-skills-after-open-prs-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00091-tailrocks-roadmap-skills-after-repository.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00091-tailrocks-roadmap-skills-after-repository.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00092-tailrocks-roadmap-skills-after-default-branch.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00092-tailrocks-roadmap-skills-after-default-branch.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00093-tailrocks-roadmap-skills-after-open-prs-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00093-tailrocks-roadmap-skills-after-open-prs-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00094-tailrocks-pull-request-skills-after-repository.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00094-tailrocks-pull-request-skills-after-repository.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00095-tailrocks-pull-request-skills-after-default-branch.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00095-tailrocks-pull-request-skills-after-default-branch.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00096-tailrocks-pull-request-skills-after-open-prs-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00096-tailrocks-pull-request-skills-after-open-prs-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00097-tailrocks-open-source-skills-after-repository.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00097-tailrocks-open-source-skills-after-repository.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00098-tailrocks-open-source-skills-after-default-branch.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00098-tailrocks-open-source-skills-after-default-branch.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00099-tailrocks-open-source-skills-after-open-prs-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00099-tailrocks-open-source-skills-after-open-prs-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00100-tailrocks-macos-skills-after-repository.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00100-tailrocks-macos-skills-after-repository.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00101-tailrocks-macos-skills-after-default-branch.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00101-tailrocks-macos-skills-after-default-branch.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00102-tailrocks-macos-skills-after-open-prs-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00102-tailrocks-macos-skills-after-open-prs-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00103-tailrocks-code-quality-skills-after-repository.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00103-tailrocks-code-quality-skills-after-repository.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00104-tailrocks-code-quality-skills-after-default-branch.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00104-tailrocks-code-quality-skills-after-default-branch.response",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00105-tailrocks-code-quality-skills-after-open-prs-page-1.body",
+    "G0/fleet/skills-raw-20260920T061548Z/raw/00105-tailrocks-code-quality-skills-after-open-prs-page-1.response",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/after.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/before.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-code-quality-skills/after/summary.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-code-quality-skills/before/summary.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-macos-skills/after/summary.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-macos-skills/before/summary.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-open-source-skills/after/summary.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-open-source-skills/before/summary.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-pull-request-skills/after/summary.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-pull-request-skills/before/summary.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-roadmap-skills/after/summary.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-roadmap-skills/before/summary.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-rust-skills/after/summary.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-rust-skills/before/summary.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-skill-authoring-skills/after/summary.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-skill-authoring-skills/before/summary.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-typescript-skills/after/summary.json",
+    "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-typescript-skills/before/summary.json",
+    "G0/homebrew-contract/native-578-exact-crosscheck.md",
+    "G0/native-review/native-578-exact-review.md",
+    "G0/rust-consumers/raw-store-5688-checkpoint.md",
+    "G0/transaction-recovery-review/0e344790dfba48765d2c971f2dfe7938840d4649-review.md",
+    "G1/bootstrap-transition/audit_v11_bundle.py",
+    "G1/bootstrap-transition/build_v11_bundle.py",
+    "G1/bootstrap-transition/v11-canonical-model-source.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/AUTHORITY-CHANGE-PLAN-2026-09-20-v11.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/AUTHORITY-CHANGE-PLAN-2026-09-20-v11.md",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/adoption.schema.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/bundle-index.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/canonical-root-manifest.v4.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/negative-fixtures.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/permanent_binding.schema.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/positive-adoption.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/positive-fixture-status.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/positive-full-typed-output-fixture.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/positive-pre-record-transport.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/positive-pre-record.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/positive-provider-result.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/positive-release-manifest.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/positive-verify-b.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/pre_record.schema.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/pre_record_transport.schema.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/provider_result.schema.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/release_manifest.schema.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/v11-canonical-field-dag.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/v11-independent-audit-report.md",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/v11-independent-audit-results.json",
+    "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/verify_b.schema.json",
+    "G1/bootstrap-transition/v11-freeze-manifest.json",
+    "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20-luna/audit_v11_luna.py",
+    "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20-luna/v11-luna-hostile-fixtures.json",
+    "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20-luna/v11-luna-independent-audit-report.md",
+    "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20-luna/v11-luna-independent-audit-results.json",
+    "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20-luna/v11-luna-independent-field-dag.json",
+    "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20/adversarial_v11_bundle.py",
+    "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20/v11-independent-adversarial-report.md",
+    "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20/v11-independent-adversarial-results.json",
+    "G1/bootstrap-transition/v11-independent-authority-transition-review-2026-09-20.md",
+    "G1/bootstrap-transition/v9-independent-contract-audit-2026-09-20/canonical-dag/v9-independent-field-dag.json",
+    "G1/bootstrap/source-review-bba2e758f91e7d40c295a2f034eaeff64ef2f09d.md",
+    "G1/reviews/apt-71a8a539-independent.md",
+    "G1/reviews/apt-f069789a-independent.md",
+    "G1/reviews/runtime-stall-5b61841d.md",
+    "G1/reviews/runtime-stall-c70428c9.md"
+  ],
+  "excluded": [
+    "live/current ruleset capture, request ledgers, raw capture trees, active monitor/session ledgers, and mutable writer snapshots",
+    "v12 and every source file newer than the declared 2026-09-20T06:28:45Z cutoff",
+    "credentials, secrets, raw logs, generated target/build trees, binaries, caches, clones, and harness worktrees",
+    "G0/fleet/skills-raw-20260920T060520Z incomplete earlier partition; only corrected 061548Z partition and independent review selected",
+    "old/pre-cutoff reports already available before parent cutoff, including d2395 docs/rust-scan and checkout 09287726/172c652a reports",
+    "active owner reports and moving handoff documents (hosted-config report, ruleset capture analysis, schema2 handoff); no duplicate historical rewrite",
+    "symlinks: none selected; no symlink dereferenced"
+  ],
+  "selection_notes": [
+    "Append begins after parent checkpoint 38269cf0ebe2c6c007f80fa78458fc63d40f76a5 and its 2026-09-20T05:32:10Z cutoff; prior update paths remain untouched.",
+    "v11 freeze is copied with canonical model, generator, full generated bundle, root-manifest historical v9 field-DAG input, owner 59/59 audit, earlier independent 19/19 audit, and Luna independent audit. All source bytes were rehashed before and after copy.",
+    "v11 status is proposal_only_external_blocked with authority_claim=false, execution_authorized=false, mutation_performed=false; Luna is separate 24/38 with 9 failed and 5 unimplemented, authority_claim=false. Design/audit only.",
+    "The raw skills 061548Z partition is included at its own manifest level (281 files, 2345007 bytes); its review says complete=false/claimable=false and workflow/status coverage incomplete. It is not a G0 result.",
+    "Native 578, APT f069/71a, bootstrap bba2, recovery 0e344, raw-store 024, checkout/CAS 81f, and runtime stall reports retain local dispositions; no verdict is promoted.",
+    "No source, GitHub ruleset/check/authority, dispatch, release, merge, install, host, credential, or remote source state changed."
+  ],
+  "integrity": {
+    "inventory": "INVENTORY.tsv",
+    "manifest_scope": "All regular files in this update except SHA256SUMS itself",
+    "sha256_manifest": "SHA256SUMS",
+    "source_hash_scope": "Every selected source file has bytes, source mtime epoch, and SHA-256 in INVENTORY.tsv",
+    "source_destination_reconciliation": "All 332 selected files matched byte-for-byte and SHA-256 after copy",
+    "source_stability_reconciliation": "All 332 selected sources were rehashed after copy; pre/post source bytes, sizes, and SHA-256 matched",
+    "json_parse_count": 73,
+    "jsonl_parse_line_count": 153,
+    "secret_scan_matches": 0,
+    "symlink_policy": "No symlinks selected; no symlink dereferenced",
+    "git_diff_check": "not-clean only because preserved external Markdown/API-response bytes contain existing trailing whitespace or blank EOF lines; no normalization applied",
+    "v11_full_hash_closure": {
+      "bundle": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20",
+      "root_digest": "deb19280afeb9bf17b4c80ca52d808a1115822e7f8d48ff28f204e9a7388c017",
+      "root_manifest_sha256": "35f8ae8a20cfe3ce774ed0d63ece8ed06d3e66d4e66693933ea5e5825e32a96d",
+      "bound_file_count": 20,
+      "bound_file_mismatches": 0,
+      "bundle_index_anchors_verified": true,
+      "freeze_manifest_sha256": "df14a907b29cf5839551dc0b4a32e77af5c61d8e927433530f9a061d75997c16",
+      "owner_audit_summary": {
+        "total": 59,
+        "passed": 59,
+        "failed": 0,
+        "unimplemented": 0
+      },
+      "earlier_adversarial_summary": {
+        "total": 19,
+        "passed": 19,
+        "failed": 0,
+        "unimplemented": 0
+      },
+      "luna_report_sha256": "7b0628135d2490b881b7c09898fb7bdef7514efc2e3d8eafd35ba1b8d1e69e66",
+      "luna_result_sha256": "50ab287a460cb7d240af78743fd46ee2ddce2965215829a71120f3daf24b1dd2"
+    },
+    "raw_skills_partition": {
+      "path": "G0/fleet/skills-raw-20260920T061548Z",
+      "file_count": 281,
+      "bytes": 2345007,
+      "manifest_sha256": "a3239feb9227a46433eba29a8e5e301353c165bbd60bb0c736e40c4b1110ceef",
+      "auth_identity_sha256": "bb1ab3ab924c4cecf09b88c7e2261235059edd65f1a74b9757f557e3c8ef4fb9",
+      "complete_partition_files_rehashed": true
+    }
+  },
+  "source_inventory": [
+    {
+      "path": "G0/checker-v2-review/024c5f61-g3-raw-store-lifecycle-review.md",
+      "bytes": 4661,
+      "source_mtime_epoch": 1789883494,
+      "sha256": "a289efec6fab7e89fe63777442df747fd46506c156802678aab985a3b6286099"
+    },
+    {
+      "path": "G0/checker-v2-review/81f6362-g3-checkout-cas-integration-review.md",
+      "bytes": 4669,
+      "source_mtime_epoch": 1789885336,
+      "sha256": "c96b2da55beeac80413d396467cac527ad25764eab3266ee8064c00c1272cb74"
+    },
+    {
+      "path": "G0/evidence-checkpoint-review/38269cf0-packaging-review.md",
+      "bytes": 4755,
+      "source_mtime_epoch": 1789882940,
+      "sha256": "46455c14b24bdb5c19b5b22eef98459bb0c33e3b4d066816ed579e3efaf4c7e5"
+    },
+    {
+      "path": "G0/fleet/g1-integration-dependency-map-20260920T060811Z.json",
+      "bytes": 8903,
+      "source_mtime_epoch": 1789884712,
+      "sha256": "f80eaa3bbe6e770a71304bf2a32f204d386a1c0efa22eafb4485ee1245586b20"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z-independent-review.md",
+      "bytes": 8966,
+      "source_mtime_epoch": 1789885642,
+      "sha256": "54d82f0f61967055c907d41c4d536ee250246d80d2144c2fcbe11ffecc1f5a13"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/auth-identity.json",
+      "bytes": 157,
+      "source_mtime_epoch": 1789884953,
+      "sha256": "bb1ab3ab924c4cecf09b88c7e2261235059edd65f1a74b9757f557e3c8ef4fb9"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/capture-summary.md",
+      "bytes": 3189,
+      "source_mtime_epoch": 1789885167,
+      "sha256": "c1e4fda0e071735cf96e48677c5fe400c386de93b781c3e9542614a531050e1e"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/manifest.json",
+      "bytes": 1126,
+      "source_mtime_epoch": 1789885025,
+      "sha256": "a3239feb9227a46433eba29a8e5e301353c165bbd60bb0c736e40c4b1110ceef"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/aggregate-status.jsonl",
+      "bytes": 45061,
+      "source_mtime_epoch": 1789885025,
+      "sha256": "6bb4a6dda1615897013d000367930abbab5ffbef1a86b7f4b25c3a9853decca9"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/branch-protection.jsonl",
+      "bytes": 6804,
+      "source_mtime_epoch": 1789885025,
+      "sha256": "7cdd141524792a823b564e0d719b88c08db663c1137ec978eb99c59755d7a5cf"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/check-runs.jsonl",
+      "bytes": 0,
+      "source_mtime_epoch": 1789885025,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/open-prs.jsonl",
+      "bytes": 0,
+      "source_mtime_epoch": 1789885025,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/repositories.jsonl",
+      "bytes": 7264,
+      "source_mtime_epoch": 1789885025,
+      "sha256": "c329ff01074dc55b7070c2c60f62b78544d3a8ada3686d4b57093801861ec8a9"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/requests.jsonl",
+      "bytes": 275534,
+      "source_mtime_epoch": 1789885025,
+      "sha256": "ebea146dbe4796034a2ed3038da6bf5eefc90129c3e4e96bb7ea27268e021311"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/rulesets.jsonl",
+      "bytes": 0,
+      "source_mtime_epoch": 1789885025,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/sha-targets.jsonl",
+      "bytes": 2144,
+      "source_mtime_epoch": 1789885188,
+      "sha256": "8363d3418c3cee8960a1d3bc147a8bff13d7f5bfaf1e9e7840c2d96d08483180"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/statuses.jsonl",
+      "bytes": 0,
+      "source_mtime_epoch": 1789885025,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-code-quality-skills/0b9a1eaa83ca2ad9b2c895741648e7cde10f6189/checks.json",
+      "bytes": 6549,
+      "source_mtime_epoch": 1789884975,
+      "sha256": "799df139ec47d4c374c1faf521ab43f4733965402386ff3660ee250532321e73"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-code-quality-skills/0b9a1eaa83ca2ad9b2c895741648e7cde10f6189/rules.json",
+      "bytes": 1194,
+      "source_mtime_epoch": 1789884975,
+      "sha256": "c03d014b4cef8167834fe5c363d5bc0b829eb172a869fcc263ef052e3a3ef952"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-code-quality-skills/0b9a1eaa83ca2ad9b2c895741648e7cde10f6189/workflow-inventory.json",
+      "bytes": 380,
+      "source_mtime_epoch": 1789884975,
+      "sha256": "4113487e0c711d2f6a7eaae6270a3422082aa7a01a9ea7d895071cd11af43193"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-macos-skills/1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2/checks.json",
+      "bytes": 6249,
+      "source_mtime_epoch": 1789884979,
+      "sha256": "4ba05153205216ace6ff755cfcd8e6ac579e5e7350c2cedc7fffa1aa7e3bf6bd"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-macos-skills/1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2/rules.json",
+      "bytes": 1166,
+      "source_mtime_epoch": 1789884979,
+      "sha256": "1c35c4353a3fc7f65650fe7ee9dfcfa2acf4689970a251a4f89db9e6ca5e1be2"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-macos-skills/1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2/workflow-inventory.json",
+      "bytes": 366,
+      "source_mtime_epoch": 1789884979,
+      "sha256": "e3055c4d4083d7d17900a5b79e8e502cb8d93f008980e10fbeb94c965c2c4f0e"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-open-source-skills/6e77a448f9776e837bfc9ab18b833bd5fdc26d3a/checks.json",
+      "bytes": 6499,
+      "source_mtime_epoch": 1789884984,
+      "sha256": "b7abe3b97b982d5ee988df7ae1a5a5ad686bccf59725bb19ab0ff5f250c4d709"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-open-source-skills/6e77a448f9776e837bfc9ab18b833bd5fdc26d3a/rules.json",
+      "bytes": 1190,
+      "source_mtime_epoch": 1789884984,
+      "sha256": "84b71768bc551ca42848e61778253e63e1d8d640847d0f8cb49b979f957b7bd1"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-open-source-skills/6e77a448f9776e837bfc9ab18b833bd5fdc26d3a/workflow-inventory.json",
+      "bytes": 378,
+      "source_mtime_epoch": 1789884984,
+      "sha256": "21e881670655b5b4bae22af4eba7968d2b2ea71d4c9cebc75b443e061cdba524"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-pull-request-skills/2b4f71f49fd27061e64d16b2b7f83d9bd2df5612/checks.json",
+      "bytes": 6543,
+      "source_mtime_epoch": 1789884989,
+      "sha256": "5a40365356ba24624d93e5c6884c5bb5f3de96c3f55aa4b680ffaac8423d2e11"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-pull-request-skills/2b4f71f49fd27061e64d16b2b7f83d9bd2df5612/rules.json",
+      "bytes": 1194,
+      "source_mtime_epoch": 1789884989,
+      "sha256": "ed903361b7d8aa537984f45f5eb24b09a29e66ea0dbbedb90803fef4362a5f3c"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-pull-request-skills/2b4f71f49fd27061e64d16b2b7f83d9bd2df5612/workflow-inventory.json",
+      "bytes": 380,
+      "source_mtime_epoch": 1789884989,
+      "sha256": "32d3bacfae0870d5d89445951bba947a917fe7d866b4be018f624149a70fc10c"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-roadmap-skills/66d9c79f6472ddace0e265335dc8dd36cdeb8a86/checks.json",
+      "bytes": 6311,
+      "source_mtime_epoch": 1789884993,
+      "sha256": "ed3ed29d3e81d05e6d79228d67b09c73d59c69a91f39014582eae25ff6b3b53e"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-roadmap-skills/66d9c79f6472ddace0e265335dc8dd36cdeb8a86/rules.json",
+      "bytes": 1174,
+      "source_mtime_epoch": 1789884993,
+      "sha256": "59e06f80a552eadd82b8368a8a40a582cf286aaa49ae19edf65ba5a5e3485549"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-roadmap-skills/66d9c79f6472ddace0e265335dc8dd36cdeb8a86/workflow-inventory.json",
+      "bytes": 370,
+      "source_mtime_epoch": 1789884993,
+      "sha256": "4a6793cfae427fe26668810698c4f38c84bf11bc38279bd6ef9e57fcb0b50b52"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-rust-skills/bcc31b1d935dac4de191a6b71b3091f628d204c0/checks.json",
+      "bytes": 6195,
+      "source_mtime_epoch": 1789884998,
+      "sha256": "e8f28d936c633eb11f0409b2a13a05cbda72fe559119346475f74bed11b82c8d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-rust-skills/bcc31b1d935dac4de191a6b71b3091f628d204c0/rules.json",
+      "bytes": 1162,
+      "source_mtime_epoch": 1789884998,
+      "sha256": "0631d3088aefd8722d577916d85af9de2028cdb8b0bcefe8565e2863c851b8fa"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-rust-skills/bcc31b1d935dac4de191a6b71b3091f628d204c0/workflow-inventory.json",
+      "bytes": 364,
+      "source_mtime_epoch": 1789884998,
+      "sha256": "6dca9bcfd50ef7a09a73f71419d21e1760ce145f0b4ed94c9e316ebbbf9a4ceb"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-skill-authoring-skills/9e25890fd63f7ca6c587490ba7cc432f5fdd98d6/checks.json",
+      "bytes": 6674,
+      "source_mtime_epoch": 1789885003,
+      "sha256": "7035799be341d99fa4b78dbc5dd0a7cbfef81e5a99408e4529f4377749b9a2ab"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-skill-authoring-skills/9e25890fd63f7ca6c587490ba7cc432f5fdd98d6/rules.json",
+      "bytes": 1206,
+      "source_mtime_epoch": 1789885003,
+      "sha256": "ddd5cf8f1eda02c2e131997db361a0e04f79d48bc29ade157bcbdf64ad4c7d5c"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-skill-authoring-skills/9e25890fd63f7ca6c587490ba7cc432f5fdd98d6/workflow-inventory.json",
+      "bytes": 386,
+      "source_mtime_epoch": 1789885003,
+      "sha256": "da0200ab4e95d710d639367d9de3086a71b9c327e2db6155a0c28d7e72c8ee90"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-typescript-skills/f434715f7c664af431f0be62982aa379400102de/checks.json",
+      "bytes": 6473,
+      "source_mtime_epoch": 1789885008,
+      "sha256": "27f43756cf1b7a61e3e044173123e7023868a38671a52175f138ac68aecb88b6"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-typescript-skills/f434715f7c664af431f0be62982aa379400102de/rules.json",
+      "bytes": 1186,
+      "source_mtime_epoch": 1789885008,
+      "sha256": "1f5ed1a53f3b8de6fde5129cfcc74e664443ca96e0727a4a09bd311829da3f4d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/tailrocks-typescript-skills/f434715f7c664af431f0be62982aa379400102de/workflow-inventory.json",
+      "bytes": 376,
+      "source_mtime_epoch": 1789885008,
+      "sha256": "03cda69d57fdef8e4df11796cbbe029bb1ef99dcc7da3c61f658da5a34f556d7"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/normalized/workflow-files.jsonl",
+      "bytes": 0,
+      "source_mtime_epoch": 1789885025,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00001-auth-user.body",
+      "bytes": 1358,
+      "source_mtime_epoch": 1789884953,
+      "sha256": "196ee5d0fae291e9cadebe63354818f1b14762fa6f126075ec604d00c266a766"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00001-auth-user.response",
+      "bytes": 2822,
+      "source_mtime_epoch": 1789884953,
+      "sha256": "beb76e4ec10f7d15c7046b78c0bab864166809d91be1e1797d41d9b5b706477a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00002-tailrocks-typescript-skills-before-repository.body",
+      "bytes": 7829,
+      "source_mtime_epoch": 1789884954,
+      "sha256": "b829562ae8d166381106ff8dd2c4496c9efcad3a93b2036250085adbde589f81"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00002-tailrocks-typescript-skills-before-repository.response",
+      "bytes": 9297,
+      "source_mtime_epoch": 1789884954,
+      "sha256": "663b27c82fd5783c24476b89f49ce4419c89c208a19cf2ef855da2a124121782"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00003-tailrocks-typescript-skills-before-default-branch.body",
+      "bytes": 7507,
+      "source_mtime_epoch": 1789884955,
+      "sha256": "efe902ff77324806ba253992b3f8085ce416f6246c72b3978260227cb36bcce7"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00003-tailrocks-typescript-skills-before-default-branch.response",
+      "bytes": 8924,
+      "source_mtime_epoch": 1789884955,
+      "sha256": "f2cee72163feccd4a8e0bd128bcae21a5c12f3c5572648ec8d0ddd0ab4d17f4e"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00004-tailrocks-typescript-skills-before-open-prs-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884956,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00004-tailrocks-typescript-skills-before-open-prs-page-1.response",
+      "bytes": 1437,
+      "source_mtime_epoch": 1789884956,
+      "sha256": "d82554075bb0ca10a28142fd819fd8913dbdd1b7060eb815a8939aca8f6ff72e"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00005-tailrocks-skill-authoring-skills-before-repository.body",
+      "bytes": 8020,
+      "source_mtime_epoch": 1789884956,
+      "sha256": "00303da0866643b35e4c268509f0788db825853f8c7530d46a58418423c2d1d4"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00005-tailrocks-skill-authoring-skills-before-repository.response",
+      "bytes": 9488,
+      "source_mtime_epoch": 1789884956,
+      "sha256": "f3ffe804eb3c1e1ed64dd07e387e859210c5f612e8edac6d8aad8fbb61c043da"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00006-tailrocks-skill-authoring-skills-before-default-branch.body",
+      "bytes": 7557,
+      "source_mtime_epoch": 1789884957,
+      "sha256": "c71bf8381917e9732bb39ed4110ccd94b1f69aa6158faaa7207eccd353447ceb"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00006-tailrocks-skill-authoring-skills-before-default-branch.response",
+      "bytes": 8975,
+      "source_mtime_epoch": 1789884957,
+      "sha256": "edf32512a3bb1210cba8afc2ddba8247c6f8db5bd77ed38851b387b720e134f7"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00007-tailrocks-skill-authoring-skills-before-open-prs-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884958,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00007-tailrocks-skill-authoring-skills-before-open-prs-page-1.response",
+      "bytes": 1437,
+      "source_mtime_epoch": 1789884958,
+      "sha256": "ac349bfff79cba287c328b382c2981a68971f7299e960bc25c03e07c76e2ab44"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00008-tailrocks-rust-skills-before-repository.body",
+      "bytes": 7563,
+      "source_mtime_epoch": 1789884958,
+      "sha256": "e49adb915928a91a4693279ca94f656b8f29987f61671f77b332c1247a8ba263"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00008-tailrocks-rust-skills-before-repository.response",
+      "bytes": 9031,
+      "source_mtime_epoch": 1789884958,
+      "sha256": "a2d37171cd297869b0aff2de9e53e24e6d93fe302cd13ea5a68eeeff2b673171"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00009-tailrocks-rust-skills-before-default-branch.body",
+      "bytes": 7447,
+      "source_mtime_epoch": 1789884959,
+      "sha256": "854f411d3ccb120d9c82558b0f94f1142c76d90c384926bfc091fd5fe184e65d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00009-tailrocks-rust-skills-before-default-branch.response",
+      "bytes": 8864,
+      "source_mtime_epoch": 1789884959,
+      "sha256": "919c5e4b8e77f462a6ff46ff723a28ca7105a13572b164fc1f76d15400b7a567"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00010-tailrocks-rust-skills-before-open-prs-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884960,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00010-tailrocks-rust-skills-before-open-prs-page-1.response",
+      "bytes": 1459,
+      "source_mtime_epoch": 1789884960,
+      "sha256": "f1fb66cd5d703e204e08a473c4e7ef3cb404a91326a19d916da61f80e7c3b48c"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00011-tailrocks-roadmap-skills-before-repository.body",
+      "bytes": 7673,
+      "source_mtime_epoch": 1789884960,
+      "sha256": "9dc3a99e208dbd1e15d0f36c0b9949a081585a747fa4bb6180709065314a10ec"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00011-tailrocks-roadmap-skills-before-repository.response",
+      "bytes": 9141,
+      "source_mtime_epoch": 1789884960,
+      "sha256": "7265e9d408c92f8d8b748a6b98ebce3f7ae266f4bf0fbca963d80eb791d95b0a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00012-tailrocks-roadmap-skills-before-default-branch.body",
+      "bytes": 7477,
+      "source_mtime_epoch": 1789884961,
+      "sha256": "dfaa5b8e3322290de461612b49e8df58310548a7fe6eb06cc7e45d59e0af6139"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00012-tailrocks-roadmap-skills-before-default-branch.response",
+      "bytes": 8895,
+      "source_mtime_epoch": 1789884961,
+      "sha256": "3ae5d6022eb2a5b5d38f1f814668314e6f255b1a06a9a0c2c493d8c3b827ce3c"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00013-tailrocks-roadmap-skills-before-open-prs-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884962,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00013-tailrocks-roadmap-skills-before-open-prs-page-1.response",
+      "bytes": 1437,
+      "source_mtime_epoch": 1789884962,
+      "sha256": "f8edb601bdba0c9a85ab72c69b08aa7ad012213842d290a0703afc136fcd1378"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00014-tailrocks-pull-request-skills-before-repository.body",
+      "bytes": 7895,
+      "source_mtime_epoch": 1789884962,
+      "sha256": "db025e426e71255c7c7d89a62e1809af04d2fd894163bc2dda89604ac8ed0412"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00014-tailrocks-pull-request-skills-before-repository.response",
+      "bytes": 9363,
+      "source_mtime_epoch": 1789884962,
+      "sha256": "335b4e7468c34289cbddc95920e30153cbc4a6d2e9f17521fcba28cd508c5954"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00015-tailrocks-pull-request-skills-before-default-branch.body",
+      "bytes": 7527,
+      "source_mtime_epoch": 1789884963,
+      "sha256": "b09b0c3bea2e0ff817d5d4567956e2e12994f31e8824583284f791cc748420ff"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00015-tailrocks-pull-request-skills-before-default-branch.response",
+      "bytes": 8945,
+      "source_mtime_epoch": 1789884963,
+      "sha256": "bbbd08d1298bcaae8a746221a59fe252ca6e3f2c22129ddea1fd923f7ead5809"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00016-tailrocks-pull-request-skills-before-open-prs-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884964,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00016-tailrocks-pull-request-skills-before-open-prs-page-1.response",
+      "bytes": 1437,
+      "source_mtime_epoch": 1789884964,
+      "sha256": "e421f95dc350824d44903ee4872f347249dca5b42fae714ba976f1b55324251e"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00017-tailrocks-open-source-skills-before-repository.body",
+      "bytes": 7853,
+      "source_mtime_epoch": 1789884964,
+      "sha256": "1ca7d6675b981d3668434049c60ce746dff60b32f4eeb477979cc15a4ab8c8e7"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00017-tailrocks-open-source-skills-before-repository.response",
+      "bytes": 9321,
+      "source_mtime_epoch": 1789884964,
+      "sha256": "ee367dcac9ecee34844c55fcae788bc07a85b494aa3e435be890538511699424"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00018-tailrocks-open-source-skills-before-default-branch.body",
+      "bytes": 7517,
+      "source_mtime_epoch": 1789884965,
+      "sha256": "67567f5a31b290f3d8ef7a393bb54a0b0fc23b3d21a2d22a9f50836a391a1201"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00018-tailrocks-open-source-skills-before-default-branch.response",
+      "bytes": 8935,
+      "source_mtime_epoch": 1789884965,
+      "sha256": "c4f4861ddf487c10cd653ef63b2c2ee3892d0c81994063f0c733b2284aca54c4"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00019-tailrocks-open-source-skills-before-open-prs-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884966,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00019-tailrocks-open-source-skills-before-open-prs-page-1.response",
+      "bytes": 1437,
+      "source_mtime_epoch": 1789884966,
+      "sha256": "91fd7e17b758a0ec60f58249277fbb48eab00cec23e9417475bb374dee979b9c"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00020-tailrocks-macos-skills-before-repository.body",
+      "bytes": 7615,
+      "source_mtime_epoch": 1789884967,
+      "sha256": "ac4437b1cc4f5d2078ae2bbab0001116208253e2080b2f45a9c8f7c84fb819d8"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00020-tailrocks-macos-skills-before-repository.response",
+      "bytes": 9083,
+      "source_mtime_epoch": 1789884967,
+      "sha256": "8468518efd6a524c938b8bc4fbf07aa4e831d4b1e7ad179051bb92726ad80b2c"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00021-tailrocks-macos-skills-before-default-branch.body",
+      "bytes": 7457,
+      "source_mtime_epoch": 1789884967,
+      "sha256": "8de41b8a83e8510d7f365698e7558b56913a2ece22c05829cec27eb65a86c9a2"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00021-tailrocks-macos-skills-before-default-branch.response",
+      "bytes": 8875,
+      "source_mtime_epoch": 1789884967,
+      "sha256": "5952fa9e5b0789568c895b778b0bd8fb165936b412c8978758f1fd56840703f3"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00022-tailrocks-macos-skills-before-open-prs-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884968,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00022-tailrocks-macos-skills-before-open-prs-page-1.response",
+      "bytes": 1459,
+      "source_mtime_epoch": 1789884968,
+      "sha256": "1b3718984a55fe30442a7886e83d16f4bb75b42f52385b96fb7de32f2083d8a1"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00023-tailrocks-code-quality-skills-before-repository.body",
+      "bytes": 7901,
+      "source_mtime_epoch": 1789884969,
+      "sha256": "92cc334a262e724d1eeb9949e653b647e1e8e12d5599088e4ef5e8dc05256c18"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00023-tailrocks-code-quality-skills-before-repository.response",
+      "bytes": 9369,
+      "source_mtime_epoch": 1789884969,
+      "sha256": "12cc6986ab01a35fed0d4d0ae5867cf21d66c77f00863a8b1b3011c0a299bf2f"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00024-tailrocks-code-quality-skills-before-default-branch.body",
+      "bytes": 7527,
+      "source_mtime_epoch": 1789884969,
+      "sha256": "b5bbd66991e8692b80ca3eebfe8babef0dfc4121deee73e15fd004895cda6281"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00024-tailrocks-code-quality-skills-before-default-branch.response",
+      "bytes": 8945,
+      "source_mtime_epoch": 1789884969,
+      "sha256": "520a3fdc1505b9edd04600e213629fbb2d4416316f4e8996e528be7244cb1205"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00025-tailrocks-code-quality-skills-before-open-prs-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884970,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00025-tailrocks-code-quality-skills-before-open-prs-page-1.response",
+      "bytes": 1436,
+      "source_mtime_epoch": 1789884970,
+      "sha256": "43aa5ac06a89a646743b79ff7aa76c5e7ceccc68707f1eac64cb360c69eb6f4b"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00026-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-tree.body",
+      "bytes": 72378,
+      "source_mtime_epoch": 1789884971,
+      "sha256": "602a057227399d6830fdad325da4d4ec257d6e0f192b79f347fbe2807e7d9722"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00026-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-tree.response",
+      "bytes": 73848,
+      "source_mtime_epoch": 1789884971,
+      "sha256": "db26dd90999948855e7e3ada4fb00024693aa9f766dd4dff72b1e0fb29e4b22f"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00027-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-rulesets-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884971,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00027-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-rulesets-page-1.response",
+      "bytes": 1441,
+      "source_mtime_epoch": 1789884971,
+      "sha256": "365044c40286b259d4808827fac5e95794e2a2640d5fba52e0a2b38915ad095a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00028-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-branch-protection.body",
+      "bytes": 149,
+      "source_mtime_epoch": 1789884972,
+      "sha256": "d6020ee3b0852c3deb66c66d159cc80caabeaa66ee301778307a2a18d486450d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00028-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-branch-protection.response",
+      "bytes": 1403,
+      "source_mtime_epoch": 1789884972,
+      "sha256": "82f8e7b4a0db0cccd169d51c880d20b60378bdbff18f3cb12cd51e5b8f1cf8ad"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00028-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-branch-protection.stderr",
+      "bytes": 36,
+      "source_mtime_epoch": 1789884972,
+      "sha256": "256bf323d488b96ed59be6a50a192e2badd6b722792fcc4b8856f97aa3a3d23a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00029-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-required-status-checks.body",
+      "bytes": 156,
+      "source_mtime_epoch": 1789884972,
+      "sha256": "10032f4abbd7a99ac064adfd74f204d1a55e7ce2389c8a31d016f80645ecd36d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00029-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-required-status-checks.response",
+      "bytes": 1412,
+      "source_mtime_epoch": 1789884972,
+      "sha256": "b0685fd460aecfc7cdf6bffaac31530a201eb1052dc8fe7d8901f8363b9ea07b"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00029-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-required-status-checks.stderr",
+      "bytes": 36,
+      "source_mtime_epoch": 1789884972,
+      "sha256": "256bf323d488b96ed59be6a50a192e2badd6b722792fcc4b8856f97aa3a3d23a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00030-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-check-runs-all-page-1.body",
+      "bytes": 33,
+      "source_mtime_epoch": 1789884973,
+      "sha256": "e83cfac35507982a40cfeb776ce85aa0367e7646f81fe857df4a6c841ea8a170"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00030-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-check-runs-all-page-1.response",
+      "bytes": 1451,
+      "source_mtime_epoch": 1789884973,
+      "sha256": "a5594765981ca9f3966c55f30293ef79c65612eaf61f2394b2d18e00c67a23d5"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00031-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-statuses-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884974,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00031-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-statuses-page-1.response",
+      "bytes": 1454,
+      "source_mtime_epoch": 1789884974,
+      "sha256": "ee93cb988f7b672977c1ce23dea00a47bdb217c3a9212a77999d736cb8acffdb"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00032-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-status-aggregate.body",
+      "bytes": 5373,
+      "source_mtime_epoch": 1789884975,
+      "sha256": "95580da0796d40c5bc44e22914a111d9495e50775863a259cffb42be431a1751"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00032-tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189-status-aggregate.response",
+      "bytes": 6808,
+      "source_mtime_epoch": 1789884975,
+      "sha256": "ef6e0876dbc6b78e607a5295575ef1159b49941bbded44b4c188876e7417d39e"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00033-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-tree.body",
+      "bytes": 103127,
+      "source_mtime_epoch": 1789884975,
+      "sha256": "647207288baf4d2f0a467225e0d1ea641c86f939a6012a11b9a6f5449ccd2fc2"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00033-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-tree.response",
+      "bytes": 104597,
+      "source_mtime_epoch": 1789884975,
+      "sha256": "4ef891c0c2bc4c16ee19789fc8c117f087d6e0c96cbf5db07546e36812d50fe8"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00034-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-rulesets-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884976,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00034-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-rulesets-page-1.response",
+      "bytes": 1441,
+      "source_mtime_epoch": 1789884976,
+      "sha256": "61875dc9a1303c6a33fdcb4df95175dd9f461f99ea1069708c32d40dc7ea55a8"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00035-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-branch-protection.body",
+      "bytes": 149,
+      "source_mtime_epoch": 1789884977,
+      "sha256": "d6020ee3b0852c3deb66c66d159cc80caabeaa66ee301778307a2a18d486450d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00035-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-branch-protection.response",
+      "bytes": 1405,
+      "source_mtime_epoch": 1789884977,
+      "sha256": "7a79523b45bbfbc99e259857445091622efd732deee040f308b1fc906bec89f3"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00035-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-branch-protection.stderr",
+      "bytes": 36,
+      "source_mtime_epoch": 1789884977,
+      "sha256": "256bf323d488b96ed59be6a50a192e2badd6b722792fcc4b8856f97aa3a3d23a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00036-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-required-status-checks.body",
+      "bytes": 156,
+      "source_mtime_epoch": 1789884977,
+      "sha256": "10032f4abbd7a99ac064adfd74f204d1a55e7ce2389c8a31d016f80645ecd36d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00036-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-required-status-checks.response",
+      "bytes": 1412,
+      "source_mtime_epoch": 1789884977,
+      "sha256": "969e247fb9a18208b506e180525c55b462b386d2cb2d639f8c0962228929c58b"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00036-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-required-status-checks.stderr",
+      "bytes": 36,
+      "source_mtime_epoch": 1789884977,
+      "sha256": "256bf323d488b96ed59be6a50a192e2badd6b722792fcc4b8856f97aa3a3d23a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00037-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-check-runs-all-page-1.body",
+      "bytes": 33,
+      "source_mtime_epoch": 1789884978,
+      "sha256": "e83cfac35507982a40cfeb776ce85aa0367e7646f81fe857df4a6c841ea8a170"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00037-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-check-runs-all-page-1.response",
+      "bytes": 1451,
+      "source_mtime_epoch": 1789884978,
+      "sha256": "ff7124d98d972258357172cde7c28c1afe5f6f1fe783fac54371e9a77947377f"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00038-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-statuses-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884979,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00038-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-statuses-page-1.response",
+      "bytes": 1454,
+      "source_mtime_epoch": 1789884979,
+      "sha256": "a77ca05311c8ba191b7dd2096af1da8364bdeaca785f36c26b169a3ae05cb23e"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00039-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-status-aggregate.body",
+      "bytes": 5101,
+      "source_mtime_epoch": 1789884979,
+      "sha256": "c77a8fa2599c5930b55e05c3b1e959d8253c0c63d6a02572061e918bc091b523"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00039-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-status-aggregate.response",
+      "bytes": 6536,
+      "source_mtime_epoch": 1789884979,
+      "sha256": "bb96492add57eabe7f399f77f3e6feddab797963a2b8768d0a95b61eaf5b0707"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00040-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-tree.body",
+      "bytes": 52628,
+      "source_mtime_epoch": 1789884980,
+      "sha256": "78a3fbf7babd128db81e9a3abb7fffc13d1a5cc8c9611814c5f998f8a681daa7"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00040-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-tree.response",
+      "bytes": 54098,
+      "source_mtime_epoch": 1789884980,
+      "sha256": "e53ef5944e82c10ee2554f356ef00413b43b21edf54f78be8e8d64c7e10c3f10"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00041-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-rulesets-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884981,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00041-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-rulesets-page-1.response",
+      "bytes": 1440,
+      "source_mtime_epoch": 1789884981,
+      "sha256": "c98e22058b4c4d0b65f1753b29743d2c7a7ce3f8ba44594dc9b7cba83a6e69d5"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00042-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-branch-protection.body",
+      "bytes": 149,
+      "source_mtime_epoch": 1789884981,
+      "sha256": "d6020ee3b0852c3deb66c66d159cc80caabeaa66ee301778307a2a18d486450d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00042-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-branch-protection.response",
+      "bytes": 1404,
+      "source_mtime_epoch": 1789884981,
+      "sha256": "6156eff01c28aadda29e453505d085fe9c0922e022d379fab1a82bb091b730e4"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00042-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-branch-protection.stderr",
+      "bytes": 36,
+      "source_mtime_epoch": 1789884981,
+      "sha256": "256bf323d488b96ed59be6a50a192e2badd6b722792fcc4b8856f97aa3a3d23a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00043-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-required-status-checks.body",
+      "bytes": 156,
+      "source_mtime_epoch": 1789884982,
+      "sha256": "10032f4abbd7a99ac064adfd74f204d1a55e7ce2389c8a31d016f80645ecd36d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00043-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-required-status-checks.response",
+      "bytes": 1412,
+      "source_mtime_epoch": 1789884982,
+      "sha256": "549d70b0fa1a5562230d1e5d5d5bfc233a5018d7dc93c5ce5376a9d84ae619fc"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00043-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-required-status-checks.stderr",
+      "bytes": 36,
+      "source_mtime_epoch": 1789884982,
+      "sha256": "256bf323d488b96ed59be6a50a192e2badd6b722792fcc4b8856f97aa3a3d23a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00044-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-check-runs-all-page-1.body",
+      "bytes": 33,
+      "source_mtime_epoch": 1789884983,
+      "sha256": "e83cfac35507982a40cfeb776ce85aa0367e7646f81fe857df4a6c841ea8a170"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00044-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-check-runs-all-page-1.response",
+      "bytes": 1451,
+      "source_mtime_epoch": 1789884983,
+      "sha256": "913e1c5251ce92125741c9ce47ef7c8bfb3623e708b1fc1d2c0e71709a02cb2e"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00045-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-statuses-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884983,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00045-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-statuses-page-1.response",
+      "bytes": 1452,
+      "source_mtime_epoch": 1789884983,
+      "sha256": "67149704a2b3534ac153d7045a02b9e553e27aab2747b1e5a8f0c70223d6510b"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00046-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-status-aggregate.body",
+      "bytes": 5327,
+      "source_mtime_epoch": 1789884984,
+      "sha256": "3190d18d1dcca497442755505cfbf628ea2093ea2aaa76d70a5f8ffe2e471d91"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00046-tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a-status-aggregate.response",
+      "bytes": 6762,
+      "source_mtime_epoch": 1789884984,
+      "sha256": "0295a88c241705c51441ebb648d5620af9a1dd68e40425252b2a9cdad6a39f27"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00047-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-tree.body",
+      "bytes": 51601,
+      "source_mtime_epoch": 1789884985,
+      "sha256": "328b21482c7203df69c2a6a69260833d242c1e6ac0c7458d2b4de0c54bc6e33b"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00047-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-tree.response",
+      "bytes": 53071,
+      "source_mtime_epoch": 1789884985,
+      "sha256": "5bb2db6d274561bbde8de9bb95eed1e1622767dbd3a6320dd3738b02222f6985"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00048-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-rulesets-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884985,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00048-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-rulesets-page-1.response",
+      "bytes": 1441,
+      "source_mtime_epoch": 1789884985,
+      "sha256": "6a6cc3daa66166540a6ad3f3da9c7b6b6fe6ab7d3fb1e3d3367bd0dcaac7b6e6"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00049-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-branch-protection.body",
+      "bytes": 149,
+      "source_mtime_epoch": 1789884986,
+      "sha256": "d6020ee3b0852c3deb66c66d159cc80caabeaa66ee301778307a2a18d486450d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00049-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-branch-protection.response",
+      "bytes": 1405,
+      "source_mtime_epoch": 1789884986,
+      "sha256": "20250c523cf25143b914ace78585cc6ad0eab8ea62a12bbfb1538e973974b72d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00049-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-branch-protection.stderr",
+      "bytes": 36,
+      "source_mtime_epoch": 1789884986,
+      "sha256": "256bf323d488b96ed59be6a50a192e2badd6b722792fcc4b8856f97aa3a3d23a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00050-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-required-status-checks.body",
+      "bytes": 156,
+      "source_mtime_epoch": 1789884986,
+      "sha256": "10032f4abbd7a99ac064adfd74f204d1a55e7ce2389c8a31d016f80645ecd36d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00050-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-required-status-checks.response",
+      "bytes": 1412,
+      "source_mtime_epoch": 1789884986,
+      "sha256": "99aa3641daad0926850f840c50abdf1c1bb7ac66fcd366d0211d831afa6779e9"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00050-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-required-status-checks.stderr",
+      "bytes": 36,
+      "source_mtime_epoch": 1789884986,
+      "sha256": "256bf323d488b96ed59be6a50a192e2badd6b722792fcc4b8856f97aa3a3d23a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00051-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-check-runs-all-page-1.body",
+      "bytes": 33,
+      "source_mtime_epoch": 1789884987,
+      "sha256": "e83cfac35507982a40cfeb776ce85aa0367e7646f81fe857df4a6c841ea8a170"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00051-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-check-runs-all-page-1.response",
+      "bytes": 1451,
+      "source_mtime_epoch": 1789884987,
+      "sha256": "b2b21c94ac9be91adfe940e919e31ad79a391c5cd2b303332365caf47bd0e94d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00052-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-statuses-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884988,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00052-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-statuses-page-1.response",
+      "bytes": 1454,
+      "source_mtime_epoch": 1789884988,
+      "sha256": "46e449fb98f8eed2395a4075d31da60e6dd80fcba4ee244975989f43ce088132"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00053-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-status-aggregate.body",
+      "bytes": 5367,
+      "source_mtime_epoch": 1789884989,
+      "sha256": "09a73cfc25a376290c1ed87e8ab0ed525761541989c1b64f704c4537d4682d7b"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00053-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-status-aggregate.response",
+      "bytes": 6802,
+      "source_mtime_epoch": 1789884989,
+      "sha256": "3ac55c50c83b4c5127a734783e14fb36443d60641e01b0b05ad9909dec4eb271"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00054-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-tree.body",
+      "bytes": 80609,
+      "source_mtime_epoch": 1789884989,
+      "sha256": "a5c90360750ab99d7b80c12e28d706c0375a4fb5dc43a2282a51f468c068705e"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00054-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-tree.response",
+      "bytes": 82078,
+      "source_mtime_epoch": 1789884989,
+      "sha256": "39afc83c00b390d5111dfc1fb82c9dc25fd22ef0befe1049bbe3884c9f588570"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00055-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-rulesets-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884990,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00055-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-rulesets-page-1.response",
+      "bytes": 1441,
+      "source_mtime_epoch": 1789884990,
+      "sha256": "698ea145f27d9fa6cf3c569e92bff5f3781ef4531928b852382a41c6314c8bd0"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00056-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-branch-protection.body",
+      "bytes": 149,
+      "source_mtime_epoch": 1789884991,
+      "sha256": "d6020ee3b0852c3deb66c66d159cc80caabeaa66ee301778307a2a18d486450d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00056-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-branch-protection.response",
+      "bytes": 1405,
+      "source_mtime_epoch": 1789884991,
+      "sha256": "09bcc7f77a20d7a6a5fb913a3643af12e6ee1ff89fa1d5c8c67f757c229b02e2"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00056-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-branch-protection.stderr",
+      "bytes": 36,
+      "source_mtime_epoch": 1789884991,
+      "sha256": "256bf323d488b96ed59be6a50a192e2badd6b722792fcc4b8856f97aa3a3d23a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00057-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-required-status-checks.body",
+      "bytes": 156,
+      "source_mtime_epoch": 1789884991,
+      "sha256": "10032f4abbd7a99ac064adfd74f204d1a55e7ce2389c8a31d016f80645ecd36d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00057-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-required-status-checks.response",
+      "bytes": 1412,
+      "source_mtime_epoch": 1789884991,
+      "sha256": "625f049407ec05ea5cb501d413f706598bae5321f9962df98771a3656e9ec0c3"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00057-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-required-status-checks.stderr",
+      "bytes": 36,
+      "source_mtime_epoch": 1789884991,
+      "sha256": "256bf323d488b96ed59be6a50a192e2badd6b722792fcc4b8856f97aa3a3d23a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00058-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-check-runs-all-page-1.body",
+      "bytes": 33,
+      "source_mtime_epoch": 1789884992,
+      "sha256": "e83cfac35507982a40cfeb776ce85aa0367e7646f81fe857df4a6c841ea8a170"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00058-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-check-runs-all-page-1.response",
+      "bytes": 1451,
+      "source_mtime_epoch": 1789884992,
+      "sha256": "b63a234fd67884b9d3835274e79e316e592703317bad513472f7c9f22dc12a19"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00059-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-statuses-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884993,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00059-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-statuses-page-1.response",
+      "bytes": 1454,
+      "source_mtime_epoch": 1789884993,
+      "sha256": "1dc5c66b796408b25e6da52ee03e9ea169f6039cdaaa67d49a19220145424a9a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00060-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-status-aggregate.body",
+      "bytes": 5155,
+      "source_mtime_epoch": 1789884993,
+      "sha256": "10e75951e47519f99692681dccac7eaded9748b4418d8aa80f850c07fa736a95"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00060-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-status-aggregate.response",
+      "bytes": 6590,
+      "source_mtime_epoch": 1789884993,
+      "sha256": "fbc8908660a9975d1cc1998c2f7db2752eb7f59c2dc5fae1caeeb416684e5e90"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00061-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-tree.body",
+      "bytes": 94829,
+      "source_mtime_epoch": 1789884994,
+      "sha256": "e43f29282a8266ef8481c78791065af7face3c27749263c0be6b5594b149891c"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00061-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-tree.response",
+      "bytes": 96299,
+      "source_mtime_epoch": 1789884994,
+      "sha256": "a8d2c0de7d540d4275dea1f0331fe4832120991b14d6e17050e3445f99b0bcd5"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00062-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-rulesets-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884995,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00062-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-rulesets-page-1.response",
+      "bytes": 1440,
+      "source_mtime_epoch": 1789884995,
+      "sha256": "d8c0cca42dcd0848521d05aef59d86c6e176d34d7d48a46efc14f8bc02d90983"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00063-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-branch-protection.body",
+      "bytes": 149,
+      "source_mtime_epoch": 1789884996,
+      "sha256": "d6020ee3b0852c3deb66c66d159cc80caabeaa66ee301778307a2a18d486450d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00063-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-branch-protection.response",
+      "bytes": 1405,
+      "source_mtime_epoch": 1789884996,
+      "sha256": "6834609f75c9c9dbaf3ca06882199ed88d891a8b916e0f07a04c6ddedde51f1c"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00063-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-branch-protection.stderr",
+      "bytes": 36,
+      "source_mtime_epoch": 1789884996,
+      "sha256": "256bf323d488b96ed59be6a50a192e2badd6b722792fcc4b8856f97aa3a3d23a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00064-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-required-status-checks.body",
+      "bytes": 156,
+      "source_mtime_epoch": 1789884996,
+      "sha256": "10032f4abbd7a99ac064adfd74f204d1a55e7ce2389c8a31d016f80645ecd36d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00064-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-required-status-checks.response",
+      "bytes": 1412,
+      "source_mtime_epoch": 1789884996,
+      "sha256": "c9d62aa0634d608473ffd11adfeecfacc2dbaaebfae5eeabede7df49134188cc"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00064-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-required-status-checks.stderr",
+      "bytes": 36,
+      "source_mtime_epoch": 1789884996,
+      "sha256": "256bf323d488b96ed59be6a50a192e2badd6b722792fcc4b8856f97aa3a3d23a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00065-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-check-runs-all-page-1.body",
+      "bytes": 33,
+      "source_mtime_epoch": 1789884997,
+      "sha256": "e83cfac35507982a40cfeb776ce85aa0367e7646f81fe857df4a6c841ea8a170"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00065-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-check-runs-all-page-1.response",
+      "bytes": 1450,
+      "source_mtime_epoch": 1789884997,
+      "sha256": "38b3f4146e77e07bae7c0b7823f60d81e68e4f3d6f7437226b37e3e800cf5cd3"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00066-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-statuses-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789884998,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00066-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-statuses-page-1.response",
+      "bytes": 1454,
+      "source_mtime_epoch": 1789884998,
+      "sha256": "2bf3c68ec4fad9c8f31ca5737eaddcb9ac4ecaa3337afc0691cf804157cb7b6a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00067-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-status-aggregate.body",
+      "bytes": 5051,
+      "source_mtime_epoch": 1789884998,
+      "sha256": "0ae9a589cf567dc0915e0abe8f0ddc0aba843b1db13f86bd9080b3d08801dd9c"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00067-tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0-status-aggregate.response",
+      "bytes": 6484,
+      "source_mtime_epoch": 1789884998,
+      "sha256": "e5ce76bc2a941d5fb1bd69888d12cad13e6afc1a068ae49aa034710004548d3d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00068-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-tree.body",
+      "bytes": 54368,
+      "source_mtime_epoch": 1789884999,
+      "sha256": "24d5055c117b4001f23c7381e665243a54413128fff164f54e3364c43c18c284"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00068-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-tree.response",
+      "bytes": 55838,
+      "source_mtime_epoch": 1789884999,
+      "sha256": "6d0e3d9d9893ad7edfd857e1497486f5ab3fe07263f77ebb57a08deece689333"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00069-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-rulesets-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789885000,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00069-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-rulesets-page-1.response",
+      "bytes": 1440,
+      "source_mtime_epoch": 1789885000,
+      "sha256": "11352df7d87b3f6bdf527eb07a3e7716b25ba62e0ff4e08fb7c336de9cb11c4e"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00070-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-branch-protection.body",
+      "bytes": 149,
+      "source_mtime_epoch": 1789885000,
+      "sha256": "d6020ee3b0852c3deb66c66d159cc80caabeaa66ee301778307a2a18d486450d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00070-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-branch-protection.response",
+      "bytes": 1404,
+      "source_mtime_epoch": 1789885000,
+      "sha256": "e49c43c057b6b611a9b4d44fd5eaace6e6fb9261fd7b3053885cf7535ef59e65"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00070-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-branch-protection.stderr",
+      "bytes": 36,
+      "source_mtime_epoch": 1789885000,
+      "sha256": "256bf323d488b96ed59be6a50a192e2badd6b722792fcc4b8856f97aa3a3d23a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00071-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-required-status-checks.body",
+      "bytes": 156,
+      "source_mtime_epoch": 1789885001,
+      "sha256": "10032f4abbd7a99ac064adfd74f204d1a55e7ce2389c8a31d016f80645ecd36d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00071-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-required-status-checks.response",
+      "bytes": 1412,
+      "source_mtime_epoch": 1789885001,
+      "sha256": "421058a0b60bb9877965d519d17abd2bf88d80ab3240213dffe5815c1789351c"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00071-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-required-status-checks.stderr",
+      "bytes": 36,
+      "source_mtime_epoch": 1789885001,
+      "sha256": "256bf323d488b96ed59be6a50a192e2badd6b722792fcc4b8856f97aa3a3d23a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00072-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-check-runs-all-page-1.body",
+      "bytes": 33,
+      "source_mtime_epoch": 1789885002,
+      "sha256": "e83cfac35507982a40cfeb776ce85aa0367e7646f81fe857df4a6c841ea8a170"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00072-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-check-runs-all-page-1.response",
+      "bytes": 1451,
+      "source_mtime_epoch": 1789885002,
+      "sha256": "628283fbc1df8da18841abde7c15c3f68e2ab53d8b12f1cfd592f55cc10590f8"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00073-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-statuses-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789885002,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00073-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-statuses-page-1.response",
+      "bytes": 1454,
+      "source_mtime_epoch": 1789885002,
+      "sha256": "caa2ac116668748e332f5368a2bd6312a8db6dc79d9c4911e75493ecaa0909bb"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00074-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-status-aggregate.body",
+      "bytes": 5486,
+      "source_mtime_epoch": 1789885003,
+      "sha256": "5ad1df7996316aac406e9a1a05c4f3e4660564793675f9d37c8866030b7409f3"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00074-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-status-aggregate.response",
+      "bytes": 6921,
+      "source_mtime_epoch": 1789885003,
+      "sha256": "8ad1668cbab3d53d3acf1cdf64697cf6759e8989d4cfcc2360e8941f66ee5512"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00075-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-tree.body",
+      "bytes": 86040,
+      "source_mtime_epoch": 1789885004,
+      "sha256": "d3717c6d045e56d019ab93fbe8ce4227b153d42ec0c9b19de9b87a88c07b2a63"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00075-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-tree.response",
+      "bytes": 87510,
+      "source_mtime_epoch": 1789885004,
+      "sha256": "485cfc63ef31f820976b539c505fdf32ad891c4c4a5d8197ccbf8fd990327c71"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00076-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-rulesets-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789885004,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00076-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-rulesets-page-1.response",
+      "bytes": 1441,
+      "source_mtime_epoch": 1789885004,
+      "sha256": "fdf01267d0c9177d7d296edf963931d6596a06b7d8e39f0a4ee38fcc065cc3f1"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00077-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-branch-protection.body",
+      "bytes": 149,
+      "source_mtime_epoch": 1789885005,
+      "sha256": "d6020ee3b0852c3deb66c66d159cc80caabeaa66ee301778307a2a18d486450d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00077-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-branch-protection.response",
+      "bytes": 1405,
+      "source_mtime_epoch": 1789885005,
+      "sha256": "ed81eb4701031adf194ff258bd8c943b47ee7d4f8fbc7124e44bda31b17bdea6"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00077-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-branch-protection.stderr",
+      "bytes": 36,
+      "source_mtime_epoch": 1789885005,
+      "sha256": "256bf323d488b96ed59be6a50a192e2badd6b722792fcc4b8856f97aa3a3d23a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00078-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-required-status-checks.body",
+      "bytes": 156,
+      "source_mtime_epoch": 1789885006,
+      "sha256": "10032f4abbd7a99ac064adfd74f204d1a55e7ce2389c8a31d016f80645ecd36d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00078-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-required-status-checks.response",
+      "bytes": 1412,
+      "source_mtime_epoch": 1789885006,
+      "sha256": "7026c34336f1eb85cd7fa1aef9bd8baa812352793046bd11576074c04d639b76"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00078-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-required-status-checks.stderr",
+      "bytes": 36,
+      "source_mtime_epoch": 1789885006,
+      "sha256": "256bf323d488b96ed59be6a50a192e2badd6b722792fcc4b8856f97aa3a3d23a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00079-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-check-runs-all-page-1.body",
+      "bytes": 33,
+      "source_mtime_epoch": 1789885006,
+      "sha256": "e83cfac35507982a40cfeb776ce85aa0367e7646f81fe857df4a6c841ea8a170"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00079-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-check-runs-all-page-1.response",
+      "bytes": 1449,
+      "source_mtime_epoch": 1789885006,
+      "sha256": "6db18b6263df5a56d8dccb04462755fbe5a8b500205ffbf5bfa79d7d7225afee"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00080-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-statuses-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789885007,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00080-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-statuses-page-1.response",
+      "bytes": 1454,
+      "source_mtime_epoch": 1789885007,
+      "sha256": "9094e85e71094c4e2abab1b2993afbf809d7a283c8c2152a20db7542173a330a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00081-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-status-aggregate.body",
+      "bytes": 5305,
+      "source_mtime_epoch": 1789885008,
+      "sha256": "2532f753346c59ddc02d4fafbfeb0fd6589b6b30a62b074f8c59c39d71bc8511"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00081-tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de-status-aggregate.response",
+      "bytes": 6740,
+      "source_mtime_epoch": 1789885008,
+      "sha256": "5431a57f061acc581614901e7c6b45b3f62bde4fa4dd3c15ee5e11b62387758a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00082-tailrocks-typescript-skills-after-repository.body",
+      "bytes": 7829,
+      "source_mtime_epoch": 1789885008,
+      "sha256": "b829562ae8d166381106ff8dd2c4496c9efcad3a93b2036250085adbde589f81"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00082-tailrocks-typescript-skills-after-repository.response",
+      "bytes": 9297,
+      "source_mtime_epoch": 1789885008,
+      "sha256": "c069f0fbae1a9731a39a5717c7786748e597ad2c8961d344e269bb52b677ddb9"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00083-tailrocks-typescript-skills-after-default-branch.body",
+      "bytes": 7507,
+      "source_mtime_epoch": 1789885009,
+      "sha256": "efe902ff77324806ba253992b3f8085ce416f6246c72b3978260227cb36bcce7"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00083-tailrocks-typescript-skills-after-default-branch.response",
+      "bytes": 8925,
+      "source_mtime_epoch": 1789885009,
+      "sha256": "cc63f15fb4fa578253b1bf6729baf79a6df5e6a02cfd0f64a6c06acd09efccc2"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00084-tailrocks-typescript-skills-after-open-prs-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789885010,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00084-tailrocks-typescript-skills-after-open-prs-page-1.response",
+      "bytes": 1437,
+      "source_mtime_epoch": 1789885010,
+      "sha256": "a104194b9c101538b52e0b0d936bbaaf04c74551c296dfe8aae7a09914de7ecd"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00085-tailrocks-skill-authoring-skills-after-repository.body",
+      "bytes": 8020,
+      "source_mtime_epoch": 1789885011,
+      "sha256": "00303da0866643b35e4c268509f0788db825853f8c7530d46a58418423c2d1d4"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00085-tailrocks-skill-authoring-skills-after-repository.response",
+      "bytes": 9488,
+      "source_mtime_epoch": 1789885011,
+      "sha256": "85e198e05e8fbcc0ea216194f7888014708a71d627ca6aea00ede61a265e0d3a"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00086-tailrocks-skill-authoring-skills-after-default-branch.body",
+      "bytes": 7557,
+      "source_mtime_epoch": 1789885012,
+      "sha256": "c71bf8381917e9732bb39ed4110ccd94b1f69aa6158faaa7207eccd353447ceb"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00086-tailrocks-skill-authoring-skills-after-default-branch.response",
+      "bytes": 8975,
+      "source_mtime_epoch": 1789885012,
+      "sha256": "d04baa03334bacb829295e7a3b038948327dec62871e5e71050848e4910be50c"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00087-tailrocks-skill-authoring-skills-after-open-prs-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789885012,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00087-tailrocks-skill-authoring-skills-after-open-prs-page-1.response",
+      "bytes": 1437,
+      "source_mtime_epoch": 1789885012,
+      "sha256": "47e41d25a6db7a320ed5b150512e8e1e33829e03f44569cabb6c12f7ca4f5dc6"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00088-tailrocks-rust-skills-after-repository.body",
+      "bytes": 7563,
+      "source_mtime_epoch": 1789885013,
+      "sha256": "e49adb915928a91a4693279ca94f656b8f29987f61671f77b332c1247a8ba263"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00088-tailrocks-rust-skills-after-repository.response",
+      "bytes": 9031,
+      "source_mtime_epoch": 1789885013,
+      "sha256": "8736116cea42905a258ca5bc47ff5d41a9559d6fbc4d2ed8e30de182f798c408"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00089-tailrocks-rust-skills-after-default-branch.body",
+      "bytes": 7447,
+      "source_mtime_epoch": 1789885014,
+      "sha256": "854f411d3ccb120d9c82558b0f94f1142c76d90c384926bfc091fd5fe184e65d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00089-tailrocks-rust-skills-after-default-branch.response",
+      "bytes": 8865,
+      "source_mtime_epoch": 1789885014,
+      "sha256": "6597c236a56244c3639a6641cd2ec98eb69e6442efb9241a25598d064a19697e"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00090-tailrocks-rust-skills-after-open-prs-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789885015,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00090-tailrocks-rust-skills-after-open-prs-page-1.response",
+      "bytes": 1437,
+      "source_mtime_epoch": 1789885015,
+      "sha256": "b1f49b3866d8db09eb6da4e70658cdc3cbc41e9167e06a129c6a7c58690a40b2"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00091-tailrocks-roadmap-skills-after-repository.body",
+      "bytes": 7673,
+      "source_mtime_epoch": 1789885015,
+      "sha256": "9dc3a99e208dbd1e15d0f36c0b9949a081585a747fa4bb6180709065314a10ec"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00091-tailrocks-roadmap-skills-after-repository.response",
+      "bytes": 9141,
+      "source_mtime_epoch": 1789885015,
+      "sha256": "82b006fc89e0c7f24f7616947c53c22d2ccdae7329f776ae6e3e30b28467f3e8"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00092-tailrocks-roadmap-skills-after-default-branch.body",
+      "bytes": 7477,
+      "source_mtime_epoch": 1789885016,
+      "sha256": "dfaa5b8e3322290de461612b49e8df58310548a7fe6eb06cc7e45d59e0af6139"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00092-tailrocks-roadmap-skills-after-default-branch.response",
+      "bytes": 8895,
+      "source_mtime_epoch": 1789885016,
+      "sha256": "e284f4970666b45d70709a48e3e9af42f4f825dd136774d762da039dd2cac9b1"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00093-tailrocks-roadmap-skills-after-open-prs-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789885017,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00093-tailrocks-roadmap-skills-after-open-prs-page-1.response",
+      "bytes": 1437,
+      "source_mtime_epoch": 1789885017,
+      "sha256": "d6846bed079abb3f69ecbdf1a5e8620aabb966bcf26dd87360c91e6e8dde2eed"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00094-tailrocks-pull-request-skills-after-repository.body",
+      "bytes": 7895,
+      "source_mtime_epoch": 1789885018,
+      "sha256": "db025e426e71255c7c7d89a62e1809af04d2fd894163bc2dda89604ac8ed0412"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00094-tailrocks-pull-request-skills-after-repository.response",
+      "bytes": 9363,
+      "source_mtime_epoch": 1789885018,
+      "sha256": "3304d11fbb9af51bd63028870c87a0b7cee55645c530b2b04b806ab886c2e459"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00095-tailrocks-pull-request-skills-after-default-branch.body",
+      "bytes": 7527,
+      "source_mtime_epoch": 1789885018,
+      "sha256": "b09b0c3bea2e0ff817d5d4567956e2e12994f31e8824583284f791cc748420ff"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00095-tailrocks-pull-request-skills-after-default-branch.response",
+      "bytes": 8945,
+      "source_mtime_epoch": 1789885018,
+      "sha256": "42d1429fd8c97536f69aadd72b93b783110b5bc0ff9c32fe4e26a502f5b4d73d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00096-tailrocks-pull-request-skills-after-open-prs-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789885019,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00096-tailrocks-pull-request-skills-after-open-prs-page-1.response",
+      "bytes": 1459,
+      "source_mtime_epoch": 1789885019,
+      "sha256": "1eb6c88f2a3d9e88cef69a1304961d00bdc77bb674d017182027860e159c604d"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00097-tailrocks-open-source-skills-after-repository.body",
+      "bytes": 7853,
+      "source_mtime_epoch": 1789885020,
+      "sha256": "1ca7d6675b981d3668434049c60ce746dff60b32f4eeb477979cc15a4ab8c8e7"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00097-tailrocks-open-source-skills-after-repository.response",
+      "bytes": 9321,
+      "source_mtime_epoch": 1789885020,
+      "sha256": "1d153a634bc9a0f3fccfdd773f9c79fb5f32b7d29330ad435b4aa29e172c103f"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00098-tailrocks-open-source-skills-after-default-branch.body",
+      "bytes": 7517,
+      "source_mtime_epoch": 1789885020,
+      "sha256": "67567f5a31b290f3d8ef7a393bb54a0b0fc23b3d21a2d22a9f50836a391a1201"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00098-tailrocks-open-source-skills-after-default-branch.response",
+      "bytes": 8935,
+      "source_mtime_epoch": 1789885020,
+      "sha256": "be814a10879720cf7ad352c6417cc2b01a57f81ffc9e862bf1130b5ac23499a2"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00099-tailrocks-open-source-skills-after-open-prs-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789885021,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00099-tailrocks-open-source-skills-after-open-prs-page-1.response",
+      "bytes": 1436,
+      "source_mtime_epoch": 1789885021,
+      "sha256": "1b514016b0a9681cf1a18248a9bbd0720ba5d2702b28bc714579c2ce2a6d3e65"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00100-tailrocks-macos-skills-after-repository.body",
+      "bytes": 7615,
+      "source_mtime_epoch": 1789885022,
+      "sha256": "ac4437b1cc4f5d2078ae2bbab0001116208253e2080b2f45a9c8f7c84fb819d8"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00100-tailrocks-macos-skills-after-repository.response",
+      "bytes": 9083,
+      "source_mtime_epoch": 1789885022,
+      "sha256": "f843143120d2733c18b2c1646dfe882dc72d04b9fc32b9e122456e389d462297"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00101-tailrocks-macos-skills-after-default-branch.body",
+      "bytes": 7457,
+      "source_mtime_epoch": 1789885022,
+      "sha256": "8de41b8a83e8510d7f365698e7558b56913a2ece22c05829cec27eb65a86c9a2"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00101-tailrocks-macos-skills-after-default-branch.response",
+      "bytes": 8875,
+      "source_mtime_epoch": 1789885022,
+      "sha256": "f8f6f21430624fd7b4efa169ccacc9d96aca627c1a3b94ca4eb4f4aee6a4c46e"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00102-tailrocks-macos-skills-after-open-prs-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789885023,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00102-tailrocks-macos-skills-after-open-prs-page-1.response",
+      "bytes": 1435,
+      "source_mtime_epoch": 1789885023,
+      "sha256": "d2bdc98b9757cdf26beaa822c9d8156eed6b89dd5d4f93e4e7fcce1d23b0cc65"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00103-tailrocks-code-quality-skills-after-repository.body",
+      "bytes": 7901,
+      "source_mtime_epoch": 1789885024,
+      "sha256": "92cc334a262e724d1eeb9949e653b647e1e8e12d5599088e4ef5e8dc05256c18"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00103-tailrocks-code-quality-skills-after-repository.response",
+      "bytes": 9369,
+      "source_mtime_epoch": 1789885024,
+      "sha256": "df20d94828f0ff53a4bdb13690e7f5d2d257c2cf9eadb355d06100b2553e2874"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00104-tailrocks-code-quality-skills-after-default-branch.body",
+      "bytes": 7527,
+      "source_mtime_epoch": 1789885024,
+      "sha256": "b5bbd66991e8692b80ca3eebfe8babef0dfc4121deee73e15fd004895cda6281"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00104-tailrocks-code-quality-skills-after-default-branch.response",
+      "bytes": 8944,
+      "source_mtime_epoch": 1789885024,
+      "sha256": "daea88b2e5c79683c8796ebbb752fc3b7f2a90ac48612ad295a55d017f62e7d6"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00105-tailrocks-code-quality-skills-after-open-prs-page-1.body",
+      "bytes": 2,
+      "source_mtime_epoch": 1789885025,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/raw/00105-tailrocks-code-quality-skills-after-open-prs-page-1.response",
+      "bytes": 1436,
+      "source_mtime_epoch": 1789885025,
+      "sha256": "05c98ae08cc712b52c37c4e7f45ac2fab2507769c870e6bd9da730b763fef9c2"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/after.json",
+      "bytes": 4623,
+      "source_mtime_epoch": 1789885025,
+      "sha256": "58e173e2f79846460c5afece377cf56ec22791ffdd4691970fd1332be78c8793"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/before.json",
+      "bytes": 4655,
+      "source_mtime_epoch": 1789885025,
+      "sha256": "1c66302c3dc672c21d01fef1bb9d9663e76d146aa3153b08436112771f145bed"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-code-quality-skills/after/summary.json",
+      "bytes": 524,
+      "source_mtime_epoch": 1789885025,
+      "sha256": "9ccc5a8eee7b5dd00b65e91c85bc5ed4fcd4d8a4b6350b131a00f87c30e0e140"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-code-quality-skills/before/summary.json",
+      "bytes": 528,
+      "source_mtime_epoch": 1789884970,
+      "sha256": "2445ca8bda07f0a60103d3cc1cf1ddd9976bb90187015743c26b1ef8f398373f"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-macos-skills/after/summary.json",
+      "bytes": 496,
+      "source_mtime_epoch": 1789885023,
+      "sha256": "ffde2558d7b8d16ceb3a8a1c51feb0aa61b8d3568da56c95a4899ad75d851a99"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-macos-skills/before/summary.json",
+      "bytes": 500,
+      "source_mtime_epoch": 1789884968,
+      "sha256": "2ba7001408a300cc01742bbb4ddd216c4df6d428b0991c0bef36fede7951f135"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-open-source-skills/after/summary.json",
+      "bytes": 520,
+      "source_mtime_epoch": 1789885021,
+      "sha256": "b466ae6f4c9cf5d19f68eef0cce6a953683f735b9c9d50129478c0452ca1ae16"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-open-source-skills/before/summary.json",
+      "bytes": 524,
+      "source_mtime_epoch": 1789884966,
+      "sha256": "815a918fee19331168b8403fc4d605339bf9d3a8fcfbfe9716cc7844402120b4"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-pull-request-skills/after/summary.json",
+      "bytes": 524,
+      "source_mtime_epoch": 1789885019,
+      "sha256": "5e5f9a795d97d88c5b55f5f48b4236a725a069b7fea72a949bec2622c738ac03"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-pull-request-skills/before/summary.json",
+      "bytes": 528,
+      "source_mtime_epoch": 1789884964,
+      "sha256": "8a43bb03b1af84abc86588d4203ac7cb87eb70634efa185dbb2f0b67143d79d1"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-roadmap-skills/after/summary.json",
+      "bytes": 504,
+      "source_mtime_epoch": 1789885017,
+      "sha256": "9dd152f232a29b9d583730228483f30319a6f35b445d3b919ddef014b415476c"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-roadmap-skills/before/summary.json",
+      "bytes": 508,
+      "source_mtime_epoch": 1789884962,
+      "sha256": "6115a4c77a16e653bfbc102b6b005f3d4ec21ba15298c84e1048ca3e8c58f8b4"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-rust-skills/after/summary.json",
+      "bytes": 492,
+      "source_mtime_epoch": 1789885015,
+      "sha256": "a6a6d4621ec2e225e482205c41730274fd4c62dce17f0ef1d330476f0ef7fe0e"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-rust-skills/before/summary.json",
+      "bytes": 496,
+      "source_mtime_epoch": 1789884960,
+      "sha256": "2620919e6efdd314f72902fc9b15ad5499c202bc127035ec447836cdfe7fac3b"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-skill-authoring-skills/after/summary.json",
+      "bytes": 536,
+      "source_mtime_epoch": 1789885012,
+      "sha256": "55999c86c1c92fb8f22c6d2ed61b273cd21e166cc5583c68a0a232d9c33d34af"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-skill-authoring-skills/before/summary.json",
+      "bytes": 540,
+      "source_mtime_epoch": 1789884958,
+      "sha256": "ed4a70986cf509791ce64c1a597465bf9aa47b33d71fed7c9fc041373a683f97"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-typescript-skills/after/summary.json",
+      "bytes": 516,
+      "source_mtime_epoch": 1789885010,
+      "sha256": "68cba1d5446cd2a758e1b90f9f1589cbc30279603b959d0dbfec73a2c15c3f6f"
+    },
+    {
+      "path": "G0/fleet/skills-raw-20260920T061548Z/snapshots/tailrocks-typescript-skills/before/summary.json",
+      "bytes": 520,
+      "source_mtime_epoch": 1789884956,
+      "sha256": "a5d23c2e84da230d1a526f3293685028a8c15a1d00587072c38f375a19d4fb4b"
+    },
+    {
+      "path": "G0/homebrew-contract/native-578-exact-crosscheck.md",
+      "bytes": 5233,
+      "source_mtime_epoch": 1789884209,
+      "sha256": "98a0c5dec7f476c2e4cd17c21a9478390c1818bee7c17c9432af041da6d2bd4d"
+    },
+    {
+      "path": "G0/native-review/native-578-exact-review.md",
+      "bytes": 9573,
+      "source_mtime_epoch": 1789885076,
+      "sha256": "428239f8fe09055ae92c5868a258ab15b1b9fc26c46775b1b6dce87c680b94b8"
+    },
+    {
+      "path": "G0/rust-consumers/raw-store-5688-checkpoint.md",
+      "bytes": 2677,
+      "source_mtime_epoch": 1789882698,
+      "sha256": "c802f44fde3dfb018a1744714c2ecac6c69abc085530318b5340896bd8bcae95"
+    },
+    {
+      "path": "G0/transaction-recovery-review/0e344790dfba48765d2c971f2dfe7938840d4649-review.md",
+      "bytes": 6524,
+      "source_mtime_epoch": 1789883977,
+      "sha256": "978d93e1b9738ec31608166bc21321eb3c8f2cb43b3589e17b5b8f09a030de67"
+    },
+    {
+      "path": "G1/bootstrap-transition/audit_v11_bundle.py",
+      "bytes": 27220,
+      "source_mtime_epoch": 1789883572,
+      "sha256": "c086da8aec79731d0a495183fb0ebea99dd88ea7fb393559714e20d43d798f55"
+    },
+    {
+      "path": "G1/bootstrap-transition/build_v11_bundle.py",
+      "bytes": 44381,
+      "source_mtime_epoch": 1789883587,
+      "sha256": "c554cdd41c7050536fd8a11382f0b6b73bf18ce6cb03c64ee7520c184e7aee44"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-canonical-model-source.json",
+      "bytes": 31586,
+      "source_mtime_epoch": 1789883564,
+      "sha256": "ff3d8018bb7707ef540b9be5b6e7b22262b93a1309733b59f9f19a9842dda930"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/AUTHORITY-CHANGE-PLAN-2026-09-20-v11.json",
+      "bytes": 18428,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "4c50c8e591924cbdbccb7ec489e8a8bbb20576d5f5fbb207c42e52837f6d42c6"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/AUTHORITY-CHANGE-PLAN-2026-09-20-v11.md",
+      "bytes": 4959,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "2fe0a7e534299e0b7dc83102706d29d91fd07e422a795ef726c1dccd5d119dde"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/adoption.schema.json",
+      "bytes": 2259,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "652057582f008f589408db30b55495887798cd524173cd6104dfa7876170b9c4"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/bundle-index.json",
+      "bytes": 677,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "6b4167e86cf075b565a799822d3d1a7fe0f49e090b2ed703097ac5a6c353c9c4"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/canonical-root-manifest.v4.json",
+      "bytes": 6967,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "35f8ae8a20cfe3ce774ed0d63ece8ed06d3e66d4e66693933ea5e5825e32a96d"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/negative-fixtures.json",
+      "bytes": 1537,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "43db58edeab771c9fee4fe40bc3a842e4d2cdc12b20a535550d4537d563f5dd1"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/permanent_binding.schema.json",
+      "bytes": 18124,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "3e0651ebb8cfe6d055fdf6cfe733901da92decdc9766d73f28a817f53dd04194"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/positive-adoption.json",
+      "bytes": 1162,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "122b8918fd6d826d8fca181fc8eb7e2d5378622ed95cd4a430e281b2d6f453bf"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/positive-fixture-status.json",
+      "bytes": 770,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "fb5add0aeefc96470269bdbc522f0c029bf42c2e3a450984408e1920eca8b2b5"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/positive-full-typed-output-fixture.json",
+      "bytes": 73807,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "d5da5063731eadf7eb317c3759bb8f5a842cc36ff3999c3487d62026f9f7b431"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/positive-pre-record-transport.json",
+      "bytes": 523,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "ab271be22eeca8e37d5f0f2c9ea904c7e89551973488c43ed9de1e4392d9ded1"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/positive-pre-record.json",
+      "bytes": 4315,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "28739c2b45d16b0959781743d7b6c4bd8f5e18e6f4c41e48de1e6216a272f671"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/positive-provider-result.json",
+      "bytes": 1822,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "7055ede0c979c6b87277a6a42531ba5193acb3355056d5e226494ad4b298c9de"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/positive-release-manifest.json",
+      "bytes": 833,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "64e8434107b309e9c3d42e4106e3790fce0e21f54ca5e95ae442cbb38a55cd86"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/positive-verify-b.json",
+      "bytes": 1782,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "4999bb4f851540a894cfa27a7496b17573d637f795724d8132793037b716d2bc"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/pre_record.schema.json",
+      "bytes": 11333,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "ec9386d575eaad10bd905c9da5dd1c3b82d3e109a9a3ca45f8346c9581c0ddd7"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/pre_record_transport.schema.json",
+      "bytes": 1412,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "3a4efe59209fb46b4230abb932378a6eba712866259283c11362b2a62b2961a2"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/provider_result.schema.json",
+      "bytes": 3507,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "a5b148edaf4e97ce0a6ebb6ccf5605b3dac17b4e12ca22669a623db6a0ff8dba"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/release_manifest.schema.json",
+      "bytes": 1830,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "22e47bb630c5766bfda394c1e0772ffd1f028771ef64b9acc6037d4228a61380"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/v11-canonical-field-dag.json",
+      "bytes": 259889,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "37e3d0cb65b5b793219d94894a672eae50e8181378481dfb846afff1c49e56e7"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/v11-independent-audit-report.md",
+      "bytes": 6778,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "b81a47a7951d2437701e0a5ec2664fcad84e71e2e1dedf79400f423864b66e24"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/v11-independent-audit-results.json",
+      "bytes": 10678,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "50160264a4e886a548b4c9494ce0e32f7a8f06f0704bf9daee4200a577fb8411"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/verify_b.schema.json",
+      "bytes": 4151,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "144b224fa816ec9f2843f006dbed59ec53e0fd1bfca315ed9bf82896620db12b"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-freeze-manifest.json",
+      "bytes": 4192,
+      "source_mtime_epoch": 1789883637,
+      "sha256": "df14a907b29cf5839551dc0b4a32e77af5c61d8e927433530f9a061d75997c16"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20-luna/audit_v11_luna.py",
+      "bytes": 61636,
+      "source_mtime_epoch": 1789885450,
+      "sha256": "a10137b3b54d4d5f041ec2e2a899ea11733c6acb0a8904f96446f17ebfb4675c"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20-luna/v11-luna-hostile-fixtures.json",
+      "bytes": 20623,
+      "source_mtime_epoch": 1789885466,
+      "sha256": "e8ea509799cfee7fa428dcd599c51aa43abf63c6c2b7a1f545784fac6d4df91d"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20-luna/v11-luna-independent-audit-report.md",
+      "bytes": 15854,
+      "source_mtime_epoch": 1789885471,
+      "sha256": "7b0628135d2490b881b7c09898fb7bdef7514efc2e3d8eafd35ba1b8d1e69e66"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20-luna/v11-luna-independent-audit-results.json",
+      "bytes": 78058,
+      "source_mtime_epoch": 1789885471,
+      "sha256": "50ab287a460cb7d240af78743fd46ee2ddce2965215829a71120f3daf24b1dd2"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20-luna/v11-luna-independent-field-dag.json",
+      "bytes": 305336,
+      "source_mtime_epoch": 1789885471,
+      "sha256": "7d55a6eb7f5ab50f8bb4792251f9454dab9515a8b11bbf4d530a8131ccc8c3ae"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20/adversarial_v11_bundle.py",
+      "bytes": 13858,
+      "source_mtime_epoch": 1789883263,
+      "sha256": "d23b55c93dbb9cf4195690369d1b1f282d28bc2ca58cac8c5e91ed3a81174cce"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20/v11-independent-adversarial-report.md",
+      "bytes": 2509,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "b877b8ad6ed9de30b0541ccdb99ebdaf061f35a46526709849540fed1f59a271"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20/v11-independent-adversarial-results.json",
+      "bytes": 3845,
+      "source_mtime_epoch": 1789883594,
+      "sha256": "972a5435150ac27b077b9edf390a20eb4e4db849f11571a23d1fd7c071d6c5b0"
+    },
+    {
+      "path": "G1/bootstrap-transition/v11-independent-authority-transition-review-2026-09-20.md",
+      "bytes": 15767,
+      "source_mtime_epoch": 1789885419,
+      "sha256": "785cb9e9eaf2a64f84cdb072cebb085ede54bfa1d45b06edb47d6c1dc3f911c5"
+    },
+    {
+      "path": "G1/bootstrap-transition/v9-independent-contract-audit-2026-09-20/canonical-dag/v9-independent-field-dag.json",
+      "bytes": 112251,
+      "source_mtime_epoch": 1789879287,
+      "sha256": "902854e6591687095856fdf507115e933cb4d57ade8437b8875ca19d104303b9"
+    },
+    {
+      "path": "G1/bootstrap/source-review-bba2e758f91e7d40c295a2f034eaeff64ef2f09d.md",
+      "bytes": 8408,
+      "source_mtime_epoch": 1789884771,
+      "sha256": "54ee1d5559021a5623c3b0a070de052c6b0138bbd7649180d0e19def02f27567"
+    },
+    {
+      "path": "G1/reviews/apt-71a8a539-independent.md",
+      "bytes": 9410,
+      "source_mtime_epoch": 1789885176,
+      "sha256": "1e443be31aa0f21bd2914a040d80c1b5543344685504de4f62c5c6cbef48e233"
+    },
+    {
+      "path": "G1/reviews/apt-f069789a-independent.md",
+      "bytes": 10012,
+      "source_mtime_epoch": 1789884003,
+      "sha256": "b7917b92510ff0f1b11c41882d6de92b196db1df3cd35b8d4324aff3be0e93c8"
+    },
+    {
+      "path": "G1/reviews/runtime-stall-5b61841d.md",
+      "bytes": 6474,
+      "source_mtime_epoch": 1789885428,
+      "sha256": "d825209c397740974eeba535fdcb7655071e8468ebd2bfbf89e256d9ed9d65b9"
+    },
+    {
+      "path": "G1/reviews/runtime-stall-c70428c9.md",
+      "bytes": 5129,
+      "source_mtime_epoch": 1789882914,
+      "sha256": "35044070abb27107e95a941a310282166a6b482ca6978198c00b2e8d1d93bc88"
+    }
+  ]
+}

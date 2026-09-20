@@ -1,0 +1,30 @@
+{
+  "branch_protection": {
+    "branch": "main",
+    "protection_error": "http_404",
+    "protection_payload": {
+      "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-branch-protection",
+      "message": "Branch not protected",
+      "status": "404"
+    },
+    "protection_request_id": "00049-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-branch-protection",
+    "protection_status": 404,
+    "required_contexts": [],
+    "required_error": "http_404",
+    "required_payload": {
+      "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-status-checks-protection",
+      "message": "Branch not protected",
+      "status": "404"
+    },
+    "required_request_id": "00050-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-required-status-checks",
+    "required_status": 404
+  },
+  "repo": "tailrocks-pull-request-skills",
+  "ruleset_detail_requests": [],
+  "ruleset_list_requests": [
+    "00048-tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612-rulesets-page-1"
+  ],
+  "rulesets": [],
+  "rulesets_complete": true,
+  "sha": "2b4f71f49fd27061e64d16b2b7f83d9bd2df5612"
+}

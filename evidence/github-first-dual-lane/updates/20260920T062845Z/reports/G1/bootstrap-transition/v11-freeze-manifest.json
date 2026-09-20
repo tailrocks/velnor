@@ -1,0 +1,63 @@
+{
+  "schema": "velnor.authority-transition.v11-freeze-manifest",
+  "status": "proposal_only_external_blocked",
+  "authority_claim": false,
+  "execution_authorized": false,
+  "mutation_performed": false,
+  "frozen_at": "2026-09-20T05:53:29Z",
+  "canonical_model": {
+    "path": "G1/bootstrap-transition/v11-canonical-model-source.json",
+    "sha256": "ff3d8018bb7707ef540b9be5b6e7b22262b93a1309733b59f9f19a9842dda930"
+  },
+  "generator": {
+    "path": "G1/bootstrap-transition/build_v11_bundle.py",
+    "sha256": "c554cdd41c7050536fd8a11382f0b6b73bf18ce6cb03c64ee7520c184e7aee44",
+    "strict_generation_rule": "generator requires jsonschema Draft202012Validator with FormatChecker and aborts on any positive-instance validation error"
+  },
+  "bundle": {
+    "path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20",
+    "root_manifest_path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/canonical-root-manifest.v4.json",
+    "root_manifest_sha256": "35f8ae8a20cfe3ce774ed0d63ece8ed06d3e66d4e66693933ea5e5825e32a96d",
+    "root_digest": "deb19280afeb9bf17b4c80ca52d808a1115822e7f8d48ff28f204e9a7388c017",
+    "dag_path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/v11-canonical-field-dag.json",
+    "dag_sha256": "37e3d0cb65b5b793219d94894a672eae50e8181378481dfb846afff1c49e56e7",
+    "plan_json_path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/AUTHORITY-CHANGE-PLAN-2026-09-20-v11.json",
+    "plan_json_sha256": "4c50c8e591924cbdbccb7ec489e8a8bbb20576d5f5fbb207c42e52837f6d42c6",
+    "plan_markdown_path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/AUTHORITY-CHANGE-PLAN-2026-09-20-v11.md",
+    "plan_markdown_sha256": "2fe0a7e534299e0b7dc83102706d29d91fd07e422a795ef726c1dccd5d119dde",
+    "bundle_index_sha256": "6b4167e86cf075b565a799822d3d1a7fe0f49e090b2ed703097ac5a6c353c9c4"
+  },
+  "owner_audit": {
+    "script_path": "G1/bootstrap-transition/audit_v11_bundle.py",
+    "script_sha256": "c086da8aec79731d0a495183fb0ebea99dd88ea7fb393559714e20d43d798f55",
+    "result_path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/v11-independent-audit-results.json",
+    "result_sha256": "50160264a4e886a548b4c9494ce0e32f7a8f06f0704bf9daee4200a577fb8411",
+    "report_path": "G1/bootstrap-transition/v11-contract-bundle-2026-09-20/v11-independent-audit-report.md",
+    "report_sha256": "b81a47a7951d2437701e0a5ec2664fcad84e71e2e1dedf79400f423864b66e24",
+    "summary": {"total": 59, "passed": 59, "failed": 0, "unimplemented": 0},
+    "strict_validator": "jsonschema 4.26.0 Draft202012Validator with FormatChecker"
+  },
+  "independent_adversarial_audit": {
+    "script_path": "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20/adversarial_v11_bundle.py",
+    "script_sha256": "d23b55c93dbb9cf4195690369d1b1f282d28bc2ca58cac8c5e91ed3a81174cce",
+    "result_path": "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20/v11-independent-adversarial-results.json",
+    "result_sha256": "972a5435150ac27b077b9edf390a20eb4e4db849f11571a23d1fd7c071d6c5b0",
+    "report_path": "G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20/v11-independent-adversarial-report.md",
+    "report_sha256": "b877b8ad6ed9de30b0541ccdb99ebdaf061f35a46526709849540fed1f59a271",
+    "summary": {"total": 19, "passed": 19, "failed": 0, "unimplemented": 0},
+    "owner_audit_imported": false,
+    "strict_validator": "jsonschema 4.26.0 Draft202012Validator with FormatChecker"
+  },
+  "preserved_history": {
+    "v10_adversarial_report_sha256": "d0ee3b1bb9a511db2dfb3845a45500ea288462e47cfad9c15ccdc84fad21c180",
+    "v10_adversarial_result_sha256": "ea7fa62a685dd94bf7e86c42a65dd86e3ab371d415b6451af0689949e843c446",
+    "v10_not_overwritten": true
+  },
+  "external_blockers": [
+    "typed publisher/verifier source and fixed-point generated closure absent at observed main",
+    "provider App, installation, verifier, signing trust, authenticated endpoint, and live result unresolved",
+    "resulting protected-main and native xcode-27/Linux-X64/Linux-ARM64 closure absent",
+    "provider-enforced freeze/CAS/recovery excluding actor 5 absent",
+    "independent authority-transition approval absent"
+  ]
+}

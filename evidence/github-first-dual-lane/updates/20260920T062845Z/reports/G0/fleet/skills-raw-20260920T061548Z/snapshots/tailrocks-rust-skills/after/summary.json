@@ -1,0 +1,16 @@
+{
+  "captured_at_utc": "2026-09-20T06:16:55.027212Z",
+  "complete": true,
+  "default_branch": "main",
+  "default_sha": "bcc31b1d935dac4de191a6b71b3091f628d204c0",
+  "open_prs": [],
+  "raw_requests": {
+    "default_branch": "00089-tailrocks-rust-skills-after-default-branch",
+    "open_pr_pages": [
+      "00090-tailrocks-rust-skills-after-open-prs-page-1"
+    ],
+    "repository": "00088-tailrocks-rust-skills-after-repository"
+  },
+  "repo": "tailrocks-rust-skills",
+  "snapshot": "after"
+}

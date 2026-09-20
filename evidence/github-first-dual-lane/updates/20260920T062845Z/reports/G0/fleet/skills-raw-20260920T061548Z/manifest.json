@@ -1,0 +1,35 @@
+{
+  "auth_identity": {
+    "error": null,
+    "http_status": 200,
+    "id": 139017,
+    "login": "donbeave",
+    "request_id": "00001-auth-user",
+    "site_admin": false,
+    "type": "User"
+  },
+  "claimable": false,
+  "complete": false,
+  "error_count": 16,
+  "errors_by_status": {
+    "404": 16
+  },
+  "finished_at_utc": "2026-09-20T06:17:05.494383Z",
+  "gh_version": "gh version 2.101.0 (2026-09-15)\nhttps://github.com/cli/cli/releases/tag/v2.101.0",
+  "note": "Read-only raw evidence partition. Permission, 404, rate-limit, and command errors remain per-request metadata; no gate or expected-job claim is made.",
+  "owner": "tailrocks",
+  "raw_response_policy": "response headers and body preserved; no request tokens persisted",
+  "repositories": [
+    "tailrocks-typescript-skills",
+    "tailrocks-skill-authoring-skills",
+    "tailrocks-rust-skills",
+    "tailrocks-roadmap-skills",
+    "tailrocks-pull-request-skills",
+    "tailrocks-open-source-skills",
+    "tailrocks-macos-skills",
+    "tailrocks-code-quality-skills"
+  ],
+  "request_count": 105,
+  "schema": 1,
+  "started_at_utc": "2026-09-20T06:15:53.086284Z"
+}

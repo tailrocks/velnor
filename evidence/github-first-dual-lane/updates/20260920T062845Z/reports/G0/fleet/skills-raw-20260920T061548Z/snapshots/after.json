@@ -1,0 +1,130 @@
+{
+  "tailrocks-code-quality-skills": {
+    "captured_at_utc": "2026-09-20T06:17:05.491470Z",
+    "complete": true,
+    "default_branch": "main",
+    "default_sha": "0b9a1eaa83ca2ad9b2c895741648e7cde10f6189",
+    "open_prs": [],
+    "raw_requests": {
+      "default_branch": "00104-tailrocks-code-quality-skills-after-default-branch",
+      "open_pr_pages": [
+        "00105-tailrocks-code-quality-skills-after-open-prs-page-1"
+      ],
+      "repository": "00103-tailrocks-code-quality-skills-after-repository"
+    },
+    "repo": "tailrocks-code-quality-skills",
+    "snapshot": "after"
+  },
+  "tailrocks-macos-skills": {
+    "captured_at_utc": "2026-09-20T06:17:03.444173Z",
+    "complete": true,
+    "default_branch": "main",
+    "default_sha": "1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2",
+    "open_prs": [],
+    "raw_requests": {
+      "default_branch": "00101-tailrocks-macos-skills-after-default-branch",
+      "open_pr_pages": [
+        "00102-tailrocks-macos-skills-after-open-prs-page-1"
+      ],
+      "repository": "00100-tailrocks-macos-skills-after-repository"
+    },
+    "repo": "tailrocks-macos-skills",
+    "snapshot": "after"
+  },
+  "tailrocks-open-source-skills": {
+    "captured_at_utc": "2026-09-20T06:17:01.355279Z",
+    "complete": true,
+    "default_branch": "main",
+    "default_sha": "6e77a448f9776e837bfc9ab18b833bd5fdc26d3a",
+    "open_prs": [],
+    "raw_requests": {
+      "default_branch": "00098-tailrocks-open-source-skills-after-default-branch",
+      "open_pr_pages": [
+        "00099-tailrocks-open-source-skills-after-open-prs-page-1"
+      ],
+      "repository": "00097-tailrocks-open-source-skills-after-repository"
+    },
+    "repo": "tailrocks-open-source-skills",
+    "snapshot": "after"
+  },
+  "tailrocks-pull-request-skills": {
+    "captured_at_utc": "2026-09-20T06:16:59.368431Z",
+    "complete": true,
+    "default_branch": "main",
+    "default_sha": "2b4f71f49fd27061e64d16b2b7f83d9bd2df5612",
+    "open_prs": [],
+    "raw_requests": {
+      "default_branch": "00095-tailrocks-pull-request-skills-after-default-branch",
+      "open_pr_pages": [
+        "00096-tailrocks-pull-request-skills-after-open-prs-page-1"
+      ],
+      "repository": "00094-tailrocks-pull-request-skills-after-repository"
+    },
+    "repo": "tailrocks-pull-request-skills",
+    "snapshot": "after"
+  },
+  "tailrocks-roadmap-skills": {
+    "captured_at_utc": "2026-09-20T06:16:57.317396Z",
+    "complete": true,
+    "default_branch": "main",
+    "default_sha": "66d9c79f6472ddace0e265335dc8dd36cdeb8a86",
+    "open_prs": [],
+    "raw_requests": {
+      "default_branch": "00092-tailrocks-roadmap-skills-after-default-branch",
+      "open_pr_pages": [
+        "00093-tailrocks-roadmap-skills-after-open-prs-page-1"
+      ],
+      "repository": "00091-tailrocks-roadmap-skills-after-repository"
+    },
+    "repo": "tailrocks-roadmap-skills",
+    "snapshot": "after"
+  },
+  "tailrocks-rust-skills": {
+    "captured_at_utc": "2026-09-20T06:16:55.027212Z",
+    "complete": true,
+    "default_branch": "main",
+    "default_sha": "bcc31b1d935dac4de191a6b71b3091f628d204c0",
+    "open_prs": [],
+    "raw_requests": {
+      "default_branch": "00089-tailrocks-rust-skills-after-default-branch",
+      "open_pr_pages": [
+        "00090-tailrocks-rust-skills-after-open-prs-page-1"
+      ],
+      "repository": "00088-tailrocks-rust-skills-after-repository"
+    },
+    "repo": "tailrocks-rust-skills",
+    "snapshot": "after"
+  },
+  "tailrocks-skill-authoring-skills": {
+    "captured_at_utc": "2026-09-20T06:16:52.837560Z",
+    "complete": true,
+    "default_branch": "main",
+    "default_sha": "9e25890fd63f7ca6c587490ba7cc432f5fdd98d6",
+    "open_prs": [],
+    "raw_requests": {
+      "default_branch": "00086-tailrocks-skill-authoring-skills-after-default-branch",
+      "open_pr_pages": [
+        "00087-tailrocks-skill-authoring-skills-after-open-prs-page-1"
+      ],
+      "repository": "00085-tailrocks-skill-authoring-skills-after-repository"
+    },
+    "repo": "tailrocks-skill-authoring-skills",
+    "snapshot": "after"
+  },
+  "tailrocks-typescript-skills": {
+    "captured_at_utc": "2026-09-20T06:16:50.619866Z",
+    "complete": true,
+    "default_branch": "main",
+    "default_sha": "f434715f7c664af431f0be62982aa379400102de",
+    "open_prs": [],
+    "raw_requests": {
+      "default_branch": "00083-tailrocks-typescript-skills-after-default-branch",
+      "open_pr_pages": [
+        "00084-tailrocks-typescript-skills-after-open-prs-page-1"
+      ],
+      "repository": "00082-tailrocks-typescript-skills-after-repository"
+    },
+    "repo": "tailrocks-typescript-skills",
+    "snapshot": "after"
+  }
+}

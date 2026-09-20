@@ -1,0 +1,1973 @@
+{
+  "audit_script_sha256": "a10137b3b54d4d5f041ec2e2a899ea11733c6acb0a8904f96446f17ebfb4675c",
+  "authority_claim": false,
+  "checks": [
+    {
+      "detail": {
+        "expected": {
+          "dag": "37e3d0cb65b5b793219d94894a672eae50e8181378481dfb846afff1c49e56e7",
+          "freeze_manifest": "df14a907b29cf5839551dc0b4a32e77af5c61d8e927433530f9a061d75997c16",
+          "model": "ff3d8018bb7707ef540b9be5b6e7b22262b93a1309733b59f9f19a9842dda930",
+          "owner_report": "b81a47a7951d2437701e0a5ec2664fcad84e71e2e1dedf79400f423864b66e24",
+          "owner_result": "50160264a4e886a548b4c9494ce0e32f7a8f06f0704bf9daee4200a577fb8411",
+          "plan_json": "4c50c8e591924cbdbccb7ec489e8a8bbb20576d5f5fbb207c42e52837f6d42c6",
+          "plan_md": "2fe0a7e534299e0b7dc83102706d29d91fd07e422a795ef726c1dccd5d119dde",
+          "root_digest": "deb19280afeb9bf17b4c80ca52d808a1115822e7f8d48ff28f204e9a7388c017",
+          "root_raw": "35f8ae8a20cfe3ce774ed0d63ece8ed06d3e66d4e66693933ea5e5825e32a96d"
+        },
+        "measured": {
+          "dag": "37e3d0cb65b5b793219d94894a672eae50e8181378481dfb846afff1c49e56e7",
+          "freeze_manifest": "df14a907b29cf5839551dc0b4a32e77af5c61d8e927433530f9a061d75997c16",
+          "model": "ff3d8018bb7707ef540b9be5b6e7b22262b93a1309733b59f9f19a9842dda930",
+          "owner_report": "b81a47a7951d2437701e0a5ec2664fcad84e71e2e1dedf79400f423864b66e24",
+          "owner_result": "50160264a4e886a548b4c9494ce0e32f7a8f06f0704bf9daee4200a577fb8411",
+          "plan_json": "4c50c8e591924cbdbccb7ec489e8a8bbb20576d5f5fbb207c42e52837f6d42c6",
+          "plan_md": "2fe0a7e534299e0b7dc83102706d29d91fd07e422a795ef726c1dccd5d119dde",
+          "root_raw": "35f8ae8a20cfe3ce774ed0d63ece8ed06d3e66d4e66693933ea5e5825e32a96d"
+        }
+      },
+      "name": "frozen-v11-input-hashes",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "expected": "deb19280afeb9bf17b4c80ca52d808a1115822e7f8d48ff28f204e9a7388c017",
+        "measured": "deb19280afeb9bf17b4c80ca52d808a1115822e7f8d48ff28f204e9a7388c017",
+        "self_digest_present": false
+      },
+      "name": "canonical-root-digest",
+      "status": "pass"
+    },
+    {
+      "detail": [
+        {
+          "declared": "c554cdd41c7050536fd8a11382f0b6b73bf18ce6cb03c64ee7520c184e7aee44",
+          "measured": "c554cdd41c7050536fd8a11382f0b6b73bf18ce6cb03c64ee7520c184e7aee44",
+          "path": "build_v11_bundle.py",
+          "status": "pass"
+        },
+        {
+          "declared": "ff3d8018bb7707ef540b9be5b6e7b22262b93a1309733b59f9f19a9842dda930",
+          "measured": "ff3d8018bb7707ef540b9be5b6e7b22262b93a1309733b59f9f19a9842dda930",
+          "path": "v11-canonical-model-source.json",
+          "status": "pass"
+        },
+        {
+          "declared": "652057582f008f589408db30b55495887798cd524173cd6104dfa7876170b9c4",
+          "measured": "652057582f008f589408db30b55495887798cd524173cd6104dfa7876170b9c4",
+          "path": "v11-contract-bundle-2026-09-20/adoption.schema.json",
+          "status": "pass"
+        },
+        {
+          "declared": "43db58edeab771c9fee4fe40bc3a842e4d2cdc12b20a535550d4537d563f5dd1",
+          "measured": "43db58edeab771c9fee4fe40bc3a842e4d2cdc12b20a535550d4537d563f5dd1",
+          "path": "v11-contract-bundle-2026-09-20/negative-fixtures.json",
+          "status": "pass"
+        },
+        {
+          "declared": "3e0651ebb8cfe6d055fdf6cfe733901da92decdc9766d73f28a817f53dd04194",
+          "measured": "3e0651ebb8cfe6d055fdf6cfe733901da92decdc9766d73f28a817f53dd04194",
+          "path": "v11-contract-bundle-2026-09-20/permanent_binding.schema.json",
+          "status": "pass"
+        },
+        {
+          "declared": "b4210e40a57fa84cf91cbd1ef688d77130f886a54d128a71414cac96ebcf314f",
+          "measured": "b4210e40a57fa84cf91cbd1ef688d77130f886a54d128a71414cac96ebcf314f",
+          "path": "v11-contract-bundle-2026-09-20/positive-adoption.json",
+          "status": "pass"
+        },
+        {
+          "declared": "fb5add0aeefc96470269bdbc522f0c029bf42c2e3a450984408e1920eca8b2b5",
+          "measured": "fb5add0aeefc96470269bdbc522f0c029bf42c2e3a450984408e1920eca8b2b5",
+          "path": "v11-contract-bundle-2026-09-20/positive-fixture-status.json",
+          "status": "pass"
+        },
+        {
+          "declared": "d5da5063731eadf7eb317c3759bb8f5a842cc36ff3999c3487d62026f9f7b431",
+          "measured": "d5da5063731eadf7eb317c3759bb8f5a842cc36ff3999c3487d62026f9f7b431",
+          "path": "v11-contract-bundle-2026-09-20/positive-full-typed-output-fixture.json",
+          "status": "pass"
+        },
+        {
+          "declared": "ab271be22eeca8e37d5f0f2c9ea904c7e89551973488c43ed9de1e4392d9ded1",
+          "measured": "ab271be22eeca8e37d5f0f2c9ea904c7e89551973488c43ed9de1e4392d9ded1",
+          "path": "v11-contract-bundle-2026-09-20/positive-pre-record-transport.json",
+          "status": "pass"
+        },
+        {
+          "declared": "054320c55584484899a3208d823a9d0c09ad786539e58c28069e1dfe97e2d453",
+          "measured": "054320c55584484899a3208d823a9d0c09ad786539e58c28069e1dfe97e2d453",
+          "path": "v11-contract-bundle-2026-09-20/positive-pre-record.json",
+          "status": "pass"
+        },
+        {
+          "declared": "8308e5eaff421e6f2bd74be92c7df87a765b70e9bb52e2852e76b74f136b630d",
+          "measured": "8308e5eaff421e6f2bd74be92c7df87a765b70e9bb52e2852e76b74f136b630d",
+          "path": "v11-contract-bundle-2026-09-20/positive-provider-result.json",
+          "status": "pass"
+        },
+        {
+          "declared": "64e8434107b309e9c3d42e4106e3790fce0e21f54ca5e95ae442cbb38a55cd86",
+          "measured": "64e8434107b309e9c3d42e4106e3790fce0e21f54ca5e95ae442cbb38a55cd86",
+          "path": "v11-contract-bundle-2026-09-20/positive-release-manifest.json",
+          "status": "pass"
+        },
+        {
+          "declared": "6bbfee97e9bb152980e744dedf6b2cfd795cbb3f4e21b1d471cc0afb48e3fc1e",
+          "measured": "6bbfee97e9bb152980e744dedf6b2cfd795cbb3f4e21b1d471cc0afb48e3fc1e",
+          "path": "v11-contract-bundle-2026-09-20/positive-verify-b.json",
+          "status": "pass"
+        },
+        {
+          "declared": "ec9386d575eaad10bd905c9da5dd1c3b82d3e109a9a3ca45f8346c9581c0ddd7",
+          "measured": "ec9386d575eaad10bd905c9da5dd1c3b82d3e109a9a3ca45f8346c9581c0ddd7",
+          "path": "v11-contract-bundle-2026-09-20/pre_record.schema.json",
+          "status": "pass"
+        },
+        {
+          "declared": "3a4efe59209fb46b4230abb932378a6eba712866259283c11362b2a62b2961a2",
+          "measured": "3a4efe59209fb46b4230abb932378a6eba712866259283c11362b2a62b2961a2",
+          "path": "v11-contract-bundle-2026-09-20/pre_record_transport.schema.json",
+          "status": "pass"
+        },
+        {
+          "declared": "a5b148edaf4e97ce0a6ebb6ccf5605b3dac17b4e12ca22669a623db6a0ff8dba",
+          "measured": "a5b148edaf4e97ce0a6ebb6ccf5605b3dac17b4e12ca22669a623db6a0ff8dba",
+          "path": "v11-contract-bundle-2026-09-20/provider_result.schema.json",
+          "status": "pass"
+        },
+        {
+          "declared": "22e47bb630c5766bfda394c1e0772ffd1f028771ef64b9acc6037d4228a61380",
+          "measured": "22e47bb630c5766bfda394c1e0772ffd1f028771ef64b9acc6037d4228a61380",
+          "path": "v11-contract-bundle-2026-09-20/release_manifest.schema.json",
+          "status": "pass"
+        },
+        {
+          "declared": "37e3d0cb65b5b793219d94894a672eae50e8181378481dfb846afff1c49e56e7",
+          "measured": "37e3d0cb65b5b793219d94894a672eae50e8181378481dfb846afff1c49e56e7",
+          "path": "v11-contract-bundle-2026-09-20/v11-canonical-field-dag.json",
+          "status": "pass"
+        },
+        {
+          "declared": "144b224fa816ec9f2843f006dbed59ec53e0fd1bfca315ed9bf82896620db12b",
+          "measured": "144b224fa816ec9f2843f006dbed59ec53e0fd1bfca315ed9bf82896620db12b",
+          "path": "v11-contract-bundle-2026-09-20/verify_b.schema.json",
+          "status": "pass"
+        },
+        {
+          "declared": "902854e6591687095856fdf507115e933cb4d57ade8437b8875ca19d104303b9",
+          "measured": "902854e6591687095856fdf507115e933cb4d57ade8437b8875ca19d104303b9",
+          "path": "v9-independent-contract-audit-2026-09-20/canonical-dag/v9-independent-field-dag.json",
+          "status": "pass"
+        }
+      ],
+      "name": "root-bound-bytes",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "canonical_dag_sha256": "37e3d0cb65b5b793219d94894a672eae50e8181378481dfb846afff1c49e56e7",
+        "canonical_model_sha256": "ff3d8018bb7707ef540b9be5b6e7b22262b93a1309733b59f9f19a9842dda930",
+        "generated_at": "2026-09-20T03:58:55Z",
+        "plan_json_sha256": "4c50c8e591924cbdbccb7ec489e8a8bbb20576d5f5fbb207c42e52837f6d42c6",
+        "plan_md_sha256": "2fe0a7e534299e0b7dc83102706d29d91fd07e422a795ef726c1dccd5d119dde",
+        "root_digest": "deb19280afeb9bf17b4c80ca52d808a1115822e7f8d48ff28f204e9a7388c017",
+        "root_manifest_sha256": "35f8ae8a20cfe3ce774ed0d63ece8ed06d3e66d4e66693933ea5e5825e32a96d",
+        "schema": "velnor.authority-transition.bundle-index.v11",
+        "v10_preserved": true
+      },
+      "name": "bundle-index-references",
+      "status": "pass"
+    },
+    {
+      "detail": "v10 bundle remains separate",
+      "name": "v10-preserved",
+      "status": "pass"
+    },
+    {
+      "detail": [
+        {
+          "actual": "652057582f008f589408db30b55495887798cd524173cd6104dfa7876170b9c4",
+          "declared": "652057582f008f589408db30b55495887798cd524173cd6104dfa7876170b9c4",
+          "schema": "adoption",
+          "status": "pass"
+        },
+        {
+          "actual": "3e0651ebb8cfe6d055fdf6cfe733901da92decdc9766d73f28a817f53dd04194",
+          "declared": "3e0651ebb8cfe6d055fdf6cfe733901da92decdc9766d73f28a817f53dd04194",
+          "schema": "permanent_binding",
+          "status": "pass"
+        },
+        {
+          "actual": "ec9386d575eaad10bd905c9da5dd1c3b82d3e109a9a3ca45f8346c9581c0ddd7",
+          "declared": "ec9386d575eaad10bd905c9da5dd1c3b82d3e109a9a3ca45f8346c9581c0ddd7",
+          "schema": "pre_record",
+          "status": "pass"
+        },
+        {
+          "actual": "3a4efe59209fb46b4230abb932378a6eba712866259283c11362b2a62b2961a2",
+          "declared": "3a4efe59209fb46b4230abb932378a6eba712866259283c11362b2a62b2961a2",
+          "schema": "pre_record_transport",
+          "status": "pass"
+        },
+        {
+          "actual": "a5b148edaf4e97ce0a6ebb6ccf5605b3dac17b4e12ca22669a623db6a0ff8dba",
+          "declared": "a5b148edaf4e97ce0a6ebb6ccf5605b3dac17b4e12ca22669a623db6a0ff8dba",
+          "schema": "provider_result",
+          "status": "pass"
+        },
+        {
+          "actual": "22e47bb630c5766bfda394c1e0772ffd1f028771ef64b9acc6037d4228a61380",
+          "declared": "22e47bb630c5766bfda394c1e0772ffd1f028771ef64b9acc6037d4228a61380",
+          "schema": "release_manifest",
+          "status": "pass"
+        },
+        {
+          "actual": "144b224fa816ec9f2843f006dbed59ec53e0fd1bfca315ed9bf82896620db12b",
+          "declared": "144b224fa816ec9f2843f006dbed59ec53e0fd1bfca315ed9bf82896620db12b",
+          "schema": "verify_b",
+          "status": "pass"
+        }
+      ],
+      "name": "schema-hash-projection",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "dag": {
+          "path": "v11-canonical-model-source.json",
+          "sha256": "ff3d8018bb7707ef540b9be5b6e7b22262b93a1309733b59f9f19a9842dda930"
+        },
+        "plan": {
+          "path": "v11-canonical-model-source.json",
+          "sha256": "ff3d8018bb7707ef540b9be5b6e7b22262b93a1309733b59f9f19a9842dda930",
+          "single_source": true
+        }
+      },
+      "name": "single-canonical-model",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "positive-adoption.json": {
+          "errors": [],
+          "schema": "adoption",
+          "valid": true
+        },
+        "positive-pre-record-transport.json": {
+          "errors": [],
+          "schema": "pre_record_transport",
+          "valid": true
+        },
+        "positive-pre-record.json": {
+          "errors": [],
+          "schema": "pre_record",
+          "valid": true
+        },
+        "positive-provider-result.json": {
+          "errors": [],
+          "schema": "provider_result",
+          "valid": true
+        },
+        "positive-release-manifest.json": {
+          "errors": [],
+          "schema": "release_manifest",
+          "valid": true
+        },
+        "positive-verify-b.json": {
+          "errors": [],
+          "schema": "verify_b",
+          "valid": true
+        }
+      },
+      "name": "strict-positive-instances",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "adoption": {
+          "error_count": 1,
+          "errors": [
+            "mode: 'permanent_pin' was expected"
+          ],
+          "field_count": 303,
+          "prefix": "adoption"
+        },
+        "permanent_binding": {
+          "error_count": 9,
+          "errors": [
+            "product.application_namespace_reuse: False was expected",
+            "product.asset: 'velnor-workflow-policy-validator-Linux-X64' was expected",
+            "product.features: '' was expected",
+            "product.mutable_latest: False was expected",
+            "product.overwrite: False was expected",
+            "product.platform: 'Linux-X64' was expected",
+            "product.product_id: 'velnor-workflow-policy-validator' was expected",
+            "product.runner: 'ubuntu-24.04' was expected",
+            "product.schema: 'velnor.workflow-policy-validator.v1' was expected"
+          ],
+          "field_count": 303,
+          "prefix": "permanent"
+        },
+        "pre_record": {
+          "error_count": 25,
+          "errors": [
+            "artifact.binary_architecture: 'x86_64' was expected",
+            "binding.final_manifest_artifact_digest: 'ad7ed67f395f2f1ac7e67564b9bbeff892206d11dcfad3261381ff6083e00905' does not match '^sha256:[0-9a-f]{64}$'",
+            "binding.predicate_path: 'attestations/velnor-policy-validator-binding.v1.json' was expected",
+            "binding.predicate_type: 'https://velnor.dev/attestations/policy-validator-binding/v1' was expected",
+            "binding.subject_digest: 'b763390d31c0606b93d3bf3ded0f7f75ffbd86460668fd3017037cfadeb7e4d0' does not match '^sha256:[0-9a-f]{64}$'",
+            "product.architecture: 'x86_64' was expected",
+            "product.name: 'velnor-workflow-policy-validator' was expected",
+            "product.namespace: 'velnor.workflow-policy-validator' was expected",
+            "product.platform: 'Linux-X64' was expected",
+            "record_kind: 'policy-validator-b-pre-provider' was expected",
+            "release.asset_digest: 'a1be5d9fcb9feda901f4d7558d25b2e43c971a6530da9d6efa9aa5f7b86275a0' does not match '^sha256:[0-9a-f]{64}$'",
+            "release.tag: 'fixture-0207' does not match '^velnor-workflow-policy-validator-v1-[0-9a-f]{40}$'",
+            "release_attestation.oidc_issuer: 'https://token.actions.githubusercontent.com' was expected",
+            "release_attestation.predicate_path: 'attestations/velnor-policy-validator-release.v1.json' was expected",
+            "release_attestation.predicate_type: 'https://velnor.dev/attestations/velnor-policy-validator-release/v1' was expected",
+            "release_attestation.signer_source_ref: 'refs/heads/main' was expected"
+          ],
+          "field_count": 303,
+          "prefix": "pre_record"
+        },
+        "pre_record_transport": {
+          "error_count": 1,
+          "errors": [
+            "artifact_raw_digest: '5290101ba5fae5ccb055af42fe95886931b2ac00bba31b675b5807303ee095f3' does not match '^sha256:[0-9a-f]{64}$'"
+          ],
+          "field_count": 303,
+          "prefix": "pre_record_transport"
+        },
+        "provider_result": {
+          "error_count": 3,
+          "errors": [
+            "provider_check_conclusion: 'success' was expected",
+            "provider_check_context: 'Policy-bootstrap-B' was expected",
+            "source_record_artifact_raw_digest: 'e82ba188484d06327c25ff115f6f50f413cd32b7cbb8757f949a2100fe9eddc3' does not match '^sha256:[0-9a-f]{64}$'"
+          ],
+          "field_count": 303,
+          "prefix": "provider_result"
+        },
+        "release_manifest": {
+          "error_count": 7,
+          "errors": [
+            "architecture: 'x86_64' was expected",
+            "asset_digest: '0c80487b0e8b90aa42294bbf6687df0ce4255c2b8d3b6c31b7b2fa32cff29d4c' does not match '^sha256:[0-9a-f]{64}$'",
+            "platform: 'Linux-X64' was expected",
+            "product_name: 'velnor-workflow-policy-validator' was expected",
+            "product_namespace: 'velnor.workflow-policy-validator' was expected",
+            "release_tag: '1a40d6729e612190868de17bd9bb2bd5bd799d4e' does not match '^velnor-workflow-policy-validator-v1-[0-9a-f]{40}$'",
+            "schema: 'velnor.workflow-policy-validator.release-manifest.v1' was expected"
+          ],
+          "field_count": 303,
+          "prefix": "release_manifest"
+        },
+        "verify_b": {
+          "error_count": 12,
+          "errors": [
+            "policy_check_conclusion: 'success' was expected",
+            "policy_check_context: 'Policy-bootstrap-B' was expected",
+            "terminal_census_rows.0: Additional properties are not allowed ('fixture_row' was unexpected)",
+            "terminal_census_rows.0: 'workflow_path' is a required property",
+            "terminal_census_rows.0: 'workflow_sha' is a required property",
+            "terminal_census_rows.0: 'run_id' is a required property",
+            "terminal_census_rows.0: 'attempt' is a required property",
+            "terminal_census_rows.0: 'job_id' is a required property",
+            "terminal_census_rows.0: 'check_run_id' is a required property",
+            "terminal_census_rows.0: 'head_sha' is a required property",
+            "terminal_census_rows.0: 'status' is a required property",
+            "terminal_census_rows.0: 'conclusion' is a required property"
+          ],
+          "field_count": 303,
+          "prefix": "verify_b"
+        }
+      },
+      "name": "typed-fixture-strict-projections",
+      "status": "fail"
+    },
+    {
+      "detail": {
+        "expected": "positive-permanent-binding.json",
+        "present": false,
+        "schema": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G1/bootstrap-transition/v11-contract-bundle-2026-09-20/permanent_binding.schema.json"
+      },
+      "name": "permanent-strict-positive-coverage",
+      "status": "fail"
+    },
+    {
+      "detail": {
+        "counts": {
+          "adoption": 17,
+          "permanent_binding": 146,
+          "pre_record": 73,
+          "pre_record_transport": 11,
+          "provider_result": 26,
+          "release_manifest": 14,
+          "verify_b": 22
+        },
+        "diff": {
+          "adoption": {
+            "extra_in_dag": [],
+            "missing_from_dag": []
+          },
+          "permanent_binding": {
+            "extra_in_dag": [],
+            "missing_from_dag": []
+          },
+          "pre_record": {
+            "extra_in_dag": [],
+            "missing_from_dag": []
+          },
+          "pre_record_transport": {
+            "extra_in_dag": [],
+            "missing_from_dag": []
+          },
+          "provider_result": {
+            "extra_in_dag": [],
+            "missing_from_dag": []
+          },
+          "release_manifest": {
+            "extra_in_dag": [],
+            "missing_from_dag": []
+          },
+          "verify_b": {
+            "extra_in_dag": [],
+            "missing_from_dag": []
+          }
+        }
+      },
+      "name": "schema-leaf-path-derivation",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "diff": {
+          "registry_entries_not_schema_leaves": [
+            "pre_record.verification.required_step_conclusions"
+          ],
+          "schema_leaves_missing_from_registry": [
+            "pre_record.verification.required_step_conclusions.artifact-verify",
+            "pre_record.verification.required_step_conclusions.attest-binding",
+            "pre_record.verification.required_step_conclusions.attest-release",
+            "pre_record.verification.required_step_conclusions.build-linux-x64",
+            "pre_record.verification.required_step_conclusions.pre-record-upload",
+            "pre_record.verification.required_step_conclusions.publish",
+            "pre_record.verification.required_step_conclusions.reserve-release"
+          ]
+        },
+        "registry_count": 303,
+        "schema_leaf_count": 309
+      },
+      "name": "schema-leaf-registry-bijection",
+      "status": "fail"
+    },
+    {
+      "detail": {
+        "field_count": 303,
+        "metadata_errors": [],
+        "producer_count": 12
+      },
+      "name": "field-registry-unique-producers",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "extra": [],
+        "missing": []
+      },
+      "name": "stage-field-coverage",
+      "status": "pass"
+    },
+    {
+      "detail": [],
+      "name": "field-producer-stage-consistency",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "consumer_errors": [],
+        "duplicates": [],
+        "edge_count": 13,
+        "producer_errors": [],
+        "unknown_fields": []
+      },
+      "name": "lineage-edge-integrity",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "examples": {
+          "permanent.actions.artifact_metadata_write": [
+            "artifact-verify",
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.actions.attest_sha": [
+            "artifact-verify",
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.actions.create_storage_record": [
+            "artifact-verify",
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.actions.push_to_registry": [
+            "artifact-verify",
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.actions.upload_artifact_sha": [
+            "artifact-verify",
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.expired": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.id": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.inner_payload_sha256": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.inner_payload_size": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.name": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.rest_service_zip_sha256": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.rest_service_zip_size": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ]
+        },
+        "field_count_with_missing_consumers": 206
+      },
+      "name": "declared-consumer-transport-coverage",
+      "status": "fail"
+    },
+    {
+      "detail": {
+        "actual": [
+          [
+            "ci-main.policy-validator-B.workflow_call.outputs",
+            "ci-main.Policy",
+            [
+              "verify_b.provider_result_id",
+              "verify_b.provider_result_digest",
+              "verify_b.terminal_census_id",
+              "verify_b.terminal_census_digest",
+              "verify_b.resulting_main_sha",
+              "verify_b.policy_check_run_id",
+              "verify_b.policy_check_head_sha"
+            ]
+          ],
+          [
+            "verify-B",
+            "ci-main.policy-validator-B.workflow_call.outputs",
+            [
+              "verify_b.provider_result_id",
+              "verify_b.provider_result_digest",
+              "verify_b.terminal_census_id",
+              "verify_b.terminal_census_digest",
+              "verify_b.resulting_main_sha",
+              "verify_b.policy_check_run_id",
+              "verify_b.policy_check_head_sha"
+            ]
+          ]
+        ],
+        "expected": [
+          [
+            "ci-main.policy-validator-B.workflow_call.outputs",
+            "ci-main.Policy",
+            [
+              "verify_b.provider_result_id",
+              "verify_b.provider_result_digest",
+              "verify_b.terminal_census_id",
+              "verify_b.terminal_census_digest",
+              "verify_b.resulting_main_sha",
+              "verify_b.policy_check_run_id",
+              "verify_b.policy_check_head_sha"
+            ]
+          ],
+          [
+            "verify-B",
+            "ci-main.policy-validator-B.workflow_call.outputs",
+            [
+              "verify_b.provider_result_id",
+              "verify_b.provider_result_digest",
+              "verify_b.terminal_census_id",
+              "verify_b.terminal_census_digest",
+              "verify_b.resulting_main_sha",
+              "verify_b.policy_check_run_id",
+              "verify_b.policy_check_head_sha"
+            ]
+          ]
+        ]
+      },
+      "name": "workflow-call-output-transport",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "count": 38,
+        "fields": [
+          "pre_record.binding.attestation_digest",
+          "pre_record.binding.attestation_id",
+          "pre_record.binding.core_digest",
+          "pre_record.binding.final_manifest_artifact_digest",
+          "pre_record.binding.final_manifest_artifact_id",
+          "pre_record.binding.final_manifest_digest",
+          "pre_record.binding.predicate_path",
+          "pre_record.binding.predicate_type",
+          "pre_record.binding.subject_digest",
+          "pre_record.binding.subject_name",
+          "pre_record.canonical_release_schema_sha256",
+          "pre_record.canonical_root_manifest_sha256",
+          "pre_record.producer.check_run_id",
+          "pre_record.producer.job_id",
+          "pre_record.producer.job_workflow_sha",
+          "pre_record.producer.run_attempt",
+          "pre_record.producer.run_id",
+          "pre_record.producer.workflow_file_blob_sha",
+          "pre_record.producer.workflow_path",
+          "pre_record.producer.workflow_ref",
+          "pre_record.record_kind",
+          "pre_record.release_attestation.attestation_digest",
+          "pre_record.release_attestation.attestation_id",
+          "pre_record.release_attestation.certificate_identity",
+          "pre_record.release_attestation.certificate_verified",
+          "pre_record.release_attestation.manifest_subject_sha256",
+          "pre_record.release_attestation.oidc_issuer",
+          "pre_record.release_attestation.oidc_policy_revision_sha256",
+          "pre_record.release_attestation.predicate_path",
+          "pre_record.release_attestation.predicate_type",
+          "pre_record.release_attestation.signer_repository",
+          "pre_record.release_attestation.signer_source_ref",
+          "pre_record.release_attestation.signer_workflow",
+          "pre_record.schema_version",
+          "pre_record.verification.binding_preimage_sha256",
+          "pre_record.verification.raw_downloads_equal_digests",
+          "pre_record.verification.release_preimage_sha256",
+          "pre_record.verification.required_step_conclusions"
+        ]
+      },
+      "name": "pre-record-fields-available-before-upload",
+      "status": "fail"
+    },
+    {
+      "detail": {
+        "count": 16,
+        "fields": [
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S4_binding_attest",
+            "field": "permanent.steps.attest_binding.conclusion",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S4_binding_attest",
+            "field": "permanent.steps.attest_binding.id",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S4_binding_attest",
+            "field": "permanent.steps.attest_binding.name",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S4_binding_attest",
+            "field": "permanent.steps.attest_binding.status",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S6_release_attest",
+            "field": "permanent.steps.attest_release.conclusion",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S6_release_attest",
+            "field": "permanent.steps.attest_release.id",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S6_release_attest",
+            "field": "permanent.steps.attest_release.name",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S6_release_attest",
+            "field": "permanent.steps.attest_release.status",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S5_publish",
+            "field": "permanent.steps.publish.conclusion",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S5_publish",
+            "field": "permanent.steps.publish.id",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S5_publish",
+            "field": "permanent.steps.publish.name",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S5_publish",
+            "field": "permanent.steps.publish.status",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S3_release_reserve",
+            "field": "permanent.steps.reserve_release.conclusion",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S3_release_reserve",
+            "field": "permanent.steps.reserve_release.id",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S3_release_reserve",
+            "field": "permanent.steps.reserve_release.name",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S3_release_reserve",
+            "field": "permanent.steps.reserve_release.status",
+            "producer": "artifact-verify"
+          }
+        ]
+      },
+      "name": "step-producer-temporal-availability",
+      "status": "fail"
+    },
+    {
+      "detail": [
+        {
+          "declared_stage": "S3_release_reserve",
+          "expected_stage": "S4_binding_attest",
+          "field": "pre_record.release.manifest_digest"
+        },
+        {
+          "declared_stage": "S3_release_reserve",
+          "expected_stage": "S5_publish",
+          "field": "pre_record.release.asset_id"
+        },
+        {
+          "declared_stage": "S3_release_reserve",
+          "expected_stage": "S5_publish",
+          "field": "pre_record.release.asset_digest"
+        }
+      ],
+      "name": "release-field-producer-timing",
+      "status": "fail"
+    },
+    {
+      "detail": {
+        "S4_binding": {
+          "duplicate": false,
+          "ordered_count": 112,
+          "overlap": [],
+          "partition_extra": [],
+          "partition_missing": [],
+          "stages": [
+            "S0_caller_readback",
+            "S1_build",
+            "S2_artifact_verify",
+            "S3_release_reserve"
+          ],
+          "unknown": []
+        },
+        "S6_release": {
+          "duplicate": false,
+          "ordered_count": 127,
+          "overlap": [],
+          "partition_extra": [],
+          "partition_missing": [],
+          "stages": [
+            "S0_caller_readback",
+            "S1_build",
+            "S2_artifact_verify",
+            "S3_release_reserve",
+            "S4_binding_attest",
+            "S5_publish"
+          ],
+          "unknown": []
+        },
+        "S7b_provider_result": {
+          "duplicate": false,
+          "ordered_count": 35,
+          "overlap": [],
+          "partition_extra": [],
+          "partition_missing": [],
+          "stages": [
+            "S7a_pre_record_transport",
+            "S7b_provider_result"
+          ],
+          "unknown": []
+        },
+        "S7c_terminal_census": {
+          "duplicate": false,
+          "ordered_count": 1,
+          "overlap": [],
+          "partition_extra": [],
+          "partition_missing": [],
+          "stages": [
+            "S7c_verify_b"
+          ],
+          "unknown": []
+        }
+      },
+      "name": "preimage-partition-integrity",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "S4_binding": [],
+        "S6_release": [],
+        "S7b_provider_result": []
+      },
+      "name": "declared-preimage-stage-boundaries",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "excluded": [
+          "terminal_census_id",
+          "terminal_census_digest"
+        ],
+        "ordered": [
+          "verify_b.terminal_census_rows"
+        ]
+      },
+      "name": "terminal-census-own-exclusion",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "explicit_exclusions": [
+          "provider_result_id",
+          "provider_result_digest",
+          "terminal_census_id",
+          "terminal_census_digest"
+        ],
+        "ordered_provider_identity_fields": [
+          "provider_result.provider_attestation_digest",
+          "provider_result.provider_check_run_id"
+        ]
+      },
+      "name": "provider-result-identity-exclusion",
+      "status": "fail"
+    },
+    {
+      "detail": {
+        "S4_binding": {
+          "missing_expected": [],
+          "suffixes": [
+            "_id",
+            "_digest",
+            "_attestation_id",
+            "_attestation_digest"
+          ],
+          "unexpected_ordered": []
+        },
+        "S6_release": {
+          "missing_expected": [],
+          "suffixes": [
+            "_id",
+            "_digest",
+            "_attestation_id",
+            "_attestation_digest"
+          ],
+          "unexpected_ordered": []
+        }
+      },
+      "name": "model-suffix-exclusions-realized",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "preimage_files": [],
+        "reason": "bundle contains ordered field IDs and synthetic digest strings, not complete canonical preimage bytes plus a live signer"
+      },
+      "name": "preimage-digest-recomputation",
+      "status": "unimplemented"
+    },
+    {
+      "detail": {
+        "artifact_digest": true,
+        "artifact_id": true,
+        "asset_digest": true,
+        "main_sha": true,
+        "manifest_subject": true,
+        "provider_result": true,
+        "raw_artifact_digest": true,
+        "source_tree": true
+      },
+      "name": "joined-positive-lifecycle",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "manifest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "subject": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "name": "release-attestation-binding",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "reason": "no raw ZIP/payload/binary bytes and no live verifier; schema permits independent valid digests",
+        "required_equalities": {
+          "build_to_rest_service_zip": "permanent.artifact.service_zip_sha256 == permanent.artifact.rest_service_zip_sha256",
+          "inner_payload_to_binary": "inner payload binary digest/size == binary fields",
+          "raw_service_zip_to_rest_digest": "permanent.artifact.rest_service_zip_sha256 == bytes(S2 REST ZIP)",
+          "raw_zip_to_pre_record": "pre_record.artifact.service_zip_digest == verified raw service ZIP digest",
+          "release_asset_raw_bytes": "release asset REST bytes digest == release_manifest.asset_digest",
+          "service_zip_to_inner_payload": "service ZIP extracted payload digest/size == inner_payload fields"
+        }
+      },
+      "name": "artifact-inner-binary-digest-contract",
+      "status": "unimplemented"
+    },
+    {
+      "detail": {
+        "S4_suffix_exclusion_unapplied": true,
+        "adoption_fields_without_stage": true,
+        "duplicate_external_provider_edge": true,
+        "live_verifier_absent": false,
+        "pre_fixture_stale_root_digest": true,
+        "pre_fixture_wrong_release_schema_hash": true,
+        "schema_leaf_dynamic_object_omitted": true,
+        "typed_object_value_string": true,
+        "verify_b_terminal_census_extra": true,
+        "verify_b_terminal_outputs_untransported": true
+      },
+      "name": "v10-hostile-classes-replayed",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "count": 44,
+        "path": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G1/bootstrap-transition/v11-independent-adversarial-audit-2026-09-20-luna/v11-luna-hostile-fixtures.json",
+        "real_execution": "unimplemented",
+        "sha256": "e8ea509799cfee7fa428dcd599c51aa43abf63c6c2b7a1f545784fac6d4df91d"
+      },
+      "name": "hostile-fixture-set",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "observed_sha": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+        "observed_tree": "22ccc1daf9d55bd12d9a58e6652fe92cf3cb9416",
+        "remote_sha": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+        "remote_tree": "22ccc1daf9d55bd12d9a58e6652fe92cf3cb9416",
+        "stderr": ""
+      },
+      "name": "fresh-live-main-reconciliation",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "commit": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+        "paths": [
+          {
+            "path": ".github/workflows/ci-policy-validator-products.yml",
+            "present": false,
+            "stderr": "fatal: path '.github/workflows/ci-policy-validator-products.yml' does not exist in '89f82dd8b287f46a3cf4c0920f341f6ca6c736db'"
+          },
+          {
+            "path": ".github-gen/sources/workflows/ci-policy-validator-products.yml",
+            "present": false,
+            "stderr": "fatal: path '.github-gen/sources/workflows/ci-policy-validator-products.yml' does not exist in '89f82dd8b287f46a3cf4c0920f341f6ca6c736db'"
+          },
+          {
+            "path": "crates/velnor-workflow/src/s2/primitives/policy_validator_products.rs",
+            "present": false,
+            "stderr": "fatal: path 'crates/velnor-workflow/src/s2/primitives/policy_validator_products.rs' does not exist in '89f82dd8b287f46a3cf4c0920f341f6ca6c736db'"
+          }
+        ],
+        "tree": "22ccc1daf9d55bd12d9a58e6652fe92cf3cb9416"
+      },
+      "name": "fresh-live-typed-verifier",
+      "status": "unimplemented"
+    },
+    {
+      "detail": {
+        "action_pin_missing": true,
+        "oidc_claims": [
+          "workflow_ref",
+          "workflow_sha",
+          "job_workflow_ref",
+          "job_workflow_sha"
+        ],
+        "provider_identity": {
+          "installation_id": null,
+          "provider_app_id": null,
+          "result_endpoint": null,
+          "status": "unresolved_external_blocker",
+          "verifier_revision": null
+        },
+        "signature": {
+          "algorithm": null,
+          "key_id": null,
+          "signed_bytes": "canonical provider-result payload excluding provider_result_id and provider_result_digest",
+          "status": "unresolved_external_blocker",
+          "trust_root": null
+        },
+        "source_commit_sha": null
+      },
+      "name": "exact-action-source-and-oidc-trust",
+      "status": "unimplemented"
+    },
+    {
+      "detail": {
+        "declared_consumer_workflows": 15,
+        "rows": 1,
+        "schema_minItems": 1
+      },
+      "name": "terminal-census-completeness-contract",
+      "status": "fail"
+    },
+    {
+      "detail": {
+        "execution_authorized": false,
+        "freeze_status": "external_blocker",
+        "mutation_performed": false,
+        "plan_status": "successor_draft_external_blocked",
+        "provider_identity_status": "unresolved_external_blocker",
+        "signature_status": "unresolved_external_blocker"
+      },
+      "name": "external-blockers-honest",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "reason": "fresh main has no typed verifier/provider; hostile JSON fixtures are persisted but not submitted"
+      },
+      "name": "real-hostile-execution",
+      "status": "unimplemented"
+    }
+  ],
+  "execution_authorized": false,
+  "findings": [
+    {
+      "detail": {
+        "adoption": {
+          "error_count": 1,
+          "errors": [
+            "mode: 'permanent_pin' was expected"
+          ],
+          "field_count": 303,
+          "prefix": "adoption"
+        },
+        "permanent_binding": {
+          "error_count": 9,
+          "errors": [
+            "product.application_namespace_reuse: False was expected",
+            "product.asset: 'velnor-workflow-policy-validator-Linux-X64' was expected",
+            "product.features: '' was expected",
+            "product.mutable_latest: False was expected",
+            "product.overwrite: False was expected",
+            "product.platform: 'Linux-X64' was expected",
+            "product.product_id: 'velnor-workflow-policy-validator' was expected",
+            "product.runner: 'ubuntu-24.04' was expected",
+            "product.schema: 'velnor.workflow-policy-validator.v1' was expected"
+          ],
+          "field_count": 303,
+          "prefix": "permanent"
+        },
+        "pre_record": {
+          "error_count": 25,
+          "errors": [
+            "artifact.binary_architecture: 'x86_64' was expected",
+            "binding.final_manifest_artifact_digest: 'ad7ed67f395f2f1ac7e67564b9bbeff892206d11dcfad3261381ff6083e00905' does not match '^sha256:[0-9a-f]{64}$'",
+            "binding.predicate_path: 'attestations/velnor-policy-validator-binding.v1.json' was expected",
+            "binding.predicate_type: 'https://velnor.dev/attestations/policy-validator-binding/v1' was expected",
+            "binding.subject_digest: 'b763390d31c0606b93d3bf3ded0f7f75ffbd86460668fd3017037cfadeb7e4d0' does not match '^sha256:[0-9a-f]{64}$'",
+            "product.architecture: 'x86_64' was expected",
+            "product.name: 'velnor-workflow-policy-validator' was expected",
+            "product.namespace: 'velnor.workflow-policy-validator' was expected",
+            "product.platform: 'Linux-X64' was expected",
+            "record_kind: 'policy-validator-b-pre-provider' was expected",
+            "release.asset_digest: 'a1be5d9fcb9feda901f4d7558d25b2e43c971a6530da9d6efa9aa5f7b86275a0' does not match '^sha256:[0-9a-f]{64}$'",
+            "release.tag: 'fixture-0207' does not match '^velnor-workflow-policy-validator-v1-[0-9a-f]{40}$'",
+            "release_attestation.oidc_issuer: 'https://token.actions.githubusercontent.com' was expected",
+            "release_attestation.predicate_path: 'attestations/velnor-policy-validator-release.v1.json' was expected",
+            "release_attestation.predicate_type: 'https://velnor.dev/attestations/velnor-policy-validator-release/v1' was expected",
+            "release_attestation.signer_source_ref: 'refs/heads/main' was expected"
+          ],
+          "field_count": 303,
+          "prefix": "pre_record"
+        },
+        "pre_record_transport": {
+          "error_count": 1,
+          "errors": [
+            "artifact_raw_digest: '5290101ba5fae5ccb055af42fe95886931b2ac00bba31b675b5807303ee095f3' does not match '^sha256:[0-9a-f]{64}$'"
+          ],
+          "field_count": 303,
+          "prefix": "pre_record_transport"
+        },
+        "provider_result": {
+          "error_count": 3,
+          "errors": [
+            "provider_check_conclusion: 'success' was expected",
+            "provider_check_context: 'Policy-bootstrap-B' was expected",
+            "source_record_artifact_raw_digest: 'e82ba188484d06327c25ff115f6f50f413cd32b7cbb8757f949a2100fe9eddc3' does not match '^sha256:[0-9a-f]{64}$'"
+          ],
+          "field_count": 303,
+          "prefix": "provider_result"
+        },
+        "release_manifest": {
+          "error_count": 7,
+          "errors": [
+            "architecture: 'x86_64' was expected",
+            "asset_digest: '0c80487b0e8b90aa42294bbf6687df0ce4255c2b8d3b6c31b7b2fa32cff29d4c' does not match '^sha256:[0-9a-f]{64}$'",
+            "platform: 'Linux-X64' was expected",
+            "product_name: 'velnor-workflow-policy-validator' was expected",
+            "product_namespace: 'velnor.workflow-policy-validator' was expected",
+            "release_tag: '1a40d6729e612190868de17bd9bb2bd5bd799d4e' does not match '^velnor-workflow-policy-validator-v1-[0-9a-f]{40}$'",
+            "schema: 'velnor.workflow-policy-validator.release-manifest.v1' was expected"
+          ],
+          "field_count": 303,
+          "prefix": "release_manifest"
+        },
+        "verify_b": {
+          "error_count": 12,
+          "errors": [
+            "policy_check_conclusion: 'success' was expected",
+            "policy_check_context: 'Policy-bootstrap-B' was expected",
+            "terminal_census_rows.0: Additional properties are not allowed ('fixture_row' was unexpected)",
+            "terminal_census_rows.0: 'workflow_path' is a required property",
+            "terminal_census_rows.0: 'workflow_sha' is a required property",
+            "terminal_census_rows.0: 'run_id' is a required property",
+            "terminal_census_rows.0: 'attempt' is a required property",
+            "terminal_census_rows.0: 'job_id' is a required property",
+            "terminal_census_rows.0: 'check_run_id' is a required property",
+            "terminal_census_rows.0: 'head_sha' is a required property",
+            "terminal_census_rows.0: 'status' is a required property",
+            "terminal_census_rows.0: 'conclusion' is a required property"
+          ],
+          "field_count": 303,
+          "prefix": "verify_b"
+        }
+      },
+      "id": "V11-FIXTURE-001",
+      "message": "The emitted 303-field typed fixture only checks coarse JSON types; strict schema projections fail canonical consts, digest prefixes, nested terminal-row shape, and typed object values.",
+      "severity": "high"
+    },
+    {
+      "detail": {
+        "schema_sha256": "3e0651ebb8cfe6d055fdf6cfe733901da92decdc9766d73f28a817f53dd04194",
+        "typed_projection_errors": {
+          "error_count": 9,
+          "errors": [
+            "product.application_namespace_reuse: False was expected",
+            "product.asset: 'velnor-workflow-policy-validator-Linux-X64' was expected",
+            "product.features: '' was expected",
+            "product.mutable_latest: False was expected",
+            "product.overwrite: False was expected",
+            "product.platform: 'Linux-X64' was expected",
+            "product.product_id: 'velnor-workflow-policy-validator' was expected",
+            "product.runner: 'ubuntu-24.04' was expected",
+            "product.schema: 'velnor.workflow-policy-validator.v1' was expected"
+          ],
+          "field_count": 303,
+          "prefix": "permanent"
+        }
+      },
+      "id": "V11-SCHEMA-001",
+      "message": "permanent_binding.schema.json has no direct strict positive instance; the only permanent projection is the invalid coarse typed wrapper.",
+      "severity": "high"
+    },
+    {
+      "detail": {
+        "registry_entries_not_schema_leaves": [
+          "pre_record.verification.required_step_conclusions"
+        ],
+        "schema_leaves_missing_from_registry": [
+          "pre_record.verification.required_step_conclusions.artifact-verify",
+          "pre_record.verification.required_step_conclusions.attest-binding",
+          "pre_record.verification.required_step_conclusions.attest-release",
+          "pre_record.verification.required_step_conclusions.build-linux-x64",
+          "pre_record.verification.required_step_conclusions.pre-record-upload",
+          "pre_record.verification.required_step_conclusions.publish",
+          "pre_record.verification.required_step_conclusions.reserve-release"
+        ]
+      },
+      "id": "V11-DAG-001",
+      "message": "Strict schema leaves and canonical field registry are not bijective: required_step_conclusions child keys are schema leaves but only their object container is in fields.",
+      "severity": "high"
+    },
+    {
+      "detail": {
+        "affected_fields": 206,
+        "edges_without_explicit_transport": [
+          {
+            "consumer": "build-linux-x64",
+            "field_ids": [
+              "permanent.actions.artifact_metadata_write",
+              "permanent.actions.attest_sha",
+              "permanent.actions.create_storage_record",
+              "permanent.actions.push_to_registry",
+              "permanent.actions.upload_artifact_sha",
+              "permanent.product.application_namespace_reuse",
+              "permanent.product.asset",
+              "permanent.product.features",
+              "permanent.product.mutable_latest",
+              "permanent.product.overwrite",
+              "permanent.product.platform",
+              "permanent.product.product_id",
+              "permanent.product.profile",
+              "permanent.product.purpose",
+              "permanent.product.runner",
+              "permanent.product.schema",
+              "permanent.product.tag",
+              "permanent.publisher.attest_permissions",
+              "permanent.publisher.build_permissions",
+              "permanent.publisher.event",
+              "permanent.publisher.head_branch",
+              "permanent.publisher.head_sha",
+              "permanent.publisher.path",
+              "permanent.publisher.ref",
+              "permanent.publisher.repository",
+              "permanent.publisher.repository_id",
+              "permanent.publisher.reserve_publish_permissions",
+              "permanent.publisher.sha",
+              "permanent.source.closure",
+              "permanent.source.ref",
+              "permanent.source.repository",
+              "permanent.source.repository_id",
+              "permanent.source.sha",
+              "permanent.source.tree_sha",
+              "pre_record.caller_workflow.capture_step_id",
+              "pre_record.caller_workflow.file_blob_sha",
+              "pre_record.caller_workflow.path",
+              "pre_record.caller_workflow.ref",
+              "pre_record.caller_workflow.run_attempt",
+              "pre_record.caller_workflow.run_id",
+              "pre_record.caller_workflow.workflow_sha",
+              "pre_record.product.architecture",
+              "pre_record.product.name",
+              "pre_record.product.namespace",
+              "pre_record.product.platform",
+              "pre_record.source.closure_digest",
+              "pre_record.source.ref",
+              "pre_record.source.repository",
+              "pre_record.source.sha",
+              "pre_record.source.tree_sha"
+            ],
+            "orientation": "producer_outputs_to_consumer_inputs",
+            "producer": "capture-caller-context.capture"
+          },
+          {
+            "consumer": "artifact-verify",
+            "field_ids": [
+              "permanent.artifact.id",
+              "permanent.artifact.inner_payload_sha256",
+              "permanent.artifact.inner_payload_size",
+              "permanent.artifact.name",
+              "permanent.artifact.service_zip_sha256",
+              "permanent.artifact.service_zip_size",
+              "permanent.binary.architecture",
+              "permanent.binary.closure",
+              "permanent.binary.mode",
+              "permanent.binary.revision",
+              "permanent.binary.sha256",
+              "permanent.binary.size",
+              "permanent.upload.artifact_digest_output",
+              "permanent.upload.artifact_id_output",
+              "permanent.upload.step_id"
+            ],
+            "orientation": "producer_outputs_to_consumer_inputs",
+            "producer": "build-linux-x64"
+          },
+          {
+            "consumer": "reserve-release",
+            "field_ids": [
+              "permanent.artifact.expired",
+              "permanent.artifact.rest_service_zip_sha256",
+              "permanent.artifact.rest_service_zip_size",
+              "permanent.artifact.workflow_run_id",
+              "permanent.job.check_run_id",
+              "permanent.job.conclusion",
+              "permanent.job.head_sha",
+              "permanent.job.id",
+              "permanent.job.key",
+              "permanent.job.run_attempt",
+              "permanent.job.run_id",
+              "permanent.job.status",
+              "permanent.run.attempt",
+              "permanent.run.conclusion",
+              "permanent.run.database_id",
+              "permanent.run.event",
+              "permanent.run.head_branch",
+              "permanent.run.head_sha",
+              "permanent.run.id",
+              "permanent.run.repository_id",
+              "permanent.run.status",
+              "permanent.run.workflow_sha",
+              "permanent.steps.attest_binding.conclusion",
+              "permanent.steps.attest_binding.id",
+              "permanent.steps.attest_binding.name",
+              "permanent.steps.attest_binding.status",
+              "permanent.steps.attest_release.conclusion",
+              "permanent.steps.attest_release.id",
+              "permanent.steps.attest_release.name",
+              "permanent.steps.attest_release.status",
+              "permanent.steps.build.conclusion",
+              "permanent.steps.build.id",
+              "permanent.steps.build.name",
+              "permanent.steps.build.status",
+              "permanent.steps.publish.conclusion",
+              "permanent.steps.publish.id",
+              "permanent.steps.publish.name",
+              "permanent.steps.publish.status",
+              "permanent.steps.reserve_release.conclusion",
+              "permanent.steps.reserve_release.id",
+              "permanent.steps.reserve_release.name",
+              "permanent.steps.reserve_release.status",
+              "permanent.steps.upload.conclusion",
+              "permanent.steps.upload.id",
+              "permanent.steps.upload.name",
+              "permanent.steps.upload.status",
+              "pre_record.artifact.binary_architecture",
+              "pre_record.artifact.binary_digest",
+              "pre_record.artifact.binary_size",
+              "pre_record.artifact.inner_payload_digest",
+              "pre_record.artifact.inner_payload_size",
+              "pre_record.artifact.service_zip_digest",
+              "pre_record.artifact.service_zip_size"
+            ],
+            "orientation": "producer_outputs_to_consumer_inputs",
+            "producer": "artifact-verify"
+          },
+          {
+            "consumer": "attest-binding",
+            "field_ids": [
+              "permanent.release.draft_first",
+              "permanent.release.draft_reserved",
+              "permanent.release.id",
+              "permanent.release.tag",
+              "permanent.release.target_sha",
+              "pre_record.release.asset_digest",
+              "pre_record.release.asset_id",
+              "pre_record.release.manifest_digest",
+              "pre_record.release.release_id",
+              "pre_record.release.tag",
+              "pre_record.release.target_sha",
+              "release_manifest.release_id",
+              "release_manifest.release_tag",
+              "release_manifest.target_sha"
+            ],
+            "orientation": "producer_outputs_to_consumer_inputs",
+            "producer": "reserve-release"
+          }
+        ],
+        "examples": {
+          "permanent.actions.artifact_metadata_write": [
+            "artifact-verify",
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.actions.attest_sha": [
+            "artifact-verify",
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.actions.create_storage_record": [
+            "artifact-verify",
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.actions.push_to_registry": [
+            "artifact-verify",
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.actions.upload_artifact_sha": [
+            "artifact-verify",
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.expired": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.id": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.inner_payload_sha256": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.inner_payload_size": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.name": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.rest_service_zip_sha256": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.rest_service_zip_size": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.service_zip_sha256": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.service_zip_size": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "reserve-release",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.artifact.workflow_run_id": [
+            "attest-binding",
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "publish",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.attestation.binding_digest": [
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.attestation.binding_predicate_path": [
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.attestation.binding_predicate_type": [
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.attestation.binding_subject_name": [
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ],
+          "permanent.attestation.binding_subject_sha256": [
+            "attest-release",
+            "external-provider-result",
+            "pre-record-upload",
+            "tree-b-adoption-verifier",
+            "verify-B"
+          ]
+        }
+      },
+      "id": "V11-TRANSPORT-001",
+      "message": "The field registry declares downstream consumers, but no carry-forward/output/storage edge transports most S0/S1/S2 fields to those jobs; only one adjacent stage edge exists and ordinary GitHub needs edges do not carry arbitrary fields.",
+      "severity": "critical"
+    },
+    {
+      "detail": {
+        "count": 38,
+        "fields": [
+          "pre_record.binding.attestation_digest",
+          "pre_record.binding.attestation_id",
+          "pre_record.binding.core_digest",
+          "pre_record.binding.final_manifest_artifact_digest",
+          "pre_record.binding.final_manifest_artifact_id",
+          "pre_record.binding.final_manifest_digest",
+          "pre_record.binding.predicate_path",
+          "pre_record.binding.predicate_type",
+          "pre_record.binding.subject_digest",
+          "pre_record.binding.subject_name",
+          "pre_record.canonical_release_schema_sha256",
+          "pre_record.canonical_root_manifest_sha256",
+          "pre_record.producer.check_run_id",
+          "pre_record.producer.job_id",
+          "pre_record.producer.job_workflow_sha",
+          "pre_record.producer.run_attempt",
+          "pre_record.producer.run_id",
+          "pre_record.producer.workflow_file_blob_sha",
+          "pre_record.producer.workflow_path",
+          "pre_record.producer.workflow_ref",
+          "pre_record.record_kind",
+          "pre_record.release_attestation.attestation_digest",
+          "pre_record.release_attestation.attestation_id",
+          "pre_record.release_attestation.certificate_identity",
+          "pre_record.release_attestation.certificate_verified",
+          "pre_record.release_attestation.manifest_subject_sha256",
+          "pre_record.release_attestation.oidc_issuer",
+          "pre_record.release_attestation.oidc_policy_revision_sha256",
+          "pre_record.release_attestation.predicate_path",
+          "pre_record.release_attestation.predicate_type",
+          "pre_record.release_attestation.signer_repository",
+          "pre_record.release_attestation.signer_source_ref",
+          "pre_record.release_attestation.signer_workflow",
+          "pre_record.schema_version",
+          "pre_record.verification.binding_preimage_sha256",
+          "pre_record.verification.raw_downloads_equal_digests",
+          "pre_record.verification.release_preimage_sha256",
+          "pre_record.verification.required_step_conclusions"
+        ]
+      },
+      "id": "V11-DAG-002",
+      "message": "The strict pre-record uploaded at S7a requires 38 fields whose sole declared producer is S7c verify-B, which runs after the provider consumes that artifact.",
+      "severity": "critical"
+    },
+    {
+      "detail": {
+        "count": 16,
+        "fields": [
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S4_binding_attest",
+            "field": "permanent.steps.attest_binding.conclusion",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S4_binding_attest",
+            "field": "permanent.steps.attest_binding.id",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S4_binding_attest",
+            "field": "permanent.steps.attest_binding.name",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S4_binding_attest",
+            "field": "permanent.steps.attest_binding.status",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S6_release_attest",
+            "field": "permanent.steps.attest_release.conclusion",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S6_release_attest",
+            "field": "permanent.steps.attest_release.id",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S6_release_attest",
+            "field": "permanent.steps.attest_release.name",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S6_release_attest",
+            "field": "permanent.steps.attest_release.status",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S5_publish",
+            "field": "permanent.steps.publish.conclusion",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S5_publish",
+            "field": "permanent.steps.publish.id",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S5_publish",
+            "field": "permanent.steps.publish.name",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S5_publish",
+            "field": "permanent.steps.publish.status",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S3_release_reserve",
+            "field": "permanent.steps.reserve_release.conclusion",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S3_release_reserve",
+            "field": "permanent.steps.reserve_release.id",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S3_release_reserve",
+            "field": "permanent.steps.reserve_release.name",
+            "producer": "artifact-verify"
+          },
+          {
+            "declared_stage": "S2_artifact_verify",
+            "expected_stage": "S3_release_reserve",
+            "field": "permanent.steps.reserve_release.status",
+            "producer": "artifact-verify"
+          }
+        ]
+      },
+      "id": "V11-DAG-003",
+      "message": "Artifact-verify S2 is declared as producer for reserve-release, attest-binding, publish, and attest-release step IDs/statuses that do not exist until those later jobs run.",
+      "severity": "high"
+    },
+    {
+      "detail": [
+        {
+          "declared_stage": "S3_release_reserve",
+          "expected_stage": "S4_binding_attest",
+          "field": "pre_record.release.manifest_digest"
+        },
+        {
+          "declared_stage": "S3_release_reserve",
+          "expected_stage": "S5_publish",
+          "field": "pre_record.release.asset_id"
+        },
+        {
+          "declared_stage": "S3_release_reserve",
+          "expected_stage": "S5_publish",
+          "field": "pre_record.release.asset_digest"
+        }
+      ],
+      "id": "V11-DAG-004",
+      "message": "pre_record release asset/manifest identities are assigned to reserve-release before their real publish/binding producers; the S3\u2192S4 lineage therefore consumes future values.",
+      "severity": "high"
+    },
+    {
+      "detail": {
+        "ordered": [
+          "provider_result.provider_attestation_digest",
+          "provider_result.provider_check_run_id"
+        ],
+        "signature_contract": "canonical provider-result payload excluding provider_result_id and provider_result_digest"
+      },
+      "id": "V11-PREIMAGE-001",
+      "message": "S7b provider preimage excludes result ID/digest but still orders provider_check_run_id and provider_attestation_digest, both provider-owned result identities with no specified pre-sign allocation/acyclic sequence.",
+      "severity": "critical"
+    },
+    {
+      "detail": {
+        "preimage_files": [],
+        "typed_fixture_live": false
+      },
+      "id": "V11-PREIMAGE-002",
+      "message": "Binding/release/provider/terminal digest values are synthetic and no complete preimage bytes or real signing verifier is available for recomputation.",
+      "severity": "high"
+    },
+    {
+      "detail": {
+        "build_to_rest_service_zip": "permanent.artifact.service_zip_sha256 == permanent.artifact.rest_service_zip_sha256",
+        "inner_payload_to_binary": "inner payload binary digest/size == binary fields",
+        "raw_service_zip_to_rest_digest": "permanent.artifact.rest_service_zip_sha256 == bytes(S2 REST ZIP)",
+        "raw_zip_to_pre_record": "pre_record.artifact.service_zip_digest == verified raw service ZIP digest",
+        "release_asset_raw_bytes": "release asset REST bytes digest == release_manifest.asset_digest",
+        "service_zip_to_inner_payload": "service ZIP extracted payload digest/size == inner_payload fields"
+      },
+      "id": "V11-DATA-001",
+      "message": "Schemas carry service-ZIP, inner-payload, binary, and release-asset digests/sizes but the frozen model has no executable equality/byte fixture proving those joins.",
+      "severity": "high"
+    },
+    {
+      "detail": {
+        "commit": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+        "paths": [
+          ".github/workflows/ci-policy-validator-products.yml",
+          ".github-gen/sources/workflows/ci-policy-validator-products.yml",
+          "crates/velnor-workflow/src/s2/primitives/policy_validator_products.rs"
+        ]
+      },
+      "id": "V11-IMPL-001",
+      "message": "No typed publisher/verifier implementation exists at fresh origin/main; schema and hostile checks are contract-only.",
+      "severity": "critical"
+    },
+    {
+      "detail": {
+        "provider_identity": {
+          "installation_id": null,
+          "provider_app_id": null,
+          "result_endpoint": null,
+          "status": "unresolved_external_blocker",
+          "verifier_revision": null
+        },
+        "signature": {
+          "algorithm": null,
+          "key_id": null,
+          "signed_bytes": "canonical provider-result payload excluding provider_result_id and provider_result_digest",
+          "status": "unresolved_external_blocker",
+          "trust_root": null
+        },
+        "source_commit_sha": null
+      },
+      "id": "V11-TRUST-001",
+      "message": "Exact provider signer/app/repository/workflow/ref/digest trust values and immutable action source SHA are unresolved; schemas accept arbitrary valid SHA strings and URI endpoints.",
+      "severity": "critical"
+    },
+    {
+      "detail": {
+        "required_workflows": [
+          "ci-main.yml",
+          "ci-policy.yml",
+          "ci-pr.yml",
+          "ci-unit-rust.yml",
+          "ci-unit-bun.yml",
+          "ci-unit-docker.yml",
+          "ci-unit-docs.yml",
+          "ci-unit-opentofu.yml",
+          "maintenance.yml",
+          "preview.yml",
+          "release.yml",
+          "ci-runtime-products.yml",
+          "ci-policy-validator-products.yml",
+          "nightly.yml",
+          "ci-release-package-signer.yml"
+        ],
+        "rows": [
+          {
+            "attempt": 1,
+            "check_run_id": 7404,
+            "conclusion": "success",
+            "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "job_id": 7403,
+            "run_id": 7401,
+            "status": "completed",
+            "workflow_path": ".github/workflows/ci-main.yml",
+            "workflow_sha": "5555555555555555555555555555555555555555"
+          }
+        ]
+      },
+      "id": "V11-TERM-001",
+      "message": "The positive terminal census has one row while the authority graph declares 15 consumer workflows; verify-B has no required coverage set or completeness predicate.",
+      "severity": "high"
+    }
+  ],
+  "frozen_inputs": {
+    "dag": "37e3d0cb65b5b793219d94894a672eae50e8181378481dfb846afff1c49e56e7",
+    "freeze_manifest": "df14a907b29cf5839551dc0b4a32e77af5c61d8e927433530f9a061d75997c16",
+    "hostile_fixture_sha256": "e8ea509799cfee7fa428dcd599c51aa43abf63c6c2b7a1f545784fac6d4df91d",
+    "model": "ff3d8018bb7707ef540b9be5b6e7b22262b93a1309733b59f9f19a9842dda930",
+    "owner_report": "b81a47a7951d2437701e0a5ec2664fcad84e71e2e1dedf79400f423864b66e24",
+    "owner_result": "50160264a4e886a548b4c9494ce0e32f7a8f06f0704bf9daee4200a577fb8411",
+    "plan_json": "4c50c8e591924cbdbccb7ec489e8a8bbb20576d5f5fbb207c42e52837f6d42c6",
+    "plan_md": "2fe0a7e534299e0b7dc83102706d29d91fd07e422a795ef726c1dccd5d119dde",
+    "projection_sha256": "7d55a6eb7f5ab50f8bb4792251f9454dab9515a8b11bbf4d530a8131ccc8c3ae",
+    "root_digest": "deb19280afeb9bf17b4c80ca52d808a1115822e7f8d48ff28f204e9a7388c017",
+    "root_raw": "35f8ae8a20cfe3ce774ed0d63ece8ed06d3e66d4e66693933ea5e5825e32a96d"
+  },
+  "hostile_execution": "unimplemented-no-live-verifier",
+  "mutation_performed": false,
+  "owner_results_not_authority": {
+    "report_sha256": "b81a47a7951d2437701e0a5ec2664fcad84e71e2e1dedf79400f423864b66e24",
+    "result_sha256": "50160264a4e886a548b4c9494ce0e32f7a8f06f0704bf9daee4200a577fb8411"
+  },
+  "schema": "velnor.authority-transition.v11-luna-independent-audit.v1",
+  "status": "proposal_only_external_blocked",
+  "strict_validator": "jsonschema 4.26.0 Draft202012Validator with FormatChecker",
+  "summary": {
+    "failed": 9,
+    "findings": 13,
+    "passed": 24,
+    "total": 38,
+    "unavailable": 0,
+    "unimplemented": 5
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "captured_at_utc": "2026-09-20T06:16:59.368431Z",
+  "complete": true,
+  "default_branch": "main",
+  "default_sha": "2b4f71f49fd27061e64d16b2b7f83d9bd2df5612",
+  "open_prs": [],
+  "raw_requests": {
+    "default_branch": "00095-tailrocks-pull-request-skills-after-default-branch",
+    "open_pr_pages": [
+      "00096-tailrocks-pull-request-skills-after-open-prs-page-1"
+    ],
+    "repository": "00094-tailrocks-pull-request-skills-after-repository"
+  },
+  "repo": "tailrocks-pull-request-skills",
+  "snapshot": "after"
+}

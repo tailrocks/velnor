@@ -1,0 +1,171 @@
+{
+  "artifact": "G1 unified-source integration dependency map",
+  "captured_utc": "2026-09-20T06:08:11Z",
+  "mode": "read-only planning; no owner branch, main, authority, merge, or push mutation",
+  "live_refs": {
+    "origin/main": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+    "origin/codex/g0-estate-scope": "0e344790dfba48765d2c971f2dfe7938840d4649",
+    "origin/codex/github-first-hosted-g1-security-3ae": "c70428c919edc6ab938fcfddd9546ecdedc713c5"
+  },
+  "ancestry": {
+    "g0_vs_main": {
+      "merge_base": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+      "main_only_commits": 8,
+      "g0_only_commits": 38,
+      "ancestor_relation": "neither"
+    },
+    "runtime_vs_main": {
+      "merge_base": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+      "main_only_commits": 4,
+      "runtime_only_commits": 16,
+      "ancestor_relation": "neither",
+      "main_only_chain": [
+        "d20d4d1d17590cca85b501d982cbaad70d42c641",
+        "e94b48406c4ed206fce2bbf39b788264e72cf39c",
+        "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+        "89f82dd8b287f46a3cf4c0920f341f6ca6c736db"
+      ]
+    },
+    "g0_vs_runtime": {
+      "merge_base": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+      "g0_only_commits": 38,
+      "runtime_only_commits": 20,
+      "ancestor_relation": "neither"
+    }
+  },
+  "review_evidence": {
+    "g0_recovery": {
+      "commit": "0e344790dfba48765d2c971f2dfe7938840d4649",
+      "report": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/transaction-recovery-review/0e344790dfba48765d2c971f2dfe7938840d4649-review.md",
+      "sha256": "978d93e1b9738ec31608166bc21321eb3c8f2cb43b3589e17b5b8f09a030de67",
+      "disposition": "bounded local recovery pass only; not G0 approval or hosted proof"
+    },
+    "runtime_successor": {
+      "commit": "c70428c919edc6ab938fcfddd9546ecdedc713c5",
+      "parent": "f90515f30c3325a1a5469b1725a202a57a884002",
+      "report": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G1/reviews/runtime-stall-c70428c9.md",
+      "sha256": "35044070abb27107e95a941a310282166a6b482ca6978198c00b2e8d1d93bc88",
+      "disposition": "conditional; four residual runtime findings remain before unified integration"
+    }
+  },
+  "branch_commit_map": {
+    "g0": {
+      "base": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+      "tip": "0e344790dfba48765d2c971f2dfe7938840d4649",
+      "source_replay_range": "6387532f03c230f26795975ba5ff3034f2862eb7..0e344790dfba48765d2c971f2dfe7938840d4649",
+      "semantic_suffixes": {
+        "estate_scope": "6387532f03c230f26795975ba5ff3034f2862eb7..e5b475b80110447469fdeb4a24b7967008b39aca",
+        "scan_ownership": "458489729431822feed9c06c6678cb814a9be73f..c4cd8da001701f1054df7464325a72d2c59aefd0",
+        "baseline_recovery": "04a39cc3a0d75bf19007a4f3f654df38c9662212..cec04dd1faef785a85e4c8dee6aecb4229ef57a2",
+        "transaction_recovery": "eedae2e161275d035c10d7f599ff0786fa466bb3..0e344790dfba48765d2c971f2dfe7938840d4649"
+      },
+      "generated_only_commit_to_omit": "0a15fd06e002f57dca546d5c041754f1ec433508",
+      "tip_direct_path": "crates/velnor-workflow/src/s2/mod.rs"
+    },
+    "runtime": {
+      "common_base_with_main": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+      "tip": "c70428c919edc6ab938fcfddd9546ecdedc713c5",
+      "reviewed_pending_suffix": [
+        "ea9686f0eb522e402441ecd461bd1f458b731d06",
+        "f90515f30c3325a1a5469b1725a202a57a884002",
+        "c70428c919edc6ab938fcfddd9546ecdedc713c5"
+      ],
+      "source_order_before_suffix": [
+        "1c5eb2aab1c4785f7915e92b9fd1249ab978c626",
+        "d70a88a2bfebada05c3ddb1140ceb9066c53a94b",
+        "3aecc6ed0bf83b1f6dd1d99a1a8a29884f3d710a",
+        "9ae363b3aceb69b2217880bf371533a55eed4946",
+        "525fc9e0eceee213814240d94b26b06a0ddefded",
+        "73ecac5f05c5b32978e81d3d955e8a679056f0d8",
+        "242eab7512a8a72a01707fa3711684f7dbb08f1d",
+        "423c2792da62b1f90cd9ade903f5a1771a771060"
+      ],
+      "generated_or_merge_commits_to_omit_until_regeneration": [
+        "a38e459c7c88fa1c6e9a646a7513b2eecac292b8",
+        "94b43578cad9720e569780d18dc966370ed47c11",
+        "b62c868eb866672e6aaec1b286c1d508989d5cac",
+        "da5218686085bd394770cfdabe4f66c9dc5d9e12"
+      ],
+      "mixed_source_generated_commit": "2fad9a2d07f51760fadad94ce3ce94e058b830ac",
+      "tip_direct_paths": [
+        "crates/velnor-workflow/Cargo.toml",
+        "crates/velnor-workflow/src/s2/runtime.rs"
+      ]
+    }
+  },
+  "cumulative_path_overlap_g0_runtime": [
+    ".github/ci/.github-actions-generator-state",
+    ".github/workflows/release.yml",
+    "Cargo.lock",
+    "crates/velnor-workflow/Cargo.toml",
+    "crates/velnor-workflow/src/s2/config/mod.rs",
+    "crates/velnor-workflow/src/s2/mod.rs",
+    "crates/velnor-workflow/src/s2/primitives/mod.rs",
+    "crates/velnor-workflow/src/s2/primitives/release.rs",
+    "crates/velnor-workflow/src/s2/scan/mod.rs"
+  ],
+  "merge_tree_conflict_probes": {
+    "main_plus_runtime": {
+      "uncommitted_tree_object": "34642bfbf966e1ff51b94b45cd03b3f2edf3ede6",
+      "conflicts": [
+        ".github/ci/.github-actions-generator-state"
+      ],
+      "auto_merged_shared_source_paths": [
+        "crates/velnor-workflow/src/s2/mod.rs",
+        "crates/velnor-workflow/src/s2/primitives/check_profiles.rs",
+        "crates/velnor-workflow/src/s2/primitives/package_release.rs",
+        "crates/velnor-workflow/src/s2/primitives/release.rs"
+      ]
+    },
+    "main_plus_g0": {
+      "uncommitted_tree_object": "23cab320cc7f798af358ef65e95af0c10d0d9ad9",
+      "conflicts": [
+        ".github/ci/.github-actions-generator-state",
+        "crates/velnor-workflow/src/s2/primitives/release.rs"
+      ]
+    },
+    "g0_plus_runtime": {
+      "uncommitted_tree_object": "7978d546fc490d0502c5e3a8782011b993b620e8",
+      "conflicts": [
+        ".github/ci/.github-actions-generator-state",
+        ".github/workflows/release.yml",
+        "crates/velnor-workflow/src/s2/primitives/release.rs"
+      ]
+    }
+  },
+  "generated_pin_state": {
+    "origin/main": {
+      "d19_revision": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+      "generator_revision": "54",
+      "config_input": "ff06cd48adfa74db",
+      "scan_input": "b096c93329fcc370"
+    },
+    "runtime_tip": {
+      "d19_revision": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+      "generator_revision": "53",
+      "config_input": "0b4786f050e99900",
+      "scan_input": "6b45276e6221b217"
+    },
+    "g0_tip": {
+      "d19_revision": "fdeed261bd2247a38db6922a7726cd45d3d6f31e",
+      "generator_revision": "52",
+      "config_input": "a56989da88a3c26a",
+      "scan_input": "1217352be0ec2ace"
+    },
+    "required_transition": "Keep origin/main generated files while source is reconciled. After all reviewed source is fixed, choose an actually published/reviewed generator revision, run the authoritative generator, verify byte identity and state hashes, then make one separate pin/state commit. Do not hand-edit generated workflows or blindly repin to an unpublished branch SHA."
+  },
+  "integration_order": [
+    "Wait for runtime c704 residual disposition: EPIPE/non-Interrupted read classification, failed process-group cleanup visibility, concurrent sink-writer guarantee, and PID-reuse identity edge.",
+    "Create a fresh integration worktree from origin/main at 89f82dd8; do not reuse either owner worktree.",
+    "Port reviewed runtime source commits in dependency order, preserving current-main changes after common base 10483370. Exclude generated-only commits and do not replay merge commits; port the source hunks of mixed 2fad9a2d only after review.",
+    "Port G0 source commits from the 6387532f..0e344790 range, omitting generated-only 0a15fd06. Resolve release.rs semantically against the runtime/main source, not by choosing one branch wholesale. Keep transaction recovery changes in s2/mod.rs and rustix dependency changes in Cargo.toml/Cargo.lock.",
+    "Regenerate all .github-gen, .github/ci, and .github/workflows outputs from the final source using the selected authoritative generator. Treat generator state as derived evidence, not a manual conflict resolution.",
+    "Commit the generated pin/state transition separately, then run generator byte-identity/policy checks, focused runtime and transaction tests, clippy, fmt, and the required full suite.",
+    "Only after independent review of the unified tree may the integration owner push; no merge, release, G0 approval, or concern-plan authority claim follows from this map."
+  ],
+  "explicit_blockers": [
+    "Runtime c704 review is conditional, not final approval.",
+    "D19 generator pin must identify a published/reviewed generator closure; current branch pin differences are stale-state evidence, not an authorization to repin.",
+    "G0 concern-plan authority gap remains separate and unresolved; this source integration map cannot promote auxiliary metadata to G0 authority."
+  ]
+}

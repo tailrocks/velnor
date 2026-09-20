@@ -1,0 +1,81 @@
+{
+  "$id": "https://velnor.dev/schemas/v11-release-manifest.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "architecture": {
+      "const": "x86_64",
+      "type": "string"
+    },
+    "asset_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "asset_id": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "closure_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "manifest_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "platform": {
+      "const": "Linux-X64",
+      "type": "string"
+    },
+    "product_name": {
+      "const": "velnor-workflow-policy-validator",
+      "type": "string"
+    },
+    "product_namespace": {
+      "const": "velnor.workflow-policy-validator",
+      "type": "string"
+    },
+    "release_id": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "release_tag": {
+      "pattern": "^velnor-workflow-policy-validator-v1-[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "schema": {
+      "const": "velnor.workflow-policy-validator.release-manifest.v1",
+      "type": "string"
+    },
+    "source_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "source_tree_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "target_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "architecture",
+    "asset_digest",
+    "asset_id",
+    "closure_digest",
+    "manifest_digest",
+    "platform",
+    "product_name",
+    "product_namespace",
+    "release_id",
+    "release_tag",
+    "schema",
+    "source_sha",
+    "source_tree_sha",
+    "target_sha"
+  ],
+  "title": "Velnor immutable release manifest",
+  "type": "object"
+}

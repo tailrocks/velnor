@@ -1,0 +1,13 @@
+{
+  "artifact_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "artifact_id": 7003,
+  "artifact_name": "policy-validator-b-pre-record",
+  "artifact_raw_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "raw_zip_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "raw_zip_size": 1007,
+  "upload_check_run_id": 7203,
+  "upload_job_id": 7202,
+  "upload_run_attempt": 1,
+  "upload_run_id": 7201,
+  "upload_step_id": "fixture-0011"
+}

@@ -1,0 +1,15 @@
+{
+  "complete": true,
+  "repo": "tailrocks-skill-authoring-skills",
+  "roles": [
+    {
+      "branch": "main",
+      "role": "default-before"
+    }
+  ],
+  "sha": "9e25890fd63f7ca6c587490ba7cc432f5fdd98d6",
+  "tree_request_id": "00068-tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6-tree",
+  "tree_truncated": false,
+  "workflow_paths": [],
+  "workflows": []
+}

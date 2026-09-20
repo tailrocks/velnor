@@ -1,0 +1,9 @@
+{
+  "error": null,
+  "http_status": 200,
+  "id": 139017,
+  "login": "donbeave",
+  "request_id": "00001-auth-user",
+  "site_admin": false,
+  "type": "User"
+}

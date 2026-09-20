@@ -1,0 +1,19 @@
+{
+  "base_policy_blob_sha": "6666666666666666666666666666666666666666",
+  "base_policy_workflow_sha": "5555555555555555555555555555555555555555",
+  "canonical_root_sha256": "deb19280afeb9bf17b4c80ca52d808a1115822e7f8d48ff28f204e9a7388c017",
+  "mode": "permanent_pin",
+  "permanent_trust_root": "fixture-trust-root-v11",
+  "pr_base_sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+  "pr_head_sha": "2445c647dafa43acbc5285c873d3b04174ff75c6",
+  "pr_number": 969,
+  "provider_result_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "release_manifest_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+  "resulting_main_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "resulting_main_tree_sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "schema_sha256": "652057582f008f589408db30b55495887798cd524173cd6104dfa7876170b9c4",
+  "source_template_map_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "temporary_authority_removed": true,
+  "terminal_census_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "validated_utc": "2026-09-20T03:58:55Z"
+}

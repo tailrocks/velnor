@@ -1,0 +1,127 @@
+{
+  "authority_claim": false,
+  "baseline": {
+    "all_fields_sunk": true,
+    "api_fields_supported": true,
+    "external_blocked_honestly": true,
+    "joined_lifecycle": true,
+    "lineage_edges_unique": true,
+    "output_edges_complete": true,
+    "phase_pin_order": true,
+    "release_attestation_binding": true,
+    "strict_positive_all": true,
+    "typed_fixture_full_and_typed": true
+  },
+  "checks": [
+    {
+      "case": "baseline_strict_positive",
+      "detail": "all six positives validate with Draft202012Validator",
+      "status": "pass"
+    },
+    {
+      "case": "unknown_schema_field",
+      "detail": "strict schema rejects undeclared metadata",
+      "status": "pass"
+    },
+    {
+      "case": "release_tag_pattern",
+      "detail": "release schema rejects bare legacy tag",
+      "status": "pass"
+    },
+    {
+      "case": "release_asset_digest_prefix",
+      "detail": "release schema rejects bare digest without sha256 prefix",
+      "status": "pass"
+    },
+    {
+      "case": "raw_artifact_digest_prefix",
+      "detail": "transport schema rejects raw digest without prefix",
+      "status": "pass"
+    },
+    {
+      "case": "joined_artifact_id",
+      "detail": "cross-stage join rejects artifact identity mismatch",
+      "status": "pass"
+    },
+    {
+      "case": "joined_provider_result",
+      "detail": "cross-stage join rejects provider result mismatch",
+      "status": "pass"
+    },
+    {
+      "case": "release_attestation_subject",
+      "detail": "release attestation subject must equal manifest digest",
+      "status": "pass"
+    },
+    {
+      "case": "provider_terminal_cycle",
+      "detail": "provider schema rejects verifier-owned terminal census",
+      "status": "pass"
+    },
+    {
+      "case": "called_commit_blob_conflation",
+      "detail": "commit SHA and Contents blob SHA conflation is detected and rejected",
+      "status": "pass"
+    },
+    {
+      "case": "duplicate_lineage_edge",
+      "detail": "duplicate producer/consumer/field edge rejects",
+      "status": "pass"
+    },
+    {
+      "case": "workflow_output_transport",
+      "detail": "caller output edges are mandatory",
+      "status": "pass"
+    },
+    {
+      "case": "typed_object_value",
+      "detail": "typed object/array value cannot be stringified",
+      "status": "pass"
+    },
+    {
+      "case": "unsupported_identity_field",
+      "detail": "unsupported integration identity is absent from generated schema",
+      "status": "pass"
+    },
+    {
+      "case": "source_step_mapping",
+      "detail": "step identity comes from immutable source plus documented jobs fields",
+      "status": "pass"
+    },
+    {
+      "case": "pr_head_not_main",
+      "detail": "candidate PR head cannot stand in for resulting main",
+      "status": "pass"
+    },
+    {
+      "case": "external_blocker_not_success",
+      "detail": "unresolved provider/freeze/live state cannot be success",
+      "status": "pass"
+    },
+    {
+      "case": "phase_pin_order",
+      "detail": "Tree-B permanent pin follows Main-B; Tree-A/Main-B remain unpinned",
+      "status": "pass"
+    },
+    {
+      "case": "all_fields_have_sink",
+      "detail": "every canonical field has an explicit transport sink",
+      "status": "pass"
+    }
+  ],
+  "inputs": {
+    "dag_sha256": "37e3d0cb65b5b793219d94894a672eae50e8181378481dfb846afff1c49e56e7",
+    "model_sha256": "ff3d8018bb7707ef540b9be5b6e7b22262b93a1309733b59f9f19a9842dda930",
+    "plan_sha256": "4c50c8e591924cbdbccb7ec489e8a8bbb20576d5f5fbb207c42e52837f6d42c6"
+  },
+  "owner_audit_not_imported": true,
+  "schema": "velnor.authority-transition.v11-independent-adversarial-results",
+  "status": "proposal_only_external_blocked",
+  "summary": {
+    "failed": 0,
+    "passed": 19,
+    "total": 19,
+    "unimplemented": 0
+  },
+  "validator": "jsonschema Draft202012Validator with FormatChecker"
+}

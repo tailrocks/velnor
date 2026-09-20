@@ -1,0 +1,16 @@
+{
+  "captured_at_utc": "2026-09-20T06:16:10.346552Z",
+  "complete": true,
+  "default_branch": "main",
+  "default_sha": "0b9a1eaa83ca2ad9b2c895741648e7cde10f6189",
+  "open_prs": [],
+  "raw_requests": {
+    "default_branch": "00024-tailrocks-code-quality-skills-before-default-branch",
+    "open_pr_pages": [
+      "00025-tailrocks-code-quality-skills-before-open-prs-page-1"
+    ],
+    "repository": "00023-tailrocks-code-quality-skills-before-repository"
+  },
+  "repo": "tailrocks-code-quality-skills",
+  "snapshot": "before"
+}

@@ -1,0 +1,16 @@
+{
+  "architecture": "x86_64",
+  "asset_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "asset_id": 7102,
+  "closure_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+  "manifest_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+  "platform": "Linux-X64",
+  "product_name": "velnor-workflow-policy-validator",
+  "product_namespace": "velnor.workflow-policy-validator",
+  "release_id": 7101,
+  "release_tag": "velnor-workflow-policy-validator-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "schema": "velnor.workflow-policy-validator.release-manifest.v1",
+  "source_sha": "dddddddddddddddddddddddddddddddddddddddd",
+  "source_tree_sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "target_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}

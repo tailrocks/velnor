@@ -1,0 +1,15 @@
+{
+  "complete": true,
+  "repo": "tailrocks-roadmap-skills",
+  "roles": [
+    {
+      "branch": "main",
+      "role": "default-before"
+    }
+  ],
+  "sha": "66d9c79f6472ddace0e265335dc8dd36cdeb8a86",
+  "tree_request_id": "00054-tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86-tree",
+  "tree_truncated": false,
+  "workflow_paths": [],
+  "workflows": []
+}

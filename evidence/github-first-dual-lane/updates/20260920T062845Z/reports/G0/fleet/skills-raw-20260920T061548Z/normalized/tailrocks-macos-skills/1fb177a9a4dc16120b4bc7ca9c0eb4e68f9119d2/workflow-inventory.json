@@ -1,0 +1,15 @@
+{
+  "complete": true,
+  "repo": "tailrocks-macos-skills",
+  "roles": [
+    {
+      "branch": "main",
+      "role": "default-before"
+    }
+  ],
+  "sha": "1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2",
+  "tree_request_id": "00033-tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2-tree",
+  "tree_truncated": false,
+  "workflow_paths": [],
+  "workflows": []
+}

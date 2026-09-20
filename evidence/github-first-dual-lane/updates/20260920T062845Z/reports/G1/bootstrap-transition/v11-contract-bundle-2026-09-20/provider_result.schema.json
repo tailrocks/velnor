@@ -1,0 +1,141 @@
+{
+  "$id": "https://velnor.dev/schemas/v11-provider-result.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "canonical_release_schema_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "canonical_root_manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "provider_attestation_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "provider_check_app_id": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "provider_check_conclusion": {
+      "const": "success",
+      "type": "string"
+    },
+    "provider_check_context": {
+      "const": "Policy-bootstrap-B",
+      "type": "string"
+    },
+    "provider_check_head_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "provider_check_run_id": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "provider_endpoint": {
+      "format": "uri",
+      "type": "string"
+    },
+    "provider_result_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "provider_result_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "provider_verifier_revision": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "provider_workflow_ref": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "provider_workflow_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "resulting_main_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "resulting_main_tree_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "signature_base64": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "signer_algorithm": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "signer_certificate_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "signer_certificate_subject": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "signer_key_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "signer_public_key_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "source_record_artifact_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "source_record_artifact_id": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "source_record_artifact_raw_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "source_record_raw_zip_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "canonical_release_schema_sha256",
+    "canonical_root_manifest_sha256",
+    "provider_attestation_digest",
+    "provider_check_app_id",
+    "provider_check_conclusion",
+    "provider_check_context",
+    "provider_check_head_sha",
+    "provider_check_run_id",
+    "provider_endpoint",
+    "provider_result_digest",
+    "provider_result_id",
+    "provider_verifier_revision",
+    "provider_workflow_ref",
+    "provider_workflow_sha",
+    "resulting_main_sha",
+    "resulting_main_tree_sha",
+    "signature_base64",
+    "signer_algorithm",
+    "signer_certificate_sha256",
+    "signer_certificate_subject",
+    "signer_key_id",
+    "signer_public_key_sha256",
+    "source_record_artifact_digest",
+    "source_record_artifact_id",
+    "source_record_artifact_raw_digest",
+    "source_record_raw_zip_sha256"
+  ],
+  "title": "Velnor external provider result",
+  "type": "object"
+}

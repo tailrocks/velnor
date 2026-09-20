@@ -1,0 +1,825 @@
+{
+  "$id": "https://velnor.dev/schemas/v11-permanent-binding.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "actions": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_metadata_write": {
+          "type": "boolean"
+        },
+        "attest_sha": {
+          "type": "string"
+        },
+        "create_storage_record": {
+          "type": "boolean"
+        },
+        "push_to_registry": {
+          "type": "boolean"
+        },
+        "upload_artifact_sha": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_metadata_write",
+        "attest_sha",
+        "create_storage_record",
+        "push_to_registry",
+        "upload_artifact_sha"
+      ],
+      "type": "object"
+    },
+    "artifact": {
+      "additionalProperties": false,
+      "properties": {
+        "expired": {
+          "type": "boolean"
+        },
+        "id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "inner_payload_sha256": {
+          "type": "string"
+        },
+        "inner_payload_size": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "rest_service_zip_sha256": {
+          "type": "string"
+        },
+        "rest_service_zip_size": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "service_zip_sha256": {
+          "type": "string"
+        },
+        "service_zip_size": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "workflow_run_id": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expired",
+        "id",
+        "inner_payload_sha256",
+        "inner_payload_size",
+        "name",
+        "rest_service_zip_sha256",
+        "rest_service_zip_size",
+        "service_zip_sha256",
+        "service_zip_size",
+        "workflow_run_id"
+      ],
+      "type": "object"
+    },
+    "attestation": {
+      "additionalProperties": false,
+      "properties": {
+        "binding_digest": {
+          "type": "string"
+        },
+        "binding_predicate_path": {
+          "type": "string"
+        },
+        "binding_predicate_type": {
+          "type": "string"
+        },
+        "binding_subject_name": {
+          "type": "string"
+        },
+        "binding_subject_sha256": {
+          "type": "string"
+        },
+        "certificate_verified": {
+          "type": "boolean"
+        },
+        "release_manifest_subject_sha256": {
+          "type": "string"
+        },
+        "release_predicate_path": {
+          "type": "string"
+        },
+        "release_predicate_type": {
+          "type": "string"
+        },
+        "signer_repository": {
+          "type": "string"
+        },
+        "signer_source_ref": {
+          "type": "string"
+        },
+        "signer_workflow": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "binding_digest",
+        "binding_predicate_path",
+        "binding_predicate_type",
+        "binding_subject_name",
+        "binding_subject_sha256",
+        "certificate_verified",
+        "release_manifest_subject_sha256",
+        "release_predicate_path",
+        "release_predicate_type",
+        "signer_repository",
+        "signer_source_ref",
+        "signer_workflow"
+      ],
+      "type": "object"
+    },
+    "binary": {
+      "additionalProperties": false,
+      "properties": {
+        "architecture": {
+          "type": "string"
+        },
+        "closure": {
+          "type": "string"
+        },
+        "mode": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "size": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "architecture",
+        "closure",
+        "mode",
+        "revision",
+        "sha256",
+        "size"
+      ],
+      "type": "object"
+    },
+    "job": {
+      "additionalProperties": false,
+      "properties": {
+        "check_run_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "conclusion": {
+          "type": "string"
+        },
+        "head_sha": {
+          "type": "string"
+        },
+        "id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "key": {
+          "type": "string"
+        },
+        "run_attempt": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "run_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "check_run_id",
+        "conclusion",
+        "head_sha",
+        "id",
+        "key",
+        "run_attempt",
+        "run_id",
+        "status"
+      ],
+      "type": "object"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "manifest": {
+      "additionalProperties": false,
+      "properties": {
+        "sha256": {
+          "type": "string"
+        },
+        "size": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sha256",
+        "size"
+      ],
+      "type": "object"
+    },
+    "product": {
+      "additionalProperties": false,
+      "properties": {
+        "application_namespace_reuse": {
+          "const": false,
+          "type": "boolean"
+        },
+        "asset": {
+          "const": "velnor-workflow-policy-validator-Linux-X64",
+          "type": "string"
+        },
+        "features": {
+          "const": "",
+          "type": "string"
+        },
+        "mutable_latest": {
+          "const": false,
+          "type": "boolean"
+        },
+        "overwrite": {
+          "const": false,
+          "type": "boolean"
+        },
+        "platform": {
+          "const": "Linux-X64",
+          "type": "string"
+        },
+        "product_id": {
+          "const": "velnor-workflow-policy-validator",
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "runner": {
+          "const": "ubuntu-24.04",
+          "type": "string"
+        },
+        "schema": {
+          "const": "velnor.workflow-policy-validator.v1",
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "application_namespace_reuse",
+        "asset",
+        "features",
+        "mutable_latest",
+        "overwrite",
+        "platform",
+        "product_id",
+        "profile",
+        "purpose",
+        "runner",
+        "schema",
+        "tag"
+      ],
+      "type": "object"
+    },
+    "publisher": {
+      "additionalProperties": false,
+      "properties": {
+        "attest_permissions": {
+          "type": "string"
+        },
+        "build_permissions": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string"
+        },
+        "head_branch": {
+          "type": "string"
+        },
+        "head_sha": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "ref": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "repository_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "reserve_publish_permissions": {
+          "type": "string"
+        },
+        "sha": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attest_permissions",
+        "build_permissions",
+        "event",
+        "head_branch",
+        "head_sha",
+        "path",
+        "ref",
+        "repository",
+        "repository_id",
+        "reserve_publish_permissions",
+        "sha"
+      ],
+      "type": "object"
+    },
+    "release": {
+      "additionalProperties": false,
+      "properties": {
+        "attestation_signed_after_draft_id": {
+          "type": "boolean"
+        },
+        "draft_first": {
+          "type": "boolean"
+        },
+        "draft_reserved": {
+          "type": "boolean"
+        },
+        "id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "manifest_signed_after_draft_id": {
+          "type": "boolean"
+        },
+        "published": {
+          "type": "boolean"
+        },
+        "tag": {
+          "type": "string"
+        },
+        "tag_immutable": {
+          "type": "boolean"
+        },
+        "target_sha": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attestation_signed_after_draft_id",
+        "draft_first",
+        "draft_reserved",
+        "id",
+        "manifest_signed_after_draft_id",
+        "published",
+        "tag",
+        "tag_immutable",
+        "target_sha"
+      ],
+      "type": "object"
+    },
+    "run": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "conclusion": {
+          "type": "string"
+        },
+        "database_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "event": {
+          "type": "string"
+        },
+        "head_branch": {
+          "type": "string"
+        },
+        "head_sha": {
+          "type": "string"
+        },
+        "id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "repository_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "workflow_sha": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "conclusion",
+        "database_id",
+        "event",
+        "head_branch",
+        "head_sha",
+        "id",
+        "repository_id",
+        "status",
+        "workflow_sha"
+      ],
+      "type": "object"
+    },
+    "source": {
+      "additionalProperties": false,
+      "properties": {
+        "closure": {
+          "type": "string"
+        },
+        "ref": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "repository_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sha": {
+          "type": "string"
+        },
+        "tree_sha": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "closure",
+        "ref",
+        "repository",
+        "repository_id",
+        "sha",
+        "tree_sha"
+      ],
+      "type": "object"
+    },
+    "steps": {
+      "additionalProperties": false,
+      "properties": {
+        "attest_binding": {
+          "additionalProperties": false,
+          "properties": {
+            "conclusion": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "conclusion",
+            "id",
+            "name",
+            "status"
+          ],
+          "type": "object"
+        },
+        "attest_release": {
+          "additionalProperties": false,
+          "properties": {
+            "conclusion": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "conclusion",
+            "id",
+            "name",
+            "status"
+          ],
+          "type": "object"
+        },
+        "build": {
+          "additionalProperties": false,
+          "properties": {
+            "conclusion": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "conclusion",
+            "id",
+            "name",
+            "status"
+          ],
+          "type": "object"
+        },
+        "publish": {
+          "additionalProperties": false,
+          "properties": {
+            "conclusion": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "conclusion",
+            "id",
+            "name",
+            "status"
+          ],
+          "type": "object"
+        },
+        "reserve_release": {
+          "additionalProperties": false,
+          "properties": {
+            "conclusion": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "conclusion",
+            "id",
+            "name",
+            "status"
+          ],
+          "type": "object"
+        },
+        "upload": {
+          "additionalProperties": false,
+          "properties": {
+            "conclusion": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "conclusion",
+            "id",
+            "name",
+            "status"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "attest_binding",
+        "attest_release",
+        "build",
+        "publish",
+        "reserve_release",
+        "upload"
+      ],
+      "type": "object"
+    },
+    "trust": {
+      "additionalProperties": false,
+      "properties": {
+        "oidc_issuer": {
+          "type": "string"
+        },
+        "oidc_policy_revision_sha256": {
+          "type": "string"
+        },
+        "repository_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "signer_repository": {
+          "type": "string"
+        },
+        "signer_workflow": {
+          "type": "string"
+        },
+        "source_ref": {
+          "type": "string"
+        },
+        "source_sha": {
+          "type": "string"
+        },
+        "temporary_key_used": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "oidc_issuer",
+        "oidc_policy_revision_sha256",
+        "repository_id",
+        "signer_repository",
+        "signer_workflow",
+        "source_ref",
+        "source_sha",
+        "temporary_key_used"
+      ],
+      "type": "object"
+    },
+    "upload": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_digest_output": {
+          "type": "string"
+        },
+        "artifact_id_output": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "step_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_digest_output",
+        "artifact_id_output",
+        "step_id"
+      ],
+      "type": "object"
+    },
+    "verification": {
+      "additionalProperties": false,
+      "properties": {
+        "binding_digest_verified": {
+          "type": "boolean"
+        },
+        "cryptographic_attestation_verified": {
+          "type": "boolean"
+        },
+        "custom_predicate_verified": {
+          "type": "boolean"
+        },
+        "draft_first_verified": {
+          "type": "boolean"
+        },
+        "evidence_state": {
+          "type": "string"
+        },
+        "inner_payload_verified": {
+          "type": "boolean"
+        },
+        "main_ref_verified": {
+          "type": "boolean"
+        },
+        "manifest_verified": {
+          "type": "boolean"
+        },
+        "permanent_trust_policy_sha256": {
+          "type": "string"
+        },
+        "producer_api_verified": {
+          "type": "boolean"
+        },
+        "raw_zip_verified": {
+          "type": "boolean"
+        },
+        "release_api_verified": {
+          "type": "boolean"
+        },
+        "temporary_authority_used": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "binding_digest_verified",
+        "cryptographic_attestation_verified",
+        "custom_predicate_verified",
+        "draft_first_verified",
+        "evidence_state",
+        "inner_payload_verified",
+        "main_ref_verified",
+        "manifest_verified",
+        "permanent_trust_policy_sha256",
+        "producer_api_verified",
+        "raw_zip_verified",
+        "release_api_verified",
+        "temporary_authority_used"
+      ],
+      "type": "object"
+    },
+    "verifier": {
+      "additionalProperties": false,
+      "properties": {
+        "check_name": {
+          "type": "string"
+        },
+        "integration_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "permissions": {
+          "type": "string"
+        },
+        "provider_app_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "verifier_revision": {
+          "type": "string"
+        },
+        "write_authority": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "check_name",
+        "integration_id",
+        "permissions",
+        "provider_app_id",
+        "verifier_revision",
+        "write_authority"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "actions",
+    "artifact",
+    "attestation",
+    "binary",
+    "job",
+    "kind",
+    "manifest",
+    "product",
+    "publisher",
+    "release",
+    "run",
+    "source",
+    "steps",
+    "trust",
+    "upload",
+    "verification",
+    "verifier"
+  ],
+  "title": "Velnor canonical permanent binding",
+  "type": "object"
+}
