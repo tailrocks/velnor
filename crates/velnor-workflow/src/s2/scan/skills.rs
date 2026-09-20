@@ -1109,14 +1109,11 @@ fn reject_yaml_tags(value: &serde_yaml::Value, path: &str) -> Result<(), Generat
     }
 }
 
-const FRONTMATTER_KEYS: [&str; 9] = [
+const FRONTMATTER_KEYS: [&str; 6] = [
     "name",
     "description",
     "argument-hint",
     "license",
-    "compatibility",
-    "metadata",
-    "allowed-tools",
     "user-invocable",
     "disable-model-invocation",
 ];
@@ -1132,33 +1129,11 @@ fn validate_frontmatter_mapping(
                 "{path} frontmatter contains unsupported key `{key}`"
             )));
         }
-        if matches!(
-            key,
-            "name"
-                | "description"
-                | "argument-hint"
-                | "license"
-                | "compatibility"
-                | "allowed-tools"
-        ) && !value.is_string()
+        if matches!(key, "name" | "description" | "argument-hint" | "license") && !value.is_string()
         {
             return Err(GeneratorError::usage(format!(
                 "{path} frontmatter {key} must be a YAML string"
             )));
-        }
-        if key == "metadata" {
-            let Some(metadata) = value.as_mapping() else {
-                return Err(GeneratorError::usage(format!(
-                    "{path} frontmatter metadata must be a YAML mapping"
-                )));
-            };
-            for (metadata_key, metadata_value) in metadata {
-                if metadata_key.is_empty() || !metadata_value.is_string() {
-                    return Err(GeneratorError::usage(format!(
-                        "{path} frontmatter metadata keys and values must be YAML strings"
-                    )));
-                }
-            }
         }
         if matches!(key, "user-invocable" | "disable-model-invocation") && !value.is_bool() {
             return Err(GeneratorError::usage(format!(
@@ -1166,7 +1141,7 @@ fn validate_frontmatter_mapping(
             )));
         }
     }
-    for key in ["name", "description"] {
+    for key in ["name", "description", "argument-hint"] {
         if !mapping.contains_key(key) {
             return Err(GeneratorError::usage(format!(
                 "{path} frontmatter requires {key}"
@@ -1181,6 +1156,20 @@ fn validate_frontmatter_mapping(
                 "{path} frontmatter {key} must not be empty"
             )));
         }
+    }
+    if mapping.get("license").and_then(serde_yaml::Value::as_str) != Some("Apache-2.0") {
+        return Err(GeneratorError::usage(format!(
+            "{path} frontmatter license must be `Apache-2.0`"
+        )));
+    }
+    if mapping
+        .get("user-invocable")
+        .and_then(serde_yaml::Value::as_bool)
+        != Some(true)
+    {
+        return Err(GeneratorError::usage(format!(
+            "{path} frontmatter user-invocable must be true"
+        )));
     }
     Ok(())
 }
@@ -1567,15 +1556,25 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
     }
 
     #[test]
-    fn frontmatter_parser_accepts_standard_agent_skills_fields() {
-        let parsed = parse_frontmatter(
-            "---\nname: example\ndescription: A skill.\ncompatibility: Bun 1.4.0\nallowed-tools: Read Bash\nmetadata:\n  author: Velnor\n  category: testing\n---\n",
-            "skills/example/SKILL.md",
-            FrontmatterMode::LiveDefinition,
-        )
-        .unwrap_or_else(|error| panic!("standard Agent Skills fields parse: {error}"));
-        assert_eq!(parsed.values["compatibility"], "Bun 1.4.0");
-        assert_eq!(parsed.values["allowed-tools"], "Read Bash");
+    fn frontmatter_parser_rejects_noncontract_fields() {
+        for field in [
+            "compatibility: Bun 1.4.0",
+            "allowed-tools: Read Bash",
+            "metadata:\n  author: Velnor",
+        ] {
+            let error = parse_frontmatter(
+                &format!(
+                    "---\nname: example\ndescription: A skill.\nargument-hint: \"<args>\"\nlicense: Apache-2.0\nuser-invocable: true\n{field}\n---\n"
+                ),
+                "skills/example/SKILL.md",
+                FrontmatterMode::LiveDefinition,
+            )
+            .expect_err("non-contract frontmatter field must fail");
+            assert!(
+                error.to_string().contains("unsupported key"),
+                "{error} does not report unsupported key"
+            );
+        }
     }
 
     #[test]
@@ -1659,12 +1658,12 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
             "user-invocable must be a YAML boolean",
         );
         reject_skill_frontmatter_variant(
-            |skill| skill.replacen("license: Apache-2.0", "compatibility: [Bun, Node.js]", 1),
-            "compatibility must be a YAML string",
+            |skill| skill.replacen("license: Apache-2.0", "compatibility: Bun 1.4.0", 1),
+            "unsupported key",
         );
         reject_skill_frontmatter_variant(
-            |skill| skill.replacen("license: Apache-2.0", "metadata: [author, Velnor]", 1),
-            "metadata must be a YAML mapping",
+            |skill| skill.replacen("license: Apache-2.0", "metadata:\n  author: Velnor", 1),
+            "unsupported key",
         );
     }
 
@@ -1693,7 +1692,7 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
     }
 
     #[test]
-    fn optional_frontmatter_policy_values_are_target_owned() {
+    fn frontmatter_policy_values_are_strict() {
         let rewrites: [fn(String) -> String; 2] = [
             |skill: String| skill.replacen("license: Apache-2.0", "license: MIT", 1),
             |skill: String| skill.replacen("user-invocable: true", "user-invocable: false", 1),
@@ -1705,15 +1704,18 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
                 "read skill fixture",
             );
             fixture.write("skills/example/SKILL.md", &rewrite(skill));
-            let (_, shape) = fixture
-                .run_detect()
-                .unwrap_or_else(|error| panic!("optional policy field must be accepted: {error}"));
-            assert_eq!(shape.units.len(), 1);
+            let (error, shape) = fixture.run_detect_failure();
+            assert!(shape.units.is_empty(), "rejected input must emit no unit");
+            assert!(
+                error.to_string().contains("license must be `Apache-2.0`")
+                    || error.to_string().contains("user-invocable must be true"),
+                "{error} does not report strict policy value"
+            );
         }
     }
 
     #[test]
-    fn minimal_provider_valid_frontmatter_is_accepted() {
+    fn frontmatter_requires_all_live_fields() {
         let fixture = Fixture::new();
         let skill = must(
             fs::read_to_string(fixture.root.join("skills/example/SKILL.md")),
@@ -1729,14 +1731,40 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
             .collect::<Vec<_>>()
             .join("\n");
         fixture.write("skills/example/SKILL.md", &skill);
-        let (_, shape) = fixture
-            .run_detect()
-            .unwrap_or_else(|error| panic!("minimal frontmatter must be accepted: {error}"));
-        assert_eq!(shape.units.len(), 1);
+        let (error, shape) = fixture.run_detect_failure();
+        assert!(shape.units.is_empty(), "rejected input must emit no unit");
+        assert!(
+            error.to_string().contains("requires argument-hint"),
+            "{error} does not report missing argument-hint"
+        );
+        reject_skill_frontmatter_variant(
+            |skill| {
+                skill
+                    .lines()
+                    .filter(|line| !line.starts_with("license:"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            },
+            "license must be `Apache-2.0`",
+        );
+        reject_skill_frontmatter_variant(
+            |skill| {
+                skill
+                    .lines()
+                    .filter(|line| !line.starts_with("user-invocable:"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            },
+            "user-invocable must be true",
+        );
     }
 
     #[test]
     fn typed_frontmatter_rejects_semantic_invalid_values() {
+        reject_skill_frontmatter_variant(
+            |skill| skill.replacen("argument-hint: \"<path>\"", "argument-hint: \"\"", 1),
+            "argument-hint must not be empty",
+        );
         reject_skill_frontmatter_variant(
             |skill| {
                 skill.replacen(
