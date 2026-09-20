@@ -10,7 +10,7 @@ on:
       providers:
         description: Comma-separated provider subset of [github-hosted, velnor]
         required: false
-        default: github-hosted,velnor
+        default: github-hosted
         type: string
       scope:
         description: Verification scope
@@ -55,7 +55,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           DEFAULT_BRANCH: main
-          DISPATCH_PROVIDERS: ${{ github.event.inputs.providers || 'github-hosted,velnor' }}
+          DISPATCH_PROVIDERS: ${{ github.event.inputs.providers || 'github-hosted' }}
           DISPATCH_SCOPE: ${{ github.event.inputs.scope || 'full' }}
           DISPATCH_BASE_SHA: ${{ github.event.inputs.base_sha || format('refs/heads/{0}', github.event.repository.default_branch) }}
         shell: bash

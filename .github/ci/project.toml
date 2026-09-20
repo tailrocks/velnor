@@ -6,7 +6,7 @@ verified = true
 default_branch = "main"
 providers = ["github-hosted", "velnor"]
 automatic_providers = ["github-hosted"]
-default_dispatch_providers = ["github-hosted", "velnor"]
+default_dispatch_providers = ["github-hosted"]
 
 [analysis]
 method = "static-filesystem-and-manifest-inspection"

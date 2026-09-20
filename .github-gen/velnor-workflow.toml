@@ -9,18 +9,20 @@ repository = "tailrocks/velnor"
 # The branch changes the generator, so keep Stage 0 on the published base
 # product until the generator change is merged and published. The policy
 # candidate path verifies the checked-in tree with this branch's renderer.
-revision = "5939604042ae5191b1b6d742e19e0db2c163ea1d"
+revision = "4c12824fa861a1b31ab503a9db866b91574306d6"
 
 [scan]
 exclude = ["migrations/**"]
 
 # Provider placement: `providers` is the available backends.
 # `automatic_providers` run on PR/push/schedule without a dispatch choice.
-# Recovery: hosted runs automatically; Velnor is manual opt-in.
+# Hosted recovery: normal PR/push/schedule and omitted dispatch run on the
+# GitHub-hosted lane. Keep Velnor in the provider universe for explicit later
+# qualification, after hosted recovery is green.
 [workflow]
 providers = ["github-hosted", "velnor"]
 automatic_providers = ["github-hosted"]
-default_dispatch_providers = ["github-hosted", "velnor"]
+default_dispatch_providers = ["github-hosted"]
 default_branch = "main"
 # Routing contract: the release-side guest-payload producer builds Linux
 # cross-target guest agents and Firecracker kernel/rootfs images, so the
@@ -151,9 +153,8 @@ units = ["rust-production-topology"]
 primitive = "rust-crate-pipeline"
 units = ["rust-velnor-workflow-contract"]
 
-# Lanes and cache: the default matrix (GitHub-hosted plus the trust-gated
-# self-hosted lane) and the detected cache contract, stated explicitly so the
-# repository owns the decision.
+# Lanes and cache: retain the Velnor provider and cache contract for explicit
+# later qualification. Automatic recovery remains hosted-only above.
 
 [[declare]]
 primitive = "provider-matrix"
