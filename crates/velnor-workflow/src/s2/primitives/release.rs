@@ -2706,6 +2706,7 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
     output
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_native_publish_job(
     config: &ProjectConfig,
     release: &ReleaseSpec,
@@ -2770,45 +2771,66 @@ fn render_native_publish_job(
         consumer = release.consumer_repository,
     );
     if product_enabled {
+        let stable_boundary_validator = r#"          expected_paths=(
+            __ASSETS__
+          )
+          for subject in product-assets/*; do expected_paths+=("$subject"); done
+          verify_stable_release_boundary() {
+            local phase="$1" expected_dir="$2"
+            local release_json assets_url assets_json expected_assets actual_assets
+            test -n "${PRODUCT_RELEASE_ID:-}" || { echo '::error::stable provider release id is missing at final boundary' >&2; exit 1; }
+            release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+            jq -e --arg id "$PRODUCT_RELEASE_ID" --arg tag "$tag" --arg commit "$COMMIT" --arg phase "$phase" '
+              (.id | numbers | tostring) == $id and
+              .tag_name == $tag and .target_commitish == $commit and .name == $tag and
+              .prerelease == false and .draft == ($phase == "draft")
+            ' <<<"$release_json" >/dev/null || { echo "::error::stable provider identity changed during $phase boundary verification" >&2; exit 1; }
+            tag_ref="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag")"
+            jq -e --arg commit "$COMMIT" '.object.type == "commit" and .object.sha == $commit' <<<"$tag_ref" >/dev/null || { echo "::error::stable release tag moved during $phase boundary verification" >&2; exit 1; }
+            assets_url="$(jq -er '.assets_url | strings' <<<"$release_json")"
+            assets_json="$(gh api --paginate "$assets_url")"
+            expected_assets="$(for path in "${expected_paths[@]}"; do basename "$path"; done | sort)"
+            actual_assets="$(jq -r '.[].name' <<<"$assets_json" | sort)"
+            [ "$actual_assets" = "$expected_assets" ] || { echo "::error::stable $phase release asset census differs" >&2; exit 1; }
+            expected_path_for() {
+              local name="$1" path
+              if [ -n "$expected_dir" ]; then
+                path="$expected_dir/$name"
+                test -f "$path" || { echo "::error::stable expected boundary asset is missing: $name" >&2; return 1; }
+                printf '%s\n' "$path"
+                return 0
+              fi
+              for path in "${expected_paths[@]}"; do
+                if [ "$(basename "$path")" = "$name" ]; then
+                  printf '%s\n' "$path"
+                  return 0
+                fi
+              done
+              echo "::error::stable candidate asset is missing: $name" >&2
+              return 1
+            }
+            for path in "${expected_paths[@]}"; do
+              name="$(basename "$path")"
+              id="$(jq -er --arg name "$name" '[.[] | select(.name == $name) | .id] | if length == 1 then .[0] else error("stable asset census is not unique") end' <<<"$assets_json")"
+              expected_path="$(expected_path_for "$name")"
+              remote="$(mktemp)"
+              gh api "$assets_url/$id" -H 'Accept: application/octet-stream' > "$remote"
+              [ "$(sha256sum "$expected_path" | awk '{print $1}')" = "$(sha256sum "$remote" | awk '{print $1}')" ] || { echo "::error::stable $phase asset bytes changed: $name" >&2; exit 1; }
+              [ "$(wc -c <"$expected_path" | tr -d '[:space:]')" = "$(wc -c <"$remote" | tr -d '[:space:]')" ] || { echo "::error::stable $phase asset size changed: $name" >&2; exit 1; }
+              rm -f -- "$remote"
+            done
+          }
+"#
+        .replace("__ASSETS__", &assets);
         let draft_upload = r#"          if [ "$(gh release view "$tag" --json isDraft --jq '.isDraft')" = true ]; then
             PRODUCT_RELEASE_ID="${{ steps.product-release.outputs.release_id }}"
             test -n "${PRODUCT_RELEASE_ID:-}" || { echo '::error::product draft id was not resolved' >&2; exit 1; }
-            expected_paths=(
-              __ASSETS__
-            )
-            for subject in product-assets/*; do expected_paths+=("$subject"); done
-            verify_remote_assets() {
-              local phase="$1"
-              local release_json assets_url assets_json expected_assets actual_assets
-              release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
-              jq -e --arg id "$PRODUCT_RELEASE_ID" --arg tag "$tag" --arg commit "$COMMIT" --arg phase "$phase" '
-                (.id | numbers | tostring) == $id and
-                .tag_name == $tag and .target_commitish == $commit and .name == $tag and
-                .prerelease == false and .draft == ($phase == "draft")
-              ' <<<"$release_json" >/dev/null || { echo "::error::stable provider identity changed during $phase asset verification" >&2; exit 1; }
-              tag_ref="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag")"
-              jq -e --arg commit "$COMMIT" '.object.type == "commit" and .object.sha == $commit' <<<"$tag_ref" >/dev/null || { echo "::error::stable release tag moved during $phase asset verification" >&2; exit 1; }
-              assets_url="$(jq -er '.assets_url | strings' <<<"$release_json")"
-              assets_json="$(gh api --paginate "$assets_url")"
-              expected_assets="$(for path in "${expected_paths[@]}"; do basename "$path"; done | sort)"
-              actual_assets="$(jq -r '.[].name' <<<"$assets_json" | sort)"
-              [ "$actual_assets" = "$expected_assets" ] || { echo "::error::stable $phase release asset census differs" >&2; exit 1; }
-              for path in "${expected_paths[@]}"; do
-                name="$(basename "$path")"
-                id="$(jq -er --arg name "$name" '[.[] | select(.name == $name) | .id] | if length == 1 then .[0] else error("stable asset census is not unique") end' <<<"$assets_json")"
-                remote="$(mktemp)"
-                gh api "$assets_url/$id" -H 'Accept: application/octet-stream' > "$remote"
-                [ "$(sha256sum "$path" | awk '{print $1}')" = "$(sha256sum "$remote" | awk '{print $1}')" ] || { echo "::error::stable $phase asset bytes changed: $name" >&2; exit 1; }
-                [ "$(wc -c <"$path" | tr -d '[:space:]')" = "$(wc -c <"$remote" | tr -d '[:space:]')" ] || { echo "::error::stable $phase asset size changed: $name" >&2; exit 1; }
-                rm -f -- "$remote"
-              done
-            }
             # Upload, then admit the exact draft bytes before the irreversible flip.
             gh release upload "$tag" __ASSETS__ product-assets/*
-            verify_remote_assets draft
+            verify_stable_release_boundary draft ""
             gh release edit "$tag" --draft=false
             # GitHub does not make the upload+flip atomic; verify the published state immediately.
-            verify_remote_assets published
+            verify_stable_release_boundary published ""
             echo "Release $tag published with canonical native product assets."
             exit 0
           fi
@@ -2816,7 +2838,9 @@ fn render_native_publish_job(
         .replace("__ASSETS__", &assets);
         create_verify = create_verify.replace(
             "          if gh release view \"$tag\" >/dev/null 2>&1; then\n",
-            &format!("          if gh release view \"$tag\" >/dev/null 2>&1; then\n{draft_upload}"),
+            &format!(
+                "{stable_boundary_validator}          if gh release view \"$tag\" >/dev/null 2>&1; then\n{draft_upload}"
+            ),
         );
         create_verify = create_verify.replace(
             "          else\n            gh release create \"$tag\"",
@@ -2831,6 +2855,9 @@ fn render_native_publish_job(
             provider_release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
             jq -e --arg tag "$tag" --arg commit "$COMMIT" '(.id | numbers) and (.tag_name == $tag) and (.target_commitish == $commit) and (.draft == false) and (.prerelease == false)' <<<"$provider_release_json" >/dev/null
             provider_release_id="$(jq -er '.id | numbers | tostring' <<<"$provider_release_json")"
+            PRODUCT_RELEASE_ID="$provider_release_id"
+            tag_ref="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag")"
+            jq -e --arg commit "$COMMIT" '.object.type == "commit" and .object.sha == $commit' <<<"$tag_ref" >/dev/null || { echo '::error::published stable release tag moved' >&2; exit 1; }
             product_release_id="$(jq -er '.release_id | numbers | tostring' "$tmp/product-manifest.json")"
             [ "$provider_release_id" = "$product_release_id" ] || { echo '::error::published product manifest release id differs from provider release' >&2; exit 1; }
             jq -e --arg version "$VERSION" --arg commit "$COMMIT" --arg tag "$tag" --arg repository "$GITHUB_REPOSITORY" '
@@ -2840,6 +2867,18 @@ fn render_native_publish_job(
               ([.artifacts[].name] | index("product-manifest.json") | not) and
               ([.artifacts[].name] | index("product-manifest.json.sha256") | not)
             ' "$tmp/product-manifest.json" >/dev/null
+            expected_paths=(
+              __RUNTIME_ASSETS__
+              product-assets/product-manifest.json
+              product-assets/product-manifest.json.sha256
+              product-assets/release-attestation.json
+            )
+            while IFS= read -r name; do
+              case "$name" in
+                ''|*[!a-zA-Z0-9._-]*|/*|../*|*/../*|*/..) echo "::error::published product asset name is unsafe: $name" >&2; exit 1 ;;
+              esac
+              expected_paths+=("product-assets/$name")
+            done < <(jq -r '.artifacts[].name' "$tmp/product-manifest.json")
             product_contract="product-component-contract.json"
             product_payload="$tmp/product-payload"
             mkdir -p "$product_payload"
@@ -2922,8 +2961,23 @@ fn render_native_publish_job(
                   ;;
               esac
             done < <(jq -c '.artifacts[]' "$tmp/product-manifest.json")
+            boundary_dir="$(mktemp -d)"
+            for path in "${expected_paths[@]}"; do
+              name="$(basename "$path")"
+              if [ -f "$tmp/$name" ]; then
+                cp -- "$tmp/$name" "$boundary_dir/$name"
+              elif [ -f "$product_dir/$name" ]; then
+                cp -- "$product_dir/$name" "$boundary_dir/$name"
+              else
+                echo "::error::published boundary asset is not staged: $name" >&2
+                exit 1
+              fi
+            done
+            verify_stable_release_boundary published "$boundary_dir"
+            rm -rf -- "$boundary_dir"
 "#
-        .replace("{binary}", &release.binary);
+        .replace("{binary}", &release.binary)
+        .replace("__RUNTIME_ASSETS__", &assets);
         create_verify = create_verify.replace(
             "            # The record must name this exact tag, source commit, crate version\n",
             &format!("{product_existing}            # The record must name this exact tag, source commit, crate version\n"),
@@ -7299,20 +7353,21 @@ mod tests {
             .find("gh release upload \"$tag\"")
             .expect("stable product publisher must upload its prepared assets");
         let draft_verify = publish
-            .find("verify_remote_assets draft")
+            .find("verify_stable_release_boundary draft")
             .expect("stable product publisher must verify the draft assets");
         let flip = publish
             .find("gh release edit \"$tag\" --draft=false")
             .expect("stable product publisher must have one draft flip");
         let published_verify = publish
-            .find("verify_remote_assets published")
+            .find("verify_stable_release_boundary published")
             .expect("stable product publisher must verify after the draft flip");
         assert!(upload < draft_verify && draft_verify < flip && flip < published_verify);
         assert!(
             publish.contains("stable $phase release asset census differs")
                 && publish.contains("stable $phase asset bytes changed")
                 && publish.contains("stable $phase asset size changed")
-                && publish.contains("stable release tag moved during $phase asset verification"),
+                && publish.contains("stable release tag moved during $phase boundary verification")
+                && publish.contains("published stable release tag moved"),
             "stable product publication must fail closed on remote races: {publish}"
         );
         assert!(
