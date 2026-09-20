@@ -29,17 +29,25 @@ The fixture deliberately probes nine hostile surfaces:
 * `trusted-contract.schema.json` fixes the base-owned handoff fields and measured
   hash/image/resource limits. It is admitted only after the trusted wrapper
   verifies its exact SHA-256.
+* `producer-manifest.schema.json` is a separate base-owned strict schema for the
+  manifest carried beside the producer binary. The manifest is artifact data,
+  never an authority source.
 * `trusted-archive-check.py` rejects archive traversal, symlink/hardlink/device
   members, duplicate/ambiguous names, oversized members, and unsafe disposable
-  output trees. It is base-owned wrapper code, not candidate code.
+  output trees. Its exact-member mode admits only the two base-owned producer
+  files (binary and manifest), permits only their parent directory entries,
+  consumes every admitted file, and checks declared sizes plus ZIP CRCs. It is
+  base-owned wrapper code, not candidate code.
 * `trusted-harness.sh` is a future Linux-hosted wrapper. It verifies the handoff,
   fixture files, final image index/platform/config digests, image `Config.Env`,
   Docker preflight, bounded execution, structured result, output rejection, and
   cleanup. Its success is diagnostic containment evidence only; it is not policy
   approval or provenance.
 * `trusted-harness-negative-tests.sh` exercises schema duplicate/float/extra-key
-  rejection, unreadable output-subtree rejection, unexpected regular-file
-  rejection, and the non-Linux host gate. It never invokes Docker or the probe.
+  rejection, exact producer archive extra/missing/duplicate-member rejection,
+  forged-manifest identity rejection, unreadable output-subtree rejection,
+  unexpected regular-file rejection, and the non-Linux host gate. It never
+  invokes Docker or the probe.
 
 The approved sandbox base identity is recorded as the raw digest-pinned
 `ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b`.
@@ -118,7 +126,8 @@ probe output:
 * exact source head/tree/closure, target/head repository names and numeric IDs,
   producer workflow/event/run/job/artifact IDs and exact names, artifact service
   digest (which must equal `sha256:` plus the re-hashed producer archive), exact
-  binary member, archive digest, profile/features/platform. These API
+  binary and manifest member names, binary and manifest digests, archive digest,
+  profile/features/platform. These API
   observations are supplied by the trusted acquire job; the fixture cannot mint
   or select them;
 * final sandbox image name, raw multi-platform index digest, exact `linux/amd64`
@@ -137,6 +146,15 @@ only after the trusted archive checker accepts it. Resource limits are 128 PIDs,
 descriptors, 16 MiB `/dev/shm`, a 300-second timeout, and a 1 MiB container log
 cap. Any image, quota, timeout, copy, result, or cleanup failure is red; no
 host-shell fallback exists.
+
+Before candidate execution, the wrapper requires the producer archive member
+census to equal the two base-owned member names. Extra files, missing files,
+duplicate names, unsafe paths, links, special entries, and malformed member
+bytes fail closed. It hashes both members, extracts only the manifest into a
+disposable file, validates the strict manifest schema, and compares
+schema/profile/features/platform/repository/run/revision/closure and binary
+digest against the trusted handoff and measured binary. A forged manifest
+therefore cannot select the allow-list or mint the run contract.
 
 The hostile result parser asserts every H1-H9 field, not just field presence:
 zero forbidden names/tokens, absent command files/endpoints/proxies/sockets,

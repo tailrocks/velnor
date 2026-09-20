@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velnor.invalid/bootstrap/producer-manifest-v1.json",
+  "title": "Velnor G1 base-owned producer manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "profile",
+    "features",
+    "platform",
+    "repository",
+    "run_id",
+    "revision",
+    "closure",
+    "binary_sha256"
+  ],
+  "properties": {
+    "schema": { "const": "velnor.bootstrap-producer-manifest.v1" },
+    "profile": { "const": "debug" },
+    "features": { "const": [] },
+    "platform": { "const": "linux-amd64" },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "run_id": { "type": "integer", "minimum": 1 },
+    "revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "closure": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "binary_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

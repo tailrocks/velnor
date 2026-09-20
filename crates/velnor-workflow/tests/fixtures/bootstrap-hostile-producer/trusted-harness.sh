@@ -47,6 +47,7 @@ base_inputs=(
   G1_BUILD_PATH G1_BUILD_SHA256 G1_BINARY_PATH G1_BINARY_SHA256
   G1_FIXTURE_CONTRACT_PATH G1_FIXTURE_CONTRACT_SHA256
   G1_TRUSTED_SCHEMA_PATH G1_TRUSTED_SCHEMA_SHA256
+  G1_MANIFEST_SCHEMA_PATH G1_MANIFEST_SCHEMA_SHA256
   G1_ARCHIVE_CHECK_PATH G1_ARCHIVE_CHECK_SHA256 G1_HARNESS_SHA256
   G1_EXPECTED_WORKFLOW_PATH G1_EXPECTED_EVENT
   G1_EXPECTED_TARGET_REPOSITORY G1_EXPECTED_TARGET_REPOSITORY_ID
@@ -54,7 +55,8 @@ base_inputs=(
   G1_EXPECTED_PRODUCER_RUN_ID G1_EXPECTED_PRODUCER_JOB_ID
   G1_EXPECTED_PRODUCER_JOB_NAME G1_EXPECTED_PRODUCER_ARTIFACT_ID
   G1_EXPECTED_PRODUCER_ARTIFACT_NAME G1_EXPECTED_PRODUCER_SERVICE_DIGEST
-  G1_PRODUCER_ARCHIVE_PATH G1_PRODUCER_BINARY_MEMBER
+  G1_PRODUCER_ARCHIVE_PATH G1_PRODUCER_BINARY_MEMBER G1_PRODUCER_MANIFEST_MEMBER
+  G1_MANIFEST_SHA256
   G1_EXPECTED_SOURCE_HEAD_SHA G1_EXPECTED_TREE_DIGEST G1_SOURCE_REPOSITORY
   G1_EXPECTED_SOURCE_CLOSURE G1_SANDBOX_IMAGE G1_SANDBOX_BASE_REF
   G1_SANDBOX_SOURCE_REVISION G1_SANDBOX_INDEX_DIGEST
@@ -67,7 +69,8 @@ for name in "${base_inputs[@]}"; do
 done
 
 for name in G1_HANDOFF_SHA256 G1_SOURCE_ARCHIVE_SHA256 G1_PRODUCER_ARCHIVE_SHA256 G1_PROBE_SHA256 G1_BUILD_SHA256 \
-  G1_BINARY_SHA256 G1_FIXTURE_CONTRACT_SHA256 G1_TRUSTED_SCHEMA_SHA256 \
+  G1_BINARY_SHA256 G1_MANIFEST_SHA256 G1_FIXTURE_CONTRACT_SHA256 G1_TRUSTED_SCHEMA_SHA256 \
+  G1_MANIFEST_SCHEMA_SHA256 \
   G1_ARCHIVE_CHECK_SHA256 G1_HARNESS_SHA256 G1_EXPECTED_TREE_DIGEST \
   G1_EXPECTED_SOURCE_CLOSURE; do
   is_sha256 "${!name}" || die "bad hash input"
@@ -93,10 +96,14 @@ done
 [[ "$G1_EXPECTED_WORKFLOW_PATH" == .github/workflows/ci-pr.yml ]] || die "bad workflow path"
 [[ "$G1_EXPECTED_EVENT" == pull_request ]] || die "bad workflow event"
 [[ "$G1_EXPECTED_HEAD_REPOSITORY" == "$G1_SOURCE_REPOSITORY" ]] || die "head repository mismatch"
-for name in G1_EXPECTED_PRODUCER_JOB_NAME G1_EXPECTED_PRODUCER_ARTIFACT_NAME G1_PRODUCER_BINARY_MEMBER; do
+for name in G1_EXPECTED_PRODUCER_JOB_NAME G1_EXPECTED_PRODUCER_ARTIFACT_NAME \
+  G1_PRODUCER_BINARY_MEMBER G1_PRODUCER_MANIFEST_MEMBER; do
   [[ -n "${!name}" && "${!name}" != *$'\n'* && "${!name}" != *$'\r'* ]] || die "bad producer string input"
 done
-[[ "$G1_PRODUCER_BINARY_MEMBER" != /* && "$G1_PRODUCER_BINARY_MEMBER" != *..* && "$G1_PRODUCER_BINARY_MEMBER" != *\\* ]] || die "bad producer member path"
+for name in G1_PRODUCER_BINARY_MEMBER G1_PRODUCER_MANIFEST_MEMBER; do
+  [[ "${!name}" != /* && "${!name}" != *..* && "${!name}" != *\\* ]] || die "bad producer member path"
+done
+[[ "$G1_PRODUCER_BINARY_MEMBER" != "$G1_PRODUCER_MANIFEST_MEMBER" ]] || die "duplicate producer member path"
 is_digest "$G1_EXPECTED_PRODUCER_SERVICE_DIGEST" || die "bad producer service digest"
 [[ "$G1_EXPECTED_PRODUCER_SERVICE_DIGEST" == "sha256:$G1_PRODUCER_ARCHIVE_SHA256" ]] || die "producer service/archive digest mismatch"
 [[ "$G1_SANDBOX_BASE_REF" == ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b ]] || die "unapproved sandbox base"
@@ -135,6 +142,7 @@ trusted_file "$G1_BUILD_PATH" "$G1_BUILD_SHA256"
 trusted_file "$G1_BINARY_PATH" "$G1_BINARY_SHA256"
 trusted_file "$G1_FIXTURE_CONTRACT_PATH" "$G1_FIXTURE_CONTRACT_SHA256"
 trusted_file "$G1_TRUSTED_SCHEMA_PATH" "$G1_TRUSTED_SCHEMA_SHA256"
+trusted_file "$G1_MANIFEST_SCHEMA_PATH" "$G1_MANIFEST_SCHEMA_SHA256"
 trusted_file "$G1_ARCHIVE_CHECK_PATH" "$G1_ARCHIVE_CHECK_SHA256"
 script_path="$(realpath -e -- "$0")" || die "harness path unavailable"
 trusted_file "$script_path" "$G1_HARNESS_SHA256"
@@ -156,6 +164,7 @@ mkdir -m 0700 -- "$evidence"
 jq empty "$G1_HANDOFF_PATH" >/dev/null || die "handoff is not JSON"
 jq empty "$G1_FIXTURE_CONTRACT_PATH" >/dev/null || die "fixture contract is not JSON"
 jq empty "$G1_TRUSTED_SCHEMA_PATH" >/dev/null || die "trusted schema is not JSON"
+jq empty "$G1_MANIFEST_SCHEMA_PATH" >/dev/null || die "manifest schema is not JSON"
 python3 -B "$G1_ARCHIVE_CHECK_PATH" --validate-handoff \
   "$G1_TRUSTED_SCHEMA_PATH" "$G1_HANDOFF_PATH" >"$evidence/handoff-schema.json" || die "handoff schema validation failed"
 jq -e '.schema == "velnor.bootstrap-handoff-validation.v1" and .status == "valid"' \
@@ -175,8 +184,11 @@ jq -e \
   --arg build "$G1_BUILD_SHA256" \
   --arg binary "$G1_BINARY_SHA256" \
   --arg binary_member "$G1_PRODUCER_BINARY_MEMBER" \
+  --arg manifest "$G1_MANIFEST_SHA256" \
+  --arg manifest_member "$G1_PRODUCER_MANIFEST_MEMBER" \
   --arg contract "$G1_FIXTURE_CONTRACT_SHA256" \
   --arg schema "$G1_TRUSTED_SCHEMA_SHA256" \
+  --arg manifest_schema "$G1_MANIFEST_SCHEMA_SHA256" \
   --arg checker "$G1_ARCHIVE_CHECK_SHA256" \
   --arg harness "$G1_HARNESS_SHA256" \
   --arg image "$G1_SANDBOX_IMAGE" \
@@ -214,8 +226,12 @@ jq -e \
     .producer.artifact_service_digest == $service_digest and
     .producer.archive_sha256 == $producer_archive and
     .producer.binary_member == $binary_member and
+    .producer.manifest_member == $manifest_member and
+    .producer.manifest_sha256 == $manifest and
     .binary.sha256 == $binary and
     .binary.member == $binary_member and
+    .manifest.sha256 == $manifest and
+    .manifest.member == $manifest_member and
     .source_archive.sha256 == $archive and
     .source_archive.head_sha == $head and
     .source_archive.tree_digest == $tree and
@@ -223,6 +239,7 @@ jq -e \
     .fixture.build_sha256 == $build and
     .fixture.contract_sha256 == $contract and
     .fixture.schema_sha256 == $schema and
+    .fixture.manifest_schema_sha256 == $manifest_schema and
     .fixture.archive_checker_sha256 == $checker and
     .fixture.harness_sha256 == $harness and
     .sandbox.image == $image and
@@ -242,7 +259,17 @@ jq -e \
     ([.engine_default_mounts[]] | sort) == ["/etc/hosts", "/etc/hostname", "/etc/resolv.conf"] and
     ([.required_isolation[]] | index("network-none") != null) and
     ([.required_isolation[]] | index("bounded-output-tmp") != null) and
-    ([.required_isolation[]] | index("numeric-non-root") != null)
+    ([.required_isolation[]] | index("numeric-non-root") != null) and
+    (.producer_archive_contract.base_owned_exact_files ==
+      ["binary-member-from-handoff", "manifest-member-from-handoff"]) and
+    .producer_archive_contract.parent_directories_only == true and
+    .producer_archive_contract.extra_files == false and
+    .producer_archive_contract.missing_files == false and
+    .producer_archive_contract.duplicate_names == false and
+    .producer_archive_contract.manifest_schema == "producer-manifest.schema.json" and
+    (.producer_archive_contract.manifest_identity ==
+      ["schema", "profile", "features", "platform", "repository", "run_id",
+       "revision", "closure", "binary_sha256"])
   ' "$G1_FIXTURE_CONTRACT_PATH" >/dev/null || die "fixture contract mismatch"
 
 stage=""
@@ -271,12 +298,48 @@ mkdir -m 0755 -- "$candidate"
 mkdir -m 0700 -- "$hostout"
 
 python3 -B "$G1_ARCHIVE_CHECK_PATH" "$G1_SOURCE_ARCHIVE" >"$evidence/archive-summary.json"
-python3 -B "$G1_ARCHIVE_CHECK_PATH" "$G1_PRODUCER_ARCHIVE_PATH" >"$evidence/producer-archive-summary.json"
+python3 -B "$G1_ARCHIVE_CHECK_PATH" \
+  --exact-member "$G1_PRODUCER_BINARY_MEMBER" \
+  --exact-member "$G1_PRODUCER_MANIFEST_MEMBER" \
+  "$G1_PRODUCER_ARCHIVE_PATH" >"$evidence/producer-archive-summary.json" \
+  || die "producer archive member census failed"
+jq -e '
+  .schema == "velnor.bootstrap-archive-exact.v1" and
+  .status == "valid" and .files == 2
+' "$evidence/producer-archive-summary.json" >/dev/null || die "producer archive census record invalid"
 python3 -B "$G1_ARCHIVE_CHECK_PATH" --member-sha256 "$G1_PRODUCER_BINARY_MEMBER" \
   "$G1_PRODUCER_ARCHIVE_PATH" >"$evidence/producer-member-summary.json" || die "producer member validation failed"
 jq -e --arg binary "$G1_BINARY_SHA256" \
   '.schema == "velnor.bootstrap-member.v1" and .status == "valid" and .sha256 == $binary' \
   "$evidence/producer-member-summary.json" >/dev/null || die "producer binary member mismatch"
+python3 -B "$G1_ARCHIVE_CHECK_PATH" --member-sha256 "$G1_PRODUCER_MANIFEST_MEMBER" \
+  "$G1_PRODUCER_ARCHIVE_PATH" >"$evidence/producer-manifest-summary.json" || die "producer manifest validation failed"
+jq -e --arg manifest "$G1_MANIFEST_SHA256" \
+  '.schema == "velnor.bootstrap-member.v1" and .status == "valid" and .sha256 == $manifest' \
+  "$evidence/producer-manifest-summary.json" >/dev/null || die "producer manifest hash mismatch"
+producer_manifest="$stage/producer-manifest.json"
+python3 -B "$G1_ARCHIVE_CHECK_PATH" --extract-member "$G1_PRODUCER_MANIFEST_MEMBER" \
+  "$producer_manifest" "$G1_PRODUCER_ARCHIVE_PATH" >"$evidence/producer-manifest-extract.json" \
+  || die "producer manifest extraction failed"
+python3 -B "$G1_ARCHIVE_CHECK_PATH" --validate-json \
+  "$G1_MANIFEST_SCHEMA_PATH" "$producer_manifest" >"$evidence/producer-manifest-schema.json" \
+  || die "producer manifest schema validation failed"
+jq -e '.schema == "velnor.bootstrap-json-validation.v1" and .status == "valid"' \
+  "$evidence/producer-manifest-schema.json" >/dev/null || die "producer manifest schema record invalid"
+jq -e \
+  --arg profile "debug" \
+  --arg platform "linux-amd64" \
+  --arg repository "$G1_SOURCE_REPOSITORY" \
+  --arg revision "$G1_EXPECTED_SOURCE_HEAD_SHA" \
+  --arg closure "$G1_EXPECTED_SOURCE_CLOSURE" \
+  --arg binary "$G1_BINARY_SHA256" \
+  --argjson run_id "$G1_EXPECTED_PRODUCER_RUN_ID" '
+    .schema == "velnor.bootstrap-producer-manifest.v1" and
+    .profile == $profile and .features == [] and .platform == $platform and
+    .repository == $repository and .run_id == $run_id and
+    .revision == $revision and .closure == $closure and
+    .binary_sha256 == $binary
+  ' "$producer_manifest" >/dev/null || die "producer manifest identity mismatch"
 python3 -B "$G1_ARCHIVE_CHECK_PATH" --extract "$input" "$G1_SOURCE_ARCHIVE" >"$evidence/archive-extract-summary.json"
 find -P "$input" -name .git -print -quit | grep -q . && die "source archive contains git metadata" || :
 find -P "$input" -type l -print -quit | grep -q . && die "source archive extracted a link" || :

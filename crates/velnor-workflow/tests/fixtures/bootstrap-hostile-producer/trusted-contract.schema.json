@@ -20,6 +20,7 @@
     "platform",
     "producer",
     "binary",
+    "manifest",
     "source_archive",
     "fixture",
     "sandbox"
@@ -58,7 +59,9 @@
         "artifact_name",
         "artifact_service_digest",
         "archive_sha256",
-        "binary_member"
+        "binary_member",
+        "manifest_member",
+        "manifest_sha256"
       ],
       "properties": {
         "run_id": { "type": "integer", "minimum": 1 },
@@ -71,10 +74,21 @@
           "pattern": "^sha256:[0-9a-f]{64}$"
         },
         "archive_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "binary_member": { "type": "string", "minLength": 1 }
+        "binary_member": { "type": "string", "minLength": 1 },
+        "manifest_member": { "type": "string", "minLength": 1 },
+        "manifest_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
     },
     "binary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "member"],
+      "properties": {
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "member": { "type": "string", "minLength": 1 }
+      }
+    },
+    "manifest": {
       "type": "object",
       "additionalProperties": false,
       "required": ["sha256", "member"],
@@ -101,6 +115,7 @@
         "build_sha256",
         "contract_sha256",
         "schema_sha256",
+        "manifest_schema_sha256",
         "archive_checker_sha256",
         "harness_sha256"
       ],
@@ -109,6 +124,10 @@
         "build_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "contract_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "schema_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "manifest_schema_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
         "archive_checker_sha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"

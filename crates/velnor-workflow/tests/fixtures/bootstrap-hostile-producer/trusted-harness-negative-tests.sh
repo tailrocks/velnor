@@ -41,6 +41,91 @@ for input in duplicate float boolean extra missing; do
   set -e
   test "$schema_rc" -ne 0
 done
+
+# The producer archive contract is an exact base-owned census. These archives
+# are disposable test data; no candidate binary, Docker daemon, or network is
+# involved.
+python3 - "$tmp" <<'PY'
+import json
+import sys
+import warnings
+import zipfile
+from pathlib import Path
+
+root = Path(sys.argv[1])
+warnings.simplefilter("ignore", UserWarning)
+
+def write_archive(name, members):
+    with zipfile.ZipFile(root / name, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for member, data in members:
+            archive.writestr(member, data)
+
+files = [
+    ("velnor-workflow", b"ELF-placeholder"),
+    ("candidate-manifest.json", b"{}"),
+]
+write_archive("exact.zip", files)
+write_archive("extra.zip", files + [("unexpected", b"no")])
+write_archive("missing.zip", files[:1])
+with zipfile.ZipFile(root / "crc.zip", "w", compression=zipfile.ZIP_STORED) as archive:
+    archive.writestr("velnor-workflow", b"first")
+    archive.writestr("candidate-manifest.json", b"{}")
+with zipfile.ZipFile(root / "crc.zip") as archive:
+    info = archive.getinfo("velnor-workflow")
+raw = bytearray((root / "crc.zip").read_bytes())
+data_start = info.header_offset + 30 + len(info.filename.encode()) + len(info.extra)
+raw[data_start] ^= 1
+(root / "crc.zip").write_bytes(raw)
+with zipfile.ZipFile(root / "duplicate.zip", "w") as archive:
+    archive.writestr("velnor-workflow", b"first")
+    archive.writestr("velnor-workflow", b"second")
+
+json.dump(
+    {
+        "schema": "velnor.bootstrap-producer-manifest.v1",
+        "profile": "debug",
+        "features": [],
+        "platform": "linux-amd64",
+        "repository": "tailrocks/velnor",
+        "run_id": 7,
+        "revision": "0" * 40,
+        "closure": "0" * 64,
+        "binary_sha256": "f" * 64,
+    },
+    (root / "forged-manifest.json").open("w", encoding="utf-8"),
+)
+PY
+python3 -B "$checker" --exact-member velnor-workflow \
+  --exact-member candidate-manifest.json "$tmp/exact.zip" >"$tmp/exact.json"
+jq -e '.schema == "velnor.bootstrap-archive-exact.v1" and .status == "valid" and .files == 2' \
+  "$tmp/exact.json" >/dev/null
+for archive in extra missing duplicate crc; do
+  set +e
+  python3 -B "$checker" --exact-member velnor-workflow \
+    --exact-member candidate-manifest.json "$tmp/$archive.zip" \
+    >"$tmp/$archive.out" 2>"$tmp/$archive.err"
+  archive_rc=$?
+  set -e
+  test "$archive_rc" -ne 0
+done
+set +e
+python3 -B "$checker" --validate-json \
+  "$script_dir/producer-manifest.schema.json" "$tmp/missing.json" \
+  >"$tmp/manifest-missing.out" 2>"$tmp/manifest-missing.err"
+manifest_rc=$?
+set -e
+test "$manifest_rc" -ne 0
+# A schema-valid but forged digest must fail the base-owned identity predicate.
+python3 -B "$checker" --validate-json \
+  "$script_dir/producer-manifest.schema.json" "$tmp/forged-manifest.json" \
+  >"$tmp/manifest-forged-schema.json"
+set +e
+jq -e --arg expected "0000000000000000000000000000000000000000000000000000000000000000" \
+  '.binary_sha256 == $expected' "$tmp/forged-manifest.json" >/dev/null
+forged_rc=$?
+set -e
+test "$forged_rc" -ne 0
+
 mkdir -- "$tmp/tree"
 printf '%s\n' forged >"$tmp/tree/handoff.json"
 set +e

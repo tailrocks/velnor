@@ -11,11 +11,31 @@
     "build.sh",
     "fixture-contract.json",
     "trusted-contract.schema.json",
+    "producer-manifest.schema.json",
     "trusted-archive-check.py",
     "trusted-harness.sh",
     "trusted-harness-negative-tests.sh"
   ],
   "binary_source": "probe.rs",
+  "producer_archive_contract": {
+    "base_owned_exact_files": ["binary-member-from-handoff", "manifest-member-from-handoff"],
+    "parent_directories_only": true,
+    "extra_files": false,
+    "missing_files": false,
+    "duplicate_names": false,
+    "manifest_schema": "producer-manifest.schema.json",
+    "manifest_identity": [
+      "schema",
+      "profile",
+      "features",
+      "platform",
+      "repository",
+      "run_id",
+      "revision",
+      "closure",
+      "binary_sha256"
+    ]
+  },
   "probe_entrypoint": [
     "--canary",
     "--output",

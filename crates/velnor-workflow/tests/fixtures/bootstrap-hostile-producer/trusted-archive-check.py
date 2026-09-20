@@ -19,6 +19,7 @@ import stat
 import sys
 import tarfile
 import zipfile
+import zlib
 from pathlib import Path
 from typing import BinaryIO, Iterable, NamedTuple
 
@@ -317,13 +318,11 @@ def open_entry(kind: str, entry: Entry, handle: object) -> BinaryIO:
     return source
 
 
-def member_sha256(kind: str, entries: list[Entry], handle: object, name: str) -> tuple[str, int]:
-    normalized = normalize_name(name)
-    matches = [entry for entry in entries if entry.name == normalized and not entry.directory]
-    if len(matches) != 1:
-        raise CheckError("member-missing")
+def consume_entry(kind: str, entry: Entry, handle: object) -> tuple[str, int]:
+    """Read one admitted member completely, checking size and ZIP CRC."""
     digest = hashlib.sha256()
-    source = open_entry(kind, matches[0], handle)
+    checksum = 0
+    source = open_entry(kind, entry, handle)
     copied = 0
     try:
         while True:
@@ -331,14 +330,98 @@ def member_sha256(kind: str, entries: list[Entry], handle: object, name: str) ->
             if not block:
                 break
             copied += len(block)
-            if copied > matches[0].size:
+            if copied > entry.size or copied > MAX_UNPACKED_BYTES:
                 raise CheckError("member-size")
             digest.update(block)
+            checksum = zlib.crc32(block, checksum)
     finally:
         source.close()
-    if copied != matches[0].size:
+    if copied != entry.size:
         raise CheckError("member-short")
+    if kind == "zip" and checksum & 0xFFFFFFFF != entry.source.CRC:
+        raise CheckError("member-crc")
     return digest.hexdigest(), copied
+
+
+def member_sha256(kind: str, entries: list[Entry], handle: object, name: str) -> tuple[str, int]:
+    normalized = normalize_name(name)
+    matches = [entry for entry in entries if entry.name == normalized and not entry.directory]
+    if len(matches) != 1:
+        raise CheckError("member-missing")
+    return consume_entry(kind, matches[0], handle)
+
+
+def exact_member_census(
+    kind: str, entries: list[Entry], handle: object, names: list[str]
+) -> tuple[int, int]:
+    """Require exactly the base-owned files, with only their parent dirs allowed."""
+    if not names:
+        raise CheckError("member-allowlist")
+    normalized = [normalize_name(name) for name in names]
+    if len(set(normalized)) != len(normalized):
+        raise CheckError("member-allowlist")
+    expected_files = set(normalized)
+    expected_dirs: set[str] = set()
+    for name in normalized:
+        parts = name.split("/")
+        expected_dirs.update("/".join(parts[:index]) for index in range(1, len(parts)))
+    actual_files = {entry.name for entry in entries if not entry.directory}
+    actual_dirs = {entry.name for entry in entries if entry.directory}
+    if (
+        actual_files != expected_files
+        or not actual_dirs.issubset(expected_dirs)
+        or any(entry.directory and entry.size != 0 for entry in entries)
+    ):
+        raise CheckError("member-census")
+    files = [entry for entry in entries if not entry.directory]
+    if len(files) != len(expected_files):
+        raise CheckError("member-census")
+    total = 0
+    for entry in files:
+        _, size = consume_entry(kind, entry, handle)
+        total += size
+    return len(entries), total
+
+
+def extract_member_to_path(
+    kind: str, entries: list[Entry], handle: object, name: str, destination: Path
+) -> None:
+    normalized = normalize_name(name)
+    matches = [entry for entry in entries if entry.name == normalized and not entry.directory]
+    if len(matches) != 1:
+        raise CheckError("member-missing")
+    if destination.exists() or destination.is_symlink() or not destination.parent.is_dir():
+        raise CheckError("extract-destination")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(destination, flags, 0o400)
+    entry = matches[0]
+    source = open_entry(kind, entry, handle)
+    copied = 0
+    checksum = 0
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            while True:
+                block = source.read(1024 * 1024)
+                if not block:
+                    break
+                copied += len(block)
+                if copied > entry.size or copied > MAX_UNPACKED_BYTES:
+                    raise CheckError("member-size")
+                checksum = zlib.crc32(block, checksum)
+                output.write(block)
+    except Exception:
+        try:
+            destination.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        source.close()
+    if copied != entry.size:
+        raise CheckError("member-short")
+    if kind == "zip" and checksum & 0xFFFFFFFF != entry.source.CRC:
+        raise CheckError("member-crc")
 
 
 def check_tree(
@@ -414,20 +497,39 @@ def check_tree(
     return TreeAudit(status, entries, bytes_total, read_errors, unexpected, missing, violations)
 
 
+def validate_json(schema_path: Path, value_path: Path) -> None:
+    schema = load_json(schema_path)
+    value = load_json(value_path)
+    if not isinstance(schema, dict):
+        raise CheckError("schema-root")
+    validate_schema(value, schema)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--extract", metavar="DEST")
+    parser.add_argument("--extract-member", nargs=2, metavar=("NAME", "DEST"))
     parser.add_argument("--check-tree", metavar="ROOT")
     parser.add_argument("--allow-file", action="append", default=[], metavar="NAME")
     parser.add_argument("--allow-dir", action="append", default=[], metavar="NAME")
     parser.add_argument("--require-name", action="append", default=[], metavar="NAME")
     parser.add_argument("--validate-handoff", nargs=2, metavar=("SCHEMA", "HANDOFF"))
+    parser.add_argument("--validate-json", nargs=2, metavar=("SCHEMA", "VALUE"))
+    parser.add_argument("--exact-member", action="append", default=[], metavar="NAME")
     parser.add_argument("--member-sha256", metavar="NAME")
     parser.add_argument("archive", nargs="?")
     args = parser.parse_args()
     mode_count = sum(
-        value is not None
-        for value in (args.extract, args.check_tree, args.validate_handoff, args.member_sha256)
+        bool(value)
+        for value in (
+            args.extract,
+            args.extract_member,
+            args.check_tree,
+            args.validate_handoff,
+            args.validate_json,
+            args.exact_member,
+            args.member_sha256,
+        )
     )
     if mode_count > 1:
         fail("arguments")
@@ -441,6 +543,20 @@ def main() -> int:
         print(
             json.dumps(
                 {"schema": "velnor.bootstrap-handoff-validation.v1", "status": "valid"},
+                separators=(",", ":"),
+            )
+        )
+        return 0
+    if args.validate_json:
+        if args.archive or args.allow_file or args.allow_dir or args.require_name:
+            fail("arguments")
+        try:
+            validate_json(Path(args.validate_json[0]), Path(args.validate_json[1]))
+        except (CheckError, OSError, ValueError):
+            fail("json-invalid")
+        print(
+            json.dumps(
+                {"schema": "velnor.bootstrap-json-validation.v1", "status": "valid"},
                 separators=(",", ":"),
             )
         )
@@ -475,8 +591,57 @@ def main() -> int:
             )
         )
         return 0 if audit.status == "accepted" else 2
-    if args.member_sha256 and not args.archive:
+    if (args.member_sha256 or args.exact_member or args.extract_member) and not args.archive:
         fail("archive-required")
+    if args.extract_member:
+        if args.allow_file or args.allow_dir or args.require_name:
+            fail("arguments")
+        try:
+            kind, entries, handle = archive_entries(Path(args.archive))
+            extract_member_to_path(
+                kind,
+                entries,
+                handle,
+                args.extract_member[0],
+                Path(args.extract_member[1]),
+            )
+        except (CheckError, OSError, ValueError, tarfile.TarError, zipfile.BadZipFile):
+            fail("member-invalid")
+        finally:
+            if "handle" in locals():
+                handle.close()
+        print(
+            json.dumps(
+                {"schema": "velnor.bootstrap-member-extract.v1", "status": "valid"},
+                separators=(",", ":"),
+            )
+        )
+        return 0
+    if args.exact_member:
+        if args.allow_file or args.allow_dir or args.require_name or args.member_sha256:
+            fail("arguments")
+        try:
+            kind, entries, handle = archive_entries(Path(args.archive))
+            members, size = exact_member_census(kind, entries, handle, args.exact_member)
+        except (CheckError, OSError, ValueError, tarfile.TarError, zipfile.BadZipFile):
+            fail("member-census")
+        finally:
+            if "handle" in locals():
+                handle.close()
+        print(
+            json.dumps(
+                {
+                    "schema": "velnor.bootstrap-archive-exact.v1",
+                    "status": "valid",
+                    "format": kind,
+                    "members": members,
+                    "files": len(args.exact_member),
+                    "bytes": size,
+                },
+                separators=(",", ":"),
+            )
+        )
+        return 0
     if args.member_sha256:
         try:
             kind, entries, handle = archive_entries(Path(args.archive))
