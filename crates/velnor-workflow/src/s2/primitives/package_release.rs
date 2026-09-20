@@ -428,7 +428,11 @@ fn indent_script(script: &str, spaces: usize) -> String {
     let prefix = " ".repeat(spaces);
     let mut indented = String::new();
     for line in script.lines() {
-        let _ = writeln!(indented, "{prefix}{line}");
+        if line.trim().is_empty() {
+            indented.push('\n');
+        } else {
+            let _ = writeln!(indented, "{prefix}{line}");
+        }
     }
     indented
 }
@@ -2192,6 +2196,21 @@ concurrency_group = "package-release-preview"
             .expect("immutable asset check");
         assert!(immutable_upload < immutable_check);
         serde_yaml::from_str::<serde_yaml::Value>(&workflow).expect("rendered workflow is YAML");
+    }
+
+    #[test]
+    fn rendered_workflow_has_no_trailing_whitespace() {
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        let offenders = workflow
+            .lines()
+            .enumerate()
+            .filter_map(|(line, content)| (content.trim_end() != content).then_some(line + 1))
+            .collect::<Vec<_>>();
+        assert!(
+            offenders.is_empty(),
+            "trailing whitespace at lines {offenders:?}"
+        );
     }
 
     #[test]
