@@ -38,16 +38,17 @@ pub struct G0MappingBindings {
 }
 
 /// Fields already captured by the live collector but absent from exact
-/// checker `a613e041` types.  Keeping this sidecar explicit prevents the
+/// checker `a613e041` types. Keeping this sidecar explicit prevents the
 /// adapter from silently discarding original-response digests, canonical
-/// request bytes, checkout SHAs, or graph source revisions while the checker
-/// owner evolves the typed contract.
+/// request bytes, run-scoped artifact observations, checkout SHAs, or graph
+/// source revisions while the checker owner evolves the typed contract.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct G0MappingSupplement {
     pub canonical_snapshot_bytes_base64: String,
     pub request_payloads: BTreeMap<String, G0RequestPayloadSupplement>,
     pub raw_objects: Vec<G0RawObjectSupplement>,
+    pub artifacts: Vec<G0ArtifactObservationSupplement>,
     pub workflow_binding_checkout_shas: BTreeMap<String, String>,
     pub check_checkout_shas: BTreeMap<String, String>,
     pub pull_request_source_urls: BTreeMap<String, String>,
@@ -70,6 +71,20 @@ pub struct G0RawObjectSupplement {
     pub safe_sha256: String,
     pub safe_byte_length: u64,
     pub safe_bytes_base64: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct G0ArtifactObservationSupplement {
+    pub repository: String,
+    pub artifact_id: u64,
+    pub run_id: u64,
+    pub run_head_sha: String,
+    pub name: String,
+    pub digest: String,
+    pub expired: Option<bool>,
+    pub source_url: String,
+    pub raw_object_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -417,6 +432,26 @@ fn map_supplement(live: &LiveCollection, canonical: &[u8]) -> G0MappingSupplemen
             )
         })
         .collect();
+    let artifacts = live
+        .repositories
+        .iter()
+        .flat_map(|repository| {
+            repository
+                .artifacts
+                .iter()
+                .map(|artifact| G0ArtifactObservationSupplement {
+                    repository: repository.repository.clone(),
+                    artifact_id: artifact.artifact_id,
+                    run_id: artifact.run_id,
+                    run_head_sha: artifact.run_head_sha.clone(),
+                    name: artifact.name.clone(),
+                    digest: artifact.digest.clone(),
+                    expired: artifact.expired,
+                    source_url: artifact.source_url.clone(),
+                    raw_object_refs: artifact.raw_object_refs.clone(),
+                })
+        })
+        .collect();
     let raw_objects = live
         .raw_objects
         .iter()
@@ -477,6 +512,7 @@ fn map_supplement(live: &LiveCollection, canonical: &[u8]) -> G0MappingSupplemen
         canonical_snapshot_bytes_base64: BASE64.encode(canonical),
         request_payloads,
         raw_objects,
+        artifacts,
         workflow_binding_checkout_shas,
         check_checkout_shas,
         pull_request_source_urls,
@@ -514,6 +550,28 @@ fn map_repository(
         &format!("repository {}", repository.repository),
         &[],
     )?;
+    for artifact in &repository.artifacts {
+        validate_raw_references(
+            &artifact.raw_object_refs,
+            raw_by_id,
+            request_by_id,
+            &format!(
+                "artifact {} run {} in {}",
+                artifact.artifact_id, artifact.run_id, repository.repository
+            ),
+            &["workflow_artifacts"],
+        )?;
+        if artifact.run_id == 0
+            || !is_sha(&artifact.run_head_sha)
+            || !is_sha256_digest(&artifact.digest)
+        {
+            bail!(
+                "artifact {} in {} lacks immutable run identity or digest",
+                artifact.artifact_id,
+                repository.repository
+            );
+        }
+    }
     let rulesets = repository
         .rulesets
         .iter()
@@ -868,7 +926,6 @@ fn map_check(
     }
     let job_id = check
         .job_id
-        .or_else(|| unique_job_id(execution))
         .ok_or_else(|| anyhow!("check {} lacks concrete job identity", check.context))?;
     if !execution.jobs.iter().any(|job| job.job_id == job_id) {
         bail!(
@@ -917,12 +974,6 @@ fn map_check(
         source_url: check.source_url.clone(),
         raw_object_refs: check.raw_object_refs.clone(),
     })
-}
-
-fn unique_job_id(execution: &LiveExecution) -> Option<u64> {
-    let mut jobs = execution.jobs.iter().map(|job| job.job_id);
-    let first = jobs.next()?;
-    jobs.next().is_none().then_some(first)
 }
 
 fn map_access(

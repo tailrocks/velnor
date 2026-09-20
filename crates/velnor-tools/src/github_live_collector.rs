@@ -993,7 +993,7 @@ where
         if !seen_paths.insert(path.clone()) {
             bail!("workflow path {path} was observed more than once");
         }
-        let encoded_path = path.replace(' ', "%20");
+        let encoded_path = encode_api_path(&path);
         let (content, content_raw_ids) = collect_one(
             transport,
             store,
@@ -1073,7 +1073,7 @@ where
     T: super::AcquisitionTransport + ?Sized,
     S: RawObjectStore,
 {
-    let encoded_path = path.replace(' ', "%20");
+    let encoded_path = encode_api_path(path);
     let (content, content_raw_ids) = collect_one(
         transport,
         store,
@@ -1231,7 +1231,7 @@ where
         }
         let run_source_sha = required_sha(&run, &["head_sha"])?;
         if run_source_sha != source_sha {
-            continue;
+            bail!("workflow run {run_id} head SHA differs from requested source {source_sha}");
         }
         let workflow_path = required_string(&run, &["path"])?;
         let workflow_index = workflows
@@ -1754,7 +1754,9 @@ fn parse_artifact(
 fn merge_artifacts(destination: &mut Vec<LiveArtifact>, incoming: Vec<LiveArtifact>) -> Result<()> {
     for artifact in incoming {
         if destination.iter().any(|existing| {
-            existing.name == artifact.name && existing.artifact_id != artifact.artifact_id
+            existing.run_id == artifact.run_id
+                && existing.name == artifact.name
+                && existing.artifact_id != artifact.artifact_id
         }) {
             bail!(
                 "artifact name {} is bound to more than one artifact ID",
@@ -1943,20 +1945,37 @@ fn validate_workflow_content(
     }
     let content_url = required_string(value, &["url"])?;
     let parsed = Url::parse(&content_url).context("parse workflow content URL")?;
+    let mut query = parsed.query_pairs();
+    let has_exact_ref = query
+        .next()
+        .is_some_and(|(key, value)| key == "ref" && value == source_sha)
+        && query.next().is_none();
     if parsed.scheme() != "https"
         || parsed.host_str() != Some("api.github.com")
         || parsed.username() != ""
         || parsed.password().is_some()
         || parsed.fragment().is_some()
-        || parsed.path() != format!("/repos/{repository}/contents/{path}")
-        || parsed
-            .query_pairs()
-            .find(|(key, _)| key == "ref")
-            .is_none_or(|(_, value)| value != source_sha)
+        || parsed.path() != format!("/repos/{repository}/contents/{}", encode_api_path(path))
+        || !has_exact_ref
     {
         bail!("workflow content URL is not bound to requested repository/path/ref");
     }
     Ok(())
+}
+
+fn encode_api_path(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    encoded
 }
 
 fn validate_job_url(value: &str, repository: &str, run_id: u64, job_id: u64) -> Result<()> {
@@ -2029,7 +2048,6 @@ fn parse_check(
         bail!("associated workflow run head SHA differs from check run");
     }
     let app_id = optional_u64(value, &["app", "id"]).map(|id| id.to_string());
-    let job_id = optional_string(value, &["external_id"]).and_then(|id| id.parse().ok());
     let check_run_id = required_u64(value, &["id"])?;
     let source_url = required_string(value, &["html_url"])?;
     validate_check_run_url(&source_url, repository, check_run_id)?;
@@ -2039,7 +2057,7 @@ fn parse_check(
         check_suite_id: Some(check_suite_id),
         check_run_id,
         workflow_run_id,
-        job_id,
+        job_id: None,
         run_attempt: optional_u64(value, &["check_suite", "workflow_run", "run_attempt"])
             .map(|value| value as u32),
         source_sha: source_sha.to_owned(),
@@ -2309,6 +2327,7 @@ fn parse_dependency(
             parts.next().unwrap_or(".").to_owned(),
         )
     };
+    validate_repository_slug(&repository)?;
     let lower = uses.to_ascii_lowercase();
     let kind = if path.ends_with(".yml") || path.ends_with(".yaml") || path.contains("/workflows/")
     {
@@ -2486,7 +2505,167 @@ fn utc_now() -> String {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
+    use super::super::{
+        sha256_digest, AcquisitionFuture, AcquisitionRequest, AcquisitionTransport, RawObject,
+        RawStorageError, TransportFailure, TransportResponse,
+    };
     use super::*;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct FixtureTransport {
+        requests: Mutex<Vec<AcquisitionRequest>>,
+        responses: Mutex<VecDeque<Result<TransportResponse, TransportFailure>>>,
+    }
+
+    impl FixtureTransport {
+        fn with_json(value: Value) -> Self {
+            let body = serde_json::to_vec(&value).expect("fixture JSON");
+            let mut responses = VecDeque::new();
+            responses.push_back(Ok(TransportResponse {
+                status: 200,
+                headers: BTreeMap::from([(
+                    "content-type".to_owned(),
+                    "application/json".to_owned(),
+                )]),
+                body,
+                effective_endpoint: "https://api.github.com/repos/actions/checkout/git/trees/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?recursive=1"
+                    .to_owned(),
+            }));
+            Self {
+                requests: Mutex::new(Vec::new()),
+                responses: Mutex::new(responses),
+            }
+        }
+    }
+
+    impl AcquisitionTransport for FixtureTransport {
+        fn send<'a>(
+            &'a self,
+            request: AcquisitionRequest,
+        ) -> AcquisitionFuture<'a, Result<TransportResponse, TransportFailure>> {
+            self.requests
+                .lock()
+                .expect("fixture request lock")
+                .push(request);
+            let response = self
+                .responses
+                .lock()
+                .expect("fixture response lock")
+                .pop_front()
+                .unwrap_or(Err(TransportFailure::Other));
+            Box::pin(async move { response })
+        }
+    }
+
+    #[derive(Default)]
+    struct FixtureStore {
+        bytes: BTreeMap<String, Vec<u8>>,
+        refs: Vec<RawObjectRef>,
+    }
+
+    impl RawObjectStore for FixtureStore {
+        fn store(&mut self, object: RawObject) -> Result<RawObjectRef, RawStorageError> {
+            let digest = sha256_digest(&object.bytes);
+            let storage_digest = digest
+                .strip_prefix("sha256:")
+                .expect("sha256 digest prefix");
+            let reference = RawObjectRef {
+                raw_id: object.raw_id.clone(),
+                request_id: object.request_id.clone(),
+                object_kind: object.object_kind.clone(),
+                canonicalization: object.canonicalization.clone(),
+                sha256: digest.clone(),
+                byte_length: object.bytes.len() as u64,
+                original_sha256: object.original_sha256.clone(),
+                original_byte_length: object.original_byte_length,
+                bytes_base64: BASE64.encode(&object.bytes),
+                media_type: object.media_type.clone(),
+                storage_ref: format!("sha256://{storage_digest}"),
+            };
+            self.bytes.insert(storage_digest.to_owned(), object.bytes);
+            self.refs.push(reference.clone());
+            Ok(reference)
+        }
+
+        fn verify(&self, reference: &RawObjectRef) -> Result<(), RawStorageError> {
+            let digest = reference
+                .storage_ref
+                .strip_prefix("sha256://")
+                .ok_or(RawStorageError::Unbound)?;
+            let bytes = self.bytes.get(digest).ok_or(RawStorageError::Unbound)?;
+            if sha256_digest(bytes) != reference.sha256
+                || bytes.len() as u64 != reference.byte_length
+                || BASE64.encode(bytes) != reference.bytes_base64
+            {
+                return Err(RawStorageError::Refused);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn production_dependency_binding_captures_tree_request_and_raw_identity() {
+        let tree = serde_json::json!({
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "truncated": false,
+            "tree": [{"path": "action.yml", "type": "blob"}]
+        });
+        let transport = FixtureTransport::with_json(tree);
+        let mut store = FixtureStore::default();
+        let auth = AuthIdentity::new(
+            "fixture-auth",
+            "github",
+            Some("1".to_owned()),
+            Some("fixture".to_owned()),
+            BTreeSet::new(),
+        );
+        let manifest = ManifestRepository {
+            repository: "tailrocks/example".to_owned(),
+            ..ManifestRepository::default()
+        };
+        let mut ledger = Ledger::default();
+        let dependencies = bind_workflow_dependencies(
+            WorkflowDependencyContext {
+                transport: &transport,
+                store: &mut store,
+                auth: &auth,
+                manifest: &manifest,
+                workflow_path: ".github/workflows/ci.yml",
+                source_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                ledger: &mut ledger,
+            },
+            WorkflowDependencyGroups {
+                reusable: Vec::new(),
+                actions: vec![LiveDependency {
+                    kind: "action".to_owned(),
+                    repository: "actions/checkout".to_owned(),
+                    path: ".".to_owned(),
+                    revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                    raw_object_refs: Vec::new(),
+                }],
+                scanners: Vec::new(),
+            },
+        )
+        .await
+        .expect("dependency tree binding");
+        assert_eq!(dependencies.actions.len(), 1);
+        assert_eq!(dependencies.actions[0].raw_object_refs.len(), 1);
+        assert_eq!(ledger.raw_objects.len(), 1);
+        assert_eq!(ledger.raw_objects[0].object_kind, "workflow.dependency");
+        let requests = transport.requests.lock().expect("fixture request lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].endpoint_or_operation,
+            "https://api.github.com/repos/actions/checkout/git/trees/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?recursive=1"
+        );
+        assert_eq!(
+            requests[0].endpoint_or_operation,
+            ledger.requests[0].endpoint_or_operation
+        );
+    }
 
     #[test]
     fn workflow_dependency_parser_requires_revision_and_preserves_categories() {
@@ -2555,6 +2734,28 @@ jobs:
         let mut truncated = tree.clone();
         truncated["truncated"] = serde_json::json!(true);
         assert!(validate_dependency_tree(&truncated, "actions/checkout", ".").is_err());
+    }
+
+    #[test]
+    fn artifacts_with_same_name_across_runs_keep_run_provenance() {
+        let artifact = |artifact_id, run_id| LiveArtifact {
+            artifact_id,
+            run_id,
+            run_head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            name: "dist".to_owned(),
+            digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
+            expired: Some(false),
+            source_url: format!(
+                "https://api.github.com/repos/tailrocks/example/actions/artifacts/{artifact_id}/zip"
+            ),
+            raw_object_refs: vec![format!("raw-{artifact_id}")],
+        };
+        let mut destination = Vec::new();
+        merge_artifacts(&mut destination, vec![artifact(1, 10), artifact(2, 11)])
+            .expect("same artifact name across runs is valid");
+        assert_eq!(destination.len(), 2);
+        assert!(merge_artifacts(&mut destination, vec![artifact(3, 10)]).is_err());
     }
 
     #[test]
@@ -2633,6 +2834,29 @@ jobs:
             7,
         )
         .is_err());
+        let source_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut content = serde_json::json!({
+            "path": ".github/workflows/ci.yml",
+            "sha": source_sha,
+            "url": "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/ci.yml?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        });
+        assert!(validate_workflow_content(
+            &content,
+            "tailrocks/velnor",
+            ".github/workflows/ci.yml",
+            source_sha
+        )
+        .is_ok());
+        content["url"] = serde_json::json!(
+            "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/ci.yml?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&token=secret"
+        );
+        assert!(validate_workflow_content(
+            &content,
+            "tailrocks/velnor",
+            ".github/workflows/ci.yml",
+            source_sha
+        )
+        .is_err());
     }
 
     #[test]
@@ -2702,6 +2926,12 @@ jobs:
         let slug_check = parse_check(&slug_only, "tailrocks/example", source_sha, vec![], 9)
             .expect("slug check remains observed but unbound");
         assert_eq!(slug_check.app_id, None);
+        let mut external_id = value.clone();
+        external_id["external_id"] = serde_json::json!("123");
+        let external_id_check =
+            parse_check(&external_id, "tailrocks/example", source_sha, vec![], 9)
+                .expect("external check remains observed but job-unbound");
+        assert_eq!(external_id_check.job_id, None);
     }
 
     #[test]
