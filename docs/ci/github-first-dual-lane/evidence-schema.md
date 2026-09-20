@@ -126,8 +126,13 @@ an explicit artifact census, and separate execution arrays for the current main
 tip and each PR. Each artifact row binds `{artifact_id, run_id, run_attempt,
 run_head_sha, name, digest, expired, source_url, raw_object_refs}`. The checker
 requires unique IDs and names, a non-expired artifact, a known source/run
-identity, the canonical GitHub API artifact URL, and a raw object whose digest
-and object kind are `workflow_artifacts`.
+identity, the canonical GitHub API artifact URL, and a raw object whose object
+kind is `workflow_artifacts`. The row's `digest` is the downloadable archive
+digest reported by the API member; it is distinct from the SHA-256 of the
+paginated API response bytes in the referenced raw object. The checker binds
+the row's ID, name, expiry, archive digest, run/head identity, and download URL
+to an actual member of that captured page, then verifies the page-byte digest
+separately.
 
 Ruleset checks are `{context, app_id}` with a source URL and complete-page
 marker. A PR row is `{number, state: "open", head_sha, base_sha, merge_sha,

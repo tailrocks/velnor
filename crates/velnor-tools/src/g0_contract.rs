@@ -204,6 +204,9 @@ pub(crate) struct G0ArtifactObservation {
     pub run_attempt: u32,
     pub run_head_sha: String,
     pub name: String,
+    /// Digest of the downloadable artifact archive reported by GitHub. This
+    /// is intentionally distinct from the SHA-256 of the paginated API
+    /// response stored in `G0RawObjectRef`.
     pub digest: String,
     pub expired: bool,
     pub source_url: String,

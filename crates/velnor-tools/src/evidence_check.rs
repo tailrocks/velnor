@@ -2038,9 +2038,11 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
             .iter()
             .find(|raw| raw.raw_id == request.response_raw_ref)
             .is_some_and(|raw| {
-                g0_endpoint_is_paginated(&request.endpoint_or_operation)
-                    && g0_raw_response_schema(&raw.object_kind, &request.endpoint_or_operation)
-                        .is_none()
+                g0_endpoint_is_paginated(
+                    &request.endpoint_or_operation,
+                    query.as_ref().ok().map(Vec::as_slice),
+                ) && g0_raw_response_schema(&raw.object_kind, &request.endpoint_or_operation)
+                    .is_none()
             });
         if unknown_paginated_response {
             finding(
@@ -2510,7 +2512,7 @@ fn g0_valid_app_id(value: &str) -> bool {
     value.parse::<u64>().is_ok_and(|id| id > 0)
 }
 
-fn g0_endpoint_is_paginated(endpoint: &str) -> bool {
+fn g0_endpoint_is_paginated(endpoint: &str, query: Option<&[u8]>) -> bool {
     let Some(parts) = endpoint
         .strip_prefix('/')
         .map(|path| path.split('/').collect::<Vec<_>>())
@@ -2520,7 +2522,7 @@ fn g0_endpoint_is_paginated(endpoint: &str) -> bool {
     if parts.len() < 2 || parts[0] != "repos" {
         return false;
     }
-    matches!(
+    let known_collection_path = matches!(
         parts.as_slice(),
         ["repos", _, _, "pulls"]
             | ["repos", _, _, "actions", "runs"]
@@ -2530,7 +2532,30 @@ fn g0_endpoint_is_paginated(endpoint: &str) -> bool {
             | ["repos", _, _, "commits", _, "check-runs"]
             | ["repos", _, _, "commits", _, "check-suites"]
             | ["repos", _, _, "rulesets"]
-    )
+    );
+    let known_collection_segment = parts.iter().any(|part| {
+        [
+            "artifacts",
+            "check-runs",
+            "check-suites",
+            "jobs",
+            "pulls",
+            "rulesets",
+            "workflows",
+        ]
+        .iter()
+        .any(|prefix| *part == *prefix || part.starts_with(&format!("{prefix}-")))
+    });
+    if known_collection_path || known_collection_segment {
+        return true;
+    }
+    query
+        .and_then(g0_rest_query_pairs_ordered)
+        .is_some_and(|pairs| {
+            pairs
+                .iter()
+                .any(|(key, _)| matches!(key.as_str(), "after" | "page" | "per_page"))
+        })
 }
 
 fn g0_response_query_contract(
@@ -2542,7 +2567,7 @@ fn g0_response_query_contract(
         return false;
     };
     if matches!(response_schema, G0RawResponseSchema::Singular) {
-        return true;
+        return ordered.is_empty() && request.page.number == 1 && !request.page.has_next_page;
     }
 
     let keys = ordered
@@ -2575,7 +2600,8 @@ fn g0_response_query_contract(
         && per_page > 0
         && per_page <= 100
         && page == request.page.number
-        && (response_schema != G0RawResponseSchema::CheckRunsPage || value("filter") == Some("all"))
+        && (response_schema != G0RawResponseSchema::CheckRunsPage
+            || matches!(value("filter"), Some("all" | "latest")))
 }
 
 fn g0_request_semantics(
@@ -3779,17 +3805,26 @@ fn check_g0_artifact_observations(
             context
                 .raw_objects
                 .iter()
-                .find(|raw| raw.raw_id == *raw_id && raw.sha256 == artifact.digest)
+                .find(|raw| raw.raw_id == *raw_id && raw.object_kind == "workflow_artifacts")
         }) else {
             finding(
                 findings,
                 "g0-artifact-digest",
                 repository,
                 "repositories.artifacts",
-                "artifact digest must bind to one referenced raw API object",
+                "artifact archive digest must be present and its row must bind to a workflow_artifacts API object",
             );
             continue;
         };
+        if !g0_artifact_row_matches_raw(repository, artifact, raw) {
+            finding(
+                findings,
+                "g0-artifact-row",
+                repository,
+                "repositories.artifacts",
+                "artifact identity must match one row in the independently captured artifact page",
+            );
+        }
         let Some(request) = context
             .requests
             .iter()
@@ -3989,6 +4024,43 @@ fn g0_artifact_source_url(repository: &str, artifact_id: u64, value: &str) -> bo
         && url.query().is_none()
         && url.fragment().is_none()
         && url.path() == format!("/repos/{repository}/actions/artifacts/{artifact_id}/zip")
+}
+
+fn g0_artifact_row_matches_raw(
+    repository: &str,
+    artifact: &G0ArtifactObservation,
+    raw: &G0RawObjectRef,
+) -> bool {
+    let expected_endpoint = format!(
+        "/repos/{repository}/actions/runs/{}/artifacts",
+        artifact.run_id
+    );
+    let Some(schema) = g0_raw_response_schema("workflow_artifacts", &expected_endpoint) else {
+        return false;
+    };
+    let Ok(bytes) = BASE64.decode(&raw.bytes_base64) else {
+        return false;
+    };
+    if raw.byte_length != bytes.len() as u64 || digest_bytes(&bytes) != raw.sha256 {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+        return false;
+    };
+    let Some((_, members)) = g0_page_members(&value, schema) else {
+        return false;
+    };
+    members.iter().any(|member| {
+        g0_json_u64(member, &["id"]) == Some(artifact.artifact_id)
+            && g0_json_string(member, &["name"]) == Some(artifact.name.as_str())
+            && member.get("expired").and_then(Value::as_bool) == Some(artifact.expired)
+            && g0_json_string(member, &["digest"]) == Some(artifact.digest.as_str())
+            && g0_json_u64(member, &["workflow_run", "id"]) == Some(artifact.run_id)
+            && g0_json_string(member, &["workflow_run", "head_sha"])
+                == Some(artifact.run_head_sha.as_str())
+            && g0_json_string(member, &["archive_download_url"])
+                == Some(artifact.source_url.as_str())
+    })
 }
 
 struct G0CheckExpectation<'a> {
@@ -8519,6 +8591,11 @@ mod tests {
             } else {
                 format!("request-{prefix}-{kind}")
             };
+            let query = if kind == "job" {
+                "per_page=100&page=1"
+            } else {
+                ""
+            };
             let body = if kind == "job" {
                 json!({"total_count": 1, "jobs": [body]})
             } else {
@@ -8546,9 +8623,9 @@ mod tests {
                 api: G0ApiKind::Rest,
                 method: "GET".to_owned(),
                 endpoint_or_operation: endpoint,
-                query_base64: BASE64.encode(b"per_page=100&page=1"),
+                query_base64: BASE64.encode(query),
                 variables_base64: BASE64.encode(b"{}"),
-                query_sha256: digest_bytes(b"per_page=100&page=1"),
+                query_sha256: digest_bytes(query.as_bytes()),
                 variables_sha256: digest_bytes(b"{}"),
                 auth_identity_ref: "collector.auth".to_owned(),
                 started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
@@ -8713,31 +8790,36 @@ mod tests {
                         .expect("digest has prefix")
                 ),
             });
+            let artifact_name = format!("scan-artifact-{repository_id}");
+            let artifact_archive_digest = digest('d');
+            let artifact_source_url = format!(
+                "https://api.github.com/repos/{repository}/actions/artifacts/{artifact_id}/zip"
+            );
             let artifact_bytes = format!(
-                "{{\"total_count\":1,\"artifacts\":[{{\"id\":{artifact_id},\"workflow_run\":{{\"id\":{main_run_id},\"run_attempt\":1}}}}]}}"
+                "{{\"total_count\":1,\"artifacts\":[{{\"id\":{artifact_id},\"name\":\"{artifact_name}\",\"digest\":\"{artifact_archive_digest}\",\"expired\":false,\"archive_download_url\":\"{artifact_source_url}\",\"workflow_run\":{{\"id\":{main_run_id},\"head_sha\":\"{source_sha}\"}}}}]}}"
             )
             .into_bytes();
-            let artifact_digest = digest_bytes(&artifact_bytes);
+            let artifact_page_digest = digest_bytes(&artifact_bytes);
             raw_objects.push(G0RawObjectRef {
                 raw_id: artifact_raw_id.clone(),
                 request_id: artifact_request_id.clone(),
                 object_kind: "workflow_artifacts".to_owned(),
                 canonicalization: "raw-json".to_owned(),
-                sha256: artifact_digest.clone(),
+                sha256: artifact_page_digest.clone(),
                 byte_length: artifact_bytes.len() as u64,
                 bytes_base64: BASE64.encode(&artifact_bytes),
                 media_type: "application/json".to_owned(),
                 storage_ref: format!(
                     "sha256://{}",
-                    artifact_digest
+                    artifact_page_digest
                         .strip_prefix("sha256:")
                         .expect("digest has prefix")
                 ),
-                original_sha256: artifact_digest.clone(),
+                original_sha256: artifact_page_digest.clone(),
                 original_byte_length: artifact_bytes.len() as u64,
                 original_storage_ref: format!(
                     "sha256://{}",
-                    artifact_digest
+                    artifact_page_digest
                         .strip_prefix("sha256:")
                         .expect("digest has prefix")
                 ),
@@ -8773,9 +8855,9 @@ mod tests {
                 api: G0ApiKind::Rest,
                 method: "GET".to_owned(),
                 endpoint_or_operation: format!("/repos/{repository}"),
-                query_base64: BASE64.encode(b"page=1"),
+                query_base64: BASE64.encode(b""),
                 variables_base64: BASE64.encode(b"{}"),
-                query_sha256: digest_bytes(b"page=1"),
+                query_sha256: digest_bytes(b""),
                 variables_sha256: digest_bytes(b"{}"),
                 auth_identity_ref: "collector.auth".to_owned(),
                 started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
@@ -9181,12 +9263,10 @@ mod tests {
                     run_id: main_run_id,
                     run_attempt: 1,
                     run_head_sha: source_sha.clone(),
-                    name: format!("scan-artifact-{repository_id}"),
-                    digest: artifact_digest,
+                    name: artifact_name,
+                    digest: artifact_archive_digest,
                     expired: false,
-                    source_url: format!(
-                        "https://api.github.com/repos/{repository}/actions/artifacts/{artifact_id}/zip"
-                    ),
+                    source_url: artifact_source_url,
                     raw_object_refs: vec![artifact_raw_id],
                 }],
                 open_prs: vec![G0PullRequestInventory {
@@ -9449,6 +9529,64 @@ mod tests {
             &mut findings,
         );
         assert!(g0_codes(&findings).contains("g0-response-schema"));
+
+        let mut unknown_collection_path = inventory.clone();
+        let artifact_request_id = unknown_collection_path
+            .collector_snapshot
+            .raw_objects
+            .iter()
+            .find(|raw| raw.object_kind == "workflow_artifacts")
+            .expect("complete fixture artifact page")
+            .request_id
+            .clone();
+        unknown_collection_path
+            .collector_snapshot
+            .requests
+            .iter_mut()
+            .find(|request| request.request_id == artifact_request_id)
+            .expect("artifact page request")
+            .endpoint_or_operation
+            .push_str("-unknown");
+        unknown_collection_path
+            .collector_snapshot
+            .raw_objects
+            .iter_mut()
+            .find(|raw| raw.request_id == artifact_request_id)
+            .expect("artifact page raw object")
+            .object_kind = "github-response".to_owned();
+        refresh_typed_inventory_bytes(&mut unknown_collection_path);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&unknown_collection_path),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-response-schema"));
+
+        let mut conflated_artifact_digest = inventory.clone();
+        let page_raw_id = conflated_artifact_digest.collector_snapshot.repositories[0].artifacts[0]
+            .raw_object_refs[0]
+            .clone();
+        let page_digest = conflated_artifact_digest
+            .collector_snapshot
+            .raw_objects
+            .iter()
+            .find(|raw| raw.raw_id == page_raw_id)
+            .expect("artifact page raw object")
+            .sha256
+            .clone();
+        conflated_artifact_digest.collector_snapshot.repositories[0].artifacts[0].digest =
+            page_digest;
+        refresh_typed_inventory_bytes(&mut conflated_artifact_digest);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&conflated_artifact_digest),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-artifact-row"));
 
         let mut missing_artifacts = inventory.clone();
         missing_artifacts.collector_snapshot.repositories[0]
@@ -10889,6 +11027,36 @@ mod tests {
     }
 
     #[test]
+    fn singular_response_rejects_pagination_query() {
+        let endpoint = "/apps/dco-2";
+        let body = br#"{"id":974774,"slug":"dco-2"}"#;
+        let raw = captured_raw_reference("app-raw", "app-request", "app", body);
+        let mut request = captured_page_request(endpoint, "page=1", 1);
+        request.request_id = "app-request".to_owned();
+        request.response_raw_ref = "app-raw".to_owned();
+        assert!(g0_capture_raw_json(
+            &["app-raw".to_owned()],
+            "app",
+            974774,
+            &[endpoint.to_owned()],
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&raw),
+        )
+        .is_none());
+        request.query_base64 = BASE64.encode(b"");
+        request.query_sha256 = digest_bytes(b"");
+        assert!(g0_capture_raw_json(
+            &["app-raw".to_owned()],
+            "app",
+            974774,
+            &[endpoint.to_owned()],
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&raw),
+        )
+        .is_some());
+    }
+
+    #[test]
     fn paginated_stream_rejects_omitted_duplicate_and_cross_scope_pages() {
         let mut collector = minimal_g0_collector();
         let endpoint = format!("/repos/tailrocks/velnor/commits/{}/check-runs", sha('a'));
@@ -11179,6 +11347,46 @@ mod tests {
                     .is_none()
                 && artifact.get("workflow_run_id").is_none()
         }));
+        let first_artifact = artifacts_array.first().expect("captured artifact row");
+        let artifact_observation = G0ArtifactObservation {
+            artifact_id: g0_json_u64(first_artifact, &["id"]).expect("artifact id"),
+            run_id: g0_json_u64(first_artifact, &["workflow_run", "id"]).expect("artifact run id"),
+            run_attempt: 1,
+            run_head_sha: g0_json_string(first_artifact, &["workflow_run", "head_sha"])
+                .expect("artifact head SHA")
+                .to_owned(),
+            name: g0_json_string(first_artifact, &["name"])
+                .expect("artifact name")
+                .to_owned(),
+            digest: g0_json_string(first_artifact, &["digest"])
+                .expect("archive digest")
+                .to_owned(),
+            expired: first_artifact["expired"]
+                .as_bool()
+                .expect("artifact expiry"),
+            source_url: g0_json_string(first_artifact, &["archive_download_url"])
+                .expect("artifact URL")
+                .to_owned(),
+            raw_object_refs: vec!["real-artifacts-raw".to_owned()],
+        };
+        let artifact_raw = captured_raw_reference(
+            "real-artifacts-raw",
+            "real-artifacts-request",
+            "workflow_artifacts",
+            &artifacts_bytes,
+        );
+        assert!(g0_artifact_row_matches_raw(
+            "tailrocks/velnor",
+            &artifact_observation,
+            &artifact_raw
+        ));
+        let mut conflated_artifact = artifact_observation.clone();
+        conflated_artifact.digest = artifact_raw.sha256.clone();
+        assert!(!g0_artifact_row_matches_raw(
+            "tailrocks/velnor",
+            &conflated_artifact,
+            &artifact_raw
+        ));
 
         let checks: Value = serde_json::from_slice(&checks_bytes).expect("checks page JSON");
         let checks_array = checks["check_runs"].as_array().expect("checks envelope");
@@ -11626,7 +11834,7 @@ mod tests {
             "check_run",
             "/repos/jackin-project/homebrew-tap/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-runs"
                 .to_owned(),
-            "per_page=100&filter=all&page=1",
+            "per_page=100&filter=latest&page=1",
             6,
             &homebrew_checks,
         );
