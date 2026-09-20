@@ -317,6 +317,7 @@ pub(crate) fn resolve_profile_for_platform_with_rust(
     validate_task_env_overrides(
         &resolver.env_overrides,
         resolver.closure.uses_rust_toolchain,
+        &resolver.platform,
     )?;
     Ok(resolver.closure)
 }
@@ -324,6 +325,7 @@ pub(crate) fn resolve_profile_for_platform_with_rust(
 fn validate_task_env_overrides(
     overrides: &[TaskEnvOverride],
     rustup_owns_rust: bool,
+    platform: &str,
 ) -> Result<(), GeneratorError> {
     const MISE_AUTO_INSTALL_KEYS: &[&str] = &[
         "MISE_AUTO_INSTALL",
@@ -332,10 +334,11 @@ fn validate_task_env_overrides(
         "MISE_TASK_RUN_AUTO_INSTALL",
     ];
     const PINNED_RUST_ENV_KEYS: &[&str] = &["PATH", "RUSTUP_TOOLCHAIN"];
+    let windows = platform.starts_with("windows");
 
     for override_env in overrides {
         for key in MISE_AUTO_INSTALL_KEYS {
-            if override_env.env.contains_key(*key) {
+            if env_contains_for_platform(&override_env.env, key, windows) {
                 return Err(GeneratorError::usage(format!(
                     "{} `{key}` conflicts with generated Mise auto-install policy; omit it",
                     override_env.context()
@@ -344,7 +347,7 @@ fn validate_task_env_overrides(
         }
         if rustup_owns_rust {
             for key in PINNED_RUST_ENV_KEYS {
-                if override_env.env.contains_key(*key) {
+                if env_contains_for_platform(&override_env.env, key, windows) {
                     return Err(GeneratorError::usage(format!(
                         "{} `{key}` conflicts with generated pinned Rust activation; omit it",
                         override_env.context()
@@ -354,6 +357,19 @@ fn validate_task_env_overrides(
         }
     }
     Ok(())
+}
+
+fn env_contains_for_platform(
+    env: &BTreeMap<String, String>,
+    expected: &str,
+    windows: bool,
+) -> bool {
+    if windows {
+        env.keys()
+            .any(|actual| actual.eq_ignore_ascii_case(expected))
+    } else {
+        env.contains_key(expected)
+    }
 }
 
 /// The lockfile platform vocabulary used by the strict installer.  A runner

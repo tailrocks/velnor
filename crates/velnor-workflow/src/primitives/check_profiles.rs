@@ -29,6 +29,8 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+use sha2::{Digest as _, Sha256};
+
 use super::{
     lanes_dispatch_inputs, lanes_runs_on, render_pinned_toolchain_steps, Args, Primitive,
     RenderCtx, Rendered,
@@ -44,6 +46,33 @@ pub(crate) const DEFAULT_CHECK_PROFILE_TIMEOUT_MINUTES: u32 = 30;
 /// Whether the primitive renders a scheduled-checks workflow file.
 pub(crate) fn is_scheduled_checks_side(primitive: &str) -> bool {
     primitive == super::SCHEDULED_CHECKS
+}
+
+const PULL_REQUEST_CONCURRENCY_PREFIX: &str = "pr-";
+const RUN_CONCURRENCY_PREFIX: &str = "run-";
+
+fn workflow_concurrency_key(file: &str) -> String {
+    let stem = file.strip_suffix(".yml").unwrap_or(file);
+    let digest = Sha256::digest(file.as_bytes());
+    let mut fingerprint = String::with_capacity(digest.len() * 2);
+    for byte in digest.iter() {
+        let _ = write!(fingerprint, "{byte:02x}");
+    }
+    format!("{stem}-{fingerprint}")
+}
+
+fn concurrency_event_key() -> String {
+    format!(
+        "${{{{ github.event_name == 'pull_request' && '{PULL_REQUEST_CONCURRENCY_PREFIX}' || '{RUN_CONCURRENCY_PREFIX}' }}}}${{{{ github.event.pull_request.number || github.run_id }}}}"
+    )
+}
+
+fn concurrency_group(file: &str) -> String {
+    format!(
+        "{}-${{{{ github.repository }}}}-{}",
+        workflow_concurrency_key(file),
+        concurrency_event_key()
+    )
 }
 
 /// The declared `scheduled-*.yml` workflow family.
@@ -404,13 +433,10 @@ fn render_checks_file(
         output.push_str(lanes_dispatch_inputs(*default));
     }
     output.push_str("\n\npermissions:\n  contents: read\n\nconcurrency:\n");
-    let _ = writeln!(
-        output,
-        "  group: {stem}-${{{{ github.repository }}}}-${{{{ github.event.pull_request.number || github.run_id }}}}"
-    );
-    // PRs share one group per PR and workflow, so an updated PR replaces its
-    // stale run. Every other event gets a unique run-id group: GitHub otherwise
-    // replaces the single pending run per group even when cancellation is off.
+    let _ = writeln!(output, "  group: {}", concurrency_group(file));
+    // The exact filename's digest preserves distinct case-only workflow names
+    // under GitHub's case-insensitive group matching. PR and run IDs also use
+    // separate namespaces; only newer runs for the same PR share a group.
     output.push_str("  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n\njobs:\n");
     for profile in profiles {
         render_profile_job(
@@ -888,7 +914,10 @@ mod tests {
         assert!(workflow.contains("workflow_dispatch:"), "{workflow}");
         assert!(workflow.contains("name: scheduled-daily"), "{workflow}");
         assert!(
-            workflow.contains("group: scheduled-daily-${{ github.repository }}-${{ github.event.pull_request.number || github.run_id }}"),
+            workflow.contains(&format!(
+                "group: {}",
+                concurrency_group("scheduled-daily.yml")
+            )),
             "{workflow}"
         );
         assert!(
@@ -1658,7 +1687,10 @@ branches = []"#,
             "{cron_only}"
         );
         assert!(
-            cron_only.contains("group: scheduled-daily-${{ github.repository }}-${{ github.event.pull_request.number || github.run_id }}"),
+            cron_only.contains(&format!(
+                "group: {}",
+                concurrency_group("scheduled-daily.yml")
+            )),
             "{cron_only}"
         );
 
@@ -1678,9 +1710,32 @@ branches = []"#,
             "{evented}"
         );
         assert!(
-            evented.contains("group: scheduled-daily-${{ github.repository }}-${{ github.event.pull_request.number || github.run_id }}"),
+            evented.contains(&format!(
+                "group: {}",
+                concurrency_group("scheduled-daily.yml")
+            )),
             "{evented}"
         );
+    }
+
+    #[test]
+    fn concurrency_group_namespaces_matching_pr_and_run_numbers() {
+        assert_eq!(
+            concurrency_event_key(),
+            "${{ github.event_name == 'pull_request' && 'pr-' || 'run-' }}${{ github.event.pull_request.number || github.run_id }}"
+        );
+
+        let same_number = 355;
+        let pull_request = format!("{PULL_REQUEST_CONCURRENCY_PREFIX}{same_number}");
+        let workflow_run = format!("{RUN_CONCURRENCY_PREFIX}{same_number}");
+        assert_ne!(pull_request, workflow_run);
+    }
+
+    #[test]
+    fn case_variant_workflow_filenames_keep_distinct_concurrency_groups() {
+        let lowercase = concurrency_group("scheduled-foo.yml").to_ascii_lowercase();
+        let uppercase = concurrency_group("scheduled-Foo.yml").to_ascii_lowercase();
+        assert_ne!(lowercase, uppercase);
     }
 
     #[test]
@@ -1710,7 +1765,10 @@ branches = ["main", "integration"]"#,
             let rendered =
                 render_with_events_and_branches(&config, None, &selected, &events, &branches);
             assert!(
-                rendered.contains("group: scheduled-daily-${{ github.repository }}-${{ github.event.pull_request.number || github.run_id }}"),
+                rendered.contains(&format!(
+                    "group: {}",
+                    concurrency_group("scheduled-daily.yml")
+                )),
                 "non-PR candidates have a unique run-id group: {events_toml}\n{rendered}"
             );
             assert!(

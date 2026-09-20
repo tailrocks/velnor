@@ -29,13 +29,15 @@
 //! bootstrap escape hatch, never emitted into generated CI — permits building
 //! the pin from the audited tree.
 //!
-//! The candidate exception binds the env-slot candidate binary by manifest
-//! before executing it: the manifest's closure must equal the audited tree's
-//! candidate closure (computed locally from git history) and the binary's
-//! digest must match the manifest first, because a `--closure` echo is an
-//! assertion by untrusted bytes, not proof. The manifest arrives via
-//! `--candidate-manifest` or `VELNOR_WORKFLOW_CANDIDATE_MANIFEST`; without
-//! either, env-slot binaries are skipped, never executed.
+//! Candidate rendering is diagnostic only and uses a binary slot separate
+//! from the declared pin. Before executing that binary, policy binds it by
+//! manifest: the manifest's closure must equal the audited tree's candidate
+//! closure (computed locally from git history) and the binary's digest must
+//! match the manifest, because a `--closure` echo is an assertion by untrusted
+//! bytes, not proof. The manifest arrives via `--candidate-manifest` or
+//! `VELNOR_WORKFLOW_CANDIDATE_MANIFEST`; without either, the candidate slot is
+//! skipped. A candidate match always remains a policy failure until the pin
+//! and generated tree agree.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -63,6 +65,8 @@ const POLICY_ENTRYPOINT: &str = ".github/workflows/ci-policy.yml";
 /// The pull-request aggregate whose job display names are the ruleset's
 /// status-check contexts.
 const PULL_REQUEST_AGGREGATE: &str = ".github/workflows/ci-pr.yml";
+/// Names the distinct candidate binary used only for render diagnostics.
+pub use super::VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV;
 /// Names the manifest binding the env-slot candidate binary.
 pub use super::VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV;
 /// Names a `velnor-workflow` binary built at the pinned revision.
@@ -445,8 +449,8 @@ fn pin_rules(
         .push(generated_tree_report(pin, comparison, mainline));
 }
 
-/// The same exact-pin contract applies before and after integration.
-/// A candidate-only match diagnoses an unpinned renderer; it never authorizes merge.
+/// Report the `generated-tree` verdict. Candidate output never replaces the
+/// declared published renderer, on pull requests or mainline.
 fn generated_tree_report(
     pin: &str,
     comparison: Result<TreeComparison, GeneratorError>,
@@ -459,10 +463,17 @@ fn generated_tree_report(
                 "every generated file is byte-identical to the render of velnor-workflow at {pin}"
             ),
         ),
+        Ok(TreeComparison::Candidate(closure)) if mainline => RuleReport::fail(
+            "generated-tree",
+            format!(
+                "the pin is stale on mainline: the tree matches the candidate render ({closure}), not the render of velnor-workflow at {pin}; run `velnor-workflow promote --rev HEAD` to stamp the pin and regenerate atomically"
+            ),
+            Vec::new(),
+        ),
         Ok(TreeComparison::Candidate(closure)) => RuleReport::fail(
             "generated-tree",
             format!(
-                "the declared pin {pin} does not render the tree: only candidate {closure} matches; commit the renderer source, pin that commit, and regenerate before merge (mainline={mainline})"
+                "the tree matches the candidate render ({closure}), not the render of velnor-workflow at {pin}; candidate output cannot authorize tracked generated files"
             ),
             Vec::new(),
         ),
@@ -1055,6 +1066,8 @@ pub(crate) fn expected_closures(repo: &Path, pin: &str) -> Result<Vec<String>, G
 pub(crate) struct PinnedBinaryLookup {
     /// [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`].
     pinned_binary: Option<PathBuf>,
+    /// [`VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV`], diagnostic only.
+    candidate_binary: Option<PathBuf>,
     /// `PATH`.
     search_path: Option<OsString>,
     /// Where an earlier resolution built the pin.
@@ -1075,6 +1088,9 @@ impl PinnedBinaryLookup {
     ) -> Self {
         Self {
             pinned_binary: env::var_os(VELNOR_WORKFLOW_PINNED_BINARY_ENV).map(PathBuf::from),
+            candidate_binary: env::var_os(VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
             search_path: env::var_os("PATH"),
             install_root: policy_install_root(revision),
             build_forbidden: !build_pin
@@ -1442,9 +1458,9 @@ pub(crate) fn regenerate_and_compare(
     verdict
 }
 
-/// The candidate exception: when the tree differs from the declared pin's
-/// render, it may still be legitimate — a generator change in flight renders
-/// with the audited tree's own candidate, not with the pin.
+/// Candidate diagnostic: when the tree differs from the declared pin's
+/// render, a generator change in flight may explain that difference by
+/// rendering with the audited tree's own candidate.
 ///
 /// Acceptance requires the manifest binding, not `--closure` alone: the
 /// manifest's closure must equal the audited checkout's own candidate
@@ -1488,8 +1504,8 @@ fn render_with_candidate(
         }
     };
     let mut binaries = Vec::new();
-    if let Some(pinned) = &lookup.pinned_binary {
-        binaries.push(pinned.clone());
+    if let Some(candidate) = &lookup.candidate_binary {
+        binaries.push(candidate.clone());
     }
     if let Some(current) = &current_exe
         && !binaries.contains(current)

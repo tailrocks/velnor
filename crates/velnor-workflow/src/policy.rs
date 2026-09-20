@@ -29,13 +29,15 @@
 //! bootstrap escape hatch, never emitted into generated CI — permits building
 //! the pin from the audited tree.
 //!
-//! The candidate exception binds the env-slot candidate binary by manifest
-//! before executing it: the manifest's closure must equal the audited tree's
-//! candidate closure (computed locally from git history) and the binary's
-//! digest must match the manifest first, because a `--closure` echo is an
-//! assertion by untrusted bytes, not proof. The manifest arrives via
-//! `--candidate-manifest` or `VELNOR_WORKFLOW_CANDIDATE_MANIFEST`; without
-//! either, env-slot binaries are skipped, never executed.
+//! Candidate rendering is diagnostic only and uses a binary slot separate
+//! from the declared pin. Before executing that binary, policy binds it by
+//! manifest: the manifest's closure must equal the audited tree's candidate
+//! closure (computed locally from git history) and the binary's digest must
+//! match the manifest, because a `--closure` echo is an assertion by untrusted
+//! bytes, not proof. The manifest arrives via `--candidate-manifest` or
+//! `VELNOR_WORKFLOW_CANDIDATE_MANIFEST`; without either, the candidate slot is
+//! skipped. A candidate match always remains a policy failure until the pin
+//! and generated tree agree.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -1508,9 +1510,9 @@ pub(crate) fn regenerate_and_compare(
     verdict
 }
 
-/// The candidate exception: when the tree differs from the declared pin's
-/// render, it may still be legitimate — a generator change in flight renders
-/// with the audited tree's own candidate, not with the pin.
+/// Candidate diagnostic: when the tree differs from the declared pin's
+/// render, a generator change in flight may explain that difference by
+/// rendering with the audited tree's own candidate.
 ///
 /// Acceptance requires the manifest binding, not `--closure` alone: the
 /// manifest's closure must equal the audited checkout's own candidate
