@@ -468,27 +468,31 @@ pub(crate) struct HostedAppleOffer {
     pub(crate) build_arches: &'static [AppleArch],
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 const UNIVERSAL_BUILD_ARCHES: &[AppleArch] = &[AppleArch::Arm64, AppleArch::X86_64];
 const ARM64_BUILD_ARCHES: &[AppleArch] = &[AppleArch::Arm64];
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 const MACOS_26_SDKS: &[(AppleSdkFamily, AppleVersion)] = &[
     (AppleSdkFamily::Macos, AppleVersion::new(26, 5, 0)),
     (AppleSdkFamily::IosDevice, AppleVersion::new(26, 5, 0)),
     (AppleSdkFamily::IosSimulator, AppleVersion::new(26, 5, 0)),
 ];
-const MACOS_27_SDKS: &[(AppleSdkFamily, AppleVersion)] =
-    &[(AppleSdkFamily::Macos, AppleVersion::new(27, 0, 0))];
+const MACOS_27_SDKS: &[(AppleSdkFamily, AppleVersion)] = &[
+    (AppleSdkFamily::Macos, AppleVersion::new(27, 0, 0)),
+    (AppleSdkFamily::IosDevice, AppleVersion::new(27, 0, 0)),
+    (AppleSdkFamily::IosSimulator, AppleVersion::new(27, 0, 0)),
+];
 
 /// The latest verified GitHub-hosted Apple label. This is intentionally an
 /// exact label, not `macos-latest`: the alias is provider policy, not an
 /// attestation of the image major or architecture.
 pub(crate) const LATEST_HOSTED_APPLE_RUNNER: &str = "xcode-27";
 
-/// Current GitHub-hosted macOS 26 offers, verified from the public runner and
-/// image readmes. The image ships Xcode 26.6 and macOS/iOS SDK 26.5 families.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn hosted_apple_offer(label: &str) -> Option<HostedAppleOffer> {
+/// Historical hosted offers used to prove architecture mismatch behavior in
+/// unit fixtures. They are not part of production label selection: generation
+/// accepts only the exact latest verified offer below.
+#[cfg(test)]
+fn hosted_apple_offer(label: &str) -> Option<HostedAppleOffer> {
     let common = |label, execution_arch, build_arches| HostedAppleOffer {
         label,
         host_macos: AppleVersion::new(26, 6, 1),
@@ -511,6 +515,19 @@ pub(crate) fn hosted_apple_offer(label: &str) -> Option<HostedAppleOffer> {
             UNIVERSAL_BUILD_ARCHES,
         )),
         _ => None,
+    }
+}
+
+/// Select the only production Apple-hosted offer. Older labels and aliases
+/// are rejected here before any workflow surface is rendered; a label alone
+/// never grants native capability.
+pub(crate) fn select_hosted_apple_offer(label: &str) -> Result<HostedAppleOffer, String> {
+    if label == LATEST_HOSTED_APPLE_RUNNER {
+        Ok(latest_hosted_apple_offer())
+    } else {
+        Err(format!(
+            "native Apple jobs require the latest verified hosted label {LATEST_HOSTED_APPLE_RUNNER}; selected {label} is an older or unverified fallback and cannot be used"
+        ))
     }
 }
 
@@ -771,10 +788,47 @@ mod tests {
     )]
 
     use super::{
-        hosted_apple_offer, offer_mismatches, render_preflight_step, AppleArch,
-        AppleNativeContract, AppleSdkFamily, AppleVersion, LATEST_HOSTED_APPLE_RUNNER,
+        hosted_apple_offer, latest_hosted_apple_offer, offer_mismatches, render_preflight_step,
+        select_hosted_apple_offer, AppleArch, AppleNativeContract, AppleSdkFamily, AppleVersion,
+        LATEST_HOSTED_APPLE_RUNNER,
     };
     use std::collections::BTreeSet;
+
+    #[test]
+    fn latest_offer_asserts_the_published_label_architecture_and_sdk_families() {
+        let offer = latest_hosted_apple_offer();
+        assert_eq!(offer.label, "xcode-27");
+        assert_eq!(offer.host_macos, AppleVersion::new(27, 0, 0));
+        assert_eq!(offer.xcode, AppleVersion::new(27, 0, 0));
+        assert_eq!(offer.execution_arch, AppleArch::Arm64);
+        assert_eq!(offer.build_arches, &[AppleArch::Arm64]);
+        assert_eq!(
+            offer.sdk_versions,
+            &[
+                (AppleSdkFamily::Macos, AppleVersion::new(27, 0, 0)),
+                (AppleSdkFamily::IosDevice, AppleVersion::new(27, 0, 0)),
+                (AppleSdkFamily::IosSimulator, AppleVersion::new(27, 0, 0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn older_alias_and_architecture_labels_are_rejected_before_rendering() {
+        for label in [
+            "macos-15",
+            "macos-26",
+            "macos-26-intel",
+            "macos-latest",
+            "macos-27",
+        ] {
+            let error = select_hosted_apple_offer(label).expect_err("stale label must be rejected");
+            assert!(
+                error.contains("latest verified hosted label xcode-27"),
+                "{error}"
+            );
+            assert!(error.contains(label), "{error}");
+        }
+    }
 
     #[test]
     fn verified_images_distinguish_execution_from_build_architecture() {
