@@ -118,6 +118,9 @@ pub struct LiveRuleset {
 #[serde(deny_unknown_fields)]
 pub struct LiveJob {
     pub job_id: u64,
+    /// Exact check-run identity exposed by the Actions jobs API.  This is
+    /// required for binding a provider check to one concrete job.
+    pub check_run_id: u64,
     pub run_id: u64,
     pub run_attempt: u32,
     pub name: String,
@@ -1478,7 +1481,12 @@ where
             }
             archive_raw_ids.extend(archive_refs.iter().cloned());
             ledger.ingest(archive_result)?;
-            artifact.raw_object_refs = archive_refs;
+            // Keep the metadata-list response and the verified archive
+            // response. Replacing metadata refs with archive refs loses the
+            // provider object that established name/run/expiry.
+            artifact.raw_object_refs.extend(archive_refs);
+            artifact.raw_object_refs.sort();
+            artifact.raw_object_refs.dedup();
         }
         artifacts.extend(run_artifacts);
         for (attempt, attempt_raw_ids, attempt_number) in attempts {
@@ -1691,6 +1699,7 @@ where
     let mut checks = Vec::new();
     for suite in suites {
         let suite_id = required_u64(&suite, &["id"])?;
+        validate_check_suite(&suite, &manifest.repository, source_sha, suite_id)?;
         let (runs, run_raw_ids) = collect_items(
             transport,
             store,
@@ -1884,8 +1893,11 @@ fn parse_job(
     let job_id = required_u64(value, &["id"])?;
     let source_url = required_string(value, &["html_url"])?;
     validate_job_url(&source_url, repository, run_id, job_id)?;
+    let check_run_url = required_string(value, &["check_run_url"])?;
+    let check_run_id = parse_check_run_api_url(&check_run_url, repository)?;
     Ok(LiveJob {
         job_id,
+        check_run_id,
         run_id: job_run_id,
         run_attempt: job_attempt,
         name: required_string(value, &["name"])?,
@@ -2199,6 +2211,56 @@ fn validate_check_run_url(value: &str, repository: &str, check_run_id: u64) -> R
     let expected = format!("/{repository}/runs/{check_run_id}");
     if parsed.path() != expected {
         bail!("check run URL is not bound to {repository}/{check_run_id}");
+    }
+    Ok(())
+}
+
+fn parse_check_run_api_url(value: &str, repository: &str) -> Result<u64> {
+    let parsed = parse_safe_url(value, "api.github.com")?;
+    let prefix = format!("/repos/{repository}/check-runs/");
+    let suffix = parsed
+        .path()
+        .strip_prefix(&prefix)
+        .ok_or_else(|| anyhow!("job check-run URL is not bound to {repository}"))?;
+    let check_run_id = suffix
+        .parse::<u64>()
+        .context("job check-run URL has invalid check-run ID")?;
+    if check_run_id == 0 {
+        bail!("job check-run URL has check-run ID 0");
+    }
+    Ok(check_run_id)
+}
+
+fn validate_check_suite(
+    value: &Value,
+    repository: &str,
+    source_sha: &str,
+    suite_id: u64,
+) -> Result<()> {
+    if required_u64(value, &["id"])? != suite_id
+        || required_sha(value, &["head_sha"])? != source_sha
+    {
+        bail!("check suite identity does not match requested source");
+    }
+    let suite_repository = value
+        .get("repository")
+        .and_then(|repository| repository.get("full_name"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("check suite lacks repository identity"))?;
+    if suite_repository != repository {
+        bail!("check suite belongs to {suite_repository}, expected {repository}");
+    }
+    let source_url = required_string(value, &["url"])?;
+    let parsed = parse_safe_url(&source_url, "api.github.com")?;
+    let expected = format!("/repos/{repository}/check-suites/{suite_id}");
+    if parsed.path() != expected {
+        bail!("check suite URL is not bound to {repository}/{suite_id}");
+    }
+    let check_runs_url = required_string(value, &["check_runs_url"])?;
+    let parsed = parse_safe_url(&check_runs_url, "api.github.com")?;
+    let expected = format!("{expected}/check-runs");
+    if parsed.path() != expected {
+        bail!("check suite check-runs URL is not bound to {repository}/{suite_id}");
     }
     Ok(())
 }
@@ -3314,6 +3376,65 @@ jobs:
             parse_check(&external_id, "tailrocks/example", source_sha, vec![], 9)
                 .expect("external check remains observed but job-unbound");
         assert_eq!(external_id_check.job_id, None);
+    }
+
+    #[test]
+    fn job_identity_requires_api_check_run_binding() {
+        let source_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let value = serde_json::json!({
+            "id": 8,
+            "run_id": 7,
+            "run_attempt": 2,
+            "head_sha": source_sha,
+            "name": "build",
+            "status": "completed",
+            "conclusion": "success",
+            "html_url": "https://github.com/tailrocks/example/actions/runs/7/job/8",
+            "check_run_url": "https://api.github.com/repos/tailrocks/example/check-runs/17"
+        });
+        let job = parse_job(
+            &value,
+            "pull_request",
+            "tailrocks/example",
+            7,
+            2,
+            source_sha,
+            vec!["raw".to_owned()],
+        )
+        .expect("API-bound job");
+        assert_eq!(job.job_id, 8);
+        assert_eq!(job.check_run_id, 17);
+
+        let mut hostile = value.clone();
+        hostile["check_run_url"] =
+            serde_json::json!("https://api.github.com.evil/repos/tailrocks/example/check-runs/17");
+        assert!(parse_job(
+            &hostile,
+            "pull_request",
+            "tailrocks/example",
+            7,
+            2,
+            source_sha,
+            vec![]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn check_suite_identity_requires_api_source_binding() {
+        let source_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let value = serde_json::json!({
+            "id": 9,
+            "head_sha": source_sha,
+            "repository": {"full_name": "tailrocks/example"},
+            "url": "https://api.github.com/repos/tailrocks/example/check-suites/9",
+            "check_runs_url": "https://api.github.com/repos/tailrocks/example/check-suites/9/check-runs"
+        });
+        validate_check_suite(&value, "tailrocks/example", source_sha, 9).expect("API-bound suite");
+
+        let mut wrong_source = value.clone();
+        wrong_source["head_sha"] = serde_json::json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert!(validate_check_suite(&wrong_source, "tailrocks/example", source_sha, 9).is_err());
     }
 
     #[test]
