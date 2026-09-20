@@ -4664,12 +4664,39 @@ fn candidate_namespace_scan_script() -> String {
           dynamic_marker = "$" + "{{"
           allowed = {candidate, handoff, result}
           job_pattern = re.compile(r"  ([A-Za-z0-9_-]+):\s*$")
-          step_pattern = re.compile(r"^( +)- name:\s*")
-          upload_pattern = re.compile(r"^\s+uses:\s*actions/upload-artifact@")
-          local_workflow_pattern = re.compile(r"^\s+uses:\s+\./(.github/workflows/[^ #]+)")
+          step_pattern = re.compile(r"^( +)-\s+(?:name|uses|run|id|if|env|shell|working-directory|timeout-minutes|continue-on-error):")
+          local_workflow_pattern = re.compile(r"^\./(.github/workflows/[^ #]+)")
+          external_workflow_pattern = re.compile(r"^[^./][^ ]*/[^ ]+/.github/workflows/[^ #]+@")
+          post_pattern = re.compile(r"(?:--method|--request|-X)\s+POST|\bPOST\b", re.IGNORECASE)
           uploads = []
+          direct_uploads = []
+          external_reusable_workflows = []
           local_workflow_edges = {}
+
+          def uses_value(line):
+              text = line.strip()
+              if text.startswith("-"):
+                  text = text[1:].strip()
+              if not text.startswith("uses:"):
+                  return None
+              return text[len("uses:"):].split(" #", 1)[0].strip().strip("\\\"'")
+
+          def direct_upload_reason(block):
+              text = "\n".join(block)
+              lower = text.lower()
+              if any(
+                  "ACTIONS_RUNTIME_URL" in line and any(command in line.lower() for command in ("curl", "wget", "http://", "https://"))
+                  for line in block
+              ):
+                  return "runner artifact service URL is used by a shell step"
+              if "actions/artifacts" in lower and post_pattern.search(text) is not None:
+                  return "shell step can POST to the Actions artifact service"
+              if "upload-artifact" in lower and post_pattern.search(text) is not None and any(command in lower for command in ("curl", "wget", "gh api")):
+                  return "shell step names an artifact uploader"
+              return None
+
           for archive_name in sys.argv[1:]:
+              archive_edges = {}
               with tarfile.open(archive_name, "r:") as archive:
                   for member in archive.getmembers():
                       if not member.isfile() or not member.name.endswith((".yml", ".yaml")):
@@ -4678,12 +4705,18 @@ fn candidate_namespace_scan_script() -> String {
                       if stream is None:
                           raise SystemExit("workflow archive member is unreadable")
                       lines = stream.read().decode("utf-8").splitlines()
-                      local_workflow_edges[member.name] = [
+                      archive_edges[member.name] = [
                           match.group(1)
                           for line in lines
-                          for match in [local_workflow_pattern.match(line)]
+                          for value in [uses_value(line)]
+                          if value is not None
+                          for match in [local_workflow_pattern.match(value)]
                           if match is not None
                       ]
+                      for line in lines:
+                          value = uses_value(line)
+                          if value is not None and external_workflow_pattern.match(value):
+                              external_reusable_workflows.append((member.name, value))
                       job = None
                       for index, line in enumerate(lines):
                           matched_job = job_pattern.fullmatch(line)
@@ -4696,32 +4729,46 @@ fn candidate_namespace_scan_script() -> String {
                           indent = len(step.group(1))
                           end = index + 1
                           while end < len(lines):
-                              if lines[end].startswith(" " * indent + "- name:") or job_pattern.fullmatch(lines[end]):
+                              next_step = step_pattern.match(lines[end])
+                              if (next_step is not None and len(next_step.group(1)) == indent) or job_pattern.fullmatch(lines[end]):
                                   break
                               end += 1
                           block = lines[index:end]
-                          if not any(upload_pattern.match(item) for item in block):
+                          values = [uses_value(item) for item in block]
+                          upload_uses = [
+                              value for value in values
+                              if value is not None and value.startswith("actions/upload-artifact@")
+                          ]
+                          reason = direct_upload_reason(block)
+                          if reason is not None:
+                              direct_uploads.append((member.name, reason))
+                          if not upload_uses:
                               continue
                           name_prefix = " " * (indent + 4) + "name:"
                           id_prefix = " " * (indent + 2) + "id:"
                           names = [item[len(name_prefix):].strip() for item in block if item.startswith(name_prefix)]
                           ids = [item[len(id_prefix):].strip() for item in block if item.startswith(id_prefix)]
-                          if len(names) != 1:
-                              raise SystemExit(f"{member.name}: upload step has no unique with.name")
+                          if len(upload_uses) != 1 or len(names) != 1:
+                              raise SystemExit(f"{member.name}: upload step has no unique action or with.name")
                           name = names[0].split(" #", 1)[0].strip().strip("\\\"'")
                           step_id = ids[0] if len(ids) == 1 else ""
                           uploads.append((archive_name, member.name, job, step_id, name))
+              local_workflow_edges[archive_name] = archive_edges
 
-          reachable = {".github/workflows/ci-pr.yml"}
-          pending = list(reachable)
-          while pending:
-              workflow = pending.pop()
-              for dependency in local_workflow_edges.get(workflow, []):
-                  if dependency not in reachable:
-                      reachable.add(dependency)
-                      pending.append(dependency)
+          for path, value in external_reusable_workflows:
+              raise SystemExit(f"{path}: external reusable workflow is outside the closed artifact publisher contract: {value}")
+          for path, reason in direct_uploads:
+              raise SystemExit(f"{path}: {reason}; use one fixed upload-artifact action contract")
 
           for archive_name in sys.argv[1:]:
+              reachable = {".github/workflows/ci-pr.yml"}
+              pending = list(reachable)
+              while pending:
+                  workflow = pending.pop()
+                  for dependency in local_workflow_edges[archive_name].get(workflow, []):
+                      if dependency not in reachable:
+                          reachable.add(dependency)
+                          pending.append(dependency)
               found = [row for row in uploads if row[0] == archive_name and row[4] == candidate]
               if len(found) != 1:
                   raise SystemExit(f"{archive_name}: candidate namespace uploader count is {len(found)}, expected 1")
@@ -4729,17 +4776,17 @@ fn candidate_namespace_scan_script() -> String {
               if row[1] != ".github/workflows/ci-pr.yml" or row[2] != "candidate_producer" or row[3] != "candidate_upload":
                   raise SystemExit(f"{archive_name}: candidate uploader is not the fixed producer contract")
 
-          for archive_name, path, job, step_id, name in uploads:
-              lower = name.lower()
-              candidate_like = "candidate" in lower or candidate in name
-              if job == "candidate_producer" and name != candidate:
-                  raise SystemExit(f"{path}: candidate producer has a second or non-static uploader")
-              if candidate_like and name not in allowed:
-                  raise SystemExit(f"{path}: candidate-like uploader name is not a fixed transport namespace")
-              if dynamic_marker in name and path in reachable and not (path == ".github/workflows/ci-pr.yml" and name.startswith("velnor-workflow-runtime-")):
-                  raise SystemExit(f"{path}: candidate workflow graph has an untrusted dynamic artifact namespace")
-              if dynamic_marker in name and candidate_like:
-                  raise SystemExit(f"{path}: candidate namespace is computed dynamically")
+              for _, path, job, step_id, name in [row for row in uploads if row[0] == archive_name]:
+                  lower = name.lower()
+                  candidate_like = "candidate" in lower or candidate in name
+                  if job == "candidate_producer" and name != candidate:
+                      raise SystemExit(f"{path}: candidate producer has a second or non-static uploader")
+                  if candidate_like and name not in allowed:
+                      raise SystemExit(f"{path}: candidate-like uploader name is not a fixed transport namespace")
+                  if dynamic_marker in name and path in reachable and not (path == ".github/workflows/ci-pr.yml" and name.startswith("velnor-workflow-runtime-")):
+                      raise SystemExit(f"{path}: candidate workflow graph has an untrusted dynamic artifact namespace")
+                  if dynamic_marker in name and candidate_like:
+                      raise SystemExit(f"{path}: candidate namespace is computed dynamically")
           PY
 "#.replace("__CANDIDATE_ARTIFACT__", crate::s2::CANDIDATE_ARTIFACT_NAME)
         .replace("__CANDIDATE_HANDOFF__", crate::s2::CANDIDATE_HANDOFF_ARTIFACT_NAME)

@@ -5,8 +5,9 @@
 
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use super::*;
 use crate::s2::{PolicyJobSpec, ProjectConfig};
@@ -757,6 +758,81 @@ fn owner_entrypoint_renders_the_isolated_candidate_transport() {
             .any(|detail| detail.contains(BASE_REVISION_ENV) && detail.contains(PIN_A)),
         "{:?}",
         drift.details
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn candidate_transport_rejects_malformed_manifest_and_open_publishers() {
+    let job = crate::s2::policy_job(&PolicyJobSpec {
+        name: "Policy",
+        revision: PIN_A,
+        runner: "ubuntu-24.04",
+        repository: crate::s2::workflow_setup_action_repository(),
+        cache_backend: "github",
+        trusted_gate: None,
+        default_branch: "main",
+        declared_ruleset_contexts: "ci-required,Policy",
+        acquire_pull_request_candidate: true,
+    });
+    for marker in [
+        "step_pattern = re.compile",
+        "external_workflow_pattern",
+        "external reusable workflow is outside the closed artifact publisher contract",
+        "upload step has no unique action or with.name",
+        "shell step can POST to the Actions artifact service",
+    ] {
+        assert!(
+            job.contains(marker),
+            "closed publisher contract missing {marker}: {job}"
+        );
+    }
+
+    let script = crate::s2::candidate_manifest_validation_script();
+    let marker = "python3 - \"$manifest_schema\" \"$manifest\" <<'PY'\n";
+    let start = must_some(script.find(marker), "manifest validator start") + marker.len();
+    let end = must_some(
+        script[start..].find("\n          PY\n"),
+        "manifest validator end",
+    ) + start;
+    let body = script[start..end]
+        .lines()
+        .map(|line| line.strip_prefix("          ").map_or(line, |value| value))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let root = temporary_directory("malformed-manifest");
+    let schema = root.join("schema.json");
+    let manifest = root.join("manifest.json");
+    write(&schema, crate::s2::CANDIDATE_MANIFEST_SCHEMA_JSON);
+    write(
+        &manifest,
+        &format!(
+            "{{\"schema\":\"{}\",\"profile\":\"debug\",\"features\":[],\"platform\":\"linux-amd64\",\"repository\":\"example/consumer\",\"run_id\":1,\"revision\":\"{PIN_A}\",\"closure\":\"{CLOSURE_A}\",\"binary_sha256\":\"{CLOSURE_A}\",\"extra\":true}}",
+            crate::s2::CANDIDATE_MANIFEST_SCHEMA
+        ),
+    );
+    let mut child = must(
+        Command::new("python3")
+            .arg("-")
+            .arg(&schema)
+            .arg(&manifest)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn(),
+        "spawn manifest validator",
+    );
+    let mut stdin = must_some(child.stdin.take(), "manifest validator stdin");
+    must(stdin.write_all(body.as_bytes()), "write manifest validator");
+    drop(stdin);
+    let output = must(child.wait_with_output(), "wait manifest validator");
+    assert!(
+        !output.status.success(),
+        "extra manifest field must fail closed"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("producer manifest keys do not match"),
+        "malformed manifest rejection names the closed-schema failure: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
     let _ = fs::remove_dir_all(root);
 }
