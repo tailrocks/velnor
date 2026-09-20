@@ -12,48 +12,10 @@
 
 use std::path::{Path, PathBuf};
 
-/// Repository slugs and estate identifiers this crate must never name again.
-/// Each entry is one deleted profile, template family, unit id, or runner
-/// placement; the list only ever grows. The list covers every repository on
-/// the legacy table, so a new consumer means a new entry here in the same
-/// change.
+/// Estate runner identifiers and unit families this generic crate must not
+/// name outside its explicit compatibility boundary. This is not a consumer
+/// inventory or a claim about how many repositories use the generator.
 const DENY_LIST: &[&str] = &[
-    // Consumer repositories, owner blocks, and their path fragments.
-    "tailrocks/velnor-apt",
-    "velnor-apt",
-    "velnor-actions-fixture",
-    "tailrocks/holla",
-    "holla-apt",
-    "holla",
-    "jackin",
-    "tailrocks/termrock",
-    "tailrocks/parallax",
-    "parallax",
-    "ruxel",
-    "chainargos",
-    "tailrocks/schemalane",
-    "schemalane",
-    "tailrocks/tablerock",
-    "tablerock",
-    "tailrocks/pg-bigdecimal",
-    "pg-bigdecimal",
-    "tailrocks/tracing-request-level",
-    "tracing-request-level",
-    "tailrocks/cloudflare-tofu",
-    "cloudflare-tofu",
-    "github-terraform",
-    "tailrocks/tailrocks-skills",
-    "tailrocks-skills",
-    "homebrew-tablerock",
-    "homebrew-holla",
-    "homebrew-parallax",
-    "homebrew-ruxel",
-    "parallax-telemetry-playground",
-    "agent-brown",
-    "agent-smith",
-    "agent-sentinel",
-    "jackin-the-architect",
-    "java-monorepo",
     // Estate runner placement.
     "velnor-trusted",
     "velnor-target-mvp",

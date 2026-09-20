@@ -56,6 +56,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 # record validation sound across a write/read cycle.
 serde_json = { version = "1.0.140", features = ["float_roundtrip"] }
 serde_yaml = { package = "noyalib", version = "0.0.28", features = ["compat-serde-yaml"] }
+pulldown-cmark = { version = "0.13.4", default-features = false }
 globset = "0.4.16"
 rayon = "1.12.0"
 sha2 = "0.11"

@@ -47,6 +47,7 @@ pub(crate) fn scan_shape(
         root,
         files: &all_files,
         file_set: &all_file_set,
+        exclude,
     };
     let mut shape = RepositoryShape {
         files: Vec::new(),
@@ -64,14 +65,12 @@ pub(crate) fn scan_shape(
     // Detector order is part of the contract: ids are sorted stably below, so
     // the first detector to claim an id keeps the un-suffixed form.
     file_walk::detect(&all_context, &mut shape);
-    // Skills repositories carry executable-looking examples below an
-    // explicit `skills/<name>/templates/` boundary. Validate that boundary
-    // from the plugin catalog before hiding those files from generic language
-    // detectors; ordinary repositories and helper packages remain visible.
-    let template_files = skills::detect(&all_context, &mut shape)?;
+    // Plugin-owned templates and Kimi subtrees blocked by the parent gate
+    // belong to skill scanning, not project-language unit detection.
+    let ignored_skill_files = skills::detect(&all_context, &mut shape)?;
     let files = all_files
         .iter()
-        .filter(|file| !template_files.contains(*file))
+        .filter(|file| !ignored_skill_files.contains(*file))
         .cloned()
         .collect::<Vec<_>>();
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
@@ -79,6 +78,7 @@ pub(crate) fn scan_shape(
         root,
         files: &files,
         file_set: &file_set,
+        exclude,
     };
     rust::detect(&context, &mut shape)?;
     signals::detect(&context, &mut shape);
@@ -160,6 +160,7 @@ pub(crate) struct ScanContext<'a> {
     root: &'a Path,
     files: &'a [String],
     file_set: &'a BTreeSet<String>,
+    exclude: &'a [String],
 }
 
 /// Build a verification unit with the shared id, label, and command contract.
@@ -217,7 +218,7 @@ fn detection_contract(kind: UnitKind) -> (Platform, TrustReq, Capabilities) {
         // A SwiftPM package is portable: it verifies wherever its toolchain
         // provisions. Only Xcode scheme work and XCFramework consumers carry
         // the Apple need, which the Swift detector overlays afterwards.
-        UnitKind::Swift | UnitKind::Skills => (Platform::LinuxX64, trust, Capabilities::default()),
+        UnitKind::Swift => (Platform::LinuxX64, trust, Capabilities::default()),
         UnitKind::Docker => (
             Platform::LinuxX64,
             trust,
