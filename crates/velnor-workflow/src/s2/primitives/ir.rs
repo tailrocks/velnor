@@ -80,8 +80,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        provider_input, GraphNode, Pins, ProviderAdmission, ProviderId, ProviderSet, RustNeeds,
-        Unit, UnitKind, WorkflowIr, WorkflowKind,
+        provider_input, GraphNode, Pins, ProviderAdmission, ProviderId, ProviderSet,
+        PullRequestRole, RustNeeds, Unit, UnitKind, WorkflowIr, WorkflowKind,
     };
     use crate::s2::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
@@ -796,7 +796,7 @@ mod tests {
     #[test]
     fn owner_pull_request_renders_direct_candidate_producer() {
         let ir = owner_test_ir(workflow_setup_action_repository(), Vec::new());
-        let rendered = ir.render_nested(WorkflowKind::PullRequest, &[], None);
+        let rendered = ir.render_pull_request(PullRequestRole::CandidateProducer, &[], None);
         assert_eq!(
             rendered.matches("candidate_producer:").count(),
             1,
@@ -839,12 +839,21 @@ mod tests {
             rendered.find("  candidate_producer:\n"),
             "candidate producer job",
         );
-        let producer_end = must_some(
-            rendered[producer_start..].find("\n  ci-required:"),
-            "candidate producer boundary",
-        );
-        let producer = &rendered[producer_start..producer_start + producer_end];
+        let producer = &rendered[producer_start..];
         assert_candidate_producer_render_contract(producer);
+    }
+
+    #[test]
+    fn checks_role_preserves_the_ordinary_pull_request_graph_without_candidate() {
+        let ir = owner_test_ir(workflow_setup_action_repository(), Vec::new());
+        let ordinary = ir.render_nested(WorkflowKind::PullRequest, &[], None);
+        let checks = ir.render_pull_request(PullRequestRole::Checks, &[], None);
+        assert_eq!(
+            ordinary, checks,
+            "checks role must use the ordinary graph renderer"
+        );
+        assert!(!checks.contains("candidate_producer:"), "{checks}");
+        assert!(checks.contains("  plan:"), "{checks}");
     }
 
     fn assert_candidate_producer_render_contract(producer: &str) {
@@ -2324,6 +2333,15 @@ pub(crate) enum WorkflowKind {
     Nightly,
 }
 
+/// The two generated PR entrypoint roles.  They deliberately do not share a
+/// filename alias: the candidate producer is a one-job transport workflow,
+/// while the checks workflow owns the complete ordinary CI graph.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PullRequestRole {
+    CandidateProducer,
+    Checks,
+}
+
 /// The admission class of a provider caller: which single predicate decides,
 /// for the current event, ref, and dispatch input, whether the provider runs
 /// the unit.
@@ -2509,6 +2527,16 @@ fn aggregate_concurrency_block(
 ) -> String {
     let group = aggregate_concurrency_group(ir, kind);
     format!("concurrency:\n  group: {group}\n  cancel-in-progress: {cancel_in_progress}\n\n")
+}
+
+fn candidate_concurrency_group(ir: &WorkflowIr) -> String {
+    ir.concurrency_group.as_deref().map_or_else(
+        || {
+            "ci-candidate-${{ github.repository }}-${{ github.event.pull_request.number }}"
+                .to_owned()
+        },
+        |base| format!("{base}-candidate-${{{{ github.event.pull_request.number }}}}"),
+    )
 }
 
 fn aggregate_triggers(
@@ -3331,11 +3359,6 @@ impl WorkflowIr {
         let mut plan = String::new();
         self.render_plan(&mut plan);
         output.push_str(&plan);
-        if kind == WorkflowKind::PullRequest
-            && self.repository == crate::s2::workflow_setup_action_repository()
-        {
-            self.render_candidate_producer(&mut output);
-        }
         if kind != WorkflowKind::PullRequest {
             self.render_policy(&mut output);
         }
@@ -3365,6 +3388,37 @@ impl WorkflowIr {
                 false,
             );
         }
+        while output.ends_with("\n\n") {
+            output.pop();
+        }
+        output
+    }
+
+    /// Render one of the two PR entrypoint roles.  Candidate production is a
+    /// separate one-job workflow; ordinary checks delegate to the existing
+    /// aggregate renderer so the old graph remains the source of truth.
+    pub(crate) fn render_pull_request(
+        &self,
+        role: PullRequestRole,
+        nodes: &[GraphNode],
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> String {
+        match role {
+            PullRequestRole::Checks => {
+                self.render_nested(WorkflowKind::PullRequest, nodes, contracts)
+            }
+            PullRequestRole::CandidateProducer => self.render_candidate_only(),
+        }
+    }
+
+    fn render_candidate_only(&self) -> String {
+        let mut output = String::from(GENERATED_HEADER);
+        let group = candidate_concurrency_group(self);
+        let _ = writeln!(
+            output,
+            "name: CI / PR candidate\nrun-name: CI / PR candidate · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  pull_request:\n\nconcurrency:\n  group: {group}\n  cancel-in-progress: false\n\npermissions: {{}}\n\njobs:"
+        );
+        self.render_candidate_producer(&mut output);
         while output.ends_with("\n\n") {
             output.pop();
         }

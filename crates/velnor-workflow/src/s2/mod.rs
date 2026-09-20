@@ -40,7 +40,7 @@ mod tui;
 mod watchdog;
 
 use crate::s2::primitives::prepared_tools::PreparedToolNeed;
-use crate::s2::primitives::{WorkflowIr, WorkflowKind};
+use crate::s2::primitives::{PullRequestRole, WorkflowIr, WorkflowKind};
 use crate::s2::scan::file_walk::is_test_support_path;
 
 /// Whether `dir` carries a generation config declaring schema 2. The schema
@@ -5472,6 +5472,12 @@ macro_rules! policy_candidate_step_template {
           BASE_REVISION: {revision}
         run: |
           set -euo pipefail
+          readonly provider_cross_run_binding_proof=Unknown
+          readonly admission_mode=Disabled
+          if [[ "$provider_cross_run_binding_proof" != Passed || "$admission_mode" != Enabled ]]; then
+            echo "::error::ProviderProofPending: cross-run artifact binding proof is Unknown; candidate admission is NotAuthorized" >&2
+            exit 78
+          fi
           export RUNNER_TEMP="${{VELNOR_TRANSPORT_SCRATCH:?bounded transport scratch was not prepared}}"
           test "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY" || {{ echo "::error::fork producer artifacts are not eligible" >&2; exit 1; }}
           test "$HEAD_REPOSITORY_ID" = "$TARGET_REPOSITORY_ID" || {{ echo "::error::head repository id is not the target repository id" >&2; exit 1; }}
@@ -7026,14 +7032,21 @@ fn validate_unit_provider_coverage(config: &ProjectConfig) -> Result<(), Generat
 const CI_PR_WORKFLOW: &str = ".github/workflows/ci-pr.yml";
 
 pub(crate) fn workflow_job_display_names(yaml: &str) -> Result<BTreeSet<String>, GeneratorError> {
+    workflow_job_display_names_for(CI_PR_WORKFLOW, yaml)
+}
+
+fn workflow_job_display_names_for(
+    workflow_path: &str,
+    yaml: &str,
+) -> Result<BTreeSet<String>, GeneratorError> {
     let doc: Value = serde_yaml::from_str(yaml).map_err(|error| {
         GeneratorError::usage(format!(
-            "parse {CI_PR_WORKFLOW} for ruleset validation: {error}"
+            "parse {workflow_path} for ruleset validation: {error}"
         ))
     })?;
     let Some(jobs) = doc.get("jobs").and_then(Value::as_mapping) else {
         return Err(GeneratorError::usage(format!(
-            "{CI_PR_WORKFLOW} is missing a top-level `jobs` mapping"
+            "{workflow_path} is missing a top-level `jobs` mapping"
         )));
     };
     let mut names = BTreeSet::new();
@@ -7075,16 +7088,23 @@ fn validate_ruleset_required_status_checks(
     if required.is_empty() {
         return Ok(());
     }
-    let path = PathBuf::from(CI_PR_WORKFLOW);
+    let workflow_path = if config.repository == workflow_setup_action_repository()
+        && files.contains_key(Path::new(".github/workflows/ci-pr-checks.yml"))
+    {
+        ".github/workflows/ci-pr-checks.yml"
+    } else {
+        CI_PR_WORKFLOW
+    };
+    let path = PathBuf::from(workflow_path);
     let Some(yaml) = files.get(&path) else {
         // Adopted or release-only surfaces omit the PR aggregate by design.
         return Ok(());
     };
-    let names = workflow_job_display_names(yaml)?;
+    let names = workflow_job_display_names_for(workflow_path, yaml)?;
     for context in required {
         if !names.contains(&context) {
             return Err(GeneratorError::usage(format!(
-                "ruleset required status check `{context}` is absent from {CI_PR_WORKFLOW} job names; found [{}]",
+                "ruleset required status check `{context}` is absent from {workflow_path} job names; found [{}]",
                 names.iter().map(String::as_str).collect::<Vec<_>>().join(", ")
             )));
         }
@@ -7670,12 +7690,90 @@ fn add_owner_runtime_products_file(config: &mut ProjectConfig) {
     }
 }
 
+/// The setup-action repository owns two PR entrypoints: the candidate
+/// producer stays in `ci-pr.yml`, while the complete ordinary graph moves to
+/// `ci-pr-checks.yml`.  This is a generator-owned split, not a second alias
+/// for the old aggregate, so the generated project contract records both
+/// files and policy can bind each role separately.
+fn add_owner_pull_request_role_files(config: &mut ProjectConfig) {
+    if config.adopted_workflow_surface
+        || config.repository != workflow_setup_action_repository()
+        || !config.workflow_files.iter().any(|file| file == "ci-pr.yml")
+    {
+        return;
+    }
+    if !config
+        .workflow_files
+        .iter()
+        .any(|file| file == "ci-pr-checks.yml")
+    {
+        config.workflow_files.push("ci-pr-checks.yml".to_owned());
+    }
+}
+
+fn owner_pull_request_role_content(
+    config: &ProjectConfig,
+    workflow_file: &str,
+    workflow: &WorkflowIr,
+) -> Option<String> {
+    if config.adopted_workflow_surface || config.repository != workflow_setup_action_repository() {
+        return None;
+    }
+    match workflow_file {
+        "ci-pr.yml" => Some(generated_ci_pr_candidate(workflow)),
+        "ci-pr-checks.yml" => Some(generated_ci_pr_checks(workflow)),
+        _ => None,
+    }
+}
+
+fn render_owned_workflow_file(
+    config: &ProjectConfig,
+    workflow: &WorkflowIr,
+    surface: Option<&primitives::Surface>,
+    workflow_file: &str,
+) -> Result<Option<String>, GeneratorError> {
+    if let Some(content) = owner_pull_request_role_content(config, workflow_file, workflow) {
+        return Ok(Some(content));
+    }
+    let path = PathBuf::from(".github/workflows").join(workflow_file);
+    if let Some(content) = surface.and_then(|surface| surface.files.get(&path)) {
+        return Ok(Some(content.clone()));
+    }
+    let content = config
+        .workflow_templates
+        .get(workflow_file)
+        .map(|template| render_static_template_for_config(config, workflow_file, template))
+        .transpose()?;
+    let content = match content {
+        Some(content) => Some(content),
+        None if config.adopted_workflow_surface => None,
+        None => match workflow_file {
+            "ci-pr.yml" | "ci-pull-request.yml" => Some(generated_ci_pr(workflow)),
+            "ci-pr-checks.yml" => Some(generated_ci_pr_checks(workflow)),
+            "ci-policy.yml" => Some(generated_ci_policy(config)),
+            "ci-release-package-signer.yml" => Some(generated_release_package_signer(config)),
+            "ci-main.yml" => Some(generated_ci_main(workflow)),
+            "nightly.yml" => Some(generated_nightly(workflow)),
+            "maintenance.yml" => Some(generated_maintenance(config)),
+            "preview.yml" => Some(generated_preview(config)),
+            "release.yml" => generated_release(config),
+            "renovate.yml" => primitives::renovate::renovate_content(config)?,
+            "renovate-validate.yml" => primitives::renovate::renovate_validate_content(config),
+            "docs.yml" => generated_docs_site(config),
+            "ci-runtime-products.yml" => generated_runtime_products(config)?,
+            _ => None,
+        },
+    };
+    Ok(content)
+}
+
 fn generated_files_with_surface(
     config: &ProjectConfig,
     surface: Option<&primitives::Surface>,
 ) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
     let mut config = config.clone();
     add_owner_runtime_products_file(&mut config);
+    add_owner_pull_request_role_files(&mut config);
     provider::require_selectors_for(&config.selectors, &config.providers)?;
     provider::validate_selector_disjointness(&config.selectors)?;
     let workflow = WorkflowIr::from_config(&config);
@@ -7717,35 +7815,9 @@ fn generated_files_with_surface(
     files.insert(PathBuf::from(".github/ci/project.toml"), config.toml());
     for workflow_file in &config.workflow_files {
         let path = PathBuf::from(".github/workflows").join(workflow_file);
-        if let Some(content) = surface.and_then(|surface| surface.files.get(&path)) {
-            files.insert(path, content.clone());
-            continue;
-        }
-        let content = config
-            .workflow_templates
-            .get(workflow_file)
-            .map(|template| render_static_template_for_config(&config, workflow_file, template))
-            .transpose()?;
-        let content = match content {
-            Some(content) => Some(content),
-            None if config.adopted_workflow_surface => None,
-            None => match workflow_file.as_str() {
-                "ci-pr.yml" | "ci-pull-request.yml" => Some(generated_ci_pr(&workflow)),
-                "ci-policy.yml" => Some(generated_ci_policy(&config)),
-                "ci-release-package-signer.yml" => Some(generated_release_package_signer(&config)),
-                "ci-main.yml" => Some(generated_ci_main(&workflow)),
-                "nightly.yml" => Some(generated_nightly(&workflow)),
-                "maintenance.yml" => Some(generated_maintenance(&config)),
-                "preview.yml" => Some(generated_preview(&config)),
-                "release.yml" => generated_release(&config),
-                "renovate.yml" => primitives::renovate::renovate_content(&config)?,
-                "renovate-validate.yml" => primitives::renovate::renovate_validate_content(&config),
-                "docs.yml" => generated_docs_site(&config),
-                "ci-runtime-products.yml" => generated_runtime_products(&config)?,
-                _ => None,
-            },
-        };
-        if let Some(content) = content {
+        if let Some(content) =
+            render_owned_workflow_file(&config, &workflow, surface, workflow_file)?
+        {
             files.insert(path, content);
         }
     }
@@ -7800,7 +7872,15 @@ fn report_velnor_ci_outcomes_action_template() -> String {
 // `generated_files` stay a pure dispatch table over renderers.
 
 fn generated_ci_pr(workflow: &WorkflowIr) -> String {
-    workflow.render_nested(WorkflowKind::PullRequest, &legacy_plan(workflow), None)
+    generated_ci_pr_checks(workflow)
+}
+
+fn generated_ci_pr_candidate(workflow: &WorkflowIr) -> String {
+    workflow.render_pull_request(PullRequestRole::CandidateProducer, &[], None)
+}
+
+fn generated_ci_pr_checks(workflow: &WorkflowIr) -> String {
+    workflow.render_pull_request(PullRequestRole::Checks, &legacy_plan(workflow), None)
 }
 
 /// The graph the legacy renderer composes itself — the plan job plus one node
@@ -17682,6 +17762,77 @@ lockfile = true
         assert!(
             !consumer.contains("Acquire candidate generator product"),
             "{consumer}"
+        );
+    }
+
+    #[test]
+    fn candidate_acquisition_is_disabled_until_external_cross_run_proof() {
+        let step = policy_candidate_step("abc123");
+        let gate = must_some(
+            step.find("readonly provider_cross_run_binding_proof=Unknown"),
+            "disabled provider proof gate",
+        );
+        let api = must_some(
+            step.find("bounded_gh_api_value"),
+            "candidate API acquisition",
+        );
+        assert!(gate < api, "the gate precedes every API selection: {step}");
+        assert!(
+            step.contains("readonly admission_mode=Disabled")
+                && step.contains("ProviderProofPending")
+                && step.contains("NotAuthorized")
+                && step.contains("exit 78"),
+            "unknown proof must fail closed without a green or fallback path: {step}"
+        );
+        assert!(
+            !step.contains("PROVIDER_CROSS_RUN_BINDING_PROOF") && !step.contains("ADMISSION_MODE:"),
+            "generated output cannot override the disabled proof state: {step}"
+        );
+    }
+
+    #[test]
+    fn owner_pr_roles_render_separate_candidate_and_checks_workflows() {
+        let mut config = scanned_fixture(all_providers());
+        config.repository = workflow_setup_action_repository().to_owned();
+        let files = must(generated_files(&config), "render owner PR roles");
+        let candidate = must_some(
+            files.get(Path::new(".github/workflows/ci-pr.yml")),
+            "candidate workflow",
+        );
+        let checks = must_some(
+            files.get(Path::new(".github/workflows/ci-pr-checks.yml")),
+            "ordinary checks workflow",
+        );
+        let candidate_doc: Value =
+            must(serde_yaml::from_str(candidate), "parse candidate workflow");
+        assert_eq!(
+            candidate_doc
+                .get("jobs")
+                .and_then(Value::as_mapping)
+                .map_or(0, serde_yaml::Mapping::len),
+            1,
+            "candidate workflow has exactly one producer job"
+        );
+        assert!(candidate.contains("candidate_producer:"), "{candidate}");
+        assert!(!candidate.contains("  plan:"), "{candidate}");
+        assert!(!candidate.contains("workflow_dispatch:"), "{candidate}");
+        assert!(checks.contains("  plan:"), "{checks}");
+        assert!(!checks.contains("candidate_producer:"), "{checks}");
+        let candidate_group = candidate
+            .lines()
+            .find(|line| line.trim_start().starts_with("group:"));
+        let checks_group = checks
+            .lines()
+            .find(|line| line.trim_start().starts_with("group:"));
+        assert_ne!(
+            candidate_group, checks_group,
+            "candidate and ordinary workflows use distinct concurrency groups"
+        );
+        assert!(
+            files
+                .get(Path::new(".github/ci/project.toml"))
+                .is_some_and(|toml| toml.contains("\"ci-pr-checks.yml\"")),
+            "the generated project contract records the checks role"
         );
     }
 

@@ -42,7 +42,7 @@ pub(crate) use ir::{
     docker_build_token_env_for_members, render_cargo_source_preparation,
     render_pinned_toolchain_steps, render_retained_output_cache_note,
     trusted_cache_save_expression, validate_nextest_tools_are_locked, ProviderAdmission,
-    WorkflowIr, WorkflowKind, GITHUB_WORKFLOW_BYTE_LIMIT,
+    PullRequestRole, WorkflowIr, WorkflowKind, GITHUB_WORKFLOW_BYTE_LIMIT,
 };
 
 #[cfg(test)]
