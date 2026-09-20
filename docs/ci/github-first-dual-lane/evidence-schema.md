@@ -208,9 +208,9 @@ here so an integration cannot silently combine incompatible contracts:
 
 | Boundary | Current producer checkpoint | Checker requirement | Status |
 | --- | --- | --- | --- |
-| API acquisition and collection | `origin/codex/g3-live-collector` `fdf1e11a1ec0b86342b0348c145ecb919dd0550a` | authenticated read-only transport, complete request/page ledger, raw response references, opening and closing default/PR rereads, and source-derived workflow/run/job/check/child graph | not consumable yet: producer `LiveCollection`/mapper does not emit this checker revision's complete `G0InventoryEvidence` (including canonical snapshot bytes/storage reference, `run_attempt`-bound artifacts, and source-job obligations) |
-| Raw-byte publication | `origin/codex/g3-raw-store` `8526294628568799f0ebbe5ee444697c1405d053` | one production `RawObjectStore` using `sha256://<lowercase-64-hex>`, measured original response bytes, descriptor-relative reopen/rehash, and immutable sidecar/reference binding | not consumable yet: independent review still finds namespace transaction, crash cleanup/reconciliation, and production CLI wiring gaps |
-| Checker validation | `c0329b892e51706f5cca1c90a73744c41766cb68` | strict `g0_contract.rs` parsing and deterministic comparison against reviewed scope/source; `--live` must receive a producer-authorized capture | live path intentionally fails closed until both producer boundaries are integrated and independently reviewed |
+| API acquisition and collection | `origin/codex/g3-live-collector` `f20f8a160a6bbcd12eb063b5bd1d15b9137b3403` | authenticated read-only transport, complete request/page ledger, raw response references, opening and closing default/PR rereads, and source-derived workflow/run/job/check/child graph | not consumable yet: producer `LiveCollection`/mapper does not emit this checker revision's complete `G0InventoryEvidence` or register an in-process adapter |
+| Raw-byte publication | `origin/codex/g3-raw-store` `3e3aa993c0f0b648a3e07c1d90913f13a14c8a2b` | one production `RawObjectStore` using `sha256://<lowercase-64-hex>`, measured original response bytes, descriptor-relative reopen/rehash, and immutable sidecar/reference binding | pending combined compile and independent review: the producer adapter must pass exact pre-redaction bytes into this store and consume its verified reference |
+| Checker validation | `348dbb82f05a5ccda2ebb6e4c4d1a54c4df5e402` | strict `g0_contract.rs` parsing and deterministic comparison against reviewed scope/source; `--live` must receive a producer-authorized capture | live path intentionally fails closed until both producer boundaries are integrated and independently reviewed |
 
 The integration target is one in-process path, not a second JSON normalizer:
 
@@ -256,6 +256,13 @@ constructing it. `VerifiedRawStoreHandle` must call the production
 descriptor-relative store's reopen/rehash verification. A future checker
 integration may accept only this in-process value; offline files continue to use
 `check_paths` for rejection tests and cannot authorize G0 or G7.
+
+The producer installs its adapter once with
+`live_authority::install_collector(Box<dyn AuthenticatedClosingCollector>)`
+during process setup. Registration is immutable and process-local; no command
+argument, JSON field, timestamp, digest, or evidence-root path can install or
+replace the authority. If setup does not register the authenticated collector,
+`--live` returns the explicit capability error.
 
 Do not cherry-pick either checkpoint wholesale into the checker branch. Their
 collector and checker contracts diverged from the strict c032 types. The next
