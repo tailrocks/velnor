@@ -311,16 +311,61 @@ pub struct LiveSampleCollection {
     pub raw_objects: Vec<RawObjectRef>,
 }
 
+/// Optional append-only sink for request progress.  The sink receives only
+/// typed request metadata; response bytes and credential material stay in the
+/// raw-object store/transport boundary.
+pub trait LiveProgressSink {
+    fn record_request(&mut self, request: &RequestRecord) -> Result<()>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct DependencyTreeKey {
+    endpoint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct DependencySourceKey {
+    metadata_endpoint: String,
+    raw_endpoint: String,
+}
+
+#[derive(Debug, Clone)]
+struct CachedDependencySource {
+    source_url: String,
+    source_text: String,
+    source_raw_object_refs: Vec<String>,
+}
+
 #[derive(Default)]
-struct Ledger {
+struct Ledger<'a> {
     requests: Vec<RequestRecord>,
     raw_objects: Vec<RawObjectRef>,
     request_ids: BTreeSet<String>,
     raw_ids: BTreeSet<String>,
+    dependency_trees: BTreeMap<DependencyTreeKey, (Value, Vec<String>)>,
+    dependency_sources: BTreeMap<DependencySourceKey, CachedDependencySource>,
+    progress: Option<&'a mut dyn LiveProgressSink>,
 }
 
-impl Ledger {
+impl<'a> Ledger<'a> {
+    fn with_progress(progress: Option<&'a mut dyn LiveProgressSink>) -> Self {
+        Self {
+            progress,
+            ..Self::default()
+        }
+    }
+
+    fn record_progress(&mut self, requests: &[RequestRecord]) -> Result<()> {
+        if let Some(progress) = self.progress.as_deref_mut() {
+            for request in requests {
+                progress.record_request(request)?;
+            }
+        }
+        Ok(())
+    }
+
     fn ingest(&mut self, result: CollectionResult) -> Result<Vec<Value>> {
+        self.record_progress(&result.requests)?;
         if !result.complete {
             bail!(
                 "GitHub collection page set is incomplete: {:?}",
@@ -421,9 +466,27 @@ fn is_digest(value: &str) -> bool {
 pub async fn collect_live<T, S>(
     transport: &T,
     store: &mut S,
+    auth: AuthIdentity,
+    manifest: &ManifestDocument,
+    snapshot_id: impl Into<String>,
+) -> Result<LiveCollection>
+where
+    T: super::AcquisitionTransport + ?Sized,
+    S: RawObjectStore,
+{
+    collect_live_with_progress(transport, store, auth, manifest, snapshot_id, None).await
+}
+
+/// Collect the complete GitHub inventory and append each committed request to
+/// an optional progress sink.  The legacy-shaped wrapper above intentionally
+/// remains a no-sink API for callers that only need the in-memory result.
+pub async fn collect_live_with_progress<T, S>(
+    transport: &T,
+    store: &mut S,
     mut auth: AuthIdentity,
     manifest: &ManifestDocument,
     snapshot_id: impl Into<String>,
+    progress: Option<&mut dyn LiveProgressSink>,
 ) -> Result<LiveCollection>
 where
     T: super::AcquisitionTransport + ?Sized,
@@ -432,7 +495,7 @@ where
     let snapshot_id = snapshot_id.into();
     validate_manifest_scope(manifest, &snapshot_id)?;
     let observed_at_utc = utc_now();
-    let mut ledger = Ledger::default();
+    let mut ledger = Ledger::with_progress(progress);
     let viewer_result = collect_result(
         transport,
         store,
@@ -641,7 +704,7 @@ async fn collect_items<T, S>(
     transport: &T,
     store: &mut S,
     auth: &AuthIdentity,
-    ledger: &mut Ledger,
+    ledger: &mut Ledger<'_>,
     request: RestCollectionRequest,
 ) -> Result<(Vec<Value>, Vec<String>)>
 where
@@ -658,7 +721,7 @@ async fn collect_one<T, S>(
     transport: &T,
     store: &mut S,
     auth: &AuthIdentity,
-    ledger: &mut Ledger,
+    ledger: &mut Ledger<'_>,
     request: RestCollectionRequest,
 ) -> Result<(Value, Vec<String>)>
 where
@@ -699,7 +762,7 @@ async fn collect_raw_source<T, S>(
     transport: &T,
     store: &mut S,
     auth: &AuthIdentity,
-    ledger: &mut Ledger,
+    ledger: &mut Ledger<'_>,
     collection_id: String,
     repository: &str,
     path: &str,
@@ -759,7 +822,7 @@ async fn collect_pr_identities<T, S>(
     auth: &AuthIdentity,
     repository: &ManifestRepository,
     phase: &str,
-    ledger: &mut Ledger,
+    ledger: &mut Ledger<'_>,
 ) -> Result<Vec<LivePullRequestIdentity>>
 where
     T: super::AcquisitionTransport + ?Sized,
@@ -820,7 +883,7 @@ async fn collect_repository_tip<T, S>(
     auth: &AuthIdentity,
     manifest: &ManifestRepository,
     phase: &str,
-    ledger: &mut Ledger,
+    ledger: &mut Ledger<'_>,
 ) -> Result<(u64, String, String, Vec<String>)>
 where
     T: super::AcquisitionTransport + ?Sized,
@@ -872,7 +935,7 @@ async fn collect_repository<T, S>(
     store: &mut S,
     auth: &AuthIdentity,
     manifest: &ManifestRepository,
-    ledger: &mut Ledger,
+    ledger: &mut Ledger<'_>,
 ) -> Result<LiveRepository>
 where
     T: super::AcquisitionTransport + ?Sized,
@@ -1022,7 +1085,7 @@ async fn collect_rulesets<T, S>(
     store: &mut S,
     auth: &AuthIdentity,
     manifest: &ManifestRepository,
-    ledger: &mut Ledger,
+    ledger: &mut Ledger<'_>,
 ) -> Result<Vec<LiveRuleset>>
 where
     T: super::AcquisitionTransport + ?Sized,
@@ -1087,7 +1150,7 @@ async fn collect_workflows<T, S>(
     auth: &AuthIdentity,
     manifest: &ManifestRepository,
     source_sha: &str,
-    ledger: &mut Ledger,
+    ledger: &mut Ledger<'_>,
 ) -> Result<Vec<LiveWorkflow>>
 where
     T: super::AcquisitionTransport + ?Sized,
@@ -1215,7 +1278,7 @@ async fn collect_workflow_at_source<T, S>(
     manifest: &ManifestRepository,
     path: &str,
     source_sha: &str,
-    ledger: &mut Ledger,
+    ledger: &mut Ledger<'_>,
 ) -> Result<LiveWorkflow>
 where
     T: super::AcquisitionTransport + ?Sized,
@@ -1323,7 +1386,7 @@ async fn collect_pr_execution_facts<T, S>(
     repository_id: u64,
     workflows: &mut Vec<LiveWorkflow>,
     identity: &LivePullRequestIdentity,
-    ledger: &mut Ledger,
+    ledger: &mut Ledger<'_>,
 ) -> Result<(Vec<LiveExecution>, Vec<LiveCheck>, Vec<LiveArtifact>)>
 where
     T: super::AcquisitionTransport + ?Sized,
@@ -1383,7 +1446,7 @@ async fn collect_executions_for_source<T, S>(
     workflows: &mut Vec<LiveWorkflow>,
     source_sha: &str,
     collection_prefix: &str,
-    ledger: &mut Ledger,
+    ledger: &mut Ledger<'_>,
 ) -> Result<(Vec<LiveExecution>, Vec<LiveArtifact>)>
 where
     T: super::AcquisitionTransport + ?Sized,
@@ -1656,7 +1719,7 @@ async fn collect_attempt_chain<T, S>(
     run_id: u64,
     latest_attempt: u32,
     collection_prefix: &str,
-    ledger: &mut Ledger,
+    ledger: &mut Ledger<'_>,
 ) -> Result<Vec<(Value, Vec<String>, u32)>>
 where
     T: super::AcquisitionTransport + ?Sized,
@@ -1753,7 +1816,7 @@ async fn collect_check_facts<T, S>(
     manifest: &ManifestRepository,
     source_sha: &str,
     collection_prefix: &str,
-    ledger: &mut Ledger,
+    ledger: &mut Ledger<'_>,
 ) -> Result<Vec<LiveCheck>>
 where
     T: super::AcquisitionTransport + ?Sized,
@@ -2644,14 +2707,14 @@ fn parse_workflow_dependencies(
     Ok((reusable, actions, scanners))
 }
 
-struct WorkflowDependencyContext<'a, T: ?Sized, S> {
+struct WorkflowDependencyContext<'a, 'ledger, 'progress, T: ?Sized, S> {
     transport: &'a T,
     store: &'a mut S,
     auth: &'a AuthIdentity,
     manifest: &'a ManifestRepository,
     workflow_path: &'a str,
     source_sha: &'a str,
-    ledger: &'a mut Ledger,
+    ledger: &'ledger mut Ledger<'progress>,
 }
 
 struct WorkflowDependencyGroups {
@@ -2661,7 +2724,7 @@ struct WorkflowDependencyGroups {
 }
 
 async fn bind_workflow_dependencies<T, S>(
-    context: WorkflowDependencyContext<'_, T, S>,
+    context: WorkflowDependencyContext<'_, '_, '_, T, S>,
     groups: WorkflowDependencyGroups,
 ) -> Result<WorkflowDependencyGroups>
 where
@@ -2693,107 +2756,139 @@ where
                 dependency.revision
             );
         }
-        let (tree, raw_ids) = collect_one(
-            transport,
-            store,
-            auth,
-            ledger,
-            github_single_object_request(
-                collection_id(
-                    &manifest.repository,
-                    &format!(
-                        "workflow-dependency-{}-{}-{}",
-                        safe_id(workflow_path),
-                        safe_id(source_sha),
-                        index
+        let tree_endpoint = format!(
+            "/repos/{}/git/trees/{}?recursive=1",
+            dependency.repository, dependency.revision
+        );
+        let tree_key = DependencyTreeKey {
+            endpoint: tree_endpoint.clone(),
+        };
+        let tree_was_cached = ledger.dependency_trees.contains_key(&tree_key);
+        let (tree, raw_ids) =
+            if let Some((tree, raw_ids)) = ledger.dependency_trees.get(&tree_key).cloned() {
+                (tree, raw_ids)
+            } else {
+                let fetched = collect_one(
+                    transport,
+                    store,
+                    auth,
+                    ledger,
+                    github_single_object_request(
+                        collection_id(
+                            &manifest.repository,
+                            &format!(
+                                "workflow-dependency-{}-{}-{}",
+                                safe_id(workflow_path),
+                                safe_id(source_sha),
+                                index
+                            ),
+                        ),
+                        tree_endpoint,
+                        "workflow.dependency",
                     ),
-                ),
-                format!(
-                    "/repos/{}/git/trees/{}?recursive=1",
-                    dependency.repository, dependency.revision
-                ),
-                "workflow.dependency",
-            ),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "workflow dependency tree {}/{}@{}",
-                dependency.repository, dependency.path, dependency.revision
-            )
-        })?;
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "workflow dependency tree {}/{}@{}",
+                        dependency.repository, dependency.path, dependency.revision
+                    )
+                })?;
+                fetched
+            };
         let resolved_path =
             validate_dependency_tree(&tree, &dependency.repository, &dependency.path)?;
+        if !tree_was_cached {
+            ledger
+                .dependency_trees
+                .insert(tree_key, (tree.clone(), raw_ids.clone()));
+        }
         let encoded_path = encode_api_path(&resolved_path);
-        let (source, _source_metadata_raw_ids) = collect_one(
-            transport,
-            store,
-            auth,
-            ledger,
-            github_single_object_request(
+        let source_endpoint = format!(
+            "/repos/{}/contents/{encoded_path}?ref={}",
+            dependency.repository, dependency.revision
+        );
+        let source_key = DependencySourceKey {
+            metadata_endpoint: source_endpoint.clone(),
+            raw_endpoint: source_endpoint.clone(),
+        };
+        let cached_source = if let Some(cached) = ledger.dependency_sources.get(&source_key) {
+            cached.clone()
+        } else {
+            let (source, _source_metadata_raw_ids) = collect_one(
+                transport,
+                store,
+                auth,
+                ledger,
+                github_single_object_request(
+                    collection_id(
+                        &manifest.repository,
+                        &format!(
+                            "workflow-dependency-source-{}-{}-{}",
+                            safe_id(workflow_path),
+                            safe_id(source_sha),
+                            index
+                        ),
+                    ),
+                    source_endpoint,
+                    "workflow.dependency.source",
+                ),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "workflow dependency source {}/{}@{}",
+                    dependency.repository, resolved_path, dependency.revision
+                )
+            })?;
+            validate_workflow_content(
+                &source,
+                &dependency.repository,
+                &resolved_path,
+                &dependency.revision,
+            )?;
+            let source_url = required_string(&source, &["url"])?;
+            let metadata_source_text = decode_workflow_content(&source)?;
+            let (source_text, source_raw_ids) = collect_raw_source(
+                transport,
+                store,
+                auth,
+                ledger,
                 collection_id(
                     &manifest.repository,
                     &format!(
-                        "workflow-dependency-source-{}-{}-{}",
+                        "workflow-dependency-raw-source-{}-{}-{}",
                         safe_id(workflow_path),
                         safe_id(source_sha),
                         index
                     ),
                 ),
-                format!(
-                    "/repos/{}/contents/{encoded_path}?ref={}",
-                    dependency.repository, dependency.revision
-                ),
+                &dependency.repository,
+                &resolved_path,
+                &dependency.revision,
                 "workflow.dependency.source",
-            ),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "workflow dependency source {}/{}@{}",
-                dependency.repository, resolved_path, dependency.revision
             )
-        })?;
-        validate_workflow_content(
-            &source,
-            &dependency.repository,
-            &resolved_path,
-            &dependency.revision,
-        )?;
-        let source_url = required_string(&source, &["url"])?;
-        let metadata_source_text = decode_workflow_content(&source)?;
-        let (source_text, source_raw_ids) = collect_raw_source(
-            transport,
-            store,
-            auth,
-            ledger,
-            collection_id(
-                &manifest.repository,
-                &format!(
-                    "workflow-dependency-raw-source-{}-{}-{}",
-                    safe_id(workflow_path),
-                    safe_id(source_sha),
-                    index
-                ),
-            ),
-            &dependency.repository,
-            &resolved_path,
-            &dependency.revision,
-            "workflow.dependency.source",
-        )
-        .await?;
-        if source_text != metadata_source_text {
-            bail!(
-                "workflow dependency source metadata and raw media bytes differ for {}/{}@{}",
-                dependency.repository,
-                resolved_path,
-                dependency.revision
-            );
-        }
+            .await?;
+            if source_text != metadata_source_text {
+                bail!(
+                    "workflow dependency source metadata and raw media bytes differ for {}/{}@{}",
+                    dependency.repository,
+                    resolved_path,
+                    dependency.revision
+                );
+            }
+            let cached = CachedDependencySource {
+                source_url,
+                source_text,
+                source_raw_object_refs: source_raw_ids,
+            };
+            ledger.dependency_sources.insert(source_key, cached.clone());
+            cached
+        };
         dependency.resolved_path = Some(resolved_path);
-        dependency.source_url = Some(source_url);
-        dependency.source_bytes_base64 = Some(BASE64.encode(source_text.as_bytes()));
-        dependency.source_raw_object_refs = source_raw_ids;
+        dependency.source_url = Some(cached_source.source_url);
+        dependency.source_bytes_base64 = Some(BASE64.encode(cached_source.source_text.as_bytes()));
+        dependency.source_raw_object_refs = cached_source.source_raw_object_refs;
         dependency.raw_object_refs = raw_ids;
     }
     let mut reusable = Vec::new();
@@ -3151,6 +3246,10 @@ mod tests {
                 .collect();
             Self::with_responses(responses)
         }
+
+        fn request_count(&self) -> usize {
+            self.requests.lock().expect("fixture request lock").len()
+        }
     }
 
     impl AcquisitionTransport for FixtureTransport {
@@ -3294,24 +3393,41 @@ mod tests {
             },
             WorkflowDependencyGroups {
                 reusable: Vec::new(),
-                actions: vec![LiveDependency {
-                    kind: "action".to_owned(),
-                    repository: "actions/checkout".to_owned(),
-                    path: ".".to_owned(),
-                    revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-                    resolved_path: None,
-                    source_url: None,
-                    source_bytes_base64: None,
-                    source_raw_object_refs: Vec::new(),
-                    raw_object_refs: Vec::new(),
-                }],
+                actions: vec![
+                    LiveDependency {
+                        kind: "action".to_owned(),
+                        repository: "actions/checkout".to_owned(),
+                        path: ".".to_owned(),
+                        revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                        resolved_path: None,
+                        source_url: None,
+                        source_bytes_base64: None,
+                        source_raw_object_refs: Vec::new(),
+                        raw_object_refs: Vec::new(),
+                    },
+                    LiveDependency {
+                        kind: "action".to_owned(),
+                        repository: "actions/checkout".to_owned(),
+                        path: "./".to_owned(),
+                        revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                        resolved_path: None,
+                        source_url: None,
+                        source_bytes_base64: None,
+                        source_raw_object_refs: Vec::new(),
+                        raw_object_refs: Vec::new(),
+                    },
+                ],
                 scanners: Vec::new(),
             },
         )
         .await
         .expect("dependency tree binding");
-        assert_eq!(dependencies.actions.len(), 1);
+        assert_eq!(dependencies.actions.len(), 2);
         assert_eq!(dependencies.actions[0].raw_object_refs.len(), 1);
+        assert_eq!(
+            dependencies.actions[0].raw_object_refs,
+            dependencies.actions[1].raw_object_refs
+        );
         assert_eq!(
             dependencies.actions[0].resolved_path.as_deref(),
             Some("action.yml")
@@ -3324,6 +3440,10 @@ mod tests {
         );
         assert!(dependencies.actions[0].source_bytes_base64.is_some());
         assert_eq!(dependencies.actions[0].source_raw_object_refs.len(), 1);
+        assert_eq!(
+            dependencies.actions[0].source_raw_object_refs,
+            dependencies.actions[1].source_raw_object_refs
+        );
         assert_eq!(ledger.raw_objects.len(), 3);
         assert_eq!(ledger.raw_objects[0].object_kind, "workflow.dependency");
         assert_eq!(
@@ -3352,6 +3472,166 @@ mod tests {
             requests[2].accept.as_deref(),
             Some("application/vnd.github.raw+json")
         );
+    }
+
+    #[tokio::test]
+    async fn dependency_cache_does_not_collapse_different_source_endpoints() {
+        let revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let tree = serde_json::json!({
+            "sha": revision,
+            "truncated": false,
+            "tree": [{"path": "action.yml", "type": "blob"}]
+        });
+        let source_bytes = b"name: action\nruns:\n  using: composite\n  steps: []\n".to_vec();
+        let source = |repository: &str| {
+            serde_json::json!({
+                "path": "action.yml",
+                "sha": "dddddddddddddddddddddddddddddddddddddddd",
+                "encoding": "base64",
+                "content": BASE64.encode(&source_bytes),
+                "url": format!(
+                    "https://api.github.com/repos/{repository}/contents/action.yml?ref={revision}"
+                )
+            })
+        };
+        let response = |endpoint: String, body: Vec<u8>, content_type: &str| {
+            Ok(TransportResponse {
+                status: 200,
+                headers: BTreeMap::from([("content-type".to_owned(), content_type.to_owned())]),
+                body,
+                effective_endpoint: endpoint,
+            })
+        };
+        let repositories = ["actions/checkout", "actions/setup"];
+        let mut responses = Vec::new();
+        for repository in repositories {
+            responses.push(response(
+                format!(
+                    "https://api.github.com/repos/{repository}/git/trees/{revision}?recursive=1"
+                ),
+                serde_json::to_vec(&tree).expect("tree fixture"),
+                "application/json",
+            ));
+            responses.push(response(
+                format!(
+                    "https://api.github.com/repos/{repository}/contents/action.yml?ref={revision}"
+                ),
+                serde_json::to_vec(&source(repository)).expect("source fixture"),
+                "application/json",
+            ));
+            responses.push(response(
+                format!(
+                    "https://api.github.com/repos/{repository}/contents/action.yml?ref={revision}"
+                ),
+                source_bytes.clone(),
+                "text/yaml",
+            ));
+        }
+        let transport = FixtureTransport::with_responses(responses);
+        let mut store = FixtureStore::default();
+        let auth = AuthIdentity::new(
+            "fixture-auth",
+            "github",
+            Some("1".to_owned()),
+            Some("fixture".to_owned()),
+            BTreeSet::new(),
+        );
+        let manifest = ManifestRepository {
+            repository: "tailrocks/example".to_owned(),
+            ..ManifestRepository::default()
+        };
+        let mut ledger = Ledger::default();
+        let dependency = |repository: &str| LiveDependency {
+            kind: "action".to_owned(),
+            repository: repository.to_owned(),
+            path: ".".to_owned(),
+            revision: revision.to_owned(),
+            resolved_path: None,
+            source_url: None,
+            source_bytes_base64: None,
+            source_raw_object_refs: Vec::new(),
+            raw_object_refs: Vec::new(),
+        };
+        let dependencies = bind_workflow_dependencies(
+            WorkflowDependencyContext {
+                transport: &transport,
+                store: &mut store,
+                auth: &auth,
+                manifest: &manifest,
+                workflow_path: ".github/workflows/ci.yml",
+                source_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                ledger: &mut ledger,
+            },
+            WorkflowDependencyGroups {
+                reusable: Vec::new(),
+                actions: repositories
+                    .iter()
+                    .map(|repository| dependency(repository))
+                    .collect(),
+                scanners: Vec::new(),
+            },
+        )
+        .await
+        .expect("different dependency endpoints bind independently");
+        assert_eq!(dependencies.actions.len(), 2);
+        assert_eq!(dependencies.actions[0].repository, "actions/checkout");
+        assert_eq!(dependencies.actions[1].repository, "actions/setup");
+        assert_ne!(
+            dependencies.actions[0].source_url,
+            dependencies.actions[1].source_url
+        );
+        assert_eq!(transport.request_count(), 6);
+        assert_eq!(ledger.raw_objects.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn dependency_fetch_error_fails_closed_without_cache_or_edges() {
+        let transport = FixtureTransport::with_responses(vec![Err(TransportFailure::Timeout)]);
+        let mut store = FixtureStore::default();
+        let auth = AuthIdentity::new(
+            "fixture-auth",
+            "github",
+            Some("1".to_owned()),
+            Some("fixture".to_owned()),
+            BTreeSet::new(),
+        );
+        let manifest = ManifestRepository {
+            repository: "tailrocks/example".to_owned(),
+            ..ManifestRepository::default()
+        };
+        let mut ledger = Ledger::default();
+        let result = bind_workflow_dependencies(
+            WorkflowDependencyContext {
+                transport: &transport,
+                store: &mut store,
+                auth: &auth,
+                manifest: &manifest,
+                workflow_path: ".github/workflows/ci.yml",
+                source_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                ledger: &mut ledger,
+            },
+            WorkflowDependencyGroups {
+                reusable: Vec::new(),
+                actions: vec![LiveDependency {
+                    kind: "action".to_owned(),
+                    repository: "actions/checkout".to_owned(),
+                    path: ".".to_owned(),
+                    revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                    resolved_path: None,
+                    source_url: None,
+                    source_bytes_base64: None,
+                    source_raw_object_refs: Vec::new(),
+                    raw_object_refs: Vec::new(),
+                }],
+                scanners: Vec::new(),
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(ledger.dependency_trees.is_empty());
+        assert!(ledger.dependency_sources.is_empty());
+        assert!(ledger.requests.is_empty());
+        assert!(ledger.raw_objects.is_empty());
     }
 
     #[test]
