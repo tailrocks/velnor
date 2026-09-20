@@ -2318,11 +2318,16 @@ fn g0_local_raw_kind(object_kind: &str) -> bool {
 
 fn g0_page_members(value: &Value, response_schema: G0RawResponseSchema) -> Option<(u64, &[Value])> {
     let envelope_key = match response_schema {
+        G0RawResponseSchema::PullRequestsPage => "pulls",
+        G0RawResponseSchema::RulesetsPage => "rulesets",
+        G0RawResponseSchema::WorkflowsPage => "workflows",
+        G0RawResponseSchema::WorkflowRunsPage => "workflow_runs",
         G0RawResponseSchema::CheckRunsPage => "check_runs",
         G0RawResponseSchema::CheckSuitesPage => "check_suites",
+        G0RawResponseSchema::CheckSuiteRunsPage => "check_runs",
         G0RawResponseSchema::JobsPage => "jobs",
         G0RawResponseSchema::ArtifactsPage => "artifacts",
-        G0RawResponseSchema::Singular => return None,
+        G0RawResponseSchema::Singular | G0RawResponseSchema::Binary => return None,
     };
     let total_count = value.get("total_count")?.as_u64()?;
     let members = value.get(envelope_key)?.as_array()?;
@@ -2367,7 +2372,18 @@ fn check_g0_paginated_response_streams(
                     }
                 };
             let response_schema = contract.response_schema;
-            let is_list = !matches!(response_schema, G0RawResponseSchema::Singular);
+            let is_list = matches!(
+                response_schema,
+                G0RawResponseSchema::PullRequestsPage
+                    | G0RawResponseSchema::RulesetsPage
+                    | G0RawResponseSchema::WorkflowsPage
+                    | G0RawResponseSchema::WorkflowRunsPage
+                    | G0RawResponseSchema::CheckRunsPage
+                    | G0RawResponseSchema::CheckSuitesPage
+                    | G0RawResponseSchema::CheckSuiteRunsPage
+                    | G0RawResponseSchema::JobsPage
+                    | G0RawResponseSchema::ArtifactsPage
+            );
             if !is_list {
                 continue;
             }
@@ -2597,8 +2613,19 @@ fn g0_response_query_contract(
         return false;
     };
     let response_schema = contract.response_schema;
-    if matches!(response_schema, G0RawResponseSchema::Singular) {
-        return ordered.is_empty() && request.page.number == 1 && !request.page.has_next_page;
+    let endpoint_query_valid = g0_endpoint_inline_query_contract(request, contract);
+    if matches!(
+        response_schema,
+        G0RawResponseSchema::Singular | G0RawResponseSchema::Binary
+    ) {
+        let singular_page = ordered.is_empty()
+            || (ordered.len() == 1
+                && ordered[0].0 == "per_page"
+                && ordered[0].1 == request.page.per_page.to_string());
+        return endpoint_query_valid
+            && singular_page
+            && request.page.number == 1
+            && !request.page.has_next_page;
     }
 
     let keys = ordered
@@ -2606,14 +2633,31 @@ fn g0_response_query_contract(
         .map(|(key, _)| key.as_str())
         .collect::<Vec<_>>();
     let expected_keys = match contract.kind {
+        G0EndpointKind::PullRequestsPage => vec!["per_page", "state", "page"],
+        G0EndpointKind::RulesetsPage => vec!["includes_parents", "per_page", "page"],
+        G0EndpointKind::WorkflowsPage | G0EndpointKind::WorkflowRunsPage => {
+            vec!["per_page", "page"]
+        }
         G0EndpointKind::CheckRunsPage => vec!["per_page", "filter", "page"],
-        G0EndpointKind::CheckSuitesPage
-        | G0EndpointKind::JobsPage
-        | G0EndpointKind::ArtifactsPage => vec!["per_page", "page"],
+        G0EndpointKind::CheckSuitesPage => vec!["per_page", "page"],
+        G0EndpointKind::CheckSuiteRunsPage => vec!["per_page", "filter", "page"],
+        G0EndpointKind::WorkflowJobsPage => vec!["filter", "per_page", "page"],
+        G0EndpointKind::WorkflowAttemptJobsPage | G0EndpointKind::ArtifactsPage => {
+            vec!["per_page", "page"]
+        }
         G0EndpointKind::Repository
+        | G0EndpointKind::Viewer
+        | G0EndpointKind::DefaultBranchCommit
+        | G0EndpointKind::PullRequest
+        | G0EndpointKind::Ruleset
+        | G0EndpointKind::WorkflowSource
+        | G0EndpointKind::WorkflowDependency
+        | G0EndpointKind::WorkflowDependencySource
+        | G0EndpointKind::WorkflowAttempt
         | G0EndpointKind::CheckRun
         | G0EndpointKind::CheckSuite
         | G0EndpointKind::WorkflowRun
+        | G0EndpointKind::ArtifactArchive
         | G0EndpointKind::App => Vec::new(),
     };
     if keys != expected_keys {
@@ -2631,12 +2675,43 @@ fn g0_response_query_contract(
     let Some(page) = value("page").and_then(|value| value.parse::<u32>().ok()) else {
         return false;
     };
-    per_page == request.page.per_page
+    endpoint_query_valid
+        && per_page == request.page.per_page
         && per_page > 0
         && per_page <= 100
         && page == request.page.number
         && (contract.coverage != G0CoveragePurpose::CheckInventory
             || value("filter") == Some("all"))
+}
+
+fn g0_endpoint_inline_query_contract(
+    request: &G0RequestRecord,
+    contract: G0EndpointContract,
+) -> bool {
+    g0_endpoint_path_query(&request.endpoint_or_operation)
+        .ok()
+        .is_some_and(|(_, query)| g0_endpoint_inline_query_shape_from_query(query, contract.kind))
+}
+
+fn g0_endpoint_inline_query_shape(endpoint: &str, kind: G0EndpointKind) -> bool {
+    g0_endpoint_path_query(endpoint)
+        .ok()
+        .is_some_and(|(_, query)| g0_endpoint_inline_query_shape_from_query(query, kind))
+}
+
+fn g0_endpoint_inline_query_shape_from_query(
+    query: Vec<(String, String)>,
+    kind: G0EndpointKind,
+) -> bool {
+    match kind {
+        G0EndpointKind::WorkflowSource | G0EndpointKind::WorkflowDependencySource => {
+            query.len() == 1 && query[0].0 == "ref" && valid_sha(&query[0].1)
+        }
+        G0EndpointKind::WorkflowDependency => {
+            query.as_slice() == [("recursive".to_owned(), "1".to_owned())]
+        }
+        _ => query.is_empty(),
+    }
 }
 
 fn g0_request_semantics(
@@ -2651,21 +2726,24 @@ fn g0_request_semantics(
     let Some(variables) = variables else {
         return false;
     };
-    if endpoint.contains("://") || endpoint.contains("..") || endpoint.contains('?') {
+    let Ok((endpoint_path, endpoint_query)) = g0_endpoint_path_query(endpoint) else {
+        return false;
+    };
+    if endpoint_path.contains("..") {
         return false;
     }
     match request.api {
         G0ApiKind::Rest => {
             if request.method != "GET"
-                || !(endpoint == "/user"
-                    || endpoint == "/rate_limit"
-                    || endpoint.starts_with("/repos/")
-                    || endpoint.starts_with("/apps/")
-                    || endpoint.starts_with("/orgs/"))
+                || !(endpoint_path == "/user"
+                    || endpoint_path == "/rate_limit"
+                    || endpoint_path.starts_with("/repos/")
+                    || endpoint_path.starts_with("/apps/")
+                    || endpoint_path.starts_with("/orgs/"))
             {
                 return false;
             }
-            if let Some(repository_path) = endpoint.strip_prefix("/repos/") {
+            if let Some(repository_path) = endpoint_path.strip_prefix("/repos/") {
                 let parts = repository_path.split('/').collect::<Vec<_>>();
                 if parts.len() < 2
                     || parts[0].trim().is_empty()
@@ -2674,7 +2752,7 @@ fn g0_request_semantics(
                 {
                     return false;
                 }
-            } else if let Some(organization_path) = endpoint.strip_prefix("/orgs/") {
+            } else if let Some(organization_path) = endpoint_path.strip_prefix("/orgs/") {
                 let parts = organization_path.split('/').collect::<Vec<_>>();
                 let known_owner = canonical_scope().iter().any(|repository| {
                     repository.split('/').next() == Some(parts.first().copied().unwrap_or_default())
@@ -2686,7 +2764,7 @@ fn g0_request_semantics(
             let Some(pairs) = g0_rest_query_pairs(query) else {
                 return false;
             };
-            if pairs.iter().any(|(key, _)| {
+            if endpoint_query.iter().any(|(key, _)| {
                 !matches!(
                     key.as_str(),
                     "after"
@@ -2694,8 +2772,29 @@ fn g0_request_semantics(
                         | "event"
                         | "filter"
                         | "first"
+                        | "head_sha"
+                        | "includes_parents"
                         | "page"
                         | "per_page"
+                        | "recursive"
+                        | "ref"
+                        | "state"
+                        | "status"
+                )
+            }) || pairs.iter().any(|(key, _)| {
+                !matches!(
+                    key.as_str(),
+                    "after"
+                        | "branch"
+                        | "event"
+                        | "filter"
+                        | "first"
+                        | "head_sha"
+                        | "includes_parents"
+                        | "page"
+                        | "per_page"
+                        | "recursive"
+                        | "ref"
                         | "state"
                         | "status"
                 )
@@ -4209,32 +4308,63 @@ fn g0_check_run_identity_valid(value: &Value, check: &G0CheckProducer, app_id: u
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum G0RawResponseSchema {
     Singular,
+    PullRequestsPage,
+    RulesetsPage,
+    WorkflowsPage,
+    WorkflowRunsPage,
     CheckRunsPage,
     CheckSuitesPage,
+    CheckSuiteRunsPage,
     JobsPage,
     ArtifactsPage,
+    Binary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum G0EndpointKind {
+    Viewer,
     Repository,
+    DefaultBranchCommit,
+    PullRequestsPage,
+    PullRequest,
+    RulesetsPage,
+    Ruleset,
+    WorkflowsPage,
+    WorkflowSource,
+    WorkflowDependency,
+    WorkflowDependencySource,
+    WorkflowRunsPage,
     CheckRunsPage,
     CheckRun,
     CheckSuitesPage,
     CheckSuite,
-    JobsPage,
+    CheckSuiteRunsPage,
+    WorkflowJobsPage,
+    WorkflowAttempt,
+    WorkflowAttemptJobsPage,
     ArtifactsPage,
+    ArtifactArchive,
     WorkflowRun,
     App,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum G0CoveragePurpose {
+    Authentication,
     RepositorySnapshot,
+    DefaultBranchSnapshot,
+    PullRequestInventory,
+    RulesetInventory,
+    WorkflowInventory,
+    WorkflowSource,
+    WorkflowDependency,
+    WorkflowDependencySource,
+    WorkflowRunInventory,
     CheckInventory,
     CheckSuiteInventory,
     JobInventory,
     ArtifactCensus,
+    ArtifactArchive,
     WorkflowRunIdentity,
     ProviderIdentity,
 }
@@ -4250,20 +4380,118 @@ struct G0EndpointContract {
 /// coverage purpose. Unknown object/path combinations are errors; callers
 /// must report them rather than silently treating them as an untyped stream.
 fn g0_endpoint_contract(object_kind: &str, endpoint: &str) -> Result<G0EndpointContract, String> {
-    let parts = endpoint
+    let (path, _) = g0_endpoint_path_query(endpoint)?;
+    let parts = path
         .strip_prefix('/')
-        .ok_or_else(|| "endpoint must begin with /".to_owned())?
+        .ok_or_else(|| "endpoint path must begin with /".to_owned())?
         .split('/')
         .collect::<Vec<_>>();
     let repository_path =
         parts.len() >= 3 && parts[0] == "repos" && !parts[1].is_empty() && !parts[2].is_empty();
     let contract = match object_kind {
+        "auth.viewer" if path == "/user" => G0EndpointContract {
+            kind: G0EndpointKind::Viewer,
+            coverage: G0CoveragePurpose::Authentication,
+            response_schema: G0RawResponseSchema::Singular,
+        },
         "repository" if repository_path && parts.len() == 3 => G0EndpointContract {
             kind: G0EndpointKind::Repository,
             coverage: G0CoveragePurpose::RepositorySnapshot,
             response_schema: G0RawResponseSchema::Singular,
         },
-        "check_run"
+        "default_branch.commit"
+            if repository_path
+                && parts.len() == 5
+                && parts[3] == "commits"
+                && !parts[4].is_empty()
+                && !parts[4].contains('/') =>
+        {
+            G0EndpointContract {
+                kind: G0EndpointKind::DefaultBranchCommit,
+                coverage: G0CoveragePurpose::DefaultBranchSnapshot,
+                response_schema: G0RawResponseSchema::Singular,
+            }
+        }
+        "pull_requests" if repository_path && parts.len() == 4 && parts[3] == "pulls" => {
+            G0EndpointContract {
+                kind: G0EndpointKind::PullRequestsPage,
+                coverage: G0CoveragePurpose::PullRequestInventory,
+                response_schema: G0RawResponseSchema::PullRequestsPage,
+            }
+        }
+        "pull_request"
+            if repository_path
+                && parts.len() == 5
+                && parts[3] == "pulls"
+                && parts[4].parse::<u64>().is_ok_and(|id| id > 0) =>
+        {
+            G0EndpointContract {
+                kind: G0EndpointKind::PullRequest,
+                coverage: G0CoveragePurpose::PullRequestInventory,
+                response_schema: G0RawResponseSchema::Singular,
+            }
+        }
+        "rulesets" if repository_path && parts.len() == 4 && parts[3] == "rulesets" => {
+            G0EndpointContract {
+                kind: G0EndpointKind::RulesetsPage,
+                coverage: G0CoveragePurpose::RulesetInventory,
+                response_schema: G0RawResponseSchema::RulesetsPage,
+            }
+        }
+        "ruleset"
+            if repository_path
+                && parts.len() == 5
+                && parts[3] == "rulesets"
+                && parts[4].parse::<u64>().is_ok_and(|id| id > 0) =>
+        {
+            G0EndpointContract {
+                kind: G0EndpointKind::Ruleset,
+                coverage: G0CoveragePurpose::RulesetInventory,
+                response_schema: G0RawResponseSchema::Singular,
+            }
+        }
+        "workflows"
+            if repository_path
+                && parts.len() == 5
+                && parts[3] == "actions"
+                && parts[4] == "workflows" =>
+        {
+            G0EndpointContract {
+                kind: G0EndpointKind::WorkflowsPage,
+                coverage: G0CoveragePurpose::WorkflowInventory,
+                response_schema: G0RawResponseSchema::WorkflowsPage,
+            }
+        }
+        "workflow.source" if repository_path && g0_is_contents_path(&parts) => G0EndpointContract {
+            kind: G0EndpointKind::WorkflowSource,
+            coverage: G0CoveragePurpose::WorkflowSource,
+            response_schema: G0RawResponseSchema::Singular,
+        },
+        "workflow.dependency" if repository_path && g0_is_tree_path(&parts) => G0EndpointContract {
+            kind: G0EndpointKind::WorkflowDependency,
+            coverage: G0CoveragePurpose::WorkflowDependency,
+            response_schema: G0RawResponseSchema::Singular,
+        },
+        "workflow.dependency.source" if repository_path && g0_is_contents_path(&parts) => {
+            G0EndpointContract {
+                kind: G0EndpointKind::WorkflowDependencySource,
+                coverage: G0CoveragePurpose::WorkflowDependencySource,
+                response_schema: G0RawResponseSchema::Singular,
+            }
+        }
+        "workflow_runs"
+            if repository_path
+                && parts.len() == 5
+                && parts[3] == "actions"
+                && parts[4] == "runs" =>
+        {
+            G0EndpointContract {
+                kind: G0EndpointKind::WorkflowRunsPage,
+                coverage: G0CoveragePurpose::WorkflowRunInventory,
+                response_schema: G0RawResponseSchema::WorkflowRunsPage,
+            }
+        }
+        "check_runs"
             if repository_path
                 && parts.len() == 6
                 && parts[3] == "commits"
@@ -4288,7 +4516,7 @@ fn g0_endpoint_contract(object_kind: &str, endpoint: &str) -> Result<G0EndpointC
                 response_schema: G0RawResponseSchema::Singular,
             }
         }
-        "check_suite"
+        "check_suites"
             if repository_path
                 && parts.len() == 6
                 && parts[3] == "commits"
@@ -4313,7 +4541,49 @@ fn g0_endpoint_contract(object_kind: &str, endpoint: &str) -> Result<G0EndpointC
                 response_schema: G0RawResponseSchema::Singular,
             }
         }
-        "job"
+        "check_suite_runs"
+            if repository_path
+                && parts.len() == 6
+                && parts[3] == "check-suites"
+                && parts[4].parse::<u64>().is_ok_and(|id| id > 0)
+                && parts[5] == "check-runs" =>
+        {
+            G0EndpointContract {
+                kind: G0EndpointKind::CheckSuiteRunsPage,
+                coverage: G0CoveragePurpose::CheckInventory,
+                response_schema: G0RawResponseSchema::CheckSuiteRunsPage,
+            }
+        }
+        "workflow_jobs"
+            if repository_path
+                && parts.len() == 7
+                && parts[3] == "actions"
+                && parts[4] == "runs"
+                && parts[5].parse::<u64>().is_ok_and(|id| id > 0)
+                && parts[6] == "jobs" =>
+        {
+            G0EndpointContract {
+                kind: G0EndpointKind::WorkflowJobsPage,
+                coverage: G0CoveragePurpose::JobInventory,
+                response_schema: G0RawResponseSchema::JobsPage,
+            }
+        }
+        "workflow_attempt"
+            if repository_path
+                && parts.len() == 8
+                && parts[3] == "actions"
+                && parts[4] == "runs"
+                && parts[5].parse::<u64>().is_ok_and(|id| id > 0)
+                && parts[6] == "attempts"
+                && parts[7].parse::<u32>().is_ok_and(|attempt| attempt > 0) =>
+        {
+            G0EndpointContract {
+                kind: G0EndpointKind::WorkflowAttempt,
+                coverage: G0CoveragePurpose::WorkflowRunIdentity,
+                response_schema: G0RawResponseSchema::Singular,
+            }
+        }
+        "workflow_attempt_jobs"
             if repository_path
                 && parts.len() == 9
                 && parts[3] == "actions"
@@ -4324,7 +4594,7 @@ fn g0_endpoint_contract(object_kind: &str, endpoint: &str) -> Result<G0EndpointC
                 && parts[8] == "jobs" =>
         {
             G0EndpointContract {
-                kind: G0EndpointKind::JobsPage,
+                kind: G0EndpointKind::WorkflowAttemptJobsPage,
                 coverage: G0CoveragePurpose::JobInventory,
                 response_schema: G0RawResponseSchema::JobsPage,
             }
@@ -4341,6 +4611,20 @@ fn g0_endpoint_contract(object_kind: &str, endpoint: &str) -> Result<G0EndpointC
                 kind: G0EndpointKind::ArtifactsPage,
                 coverage: G0CoveragePurpose::ArtifactCensus,
                 response_schema: G0RawResponseSchema::ArtifactsPage,
+            }
+        }
+        "workflow_artifacts"
+            if repository_path
+                && parts.len() == 7
+                && parts[3] == "actions"
+                && parts[4] == "artifacts"
+                && parts[5].parse::<u64>().is_ok_and(|id| id > 0)
+                && parts[6] == "zip" =>
+        {
+            G0EndpointContract {
+                kind: G0EndpointKind::ArtifactArchive,
+                coverage: G0CoveragePurpose::ArtifactArchive,
+                response_schema: G0RawResponseSchema::Binary,
             }
         }
         "workflow_run"
@@ -4369,7 +4653,49 @@ fn g0_endpoint_contract(object_kind: &str, endpoint: &str) -> Result<G0EndpointC
             ));
         }
     };
+    if !g0_endpoint_inline_query_shape(endpoint, contract.kind) {
+        return Err(format!(
+            "endpoint query does not match closed evidence contract: {object_kind} {endpoint}"
+        ));
+    }
     Ok(contract)
+}
+
+/// Return the canonical GitHub API path and the query embedded in a recorded
+/// endpoint.  The acquisition layer records absolute API URLs, while offline
+/// fixtures use the same path in relative form; both forms still have one
+/// exact origin and one exact path grammar.  No arbitrary URL is accepted.
+fn g0_endpoint_path_query(endpoint: &str) -> Result<(String, Vec<(String, String)>), String> {
+    if endpoint.starts_with("https://") {
+        let url = g0_api_url(endpoint).ok_or_else(|| {
+            "endpoint URL must use the exact https://api.github.com origin".to_owned()
+        })?;
+        let query = g0_rest_query_pairs_ordered(url.query().unwrap_or_default().as_bytes())
+            .ok_or_else(|| "endpoint URL query is not canonical".to_owned())?;
+        return Ok((url.path().to_owned(), query));
+    }
+    if endpoint.contains("://") {
+        return Err("relative endpoint must not contain a URL origin".to_owned());
+    }
+    let (path, query) = endpoint.split_once('?').unwrap_or((endpoint, ""));
+    if !path.starts_with('/') || path.contains("..") || path.is_empty() {
+        return Err("endpoint path is not canonical".to_owned());
+    }
+    let query = g0_rest_query_pairs_ordered(query.as_bytes())
+        .ok_or_else(|| "endpoint query is not canonical".to_owned())?;
+    Ok((path.to_owned(), query))
+}
+
+fn g0_is_contents_path(parts: &[&str]) -> bool {
+    parts.len() >= 6
+        && parts[3] == "contents"
+        && parts[4..]
+            .iter()
+            .all(|part| !part.is_empty() && *part != "..")
+}
+
+fn g0_is_tree_path(parts: &[&str]) -> bool {
+    parts.len() == 6 && parts[3] == "git" && parts[4] == "trees" && valid_sha(parts[5])
 }
 
 fn g0_capture_raw_json(
@@ -4436,17 +4762,26 @@ fn g0_select_raw_member(
     request: &G0RequestRecord,
 ) -> Option<Value> {
     let envelope_key = match response_schema {
+        G0RawResponseSchema::PullRequestsPage => "pulls",
+        G0RawResponseSchema::RulesetsPage => "rulesets",
+        G0RawResponseSchema::WorkflowsPage => "workflows",
+        G0RawResponseSchema::WorkflowRunsPage => "workflow_runs",
         G0RawResponseSchema::CheckRunsPage => "check_runs",
         G0RawResponseSchema::CheckSuitesPage => "check_suites",
+        G0RawResponseSchema::CheckSuiteRunsPage => "check_runs",
         G0RawResponseSchema::JobsPage => "jobs",
         G0RawResponseSchema::ArtifactsPage => "artifacts",
-        G0RawResponseSchema::Singular => {
+        G0RawResponseSchema::Singular | G0RawResponseSchema::Binary => {
             return (g0_json_u64(&value, &["id"]) == Some(member_id)
                 && request.page.items_returned == 1
                 && !request.page.has_next_page
                 && value.get("check_runs").is_none()
                 && value.get("check_suites").is_none()
-                && value.get("jobs").is_none())
+                && value.get("jobs").is_none()
+                && value.get("pulls").is_none()
+                && value.get("rulesets").is_none()
+                && value.get("workflows").is_none()
+                && value.get("workflow_runs").is_none())
             .then_some(value);
         }
     };
@@ -4500,18 +4835,38 @@ fn g0_check_raw_evidence_valid(
         &check.raw_object_refs,
         "check_run",
         check.check_run_id,
-        &check_run_endpoints,
+        std::slice::from_ref(&check_run_endpoints[0]),
         requests,
         raw_objects,
-    );
+    )
+    .or_else(|| {
+        g0_capture_raw_json(
+            &check.raw_object_refs,
+            "check_runs",
+            check.check_run_id,
+            std::slice::from_ref(&check_run_endpoints[1]),
+            requests,
+            raw_objects,
+        )
+    });
     let check_suite = g0_capture_raw_json(
         &check.raw_object_refs,
         "check_suite",
         check.check_suite_id,
-        &suite_endpoints,
+        std::slice::from_ref(&suite_endpoints[0]),
         requests,
         raw_objects,
-    );
+    )
+    .or_else(|| {
+        g0_capture_raw_json(
+            &check.raw_object_refs,
+            "check_suites",
+            check.check_suite_id,
+            std::slice::from_ref(&suite_endpoints[1]),
+            requests,
+            raw_objects,
+        )
+    });
     let app = g0_capture_raw_json(
         &check.raw_object_refs,
         "app",
@@ -4542,7 +4897,11 @@ fn g0_check_raw_evidence_valid(
     }
     let has_actions_raw_objects = check.raw_object_refs.iter().any(|raw_id| {
         raw_objects.iter().any(|raw| {
-            &raw.raw_id == raw_id && matches!(raw.object_kind.as_str(), "workflow_run" | "job")
+            &raw.raw_id == raw_id
+                && matches!(
+                    raw.object_kind.as_str(),
+                    "workflow_run" | "workflow_jobs" | "workflow_attempt_jobs"
+                )
         })
     });
     match &check.provider {
@@ -4570,7 +4929,7 @@ fn g0_check_raw_evidence_valid(
             );
             let job = g0_capture_raw_json(
                 &check.raw_object_refs,
-                "job",
+                "workflow_attempt_jobs",
                 *job_id,
                 &[format!(
                     "/repos/{repository}/actions/runs/{workflow_run_id}/attempts/{run_attempt}/jobs"
@@ -8847,12 +9206,12 @@ mod tests {
             } else {
                 format!("request-{prefix}-{kind}")
             };
-            let query = if kind == "job" {
+            let query = if kind == "workflow_attempt_jobs" {
                 "per_page=100&page=1"
             } else {
                 ""
             };
-            let body = if kind == "job" {
+            let body = if kind == "workflow_attempt_jobs" {
                 json!({"total_count": 1, "jobs": [body]})
             } else {
                 body
@@ -8962,7 +9321,7 @@ mod tests {
                 }),
             );
             push(
-                "job",
+                "workflow_attempt_jobs",
                 format!(
                     "/repos/{repository}/actions/runs/{workflow_run_id}/attempts/{run_attempt}/jobs"
                 ),
@@ -10315,7 +10674,7 @@ mod tests {
             captured_raw_reference(
                 "real-public-checks-raw",
                 "real-public-checks-request",
-                "check_run",
+                "check_runs",
                 &real_check_bytes,
             ),
             captured_raw_reference(
@@ -10393,7 +10752,7 @@ mod tests {
             serde_json::from_slice(&serialized_collector).expect("deserialize actual chain");
         let selected_check = g0_capture_raw_json(
             &["real-public-checks-raw".to_owned()],
-            "check_run",
+            "check_runs",
             106_031_458_188,
             std::slice::from_ref(&real_check_endpoint),
             &round_tripped_collector.requests,
@@ -11460,7 +11819,7 @@ mod tests {
         let raw = G0RawObjectRef {
             raw_id: raw_id.clone(),
             request_id: request_id.clone(),
-            object_kind: "check_run".to_owned(),
+            object_kind: "check_runs".to_owned(),
             canonicalization: "raw-json".to_owned(),
             sha256: "sha256:bcc6670efbb51a1457eda1da19e473921b8b0ef51feba016e761b3ccf3d67210"
                 .to_owned(),
@@ -11525,7 +11884,7 @@ mod tests {
         };
         let selected_check = g0_capture_raw_json(
             &check.raw_object_refs,
-            "check_run",
+            "check_runs",
             check.check_run_id,
             &["/repos/jackin-project/jackin-agent-smith/commits/b9db5b149cc46baba9c49549432307c29e3972b0/check-runs".to_owned()],
             std::slice::from_ref(&request),
@@ -11626,7 +11985,7 @@ mod tests {
                 G0CoveragePurpose::RepositorySnapshot,
             ),
             (
-                "check_run",
+                "check_runs",
                 check_endpoint.as_str(),
                 G0EndpointKind::CheckRunsPage,
                 G0CoveragePurpose::CheckInventory,
@@ -11638,9 +11997,9 @@ mod tests {
                 G0CoveragePurpose::CheckSuiteInventory,
             ),
             (
-                "job",
+                "workflow_attempt_jobs",
                 "/repos/tailrocks/velnor/actions/runs/1/attempts/1/jobs",
-                G0EndpointKind::JobsPage,
+                G0EndpointKind::WorkflowAttemptJobsPage,
                 G0CoveragePurpose::JobInventory,
             ),
             (
@@ -11675,7 +12034,7 @@ mod tests {
         let mut all_request =
             captured_page_request(&check_endpoint, "per_page=100&filter=all&page=1", 1);
         let check_contract =
-            g0_endpoint_contract("check_run", &check_endpoint).expect("check inventory contract");
+            g0_endpoint_contract("check_runs", &check_endpoint).expect("check inventory contract");
         assert!(g0_response_query_contract(
             &all_request,
             b"per_page=100&filter=all&page=1",
@@ -11696,7 +12055,7 @@ mod tests {
                 "/repos/tailrocks/velnor/actions/runs/1/artifacts-unknown",
             ),
             (
-                "check_run",
+                "check_runs",
                 "/repos/tailrocks/velnor/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/issues",
             ),
             ("job", "/repos/tailrocks/velnor/actions/runs/1/jobs"),
@@ -11732,8 +12091,8 @@ mod tests {
         let second_bytes = br#"{"total_count":2,"check_runs":[{"id":2}]}"#;
         collector.requests.extend([first.clone(), second.clone()]);
         collector.raw_objects.extend([
-            captured_raw_reference("checks-raw-1", "checks-page-1", "check_run", first_bytes),
-            captured_raw_reference("checks-raw-2", "checks-page-2", "check_run", second_bytes),
+            captured_raw_reference("checks-raw-1", "checks-page-1", "check_runs", first_bytes),
+            captured_raw_reference("checks-raw-2", "checks-page-2", "check_runs", second_bytes),
         ]);
         let mut findings = Vec::new();
         check_g0_request_provenance(&collector, &mut findings);
@@ -11780,7 +12139,7 @@ mod tests {
         collector.raw_objects[1] = captured_raw_reference(
             "checks-raw-2",
             "checks-page-2",
-            "check_run",
+            "check_runs",
             duplicate_bytes,
         );
         findings.clear();
@@ -11790,7 +12149,7 @@ mod tests {
             .any(|finding| finding.code == "g0-pagination-duplicate"));
 
         collector.raw_objects[1] =
-            captured_raw_reference("checks-raw-2", "checks-page-2", "check_run", second_bytes);
+            captured_raw_reference("checks-raw-2", "checks-page-2", "check_runs", second_bytes);
         collector.requests[0].page.link_next = Some(
             "https://api.github.com/repos/other/repo/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?per_page=100&filter=all&page=2"
                 .to_owned(),
@@ -11857,7 +12216,7 @@ mod tests {
         let raw = G0RawObjectRef {
             raw_id: raw_id.clone(),
             request_id: request_id.clone(),
-            object_kind: "job".to_owned(),
+            object_kind: "workflow_attempt_jobs".to_owned(),
             canonicalization: "raw-json".to_owned(),
             sha256: "sha256:e6f19864a4ef1a7c45f7f467a0409d20b1ede477e4f913722fc4b54bf083d2ad"
                 .to_owned(),
@@ -11907,7 +12266,7 @@ mod tests {
         };
         let selected_job = g0_capture_raw_json(
             &["captured-jobs-page-0001".to_owned()],
-            "job",
+            "workflow_attempt_jobs",
             104741135689,
             &["/repos/tailrocks/holla-apt/actions/runs/35079189599/attempts/1/jobs".to_owned()],
             &[request],
@@ -12150,7 +12509,7 @@ mod tests {
         let valid_raw = captured_raw_reference(
             "real-checks-raw",
             "real-checks-request",
-            "check_run",
+            "check_runs",
             &checks_bytes,
         );
         let mut wrong_app_page = checks.clone();
@@ -12166,12 +12525,12 @@ mod tests {
         let wrong_app_raw = captured_raw_reference(
             "real-checks-raw",
             "real-checks-request",
-            "check_run",
+            "check_runs",
             &wrong_app_bytes,
         );
         let wrong_app_selected = g0_capture_raw_json(
             &["real-checks-raw".to_owned()],
-            "check_run",
+            "check_runs",
             dco_check.check_run_id,
             std::slice::from_ref(&checks_request.endpoint_or_operation),
             std::slice::from_ref(&valid_request),
@@ -12196,12 +12555,12 @@ mod tests {
         let wrong_suite_raw = captured_raw_reference(
             "real-checks-raw",
             "real-checks-request",
-            "check_run",
+            "check_runs",
             &wrong_suite_bytes,
         );
         let wrong_suite_selected = g0_capture_raw_json(
             &["real-checks-raw".to_owned()],
-            "check_run",
+            "check_runs",
             dco_check.check_run_id,
             std::slice::from_ref(&checks_request.endpoint_or_operation),
             std::slice::from_ref(&valid_request),
@@ -12215,7 +12574,7 @@ mod tests {
         ));
         assert!(g0_capture_raw_json(
             &["real-checks-raw".to_owned()],
-            "check_run",
+            "check_runs",
             dco_check.check_run_id,
             std::slice::from_ref(&checks_request.endpoint_or_operation),
             std::slice::from_ref(&valid_request),
@@ -12227,7 +12586,7 @@ mod tests {
             "/repos/tailrocks/velnor/check-runs/106031458188".to_owned();
         assert!(g0_capture_raw_json(
             &["real-checks-raw".to_owned()],
-            "check_run",
+            "check_runs",
             dco_check.check_run_id,
             std::slice::from_ref(&checks_request.endpoint_or_operation),
             &[wrong_endpoint],
@@ -12236,7 +12595,7 @@ mod tests {
         .is_none());
         assert!(g0_capture_raw_json(
             &["real-checks-raw".to_owned()],
-            "check_run",
+            "check_runs",
             dco_check.check_run_id + 1,
             std::slice::from_ref(&checks_request.endpoint_or_operation),
             std::slice::from_ref(&valid_request),
@@ -12257,12 +12616,12 @@ mod tests {
         let rehashed_raw = captured_raw_reference(
             "real-checks-raw",
             "real-checks-request",
-            "check_run",
+            "check_runs",
             &rehashed_page,
         );
         assert!(g0_capture_raw_json(
             &["real-checks-raw".to_owned()],
-            "check_run",
+            "check_runs",
             dco_check.check_run_id,
             &[checks_request.endpoint_or_operation],
             &[valid_request],
@@ -12360,7 +12719,7 @@ mod tests {
             &mut raw_objects,
             "real-velnor-checks",
             "real-velnor-checks-request",
-            "check_run",
+            "check_runs",
             "/repos/tailrocks/velnor/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs"
                 .to_owned(),
             "per_page=100&filter=all&page=1",
@@ -12457,7 +12816,7 @@ mod tests {
             &mut raw_objects,
             "real-velnor-jobs",
             "real-velnor-jobs-request",
-            "job",
+            "workflow_attempt_jobs",
             "/repos/tailrocks/velnor/actions/runs/35493166478/attempts/1/jobs".to_owned(),
             "per_page=100&page=1",
             68,
