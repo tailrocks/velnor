@@ -384,6 +384,229 @@ fn index_unique_requests(requests: &[RequestRecord]) -> Result<BTreeMap<String, 
     Ok(indexed)
 }
 
+fn validate_mapper_identity_uniqueness(live: &LiveCollection) -> Result<()> {
+    if !live.reconciliation.duplicate_keys.is_empty() {
+        bail!(
+            "live reconciliation reports duplicate identities: {:?}",
+            live.reconciliation.duplicate_keys
+        );
+    }
+    let mut opening_prs = BTreeSet::new();
+    for identity in &live.opening_prs {
+        if !opening_prs.insert(identity.number) {
+            bail!("opening PR identity {} is duplicated", identity.number);
+        }
+    }
+    let mut closing_prs = BTreeSet::new();
+    for identity in &live.closing_prs {
+        if !closing_prs.insert(identity.number) {
+            bail!("closing PR identity {} is duplicated", identity.number);
+        }
+    }
+    for repository in &live.repositories {
+        let mut ruleset_ids = BTreeSet::new();
+        let mut ruleset_names = BTreeSet::new();
+        for ruleset in &repository.rulesets {
+            if !ruleset_ids.insert(ruleset.ruleset_id) {
+                bail!(
+                    "{} ruleset identity {} is duplicated",
+                    repository.repository,
+                    ruleset.ruleset_id
+                );
+            }
+            if !ruleset_names.insert(ruleset.name.clone()) {
+                bail!(
+                    "{} ruleset name {} is duplicated",
+                    repository.repository,
+                    ruleset.name
+                );
+            }
+            let mut policy_keys = BTreeSet::new();
+            for check in &ruleset.required_checks {
+                if !policy_keys.insert((check.context.clone(), check.app_id.clone())) {
+                    bail!(
+                        "{} ruleset {} required check {} has duplicate identity",
+                        repository.repository,
+                        ruleset.ruleset_id,
+                        check.context
+                    );
+                }
+            }
+        }
+
+        let mut workflow_paths = BTreeSet::new();
+        let mut artifact_ids = BTreeSet::new();
+        let mut artifact_names = BTreeSet::new();
+        let mut execution_keys = BTreeSet::new();
+        let mut job_keys = BTreeSet::new();
+        let mut check_ids = BTreeSet::new();
+        for workflow in &repository.workflows {
+            if !workflow_paths.insert(workflow.path.clone()) {
+                bail!(
+                    "{} workflow identity {} is duplicated",
+                    repository.repository,
+                    workflow.path
+                );
+            }
+            validate_dependency_identity_uniqueness(
+                &repository.repository,
+                &workflow.path,
+                workflow,
+            )?;
+        }
+        for artifact in &repository.artifacts {
+            if !artifact_ids.insert(artifact.artifact_id) {
+                bail!(
+                    "{} artifact identity {} is duplicated",
+                    repository.repository,
+                    artifact.artifact_id
+                );
+            }
+            if !artifact_names.insert((artifact.run_id, artifact.name.clone())) {
+                bail!(
+                    "{} artifact name {} is duplicated in run {}",
+                    repository.repository,
+                    artifact.name,
+                    artifact.run_id
+                );
+            }
+        }
+        let mut prs = BTreeSet::new();
+        for pull_request in &repository.open_prs {
+            if !prs.insert(pull_request.identity.number) {
+                bail!(
+                    "{} open PR identity {} is duplicated",
+                    repository.repository,
+                    pull_request.identity.number
+                );
+            }
+            validate_pull_request_identity_uniqueness(
+                &repository.repository,
+                pull_request,
+                &mut execution_keys,
+                &mut job_keys,
+                &mut check_ids,
+            )?;
+        }
+        for execution in &repository.main_executions {
+            validate_execution_identity_uniqueness(
+                &repository.repository,
+                execution,
+                &mut execution_keys,
+                &mut job_keys,
+                &mut check_ids,
+            )?;
+        }
+        for check in &repository.main_checks {
+            if !check_ids.insert(check.check_run_id) {
+                bail!(
+                    "{} check-run identity {} is duplicated",
+                    repository.repository,
+                    check.check_run_id
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_dependency_identity_uniqueness(
+    repository: &str,
+    workflow_path: &str,
+    workflow: &LiveWorkflow,
+) -> Result<()> {
+    let mut keys = BTreeSet::new();
+    for dependency in workflow
+        .reusable_workflows
+        .iter()
+        .chain(workflow.actions.iter())
+        .chain(workflow.scanners.iter())
+    {
+        let key = (
+            dependency.kind.clone(),
+            dependency.repository.clone(),
+            dependency
+                .resolved_path
+                .clone()
+                .unwrap_or_else(|| dependency.path.clone()),
+            dependency.revision.clone(),
+        );
+        if !keys.insert(key) {
+            bail!("{repository} workflow {workflow_path} dependency identity is duplicated");
+        }
+    }
+    Ok(())
+}
+
+fn validate_pull_request_identity_uniqueness(
+    repository: &str,
+    pull_request: &LivePullRequest,
+    execution_keys: &mut BTreeSet<(u64, u32)>,
+    job_keys: &mut BTreeSet<(u64, u32, u64)>,
+    check_ids: &mut BTreeSet<u64>,
+) -> Result<()> {
+    let number = pull_request.identity.number;
+    let mut binding_keys = BTreeSet::new();
+    for binding in &pull_request.workflow_bindings {
+        if !binding_keys.insert((
+            binding.workflow_path.clone(),
+            binding.event.clone(),
+            binding.source_sha.clone(),
+        )) {
+            bail!("{repository} PR {number} workflow-binding identity is duplicated");
+        }
+    }
+    let mut check_keys = BTreeSet::new();
+    for check in &pull_request.checks {
+        if !check_keys.insert((check.context.clone(), check.app_id.clone())) {
+            bail!("{repository} PR {number} check identity is duplicated");
+        }
+    }
+    for execution in &pull_request.executions {
+        validate_execution_identity_uniqueness(
+            repository,
+            execution,
+            execution_keys,
+            job_keys,
+            check_ids,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_execution_identity_uniqueness(
+    repository: &str,
+    execution: &LiveExecution,
+    execution_keys: &mut BTreeSet<(u64, u32)>,
+    job_keys: &mut BTreeSet<(u64, u32, u64)>,
+    check_ids: &mut BTreeSet<u64>,
+) -> Result<()> {
+    if !execution_keys.insert((execution.run_id, execution.run_attempt)) {
+        bail!(
+            "{repository} workflow execution {}/{} is duplicated",
+            execution.run_id,
+            execution.run_attempt
+        );
+    }
+    for job in &execution.jobs {
+        if !job_keys.insert((job.run_id, job.run_attempt, job.job_id)) {
+            bail!(
+                "{repository} job identity {}/{}/{} is duplicated",
+                job.run_id,
+                job.run_attempt,
+                job.job_id
+            );
+        }
+        if !check_ids.insert(job.check_run_id) {
+            bail!(
+                "{repository} check-run identity {} is duplicated",
+                job.check_run_id
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn map_g0_inventory_with_supplement(
     live: &LiveCollection,
     manifest: &ManifestDocument,
@@ -397,7 +620,14 @@ pub fn map_g0_inventory_with_supplement(
         .map(|raw| (raw.raw_id.clone(), raw))
         .collect::<BTreeMap<_, _>>();
     let request_by_id = index_unique_requests(&live.requests)?;
-    validate_request_raw_bindings(&live.requests, &merged_raw_objects, &request_by_id)?;
+    validate_mapper_identity_uniqueness(live)?;
+    validate_request_raw_bindings(
+        &live.requests,
+        &live.raw_objects,
+        &bindings.local_raw_objects,
+        &merged_raw_objects,
+        &request_by_id,
+    )?;
     let requests = live
         .requests
         .iter()
@@ -631,13 +861,34 @@ fn map_request_state(state: AcquisitionState) -> Result<G0RequestState> {
 /// missing, cross-bound, duplicated, or omitted from the merged raw ledger.
 fn validate_request_raw_bindings(
     requests: &[RequestRecord],
+    provider_objects: &[RawObjectRef],
+    local_objects: &[RawObjectRef],
     raw_objects: &[RawObjectRef],
     request_by_id: &BTreeMap<String, &RequestRecord>,
 ) -> Result<()> {
-    let raw_by_id = raw_objects
+    let mut raw_by_id = BTreeMap::<&str, &RawObjectRef>::new();
+    for raw in raw_objects {
+        if raw_by_id.insert(raw.raw_id.as_str(), raw).is_some() {
+            bail!("merged raw ledger repeats raw object {}", raw.raw_id);
+        }
+    }
+    let provider_ids = provider_objects
         .iter()
-        .map(|raw| (raw.raw_id.as_str(), raw))
-        .collect::<BTreeMap<_, _>>();
+        .map(|raw| raw.raw_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let local_ids = local_objects
+        .iter()
+        .map(|raw| raw.raw_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if let Some(raw_id) = provider_ids.intersection(&local_ids).next() {
+        bail!("provider/local ledgers repeat raw object {raw_id}");
+    }
+    if provider_ids.len() != provider_objects.len() {
+        bail!("provider raw ledger repeats a raw object identity");
+    }
+    if local_ids.len() != local_objects.len() {
+        bail!("local raw ledger repeats a raw object identity");
+    }
     let mut referenced = BTreeMap::<&str, &str>::new();
     for request in requests {
         let mut refs = Vec::with_capacity(2);
@@ -650,6 +901,13 @@ fn validate_request_raw_bindings(
             );
         }
         if let Some(raw_id) = request.error_raw_ref.as_deref() {
+            if request.response_raw_ref.as_deref() == Some(raw_id) {
+                bail!(
+                    "request {} uses raw object {} for both response and error roles",
+                    request.request_id,
+                    raw_id
+                );
+            }
             refs.push(("error", raw_id));
         }
         for (role, raw_id) in refs {
@@ -678,13 +936,14 @@ fn validate_request_raw_bindings(
             }
         }
     }
-    for raw in raw_objects {
-        let Some(request) = request_by_id.get(&raw.request_id).copied() else {
-            // Local model/workload objects have measured file-descriptor
-            // request IDs, not provider request-ledger IDs. Their typed
-            // bindings are checked separately by merge_raw_objects.
-            continue;
-        };
+    for raw in provider_objects {
+        let request = request_by_id.get(&raw.request_id).copied().ok_or_else(|| {
+            anyhow!(
+                "provider raw object {} references unknown request {}",
+                raw.raw_id,
+                raw.request_id
+            )
+        })?;
         let response_matches = request.response_raw_ref.as_deref() == Some(raw.raw_id.as_str());
         let error_matches = request.error_raw_ref.as_deref() == Some(raw.raw_id.as_str());
         if !response_matches && !error_matches {
@@ -692,6 +951,15 @@ fn validate_request_raw_bindings(
                 "provider raw object {} for request {} is not linked from that request",
                 raw.raw_id,
                 request.request_id
+            );
+        }
+    }
+    for raw in local_objects {
+        if request_by_id.contains_key(&raw.request_id) {
+            bail!(
+                "local raw object {} uses provider request identity {}",
+                raw.raw_id,
+                raw.request_id
             );
         }
     }
@@ -1015,7 +1283,11 @@ fn map_repository(
         &[],
     )?;
     for artifact in &repository.artifacts {
-        validate_raw_references(
+        let archive_endpoint = format!(
+            "/repos/{}/actions/artifacts/{}/zip",
+            repository.repository, artifact.artifact_id
+        );
+        validate_nested_raw_references(
             &artifact.raw_object_refs,
             raw_by_id,
             request_by_id,
@@ -1023,7 +1295,58 @@ fn map_repository(
                 "artifact {} run {} in {}",
                 artifact.artifact_id, artifact.run_id, repository.repository
             ),
-            &["workflow_artifacts"],
+            &[
+                RawEndpointBinding {
+                    object_kind: "workflow_artifacts",
+                    endpoint: format!(
+                        "/repos/{}/actions/runs/{}/artifacts",
+                        repository.repository, artifact.run_id
+                    ),
+                },
+                RawEndpointBinding {
+                    object_kind: "workflow_artifacts",
+                    endpoint: archive_endpoint.clone(),
+                },
+            ],
+        )?;
+        let archive_raw = artifact
+            .raw_object_refs
+            .iter()
+            .map(|raw_id| {
+                raw_by_id.get(raw_id).copied().ok_or_else(|| {
+                    anyhow!(
+                        "artifact {} references missing raw {}",
+                        artifact.artifact_id,
+                        raw_id
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .find(|raw| {
+                request_by_id
+                    .get(&raw.request_id)
+                    .is_some_and(|request| request.endpoint_or_operation == archive_endpoint)
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "artifact {} lacks archive response at {}",
+                    artifact.artifact_id,
+                    archive_endpoint
+                )
+            })?;
+        if archive_raw.sha256 != artifact.digest {
+            bail!(
+                "artifact {} archive digest {} differs from metadata {}",
+                artifact.artifact_id,
+                archive_raw.sha256,
+                artifact.digest
+            );
+        }
+        validate_github_api_url(
+            &artifact.source_url,
+            &archive_endpoint,
+            &format!("artifact {} source URL", artifact.artifact_id),
         )?;
         if artifact.run_id == 0
             || !is_sha(&artifact.run_head_sha)
@@ -1153,7 +1476,7 @@ fn map_repository(
     let artifacts = repository
         .artifacts
         .iter()
-        .map(map_artifact_observation)
+        .map(|artifact| map_artifact_observation(artifact, &repository.repository))
         .collect::<Result<Vec<_>>>()?;
     Ok(G0RepositoryInventory {
         repository: repository.repository.clone(),
@@ -1169,7 +1492,10 @@ fn map_repository(
     })
 }
 
-fn map_artifact_observation(artifact: &LiveArtifact) -> Result<G0ArtifactObservation> {
+fn map_artifact_observation(
+    artifact: &LiveArtifact,
+    repository: &str,
+) -> Result<G0ArtifactObservation> {
     let run_attempt = artifact.run_attempt.ok_or_else(|| {
         anyhow!(
             "artifact {} has unknown run attempt; run-scoped artifact API did not provide one",
@@ -1188,6 +1514,14 @@ fn map_artifact_observation(artifact: &LiveArtifact) -> Result<G0ArtifactObserva
             artifact.artifact_id
         );
     }
+    validate_github_api_url(
+        &artifact.source_url,
+        &format!(
+            "/repos/{repository}/actions/artifacts/{}/zip",
+            artifact.artifact_id
+        ),
+        &format!("artifact {} source URL", artifact.artifact_id),
+    )?;
     Ok(G0ArtifactObservation {
         artifact_id: artifact.artifact_id,
         run_id: artifact.run_id,
@@ -1475,11 +1809,7 @@ fn validate_nested_raw_references(
         .map(|binding| binding.object_kind)
         .collect::<Vec<_>>();
     validate_raw_references(raw_ids, raw_by_id, request_by_id, label, &allowed_kinds)?;
-    let expected_by_kind = expected
-        .iter()
-        .map(|binding| (binding.object_kind, binding))
-        .collect::<BTreeMap<_, _>>();
-    let mut observed_kinds = BTreeSet::new();
+    let mut observed_bindings = BTreeSet::new();
     let mut seen_raw_ids = BTreeSet::new();
     for raw_id in raw_ids {
         if !seen_raw_ids.insert(raw_id) {
@@ -1489,33 +1819,41 @@ fn validate_nested_raw_references(
             .get(raw_id)
             .copied()
             .ok_or_else(|| anyhow!("{label} references missing raw object {raw_id}"))?;
-        let binding = expected_by_kind
-            .get(raw.object_kind.as_str())
-            .ok_or_else(|| {
-                anyhow!(
-                    "{label} raw object {raw_id} has unexpected object kind {}",
-                    raw.object_kind
-                )
-            })?;
         let request = request_by_id
             .get(&raw.request_id)
             .copied()
             .ok_or_else(|| anyhow!("{label} raw object {raw_id} has missing request"))?;
-        if request.api != ApiKind::Rest
-            || request.method != HttpMethod::Get
-            || request.endpoint_or_operation != binding.endpoint
-        {
+        if request.api != ApiKind::Rest || request.method != HttpMethod::Get {
+            bail!("{label} raw object {raw_id} is not a REST GET response");
+        }
+        let matching = expected
+            .iter()
+            .filter(|binding| {
+                binding.object_kind == raw.object_kind
+                    && binding.endpoint == request.endpoint_or_operation
+            })
+            .count();
+        if matching != 1 {
             bail!(
-                "{label} raw object {raw_id} is bound to {} instead of {} {}",
+                "{label} raw object {raw_id} is bound to {} with unexpected kind {}",
                 request.endpoint_or_operation,
-                binding.object_kind,
-                binding.endpoint
+                raw.object_kind
             );
         }
-        observed_kinds.insert(raw.object_kind.as_str());
+        if !observed_bindings.insert((
+            raw.object_kind.to_owned(),
+            request.endpoint_or_operation.clone(),
+        )) {
+            bail!(
+                "{label} repeats endpoint {} for object kind {}",
+                request.endpoint_or_operation,
+                raw.object_kind
+            );
+        }
     }
     for binding in expected {
-        if !observed_kinds.contains(binding.object_kind) {
+        if !observed_bindings.contains(&(binding.object_kind.to_owned(), binding.endpoint.clone()))
+        {
             bail!(
                 "{label} lacks raw object kind {} at {}",
                 binding.object_kind,
@@ -2854,6 +3192,7 @@ mod tests {
     };
     use crate::github_acquisition::sha256_digest;
     use base64::engine::general_purpose::STANDARD as BASE64;
+    use serde_json::Value;
     use std::{env, fs, path::PathBuf};
 
     fn raw_object(kind: &str, raw_id: &str, value: serde_json::Value) -> RawObjectRef {
@@ -3001,6 +3340,8 @@ mod tests {
         let error = validate_request_raw_bindings(
             std::slice::from_ref(&request),
             std::slice::from_ref(&cross_bound),
+            &[],
+            std::slice::from_ref(&cross_bound),
             &request_by_id,
         )
         .expect_err("cross-bound response must fail closed");
@@ -3010,11 +3351,93 @@ mod tests {
         orphan.request_id = response.request_id.clone();
         let error = validate_request_raw_bindings(
             std::slice::from_ref(&request),
+            &[response.clone(), orphan.clone()],
+            &[],
             &[response, orphan],
             &request_by_id,
         )
         .expect_err("unlinked provider response must fail closed");
         assert!(error.to_string().contains("not linked"));
+    }
+
+    #[test]
+    fn request_raw_ledger_rejects_unknown_provider_request() {
+        let response = raw_object("repository", "response", serde_json::json!({"id": 1}));
+        let request = rest_request(&response, "/repos/acme/repo");
+        let request_by_id =
+            index_unique_requests(std::slice::from_ref(&request)).expect("unique request fixture");
+        let mut foreign = response.clone();
+        foreign.raw_id = "foreign-response".to_owned();
+        foreign.request_id = "foreign-request".to_owned();
+        let error = validate_request_raw_bindings(
+            std::slice::from_ref(&request),
+            &[response.clone(), foreign.clone()],
+            &[],
+            &[response, foreign],
+            &request_by_id,
+        )
+        .expect_err("provider raw object with unknown request must fail closed");
+        assert!(error.to_string().contains("unknown request"));
+    }
+
+    #[test]
+    fn request_raw_ledger_rejects_same_request_response_error_alias() {
+        let response = raw_object("repository", "response", serde_json::json!({"id": 1}));
+        let mut request = rest_request(&response, "/repos/acme/repo");
+        request.error_raw_ref = Some(response.raw_id.clone());
+        let request_by_id =
+            index_unique_requests(std::slice::from_ref(&request)).expect("unique request fixture");
+        let error = validate_request_raw_bindings(
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&response),
+            &[],
+            std::slice::from_ref(&response),
+            &request_by_id,
+        )
+        .expect_err("one raw object cannot have response and error roles");
+        assert!(error.to_string().contains("both response and error"));
+    }
+
+    #[test]
+    fn mapper_identity_validator_rejects_duplicate_artifact_and_workflow_ids() {
+        let names = vec!["tailrocks/example".to_owned()];
+        let mut live = scope_live(&names);
+        let artifact = LiveArtifact {
+            artifact_id: 7,
+            run_id: 8,
+            run_attempt: None,
+            run_head_sha: "a".repeat(40),
+            name: "dist".to_owned(),
+            digest: "sha256:".to_owned() + &"b".repeat(64),
+            expired: Some(false),
+            source_url: "https://api.github.com/repos/tailrocks/example/actions/artifacts/7/zip"
+                .to_owned(),
+            raw_object_refs: Vec::new(),
+        };
+        live.repositories[0].artifacts = vec![artifact.clone(), artifact];
+        let error = validate_mapper_identity_uniqueness(&live)
+            .expect_err("duplicate artifact identity must fail closed");
+        assert!(error.to_string().contains("artifact identity"));
+
+        live.repositories[0].artifacts.clear();
+        let workflow = LiveWorkflow {
+            path: ".github/workflows/ci.yml".to_owned(),
+            revision: "c".repeat(40),
+            source_sha: "c".repeat(40),
+            source_url: "https://github.com/tailrocks/example/blob/c/ci.yml".to_owned(),
+            source_bytes_base64: BASE64.encode(b"on: [push]"),
+            source_raw_object_refs: Vec::new(),
+            events: vec!["push".to_owned()],
+            source_jobs: Vec::new(),
+            reusable_workflows: Vec::new(),
+            actions: Vec::new(),
+            scanners: Vec::new(),
+            raw_object_refs: Vec::new(),
+        };
+        live.repositories[0].workflows = vec![workflow.clone(), workflow];
+        let error = validate_mapper_identity_uniqueness(&live)
+            .expect_err("duplicate workflow identity must fail closed");
+        assert!(error.to_string().contains("workflow identity"));
     }
 
     #[test]
@@ -3106,7 +3529,7 @@ mod tests {
                     link_next: None,
                     cursor_in: None,
                     cursor_out: None,
-                    has_next_page: Some(!record["has_next"].as_bool().expect("has_next")),
+                    has_next_page: Some(record["has_next"].as_bool().expect("has_next")),
                     items_returned: 1,
                 },
                 response_raw_ref: Some(raw_id.clone()),
@@ -3127,8 +3550,23 @@ mod tests {
             missing_body_records, 2,
             "metadata records without response bodies remain unresolved"
         );
+        let expected_page_flags = manifest["request_records"]
+            .as_array()
+            .expect("request records array")
+            .iter()
+            .filter(|record| record.pointer("/raw/body").is_some())
+            .map(|record| Some(record["has_next"].as_bool().expect("has_next")))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.page.has_next_page)
+                .collect::<Vec<_>>(),
+            expected_page_flags,
+            "captured pagination flags must remain unchanged"
+        );
         let request_by_id = index_unique_requests(&requests).expect("unique captured requests");
-        validate_request_raw_bindings(&requests, &raw_objects, &request_by_id)
+        validate_request_raw_bindings(&requests, &raw_objects, &[], &raw_objects, &request_by_id)
             .expect("real response/raw backlinks remain exact");
 
         let run_body: Value = serde_json::from_slice(
@@ -3172,7 +3610,7 @@ mod tests {
         assert!(artifacts
             .iter()
             .all(|artifact| artifact.run_attempt.is_none()));
-        let error = map_artifact_observation(&artifacts[0])
+        let error = map_artifact_observation(&artifacts[0], "tailrocks/velnor")
             .expect_err("run-scoped artifact without attempt must not enter G0 inventory");
         assert!(error.to_string().contains("unknown run attempt"));
 
@@ -3836,6 +4274,65 @@ mod tests {
             &raw_by_id,
             &request_by_id,
             "PR #7",
+            &expected,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn artifact_raw_identity_requires_run_list_and_archive_endpoints() {
+        let list = raw_object(
+            "workflow_artifacts",
+            "artifact-list",
+            serde_json::json!([{"id": 7}]),
+        );
+        let archive = raw_bytes("workflow_artifacts", "artifact-archive", b"zip-bytes");
+        let raw_values = [list.clone(), archive.clone()];
+        let raw_by_id = raw_values
+            .iter()
+            .map(|raw| (raw.raw_id.clone(), raw))
+            .collect::<BTreeMap<_, _>>();
+        let run_endpoint = "/repos/tailrocks/example/actions/runs/8/artifacts";
+        let archive_endpoint = "/repos/tailrocks/example/actions/artifacts/7/zip";
+        let requests = [
+            rest_request(&list, run_endpoint),
+            rest_request(&archive, archive_endpoint),
+        ];
+        let request_by_id = requests
+            .iter()
+            .map(|request| (request.request_id.clone(), request))
+            .collect::<BTreeMap<_, _>>();
+        let expected = [
+            RawEndpointBinding {
+                object_kind: "workflow_artifacts",
+                endpoint: run_endpoint.to_owned(),
+            },
+            RawEndpointBinding {
+                object_kind: "workflow_artifacts",
+                endpoint: archive_endpoint.to_owned(),
+            },
+        ];
+        assert!(validate_nested_raw_references(
+            &[list.raw_id.clone(), archive.raw_id.clone()],
+            &raw_by_id,
+            &request_by_id,
+            "artifact 7",
+            &expected,
+        )
+        .is_ok());
+
+        let mut missing_archive = requests[1].clone();
+        missing_archive.endpoint_or_operation = run_endpoint.to_owned();
+        let missing_archive_requests = [requests[0].clone(), missing_archive];
+        let missing_archive_by_id = missing_archive_requests
+            .iter()
+            .map(|request| (request.request_id.clone(), request))
+            .collect::<BTreeMap<_, _>>();
+        assert!(validate_nested_raw_references(
+            &[list.raw_id, archive.raw_id],
+            &raw_by_id,
+            &missing_archive_by_id,
+            "artifact 7",
             &expected,
         )
         .is_err());

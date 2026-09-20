@@ -36,6 +36,11 @@ pub mod live_transport;
 #[path = "github_raw_store.rs"]
 pub mod raw_store;
 
+/// Producer-side adapter for the checker-owned immutable raw-byte seam.  It
+/// is deliberately isolated until the checker enables `read_g0_raw`.
+#[path = "g0_raw_store_adapter.rs"]
+pub mod g0_raw_store_adapter;
+
 /// Current GitHub facts collector and typed observation mapping.  It remains
 /// behind this acquisition namespace until the checker owner approves the
 /// final `g0_contract` adapter seam.
