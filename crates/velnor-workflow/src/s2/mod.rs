@@ -6459,7 +6459,7 @@ fn plan_generated_write_with_options(
         })
         .map(|(relative, _)| relative.clone())
         .collect::<Vec<_>>();
-    let legacy = direct_legacy_workflows(root, files)?;
+    let legacy = direct_legacy_workflows(root, files, ownership.map(|state| &state.outputs))?;
     let conflicts = changed
         .iter()
         .filter(|relative| root.join(relative).exists())
@@ -7195,6 +7195,7 @@ fn display_paths<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> String {
 fn direct_legacy_workflows(
     root: &Path,
     generated: &BTreeMap<PathBuf, String>,
+    ownership: Option<&BTreeMap<PathBuf, u64>>,
 ) -> Result<Vec<PathBuf>, GeneratorError> {
     let workflows = root.join(".github/workflows");
     if !workflows.exists() {
@@ -7217,12 +7218,15 @@ fn direct_legacy_workflows(
                 GeneratorError::usage(format!("make workflow path relative: {error}"))
             })?
             .to_path_buf();
-        let generated_by_velnor =
-            fs::read_to_string(&path).is_ok_and(|content| content.starts_with(GENERATED_HEADER));
+        // Current outputs are authoritative from the render plan; stale
+        // outputs are authoritative only from the recorded sidecar. Their
+        // digest is verified before deletion, so a changed stale file still
+        // fails closed instead of being silently adopted.
+        let owned_by_state = ownership.is_some_and(|outputs| outputs.contains_key(&relative));
         if file_type.is_file()
             && matches!(extension, Some("yml" | "yaml"))
             && !generated.contains_key(&relative)
-            && !generated_by_velnor
+            && !owned_by_state
         {
             legacy.push(relative);
         }
@@ -18615,6 +18619,47 @@ lockfile = true
                 "read preserved foreign workflow"
             ),
             foreign
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_generation_refuses_forged_velnor_header_as_legacy() {
+        let root = temporary_repository("preserve-forged-header");
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            ),
+            "write manifest",
+        );
+        let legacy = root.join(".github/workflows/ci.yml");
+        must(
+            fs::create_dir_all(must_some(legacy.parent(), "workflow parent")),
+            "create workflow directory",
+        );
+        // A forged generated header must not authorize a workflow: ownership
+        // comes from the render plan or the recorded sidecar only.
+        let forged = format!("{GENERATED_HEADER}name: CI\non:\n  push:\n");
+        must(fs::write(&legacy, &forged), "write forged workflow");
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan test repository",
+        );
+        let files = must(generated_files(&config), "generate");
+        let error = must_some(
+            write_generated(&root, &files, false, false, true).err(),
+            "force must refuse forged-header workflow as legacy",
+        );
+        assert!(error.to_string().contains("will not be imported"));
+        assert_eq!(
+            must(fs::read_to_string(&legacy), "read preserved workflow"),
+            forged
         );
         let _ = fs::remove_dir_all(root);
     }
