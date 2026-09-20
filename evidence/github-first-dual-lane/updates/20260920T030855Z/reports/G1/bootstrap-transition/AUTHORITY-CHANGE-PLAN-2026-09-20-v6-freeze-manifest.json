@@ -1,0 +1,58 @@
+{
+  "schema": "velnor.authority-change-plan-freeze-manifest.v1",
+  "status": "proposal-frozen-for-independent-review",
+  "execution_authorized": false,
+  "mutation_performed": false,
+  "observed_utc": "2026-09-20T01:28:35Z",
+  "plan": {
+    "markdown": "AUTHORITY-CHANGE-PLAN-2026-09-20-v6.md",
+    "markdown_sha256": "4aea2c28eb06f21e094adad1b4b0dfe8a8d6918d1cbe18c3a2befb77c849e593",
+    "json": "AUTHORITY-CHANGE-PLAN-2026-09-20-v6.json",
+    "json_sha256": "556eb0485a18fe9abb91c132ff2a0cddd21e6eb3f549f66ebd90dbdf9da89947",
+    "current_main_sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+    "current_main_parent_sha": "e94b48406c4ed206fce2bbf39b788264e72cf39c",
+    "current_main_tree_sha": "e9019f00578d34c3f339c7e8d55b66f7e53f8567",
+    "current_generator_emission_revision": "54",
+    "current_policy_runtime_pin": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+    "target_generator_revision": null
+  },
+  "regression_check": {
+    "directory": "v6-executable-contract-check-2026-09-20",
+    "script": "check_v6_contract.py",
+    "script_sha256": "3d0d5a1d7dc5053c8216f3b2fbc0ee9abf0ce973aca62b632b4ecafa15bed2f3",
+    "results": "results.json",
+    "results_sha256": "a4e505aa58802c1cce923504a8fc93a9d5ec7adfd51d0a2abed41653549dde99",
+    "report": "REPORT.md",
+    "report_sha256": "5a482e2b63fcaf5e5df548dfa590431f08f9c288afd961f68210055038524b11",
+    "pass_count": 23,
+    "fail_count": 0,
+    "verdict": "structural-pass-with-execution-blockers",
+    "gate_claim": false,
+    "limitations": [
+      "no GitHub API execution",
+      "no real Actions run/job/artifact/release IDs",
+      "no cryptographic attestation verification",
+      "no reviewed target generator or B source revision"
+    ]
+  },
+  "historical_negative_baseline": {
+    "v5_report_sha256": "16259a66f4e4cd6df4da8dd80cdfb82e73022b44a4b8137f12c90866bdf01fbe",
+    "v5_results_sha256": "187e2c01766741cae0e8caf614c307beaadbbd7d88a7135757b3481d6840f4e1",
+    "v5_status": "rejected; preserved unchanged"
+  },
+  "hard_blockers": [
+    "reviewed immutable target generator revision",
+    "reviewed B source and generated output",
+    "old-parser semantic admission fixture",
+    "real verifier with live API and cryptographic execution",
+    "external A/B App and Checks provider identities",
+    "OIDC certificate and policy trust identities",
+    "enforceable coordinator/proxy monotonic fence and independent recovery exercise",
+    "bypass actor 5 freeze/audit proof",
+    "current recursive closure and two-render proof",
+    "clean publishable runtime candidate",
+    "Main-B and supporting workflow live census",
+    "independent g0_reviewer and authority_transition_review approval"
+  ],
+  "review_request": "Review this exact immutable pair. Do not execute, mutate authority, publish, merge, or treat structural checks as G1 approval. Any fix creates a new version and new manifest."
+}

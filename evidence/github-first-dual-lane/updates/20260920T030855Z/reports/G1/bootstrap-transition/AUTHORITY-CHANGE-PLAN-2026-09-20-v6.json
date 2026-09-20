@@ -1,0 +1,1613 @@
+{
+  "schema": "velnor.authority-change-plan.v6",
+  "status": "approval_required",
+  "execution_authorized": false,
+  "mutation_performed": false,
+  "observed_utc": "2026-09-20T01:28:35Z",
+  "plan_markdown": {
+    "path": "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v6.md",
+    "sha256": "4aea2c28eb06f21e094adad1b4b0dfe8a8d6918d1cbe18c3a2befb77c849e593"
+  },
+  "supersedes": {
+    "markdown": "AUTHORITY-CHANGE-PLAN-2026-09-20-v5.md",
+    "markdown_sha256": "9f9b23af9ed5e38f9e329556534b3cbbf5828410af4a9f69446ae7e1dfce482d",
+    "json": "AUTHORITY-CHANGE-PLAN-2026-09-20-v5.json",
+    "json_sha256": "66dedfc1366be8333755ac0fa1759fa3d23f8b5a8d81fffbce8f83aeb964c648",
+    "reason": "v5 executable contract audit rejected caller output re-export, lineage loss, signing cycles, and incomplete trust predicates"
+  },
+  "transition": {
+    "tree_a": {
+      "purpose": "source_and_generator_transition",
+      "authority": "one external owner-controlled Policy-bootstrap-A check for one exact PR and synthetic merge tree",
+      "literal_b_pin": false,
+      "actions_provenance": false,
+      "forbidden": [
+        "policy.validator config section",
+        "candidate artifact or manifest",
+        "old checker as authority",
+        "old setup or runtime identity",
+        "old macOS runner",
+        "mutable latest",
+        "skipped required workload"
+      ],
+      "no_pre_main_product_claim": true
+    },
+    "main_b": {
+      "purpose": "first resulting main revision and live typed validator publication",
+      "source_ref": "refs/heads/main",
+      "source_sha": "RESULTING_MAIN_SHA",
+      "publisher": ".github/workflows/ci-policy-validator-products.yml",
+      "publisher_invocation": "workflow_call only from ci-main guarded push/main caller",
+      "caller_workflow": ".github/workflows/ci-main.yml",
+      "product_id": "velnor-workflow-policy-validator",
+      "policy_mode": "live B binding through called outputs and same-run direct needs; no literal pin",
+      "required_context": {
+        "context": "Policy-bootstrap-B",
+        "integration_id": "<MAIN_B_INTEGRATION_ID>"
+      }
+    },
+    "tree_b": {
+      "purpose": "separate reviewed immutable pin adoption",
+      "adoption_file": ".github/ci/validator-pin-adoption.json",
+      "policy_mode": "base-owned exact live-binding verifier emits normal Policy",
+      "literal_pin": "materialize only after Tree-B merge and resulting-main verification",
+      "required_context": {
+        "context": "Policy",
+        "integration_id": "<BASE_POLICY_INTEGRATION_ID>"
+      }
+    },
+    "order": [
+      "tree_a_external_admission",
+      "protected_normal_pr_merge",
+      "main_b_live_publish_and_verify",
+      "ruleset_tree_a_to_main_b",
+      "ruleset_main_b_to_final_policy_before_tree_b",
+      "tree_b_adoption_pr_and_merge",
+      "temporary_authority_cleanup"
+    ],
+    "prohibitions": [
+      "pre-main release provenance",
+      "candidate or local artifact",
+      "old-OS fallback",
+      "admin or bypass merge",
+      "workflow_run or dispatch wrapper as handoff",
+      "check-name or run-name-only binding",
+      "compatibility alias or legacy fallback",
+      "caller job outputs on uses job",
+      "second authoritative publisher"
+    ]
+  },
+  "revision_bound_facts": {
+    "repository": "tailrocks/velnor",
+    "main_sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+    "main_parent_sha": "e94b48406c4ed206fce2bbf39b788264e72cf39c",
+    "tree_sha": "e9019f00578d34c3f339c7e8d55b66f7e53f8567",
+    "source_pr": 965,
+    "source_pr_sha": "6b48f8fff2f4943dbf79c21c3274caecdf77bdd5",
+    "current_generator_revision": "54",
+    "current_policy_runtime_pin": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+    "target_generator_revision": null,
+    "target_generator_revision_requirement": "reviewed immutable 40-hex revision required; current emission revision 54 and old runtime pin 0dc are not a target",
+    "current_checkpoint": {
+      "path": "G0/fleet/push-checkpoint-current.json",
+      "sha256": "d4987b227e79212df2abdf503c33a80daff225ed270ea445f5c657f938fd101a",
+      "observed_utc": "2026-09-20T01:28:35Z",
+      "runtime_products_run": 35481089522,
+      "runtime_macos_job": 105998930189,
+      "runtime_runner": "macos-26",
+      "runtime_accepted": false,
+      "preview_run": 35481089629,
+      "preview_first_job": 105998913030,
+      "preview_conclusion": "failure",
+      "preview_failure": "Resolve preview identity",
+      "ci_main_run": 35481089696,
+      "ci_main_capture": "in_progress"
+    },
+    "changed_blobs": {
+      "generator_state": "c5c83cbe212beade20a6054a591e8c52038c0145",
+      "s2_mod": "5f3001a4447527af685a93af967f670b4633da4e",
+      "package_release": "0a3387910d2e7bce5553f5452850885e55fd34e9",
+      "runtime_workflow": "c35974071e31f1cbef495776fc5167ab8748908b"
+    },
+    "closure_inventory": {
+      "observed_at_utc": "2026-09-20T00:27:10Z",
+      "inventory_main": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+      "tree": "ec2d82aa83a1b2db692d1d3d46d48568d756c602",
+      "markdown_sha256": "90314d2c32203e06012feb33d149ce864c29ba856a73c8f9b1bc5146b69b7eae",
+      "json_sha256": "97f71e70ffa8f974e0abd9b382696e713f26e88645ef468fa43ad3dd3b8d4264",
+      "old_renderer_hits": 82,
+      "old_renderer_active_files": 12,
+      "main_reusable_calls_across_five_unit_workflows": 35,
+      "pr_reusable_calls_across_five_unit_workflows": 35,
+      "literal_old_closure_or_tag_hits": 0,
+      "literal_zero_is_clean": false,
+      "dynamic_provenance_check_required": true,
+      "current_reconciliation_required": true
+    },
+    "required_native_runner": "xcode-27",
+    "forbidden_observed_runner": "macos-26",
+    "ruleset": {
+      "name": "protect-main",
+      "id": 19573071,
+      "required_contexts_before": [
+        "DCO",
+        "ci-required",
+        "Policy"
+      ],
+      "reported_bypass_actor": 5,
+      "bypass_mode_observed": "always",
+      "bypass_used_by_plan": false,
+      "branch_protection_endpoint": "404; ruleset API authoritative"
+    },
+    "d19_clean_runtime": {
+      "path": "G0/fleet/d19-pin-feasibility-20260920",
+      "advertised_tags": 47,
+      "clean_published_candidate": false,
+      "unpublished_computed_tag": "2246fdb3f05f3b21",
+      "strict_closure_failure": "CLAUDE.md exceeds regular-file closure"
+    }
+  },
+  "complete_generated_closure": [
+    {
+      "path": ".github-gen/velnor-workflow.toml",
+      "blob": "b2bd968a484b9786c112c931dc325071ba1dff08",
+      "disposition": "preserve strict old shape; add neutral typed inputs only; no policy.validator or literal pin"
+    },
+    {
+      "path": ".github-gen/sources/workflows/ci-policy-validator-products.yml",
+      "blob": "absent-at-d20",
+      "disposition": "new source-owned Linux-X64 B publisher; post-implementation blob required in closure and render hashes"
+    },
+    {
+      "path": ".github/ci/.github-actions-generator-state",
+      "blob": "cd94b8751826154fb424414a484ad39bc320caac",
+      "disposition": "regenerate and include in fixed-point proof"
+    },
+    {
+      "path": ".github/actionlint.yaml",
+      "blob": "3dfcb29e220adb41ce218c511bdffb40983e07c2",
+      "disposition": "regenerate and validate"
+    },
+    {
+      "path": ".github/workflows/ci-main.yml",
+      "blob": "1bfa0ce7358d9acca59cac1eb91719b1dbe56491",
+      "disposition": "Main-B publisher, verifier, then Policy"
+    },
+    {
+      "path": ".github/workflows/ci-policy.yml",
+      "blob": "c8896e9e9bb766105fe949fa668ca15e3fd73f9c",
+      "disposition": "base-owned exact adoption verifier; no old checker or candidate"
+    },
+    {
+      "path": ".github/workflows/ci-pr.yml",
+      "blob": "335bebccf33f3ab1cc27176f0f4154eb52cd9f9e",
+      "disposition": "full ordinary PR workload"
+    },
+    {
+      "path": ".github/workflows/ci-unit-rust.yml",
+      "blob": "3f17cdbf571e32b5c19c49f83affa47cb9800970",
+      "disposition": "full Rust child"
+    },
+    {
+      "path": ".github/workflows/ci-unit-bun.yml",
+      "blob": "937d68cb35aaebbeafe6581269a97072e728ef35",
+      "disposition": "ordinary Bun checks; remove stale identity"
+    },
+    {
+      "path": ".github/workflows/ci-unit-docker.yml",
+      "blob": "1a0a6d6df5ec25d0afe88ea69da6c7e3d7873149",
+      "disposition": "ordinary Docker checks; preserve native requirements"
+    },
+    {
+      "path": ".github/workflows/ci-unit-docs.yml",
+      "blob": "677a0d639cd3c799d65721259b023f079ea13984",
+      "disposition": "ordinary docs checks"
+    },
+    {
+      "path": ".github/workflows/ci-unit-opentofu.yml",
+      "blob": "7b2a4c4d26c3cb7b11bc1de77eef63eaba1406d7",
+      "disposition": "ordinary OpenTofu checks"
+    },
+    {
+      "path": ".github/workflows/maintenance.yml",
+      "blob": "715351889671e4d775492f87717a5143bc14dba4",
+      "disposition": "observable maintenance; no old product acquisition"
+    },
+    {
+      "path": ".github/workflows/preview.yml",
+      "blob": "f0a54de82479960b858bfc446ff79d53688ffeff",
+      "disposition": "exact Main-B SHA/live API handoff"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "blob": "99c0584852dbdd4beedd04102dc42bff8e0c7232",
+      "disposition": "exact Main-B SHA/live API handoff; v* applicability recorded"
+    },
+    {
+      "path": ".github/workflows/ci-runtime-products.yml",
+      "blob": "c35974071e31f1cbef495776fc5167ab8748908b",
+      "disposition": "Linux-X64, Linux-ARM64, xcode-27, publish; no macOS-26/15"
+    },
+    {
+      "path": ".github/workflows/ci-policy-validator-products.yml",
+      "blob": "absent-at-d20",
+      "disposition": "generated B publisher output; post-implementation blob, source/template mapping, graph, and two-render digest required"
+    },
+    {
+      "path": ".github/actions/setup-velnor-workflow/action.yml",
+      "blob": "4e48bc2694af7b3d1a969cb108234a9a92b515d3",
+      "disposition": "replace old runtime-product consumer path; no alias"
+    },
+    {
+      "path": ".github/actions/report-velnor-ci-outcomes/action.yml",
+      "blob": "199083f950f67e8befd2282d8d525b105af761e0",
+      "disposition": "exact child census and no stale path"
+    },
+    {
+      "path": ".github-gen/sources/actions/setup-velnor-workflow/action.yml",
+      "blob": "4e48bc2694af7b3d1a969cb108234a9a92b515d3",
+      "disposition": "replace setup source"
+    },
+    {
+      "path": ".github-gen/sources/actions/report-velnor-ci-outcomes/action.yml",
+      "blob": "199083f950f67e8befd2282d8d525b105af761e0",
+      "disposition": "replace report source and include in renderer tests"
+    },
+    {
+      "path": ".github/actions/setup-velnor-policy-validator/action.yml",
+      "blob": "absent-at-d20",
+      "disposition": "new generated typed B consumer action"
+    },
+    {
+      "path": ".github-gen/sources/actions/setup-velnor-policy-validator/action.yml",
+      "blob": "absent-at-d20",
+      "disposition": "new source-owned typed B consumer action"
+    },
+    {
+      "path": ".github/workflows/nightly.yml",
+      "blob": "<current-main-blob-required>",
+      "disposition": "recursive closure and dispatch-main census; no old identity or candidate route"
+    },
+    {
+      "path": ".github/workflows/ci-release-package-signer.yml",
+      "blob": "<current-main-blob-required>",
+      "disposition": "callable signer closure, isolated identity and exact attestation census"
+    },
+    {
+      "path": ".github-gen/sources/workflows/ci-policy-validator-products.yml",
+      "blob": "<Tree-A-source-blob-required>",
+      "disposition": "source-owned workflow_call-only B publisher; hash in generator closure and renderer tests"
+    },
+    {
+      "path": ".github/workflows/ci-policy-validator-products.yml",
+      "blob": "<Tree-A-generated-blob-required>",
+      "disposition": "generated B publisher output; exact output/source mapping and two-render digest required"
+    }
+  ],
+  "active_workflows": [
+    "ci-main.yml",
+    "ci-policy.yml",
+    "ci-pr.yml",
+    "ci-unit-rust.yml",
+    "ci-unit-bun.yml",
+    "ci-unit-docker.yml",
+    "ci-unit-docs.yml",
+    "ci-unit-opentofu.yml",
+    "maintenance.yml",
+    "preview.yml",
+    "release.yml",
+    "ci-runtime-products.yml",
+    "ci-policy-validator-products.yml",
+    "nightly.yml",
+    "ci-release-package-signer.yml"
+  ],
+  "recursive_forbidden_scan": {
+    "forbidden_behavior": [
+      "old 0dc runtime provenance",
+      "candidate-manifest and candidate_publish",
+      "--pin-build",
+      "old setup/runtime product identity",
+      "macos-15",
+      "macos-26",
+      "mutable latest",
+      "empty or skipped required matrix",
+      "unbound build_revision"
+    ],
+    "roots": [
+      ".github-gen",
+      ".github",
+      ".github/actions",
+      ".github/workflows",
+      ".github/ci",
+      "crates/velnor-workflow"
+    ],
+    "method": "semantic reachable graph plus generated fixed-point; string scan supporting only",
+    "historical_inventory_not_current": true,
+    "current_main_reconciliation": {
+      "main_sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+      "tree_sha": "e9019f00578d34c3f339c7e8d55b66f7e53f8567"
+    }
+  },
+  "old_parser_boundary": {
+    "source_revision": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+    "binary_sha256": "ade826fd3a27de43cfce55acfda870493b4921770199fe0afaa653b9a96f1750",
+    "unknown_field_behavior": "strict parser aborts unknown field validator",
+    "measured_facts": [
+      "historical b5 old check/policy passed 11/11",
+      "policy.validator insertion aborts before rendering",
+      "current d20/e94 raw policy fails fixed-point or verify_tasks boundary",
+      "xcode-27 transition fails old trusted-runner semantics",
+      "static_files transports bytes only and does not prove B"
+    ],
+    "selected_typed_mechanism": "existing generic static_files mapping for actual B workflow and setup action; not a compatibility sidecar",
+    "selected_mappings": [
+      {
+        "file": ".github/workflows/ci-policy-validator-products.yml",
+        "source": ".github-gen/sources/workflows/ci-policy-validator-products.yml"
+      },
+      {
+        "file": ".github/actions/setup-velnor-policy-validator/action.yml",
+        "source": ".github-gen/sources/actions/setup-velnor-policy-validator/action.yml"
+      }
+    ],
+    "typed_publisher_feasibility": {
+      "markdown_sha256": "8764712693e2883d05846de05a3c2137fb3d31e3ee97ab0ad129186f3ff960f4",
+      "json_sha256": "01ad40d473aa26ae7e5e814ef7c3f93e854d682d2c359fa7588f0bba2b4943e9",
+      "finding": "static_files transports source bytes only; no actual B source; old package-release path is incompatible",
+      "source_admission_proven": false
+    },
+    "admission_fixture_required": true,
+    "raw_old_failure_is_failure": true,
+    "final_acceptance": "semantic generator/runtime closure and reachable graph proof; text scan supporting only",
+    "candidate_route_must_be_unreachable": [
+      "ci-unit-rust candidate producer",
+      "ci-main candidate_publish caller",
+      "ci-pr candidate_publish caller",
+      "policy candidate consumers",
+      "unchecked build_revision boundary"
+    ]
+  },
+  "neutral_s2_surface": {
+    "estate_neutral": true,
+    "allowed": [
+      "typed schema and rendering",
+      "declared output/consumer types",
+      "generic fixed-point and graph validation"
+    ],
+    "forbidden": [
+      "tailrocks/velnor hardcodes",
+      "product IDs",
+      "provider IDs",
+      "literal pins",
+      "repository-specific consumer branches",
+      "compatibility aliases"
+    ]
+  },
+  "tree_a_admission": {
+    "check_context": "Policy-bootstrap-A",
+    "app": "velnor-bootstrap-authority",
+    "permissions": [
+      "metadata:read",
+      "contents:read",
+      "actions:read",
+      "checks:read/write",
+      "pull_requests:read"
+    ],
+    "forbidden_permissions": [
+      "administration",
+      "release",
+      "ref-write",
+      "workflow",
+      "secrets",
+      "packages",
+      "deployments",
+      "merge",
+      "bypass"
+    ],
+    "record_must_bind": [
+      "repository_id",
+      "pull_request_number",
+      "pr_head_sha",
+      "locked_base_sha",
+      "synthetic_merge_sha",
+      "synthetic_tree_sha",
+      "checks_integration_id",
+      "provider_app_id",
+      "transaction_id",
+      "fencing_token",
+      "lease_id",
+      "complete_premerge_run_attempt_child_census"
+    ],
+    "null_provenance": [
+      "product_id",
+      "release_id",
+      "artifact_id",
+      "attestation_subject",
+      "actions_run",
+      "actions_job"
+    ],
+    "source_ref": "refs/pull/<N>/merge",
+    "never_source_ref": "refs/heads/main",
+    "eligibility": "all required premerge checks terminal success, non-neutral, non-skipped, complete",
+    "placeholders": {
+      "BOOTSTRAP_APP_ID": "<real>",
+      "BOOTSTRAP_INSTALLATION_ID": "<real>",
+      "BOOTSTRAP_INTEGRATION_ID": "<real>",
+      "BOOTSTRAP_VERIFIER_REVISION": "<40-hex>",
+      "BOOTSTRAP_APP_PUBLIC_KEY_SHA256": "<64-hex>",
+      "BOOTSTRAP_PR_NUMBER": "<real>",
+      "PR_HEAD_SHA": "<40-hex>",
+      "BASE_SHA": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+      "SYNTHETIC_MERGE_SHA": "<40-hex>",
+      "SYNTHETIC_TREE_SHA": "<40-hex>",
+      "TRANSACTION_ID": "<unique>",
+      "FENCING_TOKEN": "<monotonic>",
+      "LEASE_ID": "<durable record>",
+      "WATCHDOG_ID": "<independent actor>",
+      "TREE_A_RULESET_HASH": "<canonical full-PUT hash>",
+      "MAIN_B_VERIFIER_APP_ID": "<real>",
+      "MAIN_B_INTEGRATION_ID": "<real>",
+      "MAIN_B_VERIFIER_REVISION": "<40-hex>",
+      "TREE_B_PR_NUMBER": "<real>"
+    }
+  },
+  "main_b_publisher": {
+    "workflow_source": ".github-gen/sources/workflows/ci-policy-validator-products.yml",
+    "workflow_output": ".github/workflows/ci-policy-validator-products.yml",
+    "event_guard": {
+      "publisher_trigger": "workflow_call only",
+      "standalone_push": false,
+      "standalone_workflow_dispatch": false,
+      "standalone_tag": false,
+      "pull_request": false,
+      "caller_workflow": ".github/workflows/ci-main.yml",
+      "caller_job_condition": "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+      "called_side_effect_guard": "inherited caller push/main guard is repeated before reserve, attest, publish, and Policy-bootstrap-B",
+      "workflow_dispatch": "diagnostic/non-publishing; no B reserve/attest/publish/release/check",
+      "no_second_publisher": true
+    },
+    "job_graph": [
+      "build-linux-x64",
+      "artifact-verify",
+      "reserve-release",
+      "attest",
+      "publish",
+      "verify-B"
+    ],
+    "needs_edges": [
+      [
+        "artifact-verify",
+        "build-linux-x64"
+      ],
+      [
+        "reserve-release",
+        "artifact-verify"
+      ],
+      [
+        "attest",
+        "reserve-release"
+      ],
+      [
+        "publish",
+        "attest"
+      ],
+      [
+        "verify-B",
+        "publish"
+      ]
+    ],
+    "caller_permissions": [
+      "metadata:read",
+      "actions:read",
+      "contents:write",
+      "checks:write",
+      "id-token:write",
+      "attestations:write"
+    ],
+    "workflow_call_outputs": [
+      "policy_validator_b_record:canonical-json-artifact-id-and-sha256",
+      "policy_bootstrap_b_check_id:u64",
+      "source_sha:sha1",
+      "source_tree:sha1",
+      "closure_digest:sha256",
+      "caller_run_id:u64",
+      "caller_run_attempt:u64",
+      "caller_run_database_id:u64",
+      "called_workflow_path:string",
+      "called_workflow_sha:sha1",
+      "called_producer_run_id:u64",
+      "called_producer_run_attempt:u64",
+      "called_producer_job_database_id:u64",
+      "called_producer_check_id:u64",
+      "release_id:u64",
+      "release_asset_id:u64",
+      "artifact_id:u64",
+      "artifact_digest:sha256",
+      "binding_digest:sha256",
+      "binding_attestation_digest:sha256",
+      "release_attestation_digest:sha256",
+      "manifest_digest:sha256"
+    ],
+    "called_workflow_outputs_source": "verify-B outputs directly; no caller-job re-export",
+    "ci_main_graph": {
+      "caller_job": {
+        "id": "policy-validator-B",
+        "uses": ".github/workflows/ci-policy-validator-products.yml",
+        "needs": [],
+        "outputs_declared": false,
+        "shell_steps": false,
+        "consumes": "declared workflow_call outputs are available to the caller job and direct Policy needs edge",
+        "permission_union": "caller_permissions only; called jobs reduce permissions per job"
+      },
+      "policy_job": {
+        "id": "Policy",
+        "needs": [
+          "policy-validator-B"
+        ],
+        "consumes": [
+          "policy_validator_b_record:canonical-json-artifact-id-and-sha256",
+          "policy_bootstrap_b_check_id:u64",
+          "source_sha:sha1",
+          "source_tree:sha1",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_run_database_id:u64",
+          "called_workflow_path:string",
+          "called_workflow_sha:sha1",
+          "called_producer_run_id:u64",
+          "called_producer_run_attempt:u64",
+          "called_producer_job_database_id:u64",
+          "called_producer_check_id:u64",
+          "release_id:u64",
+          "release_asset_id:u64",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "binding_digest:sha256",
+          "binding_attestation_digest:sha256",
+          "release_attestation_digest:sha256",
+          "manifest_digest:sha256"
+        ]
+      },
+      "caller_event_dispatch": "diagnostic/non-publishing",
+      "run_identity": "one caller ci-main run ID/attempt; called job/check IDs from live API; no standalone B run"
+    },
+    "jobs": {
+      "build-linux-x64": {
+        "needs": [],
+        "permissions": [
+          "contents:read",
+          "actions:read"
+        ],
+        "forbidden": [
+          "contents:write",
+          "id-token:write",
+          "attestations:write",
+          "release",
+          "package",
+          "secrets"
+        ],
+        "outputs": [
+          "artifact_id:u64",
+          "artifact_name:string",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:enum",
+          "source_sha:sha1",
+          "source_tree:sha1",
+          "closure_digest:sha256",
+          "producer_workflow_path:string",
+          "producer_workflow_sha:sha1",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_key:typed-role",
+          "producer_job_database_id:u64",
+          "producer_check_id:u64",
+          "upload_step_id:string"
+        ]
+      },
+      "artifact-verify": {
+        "needs": [
+          "build-linux-x64"
+        ],
+        "permissions": [
+          "contents:read",
+          "actions:read"
+        ],
+        "consumes": [
+          "artifact_id:u64",
+          "artifact_name:string",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:enum",
+          "source_sha:sha1",
+          "source_tree:sha1",
+          "closure_digest:sha256",
+          "producer_workflow_path:string",
+          "producer_workflow_sha:sha1",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_key:typed-role",
+          "producer_job_database_id:u64",
+          "producer_check_id:u64",
+          "upload_step_id:string"
+        ],
+        "outputs": [
+          "verified_artifact_id:u64",
+          "verified_artifact_digest:sha256",
+          "verified_service_zip_digest:sha256",
+          "verified_service_zip_size:u64",
+          "verified_inner_payload_digest:sha256",
+          "verified_inner_payload_size:u64",
+          "verified_binary_digest:sha256",
+          "verified_binary_size:u64",
+          "verified_binary_architecture:enum",
+          "source_sha:sha1",
+          "source_tree:sha1",
+          "closure_digest:sha256",
+          "producer_workflow_path:string",
+          "producer_workflow_sha:sha1",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_key:typed-role",
+          "producer_job_database_id:u64",
+          "producer_check_id:u64",
+          "upload_step_id:string",
+          "canonical_binding_inputs_digest:sha256"
+        ]
+      },
+      "reserve-release": {
+        "needs": [
+          "artifact-verify"
+        ],
+        "permissions": [
+          "contents:write"
+        ],
+        "forbidden": [
+          "build",
+          "id-token:write",
+          "attestations:write",
+          "package"
+        ],
+        "consumes": [
+          "verified_artifact_id:u64",
+          "verified_artifact_digest:sha256",
+          "verified_service_zip_digest:sha256",
+          "verified_service_zip_size:u64",
+          "verified_inner_payload_digest:sha256",
+          "verified_inner_payload_size:u64",
+          "verified_binary_digest:sha256",
+          "verified_binary_size:u64",
+          "verified_binary_architecture:enum",
+          "source_sha:sha1",
+          "source_tree:sha1",
+          "closure_digest:sha256",
+          "producer_workflow_path:string",
+          "producer_workflow_sha:sha1",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_key:typed-role",
+          "producer_job_database_id:u64",
+          "producer_check_id:u64",
+          "upload_step_id:string",
+          "canonical_binding_inputs_digest:sha256"
+        ],
+        "outputs": [
+          "release_id:u64",
+          "release_tag:immutable-string",
+          "release_target:sha1",
+          "verified_artifact_id:u64",
+          "verified_artifact_digest:sha256",
+          "source_sha:sha1",
+          "source_tree:sha1",
+          "closure_digest:sha256",
+          "producer_workflow_path:string",
+          "producer_workflow_sha:sha1",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_database_id:u64",
+          "producer_check_id:u64",
+          "upload_step_id:string"
+        ]
+      },
+      "attest": {
+        "needs": [
+          "reserve-release"
+        ],
+        "permissions": [
+          "contents:read",
+          "actions:read",
+          "id-token:write",
+          "attestations:write"
+        ],
+        "forbidden": [
+          "contents:write",
+          "release",
+          "package"
+        ],
+        "consumes": [
+          "release_id:u64",
+          "release_tag:immutable-string",
+          "release_target:sha1",
+          "verified_artifact_id:u64",
+          "verified_artifact_digest:sha256",
+          "source_sha:sha1",
+          "source_tree:sha1",
+          "closure_digest:sha256",
+          "producer_workflow_path:string",
+          "producer_workflow_sha:sha1",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_database_id:u64",
+          "producer_check_id:u64",
+          "upload_step_id:string"
+        ],
+        "outputs": [
+          "binding_artifact_id:u64",
+          "binding_artifact_digest:sha256",
+          "binding_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "release_attestation_id:u64",
+          "release_attestation_digest:sha256",
+          "release_id:u64",
+          "release_tag:immutable-string",
+          "release_target:sha1",
+          "verified_artifact_id:u64",
+          "verified_artifact_digest:sha256",
+          "source_sha:sha1",
+          "source_tree:sha1",
+          "closure_digest:sha256",
+          "producer_workflow_path:string",
+          "producer_workflow_sha:sha1",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_database_id:u64",
+          "producer_check_id:u64",
+          "upload_step_id:string"
+        ]
+      },
+      "publish": {
+        "needs": [
+          "attest"
+        ],
+        "permissions": [
+          "contents:write"
+        ],
+        "forbidden": [
+          "build",
+          "id-token:write",
+          "attestations:write",
+          "package"
+        ],
+        "consumes": [
+          "binding_artifact_id:u64",
+          "binding_artifact_digest:sha256",
+          "binding_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "release_attestation_id:u64",
+          "release_attestation_digest:sha256",
+          "release_id:u64",
+          "release_tag:immutable-string",
+          "release_target:sha1",
+          "verified_artifact_id:u64",
+          "verified_artifact_digest:sha256",
+          "source_sha:sha1",
+          "source_tree:sha1",
+          "closure_digest:sha256",
+          "producer_workflow_path:string",
+          "producer_workflow_sha:sha1",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_database_id:u64",
+          "producer_check_id:u64",
+          "upload_step_id:string"
+        ],
+        "outputs": [
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target:sha1",
+          "published_release_asset_id:u64",
+          "published_release_asset_digest:sha256",
+          "published_manifest_artifact_id:u64",
+          "published_manifest_digest:sha256",
+          "published_binding_artifact_id:u64",
+          "published_binding_artifact_digest:sha256",
+          "published_binding_digest:sha256",
+          "published_binding_attestation_id:u64",
+          "published_binding_attestation_digest:sha256",
+          "published_release_attestation_id:u64",
+          "published_release_attestation_digest:sha256",
+          "published_verified_artifact_id:u64",
+          "published_verified_artifact_digest:sha256",
+          "source_sha:sha1",
+          "source_tree:sha1",
+          "closure_digest:sha256",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_database_id:u64",
+          "producer_check_id:u64"
+        ]
+      },
+      "verify-B": {
+        "needs": [
+          "publish"
+        ],
+        "permissions": [
+          "metadata:read",
+          "contents:read",
+          "actions:read",
+          "checks:read/write"
+        ],
+        "forbidden": [
+          "contents:write",
+          "id-token:write",
+          "attestations:write",
+          "release",
+          "merge",
+          "bypass"
+        ],
+        "consumes": [
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target:sha1",
+          "published_release_asset_id:u64",
+          "published_release_asset_digest:sha256",
+          "published_manifest_artifact_id:u64",
+          "published_manifest_digest:sha256",
+          "published_binding_artifact_id:u64",
+          "published_binding_artifact_digest:sha256",
+          "published_binding_digest:sha256",
+          "published_binding_attestation_id:u64",
+          "published_binding_attestation_digest:sha256",
+          "published_release_attestation_id:u64",
+          "published_release_attestation_digest:sha256",
+          "published_verified_artifact_id:u64",
+          "published_verified_artifact_digest:sha256",
+          "source_sha:sha1",
+          "source_tree:sha1",
+          "closure_digest:sha256",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_database_id:u64",
+          "producer_check_id:u64",
+          "live source/tree/ref API",
+          "live caller/called workflow and job/check API",
+          "raw release asset API",
+          "both attestation predicates"
+        ],
+        "outputs": [
+          "policy_validator_b_record:canonical-json-artifact-id-and-sha256",
+          "policy_bootstrap_b_check_id:u64",
+          "source_sha:sha1",
+          "source_tree:sha1",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_run_database_id:u64",
+          "called_workflow_path:string",
+          "called_workflow_sha:sha1",
+          "called_producer_run_id:u64",
+          "called_producer_run_attempt:u64",
+          "called_producer_job_database_id:u64",
+          "called_producer_check_id:u64",
+          "release_id:u64",
+          "release_asset_id:u64",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "binding_digest:sha256",
+          "binding_attestation_digest:sha256",
+          "release_attestation_digest:sha256",
+          "manifest_digest:sha256"
+        ],
+        "emits": "Policy-bootstrap-B",
+        "upstream_terminal_census_excludes": [
+          "verify-B own job/check",
+          "caller run",
+          "Policy job",
+          "Policy-bootstrap-B check"
+        ],
+        "self_checks": [
+          "verify-B own terminal check and live API verifier conclusion recorded separately"
+        ]
+      }
+    },
+    "transport_fields": [
+      "artifact_id:u64",
+      "artifact_name:string",
+      "artifact_digest:sha256",
+      "service_zip_digest:sha256",
+      "service_zip_size:u64",
+      "inner_payload_digest:sha256",
+      "inner_payload_size:u64",
+      "binary_digest:sha256",
+      "binary_size:u64",
+      "binary_architecture:enum",
+      "source_sha:sha1",
+      "source_tree:sha1",
+      "closure_digest:sha256",
+      "producer_workflow_path:string",
+      "producer_workflow_sha:sha1",
+      "producer_run_id:u64",
+      "producer_run_attempt:u64",
+      "producer_job_key:typed-role",
+      "producer_job_database_id:u64",
+      "producer_check_id:u64",
+      "upload_step_id:string",
+      "release_id:u64",
+      "release_tag:immutable-string",
+      "release_target:sha1",
+      "published_release_id:u64",
+      "published_release_tag:string",
+      "published_release_target:sha1",
+      "published_release_asset_id:u64",
+      "published_release_asset_digest:sha256",
+      "published_manifest_artifact_id:u64",
+      "published_manifest_digest:sha256",
+      "published_binding_artifact_id:u64",
+      "published_binding_artifact_digest:sha256",
+      "published_binding_digest:sha256",
+      "published_binding_attestation_id:u64",
+      "published_binding_attestation_digest:sha256",
+      "published_release_attestation_id:u64",
+      "published_release_attestation_digest:sha256",
+      "published_verified_artifact_id:u64",
+      "published_verified_artifact_digest:sha256",
+      "source_sha:sha1",
+      "source_tree:sha1",
+      "closure_digest:sha256",
+      "producer_run_id:u64",
+      "producer_run_attempt:u64",
+      "producer_job_database_id:u64",
+      "producer_check_id:u64",
+      "policy_validator_b_record:canonical-json-artifact-id-and-sha256",
+      "policy_bootstrap_b_check_id:u64",
+      "source_sha:sha1",
+      "source_tree:sha1",
+      "closure_digest:sha256",
+      "caller_run_id:u64",
+      "caller_run_attempt:u64",
+      "caller_run_database_id:u64",
+      "called_workflow_path:string",
+      "called_workflow_sha:sha1",
+      "called_producer_run_id:u64",
+      "called_producer_run_attempt:u64",
+      "called_producer_job_database_id:u64",
+      "called_producer_check_id:u64",
+      "release_id:u64",
+      "release_asset_id:u64",
+      "artifact_id:u64",
+      "artifact_digest:sha256",
+      "binding_digest:sha256",
+      "binding_attestation_digest:sha256",
+      "release_attestation_digest:sha256",
+      "manifest_digest:sha256"
+    ],
+    "field_provenance": {
+      "artifact_id": "build upload step -> artifact-verify REST GET -> reserve -> attest -> publish -> verify-B",
+      "release_asset_id": "publish GitHub release asset REST response; never Actions artifact ID",
+      "binding_digest": "canonical binding preimage excluding binding_digest and later manifest/attestation fields",
+      "manifest_digest": "final manifest upload after release ID and binding digest exist",
+      "attestation_bundle_digest": "attest API response and raw predicate bytes; not a name lookup",
+      "source_sha": "caller github.sha and live refs/heads/main; Policy rejects mismatch",
+      "called_workflow_sha": "OIDC job_workflow_sha plus live workflow file blob; not caller SHA alias"
+    },
+    "attestation_contract": {
+      "binding_subject": "raw immutable service ZIP",
+      "binding_predicate_type": "https://velnor.dev/attestations/policy-validator-binding/v1",
+      "binding_predicate_path": "attestations/velnor-policy-validator-binding.v1.json",
+      "release_manifest_subject": "final manifest artifact digest",
+      "release_predicate_type": "https://velnor.dev/attestations/policy-validator-release/v1",
+      "release_predicate_path": "attestations/velnor-workflow-policy-validator-release.v1.json",
+      "required_fields": [
+        "repository_id",
+        "source_ref",
+        "source_sha",
+        "source_tree",
+        "closure_digest",
+        "caller_workflow_path",
+        "caller_workflow_sha",
+        "caller_run_id",
+        "caller_run_attempt",
+        "caller_run_database_id",
+        "called_workflow_path",
+        "called_workflow_sha",
+        "producer_workflow_path",
+        "producer_workflow_sha",
+        "producer_run_id",
+        "producer_run_attempt",
+        "producer_job_key",
+        "producer_job_database_id",
+        "producer_check_id",
+        "upload_step_id",
+        "actions_artifact_id",
+        "actions_artifact_name",
+        "actions_artifact_digest",
+        "service_zip_digest",
+        "service_zip_size",
+        "inner_payload_digest",
+        "inner_payload_size",
+        "binary_digest",
+        "binary_size",
+        "binary_architecture",
+        "release_id",
+        "release_tag",
+        "release_target",
+        "release_asset_id",
+        "release_asset_digest",
+        "binding_attestation_id",
+        "binding_attestation_digest",
+        "binding_predicate_type",
+        "binding_predicate_path",
+        "binding_subject_name",
+        "binding_subject_digest",
+        "release_manifest_artifact_id",
+        "release_manifest_digest",
+        "release_manifest_subject_sha256",
+        "release_predicate_type",
+        "release_predicate_path",
+        "signer_repository",
+        "signer_workflow",
+        "signer_source_ref",
+        "oidc_issuer",
+        "certificate_identity",
+        "certificate_verified",
+        "oidc_policy_revision",
+        "required_step_conclusions"
+      ],
+      "trust": {
+        "oidc_issuer": "https://token.actions.githubusercontent.com",
+        "certificate_verified": true,
+        "signer_repository": "tailrocks/velnor",
+        "signer_workflow": ".github/workflows/ci-policy-validator-products.yml",
+        "signer_source_ref": "refs/heads/main",
+        "oidc_policy_revision": "<reviewed 40-hex>",
+        "temporary_key": false
+      }
+    },
+    "product": {
+      "product_id": "velnor-workflow-policy-validator",
+      "schema": "velnor.workflow-policy-validator.v1",
+      "purpose": "policy-validator",
+      "platform": "Linux-X64",
+      "runner": "ubuntu-24.04",
+      "profile": "release",
+      "features": "",
+      "application_namespace_reuse": false,
+      "mutable_latest": false,
+      "overwrite": false
+    },
+    "release_protocol": [
+      "build/upload immutable Actions artifact",
+      "verify raw REST ZIP and all digests",
+      "reserve fresh nonzero draft release at exact main SHA",
+      "create binding after real release/producer IDs",
+      "upload binding artifact",
+      "attest binding subject",
+      "create/upload final manifest",
+      "attest release manifest subject",
+      "publish exactly once",
+      "verify live release asset and both predicates"
+    ],
+    "validation_contract": [
+      "no caller uses-job outputs",
+      "no second publisher",
+      "no workflow name as data",
+      "no workspace crossing jobs",
+      "no orphan inputs or undeclared outputs",
+      "no digest self-preimage or manifest/attestation future reference",
+      "Actions artifact and release asset IDs distinct",
+      "per-hop permissions and digest equality checked",
+      "verify-B own check excluded from upstream census"
+    ]
+  },
+  "tree_b_adoption": {
+    "file": ".github/ci/validator-pin-adoption.json",
+    "schema": "velnor.policy-validator-pin-adoption.v1",
+    "mode": "tree-b",
+    "base_policy_identity": {
+      "workflow_path": ".github/workflows/ci-policy.yml",
+      "workflow_sha256": "sha256:<immutable base-policy workflow blob>",
+      "verifier_key": "policy-adoption-v1",
+      "verifier_revision": "<40-hex reviewed immutable verifier>",
+      "checks_integration_id": "<BASE_POLICY_INTEGRATION_ID>"
+    },
+    "target_mapping_contract": {
+      "config_path": ".github-gen/velnor-workflow.toml",
+      "config_sha256": "sha256:<exact Tree-B config blob>",
+      "generator_revision": "<exact reviewed immutable generator revision>",
+      "schema": "velnor.workflow-policy-validator.v1",
+      "template_sources": [
+        {
+          "path": ".github-gen/sources/workflows/ci-policy-validator-products.yml",
+          "sha256": "sha256:<exact source blob>"
+        },
+        {
+          "path": ".github-gen/sources/actions/setup-velnor-policy-validator/action.yml",
+          "sha256": "sha256:<exact source blob>"
+        }
+      ],
+      "static_files": [
+        {
+          "file": ".github/workflows/ci-policy-validator-products.yml",
+          "source": ".github-gen/sources/workflows/ci-policy-validator-products.yml",
+          "sha256": "sha256:<exact generated blob>"
+        },
+        {
+          "file": ".github/actions/setup-velnor-policy-validator/action.yml",
+          "source": ".github-gen/sources/actions/setup-velnor-policy-validator/action.yml",
+          "sha256": "sha256:<exact generated blob>"
+        }
+      ],
+      "product": {
+        "product_id": "velnor-workflow-policy-validator",
+        "features": "",
+        "application_namespace_reuse": false
+      },
+      "generic_s2": "estate-neutral; no product, repository, provider, pin, or consumer hardcode"
+    },
+    "main_b_binding_fields": [
+      "source_sha",
+      "release_id",
+      "release_tag",
+      "release_target",
+      "release_asset_id",
+      "actions_artifact_id",
+      "artifact_digest",
+      "binding_digest",
+      "binding_attestation_digest",
+      "release_attestation_digest",
+      "manifest_digest",
+      "signer_repository",
+      "signer_workflow",
+      "caller_run_id",
+      "caller_run_attempt",
+      "called_producer_job_database_id"
+    ],
+    "verification": [
+      "exact PR identity and adoption-file digest",
+      "base workflow/verifier/integration identity",
+      "target config/source/template/static mapping and digests",
+      "live Main-B source/tree/ref and all run/attempt/job/check/artifact/release/attestation APIs",
+      "raw ZIP and release-asset digest equality"
+    ],
+    "missing_file": "non-required audit only; never old checker, candidate, local, alias, mutable latest, or skip",
+    "pin_timing": "materialize/retain literal pin only after Tree-B merge and resulting-main verification",
+    "temporary_cleanup": [
+      "Policy-bootstrap-A provider/config",
+      "Policy-bootstrap-B transition provider/config",
+      "coordinator lease/watchdog transition permissions"
+    ],
+    "permanent_retained": [
+      "B publisher",
+      "permanent OIDC/Sigstore trust",
+      "base Policy verifier"
+    ]
+  },
+  "ruleset_transition": {
+    "contexts": {
+      "before": [
+        {
+          "context": "DCO",
+          "integration_id": "<DCO_ID>"
+        },
+        {
+          "context": "ci-required",
+          "integration_id": "<CI_REQUIRED_ID>"
+        },
+        {
+          "context": "Policy",
+          "integration_id": "<BASE_POLICY_INTEGRATION_ID>"
+        }
+      ],
+      "tree_a": [
+        {
+          "context": "DCO",
+          "integration_id": "<DCO_ID>"
+        },
+        {
+          "context": "ci-required",
+          "integration_id": "<CI_REQUIRED_ID>"
+        },
+        {
+          "context": "Policy-bootstrap-A",
+          "integration_id": "<BOOTSTRAP_INTEGRATION_ID>"
+        }
+      ],
+      "main_b": [
+        {
+          "context": "DCO",
+          "integration_id": "<DCO_ID>"
+        },
+        {
+          "context": "ci-required",
+          "integration_id": "<CI_REQUIRED_ID>"
+        },
+        {
+          "context": "Policy-bootstrap-B",
+          "integration_id": "<MAIN_B_INTEGRATION_ID>"
+        }
+      ],
+      "tree_b_final": [
+        {
+          "context": "DCO",
+          "integration_id": "<DCO_ID>"
+        },
+        {
+          "context": "ci-required",
+          "integration_id": "<CI_REQUIRED_ID>"
+        },
+        {
+          "context": "Policy",
+          "integration_id": "<BASE_POLICY_INTEGRATION_ID>"
+        }
+      ]
+    },
+    "update_method": "documented full-object PUT; no ETag/CAS assumption",
+    "context_identity_rule": "context and integration_id are a pair; same context from another provider is not equivalent",
+    "coordinator": {
+      "type": "external owner-controlled mutation proxy with durable monotonic fencing token",
+      "required_guards": [
+        "expected current main SHA",
+        "expected PR head/base and synthetic tree",
+        "expected full ruleset hash",
+        "allowlisted endpoint and actor",
+        "transaction ID",
+        "unexpired fence"
+      ],
+      "reject": [
+        "stale fence",
+        "wrong ref/hash",
+        "unallowlisted actor/endpoint",
+        "duplicate operation",
+        "concurrent writer"
+      ],
+      "all_mutations_through_proxy": true,
+      "required_exercise": "disposable equivalent ruleset; race, coordinator death, recovery, and PR attribution proof",
+      "ids": {
+        "coordinator": "<real>",
+        "proxy": "<real>",
+        "watchdog": "<real>",
+        "trust_location": "<durable reviewed location>"
+      }
+    },
+    "lease": "signed record is evidence only; proxy enforcement and independent watchdog are required",
+    "recovery": {
+      "premerge": "conditional restore only when live ruleset hash equals temporary hash and main equals locked pre-merge SHA",
+      "postmerge": "no rollback; watchdog freezes and forward-completes staged transition",
+      "concurrent_change": "never unconditional restore or overwrite",
+      "watchdog_independent": true
+    },
+    "merge_method": "normal protected PR merge only; sha=PR_HEAD_SHA; no direct ref/admin/bypass",
+    "direct_ref_update": "rejected",
+    "bypass_actor_5": "always observed; not used; must be frozen/audited by coordinator and verified in transcript",
+    "disposable_proof": [
+      "same ruleset object",
+      "no competing writer",
+      "DCO/ci-required/review preserved",
+      "exact integration-bound contexts",
+      "no bypass",
+      "PR attribution retained",
+      "coordinator death/recovery"
+    ],
+    "api_transcript": [
+      "GET main ref",
+      "GET PR",
+      "GET ruleset 19573071",
+      "GET check-runs",
+      "paginated workflow runs/jobs/attempts",
+      "full PUT ruleset with canonical body",
+      "normal PR merge with sha=PR_HEAD_SHA",
+      "postoperation ref/ruleset/attribution re-read"
+    ],
+    "exact_order": [
+      "create durable fenced transaction",
+      "Tree-A exact premerge census",
+      "freeze writers and full-PUT Tree-A ruleset",
+      "normal protected merge and exact resulting-main verification",
+      "Main-B called DAG plus full native/application census",
+      "Main-B API handoff for Preview/Release/nightly/signer",
+      "full-PUT Tree-A to Main-B then verify B-backed Policy",
+      "full-PUT Main-B to final Policy before Tree-B",
+      "Tree-B exact adoption PR and merge",
+      "cleanup temporary authorities and verify final graph"
+    ]
+  },
+  "cross_workflow_handoff": {
+    "scope": [
+      "preview consumer",
+      "release consumer",
+      "nightly dispatch-main wrapper",
+      "ci-release-package-signer callable child"
+    ],
+    "mode": "bounded live API polling and exact binding transport; no workflow_run or dispatch wrapper is a B publisher",
+    "publisher_mode": "workflow_call-only; one caller ci-main run and called job identities",
+    "poll_interval_seconds": 15,
+    "deadline_minutes": 45,
+    "queries": [
+      "actions runs by exact head_sha/branch/event/workflow path",
+      "run attempt jobs paginated",
+      "run artifacts paginated",
+      "artifact by numeric ID",
+      "release by numeric ID",
+      "raw release-asset download",
+      "attestation APIs",
+      "workflow file blob and OIDC certificate claims"
+    ],
+    "matching": [
+      "exact source SHA/tree/ref",
+      "caller/called workflow path and SHA",
+      "caller run ID/attempt/database ID",
+      "called producer run/attempt/job/check IDs",
+      "artifact/release IDs",
+      "binding and raw digest equality",
+      "integration-bound check identity"
+    ],
+    "exclude_from_upstream_census": [
+      "verify-B own job/check",
+      "caller parent run as child",
+      "Policy job",
+      "Policy-bootstrap-B check"
+    ],
+    "pending_states": [
+      "queued",
+      "in_progress"
+    ],
+    "terminal_success": "success only; non-neutral, non-skipped, non-empty",
+    "terminal_failure": [
+      "failure",
+      "cancelled",
+      "timed_out",
+      "neutral",
+      "skipped",
+      "missing child",
+      "attempt mismatch",
+      "deadline timeout",
+      "multiple candidate runs"
+    ],
+    "release_non_applicable_on_main_push": true,
+    "record_fields": [
+      "query_urls",
+      "timestamps",
+      "expected_sha",
+      "run/attempt/job/check/artifact/release IDs",
+      "terminal conclusions",
+      "timeout",
+      "all digest comparisons",
+      "attestation subject/predicate",
+      "OIDC certificate and policy revision"
+    ]
+  },
+  "required_workloads": {
+    "ordinary_workflows": [
+      "ci-main.yml",
+      "ci-policy.yml",
+      "ci-pr.yml",
+      "ci-unit-rust.yml",
+      "ci-unit-bun.yml",
+      "ci-unit-docker.yml",
+      "ci-unit-docs.yml",
+      "ci-unit-opentofu.yml",
+      "maintenance.yml",
+      "preview.yml",
+      "release.yml"
+    ],
+    "supporting_workflows": [
+      "nightly.yml",
+      "ci-release-package-signer.yml"
+    ],
+    "application_publisher_workflow": "ci-runtime-products.yml",
+    "typed_validator_publisher": "ci-policy-validator-products.yml",
+    "runtime_matrix": [
+      "build[Linux-X64]",
+      "build[Linux-ARM64]",
+      "build[xcode-27]",
+      "publish"
+    ],
+    "role_matrix": {
+      "main": "B publisher + Policy",
+      "policy": "base adoption verifier",
+      "pr": "ordinary checks, no B publisher",
+      "units": "ordinary child checks, no old identity",
+      "preview": "consumer only",
+      "release": "consumer only on applicable v* tag",
+      "nightly": "dispatch-main observation only",
+      "signer": "isolated signer child, no build token"
+    },
+    "result_rule": "every applicable required run/attempt/job/check/child/artifact/manifest/provider/native cell terminal success, non-neutral, non-skipped, non-empty, exact SHA and attempt",
+    "release_trigger": "v* non-applicable on Main-B push; first applicable stable tag runs full census",
+    "handoff": "exact resulting main SHA plus live IDs/digests; no workflow_run, dispatch, names, labels, or mutable latest",
+    "publisher_event_guard": "workflow_call-only publisher; caller push/main guard; dispatch diagnostic only",
+    "semantic_final_closure": "parse final config; build exact generator; recompute source/runtime closure/tag/manifest; inspect reachable graph; two byte-identical renders over workflows/actions/state/actionlint/manifests/sidecars",
+    "text_scan_is_sufficient": false
+  },
+  "pre_tree_a_removal": [
+    "active old 0dc checker path",
+    "candidate-manifest and candidate_publish path",
+    "--pin-build",
+    "old setup/runtime product identity",
+    "old macOS-15/26 labels",
+    "empty or disabled required cells",
+    "legacy aliases and compatibility fallbacks",
+    "temporary Tree-A/B authority paths not used by final tree"
+  ],
+  "evidence": {
+    "current_checkpoint_path": "G0/fleet/push-checkpoint-current.json",
+    "current_checkpoint_sha256": "d4987b227e79212df2abdf503c33a80daff225ed270ea445f5c657f938fd101a",
+    "current_main": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+    "current_parent": "e94b48406c4ed206fce2bbf39b788264e72cf39c",
+    "current_tree": "e9019f00578d34c3f339c7e8d55b66f7e53f8567",
+    "current_observed_utc": "2026-09-20T01:28:35Z",
+    "e94_feasibility_md_sha256": "cdb5a5bca2820d88bbf3ff8ab80a9249814be9ed639b9e0d9467322ee40baf72",
+    "e94_feasibility_json_sha256": "3a05e2bd8c1348ed808ca85053de7f7d93b74b99df201d8b331552c095cafcf6",
+    "old_validator_admission_probe_md_sha256": "70039e170b154db26ad595549fa8f69e02b509e62ff9d82d9eaf34f365525591",
+    "binding_audit_md_sha256": "6adfc96925cfda77d6db1329c7e3592da63f541af21d68f8c53267686270b9d8",
+    "v5_executable_contract_audit": {
+      "report_path": "G1/bootstrap-transition/v5-executable-contract-check-2026-09-20/REPORT.md",
+      "report_sha256": "16259a66f4e4cd6df4da8dd80cdfb82e73022b44a4b8137f12c90866bdf01fbe",
+      "results_path": "G1/bootstrap-transition/v5-executable-contract-check-2026-09-20/results.json",
+      "results_sha256": "187e2c01766741cae0e8caf614c307beaadbbd7d88a7135757b3481d6840f4e1",
+      "script_sha256": "833a25a815bc53c8d7e4642075330d7014a863a6dbe60e6c84d6c19d35241244",
+      "verdict": "negative regression baseline; 22 checks passed and 20 findings; no approval"
+    },
+    "closure_inventory": {
+      "markdown_sha256": "90314d2c32203e06012feb33d149ce864c29ba856a73c8f9b1bc5146b69b7eae",
+      "json_sha256": "97f71e70ffa8f974e0abd9b382696e713f26e88645ef468fa43ad3dd3b8d4264",
+      "observed_main": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+      "dynamic_provenance_clean": false
+    },
+    "typed_publisher_feasibility": {
+      "markdown_sha256": "8764712693e2883d05846de05a3c2137fb3d31e3ee97ab0ad129186f3ff960f4",
+      "json_sha256": "01ad40d473aa26ae7e5e814ef7c3f93e854d682d2c359fa7588f0bba2b4943e9",
+      "source_admission_proven": false
+    },
+    "authority_contract_separation": {
+      "results_sha256": "80d0f24d0dfc72abcd8b7f6c5b2e56cefb715791fb7c7cd320c8314c35baba68",
+      "canonical_root_manifest_sha256": "cdc77d552ada64c3b222b712f689a0958f4164c1e354c5e2557921bc13cf98b5",
+      "regular_file_count": 44,
+      "symlink_count": 0,
+      "fixture_count": 30,
+      "real_verifier": "unimplemented",
+      "live_api_execution": false,
+      "cryptographic_execution": false,
+      "gate_claim": false
+    },
+    "d19_pin_feasibility": {
+      "path": "G0/fleet/d19-pin-feasibility-20260920",
+      "clean_published_candidate": false,
+      "unpublished_computed_tag": "2246fdb3f05f3b21",
+      "gate_claim": false
+    },
+    "required_future_evidence": [
+      "real old-parser fixture on final source/config",
+      "reviewed target generator and rendered source/output blobs",
+      "full machine output field-provenance validator",
+      "real App/provider IDs and check bindings",
+      "disposable coordinator/freeze/recovery proof",
+      "Main-B caller/called run/job/check/artifact/release/attestation census",
+      "raw ZIP/manifest/predicate/OIDC verification",
+      "full native xcode-27 and all supporting workflow census",
+      "Tree-B adoption and permanent cleanup"
+    ]
+  },
+  "hard_blockers": [
+    {
+      "id": "reviewed_target_generator",
+      "condition": "target generator revision is null; current emission 54 and old runtime pin 0dc are not an approved target",
+      "required_before": "any authority operation"
+    },
+    {
+      "id": "publisher_source_and_output",
+      "condition": "reviewed B source, generated output, exact source/template mapping, and byte-stable render are absent",
+      "required_before": "Tree-A admission"
+    },
+    {
+      "id": "real_b_product",
+      "condition": "no clean published candidate exists; no real B release/artifact/attestation/binding IDs",
+      "required_before": "Tree-B"
+    },
+    {
+      "id": "machine_output_transport",
+      "condition": "v5 audit found caller re-export, dropped lineage, ID namespace, signing-cycle, and trust-field defects; v6 contract still requires implementation and independent review",
+      "required_before": "Tree-A admission"
+    },
+    {
+      "id": "old_parser_admission",
+      "condition": "current old 0dc rejects new fields/graph; static_files bytes-only feasibility is not semantic admission",
+      "required_before": "Tree-A admission"
+    },
+    {
+      "id": "external_a_identity",
+      "condition": "A App/integration/verifier/revision/key placeholders unresolved",
+      "required_before": "Tree-A ruleset"
+    },
+    {
+      "id": "main_b_identity",
+      "condition": "B provider/check integration, called workflow identity, OIDC policy revision, signer certificate identity placeholders unresolved",
+      "required_before": "Main-B publication"
+    },
+    {
+      "id": "coordinator_proxy_watchdog",
+      "condition": "no exercised external mutation proxy, monotonic fence, durable trust location, independent recovery actor, or race proof",
+      "required_before": "any ruleset/main mutation"
+    },
+    {
+      "id": "bypass_actor_5",
+      "condition": "ruleset reports actor 5 always-bypass; plan cannot prove freeze/audit before operation",
+      "required_before": "any transition"
+    },
+    {
+      "id": "semantic_closure",
+      "condition": "current recursive generator/runtime/product graph has not proven old 0dc/candidate/setup/macOS routes unreachable",
+      "required_before": "Tree-A admission"
+    },
+    {
+      "id": "native_matrix",
+      "condition": "latest required xcode-27 is not proven; observed runtime job used forbidden macos-26",
+      "required_before": "Main-B acceptance"
+    },
+    {
+      "id": "supporting_workflows",
+      "condition": "nightly and ci-release-package-signer closure/permissions/censuses not yet bound",
+      "required_before": "Main-B acceptance"
+    },
+    {
+      "id": "real_verifier",
+      "condition": "contract bundle has structural fixtures only; live API and cryptographic verifier are unimplemented/not run",
+      "required_before": "any acceptance"
+    },
+    {
+      "id": "d19_clean_runtime",
+      "condition": "all advertised tags fail strict closure and computed tag is unpublished",
+      "required_before": "runtime publication"
+    }
+  ],
+  "independent_approval": {
+    "required_reviewers": [
+      "g0_reviewer",
+      "authority_transition_review"
+    ],
+    "author_can_approve": false,
+    "review_scope": [
+      "current main 325719f1 and current changed blobs",
+      "v6 frozen Markdown/JSON hashes",
+      "old-parser fixture and target-generator two-render hashes",
+      "full recursive closure including generated B/nightly/signer",
+      "caller/called identity and workflow_call outputs with no caller re-export",
+      "complete output field provenance and acyclic attestation",
+      "release asset versus Actions artifact namespaces",
+      "OIDC/certificate/policy trust",
+      "exact context/integration_id ruleset objects",
+      "enforceable coordinator/proxy/fence/recovery",
+      "cross-workflow API handoff",
+      "full Linux-X64/Linux-ARM64/xcode-27/native and supporting census",
+      "Tree-B mapping, merge, permanent cleanup"
+    ],
+    "final_status": "not_approved",
+    "approval_required_before": [
+      "source or workflow edits",
+      "authority/trust/ruleset mutation",
+      "release/publication",
+      "merge",
+      "G1 completion"
+    ]
+  }
+}
+

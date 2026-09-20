@@ -1,0 +1,73 @@
+{
+  "schema": "velnor.authority-change-plan-freeze-manifest.v1",
+  "plan_version": "v7",
+  "status": "proposal-frozen-for-independent-review",
+  "execution_authorized": false,
+  "mutation_performed": false,
+  "observed_utc": "2026-09-20T01:28:35Z",
+  "repository": "tailrocks/velnor",
+  "revision_bound_main_sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+  "revision_bound_main_tree_sha": "e9019f00578d34c3f339c7e8d55b66f7e53f8567",
+  "target_generator_revision": null,
+  "files": {
+    "plan_markdown": {
+      "path": "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v7.md",
+      "sha256": "7339996f7c3d76fe4e750cb9036b474beb7e0d20ae7b2b7e7a9f0787cd81b72e"
+    },
+    "plan_json": {
+      "path": "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v7.json",
+      "sha256": "1a1cc175b36611f6ce175f4c82b6f6ce51f36f74bfb22a5d8e1abb9cc5647826"
+    },
+    "field_audit_script": {
+      "path": "G1/bootstrap-transition/v7-field-availability-audit-2026-09-20/check_v7_contract.py",
+      "sha256": "ccc71e4afaba6dfe96fc74d27fe9a522fab6fafd007c57a671a85614efdc3c31"
+    },
+    "field_audit_results": {
+      "path": "G1/bootstrap-transition/v7-field-availability-audit-2026-09-20/results.json",
+      "sha256": "49d98e32890baf5bb9b148888c4aa2f3a074a08745c30cd1b4e2ccccc486524f"
+    },
+    "field_audit_report": {
+      "path": "G1/bootstrap-transition/v7-field-availability-audit-2026-09-20/REPORT.md",
+      "sha256": "864ca8e1578e1f3bb91d325b0697d89b61c6634ccf31a77d4451572f8ad5a14e"
+    }
+  },
+  "audit_result": {
+    "pass_count": 35,
+    "fail_count": 0,
+    "verdict": "structural-pass-with-external-blockers",
+    "gate_claim": false,
+    "live_api_execution": false,
+    "cryptographic_execution": false,
+    "authority_mutation": false
+  },
+  "provider_feasibility": {
+    "report_sha256": "9735c1b2184f32f3b6b1cd1fefe98045dbb23403f937cd65692d2bcf54b06725",
+    "results_sha256": "29fa711c78ffd8c323acaf6e19653e4adbad87d1658b4d27c9116d669bab36b9",
+    "decision": "no provider atomic exact base/head plus ruleset CAS excluding the current repository or organization administrator was proven",
+    "required_user_boundary": [
+      "operator quiescence with an explicitly amended threat model",
+      "separately controlled provider authority with a verified enforcement mechanism"
+    ],
+    "execution_blocked": true
+  },
+  "supersedes": {
+    "plan_markdown_sha256": "4aea2c28eb06f21e094adad1b4b0dfe8a8d6918d1cbe18c3a2befb77c849e593",
+    "plan_json_sha256": "556eb0485a18fe9abb91c132ff2a0cddd21e6eb3f549f66ebd90dbdf9da89947",
+    "reason": "v7 corrects Actions permission modeling and freezes the executable field/provenance audit; v6 remains historical rejected evidence"
+  },
+  "independent_review": {
+    "required": [
+      "g0_reviewer",
+      "authority_transition_review"
+    ],
+    "final_status": "not_approved",
+    "approval_required_before": [
+      "source/workflow edits",
+      "authority/trust/ruleset mutation",
+      "release/publication",
+      "merge",
+      "G1 completion"
+    ]
+  },
+  "self_hash_excluded": true
+}

@@ -1,0 +1,1130 @@
+{
+  "checks": [
+    {
+      "detail": {
+        "declared": "7339996f7c3d76fe4e750cb9036b474beb7e0d20ae7b2b7e7a9f0787cd81b72e",
+        "measured": "7339996f7c3d76fe4e750cb9036b474beb7e0d20ae7b2b7e7a9f0787cd81b72e"
+      },
+      "id": "P01-markdown-pair",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+      "id": "P02-current-main",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "review": "not_approved",
+        "status": "approval_required"
+      },
+      "id": "P03-not-approved",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "called_side_effect_guard": "repeat push/main guard before every side effect",
+        "caller_job_condition": "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+        "caller_job_uses": "./.github/workflows/ci-policy-validator-products.yml",
+        "caller_workflow": ".github/workflows/ci-main.yml",
+        "no_second_publisher": true,
+        "permissions_model": {
+          "actions_job_scope_keys": [
+            "actions",
+            "attestations",
+            "checks",
+            "contents",
+            "id-token"
+          ],
+          "attest_job_attestations_scope": "write (single value; write permits the required read path)",
+          "duplicate_scope_entries_forbidden": true,
+          "metadata_is_not_actions_job_scope": true,
+          "metadata_read_location": "external_checks_app_installation_only"
+        },
+        "publisher_trigger": "workflow_call only",
+        "pull_request": false,
+        "standalone_push": false,
+        "standalone_tag": false,
+        "standalone_workflow_dispatch": false,
+        "workflow_dispatch": "diagnostic/non-publishing; no reserve/attest/publish/record/check"
+      },
+      "id": "C01-workflow-call-only",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": "./.github/workflows/ci-policy-validator-products.yml",
+      "id": "C02-local-uses-prefix",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "id": "policy-validator-B",
+        "needs": [],
+        "outputs_declared": false,
+        "permissions": [
+          "actions:write",
+          "contents:write",
+          "attestations:write",
+          "id-token:write",
+          "checks:read"
+        ],
+        "shell_steps": false,
+        "uses": "./.github/workflows/ci-policy-validator-products.yml"
+      },
+      "id": "C03-no-caller-outputs",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "consumes": [
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:enum",
+          "source_ref:string",
+          "source_sha:sha1",
+          "source_tree_sha:sha1",
+          "closure_digest:sha256",
+          "upload_step_id:string",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_oidc_job_workflow_sha:sha1",
+          "producer_workflow_file_blob_sha:sha1",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:immutable-string",
+          "release_target_sha:sha1",
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "release_attestation_id:u64",
+          "release_attestation_digest:sha256",
+          "release_asset_id:u64",
+          "release_asset_digest:sha256",
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target_sha:sha1",
+          "record_artifact_id:u64",
+          "record_artifact_name:string",
+          "record_artifact_digest:sha256",
+          "record_upload_step_id:string",
+          "record_upload_run_id:u64",
+          "record_upload_run_attempt:u64",
+          "record_upload_job_id:u64",
+          "record_upload_check_run_id:u64",
+          "policy_bootstrap_b_check_id:u64",
+          "policy_bootstrap_b_provider_app_id:u64",
+          "policy_bootstrap_b_integration_id:u64",
+          "policy_bootstrap_b_verifier_revision:sha1",
+          "called_workflow_path:string",
+          "called_workflow_ref:string",
+          "called_oidc_job_workflow_sha:sha1",
+          "called_workflow_file_blob_sha:sha1"
+        ],
+        "id": "Policy",
+        "needs": [
+          "policy-validator-B"
+        ],
+        "permissions": [
+          "contents:read",
+          "actions:read",
+          "attestations:read",
+          "checks:read"
+        ]
+      },
+      "id": "C04-direct-policy-needs",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "cycle": [],
+        "edges": [
+          [
+            "artifact-verify",
+            "build-linux-x64"
+          ],
+          [
+            "reserve-release",
+            "artifact-verify"
+          ],
+          [
+            "attest",
+            "reserve-release"
+          ],
+          [
+            "publish",
+            "attest"
+          ],
+          [
+            "record-upload",
+            "publish"
+          ],
+          [
+            "verify-B",
+            "record-upload"
+          ]
+        ]
+      },
+      "id": "G01-dag-acyclic",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": [
+        {
+          "consumer": "artifact-verify",
+          "missing": [],
+          "producer": "build-linux-x64",
+          "type_mismatch": []
+        },
+        {
+          "consumer": "reserve-release",
+          "missing": [],
+          "producer": "artifact-verify",
+          "type_mismatch": []
+        },
+        {
+          "consumer": "attest",
+          "missing": [],
+          "producer": "reserve-release",
+          "type_mismatch": []
+        },
+        {
+          "consumer": "publish",
+          "missing": [],
+          "producer": "attest",
+          "type_mismatch": []
+        },
+        {
+          "consumer": "record-upload",
+          "missing": [],
+          "producer": "publish",
+          "type_mismatch": []
+        },
+        {
+          "consumer": "verify-B",
+          "missing": [],
+          "producer": "record-upload",
+          "type_mismatch": []
+        }
+      ],
+      "id": "G02-edge-field-availability",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": [],
+      "id": "G04-no-later-stage-consumption",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "extra": [],
+        "missing": []
+      },
+      "id": "G05-all-attestation-fields-have-provenance",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": [
+        "binding_attestation_digest",
+        "binding_attestation_id",
+        "final_manifest_artifact_digest",
+        "final_manifest_artifact_id",
+        "final_manifest_digest",
+        "release_attestation_digest",
+        "release_attestation_id"
+      ],
+      "id": "G06-own-attestation-fields-excluded",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": "attestations/velnor-policy-validator-release.v1.json",
+      "id": "G07-canonical-release-predicate",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "actual_producer_job": "record-upload numeric job id",
+        "actual_upload_step": "upload-record",
+        "artifact_namespace": "Actions artifact",
+        "contains": [
+          "repository_id",
+          "source_ref",
+          "source_sha",
+          "source_tree_sha",
+          "closure_digest",
+          "caller_workflow_path",
+          "caller_workflow_ref",
+          "caller_oidc_job_workflow_sha",
+          "caller_workflow_file_blob_sha",
+          "caller_run_id",
+          "caller_run_attempt",
+          "producer_workflow_path",
+          "producer_workflow_ref",
+          "producer_oidc_job_workflow_sha",
+          "producer_workflow_file_blob_sha",
+          "producer_run_id",
+          "producer_run_attempt",
+          "producer_job_id",
+          "producer_check_run_id",
+          "upload_step_id",
+          "actions_artifact_id",
+          "actions_artifact_name",
+          "actions_artifact_digest",
+          "service_zip_digest",
+          "service_zip_size",
+          "inner_payload_digest",
+          "inner_payload_size",
+          "binary_digest",
+          "binary_size",
+          "binary_architecture",
+          "release_id",
+          "release_tag",
+          "release_target_sha",
+          "release_asset_id",
+          "release_asset_digest",
+          "binding_core_digest",
+          "binding_record_artifact_id",
+          "binding_record_artifact_digest",
+          "binding_attestation_id",
+          "binding_attestation_digest",
+          "binding_predicate_type",
+          "binding_predicate_path",
+          "binding_subject_name",
+          "binding_subject_digest",
+          "final_manifest_artifact_id",
+          "final_manifest_artifact_digest",
+          "final_manifest_digest",
+          "release_attestation_id",
+          "release_attestation_digest",
+          "release_manifest_subject_sha256",
+          "release_predicate_type",
+          "release_predicate_path",
+          "signer_repository",
+          "signer_workflow",
+          "signer_source_ref",
+          "oidc_issuer",
+          "certificate_identity",
+          "certificate_verified",
+          "oidc_policy_revision_sha256",
+          "required_step_conclusions"
+        ],
+        "path": "policy-validator-b-record.json",
+        "required_outputs": [
+          "record_artifact_id",
+          "record_artifact_name",
+          "record_artifact_digest",
+          "record_upload_run_id",
+          "record_upload_run_attempt",
+          "record_upload_job_id",
+          "record_upload_check_run_id"
+        ]
+      },
+      "id": "G08-canonical-record-producer",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "actual_producer_job": "record-upload numeric job id",
+        "actual_upload_step": "upload-record",
+        "artifact_namespace": "Actions artifact",
+        "contains": [
+          "repository_id",
+          "source_ref",
+          "source_sha",
+          "source_tree_sha",
+          "closure_digest",
+          "caller_workflow_path",
+          "caller_workflow_ref",
+          "caller_oidc_job_workflow_sha",
+          "caller_workflow_file_blob_sha",
+          "caller_run_id",
+          "caller_run_attempt",
+          "producer_workflow_path",
+          "producer_workflow_ref",
+          "producer_oidc_job_workflow_sha",
+          "producer_workflow_file_blob_sha",
+          "producer_run_id",
+          "producer_run_attempt",
+          "producer_job_id",
+          "producer_check_run_id",
+          "upload_step_id",
+          "actions_artifact_id",
+          "actions_artifact_name",
+          "actions_artifact_digest",
+          "service_zip_digest",
+          "service_zip_size",
+          "inner_payload_digest",
+          "inner_payload_size",
+          "binary_digest",
+          "binary_size",
+          "binary_architecture",
+          "release_id",
+          "release_tag",
+          "release_target_sha",
+          "release_asset_id",
+          "release_asset_digest",
+          "binding_core_digest",
+          "binding_record_artifact_id",
+          "binding_record_artifact_digest",
+          "binding_attestation_id",
+          "binding_attestation_digest",
+          "binding_predicate_type",
+          "binding_predicate_path",
+          "binding_subject_name",
+          "binding_subject_digest",
+          "final_manifest_artifact_id",
+          "final_manifest_artifact_digest",
+          "final_manifest_digest",
+          "release_attestation_id",
+          "release_attestation_digest",
+          "release_manifest_subject_sha256",
+          "release_predicate_type",
+          "release_predicate_path",
+          "signer_repository",
+          "signer_workflow",
+          "signer_source_ref",
+          "oidc_issuer",
+          "certificate_identity",
+          "certificate_verified",
+          "oidc_policy_revision_sha256",
+          "required_step_conclusions"
+        ],
+        "path": "policy-validator-b-record.json",
+        "required_outputs": [
+          "record_artifact_id",
+          "record_artifact_name",
+          "record_artifact_digest",
+          "record_upload_run_id",
+          "record_upload_run_attempt",
+          "record_upload_job_id",
+          "record_upload_check_run_id"
+        ]
+      },
+      "id": "G09-record-is-not-generic-claim",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": "database_id absent from transport/publisher contract",
+      "id": "G10-no-invented-rest-database-id",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "certificate_verified": true,
+        "oidc_claims": [
+          "job_workflow_ref",
+          "job_workflow_sha"
+        ],
+        "oidc_issuer": "https://token.actions.githubusercontent.com",
+        "oidc_policy_revision_sha256": "<64-hex>",
+        "signer_repository": "tailrocks/velnor",
+        "signer_source_ref": "refs/heads/main",
+        "signer_workflow": "tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml",
+        "temporary_key": false,
+        "workflow_file_blob_sha": "Contents API exact ref"
+      },
+      "id": "G11-oidc-blob-distinct",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "application_namespace_reuse": false,
+        "features": "",
+        "mutable_latest": false,
+        "overwrite": false,
+        "platform": "Linux-X64",
+        "product_id": "velnor-workflow-policy-validator",
+        "profile": "release",
+        "purpose": "policy-validator",
+        "runner": "ubuntu-24.04",
+        "schema": "velnor.workflow-policy-validator.v1"
+      },
+      "id": "S01-product-canonical",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "artifact_metadata_write": false,
+        "attest_sha": "1e69f48acb82d1966a394da916b4c1698aa569d6",
+        "create_storage_record": false,
+        "push_to_registry": false,
+        "upload_artifact_sha": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+      },
+      "id": "S02-actions-and-attestation-fields",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "artifact-verify": [
+          "contents:read",
+          "actions:read",
+          "attestations:read"
+        ],
+        "verify-B": [
+          "contents:read",
+          "actions:read",
+          "attestations:read",
+          "checks:read"
+        ]
+      },
+      "id": "S03-consumer-read-scopes",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "failures": [],
+        "model": {
+          "actions_job_scope_keys": [
+            "actions",
+            "attestations",
+            "checks",
+            "contents",
+            "id-token"
+          ],
+          "attest_job_attestations_scope": "write (single value; write permits the required read path)",
+          "duplicate_scope_entries_forbidden": true,
+          "metadata_is_not_actions_job_scope": true,
+          "metadata_read_location": "external_checks_app_installation_only"
+        }
+      },
+      "id": "S03b-actions-permission-model",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "consumes": [
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:enum",
+          "source_ref:string",
+          "source_sha:sha1",
+          "source_tree_sha:sha1",
+          "closure_digest:sha256",
+          "upload_step_id:string",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_oidc_job_workflow_sha:sha1",
+          "producer_workflow_file_blob_sha:sha1",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:immutable-string",
+          "release_target_sha:sha1",
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "release_attestation_id:u64",
+          "release_attestation_digest:sha256",
+          "release_asset_id:u64",
+          "release_asset_digest:sha256",
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target_sha:sha1"
+        ],
+        "forbidden": [
+          "contents:write",
+          "id-token:write",
+          "attestations:write",
+          "release",
+          "package"
+        ],
+        "needs": [
+          "publish"
+        ],
+        "outputs": [
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:enum",
+          "source_ref:string",
+          "source_sha:sha1",
+          "source_tree_sha:sha1",
+          "closure_digest:sha256",
+          "upload_step_id:string",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_oidc_job_workflow_sha:sha1",
+          "producer_workflow_file_blob_sha:sha1",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:immutable-string",
+          "release_target_sha:sha1",
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "release_attestation_id:u64",
+          "release_attestation_digest:sha256",
+          "release_asset_id:u64",
+          "release_asset_digest:sha256",
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target_sha:sha1",
+          "record_artifact_id:u64",
+          "record_artifact_name:string",
+          "record_artifact_digest:sha256",
+          "record_upload_step_id:string",
+          "record_upload_run_id:u64",
+          "record_upload_run_attempt:u64",
+          "record_upload_job_id:u64",
+          "record_upload_check_run_id:u64"
+        ],
+        "permissions": [
+          "actions:write"
+        ]
+      },
+      "id": "S04-record-upload-write-isolated",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "check_binding": [
+          "context",
+          "integration_id",
+          "provider_app_id",
+          "resulting_main_sha",
+          "record_artifact_id",
+          "record_artifact_digest",
+          "verifier_revision",
+          "transaction_id"
+        ],
+        "credential_source": "private key in durable external secret manager",
+        "github_token_impersonation": false,
+        "installation_id": "<real>",
+        "integration_id": "<real>",
+        "permissions": [
+          "metadata:read",
+          "contents:read",
+          "actions:read",
+          "attestations:read",
+          "checks:read/write"
+        ],
+        "provider_app_id": "<real>",
+        "status": "unproven external capability blocker",
+        "verifier_revision": "<40-hex>"
+      },
+      "id": "S05-checks-app-separated",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "base_policy_identity": {
+          "checks_integration_id": "<BASE_POLICY_INTEGRATION_ID>",
+          "verifier_key": "policy-adoption-v1",
+          "verifier_revision": "<40-hex>",
+          "workflow_file_blob_sha": "<immutable Contents API blob SHA>",
+          "workflow_path": ".github/workflows/ci-policy.yml"
+        },
+        "digest_preimage": "canonical UTF-8 LF JSON bytes; no self-digest field",
+        "digest_sidecar": ".github/ci/validator-pin-adoption.sha256",
+        "file": ".github/ci/validator-pin-adoption.json",
+        "main_b_binding_fields": [
+          "source_sha",
+          "release_id",
+          "release_tag",
+          "release_target_sha",
+          "actions_artifact_id",
+          "actions_artifact_digest",
+          "release_asset_id",
+          "release_asset_digest",
+          "record_artifact_id",
+          "record_artifact_digest",
+          "binding_digest",
+          "binding_attestation_digest",
+          "release_attestation_digest",
+          "manifest_digest",
+          "provider_app_id",
+          "provider_integration_id"
+        ],
+        "mode": "tree-b",
+        "permanent_retained": [
+          "B publisher",
+          "permanent trust",
+          "base Policy verifier"
+        ],
+        "pin_timing": "materialize/retain literal pin only after Tree-B merge/resulting-main verification",
+        "pr_number": "created only after Main-B",
+        "required_fields": [
+          "transition_id",
+          "tree_b_pr_number",
+          "base_policy.workflow_path",
+          "base_policy.workflow_file_blob_sha",
+          "base_policy.verifier_key",
+          "base_policy.verifier_revision",
+          "base_policy.checks_integration_id",
+          "target.config_path",
+          "target.config_sha256",
+          "target.generator_revision",
+          "target.template_sources",
+          "target.static_files",
+          "main_b.source_sha",
+          "main_b.release_id",
+          "main_b.actions_artifact_id",
+          "main_b.release_asset_id",
+          "main_b.record_artifact_id",
+          "main_b.binding_digest",
+          "main_b.provider_integration_id"
+        ],
+        "schema": "velnor.policy-validator-pin-adoption.v1",
+        "self_digest_field": false,
+        "state_machine": [
+          "TREE_A_AUDIT",
+          "MAIN_B_HANDOFF",
+          "TREE_B_FILE",
+          "PERMANENT"
+        ],
+        "temporary_cleanup": [
+          "A context/App",
+          "B transition provider/config",
+          "MAIN_B_HANDOFF state",
+          "coordinator/watchdog transition permissions"
+        ],
+        "verification": [
+          "sidecar hash over exact JSON bytes",
+          "exact PR identity after Main-B",
+          "base workflow blob/verifier/integration identity",
+          "target config/source/template/static mapping",
+          "live IDs/predicates and raw digest equality"
+        ]
+      },
+      "id": "T01-treeb-pr-late",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "base_policy_identity": {
+          "checks_integration_id": "<BASE_POLICY_INTEGRATION_ID>",
+          "verifier_key": "policy-adoption-v1",
+          "verifier_revision": "<40-hex>",
+          "workflow_file_blob_sha": "<immutable Contents API blob SHA>",
+          "workflow_path": ".github/workflows/ci-policy.yml"
+        },
+        "digest_preimage": "canonical UTF-8 LF JSON bytes; no self-digest field",
+        "digest_sidecar": ".github/ci/validator-pin-adoption.sha256",
+        "file": ".github/ci/validator-pin-adoption.json",
+        "main_b_binding_fields": [
+          "source_sha",
+          "release_id",
+          "release_tag",
+          "release_target_sha",
+          "actions_artifact_id",
+          "actions_artifact_digest",
+          "release_asset_id",
+          "release_asset_digest",
+          "record_artifact_id",
+          "record_artifact_digest",
+          "binding_digest",
+          "binding_attestation_digest",
+          "release_attestation_digest",
+          "manifest_digest",
+          "provider_app_id",
+          "provider_integration_id"
+        ],
+        "mode": "tree-b",
+        "permanent_retained": [
+          "B publisher",
+          "permanent trust",
+          "base Policy verifier"
+        ],
+        "pin_timing": "materialize/retain literal pin only after Tree-B merge/resulting-main verification",
+        "pr_number": "created only after Main-B",
+        "required_fields": [
+          "transition_id",
+          "tree_b_pr_number",
+          "base_policy.workflow_path",
+          "base_policy.workflow_file_blob_sha",
+          "base_policy.verifier_key",
+          "base_policy.verifier_revision",
+          "base_policy.checks_integration_id",
+          "target.config_path",
+          "target.config_sha256",
+          "target.generator_revision",
+          "target.template_sources",
+          "target.static_files",
+          "main_b.source_sha",
+          "main_b.release_id",
+          "main_b.actions_artifact_id",
+          "main_b.release_asset_id",
+          "main_b.record_artifact_id",
+          "main_b.binding_digest",
+          "main_b.provider_integration_id"
+        ],
+        "schema": "velnor.policy-validator-pin-adoption.v1",
+        "self_digest_field": false,
+        "state_machine": [
+          "TREE_A_AUDIT",
+          "MAIN_B_HANDOFF",
+          "TREE_B_FILE",
+          "PERMANENT"
+        ],
+        "temporary_cleanup": [
+          "A context/App",
+          "B transition provider/config",
+          "MAIN_B_HANDOFF state",
+          "coordinator/watchdog transition permissions"
+        ],
+        "verification": [
+          "sidecar hash over exact JSON bytes",
+          "exact PR identity after Main-B",
+          "base workflow blob/verifier/integration identity",
+          "target config/source/template/static mapping",
+          "live IDs/predicates and raw digest equality"
+        ]
+      },
+      "id": "T02-adoption-no-self-hash",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "main_b": {
+          "policy_state": "MAIN_B_HANDOFF after external B check; no source pin",
+          "publisher": ".github/workflows/ci-policy-validator-products.yml",
+          "publisher_invocation": "workflow_call only from guarded ci-main push/main",
+          "purpose": "first resulting main and live typed validator publication",
+          "required_context": {
+            "context": "Policy-bootstrap-B",
+            "integration_id": "<MAIN_B_INTEGRATION_ID>"
+          }
+        },
+        "order": [
+          "tree_a_external_admission",
+          "protected_normal_pr_merge",
+          "main_b_live_publish_and_verify",
+          "store_main_b_handoff",
+          "ruleset_main_b_to_final_policy",
+          "tree_b_adoption_pr_and_merge",
+          "permanent_cleanup"
+        ],
+        "prohibitions": [
+          "pre-main provenance",
+          "candidate/local artifact",
+          "old OS fallback",
+          "admin/bypass merge",
+          "workflow_run/dispatch handoff",
+          "name-only binding",
+          "caller uses-job outputs",
+          "invented REST database_id",
+          "GITHUB_TOKEN impersonation",
+          "second publisher"
+        ],
+        "tree_a": {
+          "authority": "one external owner-controlled Policy-bootstrap-A check for exact PR/synthetic tree",
+          "literal_b_pin": false,
+          "policy_state": "TREE_A_AUDIT; Policy not required",
+          "purpose": "source_and_generator_transition"
+        },
+        "tree_b": {
+          "adoption_file": ".github/ci/validator-pin-adoption.json",
+          "digest_sidecar": ".github/ci/validator-pin-adoption.sha256",
+          "policy_state": "TREE_B_FILE then PERMANENT",
+          "pr_number": "created only after Main-B census",
+          "purpose": "reviewed pin adoption after Main-B"
+        }
+      },
+      "id": "T03-policy-state-machine",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "before": [
+          {
+            "context": "DCO",
+            "integration_id": "<DCO_ID>"
+          },
+          {
+            "context": "ci-required",
+            "integration_id": "<CI_REQUIRED_ID>"
+          },
+          {
+            "context": "Policy",
+            "integration_id": "<BASE_POLICY_INTEGRATION_ID>"
+          }
+        ],
+        "main_b": [
+          {
+            "context": "DCO",
+            "integration_id": "<DCO_ID>"
+          },
+          {
+            "context": "ci-required",
+            "integration_id": "<CI_REQUIRED_ID>"
+          },
+          {
+            "context": "Policy-bootstrap-B",
+            "integration_id": "<MAIN_B_INTEGRATION_ID>"
+          }
+        ],
+        "tree_a": [
+          {
+            "context": "DCO",
+            "integration_id": "<DCO_ID>"
+          },
+          {
+            "context": "ci-required",
+            "integration_id": "<CI_REQUIRED_ID>"
+          },
+          {
+            "context": "Policy-bootstrap-A",
+            "integration_id": "<BOOTSTRAP_INTEGRATION_ID>"
+          }
+        ],
+        "tree_b_final": [
+          {
+            "context": "DCO",
+            "integration_id": "<DCO_ID>"
+          },
+          {
+            "context": "ci-required",
+            "integration_id": "<CI_REQUIRED_ID>"
+          },
+          {
+            "context": "Policy",
+            "integration_id": "<BASE_POLICY_INTEGRATION_ID>"
+          }
+        ]
+      },
+      "id": "R01-context-provider-pairs",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "before": {
+          "body": "<external full JSON>",
+          "sha256": "<64-hex>"
+        },
+        "each_reread": "full body+canonical SHA",
+        "final": {
+          "body": "<external full JSON>",
+          "sha256": "<64-hex>"
+        },
+        "main_b": {
+          "body": "<external full JSON>",
+          "sha256": "<64-hex>"
+        },
+        "tree_a": {
+          "body": "<external full JSON>",
+          "sha256": "<64-hex>"
+        }
+      },
+      "id": "R02-full-ruleset-snapshots",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "blocker": true,
+        "mechanism": "owner-authorized provider full PUT removing actor 5 or changing provider-supported mode",
+        "observed_bypass_actor": 5,
+        "observed_mode": "always",
+        "provider_enforces": "unproven",
+        "proxy_cannot_enforce_admin_direct_api": true,
+        "required": true,
+        "required_snapshot": "full returned JSON body + canonical SHA"
+      },
+      "id": "R03-admin-freeze-honest",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "bypass": "provider freeze unproven; no operation authorized",
+        "coordinator": {
+          "all_mutations_through_proxy": true,
+          "ids": {
+            "coordinator": "<real>",
+            "proxy": "<real>",
+            "trust_location": "<durable reviewed location>",
+            "watchdog": "<real>"
+          },
+          "reject": [
+            "stale fence",
+            "wrong ref/hash",
+            "duplicate operation",
+            "unallowlisted actor/endpoint",
+            "concurrent writer"
+          ],
+          "required_guards": [
+            "expected main SHA",
+            "expected PR head/base/tree",
+            "expected full ruleset hash",
+            "allowlisted endpoint/actor",
+            "transaction ID",
+            "unexpired fence"
+          ],
+          "status": "unproven until disposable race/death/recovery exercise",
+          "type": "external owner-controlled mutation proxy with durable monotonic fence"
+        }
+      },
+      "id": "R04-coordinator-not-claimed",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": {
+        "POLICY_BOOTSTRAP_B_CHECK_ID": true,
+        "RECORD_ARTIFACT_DIGEST": true,
+        "RECORD_ARTIFACT_ID": true,
+        "actions:read": true,
+        "attestations:read": true,
+        "checks:read": true
+      },
+      "id": "W01-policy-download-tree",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": [
+        "build[Linux-X64]",
+        "build[Linux-ARM64]",
+        "build[xcode-27]",
+        "publish"
+      ],
+      "id": "W02-native-matrix",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": [
+        "ci-main.yml",
+        "ci-policy.yml",
+        "ci-pr.yml",
+        "ci-unit-rust.yml",
+        "ci-unit-bun.yml",
+        "ci-unit-docker.yml",
+        "ci-unit-docs.yml",
+        "ci-unit-opentofu.yml",
+        "maintenance.yml",
+        "preview.yml",
+        "release.yml",
+        "ci-runtime-products.yml",
+        "ci-policy-validator-products.yml",
+        "nightly.yml",
+        "ci-release-package-signer.yml"
+      ],
+      "id": "W03-supporting-workflows",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": null,
+      "id": "B01-target-unresolved",
+      "severity": "high",
+      "status": "pass"
+    },
+    {
+      "detail": "execution remains blocked",
+      "id": "B02-provider-unresolved",
+      "severity": "high",
+      "status": "pass"
+    }
+  ],
+  "cryptographic_execution": false,
+  "fail_count": 0,
+  "gate_claim": false,
+  "inputs": {
+    "plan_json": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v7.json",
+    "plan_json_sha256": "1a1cc175b36611f6ce175f4c82b6f6ce51f36f74bfb22a5d8e1abb9cc5647826",
+    "plan_markdown": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v7.md",
+    "plan_markdown_sha256": "7339996f7c3d76fe4e750cb9036b474beb7e0d20ae7b2b7e7a9f0787cd81b72e",
+    "v6_independent_report_sha256": "60e15e3a45c9c7d2739be0db30e7f642e0696567881806613a263f8283a0a7f0",
+    "v6_independent_results_sha256": "0b889e2a567b8d0f87900cc888900abeb63693eb07a2a4aaf4b045969322c1879"
+  },
+  "limitations": [
+    "No GitHub API calls",
+    "No live source/output actionlint",
+    "No real App credentials",
+    "No cryptographic attestation verification",
+    "No authority mutation"
+  ],
+  "live_api_execution": false,
+  "pass_count": 35,
+  "schema": "velnor.authority-v7-field-availability-audit-results.v1",
+  "status": "read-only-independent-structural-audit",
+  "verdict": "structural-pass-with-external-blockers"
+}

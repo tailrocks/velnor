@@ -1,0 +1,177 @@
+{
+  "title": "GitHub authority-freeze/provider feasibility",
+  "observed_at_utc": "2026-09-20T02:36:32Z",
+  "status": "read_only_feasibility",
+  "mutation_performed": false,
+  "scope": [
+    "provider-enforced ref/ruleset freeze",
+    "atomic transition limits",
+    "exact reviewed-tree integration",
+    "admin versus non-bypass threat model"
+  ],
+  "verdict": {
+    "admin_lock_available_current_model": false,
+    "reason": "The live ruleset has RepositoryRole actor 5 in always bypass mode; the authenticated caller is repository and organization admin. Documented ruleset/ref APIs expose no old-state/base-SHA CAS. A cooperating lease or proxy cannot fence an admin's direct provider call.",
+    "non_bypass_provider_gates_available": true,
+    "exact_base_sha_atomic_transition_available": false,
+    "cross_resource_transaction_available": false
+  },
+  "live_snapshot": {
+    "repository": "tailrocks/velnor",
+    "visibility": "public",
+    "organization": "tailrocks",
+    "organization_plan": "free",
+    "default_branch": "main",
+    "main_ref": "refs/heads/main",
+    "main_sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+    "main_parent": "e94b48406c4ed206fce2bbf39b788264e72cf39c",
+    "main_tree": "e9019f00578d34c3f339c7e8d55b66f7e53f8567",
+    "legacy_branch_protection": "404 Branch not protected",
+    "active_rulesets": [
+      {"id": 19573071, "name": "protect-main", "target": "branch", "enforcement": "active"},
+      {"id": 19573007, "name": "protect-tags", "target": "tag", "enforcement": "active"}
+    ],
+    "protect_main": {
+      "target_include": ["~DEFAULT_BRANCH"],
+      "rules": ["deletion", "non_fast_forward", "pull_request", "required_status_checks"],
+      "required_status_contexts": ["DCO", "ci-required", "Policy"],
+      "required_status_integration_ids": [],
+      "strict_required_status_checks_policy": false,
+      "required_approving_review_count": 0,
+      "bypass_actors": [
+        {"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}
+      ],
+      "current_user_can_bypass": "always",
+      "merge_queue_rule_present": false,
+      "update_rule_present": false,
+      "workflow_rule_present": false,
+      "signature_rule_present": false,
+      "deployment_rule_present": false
+    },
+    "caller": {
+      "login": "donbeave",
+      "repository_permission": "admin",
+      "organization_role": "admin"
+    }
+  },
+  "documented_mechanisms": [
+    {
+      "mechanism": "git_ref_update",
+      "guarantee": "Sets target sha; force=false requires fast-forward.",
+      "limit": "No documented expected-old-SHA/base-SHA precondition; read-then-update races.",
+      "source": "https://docs.github.com/en/rest/git/refs"
+    },
+    {
+      "mechanism": "non_fast_forward",
+      "guarantee": "Blocks force pushes for actors subject to the ruleset.",
+      "limit": "Does not constrain bypass actors or unwanted fast-forward writes.",
+      "source": "https://docs.github.com/en/rest/repos/rules"
+    },
+    {
+      "mechanism": "restrict_updates",
+      "guarantee": "Only users with bypass permission may update matching refs.",
+      "limit": "An administrator able to edit the ruleset can change this guard; compatible merge actor must be proven.",
+      "source": "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets"
+    },
+    {
+      "mechanism": "required_checks_and_workflows",
+      "guarantee": "Can gate matching refs on checks and a specified workflow path/ref/repository/sha.",
+      "limit": "Not an old-ref/base-SHA CAS; current ruleset uses bare contexts and no workflow rule.",
+      "source": "https://docs.github.com/en/rest/repos/rules"
+    },
+    {
+      "mechanism": "pull_request_merge_sha",
+      "guarantee": "Rejects when supplied sha does not match PR head.",
+      "limit": "Guards PR head only; no base SHA.",
+      "source": "https://docs.github.com/en/rest/pulls/pulls"
+    },
+    {
+      "mechanism": "branch_merge",
+      "guarantee": "Accepts base branch and head branch or commit SHA.",
+      "limit": "Base is a mutable branch name; no base-SHA precondition.",
+      "source": "https://docs.github.com/en/rest/branches/branches"
+    },
+    {
+      "mechanism": "merge_queue",
+      "guarantee": "Tests queued changes against latest target branch and queued PRs.",
+      "limit": "Not exact earlier base; requires merge_group checks; absent from live protect-main; bypass remains a limit.",
+      "source": "https://docs.github.com/en/enterprise-cloud@latest/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue"
+    },
+    {
+      "mechanism": "ruleset_put",
+      "guarantee": "Admin-capable caller can replace full ruleset object.",
+      "limit": "No documented version/expected-current hash/CAS field or header; separate from ref/merge/publication operations.",
+      "source": "https://docs.github.com/en/rest/repos/rules"
+    },
+    {
+      "mechanism": "organization_ruleset",
+      "guarantee": "Potential separate policy root when controlled by organization authority.",
+      "limit": "Documentation places organization rulesets on Enterprise; live organization is Free. Requires explicit external authority.",
+      "source": "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets"
+    }
+  ],
+  "alternatives": [
+    {
+      "name": "operator_quiescence",
+      "classification": "consent_only",
+      "authority_required": "Explicit owner/admin promise to stop all direct writers; lease/proxy/watchdog operation.",
+      "admin_resistance": false,
+      "exact_tree": "Detect after merge by checking parents/tree; cannot make race impossible."
+    },
+    {
+      "name": "non_bypass_ruleset_and_queue",
+      "classification": "provider_enforced_for_non_bypass_actors",
+      "authority_required": "Ruleset admin removes broad actor-5 bypass, adds exact check/workflow/queue rules, and proves merge_group CI in disposable fixture.",
+      "admin_resistance": false,
+      "exact_tree": "Queue checks latest base/queue tree, not caller-pinned earlier base."
+    },
+    {
+      "name": "existing_dedicated_updater_app",
+      "classification": "provider_enforced_for_other_writers",
+      "authority_required": "Explicit authorization for an already-installed narrowly permissioned App and matching update/bypass rules; no App creation here.",
+      "admin_resistance": false,
+      "exact_tree": "Requires post-operation parent/tree verification; no base CAS."
+    },
+    {
+      "name": "external_root_of_trust",
+      "classification": "only_candidate_for_admin_exclusion",
+      "authority_required": "Separate organization/repository owner or eligible organization-level ruleset controlled outside repository admin.",
+      "admin_resistance": "potentially_true only after provider configuration is independently proven",
+      "exact_tree": "Still requires a provider-supported integration contract; no current live proof."
+    }
+  ],
+  "exact_reviewed_tree": {
+    "expected_base_sha_plus_pr_head_atomic": false,
+    "merge_queue_can_preserve_pr_content": true,
+    "merge_queue_preserves_exact_prior_base": false,
+    "pinned_auxiliary_ref_is_base_cas": false,
+    "required_post_merge_assertions": ["main ref sha", "parent order", "resulting tree", "PR attribution", "ruleset hash", "check provider IDs", "complete run/job/check census"]
+  },
+  "preflight_assertions": [
+    "Fail closed if an administrator remains able to bypass or edit the guard under the declared threat model.",
+    "Bind checks to exact integration IDs and workflows to path/ref/repository/sha.",
+    "For queue use, require merge_group trigger and prove required checks on synthetic queue SHA.",
+    "For direct updater use, identify an already-installed App and prove permissions/semantics in an isolated fixture.",
+    "Treat after-merge parent/tree comparison as detection and evidence, never retroactive CAS.",
+    "Preserve all platform and current-main obligations; no authority plan may narrow them."
+  ],
+  "read_only_commands": [
+    "rtk gh api repos/tailrocks/velnor/git/ref/heads/main --jq '{ref:.ref,sha:.object.sha}'",
+    "rtk gh api repos/tailrocks/velnor/commits/325719f1e05d3d46322c9fd3eeb9ad545e175638 --jq '{sha:.sha,tree:.commit.tree.sha,parents:[.parents[].sha],message:(.commit.message|split(\"\\n\")[0]),date:.commit.author.date}'",
+    "rtk gh api repos/tailrocks/velnor/branches/main/protection",
+    "rtk gh api repos/tailrocks/velnor/rulesets --jq '.[] | {id,name,target,enforcement,source_type}'",
+    "rtk gh api repos/tailrocks/velnor/rulesets/19573071",
+    "rtk gh api repos/tailrocks/velnor/collaborators/donbeave/permission",
+    "rtk gh api orgs/tailrocks/memberships/donbeave --jq '{role,state}'",
+    "rtk gh api orgs/tailrocks --jq '{login,plan,default_repository_permission}'"
+  ],
+  "sources": [
+    "https://docs.github.com/en/rest/git/refs",
+    "https://docs.github.com/en/rest/repos/rules",
+    "https://docs.github.com/en/rest/branches/branches",
+    "https://docs.github.com/en/rest/pulls/pulls",
+    "https://docs.github.com/en/enterprise-cloud@latest/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue",
+    "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets",
+    "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets"
+  ]
+}
