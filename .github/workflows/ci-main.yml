@@ -1362,12 +1362,12 @@ jobs:
       candidate_publish: true
       unit_platform: linux-x64
       unit_trust: untrusted-ok
-      unit_dependencies: rust-velnor-runner
+      unit_dependencies: "rust-velnor-model,rust-velnor-runner"
       unit_admission: github-hosted
   velnor-rust-velnor-workflow:
     name: "Rust · velnor-workflow · velnor — rust-velnor-workflow"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
-    needs: [plan, policy, prepare-cargo, velnor-rust-velnor-runner]
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    needs: [plan, policy, prepare-cargo, velnor-rust-velnor-model, velnor-rust-velnor-runner]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-workflow
@@ -1385,7 +1385,7 @@ jobs:
       policy_runtime: true
       unit_platform: linux-x64
       unit_trust: untrusted-ok
-      unit_dependencies: rust-velnor-runner
+      unit_dependencies: "rust-velnor-model,rust-velnor-runner"
       unit_admission: velnor-trust-gated
   github-hosted-rust-velnor-workflow-contract:
     name: "Rust · velnor-workflow-contract · github-hosted — rust-velnor-workflow-contract"
