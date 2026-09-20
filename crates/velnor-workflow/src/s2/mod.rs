@@ -4865,6 +4865,12 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                   block = job_lines[step_start:step_end]
                   uses = [uses_value(line) for line in block]
                   for value in uses:
+                      if value is not None and not value.startswith(
+                          ("actions/checkout@", "actions/upload-artifact@")
+                      ):
+                          raise SystemExit(
+                              f"{archive_name}: candidate_producer action is outside the fixed checkout/upload allowlist: {value}"
+                          )
                       if value is not None and value.startswith("./"):
                           raise SystemExit(
                               f"{archive_name}: candidate_producer cannot resolve a repository-local action from the PR workspace: {value}"
@@ -5191,6 +5197,7 @@ macro_rules! policy_candidate_step_template {
           test "$(grep -Fxc "          persist-credentials: false" <<<"$candidate_block")" = 2
           test "$(grep -Fxc "        working-directory: candidate-control" <<<"$candidate_block")" = 2
           test "$(grep -Fxc "        uses: {upload}" <<<"$candidate_block")" = 1
+          test "$(grep -Ec "^[[:space:]]+uses: " <<<"$candidate_block")" = 3
           test "$(grep -Ec "^[[:space:]]+uses: \.\/" <<<"$candidate_block")" = 0
           grep -Fq "github.event.pull_request.head.repo.id == github.repository_id" <<<"$candidate_block"
           grep -Fq "github.event.pull_request.base.repo.id == github.repository_id" <<<"$candidate_block"
