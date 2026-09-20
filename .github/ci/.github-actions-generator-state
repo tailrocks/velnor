@@ -11,7 +11,7 @@ generator	52
 .github/ci/project.toml	8025f19b38e1cad3
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
 .github/workflows/ci-main.yml	f009a0cb9b385137
-.github/workflows/ci-policy.yml	94a8e474c3c9861d
+.github/workflows/ci-policy.yml	17e07716dbd3b67c
 .github/workflows/ci-pr.yml	7e9ce53f80f279c5
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
 .github/workflows/ci-runtime-products.yml	49f404fe0be28813

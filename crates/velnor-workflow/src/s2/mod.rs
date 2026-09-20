@@ -4614,6 +4614,20 @@ fn policy_candidate_step(revision: &str) -> String {
           base_commit_api="$(gh api "repos/$GITHUB_REPOSITORY/commits/$BASE_SHA")"
           jq -e --arg base "$BASE_SHA" '.sha == $base and (.commit.tree.sha | strings | test("^[0-9a-f]{{40}}$"))' <<<"$base_commit_api" >/dev/null
           base_tree_sha="$(jq -er '.commit.tree.sha' <<<"$base_commit_api")"
+          tree_api_digest() {{
+            local tree_sha="$1"
+            local tree_path="$2"
+            gh api "repos/$GITHUB_REPOSITORY/git/trees/$tree_sha?recursive=1" > "$tree_path"
+            jq -e --arg tree "$tree_sha" '
+              .sha == $tree and .truncated == false and (.tree | type == "array") and
+              all(.tree[]; (.path | strings) and (.mode | strings) and (.type | strings) and (.sha | strings))
+            ' "$tree_path" >/dev/null
+            jq -cS '[.tree[] | {{path, mode, type, sha, size: (.size // null)}}] | sort_by(.path, .mode, .type, .sha)' "$tree_path" \
+              | sha256sum | awk '{{print $1}}'
+          }}
+          head_tree_api_digest="$(tree_api_digest "$head_tree_sha" "$RUNNER_TEMP/head-tree-api.json")"
+          base_tree_api_digest="$(tree_api_digest "$base_tree_sha" "$RUNNER_TEMP/base-tree-api.json")"
+          if [[ ! "$head_tree_api_digest" =~ ^[0-9a-f]{{64}}$ || ! "$base_tree_api_digest" =~ ^[0-9a-f]{{64}}$ ]]; then exit 1; fi
           source_repo="$RUNNER_TEMP/target-source.git"
           source_home="$RUNNER_TEMP/target-source-home"
           rm -rf "$source_repo" "$source_home"
@@ -4768,6 +4782,8 @@ fn policy_candidate_step(revision: &str) -> String {
             --arg base_revision "$BASE_REVISION" \
             --arg head_tree_sha "$head_tree_sha" \
             --arg base_tree_sha "$base_tree_sha" \
+            --arg head_tree_api_digest "$head_tree_api_digest" \
+            --arg base_tree_api_digest "$base_tree_api_digest" \
             --arg artifact_name "$artifact_name" \
             --argjson artifact_id "$artifact_id" \
             --argjson artifact_size "$artifact_size" \
@@ -4783,7 +4799,7 @@ fn policy_candidate_step(revision: &str) -> String {
             --arg source_archive_sha256 "$source_archive_sha256" \
             --arg candidate_closure "$candidate_closure" \
             --arg contract_sha256 "$contract_sha256" \
-            '{{role: $role, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, job_id: $job_id, job_name: $job_name, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, profile: $profile, platform: $platform, features: $features, build_image_repository: $build_image_repository, build_image_digest: $build_image_digest, build_image_platform_digest: $build_image_platform_digest, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_expires_at: $artifact_expires_at, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, contract_sha256: $contract_sha256}}' > "$handoff/handoff.json"
+            '{{role: $role, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, job_id: $job_id, job_name: $job_name, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, build_image_repository: $build_image_repository, build_image_digest: $build_image_digest, build_image_platform_digest: $build_image_platform_digest, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_expires_at: $artifact_expires_at, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, contract_sha256: $contract_sha256}}' > "$handoff/handoff.json"
       - name: Upload candidate handoff
         id: handoff_upload
         uses: {upload}
@@ -4889,6 +4905,8 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
             (.base_revision | strings | test("^[0-9a-f]{{40}}$")) and
             (.head_tree_sha | strings | test("^[0-9a-f]{{40}}$")) and
             (.base_tree_sha | strings | test("^[0-9a-f]{{40}}$")) and
+            (.head_tree_api_digest | strings | test("^[0-9a-f]{{64}}$")) and
+            (.base_tree_api_digest | strings | test("^[0-9a-f]{{64}}$")) and
             (.profile == "debug") and (.platform == "linux/amd64") and (.features == "tui") and
             (.build_image_repository == "{build_image_repository}") and (.build_image_digest == "{build_image_digest}") and
             (.build_image_platform_digest | strings | test("^sha256:[0-9a-f]{{64}}$")) and
@@ -5056,6 +5074,8 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
             --arg base_revision "$(jq -er .base_revision "$handoff_json")" \
             --arg head_tree_sha "$(jq -er .head_tree_sha "$handoff_json")" \
             --arg base_tree_sha "$(jq -er .base_tree_sha "$handoff_json")" \
+            --arg head_tree_api_digest "$(jq -er .head_tree_api_digest "$handoff_json")" \
+            --arg base_tree_api_digest "$(jq -er .base_tree_api_digest "$handoff_json")" \
             --arg profile "$(jq -er .profile "$handoff_json")" \
             --arg platform "$(jq -er .platform "$handoff_json")" \
             --arg features "$(jq -er .features "$handoff_json")" \
@@ -5076,7 +5096,7 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
             --arg sandbox_index_digest "$SANDBOX_IMAGE_DIGEST" \
             --arg sandbox_platform_digest "$platform_digest" \
             --arg sandbox_config_digest "$config_digest" \
-            '{{role: $role, render_sha256: $render_sha256, handoff_id: $handoff_id, handoff_digest: $handoff_digest, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, job_id: $job_id, job_name: $job_name, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, profile: $profile, platform: $platform, features: $features, build_image_repository: $build_image_repository, build_image_digest: $build_image_digest, build_image_platform_digest: $build_image_platform_digest, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_expires_at: $artifact_expires_at, execution_run_id: $execution_run_id, execution_run_attempt: $execution_run_attempt, execution_job: $execution_job, sandbox_index_digest: $sandbox_index_digest, sandbox_platform_digest: $sandbox_platform_digest, sandbox_config_digest: $sandbox_config_digest}}' > "$result/result.json"
+            '{{role: $role, render_sha256: $render_sha256, handoff_id: $handoff_id, handoff_digest: $handoff_digest, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, job_id: $job_id, job_name: $job_name, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, build_image_repository: $build_image_repository, build_image_digest: $build_image_digest, build_image_platform_digest: $build_image_platform_digest, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_expires_at: $artifact_expires_at, execution_run_id: $execution_run_id, execution_run_attempt: $execution_run_attempt, execution_job: $execution_job, sandbox_index_digest: $sandbox_index_digest, sandbox_platform_digest: $sandbox_platform_digest, sandbox_config_digest: $sandbox_config_digest}}' > "$result/result.json"
       - name: Upload candidate verification result
         id: result_upload
         uses: {upload}
@@ -5234,6 +5254,7 @@ fn policy_candidate_result_verification_step() -> String {
             (.head_sha == $head) and (.base_sha == $base) and
             (.base_revision | strings | test("^[0-9a-f]{{40}}$")) and
             (.head_tree_sha | strings | test("^[0-9a-f]{{40}}$")) and (.base_tree_sha | strings | test("^[0-9a-f]{{40}}$")) and
+            (.head_tree_api_digest | strings | test("^[0-9a-f]{{64}}$")) and (.base_tree_api_digest | strings | test("^[0-9a-f]{{64}}$")) and
             (.profile == "debug") and (.platform == "linux/amd64") and (.features == "tui") and
             (.build_image_repository == "{build_image_repository}") and (.build_image_digest == "{build_image_digest}") and
             (.build_image_platform_digest | strings | test("^sha256:[0-9a-f]{{64}}$")) and
@@ -5298,6 +5319,7 @@ fn policy_candidate_result_verification_step() -> String {
             $h.head_repository == $head_repo and $h.head_repository_id == $head_repo_id and
             $h.head_sha == $head and $h.base_sha == $base and $h.base_revision == $r.base_revision and
             $h.head_tree_sha == $r.head_tree_sha and $h.base_tree_sha == $r.base_tree_sha and
+            $h.head_tree_api_digest == $r.head_tree_api_digest and $h.base_tree_api_digest == $r.base_tree_api_digest and
             $h.profile == $r.profile and $h.platform == $r.platform and $h.features == $r.features and
             $h.build_image_repository == $r.build_image_repository and $h.build_image_digest == $r.build_image_digest and
             ($h.build_image_platform_digest == $r.build_image_platform_digest) and
@@ -5364,6 +5386,21 @@ fn policy_candidate_result_verification_step() -> String {
           base_commit_api="$(gh api "repos/$GITHUB_REPOSITORY/commits/$BASE_SHA")"
           jq -e --arg base "$BASE_SHA" '.sha == $base and (.commit.tree.sha | strings | test("^[0-9a-f]{{40}}$"))' <<<"$base_commit_api" >/dev/null
           base_tree_sha="$(jq -er '.commit.tree.sha' <<<"$base_commit_api")"
+          tree_api_digest() {{
+            local tree_sha="$1"
+            local tree_path="$2"
+            gh api "repos/$GITHUB_REPOSITORY/git/trees/$tree_sha?recursive=1" > "$tree_path"
+            jq -e --arg tree "$tree_sha" '
+              .sha == $tree and .truncated == false and (.tree | type == "array") and
+              all(.tree[]; (.path | strings) and (.mode | strings) and (.type | strings) and (.sha | strings))
+            ' "$tree_path" >/dev/null
+            jq -cS '[.tree[] | {{path, mode, type, sha, size: (.size // null)}}] | sort_by(.path, .mode, .type, .sha)' "$tree_path" \
+              | sha256sum | awk '{{print $1}}'
+          }}
+          head_tree_api_digest="$(tree_api_digest "$head_tree_sha" "$RUNNER_TEMP/verifier-head-tree-api.json")"
+          base_tree_api_digest="$(tree_api_digest "$base_tree_sha" "$RUNNER_TEMP/verifier-base-tree-api.json")"
+          test "$head_tree_api_digest" = "$(jq -er .head_tree_api_digest "$handoff_json")"
+          test "$base_tree_api_digest" = "$(jq -er .base_tree_api_digest "$handoff_json")"
           verifier_source_repo="$RUNNER_TEMP/verifier-source.git"
           verifier_source_home="$RUNNER_TEMP/verifier-source-home"
           rm -rf "$verifier_source_repo" "$verifier_source_home"
@@ -5374,6 +5411,10 @@ fn policy_candidate_result_verification_step() -> String {
           done
           test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" show -s --format=%T "$HEAD_SHA")" = "$head_tree_sha"
           test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" show -s --format=%T "$BASE_SHA")" = "$base_tree_sha"
+          verifier_source_archive="$RUNNER_TEMP/verifier-source.tar"
+          GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" archive --format=tar "$HEAD_SHA" > "$verifier_source_archive"
+          test "$(sha256sum "$verifier_source_archive" | awk '{{print $1}}')" = "$(jq -er .source_archive_sha256 "$handoff_json")"
+          cmp -s "$verifier_source_archive" "$handoff_dir/source.tar"
           workflow_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml")"
           jq -e --argjson id "$(jq -er .workflow_id "$handoff_json")" '.path == ".github/workflows/ci-pr.yml" and .id == $id' <<<"$workflow_api" >/dev/null
           run_id="$(jq -er .run_id "$handoff_json")"
