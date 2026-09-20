@@ -5,12 +5,13 @@
 //! terminal work and owned cleanup are confirmed. Reserved, acquiring,
 //! provisioning, assignable, running, cleaning, and uncertain states are
 //! all included in the single count: row presence is occupancy, whatever
-//! the state. Offered but unacquired work is queued demand, not occupied
-//! capacity, and never appears here.
+//! the state. Offered but unacquired work is durable queued demand, not
+//! occupied capacity. Demand ordering and permit acquisition share one
+//! immediate transaction, so no lane can spend a permit ahead of older
+//! eligible work.
 //!
-//! Lanes ([`PermitLane`]) share the one `N`: native acquisitions and the
-//! future Scale Set adapter ([`PermitLane::ScaleSet`], the D1 hook point)
-//! gate at this authority. There is no per-lane reservation.
+//! Lanes ([`PermitLane`]) share the one `N` and the same oldest-first demand
+//! queue. There is no per-lane reservation.
 //!
 //! Durability and crash recovery:
 //!
@@ -32,15 +33,21 @@
 //!   semaphore.
 //! * Acquisition is idempotent per holder: a duplicate delivery for the
 //!   same holder returns [`AcquireOutcome::AlreadyHeld`] without spending
-//!   a second permit.
+//!   a second permit. A fresh grant atomically changes the oldest eligible
+//!   demand to granted while inserting its permit.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 /// SQLite busy timeout for multi-process ledger contention.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// An unrefreshed offer this old is no longer eligible to block another
+/// lane. Active queues refresh on redelivery; the original age remains in
+/// the row so a later redelivery keeps its place.
+pub const DEMAND_STALE_AFTER_SECS: u64 = 300;
 
 /// A local lane sharing the one host-wide `N`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -52,7 +59,7 @@ pub enum PermitLane {
 }
 
 impl PermitLane {
-    fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Native => "native",
             Self::ScaleSet => "scale-set",
@@ -66,6 +73,51 @@ impl PermitLane {
             _ => None,
         }
     }
+}
+
+/// Lifecycle of one durable demand. Only `Eligible` rows take part in the
+/// oldest-first admission decision. A granted row owns a permit; terminal
+/// and cancelled rows cannot block later work or be revived by redelivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DemandState {
+    Eligible,
+    Granted,
+    Terminal,
+    Cancelled,
+}
+
+impl DemandState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Eligible => "eligible",
+            Self::Granted => "granted",
+            Self::Terminal => "terminal",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "eligible" => Some(Self::Eligible),
+            "granted" => Some(Self::Granted),
+            "terminal" => Some(Self::Terminal),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+/// One durable demand observation. `first_seen_unix` and `sequence` never
+/// change after insertion; redelivery only refreshes `updated_unix`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermitDemand {
+    pub holder: String,
+    pub lane: PermitLane,
+    pub scope: String,
+    pub first_seen_unix: u64,
+    pub sequence: i64,
+    pub state: DemandState,
+    pub updated_unix: u64,
 }
 
 /// Lifecycle state of one held permit. Every state counts toward `N`.
@@ -117,9 +169,8 @@ pub struct PermitHolder {
     pub updated_unix: u64,
     pub generation: u64,
     /// Host pid of the acquiring process, when the lane records one.
-    /// Crash-recovery evidence for the sweep: a dead pid proves the attempt
-    /// that held the permit is gone. Pids are host-scoped; lanes whose
-    /// holders are not host processes pass `None` and are never swept.
+    /// Same-holder redelivery may adopt a dead attempt; startup never uses
+    /// local pid or root evidence alone to erase another daemon's row.
     pub pid: Option<u32>,
 }
 
@@ -147,6 +198,11 @@ pub enum AcquireOutcome {
     AlreadyHeld,
     /// `occupied >= max_jobs`; no permit was granted.
     Full,
+    /// Capacity is available, but an older eligible demand must acquire
+    /// first. The demand remains durable and keeps its original age.
+    Deferred,
+    /// This demand was already terminal or cancelled and cannot be revived.
+    Closed,
     /// The caller fenced on a stale generation; re-read and retry.
     StaleGeneration,
     /// No `max_jobs` was ever configured; refusing rather than guessing.
@@ -171,8 +227,17 @@ pub enum LedgerError {
     Storage(rusqlite::Error),
     UnknownLane(String),
     UnknownState(String),
+    UnknownDemandState(String),
     UnknownHolder(String),
-    StaleGeneration { expected: u64, seen: u64 },
+    DemandLaneMismatch {
+        holder: String,
+        expected: PermitLane,
+        seen: String,
+    },
+    StaleGeneration {
+        expected: u64,
+        seen: u64,
+    },
 }
 
 impl std::fmt::Display for LedgerError {
@@ -181,9 +246,20 @@ impl std::fmt::Display for LedgerError {
             Self::Storage(error) => write!(f, "permit ledger storage: {error}"),
             Self::UnknownLane(lane) => write!(f, "permit ledger holds unknown lane {lane:?}"),
             Self::UnknownState(state) => write!(f, "permit ledger holds unknown state {state:?}"),
+            Self::UnknownDemandState(state) => {
+                write!(f, "permit ledger holds unknown demand state {state:?}")
+            }
             Self::UnknownHolder(holder) => {
                 write!(f, "permit ledger holds no permit for {holder:?}")
             }
+            Self::DemandLaneMismatch {
+                holder,
+                expected,
+                seen,
+            } => write!(
+                f,
+                "permit demand {holder:?} belongs to lane {seen:?}, not {expected:?}"
+            ),
             Self::StaleGeneration { expected, seen } => write!(
                 f,
                 "permit ledger generation moved from {seen} to {expected}; re-read and retry"
@@ -200,7 +276,9 @@ impl From<rusqlite::Error> for LedgerError {
     }
 }
 
-fn unix_now() -> u64 {
+/// Current Unix time in seconds, used for durable demand and permit
+/// observation timestamps.
+pub fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
@@ -212,6 +290,171 @@ fn unix_now() -> u64 {
 pub struct PermitLedger {
     path: PathBuf,
     conn: Connection,
+}
+
+/// Move the former native-only queue into the host-wide queue before any
+/// admission operation can observe the new schema. The transaction makes
+/// the migration safe when multiple daemon processes open the ledger at
+/// once. Native `first_seen_unix` and relative tie order survive the move;
+/// the new global sequence starts after rows already present in the shared
+/// queue.
+fn migrate_legacy_native_demand(conn: &mut Connection) -> Result<(), LedgerError> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'native_demand'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        tx.commit()?;
+        return Ok(());
+    }
+    let legacy_rows: Vec<(String, String, i64, i64, String, i64)> = {
+        let mut select = tx.prepare(
+            "SELECT request_id, scope, first_seen_unix, sequence, state, updated_unix
+             FROM native_demand ORDER BY first_seen_unix, sequence, request_id",
+        )?;
+        select
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?
+    };
+    let mut next_sequence: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM permit_demands",
+        [],
+        |row| row.get(0),
+    )?;
+    for (request_id, scope, first_seen, _legacy_sequence, raw_state, updated) in legacy_rows {
+        let state = DemandState::parse(&raw_state)
+            .ok_or_else(|| LedgerError::UnknownDemandState(raw_state.clone()))?;
+        let holder = format!("native/{request_id}");
+        let already_migrated: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM permit_demands WHERE holder = ?1)",
+            params![holder],
+            |row| row.get(0),
+        )?;
+        if already_migrated {
+            continue;
+        }
+        let sequence = next_sequence;
+        next_sequence = next_sequence.saturating_add(1);
+        tx.execute(
+            "INSERT INTO permit_demands
+             (holder, lane, scope, first_seen_unix, sequence, state, updated_unix)
+             VALUES (?1, 'native', ?2, ?3, ?4, ?5, ?6)",
+            params![holder, scope, first_seen, sequence, state.as_str(), updated],
+        )?;
+    }
+    tx.execute_batch("DROP TABLE native_demand;")?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn read_demand(conn: &Connection, holder: &str) -> Result<Option<PermitDemand>, LedgerError> {
+    let row: Option<(String, String, String, i64, i64, String, i64)> = conn
+        .query_row(
+            "SELECT holder, lane, scope, first_seen_unix, sequence, state, updated_unix
+             FROM permit_demands WHERE holder = ?1",
+            params![holder],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(
+        |(holder, raw_lane, scope, first_seen, sequence, raw_state, updated)| {
+            let lane = PermitLane::parse(&raw_lane)
+                .ok_or_else(|| LedgerError::UnknownLane(raw_lane.clone()))?;
+            let state = DemandState::parse(&raw_state)
+                .ok_or_else(|| LedgerError::UnknownDemandState(raw_state.clone()))?;
+            Ok(PermitDemand {
+                holder,
+                lane,
+                scope,
+                first_seen_unix: first_seen.max(0) as u64,
+                sequence,
+                state,
+                updated_unix: updated.max(0) as u64,
+            })
+        },
+    )
+    .transpose()
+}
+
+fn check_demand_lane(
+    holder: &str,
+    demand: &PermitDemand,
+    lane: PermitLane,
+) -> Result<(), LedgerError> {
+    if demand.lane == lane {
+        return Ok(());
+    }
+    Err(LedgerError::DemandLaneMismatch {
+        holder: holder.to_owned(),
+        expected: lane,
+        seen: demand.lane.as_str().to_owned(),
+    })
+}
+
+fn ensure_demand_tx(
+    tx: &Transaction<'_>,
+    holder: &str,
+    lane: PermitLane,
+    scope: &str,
+    first_seen_unix: u64,
+    updated_unix: u64,
+    initial_state: DemandState,
+) -> Result<PermitDemand, LedgerError> {
+    if let Some(demand) = read_demand(tx, holder)? {
+        check_demand_lane(holder, &demand, lane)?;
+        return Ok(demand);
+    }
+    let sequence: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM permit_demands",
+        [],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "INSERT INTO permit_demands
+         (holder, lane, scope, first_seen_unix, sequence, state, updated_unix)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            holder,
+            lane.as_str(),
+            scope,
+            i64::try_from(first_seen_unix).unwrap_or(i64::MAX),
+            sequence,
+            initial_state.as_str(),
+            i64::try_from(updated_unix).unwrap_or(i64::MAX),
+        ],
+    )?;
+    Ok(PermitDemand {
+        holder: holder.to_owned(),
+        lane,
+        scope: scope.to_owned(),
+        first_seen_unix,
+        sequence,
+        state: initial_state,
+        updated_unix,
+    })
 }
 
 impl PermitLedger {
@@ -227,7 +470,7 @@ impl PermitLedger {
                 ))
             })?;
         }
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS permit_meta (
@@ -246,8 +489,20 @@ impl PermitLedger {
                 updated_unix INTEGER NOT NULL,
                 generation INTEGER NOT NULL,
                 pid INTEGER
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS permit_demands (
+                holder TEXT PRIMARY KEY,
+                lane TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                first_seen_unix INTEGER NOT NULL,
+                sequence INTEGER NOT NULL UNIQUE,
+                state TEXT NOT NULL,
+                updated_unix INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_permit_demands_oldest
+                ON permit_demands (state, first_seen_unix, sequence);",
         )?;
+        migrate_legacy_native_demand(&mut conn)?;
         Ok(Self {
             path: path.to_path_buf(),
             conn,
@@ -277,6 +532,27 @@ impl PermitLedger {
             params![i64::from(max_jobs)],
         )?;
         Ok(())
+    }
+
+    /// Adopt the first fallback capacity atomically across daemon starts.
+    /// Returns true only for the process that initialized an unset ledger.
+    pub fn set_max_jobs_if_unset(&mut self, max_jobs: u32) -> Result<bool, LedgerError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let configured: Option<i64> =
+            tx.query_row("SELECT max_jobs FROM permit_meta WHERE id = 1", [], |row| {
+                row.get(0)
+            })?;
+        let adopted = configured.is_none();
+        if adopted {
+            tx.execute(
+                "UPDATE permit_meta SET max_jobs = ?1 WHERE id = 1 AND max_jobs IS NULL",
+                params![i64::from(max_jobs)],
+            )?;
+        }
+        tx.commit()?;
+        Ok(adopted)
     }
 
     /// Current generation. Callers fence mutations on this value.
@@ -385,6 +661,87 @@ impl PermitLedger {
         Ok(holders)
     }
 
+    /// Read one durable demand row.
+    pub fn demand(&self, holder: &str) -> Result<Option<PermitDemand>, LedgerError> {
+        read_demand(&self.conn, holder)
+    }
+
+    /// Record that a lane currently observes eligible demand.
+    ///
+    /// On first observation, `first_seen_unix` and a host-wide immutable
+    /// sequence are persisted. Redelivery preserves both and refreshes only
+    /// `updated_unix`. If the holder already owns a permit, a newly created
+    /// row starts granted so it cannot block younger demand.
+    pub fn observe_demand(
+        &mut self,
+        holder: &str,
+        lane: PermitLane,
+        scope: &str,
+        first_seen_unix: u64,
+        observed_unix: u64,
+    ) -> Result<PermitDemand, LedgerError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let held_lane: Option<String> = tx
+            .query_row(
+                "SELECT lane FROM permits WHERE holder = ?1",
+                params![holder],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(held_lane) = held_lane.as_deref()
+            && held_lane != lane.as_str()
+        {
+            return Err(LedgerError::DemandLaneMismatch {
+                holder: holder.to_owned(),
+                expected: lane,
+                seen: held_lane.to_owned(),
+            });
+        }
+        let initial_state = if held_lane.is_some() {
+            DemandState::Granted
+        } else {
+            DemandState::Eligible
+        };
+        let existing = ensure_demand_tx(
+            &tx,
+            holder,
+            lane,
+            scope,
+            first_seen_unix,
+            observed_unix,
+            initial_state,
+        )?;
+        if matches!(existing.state, DemandState::Eligible | DemandState::Granted) {
+            tx.execute(
+                "UPDATE permit_demands SET updated_unix = ?1 WHERE holder = ?2",
+                params![i64::try_from(observed_unix).unwrap_or(i64::MAX), holder],
+            )?;
+        }
+        let demand = read_demand(&tx, holder)?
+            .ok_or_else(|| LedgerError::UnknownHolder(holder.to_owned()))?;
+        tx.commit()?;
+        Ok(demand)
+    }
+
+    /// Cancel an eligible demand that its lane has confirmed is no longer
+    /// available upstream. A held permit cannot be cancelled through this
+    /// path; cleanup must release it first.
+    pub fn cancel_demand(&mut self, holder: &str) -> Result<bool, LedgerError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE permit_demands SET state = 'cancelled', updated_unix = ?1
+             WHERE holder = ?2 AND state = 'eligible'
+               AND NOT EXISTS (SELECT 1 FROM permits WHERE holder = ?2)",
+            params![unix_now() as i64, holder],
+        )?;
+        tx.commit()?;
+        Ok(changed > 0)
+    }
+
     /// Current state of one holder's permit, if held.
     pub fn holder_state(&self, holder: &str) -> Result<Option<PermitState>, LedgerError> {
         let state: Option<String> = self
@@ -403,12 +760,13 @@ impl PermitLedger {
     /// Acquire one permit for `holder`, fenced on `generation`.
     ///
     /// Idempotent: a holder that already holds keeps its permit (its state
-    /// is left untouched) and reports [`AcquireOutcome::AlreadyHeld`].
-    /// Full ledgers and stale generations grant nothing.
+    /// is left untouched) and reports [`AcquireOutcome::AlreadyHeld`]. A
+    /// fresh holder acquires only when capacity is available and it is the
+    /// oldest eligible demand. Permit insertion and the eligible-to-granted
+    /// transition commit together.
     ///
-    /// `pid` records the acquiring host process for crash recovery (see
-    /// [`Self::sweep_dead_uncertain`]); lanes whose holders are not host
-    /// processes pass `None`.
+    /// `pid` records the acquiring host process as diagnostic recovery
+    /// evidence; lanes whose holders are not host processes pass `None`.
     pub fn acquire(
         &mut self,
         holder: &str,
@@ -428,6 +786,33 @@ impl PermitLedger {
         if current.max(0) as u64 != generation {
             return Ok(AcquireOutcome::StaleGeneration);
         }
+        let now = unix_now();
+        let held_lane: Option<String> = tx
+            .query_row(
+                "SELECT lane FROM permits WHERE holder = ?1",
+                params![holder],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(held_lane) = held_lane {
+            if held_lane != lane.as_str() {
+                return Err(LedgerError::DemandLaneMismatch {
+                    holder: holder.to_owned(),
+                    expected: lane,
+                    seen: held_lane,
+                });
+            }
+            let demand = ensure_demand_tx(&tx, holder, lane, "", now, now, DemandState::Granted)?;
+            if demand.state == DemandState::Eligible {
+                tx.execute(
+                    "UPDATE permit_demands SET state = 'granted', updated_unix = ?1
+                     WHERE holder = ?2",
+                    params![i64::try_from(now).unwrap_or(i64::MAX), holder],
+                )?;
+            }
+            tx.commit()?;
+            return Ok(AcquireOutcome::AlreadyHeld);
+        }
         let max: Option<i64> =
             tx.query_row("SELECT max_jobs FROM permit_meta WHERE id = 1", [], |row| {
                 row.get(0)
@@ -435,21 +820,44 @@ impl PermitLedger {
         let Some(max) = max.and_then(|max| u32::try_from(max).ok()) else {
             return Ok(AcquireOutcome::NotConfigured);
         };
-        let held: Option<String> = tx
-            .query_row(
-                "SELECT holder FROM permits WHERE holder = ?1",
-                params![holder],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if held.is_some() {
-            return Ok(AcquireOutcome::AlreadyHeld);
+
+        let demand = ensure_demand_tx(&tx, holder, lane, "", now, now, DemandState::Eligible)?;
+        if demand.state == DemandState::Terminal || demand.state == DemandState::Cancelled {
+            return Ok(AcquireOutcome::Closed);
+        }
+        if demand.state == DemandState::Granted {
+            // A granted demand without its permit can only come from an
+            // interrupted older release path. It is eligible again because
+            // no capacity is currently held for it.
+            tx.execute(
+                "UPDATE permit_demands SET state = 'eligible', updated_unix = ?1
+                 WHERE holder = ?2",
+                params![i64::try_from(now).unwrap_or(i64::MAX), holder],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE permit_demands SET updated_unix = ?1 WHERE holder = ?2",
+                params![i64::try_from(now).unwrap_or(i64::MAX), holder],
+            )?;
         }
         let occupied: i64 = tx.query_row("SELECT COUNT(*) FROM permits", [], |row| row.get(0))?;
         if occupied.max(0) as u64 >= u64::from(max) {
+            tx.commit()?;
             return Ok(AcquireOutcome::Full);
         }
-        let now = unix_now() as i64;
+        let fresh_after = now.saturating_sub(DEMAND_STALE_AFTER_SECS);
+        let oldest: String = tx.query_row(
+            "SELECT holder FROM permit_demands WHERE state = 'eligible'
+               AND updated_unix > ?1
+             ORDER BY first_seen_unix, sequence LIMIT 1",
+            params![i64::try_from(fresh_after).unwrap_or(i64::MAX)],
+            |row| row.get(0),
+        )?;
+        if oldest != holder {
+            tx.commit()?;
+            return Ok(AcquireOutcome::Deferred);
+        }
+        let now_i64 = i64::try_from(now).unwrap_or(i64::MAX);
         tx.execute(
             "INSERT INTO permits (holder, lane, state, acquired_unix, updated_unix, generation, pid)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -457,11 +865,16 @@ impl PermitLedger {
                 holder,
                 lane.as_str(),
                 state.as_str(),
-                now,
-                now,
+                now_i64,
+                now_i64,
                 i64::try_from(generation).unwrap_or(i64::MAX),
                 pid.map(i64::from),
             ],
+        )?;
+        tx.execute(
+            "UPDATE permit_demands SET state = 'granted', updated_unix = ?1
+             WHERE holder = ?2",
+            params![now_i64, holder],
         )?;
         tx.commit()?;
         Ok(AcquireOutcome::Acquired)
@@ -515,18 +928,26 @@ impl PermitLedger {
         if is_alive(row_pid) {
             return Ok(AdoptOutcome::LiveHolder);
         }
-        let now = unix_now() as i64;
+        let now = unix_now();
         tx.execute(
             "UPDATE permits SET state = ?1, updated_unix = ?2, generation = ?3, pid = ?4
              WHERE holder = ?5",
             params![
                 state.as_str(),
-                now,
+                i64::try_from(now).unwrap_or(i64::MAX),
                 i64::try_from(generation).unwrap_or(i64::MAX),
                 i64::from(pid),
                 holder,
             ],
         )?;
+        let demand = ensure_demand_tx(&tx, holder, lane, "", now, now, DemandState::Granted)?;
+        if demand.state == DemandState::Eligible {
+            tx.execute(
+                "UPDATE permit_demands SET state = 'granted', updated_unix = ?1
+                 WHERE holder = ?2",
+                params![i64::try_from(now).unwrap_or(i64::MAX), holder],
+            )?;
+        }
         tx.commit()?;
         Ok(AdoptOutcome::Adopted)
     }
@@ -570,13 +991,91 @@ impl PermitLedger {
         Ok(())
     }
 
-    /// Release one holder's permit. Unfenced by design (see module docs);
-    /// returns whether a row was removed.
-    pub fn release(&self, holder: &str) -> Result<bool, LedgerError> {
-        let removed = self
+    /// Confirm terminal owned cleanup, then atomically release the permit
+    /// and close its demand. Unfenced by design: a worker from an earlier
+    /// daemon epoch must be able to release its own completed hold.
+    pub fn release(&mut self, holder: &str) -> Result<bool, LedgerError> {
+        self.release_with_demand_state(holder, DemandState::Terminal)
+    }
+
+    /// Release a permit after confirmed handoff/retry cleanup and return
+    /// its demand to the queue without changing its original age.
+    pub fn release_to_eligible(&mut self, holder: &str) -> Result<bool, LedgerError> {
+        self.release_with_demand_state(holder, DemandState::Eligible)
+    }
+
+    /// Release a permit after confirmed upstream cancellation and ensure
+    /// the demand cannot block later work.
+    pub fn release_cancelled(&mut self, holder: &str) -> Result<bool, LedgerError> {
+        self.release_with_demand_state(holder, DemandState::Cancelled)
+    }
+
+    fn release_with_demand_state(
+        &mut self,
+        holder: &str,
+        next_demand_state: DemandState,
+    ) -> Result<bool, LedgerError> {
+        let tx = self
             .conn
-            .execute("DELETE FROM permits WHERE holder = ?1", params![holder])?;
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let now = i64::try_from(unix_now()).unwrap_or(i64::MAX);
+        let removed = tx.execute("DELETE FROM permits WHERE holder = ?1", params![holder])?;
+        match next_demand_state {
+            DemandState::Terminal | DemandState::Cancelled => {
+                tx.execute(
+                    "UPDATE permit_demands SET state = ?1, updated_unix = ?2
+                     WHERE holder = ?3",
+                    params![next_demand_state.as_str(), now, holder],
+                )?;
+            }
+            DemandState::Eligible => {
+                // Never revive work that has already been closed.
+                tx.execute(
+                    "UPDATE permit_demands SET state = 'eligible', updated_unix = ?1
+                     WHERE holder = ?2 AND state IN ('eligible', 'granted')",
+                    params![now, holder],
+                )?;
+            }
+            DemandState::Granted => {}
+        }
+        tx.commit()?;
         Ok(removed > 0)
+    }
+
+    /// Retain an uncertain permit after cleanup could not be confirmed.
+    /// The permit and demand transition commit together so failure cannot
+    /// expose false capacity or leave a served demand blocking the queue.
+    pub fn retain_uncertain(&mut self, holder: &str, generation: u64) -> Result<(), LedgerError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: i64 = tx.query_row(
+            "SELECT generation FROM permit_meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        if current.max(0) as u64 != generation {
+            return Err(LedgerError::StaleGeneration {
+                expected: current.max(0) as u64,
+                seen: generation,
+            });
+        }
+        let now = i64::try_from(unix_now()).unwrap_or(i64::MAX);
+        let updated = tx.execute(
+            "UPDATE permits SET state = 'uncertain', updated_unix = ?1, generation = ?2
+             WHERE holder = ?3",
+            params![now, i64::try_from(generation).unwrap_or(i64::MAX), holder],
+        )?;
+        if updated == 0 {
+            return Err(LedgerError::UnknownHolder(holder.to_owned()));
+        }
+        tx.execute(
+            "UPDATE permit_demands SET state = 'terminal', updated_unix = ?1
+             WHERE holder = ?2 AND state IN ('eligible', 'granted')",
+            params![now, holder],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Reconcile durable occupancy against observed live work, and mark this
@@ -618,21 +1117,55 @@ impl PermitLedger {
             } else {
                 report.confirmed.push((*holder).to_string());
             }
+            let demand = ensure_demand_tx(
+                &tx,
+                holder,
+                *lane,
+                "",
+                now.max(0) as u64,
+                now.max(0) as u64,
+                DemandState::Granted,
+            )?;
+            if demand.state == DemandState::Eligible {
+                tx.execute(
+                    "UPDATE permit_demands SET state = 'granted', updated_unix = ?1
+                     WHERE holder = ?2",
+                    params![now, holder],
+                )?;
+            }
         }
-        let mut select = tx.prepare("SELECT holder FROM permits")?;
-        let recorded: Vec<String> = select
-            .query_map([], |row| row.get(0))?
+        let mut select = tx.prepare("SELECT holder, lane FROM permits")?;
+        let recorded: Vec<(String, String)> = select
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<Result<_, _>>()?;
         drop(select);
-        for holder in &recorded {
+        for (holder, raw_lane) in &recorded {
             if alive.iter().any(|(live, _, _)| live == holder) {
                 continue;
             }
+            let lane = PermitLane::parse(raw_lane)
+                .ok_or_else(|| LedgerError::UnknownLane(raw_lane.clone()))?;
             tx.execute(
                 "UPDATE permits SET state = 'uncertain', updated_unix = ?1, generation = ?2
                  WHERE holder = ?3",
                 params![now, generation, holder],
             )?;
+            let demand = ensure_demand_tx(
+                &tx,
+                holder,
+                lane,
+                "",
+                now.max(0) as u64,
+                now.max(0) as u64,
+                DemandState::Granted,
+            )?;
+            if demand.state == DemandState::Eligible {
+                tx.execute(
+                    "UPDATE permit_demands SET state = 'granted', updated_unix = ?1
+                     WHERE holder = ?2",
+                    params![now, holder],
+                )?;
+            }
             report.marked_uncertain.push(holder.clone());
         }
         tx.execute(
@@ -792,6 +1325,32 @@ mod tests {
         assert_eq!(ledger.occupied_by_lane(PermitLane::ScaleSet).unwrap(), 0);
 
         assert!(ledger.release("a").unwrap());
+        // The older queued native demand gets the newly freed permit first.
+        assert_eq!(
+            ledger
+                .acquire(
+                    "d",
+                    PermitLane::ScaleSet,
+                    PermitState::Provisioning,
+                    generation,
+                    None,
+                )
+                .unwrap(),
+            AcquireOutcome::Deferred
+        );
+        assert_eq!(
+            ledger
+                .acquire(
+                    "c",
+                    PermitLane::Native,
+                    PermitState::Reserved,
+                    generation,
+                    None,
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
+        assert!(ledger.release("b").unwrap());
         assert_eq!(
             ledger
                 .acquire(
@@ -928,6 +1487,267 @@ mod tests {
         assert!(ledger.release("a").unwrap());
         assert!(!ledger.release("a").unwrap());
 
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn oldest_eligible_is_granted_across_lanes_and_redelivery_keeps_age() {
+        let (mut ledger, dir) = temp_ledger("global-order");
+        ledger.set_max_jobs(2).unwrap();
+        let generation = ledger.generation().unwrap();
+        let now = unix_now();
+        ledger
+            .observe_demand("native/older", PermitLane::Native, "scope-a", now, now)
+            .unwrap();
+        let younger = ledger
+            .observe_demand(
+                "scaleset/7/younger",
+                PermitLane::ScaleSet,
+                "set-7",
+                now + 1,
+                now + 1,
+            )
+            .unwrap();
+        let original = (younger.first_seen_unix, younger.sequence);
+
+        // A younger Scale Set lane has spare capacity but cannot pass the
+        // older native demand before the shared grant transaction commits.
+        assert_eq!(
+            ledger
+                .acquire(
+                    "scaleset/7/younger",
+                    PermitLane::ScaleSet,
+                    PermitState::Reserved,
+                    generation,
+                    None,
+                )
+                .unwrap(),
+            AcquireOutcome::Deferred
+        );
+        let redelivered = ledger
+            .observe_demand(
+                "scaleset/7/younger",
+                PermitLane::ScaleSet,
+                "set-7",
+                now.saturating_sub(100),
+                now + 2,
+            )
+            .unwrap();
+        assert_eq!(
+            (redelivered.first_seen_unix, redelivered.sequence),
+            original
+        );
+
+        assert_eq!(
+            ledger
+                .acquire(
+                    "native/older",
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    None,
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
+        assert_eq!(
+            ledger.demand("native/older").unwrap().unwrap().state,
+            DemandState::Granted
+        );
+        // Once the oldest row owns a permit, it leaves the eligible queue;
+        // another free host slot is available to the next demand.
+        assert_eq!(
+            ledger
+                .acquire(
+                    "scaleset/7/younger",
+                    PermitLane::ScaleSet,
+                    PermitState::Reserved,
+                    generation,
+                    None,
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_acquire_cannot_let_younger_cross_older() {
+        use std::sync::{Arc, Barrier};
+
+        let (mut ledger, dir) = temp_ledger("concurrent-order");
+        ledger.set_max_jobs(1).unwrap();
+        let generation = ledger.generation().unwrap();
+        let now = unix_now();
+        ledger
+            .observe_demand("native/older", PermitLane::Native, "", now, now)
+            .unwrap();
+        ledger
+            .observe_demand(
+                "scaleset/7/younger",
+                PermitLane::ScaleSet,
+                "",
+                now + 1,
+                now + 1,
+            )
+            .unwrap();
+        drop(ledger);
+
+        let barrier = Arc::new(Barrier::new(3));
+        let older_barrier = Arc::clone(&barrier);
+        let older_path = dir.join("permit-ledger.db");
+        let older = std::thread::spawn(move || {
+            let mut ledger = PermitLedger::open(&older_path).unwrap();
+            older_barrier.wait();
+            ledger
+                .acquire(
+                    "native/older",
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    None,
+                )
+                .unwrap()
+        });
+        let younger_barrier = Arc::clone(&barrier);
+        let younger_path = dir.join("permit-ledger.db");
+        let younger = std::thread::spawn(move || {
+            let mut ledger = PermitLedger::open(&younger_path).unwrap();
+            younger_barrier.wait();
+            ledger
+                .acquire(
+                    "scaleset/7/younger",
+                    PermitLane::ScaleSet,
+                    PermitState::Reserved,
+                    generation,
+                    None,
+                )
+                .unwrap()
+        });
+        barrier.wait();
+
+        assert_eq!(older.join().unwrap(), AcquireOutcome::Acquired);
+        assert!(matches!(
+            younger.join().unwrap(),
+            AcquireOutcome::Full | AcquireOutcome::Deferred
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn retry_release_preserves_age_and_uncertain_cleanup_keeps_occupancy() {
+        let (mut ledger, dir) = temp_ledger("release-order");
+        ledger.set_max_jobs(2).unwrap();
+        let generation = ledger.generation().unwrap();
+        let now = unix_now();
+        let original = ledger
+            .observe_demand("native/first", PermitLane::Native, "", now, now)
+            .unwrap();
+        ledger
+            .observe_demand(
+                "scaleset/7/second",
+                PermitLane::ScaleSet,
+                "",
+                now + 1,
+                now + 1,
+            )
+            .unwrap();
+        assert_eq!(
+            ledger
+                .acquire(
+                    "native/first",
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    None,
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
+        assert!(ledger.release_to_eligible("native/first").unwrap());
+        assert_eq!(
+            ledger
+                .demand("native/first")
+                .unwrap()
+                .unwrap()
+                .first_seen_unix,
+            original.first_seen_unix
+        );
+        assert_eq!(
+            ledger
+                .acquire(
+                    "scaleset/7/second",
+                    PermitLane::ScaleSet,
+                    PermitState::Reserved,
+                    generation,
+                    None,
+                )
+                .unwrap(),
+            AcquireOutcome::Deferred
+        );
+        assert_eq!(
+            ledger
+                .acquire(
+                    "native/first",
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    None,
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
+        assert!(ledger.retain_uncertain("native/first", generation).is_ok());
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        assert_eq!(
+            ledger.demand("native/first").unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn open_migrates_native_demand_into_global_sequence() {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-permit-ledger-migrate-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("permit-ledger.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE native_demand (
+                    request_id TEXT PRIMARY KEY,
+                    scope TEXT NOT NULL,
+                    first_seen_unix INTEGER NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    state TEXT NOT NULL,
+                    updated_unix INTEGER NOT NULL
+                );
+                INSERT INTO native_demand VALUES
+                    ('legacy-request', 'scope-a', 100, 8, 'eligible', 120);",
+            )
+            .unwrap();
+        }
+        let ledger = PermitLedger::open(&path).unwrap();
+        let demand = ledger.demand("native/legacy-request").unwrap().unwrap();
+        assert_eq!(demand.lane, PermitLane::Native);
+        assert_eq!(demand.scope, "scope-a");
+        assert_eq!(demand.first_seen_unix, 100);
+        assert_eq!(demand.state, DemandState::Eligible);
+        let legacy_exists: bool = ledger
+            .conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'native_demand'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!legacy_exists);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1133,7 +1953,7 @@ mod tests {
         let (mut ledger, dir) = temp_ledger("sweep");
         ledger.set_max_jobs(8).unwrap();
         let generation = ledger.generation().unwrap();
-        // Dead pid, unprotected: swept.
+        // Dead pid does not prove owned teardown completed.
         ledger
             .acquire(
                 "dead",

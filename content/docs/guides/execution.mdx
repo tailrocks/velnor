@@ -4,17 +4,19 @@ title: "Job execution"
 
 # Job execution
 
-Velnor is a GitHub Actions runner. GitHub remains the scheduler and source of
-truth; Velnor admits eligible jobs, executes them, streams progress, and
-reports the result.
+Velnor has a Native runner lane and an optional Scale Set lane. GitHub remains
+the scheduler and source of truth. Native slots apply Velnor's action,
+capability, and trust admission, execute eligible jobs, stream progress, and
+report the result. The Scale Set adapter classifies offers, then delegates
+acquired jobs to the official Actions runner.
 
-## Lifecycle
+## Native lifecycle
 
 ```mermaid
 sequenceDiagram
     participant G as GitHub
     participant B as Broker
-    participant V as Velnor
+    participant V as Native Velnor runner
     participant E as Docker or microVM
     participant R as Run/Results services
     G->>B: Queue eligible job
@@ -33,19 +35,30 @@ The broker message is a delivery notification, not the full job. Velnor
 acquires the payload from the Run Service, then claims the job locally. A host
 lock and atomic in-flight marker fence duplicate delivery.
 
-Admission happens before checkout, downloads, container creation, cache or
-artifact work, leases, or injection of job execution credentials. It checks
-the trust policy, capability manifest, action graph, job shape, and selected
-backend. Rejection is fail-closed.
+Native admission happens before checkout, downloads, container creation,
+cache or artifact work, leases, or injection of job execution credentials. It
+checks the trust policy, capability manifest, action graph, job shape, and
+selected backend. Rejection is fail-closed.
 
 After admission, Velnor reserves capacity, renews the GitHub job lease,
 normalizes the workspace and environment, executes ordered steps, publishes
 step and timeline updates, drains publishers, reports completion, and cleans
 up. Teardown is mandatory; the result records whether cleanup completed.
 
-## Admission and supported work
+## Native admission and supported work
 
-Velnor does not run arbitrary Actions workflows. It admits a **closed
+This section covers the Native lane's action-closure admission. The Scale Set
+adapter classifies offers from event and owner/repository fields, then hands
+acquired jobs to the official Actions runner; it does not resolve the Native
+action closure. Offers with unparseable event names, missing owner/repository
+fields, `pull_request*` events, or `workflow_run` are classified as unknown.
+Unknown Scale Set offers are demoted to `Observed` and are never admitted or
+acquired. Other parseable event names with nonempty owner and repository fields
+are classified as trusted. See
+the [Scale Set job flow](/concepts/architecture#scale-set-job-flow) for the
+offer-classifier limits.
+
+The Native lane does not run arbitrary Actions workflows. It admits a **closed
 allowlist** of action identities compiled into the capability manifest, and
 rejects everything else at planning, before any side effect.
 
@@ -95,6 +108,10 @@ count, response size, and wall time.
 
 ## What Velnor does not support
 
+These limits apply to the Native lane and its built-in action allowlist. The
+Scale Set lane uses offer classification and delegates acquired jobs to the
+official Actions runner; this Native action closure does not govern it.
+
 Stated, not implied by omission:
 
 - **Arbitrary JavaScript actions.** A `runs.using: node20`/`node24` action that
@@ -141,9 +158,13 @@ it:
   context data.
 
 MicroVM jobs also never receive the Docker Mr Boxington integration or its
-mount. Cancellation is not wired end to end on this backend.
+mount.
 
 ## Checkout, cache, and artifacts
+
+These checkout, cache, and artifact paths describe Native Velnor adapters. The
+Scale Set official runner handles those job steps through its own Actions
+session.
 
 Checkout resolves repository, ref, destination, depth, tags, clean behavior,
 LFS, and credential persistence. A mirror may be refreshed first; direct
@@ -165,26 +186,28 @@ and sizes are bounded.
 ## Credentials and secrets
 
 The operator PAT is for registration, runner management, and cleanup. It is
-not used as a job token. GitHub supplies job credentials in the acquired
-payload; Velnor injects the applicable `GITHUB_TOKEN`, Actions runtime token,
-OIDC data, cache credentials, and Results Service data only after admission.
+not used as a job token. For native jobs, GitHub supplies job credentials in
+the acquired payload; Velnor injects the applicable `GITHUB_TOKEN`, Actions
+runtime token, OIDC data, cache credentials, and Results Service data only
+after admission. In the Scale Set lane, the official runner receives job
+credentials through its GitHub session.
 
-Trust scope defaults to `untrusted` and fails closed. A job carrying GitHub
-user secrets is refused before execution unless the pool is `trusted`
-(`VELNOR_TRUST_SCOPE=trusted`) and the job's own trust class — derived from
-its event — is trusted: fork and unknown jobs are refused user secrets on
-every pool. See [Trust scope](/reference/trust-scope) for the full capability
-table and the store partitioning it controls.
+Native trust scope defaults to `untrusted` and fails closed. A native job
+carrying GitHub user secrets is refused before execution unless the pool is
+`trusted` (`VELNOR_TRUST_SCOPE=trusted`) and the job's own trust class —
+derived from its event — is trusted: fork and unknown jobs are refused user
+secrets on every pool. See [Trust scope](/reference/trust-scope) for the full
+capability table and the store partitioning it controls.
 
-Secret variables and mask hints become
-runtime masks; masked values are excluded from environment URLs and sanitized
-job dumps. Firecracker snapshots must contain no job credentials, and guest
-readiness rejects guests that already contain them.
+For Native jobs, secret variables and mask hints become runtime masks; masked
+values are excluded from environment URLs and sanitized job dumps. Firecracker
+snapshots must contain no job credentials, and guest readiness rejects guests
+that already contain them.
 
 ## Backend selection
 
-Select exactly one backend in `/etc/velnor/execution.toml` (or the configured
-execution file):
+Select exactly one backend for Native jobs in
+`/etc/velnor/execution.toml` (or the configured execution file):
 
 ```toml
 [execution]
@@ -274,10 +297,11 @@ separate stores and are unaffected by Mr Boxington's GC.
 
 #### Unbounded execution
 
-Jobs run unbounded: no `--cpus`/`--memory` flag, no slice CPU/RAM ceiling,
-and no compiler partition is ever imposed — builders see the whole
-machine. Host capacity is governed by the single host-wide `max_jobs=N`
-permit ledger. Full policy:
+Native Docker jobs run unbounded: no `--cpus`/`--memory` flag, no slice CPU/RAM
+ceiling, and no compiler partition is imposed — builders see the whole
+machine. The shared host-wide `max_jobs=N` ledger is a ceiling; Native slot
+count caps Native concurrency, and configured worker capacity caps Scale Set
+demand. Either lane can stay below `N`. Full policy:
 [Storage and resource budgets](/operations/storage-and-resources).
 
 #### Choosing sccache instead
@@ -343,14 +367,20 @@ The Docker Mr Boxington integration and its mount are not provided to MicroVM
 jobs. The guest implements a native `mozilla-actions/sccache-action` adapter
 that starts an sccache server inside the guest, but there is no host-persistent
 sccache store behind it, so it does not carry compiled state between jobs.
-`actions/cache` and `Swatinem/rust-cache` are refused at planning. Cancellation
-is not wired end to end: no vsock cancel is sent to the guest.
+`actions/cache` and `Swatinem/rust-cache` are refused at planning. When an
+active job cancellation token and a vsock cancel handle are both available,
+Velnor attempts a guest `Cancel` over vsock; otherwise, the jailer process
+group is the termination fallback.
 
-## Slots and capacity
+## Native slots and capacity
 
 `VELNOR_SLOTS` sets the number of daemon slots. Each slot registers its own
 ephemeral JIT runner and polls GitHub independently. A ready slot waits on the
 broker; REST queued-job listings are diagnostic and do not assign work.
+
+These slot and wait settings apply to Native broker jobs. Scale Set offers use
+durable demand, configured worker capacity, and the shared host-wide permit
+ledger; see [Scale Set job flow](/concepts/architecture#scale-set-job-flow).
 
 Velnor limits both unassigned queue waiting and acquired-job capacity waiting.
 The defaults are 300 seconds for queue wait and 120 seconds for disk-capacity
@@ -359,6 +389,10 @@ within configured safety floors. A capacity timeout fails the GitHub job
 closed rather than oversubscribing the host.
 
 ## Cancellation
+
+This section describes Native job cancellation through the broker session and
+per-job cancellation token. The Scale Set official runner handles its own job
+cancellation; Velnor manages the worker lifecycle and cleanup.
 
 Active-job cancellation arrives through the busy broker session and is matched
 to the job by job ID. A malformed cancellation body is treated conservatively
@@ -381,15 +415,14 @@ Anything that can be terminated registers itself with the token as a
 | --- | --- |
 | The current step's host process group | `Requested` |
 | A Docker action's sidecar container | `Requested` |
-| A BuildKit builder container | `Requested` |
 | The job container | `Forced` |
 | Service containers | `Forced` |
 
 The job and service containers deliberately outlive the request. Upstream stops
 them in an `always()` post step, not on the cancellation callback, so
-`always()` and `cancelled()` steps must still find a container to run in.
-Everything that is the current step's own work dies immediately, which is what
-upstream's step cancel token does.
+`always()` and `cancelled()` steps must still find a container to run in. The
+step process group and Docker-action sidecars die at `Requested`, matching
+upstream's step cancel token.
 
 Each target is then walked down one **termination ladder**:
 
@@ -412,19 +445,20 @@ logged; there is no further escalation.
 Container removal, network removal, and BuildKit reclamation belong to
 teardown, which runs after collection whether or not the job was cancelled.
 
-Two gaps remain between this model and what a live job drives today, and both
-are visible to an operator:
-
-- Only host process groups actually register themselves as termination targets.
-  Job, service, Docker-action, and BuildKit containers are terminated on the
-  live cancellation path by an older route that issues `docker kill` against
-  two container names, so they do not observe the ladder's escalation levels.
-- MicroVM cancellation is not wired end to end. The guest agent implements a
-  vsock `Cancel` message, but the host never sends one, and the VMM is not a
-  registered termination target. Treat a cancelled microVM job as a host-side
-  termination event, not as step-level cancellation inside the guest.
+The live native path registers host process groups, job and service
+containers, and Docker-action sidecars with the cancellation token. For
+Firecracker, the active job token registers the jailer process group as the
+termination fallback. A guest `Cancel` hook is also registered when a vsock
+cancel handle is available; without that handle, cancellation falls back to
+the jailer process group. Container and process-group targets use the signal
+ladder; the guest hook attempts graceful cancellation. Teardown still owns
+resource removal.
 
 ## Completion durability
+
+This outbox and replay contract applies to Native Run Service completion. The
+Scale Set official runner reports its own job completion through its GitHub
+session; Velnor tracks worker lifecycle and cleanup.
 
 Completion has a stronger durability contract than ordinary progress. In order:
 
@@ -469,15 +503,21 @@ claim, and it abandons rather than replaying when the budget is already spent.
 
 ## Communication failures and limits
 
+These broker, action-admission, and Native completion limits describe the
+Native runner path. Scale Set offers use a separate session and the official
+runner handles each acquired job's protocol; Native broker and outbox checks do
+not apply to Scale Set work.
+
 Empty `204` or empty-success broker responses mean idle. Authentication and
 other non-success responses are errors, with credential refresh or backoff as
 appropriate. Acquisition retries only classified transient failures.
 
-Complete GitHub Actions parity, arbitrary guest feature parity, crash-resume of
-an executing job, and guaranteed cleanup after uncertain isolation teardown are
-not established capabilities.
+The Native lane does not establish complete GitHub Actions parity, arbitrary
+guest feature parity, crash-resume of an executing job, or guaranteed cleanup
+after uncertain isolation teardown. The Scale Set lane runs the official
+Actions runner for acquired jobs.
 
-For operator diagnosis, distinguish stages: no broker delivery means scope,
-labels, registration, or connectivity; delivery without execution means
+For Native operator diagnosis, distinguish stages: no broker delivery means
+scope, labels, registration, or connectivity; delivery without execution means
 acquisition or admission; local execution without GitHub state means lease,
 publisher, completion, or outbox recovery.

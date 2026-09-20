@@ -192,16 +192,17 @@ impl ActionsAuth {
 
     /// Mirror of `actionsAuth.validate`.
     pub fn validate(&self) -> Result<()> {
-        match (&self.token, &self.jwt_provider) {
-            (None, None) => {
+        let has_pat = self.token.as_deref().is_some_and(|token| !token.is_empty());
+        match (has_pat, self.jwt_provider.is_some()) {
+            (false, false) => {
                 anyhow::bail!("either GitHub App credentials or personal access token is required");
             }
-            (Some(_), Some(_)) => {
+            (true, true) => {
                 anyhow::bail!(
                     "cannot provide both GitHub App credentials and personal access token"
                 );
             }
-            (_, Some(_)) if self.installation_id == 0 => {
+            (false, true) if self.installation_id == 0 => {
                 anyhow::bail!("app installation ID is required");
             }
             _ => Ok(()),
@@ -210,7 +211,7 @@ impl ActionsAuth {
 
     #[must_use]
     pub fn is_pat(&self) -> bool {
-        self.token.is_some()
+        self.token.as_deref().is_some_and(|token| !token.is_empty())
     }
 }
 
@@ -288,6 +289,8 @@ mod tests {
     #[test]
     fn actions_auth_is_pat_xor_app() {
         assert!(ActionsAuth::pat("pat".into()).validate().is_ok());
+        assert!(ActionsAuth::pat(" ".into()).validate().is_ok());
+        assert!(ActionsAuth::pat(String::new()).validate().is_err());
         assert!(ActionsAuth {
             token: None,
             jwt_provider: None,
@@ -311,6 +314,19 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn empty_pat_does_not_conflict_with_valid_app_auth() {
+        let provider: Arc<dyn JwtProvider> =
+            Arc::new(PemJwtProvider::new("client", &test_key_pem()).unwrap());
+        let auth = ActionsAuth {
+            token: Some(String::new()),
+            jwt_provider: Some(provider),
+            installation_id: 1,
+        };
+        assert!(auth.validate().is_ok());
+        assert!(!auth.is_pat());
     }
 
     #[test]

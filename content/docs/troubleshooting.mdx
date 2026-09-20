@@ -24,20 +24,35 @@ policy mismatch.
 
 ## 2. Eligibility and admission
 
-Healthy: a delivered job becomes acquired, locally claimed, and admitted
-before checkout, downloads, credentials, or execution.
+Healthy Native path: a delivered job becomes acquired, locally claimed, and
+admitted before native checkout, downloads, credentials, or execution.
 
-Inspect `velnorctl get jobs`, `get runs`, `events`, and `telemetry`. Check the
-configured backend and capability manifest. Admission resolves the complete
-action closure and rejects unsupported, unpinned, untrusted, or over-limit
-work before side effects.
+Inspect `velnorctl get jobs`, `get runs`, `events`, and `telemetry`. For Native
+jobs, check the configured backend and capability manifest. Native admission
+resolves the complete action closure and rejects unsupported, unpinned,
+untrusted, or over-limit work before side effects.
 
-Distinguish rejection here from execution failure: there should be no backend
-start or checkout activity. Likely causes are an action that is not on the
-closed allowlist, an unpinned ref, an action input outside its declared rules,
-a trust-policy violation, an oversized or deep action graph, and user secrets
-in a non-`trusted` scope. The rejection names the field, the received value,
-and the accepted values. See
+The Scale Set adapter classifies offers from event and owner/repository
+metadata, then delegates acquired jobs to the official Actions runner. It does
+not resolve the Native action closure or apply Native secret policy. See
+[Scale Set job flow](/concepts/architecture#scale-set-job-flow) for the
+classifier limits. Unknown Scale Set offers are demoted to `Observed` and are
+never admitted or acquired. This includes unparseable event names, missing
+owner/repository fields, `pull_request*`, and `workflow_run`; other parseable
+events with nonempty owner and repository fields are trusted.
+
+Sections 3–11 below diagnose Native slots, broker sessions, action preparation,
+Docker/MicroVM execution, publishing, and the completion outbox. For Scale Set
+failures, inspect offer classification, durable demand/permit state, runner and
+DinD worker health, and GitHub job evidence. The official runner handles the
+per-job protocol; Native broker, backend, and outbox checks do not apply.
+
+Distinguish Native admission rejection from execution failure: there should be
+no native backend start or checkout activity. Likely causes are an action not
+on the closed allowlist, an unpinned ref, an action input outside its declared
+rules, a trust-policy violation, an oversized or deep action graph, or user
+secrets in a Native non-`trusted` scope. The rejection names the field, the
+received value, and the accepted values. See
 [what Velnor does not support](/guides/execution#what-velnor-does-not-support)
 and [Trust scope](/reference/trust-scope).
 
@@ -46,7 +61,7 @@ admission problem at all — an `if:` that names no status function is compiled
 as `success() && (<CONDITION>)`. See
 [Expressions and conditions](/reference/expressions#the-rule-most-people-get-wrong).
 
-## 3. Authentication and connectivity
+## 3. Native authentication and connectivity
 
 Healthy: health reports GitHub/control connectivity; a slot has a live runner
 registration and can maintain its broker session.
@@ -61,7 +76,7 @@ registration or failed renewal can cancel active work. Transient transport
 failures back off; repeated failures can quarantine recovery. Do not diagnose
 “no jobs” from an authentication error.
 
-## 4. Job delivery and acquisition
+## 4. Native job delivery and acquisition
 
 Healthy: the broker long-poll returns a job reference, Velnor acknowledges it
 when required, then acquires the full job from the run service.
@@ -76,7 +91,7 @@ Likely causes: expired or already claimed work, invalid session, endpoint
 failure, authentication failure, or a drained slot. A queued GitHub job with
 no broker message belongs to eligibility/configuration, not this stage.
 
-## 5. Capacity and reservation
+## 5. Native capacity and reservation
 
 Healthy: health shows ready capacity and permits; the job acquires a disk/
 resource reservation within the configured wait bound.
@@ -91,7 +106,7 @@ this from eligibility by confirming the job was acquired and from backend
 failure by confirming no `start` phase occurred. Causes include all slots busy,
 stale slot health, disk pressure, or insufficient configured capacity.
 
-## 6. Action preparation and checkout
+## 6. Native action preparation and checkout
 
 Healthy: the job plan is normalized, actions are admitted, workspace paths and
 credentials are prepared, and checkout begins.
@@ -105,7 +120,7 @@ after backend start is execution setup, not GitHub scheduling. Persisted
 checkout credentials are intended to be removed during cleanup; inspect logs if
 cleanup reports failure.
 
-## 7. Backend execution
+## 7. Native backend execution
 
 Healthy: the selected backend completes `preflight → reserve → prepare → start
 → execute/cancel → collect → teardown` with no fallback.
@@ -116,11 +131,14 @@ host boundary. MicroVM requires KVM, verified artifacts, jailer, and vsock; it
 rejects the Docker socket. Unknown backend values fail closed.
 
 Backend start/preflight errors are infrastructure failures. A step exit status
-is workload failure. Cancellation is a separate terminal path. MicroVM
-cancellation is not end-to-end equivalent to the Docker path; do not infer
-successful guest termination from a host cancellation request alone.
+is workload failure. Cancellation is a separate terminal path. Firecracker
+attempts a guest `Cancel` over vsock when both the active cancellation token
+and vsock cancel handle are available; otherwise, termination falls back to
+the jailer process group. If a job remains stuck, inspect guest-cancel and
+jailer cleanup evidence; a cancellation request alone is not proof of
+reported completion.
 
-## 8. Logs, timeline, and live status
+## 8. Native logs, timeline, and live status
 
 Healthy: local events/logs advance and GitHub receives masked live lines,
 timeline updates, and uploaded logs as applicable.
@@ -135,7 +153,7 @@ or connectivity problem. If GitHub has logs but local logs are empty after a
 restart, projection rehydration is a known limitation. CLI `logs --step` and
 `--failed` currently do not narrow output.
 
-## 9. Artifacts and cache
+## 9. Native artifacts and cache
 
 Healthy: validated paths are materialized, local artifact handling completes,
 and Results Service credentials are present when remote upload/download is
@@ -155,11 +173,11 @@ comparing jobs — a node whose trust scope changed reads a different partition
 and looks cold once. Cargo registry and Git source caches are separate, so a
 warm registry does not imply a warm Mr Boxington store.
 
-If the build looks under-parallelized, the daemon is not throttling it:
-jobs run unbounded and no compiler partition is imposed. Check the tool's
-own parallelism settings (`CARGO_BUILD_JOBS` is whatever the workflow or
-tool default sets — the daemon no longer overrides it) and the host's
-actual load against `VELNOR_MAX_JOBS`.
+If the build looks under-parallelized, jobs run unbounded and no compiler
+partition is imposed, but lane capacity can still be lower than the shared
+`VELNOR_MAX_JOBS` ceiling. Check ready lane capacity, the tool's own
+parallelism settings (`CARGO_BUILD_JOBS` is whatever the workflow or tool
+default sets — the daemon no longer overrides it), and the host's actual load.
 
 Set `MBX_DISABLE=1` in the workflow to reproduce with plain Cargo outside Mr
 Boxington. An explicit `mozilla-actions/sccache-action` is the only supported
@@ -169,7 +187,7 @@ MicroVM jobs never receive this Docker integration. Mr Boxington discovers
 cgroup resources automatically, so avoid diagnosing its behavior from assumed
 hardcoded CPU or memory values.
 
-## 10. Result reporting
+## 10. Native result reporting
 
 Healthy: publishers drain, Velnor posts completion to the run service, receives
 remote acknowledgement, then clears in-flight state.
@@ -189,7 +207,7 @@ that metric counts only pending entries.
 Do not delete completion/outbox evidence while diagnosing. It is the recovery
 proof that separates “posted,” “acknowledged,” and “cleaned up.”
 
-## 11. Cleanup and recovery
+## 11. Native cleanup and recovery
 
 Healthy: teardown runs after collection, in-flight state is cleared only after
 the completion decision, and restart preserves durable journal/outbox evidence.
@@ -199,13 +217,13 @@ systemd logs. Corrupt, legacy, newer, or ownership-inconsistent state fails
 closed and remains for inspection. A stale slot should be fenced while sibling
 slots continue when possible.
 
-On drain, idle slots exit at a poll boundary and active jobs are allowed to
-finish subject to service stop limits. Controller restart is not itself proof
-that slot workers stopped. Query/log projections may be empty after recreation
-even while durable events remain; use those durable events plus GitHub state to
-reconstruct what happened.
+On native-lane drain, idle slots exit at a poll boundary and native jobs are
+allowed to finish subject to service-stop limits. Controller restart is not
+itself proof that slot workers stopped. Query/log projections may be empty
+after recreation even while durable events remain; use those durable events
+plus GitHub state to reconstruct what happened.
 
-## Quick distinction table
+## Native quick distinction table
 
 | Observation | Most likely stage | Confirm with |
 | --- | --- | --- |

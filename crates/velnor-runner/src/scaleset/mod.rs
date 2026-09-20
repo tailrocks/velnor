@@ -58,7 +58,7 @@ pub use daemon::{
 pub use demand::{
     classify_offer, grant_oldest, DemandState, DemandStore, OfferTrust, SubmitOutcome,
 };
-pub use errors::{RequestFailure, ScaleSetError, ScaleSetFault};
+pub use errors::{ActionsApiException, RequestFailure, ScaleSetError, ScaleSetFault};
 pub use fixtures::{
     verify_redaction, DemandSeed, DemandSeedRow, FixtureManifest, Fixtures, PollTranscript,
     TranscriptPoll, FIXTURE_HOST, REDACTED,

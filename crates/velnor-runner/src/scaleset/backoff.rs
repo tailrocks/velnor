@@ -5,15 +5,14 @@
 //! `retryablehttp.DefaultRetryPolicy`: retry connection failures, 429, and
 //! 5xx except 501; the admin-connection handshake additionally retries
 //! 401/403 (`getActionsServiceAdminConnectionRequest`). Rate-limit waits
-//! reuse [`GitHubRateLimitStatus`](crate::protocol::GitHubRateLimitStatus)
-//! so `Retry-After`/`x-ratelimit-reset` are honored before the backoff.
+//! use `Retry-After` for 429/503 exactly as `retryablehttp.DefaultBackoff`;
+//! the Scale Set client does not apply GitHub REST quota-reset headers.
 
 use std::time::Duration;
+use std::time::SystemTime;
 
 use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
-
-use crate::protocol::GitHubRateLimitStatus;
 
 /// Upstream default: at most 4 retries after the first attempt.
 pub const DEFAULT_RETRY_MAX: u32 = 4;
@@ -65,7 +64,20 @@ impl RetryPolicy {
         if status == StatusCode::TOO_MANY_REQUESTS {
             return true;
         }
-        status.is_server_error() && status != StatusCode::NOT_IMPLEMENTED
+        status.as_u16() >= 500 && status != StatusCode::NOT_IMPLEMENTED
+    }
+
+    /// Match retryablehttp's non-retryable transport cases: request build and
+    /// redirect failures, deadline/timeout, and TLS certificate validation.
+    #[must_use]
+    pub fn retryable_transport_error(error: &reqwest::Error) -> bool {
+        let rendered = format!("{error:#}").to_ascii_lowercase();
+        retryable_transport_flags(
+            error.is_builder(),
+            error.is_redirect(),
+            error.is_timeout(),
+            is_certificate_verification_failure(&rendered),
+        )
     }
 
     /// Exponential backoff `wait_min * 2^attempt`, capped at `wait_max`.
@@ -101,29 +113,50 @@ impl RetryPolicy {
         }
     }
 
-    /// Rate-limit wait from response headers, reusing the shared
-    /// [`GitHubRateLimitStatus`](crate::protocol::GitHubRateLimitStatus)
-    /// exhaustion rule (429, or 403 with `remaining=0`/`Retry-After`).
+    /// Parse the upstream retryablehttp Retry-After override. The server hint
+    /// applies only to 429/503 and bypasses the exponential wait cap.
     #[must_use]
-    pub fn rate_limit_delay(
+    pub fn retry_after_delay(
         status: StatusCode,
         headers: &HeaderMap,
-        now_epoch: u64,
-        default: Duration,
-    ) -> Duration {
-        let rate = GitHubRateLimitStatus {
-            retry_after_seconds: header_u64(headers, reqwest::header::RETRY_AFTER.as_str()),
-            rate_limit_reset_epoch: header_u64(headers, "x-ratelimit-reset"),
-            remaining: header_u64(headers, "x-ratelimit-remaining"),
-        };
-        if !rate.is_limited(status.as_u16()) {
-            return default;
+        now: SystemTime,
+    ) -> Option<Duration> {
+        if status != StatusCode::TOO_MANY_REQUESTS && status != StatusCode::SERVICE_UNAVAILABLE {
+            return None;
         }
-        rate.reset_epoch_or_retry_after(now_epoch)
-            .map_or(default, |epoch| {
-                Duration::from_secs(epoch.saturating_sub(now_epoch)).max(default)
-            })
+        let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+        if let Ok(seconds) = value.parse::<i64>() {
+            return u64::try_from(seconds).ok().map(Duration::from_secs);
+        }
+        let retry_at = parse_http_date(value)?;
+        Some(retry_at.duration_since(now).unwrap_or(Duration::ZERO))
     }
+}
+
+fn retryable_transport_flags(
+    builder: bool,
+    redirect: bool,
+    timeout: bool,
+    certificate_verification: bool,
+) -> bool {
+    !(builder || redirect || timeout || certificate_verification)
+}
+
+fn is_certificate_verification_failure(error: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "invalid peer certificate",
+        "certificate is not trusted",
+        "certificate verify failed",
+        "certificate verification failed",
+        "certificate has expired",
+        "certificate expired",
+        "unknownissuer",
+        "notvalidforname",
+        "notvalidyet",
+        "unknown ca",
+        "self-signed certificate",
+    ];
+    MARKERS.iter().any(|marker| error.contains(marker))
 }
 
 /// Poll-result class driving [`RetryPolicy::poll_delay`].
@@ -149,11 +182,18 @@ impl Default for IdlePolicy {
     }
 }
 
-fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|text| text.trim().parse().ok())
+fn parse_http_date(value: &str) -> Option<SystemTime> {
+    let format = time::format_description::parse_borrowed::<1>(
+        "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT",
+    )
+    .ok()?;
+    let date = time::PrimitiveDateTime::parse(value, &format)
+        .ok()?
+        .assume_utc();
+    let timestamp = date.unix_timestamp_nanos();
+    let seconds = u64::try_from(timestamp.div_euclid(1_000_000_000)).ok()?;
+    let nanoseconds = u32::try_from(timestamp.rem_euclid(1_000_000_000)).ok()?;
+    SystemTime::UNIX_EPOCH.checked_add(Duration::new(seconds, nanoseconds))
 }
 
 #[cfg(test)]
@@ -211,6 +251,38 @@ mod tests {
             true
         ));
         assert!(RetryPolicy::retryable_status(StatusCode::FORBIDDEN, true));
+        assert!(RetryPolicy::retryable_status(
+            StatusCode::from_u16(599).unwrap(),
+            false
+        ));
+        assert!(!RetryPolicy::retryable_status(
+            StatusCode::from_u16(499).unwrap(),
+            false
+        ));
+        assert!(RetryPolicy::retryable_status(
+            StatusCode::from_u16(600).unwrap(),
+            false
+        ));
+        assert!(RetryPolicy::retryable_status(
+            StatusCode::from_u16(999).unwrap(),
+            false
+        ));
+    }
+
+    #[test]
+    fn transport_retryability_matches_non_retryable_upstream_cases() {
+        assert!(retryable_transport_flags(false, false, false, false));
+        assert!(!retryable_transport_flags(true, false, false, false));
+        assert!(!retryable_transport_flags(false, true, false, false));
+        assert!(!retryable_transport_flags(false, false, true, false));
+        assert!(!retryable_transport_flags(false, false, false, true));
+        assert!(is_certificate_verification_failure(
+            "error sending request: invalid peer certificate: UnknownIssuer"
+        ));
+        assert!(is_certificate_verification_failure(
+            "certificate is not trusted"
+        ));
+        assert!(!is_certificate_verification_failure("connection refused"));
     }
 
     #[test]
@@ -223,16 +295,50 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_extends_backoff() {
+    fn retry_after_seconds_are_exact_and_ignore_backoff_cap() {
         let mut headers = HeaderMap::new();
-        headers.insert("retry-after", "45".parse().unwrap());
-        let delay = RetryPolicy::rate_limit_delay(
+        headers.insert("retry-after", "90".parse().unwrap());
+        let delay = RetryPolicy::retry_after_delay(
             StatusCode::TOO_MANY_REQUESTS,
             &headers,
-            1_000,
-            Duration::from_secs(2),
+            SystemTime::UNIX_EPOCH,
         );
-        assert_eq!(delay, Duration::from_secs(45));
+        assert_eq!(delay, Some(Duration::from_secs(90)));
+
+        headers.insert("retry-after", "1".parse().unwrap());
+        let short = RetryPolicy::retry_after_delay(
+            StatusCode::TOO_MANY_REQUESTS,
+            &headers,
+            SystemTime::UNIX_EPOCH,
+        );
+        assert_eq!(short, Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn retry_after_http_date_is_supported_for_429_and_503() {
+        let value = "Wed, 21 Oct 2015 07:28:00 GMT";
+        let retry_at = parse_http_date(value).unwrap();
+        let now = retry_at - Duration::from_secs(60);
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", value.parse().unwrap());
+
+        assert_eq!(
+            RetryPolicy::retry_after_delay(StatusCode::TOO_MANY_REQUESTS, &headers, now),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            RetryPolicy::retry_after_delay(StatusCode::SERVICE_UNAVAILABLE, &headers, now),
+            Some(Duration::from_secs(60))
+        );
+
+        assert_eq!(
+            RetryPolicy::retry_after_delay(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &headers,
+                retry_at + Duration::from_secs(1)
+            ),
+            Some(Duration::ZERO)
+        );
     }
 
     #[test]
@@ -262,15 +368,20 @@ mod tests {
     }
 
     #[test]
-    fn permission_403_keeps_default_delay() {
+    fn retry_after_does_not_override_other_statuses_or_github_quota_headers() {
         let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "40".parse().unwrap());
         headers.insert("x-ratelimit-remaining", "10".parse().unwrap());
-        let delay = RetryPolicy::rate_limit_delay(
-            StatusCode::FORBIDDEN,
-            &headers,
-            1_000,
-            Duration::from_secs(2),
+        let delay =
+            RetryPolicy::retry_after_delay(StatusCode::FORBIDDEN, &headers, SystemTime::UNIX_EPOCH);
+        assert_eq!(delay, None);
+        assert_eq!(
+            RetryPolicy::retry_after_delay(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &headers,
+                SystemTime::UNIX_EPOCH
+            ),
+            None
         );
-        assert_eq!(delay, Duration::from_secs(2));
     }
 }

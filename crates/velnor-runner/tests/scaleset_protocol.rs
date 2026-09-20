@@ -513,7 +513,7 @@ async fn scale_set_and_runner_reads_match_upstream_shapes() {
         .is_none());
 
     let error = client.get_runner(11).await.unwrap_err();
-    assert_eq!(error.fault(), Some(ScaleSetFault::NotFound));
+    assert_eq!(error.fault(), Some(ScaleSetFault::RunnerNotFound));
     assert!(error.to_string().contains("runner not found"), "{error}");
 }
 
