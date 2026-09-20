@@ -1,0 +1,15 @@
+{
+  "recorded_utc": "2026-09-20T17:09:17.495179+00:00",
+  "repository": "tailrocks/velnor",
+  "run_id": 35524310993,
+  "requested_attempt": 2,
+  "source_head": "ce75f7c322cbb427d4aea2138abdb9fc5e0f5ed9",
+  "intervention": "none; full identical-input rerun",
+  "purpose": "warm-repeat baseline variance sample; not a distinct iteration",
+  "control": "single campaign timing run at a time; no cache deletion or namespace mutation",
+  "limitations": [
+    "PR event rerun; verify effective checkout and referenced workflow revisions",
+    "runner hardware and external repository contention not experimentally fixed",
+    "does not prove source-edit or dependency-edit performance"
+  ]
+}

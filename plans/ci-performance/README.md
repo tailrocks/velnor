@@ -2,6 +2,8 @@
 
 Status: active; no performance improvement accepted yet. Started 2026-09-20.
 
+Current continuation: [resumed campaign and ownership](resume-2026-09-21.md).
+
 The focused Velnor CI reliability task is tracked in
 [the reliability execution record](reliability.md), including failure
 dispositions, hook isolation, required gates, and protected integration.

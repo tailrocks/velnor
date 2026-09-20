@@ -1,0 +1,129 @@
+{
+  "repository": "tailrocks/parallax",
+  "run": 35525629941,
+  "attempt": 1,
+  "source_sha": "8e1262d75cdf8b091f479ef4639b139041e47eff",
+  "event": "pull_request",
+  "conclusion": "success",
+  "created_at": "2026-09-20T17:21:55Z",
+  "run_started_at": "2026-09-20T17:21:55Z",
+  "required_result_seconds": 756,
+  "last_control_seconds": 762,
+  "aggregate_job_execution_seconds": 3666,
+  "executed_jobs": 24,
+  "reports": {
+    "server": {
+      "report": {
+        "schema_version": 1,
+        "job": "rust-parallax-server",
+        "log_present": true,
+        "queue_seconds": null,
+        "queue_source": null,
+        "total_source": "job_markers",
+        "runner_setup_seconds": 3,
+        "selection_transport_seconds": 0,
+        "tool_bootstrap_seconds": 12,
+        "cache_prep_seconds": 4,
+        "cargo_fetch_seconds": 0,
+        "checks_wall_seconds": 651,
+        "checks_seconds": 651,
+        "cleanup_seconds": 0,
+        "total_seconds": 670,
+        "cache_outcomes": {
+          "lane": "github",
+          "rustup": "exact",
+          "mold": "exact",
+          "cargo": "exact",
+          "mbx": "prefix",
+          "docker_seed": null
+        },
+        "origin_downloads": {
+          "updating_crates_io_index": 0,
+          "updating_git": 0,
+          "downloading_crates": 0,
+          "downloaded_lines": []
+        },
+        "compiler": {
+          "mbx_outcomes": [
+            "mbx[cache]: object cache: 0 hits, 0 misses, 1654 not looked up, 128 bypassed; 0 B downloaded, 0 B uploaded, 27.9 GiB stored locally",
+            "mbx[cache]: object cache: 0 hits, 3 misses, 1569 not looked up, 126 bypassed; 0 B downloaded, 0 B uploaded, 473.5 MiB stored locally"
+          ],
+          "finished_segments": [
+            "    Finished `test` profile [unoptimized + debuginfo] target(s) in 7m 12s",
+            "    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 13s"
+          ],
+          "compiling_lines": 421
+        }
+      },
+      "raw_mbx_cache_state": "miss",
+      "reported_mbx_state_valid": false,
+      "directory_import_exercised": false,
+      "checkout_log_sha": [
+        "1ba04c383691f97b8cb49bb72af6c74949a1e686"
+      ]
+    },
+    "cli": {
+      "report": {
+        "schema_version": 1,
+        "job": "rust-parallax-cli",
+        "log_present": true,
+        "queue_seconds": null,
+        "queue_source": null,
+        "total_source": "job_markers",
+        "runner_setup_seconds": 3,
+        "selection_transport_seconds": 0,
+        "tool_bootstrap_seconds": 11,
+        "cache_prep_seconds": 4,
+        "cargo_fetch_seconds": 0,
+        "checks_wall_seconds": 493,
+        "checks_seconds": 493,
+        "cleanup_seconds": 0,
+        "total_seconds": 511,
+        "cache_outcomes": {
+          "lane": "github",
+          "rustup": "exact",
+          "mold": "exact",
+          "cargo": "exact",
+          "mbx": "prefix",
+          "docker_seed": null
+        },
+        "origin_downloads": {
+          "updating_crates_io_index": 0,
+          "updating_git": 0,
+          "downloading_crates": 0,
+          "downloaded_lines": []
+        },
+        "compiler": {
+          "mbx_outcomes": [
+            "mbx[cache]: object cache: 0 hits, 0 misses, 1643 not looked up, 128 bypassed; 0 B downloaded, 0 B uploaded, 4.4 GiB stored locally",
+            "mbx[cache]: object cache: 0 hits, 3 misses, 1561 not looked up, 126 bypassed; 0 B downloaded, 0 B uploaded, 512.2 MiB stored locally"
+          ],
+          "finished_segments": [
+            "    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 50s",
+            "    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 06s"
+          ],
+          "compiling_lines": 449
+        }
+      },
+      "raw_mbx_cache_state": "miss",
+      "reported_mbx_state_valid": false,
+      "directory_import_exercised": false,
+      "checkout_log_sha": [
+        "1ba04c383691f97b8cb49bb72af6c74949a1e686"
+      ]
+    }
+  },
+  "comparison_status": "uncontrolled single observation; cold MBX, warm Cargo/Rustup/mold; no accepted speedup",
+  "url": "https://github.com/tailrocks/parallax/actions/runs/35525629941",
+  "effective_merge_sha": "1ba04c383691f97b8cb49bb72af6c74949a1e686",
+  "effective_merge_parents": [
+    "3a657a54b0a1f81db318e919c1b534a4b08b738d",
+    "8e1262d75cdf8b091f479ef4639b139041e47eff"
+  ],
+  "source_and_merge_tree": "dbe2c184e341a56c0ebc06bfec8075e7161039f7",
+  "post_mbx_seconds": {
+    "server": 48,
+    "cli": 46
+  },
+  "post_mbx_phase": "unobserved internal work; raw step duration retained"
+}
