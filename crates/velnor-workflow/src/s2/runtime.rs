@@ -22,8 +22,15 @@ use serde::Deserialize;
 
 #[cfg(unix)]
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
+#[cfg(unix)]
+use rustix::fs::{fstat, FileType};
+#[cfg(unix)]
+use rustix::process::{kill_process_group, Pid, Signal};
 
 use sha2::{Digest, Sha256};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use super::primitives::prepared_tools::{
     classify_and_verify, fetch_producer_conclusion, format_failure_output, format_install_outputs,
@@ -2767,17 +2774,19 @@ fn run_command_with_stall_guard(
     command: &str,
     stall_limit: Duration,
 ) -> Result<(), GeneratorError> {
-    let child = Command::new("bash")
-        .args(["-euo", "pipefail", "-c", command])
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| GeneratorError::usage(format!("run CI command {unit_id}: {error}")))?;
+    let child = spawn_run_command(root, unit_id, command)?;
     #[cfg(unix)]
     {
-        run_command_with_polling(child, unit_id, command, stall_limit)
+        let mut stdout_writer = std::io::stdout();
+        let mut stderr_writer = std::io::stderr();
+        run_command_with_polling(
+            child,
+            unit_id,
+            command,
+            stall_limit,
+            &mut stdout_writer,
+            &mut stderr_writer,
+        )
     }
     #[cfg(not(unix))]
     {
@@ -2785,31 +2794,117 @@ fn run_command_with_stall_guard(
     }
 }
 
+fn spawn_run_command(root: &Path, unit_id: &str, command: &str) -> Result<Child, GeneratorError> {
+    let mut command_builder = Command::new("bash");
+    command_builder
+        .args(["-euo", "pipefail", "-c", command])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command_builder.process_group(0);
+    command_builder
+        .spawn()
+        .map_err(|error| GeneratorError::usage(format!("run CI command {unit_id}: {error}")))
+}
+
+#[cfg(all(unix, test))]
+fn run_command_with_stall_guard_to<WOut, WErr>(
+    root: &Path,
+    unit_id: &str,
+    command: &str,
+    stall_limit: Duration,
+    stdout_writer: &mut WOut,
+    stderr_writer: &mut WErr,
+) -> Result<(), GeneratorError>
+where
+    WOut: std::os::fd::AsFd,
+    WErr: std::os::fd::AsFd,
+{
+    let child = spawn_run_command(root, unit_id, command)?;
+    run_command_with_polling(
+        child,
+        unit_id,
+        command,
+        stall_limit,
+        stdout_writer,
+        stderr_writer,
+    )
+}
+
 #[cfg(unix)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 enum ChildStreamRead {
     Output,
     Eof,
     Interrupted,
+    Backpressure,
+}
+
+#[cfg(unix)]
+const MAX_PENDING_OUTPUT_BYTES: usize = 64 * 1024;
+
+#[cfg(unix)]
+#[derive(Default)]
+struct PendingOutput {
+    bytes: Vec<u8>,
+    offset: usize,
+}
+
+#[cfg(unix)]
+impl PendingOutput {
+    fn is_empty(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+
+    fn remaining(&self) -> &[u8] {
+        &self.bytes[self.offset..]
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> bool {
+        if self
+            .bytes
+            .len()
+            .saturating_sub(self.offset)
+            .saturating_add(bytes.len())
+            > MAX_PENDING_OUTPUT_BYTES
+        {
+            return false;
+        }
+        if self.is_empty() {
+            self.bytes.clear();
+            self.offset = 0;
+        }
+        self.bytes.extend_from_slice(bytes);
+        true
+    }
+
+    fn consume(&mut self, written: usize) {
+        self.offset += written;
+        if self.is_empty() {
+            self.bytes.clear();
+            self.offset = 0;
+        } else if self.offset >= 8192 && self.offset * 2 >= self.bytes.len() {
+            self.bytes.drain(..self.offset);
+            self.offset = 0;
+        }
+    }
 }
 
 #[cfg(unix)]
 /// Read one poll-ready child stream without allowing a pipe read to block the
-/// stall guard. Output failures retain the old behavior: they do not change
-/// command success/failure, but bytes still count as liveness output.
-fn forward_ready_child_stream<R, W>(reader: &mut R, writer: &mut W) -> ChildStreamRead
+/// stall guard. Bytes are queued in a bounded buffer; output backpressure is
+/// reported instead of blocking the child/deadline owner.
+fn forward_ready_child_stream<R>(reader: &mut R, pending: &mut PendingOutput) -> ChildStreamRead
 where
     R: Read,
-    W: Write,
 {
     let mut buffer = [0_u8; 8192];
     match reader.read(&mut buffer) {
         Ok(0) => ChildStreamRead::Eof,
-        Ok(read) => {
-            let _ = writer.write_all(&buffer[..read]);
-            let _ = writer.flush();
-            ChildStreamRead::Output
-        }
+        Ok(read) if pending.append(&buffer[..read]) => ChildStreamRead::Output,
+        Ok(_) => ChildStreamRead::Backpressure,
         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
             ChildStreamRead::Interrupted
         }
@@ -2826,14 +2921,34 @@ fn poll_timeout(duration: Duration) -> Timespec {
 }
 
 #[cfg(unix)]
-/// Wait for either child pipe without blocking on a `Read`. The returned
-/// booleans include EOF/error readiness so the caller can remove closed pipes.
-fn poll_child_streams(
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "poll returns independent readiness bits for two streams and two sinks"
+)]
+struct PollReady {
+    stdout_read: bool,
+    stderr_read: bool,
+    stdout_write: bool,
+    stderr_write: bool,
+}
+
+#[cfg(unix)]
+/// Wait for child pipes and output sinks without blocking on either read or
+/// write. The returned booleans include EOF/error readiness so closed streams
+/// can be removed by the owner loop.
+fn poll_child_streams<WOut, WErr>(
     stdout: Option<&std::process::ChildStdout>,
     stderr: Option<&std::process::ChildStderr>,
+    stdout_writer: Option<&WOut>,
+    stderr_writer: Option<&WErr>,
     timeout: Duration,
-) -> rustix::io::Result<(bool, bool)> {
-    let mut descriptors = Vec::with_capacity(2);
+) -> rustix::io::Result<PollReady>
+where
+    WOut: std::os::fd::AsFd,
+    WErr: std::os::fd::AsFd,
+{
+    let mut descriptors = Vec::with_capacity(4);
     let stdout_index = stdout.map(|stream| {
         let index = descriptors.len();
         descriptors.push(PollFd::new(stream, PollFlags::IN));
@@ -2844,36 +2959,57 @@ fn poll_child_streams(
         descriptors.push(PollFd::new(stream, PollFlags::IN));
         index
     });
+    let stdout_write_index = stdout_writer.map(|writer| {
+        let index = descriptors.len();
+        descriptors.push(PollFd::new(writer, PollFlags::OUT));
+        index
+    });
+    let stderr_write_index = stderr_writer.map(|writer| {
+        let index = descriptors.len();
+        descriptors.push(PollFd::new(writer, PollFlags::OUT));
+        index
+    });
     if descriptors.is_empty() {
-        return Ok((false, false));
+        return Ok(PollReady::default());
     }
 
     let timeout = poll_timeout(timeout);
     let result = poll(&mut descriptors, Some(&timeout));
-    let ready = |index: Option<usize>| {
+    let readable = |index: Option<usize>| {
         index.is_some_and(|index| {
             descriptors[index]
                 .revents()
                 .intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL)
         })
     };
-    result.map(|_| (ready(stdout_index), ready(stderr_index)))
+    let writable = |index: Option<usize>| {
+        index.is_some_and(|index| {
+            descriptors[index]
+                .revents()
+                .intersects(PollFlags::OUT | PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL)
+        })
+    };
+    result.map(|_| PollReady {
+        stdout_read: readable(stdout_index),
+        stderr_read: readable(stderr_index),
+        stdout_write: writable(stdout_write_index),
+        stderr_write: writable(stderr_write_index),
+    })
 }
 
 #[cfg(unix)]
-fn consume_ready_child_stream<R, W>(
+fn consume_ready_child_stream<R>(
     ready: bool,
     reader: &mut Option<R>,
-    writer: &mut W,
+    pending: &mut PendingOutput,
 ) -> Option<ChildStreamRead>
 where
     R: Read,
-    W: Write,
 {
     if !ready {
         return None;
     }
-    let outcome = forward_ready_child_stream(reader.as_mut()?, writer);
+    let outcome = forward_ready_child_stream(reader.as_mut()?, pending);
     if outcome == ChildStreamRead::Eof {
         *reader = None;
     }
@@ -2881,16 +3017,99 @@ where
 }
 
 #[cfg(unix)]
-fn run_command_with_polling(
+fn flush_pending_output<W>(
+    ready: bool,
+    writer: &W,
+    pending: &mut PendingOutput,
+) -> rustix::io::Result<bool>
+where
+    W: std::os::fd::AsFd,
+{
+    if !ready || pending.is_empty() {
+        return Ok(false);
+    }
+    let remaining = pending.remaining();
+    let chunk_len = output_write_chunk_limit(writer).min(remaining.len());
+    match rustix::io::write(writer, &remaining[..chunk_len]) {
+        Ok(0) => Ok(false),
+        Ok(written) => {
+            pending.consume(written);
+            Ok(true)
+        }
+        Err(error) if error == rustix::io::Errno::INTR => Ok(false),
+        Err(error) if error == rustix::io::Errno::WOULDBLOCK => Ok(false),
+        Err(error) if error == rustix::io::Errno::PIPE => {
+            pending.bytes.clear();
+            pending.offset = 0;
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+/// A poll-ready pipe or socket may accept one byte but still block on a large
+/// write. Regular files have no output backpressure, so retain chunked writes
+/// for them; use a one-byte write for every other sink to keep the owner loop
+/// cancellation-safe.
+fn output_write_chunk_limit<W>(writer: &W) -> usize
+where
+    W: std::os::fd::AsFd,
+{
+    fstat(writer).map_or(1, |stat| {
+        if FileType::from_raw_mode(stat.st_mode).is_file() {
+            8192
+        } else {
+            1
+        }
+    })
+}
+
+#[cfg(unix)]
+fn kill_child_group(child: &Child) -> Result<(), String> {
+    match kill_process_group(Pid::from_child(child), Signal::KILL) {
+        Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(unix)]
+fn abort_child(child: &mut Child) -> String {
+    let group = kill_child_group(child).err();
+    let direct = child.kill().err().map(|error| error.to_string());
+    let reaped = child.wait().err().map(|error| error.to_string());
+    [
+        group.map(|error| format!("process-group kill failed: {error}")),
+        direct.map(|error| format!("direct kill failed: {error}")),
+        reaped.map(|error| format!("reap failed: {error}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
+#[cfg(unix)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the owner loop keeps child lifetime, bounded I/O, deadlines, and cleanup atomic"
+)]
+fn run_command_with_polling<WOut, WErr>(
     mut child: Child,
     unit_id: &str,
     command: &str,
     stall_limit: Duration,
-) -> Result<(), GeneratorError> {
+    stdout_writer: &mut WOut,
+    stderr_writer: &mut WErr,
+) -> Result<(), GeneratorError>
+where
+    WOut: std::os::fd::AsFd,
+    WErr: std::os::fd::AsFd,
+{
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
-    let mut stdout_writer = std::io::stdout();
-    let mut stderr_writer = std::io::stderr();
+    let mut stdout_pending = PendingOutput::default();
+    let mut stderr_pending = PendingOutput::default();
     let pid = child.id();
     let mut deadline = Instant::now() + stall_limit;
 
@@ -2899,12 +3118,11 @@ fn run_command_with_polling(
             Ok(Some(status)) => break status,
             Ok(None) => {}
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                let cleanup = abort_child(&mut child);
                 drop(stdout);
                 drop(stderr);
                 return Err(GeneratorError::usage(format!(
-                    "run CI command {unit_id}: failed to poll child pid {pid}: {error}"
+                    "run CI command {unit_id}: failed to poll child pid {pid}: {error}; {cleanup}"
                 )));
             }
         }
@@ -2916,64 +3134,191 @@ fn run_command_with_polling(
                 Ok(None) => String::from("running"),
                 Err(error) => format!("unknown (try_wait failed: {error})"),
             };
-            let _ = child.kill();
-            let reaped = match child.wait() {
-                Ok(status) => format!("reaped with {status}"),
-                Err(error) => format!("reap failed: {error}"),
-            };
+            let cleanup = abort_child(&mut child);
             drop(stdout);
             drop(stderr);
             return Err(GeneratorError::usage(format!(
-                "CI command stalled for unit {unit_id}: no stdout/stderr output for {}s; killed pid {pid} (was {state}, {reaped}); command: {command}",
+                "CI command stalled for unit {unit_id}: no stdout/stderr output for {}s; killed pid {pid} (was {state}; {cleanup}); command: {command}",
                 stall_limit.as_secs(),
             )));
         }
 
         let timeout = remaining.min(RUN_CMD_EXIT_POLL_QUANTUM);
-        if stdout.is_none() && stderr.is_none() {
+        if stdout.is_none()
+            && stderr.is_none()
+            && stdout_pending.is_empty()
+            && stderr_pending.is_empty()
+        {
             thread::sleep(timeout);
             continue;
         }
-        let (stdout_ready, stderr_ready) =
-            match poll_child_streams(stdout.as_ref(), stderr.as_ref(), timeout) {
-                Ok(ready) => ready,
-                Err(error) if error == rustix::io::Errno::INTR => continue,
-                Err(_) => {
-                    thread::sleep(timeout);
-                    continue;
-                }
-            };
+        let ready = match poll_child_streams(
+            stdout.as_ref(),
+            stderr.as_ref(),
+            (!stdout_pending.is_empty()).then_some(&*stdout_writer),
+            (!stderr_pending.is_empty()).then_some(&*stderr_writer),
+            timeout,
+        ) {
+            Ok(ready) => ready,
+            Err(error) if error == rustix::io::Errno::INTR => continue,
+            Err(error) => {
+                let cleanup = abort_child(&mut child);
+                drop(stdout);
+                drop(stderr);
+                return Err(GeneratorError::usage(format!(
+                    "run CI command {unit_id}: poll child streams for pid {pid}: {error}; {cleanup}"
+                )));
+            }
+        };
 
-        if let Some(ChildStreamRead::Output) =
-            consume_ready_child_stream(stdout_ready, &mut stdout, &mut stdout_writer)
+        if let Err(error) =
+            flush_pending_output(ready.stdout_write, &*stdout_writer, &mut stdout_pending)
         {
-            deadline = Instant::now() + stall_limit;
+            let cleanup = abort_child(&mut child);
+            drop(stdout);
+            drop(stderr);
+            return Err(GeneratorError::usage(format!(
+                "run CI command {unit_id}: write stdout for pid {pid}: {error}; {cleanup}"
+            )));
         }
-        if let Some(ChildStreamRead::Output) =
-            consume_ready_child_stream(stderr_ready, &mut stderr, &mut stderr_writer)
+        if let Err(error) =
+            flush_pending_output(ready.stderr_write, &*stderr_writer, &mut stderr_pending)
         {
-            deadline = Instant::now() + stall_limit;
+            let cleanup = abort_child(&mut child);
+            drop(stdout);
+            drop(stderr);
+            return Err(GeneratorError::usage(format!(
+                "run CI command {unit_id}: write stderr for pid {pid}: {error}; {cleanup}"
+            )));
+        }
+
+        match consume_ready_child_stream(ready.stdout_read, &mut stdout, &mut stdout_pending) {
+            Some(ChildStreamRead::Output) => deadline = Instant::now() + stall_limit,
+            Some(ChildStreamRead::Backpressure) => {
+                let cleanup = abort_child(&mut child);
+                drop(stdout);
+                drop(stderr);
+                return Err(GeneratorError::usage(format!(
+                    "CI command {unit_id} stdout backpressure exceeded {MAX_PENDING_OUTPUT_BYTES} bytes; {cleanup}"
+                )));
+            }
+            Some(ChildStreamRead::Eof | ChildStreamRead::Interrupted) | None => {}
+        }
+        match consume_ready_child_stream(ready.stderr_read, &mut stderr, &mut stderr_pending) {
+            Some(ChildStreamRead::Output) => deadline = Instant::now() + stall_limit,
+            Some(ChildStreamRead::Backpressure) => {
+                let cleanup = abort_child(&mut child);
+                drop(stdout);
+                drop(stderr);
+                return Err(GeneratorError::usage(format!(
+                    "CI command {unit_id} stderr backpressure exceeded {MAX_PENDING_OUTPUT_BYTES} bytes; {cleanup}"
+                )));
+            }
+            Some(ChildStreamRead::Eof | ChildStreamRead::Interrupted) | None => {}
         }
     };
 
     let drain_deadline = Instant::now() + RUN_CMD_DRAIN_GRACE;
-    while stdout.is_some() || stderr.is_some() {
+    while stdout.is_some()
+        || stderr.is_some()
+        || !stdout_pending.is_empty()
+        || !stderr_pending.is_empty()
+    {
         let remaining = drain_deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             break;
         }
         let timeout = remaining.min(RUN_CMD_EXIT_POLL_QUANTUM);
-        let (stdout_ready, stderr_ready) =
-            match poll_child_streams(stdout.as_ref(), stderr.as_ref(), timeout) {
-                Ok(ready) => ready,
-                Err(error) if error == rustix::io::Errno::INTR => continue,
-                Err(_) => {
-                    thread::sleep(timeout);
-                    continue;
-                }
-            };
-        consume_ready_child_stream(stdout_ready, &mut stdout, &mut stdout_writer);
-        consume_ready_child_stream(stderr_ready, &mut stderr, &mut stderr_writer);
+        let ready = match poll_child_streams(
+            stdout.as_ref(),
+            stderr.as_ref(),
+            (!stdout_pending.is_empty()).then_some(&*stdout_writer),
+            (!stderr_pending.is_empty()).then_some(&*stderr_writer),
+            timeout,
+        ) {
+            Ok(ready) => ready,
+            Err(error) if error == rustix::io::Errno::INTR => continue,
+            Err(error) => {
+                let cleanup = kill_child_group(&child)
+                    .err()
+                    .map_or_else(String::new, |error| {
+                        format!("process-group kill failed: {error}")
+                    });
+                drop(stdout);
+                drop(stderr);
+                return Err(GeneratorError::usage(format!(
+                    "run CI command {unit_id}: poll child tail for pid {pid}: {error}; {cleanup}"
+                )));
+            }
+        };
+        if let Err(error) =
+            flush_pending_output(ready.stdout_write, &*stdout_writer, &mut stdout_pending)
+        {
+            let cleanup = kill_child_group(&child)
+                .err()
+                .map_or_else(String::new, |error| {
+                    format!("process-group kill failed: {error}")
+                });
+            drop(stdout);
+            drop(stderr);
+            return Err(GeneratorError::usage(format!(
+                "run CI command {unit_id}: write stdout tail for pid {pid}: {error}; {cleanup}"
+            )));
+        }
+        if let Err(error) =
+            flush_pending_output(ready.stderr_write, &*stderr_writer, &mut stderr_pending)
+        {
+            let cleanup = kill_child_group(&child)
+                .err()
+                .map_or_else(String::new, |error| {
+                    format!("process-group kill failed: {error}")
+                });
+            drop(stdout);
+            drop(stderr);
+            return Err(GeneratorError::usage(format!(
+                "run CI command {unit_id}: write stderr tail for pid {pid}: {error}; {cleanup}"
+            )));
+        }
+        if matches!(
+            consume_ready_child_stream(ready.stdout_read, &mut stdout, &mut stdout_pending),
+            Some(ChildStreamRead::Backpressure)
+        ) {
+            let _ = kill_child_group(&child);
+            drop(stdout);
+            drop(stderr);
+            return Err(GeneratorError::usage(format!(
+                "CI command {unit_id} stdout tail backpressure exceeded {MAX_PENDING_OUTPUT_BYTES} bytes"
+            )));
+        }
+        if matches!(
+            consume_ready_child_stream(ready.stderr_read, &mut stderr, &mut stderr_pending),
+            Some(ChildStreamRead::Backpressure)
+        ) {
+            let _ = kill_child_group(&child);
+            drop(stdout);
+            drop(stderr);
+            return Err(GeneratorError::usage(format!(
+                "CI command {unit_id} stderr tail backpressure exceeded {MAX_PENDING_OUTPUT_BYTES} bytes"
+            )));
+        }
+    }
+    if stdout.is_some()
+        || stderr.is_some()
+        || !stdout_pending.is_empty()
+        || !stderr_pending.is_empty()
+    {
+        let cleanup = kill_child_group(&child)
+            .err()
+            .map_or_else(String::new, |error| {
+                format!("process-group kill failed: {error}")
+            });
+        if !stdout_pending.is_empty() || !stderr_pending.is_empty() {
+            drop(stdout);
+            drop(stderr);
+            return Err(GeneratorError::usage(format!(
+                "run CI command {unit_id}: output sink backpressure prevented draining pid {pid}; {cleanup}"
+            )));
+        }
     }
     drop(stdout);
     drop(stderr);
@@ -3076,9 +3421,24 @@ fn run_unit(root: &Path, unit: &CiUnit, commands: &[String]) -> Result<(), Gener
 #[cfg(test)]
 mod run_cmd_stall_tests {
     use super::{
-        parse_run_cmd_stall_limit, run_command_with_stall_guard, DEFAULT_RUN_CMD_STALL_SECS,
+        parse_run_cmd_stall_limit, run_command_with_stall_guard, run_command_with_stall_guard_to,
+        DEFAULT_RUN_CMD_STALL_SECS,
     };
+    use std::fs::{self, File};
+    #[cfg(unix)]
+    use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error}"),
+        }
+    }
 
     #[test]
     fn stall_limit_parses_override_and_falls_back() {
@@ -3147,6 +3507,140 @@ mod run_cmd_stall_tests {
         assert!(
             elapsed < Duration::from_secs(3),
             "blocked child must be cancelled near the stall deadline, took {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descendant_output_after_direct_exit_is_drained_and_captured() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-descendant-output-{}",
+            crate::s2::unique_suffix()
+        ));
+        must(
+            fs::create_dir_all(&root),
+            "create descendant output fixture",
+        );
+        let stdout_path = root.join("stdout");
+        let stderr_path = root.join("stderr");
+        let mut stdout = must(File::create(&stdout_path), "create stdout capture");
+        let mut stderr = must(File::create(&stderr_path), "create stderr capture");
+        let started = Instant::now();
+        let result = run_command_with_stall_guard_to(
+            &root,
+            "descendant-output",
+            "printf 'before\\n'; printf 'err-before\\n' >&2; (sleep 1; printf 'tail\\n'; printf 'err-tail\\n' >&2) & exit 0",
+            Duration::from_secs(3),
+            &mut stdout,
+            &mut stderr,
+        );
+        let elapsed = started.elapsed();
+        must(result, "direct child with descendant output must succeed");
+        drop(stdout);
+        drop(stderr);
+        assert_eq!(
+            must(fs::read_to_string(&stdout_path), "read captured stdout"),
+            "before\ntail\n"
+        );
+        assert_eq!(
+            must(fs::read_to_string(&stderr_path), "read captured stderr"),
+            "err-before\nerr-tail\n"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "descendant tail must drain without an unbounded wait, took {elapsed:?}"
+        );
+        must(
+            fs::remove_dir_all(&root),
+            "remove descendant output fixture",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stalled_command_kills_its_descendant_process_group() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-descendant-cleanup-{}",
+            crate::s2::unique_suffix()
+        ));
+        must(
+            fs::create_dir_all(&root),
+            "create descendant cleanup fixture",
+        );
+        let marker = root.join("descendant-survived");
+        let command = format!("(sleep 2; touch '{}') & exec sleep 30", marker.display());
+        let started = Instant::now();
+        let result = run_command_with_stall_guard(
+            &root,
+            "descendant-cleanup",
+            &command,
+            Duration::from_millis(200),
+        );
+        let elapsed = started.elapsed();
+        let message = match result {
+            Ok(()) => String::from("<unexpected success>"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("stall"),
+            "silent parent must fail naming the stall, got: {message}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "stalled command must be cancelled near its deadline, took {elapsed:?}"
+        );
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(
+            !marker.exists(),
+            "a descendant must not survive process-group cancellation"
+        );
+        must(
+            fs::remove_dir_all(&root),
+            "remove descendant cleanup fixture",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_backpressure_does_not_block_stall_owner() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-output-backpressure-{}",
+            crate::s2::unique_suffix()
+        ));
+        must(
+            fs::create_dir_all(&root),
+            "create output backpressure fixture",
+        );
+        let (mut stdout, _stdout_reader) = must(UnixStream::pair(), "create stdout socket");
+        let stderr_path = root.join("stderr");
+        let mut stderr = must(File::create(&stderr_path), "create stderr capture");
+        let started = Instant::now();
+        let result = run_command_with_stall_guard_to(
+            &root,
+            "output-backpressure",
+            "yes x",
+            Duration::from_millis(200),
+            &mut stdout,
+            &mut stderr,
+        );
+        let elapsed = started.elapsed();
+        let message = match result {
+            Ok(()) => String::from("<unexpected success>"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("backpressure") || message.contains("stall"),
+            "blocked output must fail with a bounded backpressure/stall error, got: {message}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "blocked output must not block the stall owner, took {elapsed:?}"
+        );
+        drop(stdout);
+        drop(stderr);
+        must(
+            fs::remove_dir_all(&root),
+            "remove output backpressure fixture",
         );
     }
 
