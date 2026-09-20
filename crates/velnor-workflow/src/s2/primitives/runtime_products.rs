@@ -35,6 +35,7 @@ use crate::s2::closure::{
 use crate::s2::{
     config_rust_toolchain, workflow_setup_action_repository, yaml_scalar, ActionPin,
     GeneratorError, ProjectConfig, RustToolchain, GENERATED_HEADER, HOSTED_WORKFLOW_RUNTIME_HOME,
+    MACOS_HOSTED_RUNS_ON,
 };
 
 /// The workflow file the producer renders into. Consumers pin this path in
@@ -70,7 +71,6 @@ pub(crate) fn canonical_runtime_products_side_file(primitive: &str) -> Option<&'
 /// silently reselect them.
 const LINUX_X64_RUNNER: &str = "ubuntu-24.04";
 const LINUX_ARM64_RUNNER: &str = "ubuntu-24.04-arm";
-const MACOS_ARM64_RUNNER: &str = "macos-15";
 
 /// The manifest acceptance filter, exactly as the setup action evaluates it:
 /// full closure, a well-formed source revision, release profile, empty
@@ -135,7 +135,7 @@ fn platforms() -> [Platform; 3] {
         Platform {
             os: "macOS",
             arch: "ARM64",
-            runner: MACOS_ARM64_RUNNER,
+            runner: MACOS_HOSTED_RUNS_ON,
         },
     ]
 }
@@ -1258,7 +1258,7 @@ mod tests {
         for (os, arch, runner) in [
             ("Linux", "X64", LINUX_X64_RUNNER),
             ("Linux", "ARM64", LINUX_ARM64_RUNNER),
-            ("macOS", "ARM64", MACOS_ARM64_RUNNER),
+            ("macOS", "ARM64", MACOS_HOSTED_RUNS_ON),
         ] {
             assert!(
                 matrix.contains(&format!(
@@ -1289,12 +1289,16 @@ mod tests {
             fs::read_to_string(&mapping_file),
             "read the producer renderer",
         );
-        for runner in [LINUX_X64_RUNNER, LINUX_ARM64_RUNNER, MACOS_ARM64_RUNNER] {
+        for runner in [LINUX_X64_RUNNER, LINUX_ARM64_RUNNER] {
             assert!(
                 mapping_source.contains(&format!("\"{runner}\"")),
                 "the fixed mapping lives in the producer renderer: {runner}"
             );
         }
+        assert!(
+            mapping_source.contains("runner: MACOS_HOSTED_RUNS_ON"),
+            "the macOS builder reuses the hosted Apple runner contract: {mapping_source}"
+        );
         let root = must(
             std::process::Command::new("git")
                 .arg("-C")
@@ -1788,7 +1792,7 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "dc9c5d95a00c193a7c2332e348398ccd15f05df64252c863fa14558197b2843b";
+        const PINNED: &str = "a7b4721e9dbd7a19fb6fbbb51aca185678ebeb1b0b05b16be9c15d463ff39765";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");
