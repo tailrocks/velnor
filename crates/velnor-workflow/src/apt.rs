@@ -4579,7 +4579,7 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
             ));
         }
     }
-    check_sentinel(inputs.incoming).map_err(|error| {
+    let snapshot = IncomingSnapshot::capture(inputs.incoming).map_err(|error| {
         GeneratorError::usage(format!(
             "publish: refusing — verify has not armed the reprepro sentinel: {error}"
         ))
@@ -4591,13 +4591,11 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
                 "publish: discovery selection changed after verification",
             ));
         }
-        verify_discovery_incoming(selection_path, inputs.incoming)?;
     } else if inputs.selection_path.is_some() || inputs.selection.is_some() {
         return Err(GeneratorError::usage(
             "publish: selection and selection path must be supplied together",
         ));
     }
-    let snapshot = IncomingSnapshot::capture(inputs.incoming)?;
     if let (Some(expected), Some(actual)) = (inputs.selection, &snapshot.selection)
         && expected != actual
     {
