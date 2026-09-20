@@ -202,14 +202,17 @@ pub(crate) fn capture_bindings<S: RawObjectStore>(
         .context("reopen captured model session")?;
     let workload_artifact = CapturedWorkloadArtifact::from_raw_object(&artifact_ref)
         .context("reopen derived workload artifact")?;
+    let model_summary = summarize_raw(&model_ref);
+    let artifact_summary = summarize_raw(&artifact_ref);
+    let source_summary = summarize_raw(&source_ref);
     let raw_objects = vec![model_ref, source_ref, artifact_ref];
     let report = BindingCaptureReport {
         schema_version: 1,
         observed_at_utc: observed_at_utc.to_owned(),
         model_config: prepared_model.observation,
-        model_session: summarize_raw(&model_ref),
-        workload_artifact: summarize_raw(&artifact_ref),
-        workload_source: summarize_raw(&source_ref),
+        model_session: model_summary,
+        workload_artifact: artifact_summary,
+        workload_source: source_summary,
         workload_input_sha256: prepared_workload.source_digest,
         workflow_count: prepared_workload.workflow_count,
         scanner_dependency_count: prepared_workload.scanner_dependency_count,

@@ -82,7 +82,7 @@ pub async fn run(args: G0LiveCollectArgs) -> Result<()> {
     let (transport, auth) = authenticated_transport()?;
     let mut store = RawObjectFileStore::new(args.evidence_dir.join("raw"))
         .with_context(|| format!("create raw store below {}", args.evidence_dir.display()))?;
-    let mut collection = collect_live(
+    let collection = collect_live(
         &transport,
         &mut store,
         auth,
