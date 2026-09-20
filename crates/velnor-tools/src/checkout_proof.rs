@@ -1427,6 +1427,32 @@ mod tests {
     }
 
     #[test]
+    fn archive_census_rejects_a_deflate_stream_that_overflows_the_member_cap() {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::FileOptions::<()>::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file("source/manifest.json", options).unwrap();
+        let chunk = [0_u8; 8192];
+        let mut remaining = MAX_ARCHIVE_MEMBER_BYTES + 1;
+        while remaining > 0 {
+            let length = usize::try_from(remaining.min(chunk.len() as u64)).unwrap();
+            writer.write_all(&chunk[..length]).unwrap();
+            remaining -= length as u64;
+        }
+        let mut archive = writer.finish().unwrap().into_inner();
+        let central = central_offset_for_test(&archive);
+        let local = usize::try_from(read_u32(&archive, central + 42).unwrap()).unwrap();
+        write_u32_for_test(&mut archive, local + 22, MAX_ARCHIVE_MEMBER_BYTES as u32);
+        write_u32_for_test(&mut archive, central + 24, MAX_ARCHIVE_MEMBER_BYTES as u32);
+
+        let target = SnapshotMemberName::parse("source/manifest.json".to_owned()).unwrap();
+        assert_eq!(
+            census_archive(&archive, &target),
+            Err(CheckoutProofError::ArchiveMemberTooLarge)
+        );
+    }
+
+    #[test]
     fn provider_url_rejects_userinfo_and_explicit_ports() {
         let archive = archive_fixture();
         let (subject, job, _) = fixture_json(&archive);
