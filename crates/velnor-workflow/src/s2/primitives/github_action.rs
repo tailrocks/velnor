@@ -113,6 +113,7 @@ impl Primitive for GithubActionFixtures {
                         "parse github-action-fixtures consumer workflow `{fixture}`: {error}"
                     ))
                 })?;
+                validate_consumer_workflow_graph(&rendered, ctx.pins.checkout, &fixture)?;
                 let output = consumer_workflow_path(&unit.id, &fixture);
                 if files.insert(output.clone(), rendered).is_some() {
                     return Err(GeneratorError::usage(format!(
@@ -141,6 +142,80 @@ fn consumer_uses_marker_named(source: &str, marker: &str) -> bool {
             .or_else(|| line.strip_prefix("uses:"))
             .is_some_and(|value| value.contains(marker))
     })
+}
+
+fn validate_consumer_workflow_graph(
+    source: &str,
+    checkout_reference: &str,
+    fixture: &str,
+) -> Result<(), GeneratorError> {
+    let document = serde_yaml::from_str::<serde_yaml::Value>(source).map_err(|error| {
+        GeneratorError::usage(format!(
+            "parse github-action-fixtures consumer workflow `{fixture}`: {error}"
+        ))
+    })?;
+    let triggers = document.get("on").ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "github-action-fixtures consumer workflow `{fixture}` must declare automatic triggers"
+        ))
+    })?;
+    for trigger in ["pull_request", "push"] {
+        if !workflow_trigger_present(triggers, trigger) {
+            return Err(GeneratorError::usage(format!(
+                "github-action-fixtures consumer workflow `{fixture}` must trigger on `{trigger}`"
+            )));
+        }
+    }
+    let jobs = document
+        .get("jobs")
+        .and_then(serde_yaml::Value::as_mapping)
+        .ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "github-action-fixtures consumer workflow `{fixture}` must declare jobs"
+            ))
+        })?;
+    let checkout_reference = checkout_reference
+        .split_once(" #")
+        .map_or(checkout_reference, |(reference, _)| reference);
+    for (job_name, job) in jobs {
+        let steps = job
+            .get("steps")
+            .and_then(serde_yaml::Value::as_sequence)
+            .ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "github-action-fixtures consumer workflow `{fixture}` job `{job_name:?}` must declare steps"
+                ))
+            })?;
+        let mut checkout_seen = false;
+        for (index, step) in steps.iter().enumerate() {
+            let Some(uses) = step.get("uses").and_then(serde_yaml::Value::as_str) else {
+                continue;
+            };
+            if uses == checkout_reference {
+                checkout_seen = true;
+            } else if uses.starts_with("./") && !checkout_seen {
+                return Err(GeneratorError::usage(format!(
+                    "github-action-fixtures consumer workflow `{fixture}` job `{job_name:?}` local action at step {index} must follow pinned checkout `{checkout_reference}`"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn workflow_trigger_present(triggers: &serde_yaml::Value, expected: &str) -> bool {
+    match triggers {
+        serde_yaml::Value::Mapping(mapping) => mapping
+            .keys()
+            .any(|key| key.as_str().eq_ignore_ascii_case(expected)),
+        serde_yaml::Value::Sequence(sequence) => sequence.iter().any(|value| {
+            value
+                .as_str()
+                .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+        }),
+        serde_yaml::Value::String(value) => value.eq_ignore_ascii_case(expected),
+        _ => false,
+    }
 }
 
 fn consumer_workflow_path(unit_id: &str, fixture: &str) -> PathBuf {
@@ -299,6 +374,32 @@ mod tests {
         assert!(failure.starts_with("if bash -- 'tests/consumer-failure.sh'; then"));
         assert!(failure.contains("unexpectedly succeeded"));
         assert!(failure.ends_with("exit 1; fi"));
+    }
+
+    #[test]
+    fn generated_consumer_graph_requires_automatic_triggers_and_checkout_order() {
+        let missing_trigger = "on: workflow_dispatch\njobs:\n  consume:\n    steps:\n      - uses: actions/checkout@deadbeef\n      - uses: ./\n";
+        let error = super::validate_consumer_workflow_graph(
+            missing_trigger,
+            "actions/checkout@deadbeef",
+            "fixture.yml",
+        )
+        .err()
+        .unwrap_or_else(|| panic!("dispatch-only consumers must be rejected"));
+        assert!(error.to_string().contains("pull_request"), "{error}");
+
+        let checkout_after_local = "on:\n  pull_request:\n  push:\njobs:\n  consume:\n    steps:\n      - uses: ./\n      - uses: actions/checkout@deadbeef\n";
+        let error = super::validate_consumer_workflow_graph(
+            checkout_after_local,
+            "actions/checkout@deadbeef",
+            "fixture.yml",
+        )
+        .err()
+        .unwrap_or_else(|| panic!("local actions must follow checkout"));
+        assert!(
+            error.to_string().contains("must follow pinned checkout"),
+            "{error}"
+        );
     }
 
     #[test]
