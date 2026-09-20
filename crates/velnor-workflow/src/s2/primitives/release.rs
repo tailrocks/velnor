@@ -2422,6 +2422,7 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
         r#"          blocked_targets="$(jq -c '.blocked_targets // []' "$contract")"
           [ "$blocked_targets" = '[]' ] || { echo '::error::native product has blocked targets; publication is blocked until every required target is buildable' >&2; exit 1; }
           product_version="$(jq -er '.version' "$contract")"
+          source_ref="$(jq -er '.source_ref' "$contract")"
           source_commit="#,
     );
     output = output.replace(
@@ -2654,7 +2655,7 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
             start..end,
             r#"          : > native-product-component-census.jsonl
           while IFS= read -r target; do cat "native-product/components-$target.jsonl" >> native-product-component-census.jsonl; done < <(jq -r '.[]' <<<"$expected_targets")
-          actual_components="$(jq -s '[.[] | .name] | unique | sort' native-product-component-census.jsonl)""#,
+          actual_components="$(jq -sc '[.[] | .name] | unique | sort' native-product-component-census.jsonl)""#,
         );
     }
     output = output.replace(
@@ -7463,6 +7464,167 @@ mod tests {
             "numeric release id must fail the rendered string-only rerun"
         );
         fs::remove_dir_all(rerun_root).expect("remove rerun fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rendered_native_product_census_binds_source_ref_under_nounset() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let config = native_identity_config(&["release.yml", "preview.yml", "native-product.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let publish = yaml_job(&workflow, "publish");
+        let marker = "      - name: Verify native product census and resolve provider release id\n";
+        let start = publish
+            .find(marker)
+            .expect("rendered publisher must carry the native census step");
+        let step = &publish[start + marker.len()..];
+        let run_marker = "        run: |\n";
+        let run_start = step
+            .find(run_marker)
+            .expect("native census step must carry a shell body");
+        let script_tail = &step[run_start + run_marker.len()..];
+        let end = script_tail
+            .find("\n      - name: ")
+            .expect("native census shell must end at the next rendered step");
+        let census = script_tail[..end]
+            .lines()
+            .map(|line| line.strip_prefix("          ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-native-census-source-ref-{}",
+            crate::s2::unique_suffix()
+        ));
+        fs::create_dir_all(root.join("native-product")).expect("create native product fixture");
+        let contract_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.github/ci/native-product-contract.json");
+        let mut contract: Value = serde_json::from_str(
+            &fs::read_to_string(contract_path).expect("read native product contract source"),
+        )
+        .expect("parse native product contract source");
+        contract["blocked_targets"] = json!([]);
+        contract["schema"] = contract["manifest_schema"].clone();
+        contract["version"] = json!("1.2.3");
+        contract["source_repository"] = json!("tailrocks/velnor");
+        contract["source_ref"] = json!("refs/tags/v1.2.3");
+        contract["source_commit"] = json!(FIXTURE_REVISION);
+        contract["release_tag"] = json!("v1.2.3");
+        let contract_bytes =
+            serde_json::to_vec_pretty(&contract).expect("serialize contract fixture");
+        fs::create_dir_all(root.join(".github/ci")).expect("create source contract fixture");
+        fs::write(
+            root.join(".github/ci/native-product-contract.json"),
+            &contract_bytes,
+        )
+        .expect("write source contract fixture");
+        let targets = contract["targets"]
+            .as_array()
+            .expect("contract targets")
+            .iter()
+            .map(|target| target.as_str().expect("target string").to_owned())
+            .collect::<Vec<_>>();
+        let components = contract["components"]
+            .as_array()
+            .expect("contract components")
+            .clone();
+        for target in &targets {
+            fs::write(
+                root.join("native-product")
+                    .join(format!("product-contract-{target}.json")),
+                &contract_bytes,
+            )
+            .expect("write target contract fixture");
+            let rows = components
+                .iter()
+                .map(|component| {
+                    serde_json::to_string(&json!({
+                        "name": component["name"],
+                        "target": target,
+                    }))
+                    .expect("serialize component row")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            fs::write(
+                root.join("native-product")
+                    .join(format!("components-{target}.jsonl")),
+                format!("{rows}\n"),
+            )
+            .expect("write component census fixture");
+            fs::write(
+                root.join("native-product")
+                    .join(format!("artifacts-{target}.jsonl")),
+                "[]\n",
+            )
+            .expect("write artifact census fixture");
+        }
+
+        let fake_bin = root.join("fake-bin");
+        fs::create_dir_all(&fake_bin).expect("create fake provider bin");
+        let gh = fake_bin.join("gh");
+        fs::write(
+            &gh,
+            "#!/bin/sh\nset -eu\ntest \"${1:-}\" = api\nif test \"${2:-}\" = -i; then\ncat <<'HTTP'\nHTTP/2 200\ncontent-type: application/json\n\nHTTP\nfi\ncat <<'JSON'\n{\"id\":12345,\"tag_name\":\"v1.2.3\",\"target_commitish\":\"0123456789abcdef0123456789abcdef01234567\",\"draft\":true,\"prerelease\":false}\nJSON\n",
+        )
+        .expect("write fake provider command");
+        let mut permissions = fs::metadata(&gh)
+            .expect("stat fake provider command")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&gh, permissions).expect("make fake provider command executable");
+        let cargo = fake_bin.join("cargo");
+        fs::write(
+            &cargo,
+            "#!/bin/sh\nset -eu\ntest \"${1:-}\" = metadata\ncat <<'JSON'\n{\"packages\":[{\"name\":\"velnor-runner\",\"version\":\"0.1.0\"},{\"name\":\"velnor-workflow\",\"version\":\"0.1.0\"},{\"name\":\"velnorctl\",\"version\":\"0.1.0\"}]}\nJSON\n",
+        )
+        .expect("write fake cargo metadata command");
+        let mut permissions = fs::metadata(&cargo)
+            .expect("stat fake cargo command")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&cargo, permissions).expect("make fake cargo command executable");
+
+        let github_output = root.join("github-output");
+        let path = format!(
+            "{}:{}",
+            fake_bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let result = Command::new("bash")
+            .current_dir(&root)
+            .args(["-eu", "-o", "pipefail", "-c", census.as_str()])
+            .env("PATH", path)
+            .env("VERSION", "1.2.3")
+            .env("COMMIT", FIXTURE_REVISION)
+            .env("GITHUB_REPOSITORY", "tailrocks/velnor")
+            .env("GITHUB_REF", "refs/tags/v1.2.3")
+            .env("GITHUB_REF_NAME", "v1.2.3")
+            .env("GITHUB_OUTPUT", &github_output)
+            .env("GH_TOKEN", "fixture-token")
+            .output()
+            .expect("run rendered native census shell");
+        assert!(
+            result.status.success(),
+            "rendered census must pass with source_ref bound under nounset; stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let outputs = fs::read_to_string(&github_output).expect("read rendered census outputs");
+        assert!(
+            outputs.contains("release_id=12345"),
+            "provider release id output: {outputs}"
+        );
+        assert!(
+            outputs.contains("contract=native-product/product-contract-"),
+            "provider contract output: {outputs}"
+        );
+        fs::remove_dir_all(root).expect("remove native census fixture");
     }
 
     #[test]
