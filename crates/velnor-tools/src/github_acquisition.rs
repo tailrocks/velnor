@@ -55,6 +55,12 @@ pub mod g0_mapping;
 #[path = "g0_binding_producer.rs"]
 pub mod binding_producer;
 
+/// Offline, fail-closed checkout-proof and immutable snapshot verification.
+/// This module exposes only a typed CAS adapter; it does not wire a storage
+/// implementation or enable live authority.
+#[path = "checkout_proof.rs"]
+pub mod checkout_proof;
+
 /// Explicit CLI boundary for a read-only live capture.  It writes only to a
 /// caller-selected local evidence directory and never dispatches or mutates
 /// GitHub.
