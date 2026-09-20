@@ -5,14 +5,15 @@
 //! IDs or successful empty rows.
 
 use super::live_collector::{
-    LiveCheck, LiveCheckoutObservation, LiveCollection, LiveDependency, LiveExecution,
-    LivePullRequest, LivePullRequestIdentity, LiveRepository, LiveWorkflow,
+    LiveArtifact, LiveCheck, LiveCheckoutObservation, LiveCollection, LiveDependency,
+    LiveExecution, LivePullRequest, LivePullRequestIdentity, LiveRepository, LiveWorkflow,
 };
 use super::{sha256_digest, AcquisitionState, ApiKind, HttpMethod, RawObjectRef, RequestRecord};
 use crate::evidence_check::{ManifestDocument, ManifestRepository, CANONICAL_REPOSITORIES};
 use crate::g0_contract::*;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use serde_json::Value;
 use serde_yaml::Value as YamlValue;
 use std::collections::{BTreeMap, BTreeSet};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -1026,7 +1027,6 @@ fn map_repository(
             &["workflow_artifacts"],
         )?;
         if artifact.run_id == 0
-            || artifact.run_attempt.is_none()
             || !is_sha(&artifact.run_head_sha)
             || !is_sha256_digest(&artifact.digest)
             || artifact.expired.is_none()
@@ -1154,23 +1154,7 @@ fn map_repository(
     let artifacts = repository
         .artifacts
         .iter()
-        .map(|artifact| {
-            Ok(G0ArtifactObservation {
-                artifact_id: artifact.artifact_id,
-                run_id: artifact.run_id,
-                run_attempt: artifact.run_attempt.ok_or_else(|| {
-                    anyhow!("artifact {} lacks attempt identity", artifact.artifact_id)
-                })?,
-                run_head_sha: artifact.run_head_sha.clone(),
-                name: artifact.name.clone(),
-                digest: artifact.digest.clone(),
-                expired: artifact.expired.ok_or_else(|| {
-                    anyhow!("artifact {} lacks expired state", artifact.artifact_id)
-                })?,
-                source_url: artifact.source_url.clone(),
-                raw_object_refs: artifact.raw_object_refs.clone(),
-            })
-        })
+        .map(map_artifact_observation)
         .collect::<Result<Vec<_>>>()?;
     Ok(G0RepositoryInventory {
         repository: repository.repository.clone(),
@@ -1183,6 +1167,38 @@ fn map_repository(
         open_prs,
         main_checks,
         raw_object_refs: repository.raw_object_refs.clone(),
+    })
+}
+
+fn map_artifact_observation(artifact: &LiveArtifact) -> Result<G0ArtifactObservation> {
+    let run_attempt = artifact.run_attempt.ok_or_else(|| {
+        anyhow!(
+            "artifact {} has unknown run attempt; run-scoped artifact API did not provide one",
+            artifact.artifact_id
+        )
+    })?;
+    let expired = artifact
+        .expired
+        .ok_or_else(|| anyhow!("artifact {} lacks expired state", artifact.artifact_id))?;
+    if artifact.run_id == 0
+        || !is_sha(&artifact.run_head_sha)
+        || !is_sha256_digest(&artifact.digest)
+    {
+        bail!(
+            "artifact {} lacks immutable run identity or digest",
+            artifact.artifact_id
+        );
+    }
+    Ok(G0ArtifactObservation {
+        artifact_id: artifact.artifact_id,
+        run_id: artifact.run_id,
+        run_attempt,
+        run_head_sha: artifact.run_head_sha.clone(),
+        name: artifact.name.clone(),
+        digest: artifact.digest.clone(),
+        expired,
+        source_url: artifact.source_url.clone(),
+        raw_object_refs: artifact.raw_object_refs.clone(),
     })
 }
 
@@ -2834,9 +2850,12 @@ fn utc_now() -> String {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::github_acquisition::live_collector::{LiveRuleset, LiveRulesetCheck, LiveSourceJob};
+    use crate::github_acquisition::live_collector::{
+        parse_artifact, LiveRuleset, LiveRulesetCheck, LiveSourceJob,
+    };
     use crate::github_acquisition::sha256_digest;
     use base64::engine::general_purpose::STANDARD as BASE64;
+    use std::{env, fs, path::PathBuf};
 
     fn raw_object(kind: &str, raw_id: &str, value: serde_json::Value) -> RawObjectRef {
         let bytes = serde_json::to_vec(&value).expect("fixture JSON");
@@ -3010,6 +3029,180 @@ mod tests {
         )
         .expect_err("provider/local duplicate must fail closed");
         assert!(error.to_string().contains("provider/local"));
+    }
+
+    #[test]
+    #[ignore = "requires VELNOR_REAL_API_CORPUS pointing at the frozen corpus"]
+    fn frozen_real_api_corpus_preserves_raw_links_failures_and_unknown_artifact_attempt() {
+        let root =
+            PathBuf::from(env::var("VELNOR_REAL_API_CORPUS").expect("set VELNOR_REAL_API_CORPUS"));
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join("manifest.json")).expect("read corpus manifest"),
+        )
+        .expect("parse corpus manifest");
+        let mut requests = Vec::new();
+        let mut raw_objects = Vec::new();
+        let mut raw_ids_by_path = BTreeMap::new();
+        let mut missing_body_records = 0;
+        for (index, record) in manifest["request_records"]
+            .as_array()
+            .expect("request records array")
+            .iter()
+            .enumerate()
+        {
+            let Some(body_path) = record.pointer("/raw/body").and_then(Value::as_str) else {
+                missing_body_records += 1;
+                continue;
+            };
+            let body = fs::read(root.join(body_path)).expect("read captured response body");
+            let expected_digest = manifest["raw_files"]
+                .as_array()
+                .expect("raw files array")
+                .iter()
+                .find(|raw| raw["path"].as_str() == Some(body_path))
+                .and_then(|raw| raw["sha256"].as_str())
+                .expect("manifest digest for response body");
+            assert_eq!(
+                sha256_digest(&body).strip_prefix("sha256:"),
+                Some(expected_digest),
+                "captured body digest changed for {body_path}"
+            );
+            let raw_id = format!("real-corpus-{index}-response");
+            let mut raw = raw_bytes("real.api.fixture", &raw_id, &body);
+            raw.request_id = record["source_request_id"]
+                .as_str()
+                .expect("source request ID")
+                .to_owned();
+            let request_id = raw.request_id.clone();
+            let endpoint = record["url"].as_str().expect("request URL");
+            requests.push(RequestRecord {
+                request_id,
+                api: ApiKind::Rest,
+                method: HttpMethod::Get,
+                endpoint_or_operation: endpoint.to_owned(),
+                query_base64: BASE64.encode(b"{}"),
+                variables_base64: BASE64.encode(b"{}"),
+                query_sha256: Some(sha256_digest(b"{}")),
+                variables_sha256: Some(sha256_digest(b"{}")),
+                redacted_variables: None,
+                auth_identity_ref: "real-corpus.auth".to_owned(),
+                started_at_utc: "2026-09-20T08:03:18Z".to_owned(),
+                completed_at_utc: "2026-09-20T08:03:19Z".to_owned(),
+                http_status: Some(
+                    u16::try_from(record["status"].as_u64().expect("HTTP status"))
+                        .expect("HTTP status range"),
+                ),
+                api_request_id: Some(format!("real-corpus-request-{index}")),
+                rate_limit: Some(crate::github_acquisition::RateLimitObservation {
+                    limit: Some(5000),
+                    remaining: Some(4999),
+                    used: Some(1),
+                    reset_at: Some("2026-09-20T09:00:00Z".to_owned()),
+                    retry_after: None,
+                }),
+                safe_scopes: Some(vec!["actions:read".to_owned()]),
+                page: crate::github_acquisition::PageState {
+                    number: record["page"].as_u64().expect("page") as u32,
+                    per_page: Some(100),
+                    link_next: None,
+                    cursor_in: None,
+                    cursor_out: None,
+                    has_next_page: Some(!record["has_next"].as_bool().expect("has_next")),
+                    items_returned: 1,
+                },
+                response_raw_ref: Some(raw_id.clone()),
+                error_raw_ref: None,
+                state: AcquisitionState::Complete,
+                complete: true,
+                truncation_reason: None,
+            });
+            raw_ids_by_path.insert(body_path.to_owned(), raw_id);
+            raw_objects.push(raw);
+        }
+        assert_eq!(
+            requests.len(),
+            8,
+            "eight captured API response records have bodies"
+        );
+        assert_eq!(
+            missing_body_records, 2,
+            "metadata records without response bodies remain unresolved"
+        );
+        let request_by_id = index_unique_requests(&requests).expect("unique captured requests");
+        validate_request_raw_bindings(&requests, &raw_objects, &request_by_id)
+            .expect("real response/raw backlinks remain exact");
+
+        let run_body: Value = serde_json::from_slice(
+            &fs::read(root.join("raw/velnor/run-35493166478/run.body")).expect("read captured run"),
+        )
+        .expect("parse captured run");
+        let repository_body: Value = serde_json::from_slice(
+            &fs::read(root.join("raw/metadata/tailrocks-velnor/repository.body"))
+                .expect("read captured repository"),
+        )
+        .expect("parse captured repository");
+        let artifacts_body: Value = serde_json::from_slice(
+            &fs::read(root.join("raw/velnor/run-35493166478/artifacts/page-0001.body"))
+                .expect("read captured artifacts"),
+        )
+        .expect("parse captured artifacts");
+        let artifact_raw_id = raw_ids_by_path
+            .get("raw/velnor/run-35493166478/artifacts/page-0001.body")
+            .expect("artifact list raw reference")
+            .clone();
+        let repository_id = repository_body["id"].as_u64().expect("repository ID");
+        let run_id = run_body["id"].as_u64().expect("run ID");
+        let run_head_sha = run_body["head_sha"].as_str().expect("run head SHA");
+        let artifacts = artifacts_body["artifacts"]
+            .as_array()
+            .expect("artifact array")
+            .iter()
+            .map(|value| {
+                parse_artifact(
+                    value,
+                    "tailrocks/velnor",
+                    repository_id,
+                    run_id,
+                    run_head_sha,
+                    vec![artifact_raw_id.clone()],
+                )
+            })
+            .collect::<Result<Vec<_>>>()
+            .expect("parse real artifact records");
+        assert_eq!(artifacts.len(), 2);
+        assert!(artifacts
+            .iter()
+            .all(|artifact| artifact.run_attempt.is_none()));
+        let error = map_artifact_observation(&artifacts[0])
+            .expect_err("run-scoped artifact without attempt must not enter G0 inventory");
+        assert!(error.to_string().contains("unknown run attempt"));
+
+        let jobs_body: Value = serde_json::from_slice(
+            &fs::read(root.join("raw/velnor/run-35493166478/attempt-1/jobs/page-0001.body"))
+                .expect("read captured jobs"),
+        )
+        .expect("parse captured jobs");
+        let skipped_jobs = jobs_body["jobs"]
+            .as_array()
+            .expect("jobs array")
+            .iter()
+            .filter(|job| job["conclusion"].as_str() == Some("skipped"))
+            .count();
+        assert_eq!(skipped_jobs, 48, "real skipped jobs must remain skipped");
+        let checks_body: Value = serde_json::from_slice(
+            &fs::read(root.join(
+                "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs/page-0001.body",
+            ))
+            .expect("read captured checks"),
+        )
+        .expect("parse captured checks");
+        let failed_checks = checks_body["check_runs"]
+            .as_array()
+            .expect("check runs array")
+            .iter()
+            .filter(|check| check["conclusion"].as_str() == Some("failure"))
+            .count();
+        assert_eq!(failed_checks, 1, "real failed check must remain failed");
     }
 
     #[test]

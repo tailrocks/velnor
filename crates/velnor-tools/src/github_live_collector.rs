@@ -2088,7 +2088,7 @@ fn parse_job(
     })
 }
 
-fn parse_artifact(
+pub(crate) fn parse_artifact(
     value: &Value,
     repository: &str,
     repository_id: u64,
