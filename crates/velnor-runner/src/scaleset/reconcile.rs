@@ -19,6 +19,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::scaleset::capacity::{AcquireOutcome, CapacityLedger, LedgerLane, LedgerPermitState};
+use crate::scaleset::converge::WorkerLane;
 use crate::scaleset::demand::{DemandState, DemandStore};
 use crate::scaleset::intents::{permit_holder, reconcile_returned_ids, AcquireBatchStore};
 use crate::scaleset::metrics::Metrics;
@@ -210,11 +211,13 @@ fn batch_age(created_at: &str) -> Option<Duration> {
 /// Bounded idle-poll reconcile: resolve uncertain batches from observations
 /// first, then re-acquire at most one overdue batch. Never fails the poll:
 /// a failed re-acquire stays uncertain for the next idle round.
-pub async fn idle_poll<Q: QueueSession, L: CapacityLedger>(
+#[allow(clippy::too_many_arguments, reason = "single idle-reconcile call path")]
+pub async fn idle_poll<Q: QueueSession, L: CapacityLedger, W: WorkerLane>(
     queue: &Q,
     ledger: &mut L,
     demand: &mut DemandStore,
     batches: &mut AcquireBatchStore,
+    lane: &mut W,
     scale_set_id: i32,
     generation: u64,
     metrics: &Metrics,
@@ -223,7 +226,7 @@ pub async fn idle_poll<Q: QueueSession, L: CapacityLedger>(
     let mut report = IdleReport::default();
     let open = batches.open_batches(scale_set_id, 16)?;
     for batch in &open {
-        if resolve_from_observations(ledger, demand, batches, batch, generation).await? {
+        if resolve_from_observations(ledger, demand, batches, lane, batch, generation).await? {
             report.batches_resolved += 1;
         }
     }
@@ -247,14 +250,17 @@ pub async fn idle_poll<Q: QueueSession, L: CapacityLedger>(
 }
 
 /// Resolve one batch when no member remains uncertain: members observed
-/// `acquired` confirm the grant, members observed `terminal` ran elsewhere
-/// (permits released — nothing was ever provisioned for an uncertain
-/// member). Returns whether the batch resolved.
+/// `acquired` confirm the grant; members observed `terminal` stay owned by
+/// the terminal handler unless the lane disowns them (rowless orphans free
+/// their permits under the epoch fence — nothing was ever provisioned for
+/// them and no further messages will arrive). Returns whether the batch
+/// resolved.
 #[allow(clippy::too_many_arguments, reason = "single idle-resolve call site")]
-async fn resolve_from_observations<L: CapacityLedger>(
+async fn resolve_from_observations<L: CapacityLedger, W: WorkerLane>(
     ledger: &mut L,
     demand: &mut DemandStore,
     batches: &mut AcquireBatchStore,
+    lane: &mut W,
     batch: &crate::scaleset::intents::AcquireBatch,
     generation: u64,
 ) -> Result<bool> {
@@ -283,13 +289,47 @@ async fn resolve_from_observations<L: CapacityLedger>(
                 transition_or_adopt(ledger, &holder, LedgerPermitState::Acquiring, generation)?;
             }
             // The terminal handler owns worker cleanup and permit release.
-            // A completion message alone is not cleanup confirmation.
-            DemandState::Terminal => {}
+            // A completion message alone is not cleanup confirmation. The
+            // one exception is a rowless orphan: no worker row exists, so
+            // nobody will ever visit this holder again (a completed job
+            // emits no further messages) and the held permit would leak
+            // occupancy forever. Free it under the epoch fence.
+            DemandState::Terminal => {
+                let owned = lane
+                    .owns_terminal_cleanup(*request_id)
+                    .map_err(|error| anyhow::anyhow!("check terminal ownership: {error}"))?;
+                if !owned {
+                    fenced_release_orphan(ledger, &holder, generation)?;
+                }
+            }
             _ => {}
         }
     }
     batches.resolve(&batch.batch_id, false)?;
     Ok(true)
+}
+
+/// Release a rowless orphan's permit under the epoch fence. The demand
+/// rows were read under `generation`, so a moved epoch means the Terminal
+/// observation may be stale — bail and let the next poll retry rather
+/// than free another epoch's permit. Idempotent: an already-released
+/// holder is a no-op.
+fn fenced_release_orphan<L: CapacityLedger>(
+    ledger: &mut L,
+    holder: &str,
+    generation: u64,
+) -> Result<bool> {
+    let fresh = ledger
+        .generation()
+        .map_err(|error| anyhow::anyhow!("re-read ledger generation: {error}"))?;
+    if fresh != generation {
+        anyhow::bail!(
+            "ledger generation moved during idle resolve (saw {generation}, now {fresh}); retry under the fresh epoch"
+        );
+    }
+    ledger
+        .release(holder)
+        .map_err(|error| anyhow::anyhow!("release orphaned holder: {error}"))
 }
 
 pub(crate) fn transition_or_adopt<L: CapacityLedger>(
@@ -480,6 +520,46 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| Ok(request_ids.to_vec()))
                 .map_err(QueueError)
+        }
+    }
+
+    struct OwnershipLane {
+        owned: bool,
+    }
+
+    impl WorkerLane for OwnershipLane {
+        type Error = std::convert::Infallible;
+
+        async fn provision(
+            &mut self,
+            _intent: &crate::scaleset::intents::ProvisionIntent,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn note_assigned(
+            &mut self,
+            _assigned: &velnor_model::ScaleSetJobAssigned,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn note_started(
+            &mut self,
+            _started: &velnor_model::ScaleSetJobStarted,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn note_terminal(
+            &mut self,
+            _completed: &velnor_model::ScaleSetJobCompleted,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn owns_terminal_cleanup(&self, _request_id: i64) -> Result<bool, Self::Error> {
+            Ok(self.owned)
         }
     }
 
@@ -676,11 +756,13 @@ mod tests {
 
         let queue = ScriptedQueue::default();
         *queue.answer.lock().unwrap() = Some(Ok(vec![31]));
+        let mut lane = OwnershipLane { owned: true };
         let report = idle_poll(
             &queue,
             &mut ledger,
             &mut demand,
             &mut batches,
+            &mut lane,
             7,
             generation,
             &metrics,
@@ -699,6 +781,147 @@ mod tests {
         );
         assert_eq!(ledger.holder_state(&holders[1]).unwrap(), None);
         assert_eq!(queue.seen.lock().unwrap().as_slice(), &[vec![31, 32]]);
+    }
+
+    #[tokio::test]
+    async fn idle_poll_releases_rowless_terminal_orphans() {
+        let path = temp_path("terminal-orphan");
+        let mut demand = DemandStore::open(&path).unwrap();
+        let mut batches = AcquireBatchStore::open(&path).unwrap();
+        let mut ledger = MemLedger::new();
+        ledger.set_max_jobs(4);
+        ledger.reconcile(&[]).unwrap();
+        let metrics = Metrics::new();
+        let generation = ledger.generation().unwrap();
+
+        // Crash orphan: the demand row went `terminal` but the permit
+        // release never landed (crash between the row write and the
+        // terminal path). No worker row exists and a completed job emits
+        // no further messages, so the lane disowns cleanup.
+        for id in [41, 42] {
+            demand.submit_offer(7, &push_offer(id), generation).unwrap();
+            demand
+                .set_state(id, DemandState::Terminal, None, generation)
+                .unwrap();
+            ledger
+                .acquire(
+                    &permit_holder(7, id),
+                    LedgerLane::ScaleSet,
+                    LedgerPermitState::Uncertain,
+                    generation,
+                )
+                .unwrap();
+        }
+        let holders = vec![permit_holder(7, 41), permit_holder(7, 42)];
+        batches
+            .record_intended("acq-orphan", 7, &[41, 42], &holders, generation)
+            .unwrap();
+        batches.resolve("acq-orphan", true).unwrap();
+        assert_eq!(ledger.occupied().unwrap(), 2);
+
+        let queue = ScriptedQueue::default();
+        let mut lane = OwnershipLane { owned: false };
+        let report = idle_poll(
+            &queue,
+            &mut ledger,
+            &mut demand,
+            &mut batches,
+            &mut lane,
+            7,
+            generation,
+            &metrics,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.batches_resolved, 1);
+        assert_eq!(ledger.occupied().unwrap(), 0);
+        assert_eq!(ledger.holder_state(&holders[0]).unwrap(), None);
+        assert_eq!(ledger.holder_state(&holders[1]).unwrap(), None);
+        // Observation-only resolve: no re-acquire traffic for members that
+        // already observed terminal.
+        assert!(queue.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn idle_poll_keeps_lane_owned_terminal_permits() {
+        let path = temp_path("terminal-owned");
+        let mut demand = DemandStore::open(&path).unwrap();
+        let mut batches = AcquireBatchStore::open(&path).unwrap();
+        let mut ledger = MemLedger::new();
+        ledger.set_max_jobs(4);
+        ledger.reconcile(&[]).unwrap();
+        let metrics = Metrics::new();
+        let generation = ledger.generation().unwrap();
+
+        demand.submit_offer(7, &push_offer(43), generation).unwrap();
+        demand
+            .set_state(43, DemandState::Terminal, None, generation)
+            .unwrap();
+        let holder = permit_holder(7, 43);
+        ledger
+            .acquire(
+                &holder,
+                LedgerLane::ScaleSet,
+                LedgerPermitState::Cleaning,
+                generation,
+            )
+            .unwrap();
+        batches
+            .record_intended("acq-owned", 7, &[43], &[holder.clone()], generation)
+            .unwrap();
+        batches.resolve("acq-owned", true).unwrap();
+
+        // The lane owns cleanup (a worker row exists): the terminal handler
+        // — not the idle path — releases this permit.
+        let queue = ScriptedQueue::default();
+        let mut lane = OwnershipLane { owned: true };
+        let report = idle_poll(
+            &queue,
+            &mut ledger,
+            &mut demand,
+            &mut batches,
+            &mut lane,
+            7,
+            generation,
+            &metrics,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.batches_resolved, 1);
+        assert_eq!(
+            ledger.holder_state(&holder).unwrap(),
+            Some(LedgerPermitState::Cleaning)
+        );
+        assert_eq!(ledger.occupied().unwrap(), 1);
+    }
+
+    #[test]
+    fn fenced_orphan_release_bails_on_moved_epoch() {
+        let mut ledger = MemLedger::new();
+        ledger.set_max_jobs(4);
+        ledger.reconcile(&[]).unwrap();
+        let generation = ledger.generation().unwrap();
+        let holder = permit_holder(7, 44);
+        ledger
+            .acquire(
+                &holder,
+                LedgerLane::ScaleSet,
+                LedgerPermitState::Uncertain,
+                generation,
+            )
+            .unwrap();
+        ledger.begin_epoch();
+        let error = fenced_release_orphan(&mut ledger, &holder, generation).unwrap_err();
+        assert!(
+            error.to_string().contains("retry under the fresh epoch"),
+            "unexpected fence error: {error:#}"
+        );
+        // No release happened: the next poll retries under the fresh epoch.
+        assert_eq!(
+            ledger.holder_state(&holder).unwrap(),
+            Some(LedgerPermitState::Uncertain)
+        );
+        assert_eq!(ledger.occupied().unwrap(), 1);
     }
 
     #[test]

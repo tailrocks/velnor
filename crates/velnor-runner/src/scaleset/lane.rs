@@ -1631,6 +1631,16 @@ impl WorkerLane for DaemonWorkerLane {
         self.opportunistic_sweep();
         Ok(())
     }
+
+    fn owns_terminal_cleanup(&self, request_id: i64) -> Result<bool, Self::Error> {
+        let key = self.terminal_key(request_id)?;
+        let owned = self
+            .registry
+            .get(&key)
+            .map_err(|error| LaneError::new("read worker row", error))?
+            .is_some();
+        Ok(owned)
+    }
 }
 
 #[cfg(test)]

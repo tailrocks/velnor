@@ -173,9 +173,15 @@ impl<Q, L, W> Processor<Q, L, W> {
     }
 
     /// Disjoint mutable access to the reconcile inputs (one method so the
-    /// borrow checker sees the disjoint fields).
-    pub fn parts_mut(&mut self) -> (&mut L, &mut DemandStore, &mut AcquireBatchStore) {
-        (&mut self.ledger, &mut self.demand, &mut self.batches)
+    /// borrow checker sees the disjoint fields). The lane answers worker
+    /// ownership for the idle orphan release.
+    pub fn parts_mut(&mut self) -> (&mut L, &mut DemandStore, &mut AcquireBatchStore, &mut W) {
+        (
+            &mut self.ledger,
+            &mut self.demand,
+            &mut self.batches,
+            &mut self.lane,
+        )
     }
 
     pub fn ledger_ref(&self) -> &L {
@@ -1414,11 +1420,12 @@ mod tests {
                 ledger,
                 demand,
                 batches,
+                lane,
                 metrics,
                 ..
             } = &mut processor;
             super::super::reconcile::idle_poll(
-                queue, ledger, demand, batches, 7, generation, metrics,
+                queue, ledger, demand, batches, lane, 7, generation, metrics,
             )
             .await
             .unwrap()

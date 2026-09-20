@@ -373,7 +373,7 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
             .ledger_generation()
             .map_err(ListenerError::Ledger)?;
         if self.reconciled_generation != Some(generation) {
-            let (ledger, demand, batches) = self.processor.parts_mut();
+            let (ledger, demand, batches, _lane) = self.processor.parts_mut();
             startup(ledger, demand, batches, set, &self.metrics)
                 .map_err(ListenerError::Reconcile)?;
             self.reconciled_generation = Some(generation);
@@ -461,12 +461,13 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
             .lane_mut()
             .idle_tick()
             .map_err(|error| ListenerError::Scale(ScaleError::Lane(error)))?;
-        let (ledger, demand, batches) = self.processor.parts_mut();
+        let (ledger, demand, batches, lane) = self.processor.parts_mut();
         idle_poll(
             &self.session,
             ledger,
             demand,
             batches,
+            lane,
             self.config.scale_set_id,
             generation,
             &self.metrics,
