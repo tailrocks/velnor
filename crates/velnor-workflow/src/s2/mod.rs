@@ -22,7 +22,6 @@ use serde_yaml::Value;
 mod capability_tests;
 mod closure;
 mod config;
-pub(crate) mod dispatch;
 mod estate;
 mod planner;
 pub(crate) mod platform;
@@ -43,6 +42,23 @@ mod watchdog;
 use crate::s2::primitives::prepared_tools::PreparedToolNeed;
 use crate::s2::primitives::{WorkflowIr, WorkflowKind};
 use crate::s2::scan::file_walk::is_test_support_path;
+
+/// Whether `dir` carries a generation config declaring schema 2. The schema
+/// probe is a small migration helper, not a second command dispatcher: schema
+/// two invocations enter this module directly, and its parser remains the
+/// authority for the final config decision.
+pub(crate) fn dir_is_schema2(dir: &Path) -> bool {
+    if !dir.is_dir() {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(dir.join(".github-gen/velnor-workflow.toml")) else {
+        return false;
+    };
+    match text.parse::<toml::Table>() {
+        Ok(table) => table.get("schema").and_then(toml::Value::as_integer) == Some(2),
+        Err(_) => false,
+    }
+}
 
 /// Revision of the generator's rendering contract.
 ///

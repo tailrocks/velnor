@@ -24,11 +24,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::s2::dispatch::dir_is_schema2;
 use super::s2::policy::GENERATION_CONFIG;
 use super::s2::provider::{ProviderId, ProviderSet};
 use super::s2::{
-    ownership_state_content, render_tree, write_generated_with_options, OWNERSHIP_STATE,
+    dir_is_schema2, ownership_state_content, render_tree, write_generated_with_options,
+    OWNERSHIP_STATE,
 };
 use super::{
     is_full_revision, resolve_default_branch, GeneratorError, RunnerMode, SOURCE_CLOSURE,
