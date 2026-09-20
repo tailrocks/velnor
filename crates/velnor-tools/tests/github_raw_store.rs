@@ -1001,96 +1001,35 @@ fn verification_survives_symlink_and_hardlink_replacement_race() {
 
 #[cfg(unix)]
 #[test]
-fn cleanup_leaves_replaced_regular_temporary_name_instead_of_unlinking_it() {
-    let root = fixture("cleanup-race");
-    let safe = vec![b'z'; 8 * 1024 * 1024];
-    let mut store = must(RawObjectFileStore::new(&root), "open cleanup store");
-    let reference = must(
-        store.store(capture("cleanup-race", b"source", &safe)),
-        "seed cleanup object",
-    );
-    let object = object_path(&root, &reference);
+fn cleanup_preserves_preexisting_replacement_as_retained_evidence() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("cleanup-replacement");
+    let store = must(RawObjectFileStore::new(&root), "open cleanup store");
+    drop(store);
+    let temporary = root
+        .join("sha256")
+        .join(format!(".velnor-raw-{}-0-0.tmp", std::process::id()));
     must(
-        fs::remove_file(&object),
-        "remove object before publication race",
+        fs::write(&temporary, b"attacker-temporary-file"),
+        "write preexisting replacement",
     );
-    let object_directory = root.join("sha256");
-    let outside = root.join("outside-cleanup");
     must(
-        fs::write(&outside, b"attacker-bytes"),
-        "write cleanup attacker file",
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o400)),
+        "restrict preexisting replacement",
     );
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let replaced = Arc::new(AtomicBool::new(false));
-    let attacker_stop = Arc::clone(&stop);
-    let attacker_replaced = Arc::clone(&replaced);
-    let attacker_directory = object_directory.clone();
-    let attacker_replacement = object_directory.join("cleanup-attacker-replacement");
-    let attacker = thread::spawn(move || {
-        while !attacker_stop.load(Ordering::Relaxed) {
-            let Ok(entries) = fs::read_dir(&attacker_directory) else {
-                thread::yield_now();
-                continue;
-            };
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                if !name.to_string_lossy().starts_with(".velnor-raw-") {
-                    continue;
-                }
-                let path = entry.path();
-                if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_file())
-                {
-                    continue;
-                }
-                let _ = fs::remove_file(&attacker_replacement);
-                if fs::write(&attacker_replacement, b"attacker-temporary-file").is_ok()
-                    && fs::rename(&attacker_replacement, &path).is_ok()
-                {
-                    attacker_replaced.store(true, Ordering::Relaxed);
-                    return;
-                }
-            }
-            thread::yield_now();
-        }
-    });
-
-    for _ in 0..20_000 {
-        if replaced.load(Ordering::Relaxed) {
-            break;
-        }
-        let _ = store.store(capture("cleanup-race", b"source", &safe));
-        thread::yield_now();
-    }
-    stop.store(true, Ordering::Relaxed);
-    attacker
-        .join()
-        .unwrap_or_else(|_| panic!("cleanup attacker panicked"));
-    assert!(replaced.load(Ordering::Relaxed));
+    assert!(RawObjectFileStore::new(&root).is_ok());
+    assert!(!temporary.exists());
+    let entry = must(fs::read_dir(root.join("sha256")), "read retained sources")
+        .flatten()
+        .map(|entry| entry.path().join("entry"))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("replacement was not retained"));
     assert_eq!(
-        must(fs::read(&outside), "read cleanup attacker file"),
-        b"attacker-bytes"
+        must(fs::read(entry), "read retained replacement"),
+        b"attacker-temporary-file"
     );
-    if object.exists() {
-        assert_eq!(
-            must(fs::read(&object), "read replaced final object"),
-            b"attacker-temporary-file"
-        );
-    } else {
-        let temporary = must(fs::read_dir(&object_directory), "read cleanup directory")
-            .flatten()
-            .map(|entry| entry.path())
-            .find(|path| {
-                path.file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with(".velnor-raw-"))
-            })
-            .unwrap_or_else(|| panic!("replaced temporary missing"));
-        assert!(temporary.is_file());
-        assert_eq!(
-            must(fs::read(temporary), "read replaced temporary"),
-            b"attacker-temporary-file"
-        );
-    }
     remove_fixture(&root);
 }
 
@@ -1221,6 +1160,270 @@ fn retention_admission_is_bounded_and_reopens_fail_closed() {
 
 #[cfg(unix)]
 #[test]
+fn quota_rejects_max_transaction_before_quarantine_move() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const MAX_SIDECAR_BYTES: usize = 2 * 64 * 1024 * 1024 + 4096;
+
+    let root = fixture("quota-max-transaction");
+    let store = must(RawObjectFileStore::new(&root), "open max-transaction store");
+    drop(store);
+    let transaction = root.join("refs").join("raw-max-transaction.txn");
+    must(
+        fs::write(&transaction, vec![b't'; MAX_SIDECAR_BYTES]),
+        "write max transaction",
+    );
+    must(
+        fs::set_permissions(&transaction, fs::Permissions::from_mode(0o400)),
+        "restrict max transaction",
+    );
+
+    assert!(RawObjectFileStore::new(&root).is_err());
+    assert_eq!(
+        must(fs::metadata(&transaction), "stat rejected transaction").len(),
+        MAX_SIDECAR_BYTES as u64
+    );
+    assert_eq!(
+        must(
+            fs::read_dir(root.join("refs")),
+            "read refs after rejected transaction"
+        )
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".velnor-raw-quarantine-")
+        })
+        .count(),
+        0
+    );
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn quota_rejects_orphan_at_boundary_before_move() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    const SOURCE_BYTES: usize = 120 * 1024 * 1024;
+    const ORPHAN_BYTES: usize = 8 * 1024 * 1024;
+
+    let root = fixture("quota-orphan-boundary");
+    let store = must(RawObjectFileStore::new(&root), "open orphan-boundary store");
+    drop(store);
+    let source_quarantine = root.join("sha256").join(".velnor-raw-quarantine-0-0-0");
+    must(
+        fs::create_dir(&source_quarantine),
+        "create source quarantine",
+    );
+    must(
+        fs::set_permissions(&source_quarantine, fs::Permissions::from_mode(0o700)),
+        "restrict source quarantine",
+    );
+    let source_entry = source_quarantine.join("entry");
+    must(
+        fs::write(&source_entry, vec![b's'; SOURCE_BYTES]),
+        "write source quarantine entry",
+    );
+    must(
+        fs::set_permissions(&source_entry, fs::Permissions::from_mode(0o400)),
+        "restrict source quarantine entry",
+    );
+    let orphan_name = "a".repeat(64);
+    let orphan = root.join("sha256").join(&orphan_name);
+    must(
+        fs::write(&orphan, vec![b'o'; ORPHAN_BYTES]),
+        "write orphan object",
+    );
+    must(
+        fs::set_permissions(&orphan, fs::Permissions::from_mode(0o400)),
+        "restrict orphan object",
+    );
+    assert!(
+        must(fs::metadata(&orphan), "stat orphan object").blocks() * 512 >= ORPHAN_BYTES as u64
+    );
+
+    assert!(RawObjectFileStore::new(&root).is_err());
+    assert_eq!(
+        must(fs::metadata(&orphan), "stat preserved orphan object").len(),
+        ORPHAN_BYTES as u64
+    );
+    assert_eq!(
+        must(
+            fs::read_dir(root.join("sha256")),
+            "read objects after rejected orphan"
+        )
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".velnor-raw-quarantine-")
+        })
+        .count(),
+        1
+    );
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn concurrent_orphans_reject_before_either_move() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const ORPHAN_BYTES: usize = 64 * 1024 * 1024;
+
+    let root = fixture("quota-concurrent-orphans");
+    let store = must(
+        RawObjectFileStore::new(&root),
+        "open concurrent-orphan store",
+    );
+    drop(store);
+    let names = ["b".repeat(64), "c".repeat(64)];
+    for name in &names {
+        let path = root.join("sha256").join(name);
+        must(
+            fs::write(&path, vec![b'x'; ORPHAN_BYTES]),
+            "write concurrent orphan",
+        );
+        must(
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o400)),
+            "restrict concurrent orphan",
+        );
+    }
+    let first_root = root.clone();
+    let second_root = root.clone();
+    let first = thread::spawn(move || RawObjectFileStore::new(&first_root).is_err());
+    let second = thread::spawn(move || RawObjectFileStore::new(&second_root).is_err());
+    assert!(first
+        .join()
+        .unwrap_or_else(|_| panic!("first opener panicked")));
+    assert!(second
+        .join()
+        .unwrap_or_else(|_| panic!("second opener panicked")));
+    for name in &names {
+        assert!(root.join("sha256").join(name).is_file());
+    }
+    assert_eq!(
+        must(
+            fs::read_dir(root.join("sha256")),
+            "read objects after concurrent rejection"
+        )
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".velnor-raw-quarantine-")
+        })
+        .count(),
+        0
+    );
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn complete_staged_retention_record_is_published_on_reopen() {
+    let root = fixture("retention-staged-recovery");
+    let store = must(RawObjectFileStore::new(&root), "open staged store");
+    drop(store);
+    let quarantine = root.join("sha256").join(".velnor-raw-quarantine-11-0-0");
+    must(
+        fs::create_dir(&quarantine),
+        "create staged source quarantine",
+    );
+    must(
+        fs::write(quarantine.join("entry"), b"staged-source"),
+        "write staged source entry",
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        must(
+            fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o700)),
+            "restrict staged source quarantine",
+        );
+        must(
+            fs::set_permissions(quarantine.join("entry"), fs::Permissions::from_mode(0o400)),
+            "restrict staged source entry",
+        );
+    }
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "materialize staged retention record",
+    );
+    drop(reopened);
+    let retention = root.join(".velnor-raw-quarantine");
+    let final_record = must(fs::read_dir(&retention), "read staged retention records")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".velnor-raw-retained-"))
+                && !path.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .starts_with(".velnor-raw-retained-pending-")
+                })
+        })
+        .unwrap_or_else(|| panic!("materialized retention record missing"));
+    let pending = retention.join(
+        final_record
+            .file_name()
+            .unwrap_or_else(|| panic!("staged record has name"))
+            .to_string_lossy()
+            .replacen(".velnor-raw-retained-", ".velnor-raw-retained-pending-", 1),
+    );
+    must(
+        fs::rename(&final_record, &pending),
+        "move complete record into staging name",
+    );
+    assert!(RawObjectFileStore::new(&root).is_ok());
+    assert!(final_record.is_dir());
+    assert!(!pending.exists());
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn partial_staged_retention_record_fails_closed_without_reclaim() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("retention-partial-staged-record");
+    let store = must(RawObjectFileStore::new(&root), "open partial-staged store");
+    drop(store);
+    let record = root
+        .join(".velnor-raw-quarantine")
+        .join(".velnor-raw-retained-pending-1-0-0");
+    must(fs::create_dir(&record), "create partial staged record");
+    must(
+        fs::set_permissions(&record, fs::Permissions::from_mode(0o700)),
+        "restrict partial staged record",
+    );
+    let manifest = record.join("manifest.json");
+    must(
+        fs::write(&manifest, b"{\"schema\":2"),
+        "write partial staged manifest",
+    );
+    must(
+        fs::set_permissions(&manifest, fs::Permissions::from_mode(0o400)),
+        "restrict partial staged manifest",
+    );
+
+    assert!(RawObjectFileStore::new(&root).is_err());
+    assert_eq!(
+        must(
+            fs::read(&manifest),
+            "read preserved partial staged manifest"
+        ),
+        b"{\"schema\":2"
+    );
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
 fn partial_retention_record_fails_closed_without_reclaim() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -1257,7 +1460,7 @@ fn partial_retention_record_fails_closed_without_reclaim() {
 #[cfg(unix)]
 #[test]
 fn retention_disk_usage_does_not_duplicate_source_bytes() {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     const PAYLOAD_BYTES: usize = 60 * 1024 * 1024;
     const RETENTION_QUOTA_BYTES: u64 = 128 * 1024 * 1024;
@@ -1329,6 +1532,23 @@ fn retention_disk_usage_does_not_duplicate_source_bytes() {
             + SOURCE_OVERHEAD_BYTES
             + RECORD_OVERHEAD_BYTES
             <= RETENTION_QUOTA_BYTES
+    );
+    fn allocated_bytes(path: &Path) -> u64 {
+        let metadata = must(fs::symlink_metadata(path), "stat allocated tree entry");
+        let self_bytes = metadata.blocks() * 512;
+        if metadata.file_type().is_dir() {
+            self_bytes
+                + must(fs::read_dir(path), "read allocated tree directory")
+                    .flatten()
+                    .map(|entry| allocated_bytes(&entry.path()))
+                    .sum::<u64>()
+        } else {
+            self_bytes
+        }
+    }
+    assert!(
+        allocated_bytes(&root) <= RETENTION_QUOTA_BYTES,
+        "measured filesystem allocation exceeds retention quota"
     );
     remove_fixture(&root);
 }
