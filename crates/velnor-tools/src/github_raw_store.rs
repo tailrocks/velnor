@@ -366,6 +366,12 @@ impl FileIdentity {
         self.is_regular_single_link() && self.mode & 0o400 != 0 && self.mode & 0o077 == 0
     }
 
+    fn is_private_regular(self) -> bool {
+        self.mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
+            && self.mode & 0o400 != 0
+            && self.mode & 0o077 == 0
+    }
+
     fn same_inode(self, other: Self) -> bool {
         self.device == other.device && self.inode == other.inode
     }
@@ -1064,29 +1070,31 @@ fn remove_private_named(
     name: &CStr,
     max_bytes: Option<usize>,
 ) -> Result<(), RawStorageError> {
-    let Some(mut file) = open_named(directory, name)? else {
+    let Some(mut file) = (match open_named(directory, name) {
+        Ok(file) => file,
+        // Reconciliation is fail-closed for hostile namespace entries.  A
+        // symlink, FIFO, device, or other non-regular entry is operator-owned
+        // until an explicit policy handles it; never turn it into an init DoS
+        // and never unlink it by name.
+        Err(RawStorageError::Refused) => return Ok(()),
+        Err(error) => return Err(error),
+    }) else {
         return Ok(());
     };
     let before = stat_fd(&file).map_err(storage_io)?;
-    if !before.is_regular_single_link() {
-        return Err(RawStorageError::Refused);
+    if !before.is_private_regular_single_link() {
+        return Ok(());
     }
     if let Some(max_bytes) = max_bytes {
         let _ = read_verified_fd(&mut file, max_bytes)?;
     }
     let after = stat_fd(&file).map_err(storage_io)?;
     if after != before {
-        return Err(RawStorageError::Refused);
+        return Ok(());
     }
-    let result = unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) };
-    if result < 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ENOENT) {
-            return Ok(());
-        }
-        return Err(storage_io(error));
+    match quarantine_remove(directory, name, before, max_bytes, None, Some(1))? {
+        QuarantineResult::Removed | QuarantineResult::Left => Ok(()),
     }
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -1109,20 +1117,183 @@ fn remove_exact_file(
     if after != before {
         return Err(RawStorageError::Refused);
     }
-    let result = unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) };
+    match quarantine_remove(
+        directory,
+        name,
+        before,
+        Some(max_bytes),
+        Some(expected),
+        Some(1),
+    )? {
+        QuarantineResult::Removed => Ok(()),
+        // A replacement won the atomic move or changed the owned quarantine
+        // entry.  It remains quarantined and the caller must fail closed.
+        QuarantineResult::Left => Err(RawStorageError::Refused),
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuarantineResult {
+    Removed,
+    Left,
+}
+
+/// Move a candidate into a fresh, private directory before removing it.
+///
+/// `unlinkat(directory, name)` after an FD identity check is not an identity
+/// operation: another writer can replace `name` between the check and the
+/// unlink.  The source pathname is therefore never unlinked.  An atomic
+/// no-clobber rename transfers the entry into a directory created by this
+/// process, where the entry is re-opened and re-verified.  A mismatched,
+/// hostile, or otherwise unknown entry is left in that quarantine directory;
+/// it is never deleted by pathname.  The private directory is removed only
+/// after its verified entry has been removed and it is still the directory
+/// created by this operation.
+#[cfg(unix)]
+fn quarantine_remove(
+    directory: &File,
+    name: &CStr,
+    expected: FileIdentity,
+    max_bytes: Option<usize>,
+    expected_bytes: Option<&[u8]>,
+    expected_links: Option<u64>,
+) -> Result<QuarantineResult, RawStorageError> {
+    let (quarantine_name, quarantine) = create_quarantine_directory(directory)?;
+    let entry_name = CString::new("entry").map_err(|_| RawStorageError::Refused)?;
+    match rename_no_clobber(directory, name, &quarantine, &entry_name) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+            let _ = remove_quarantine_directory(directory, &quarantine_name, &quarantine);
+            return Ok(QuarantineResult::Removed);
+        }
+        Err(error) => {
+            let _ = remove_quarantine_directory(directory, &quarantine_name, &quarantine);
+            return Err(storage_io(error));
+        }
+    }
+
+    let Some(mut file) = (match open_named(&quarantine, &entry_name) {
+        Ok(file) => file,
+        // O_NOFOLLOW and O_NONBLOCK make symlink/FIFO replacements safe. Keep
+        // the moved entry for operator inspection instead of deleting it.
+        Err(RawStorageError::Refused) => return Ok(QuarantineResult::Left),
+        Err(error) => return Err(error),
+    }) else {
+        return Ok(QuarantineResult::Left);
+    };
+    let actual = stat_fd(&file).map_err(storage_io)?;
+    if !actual.is_private_regular()
+        || !actual.same_inode(expected)
+        || expected_links.is_some_and(|links| actual.nlink != links)
+    {
+        return Ok(QuarantineResult::Left);
+    }
+    let bytes = if let Some(max_bytes) = max_bytes {
+        Some(read_verified_fd(&mut file, max_bytes)?)
+    } else {
+        None
+    };
+    if expected_bytes.is_some_and(|expected| bytes.as_deref() != Some(expected)) {
+        return Ok(QuarantineResult::Left);
+    }
+    let after = stat_fd(&file).map_err(storage_io)?;
+    if after != actual
+        || !after.same_inode(expected)
+        || expected_links.is_some_and(|links| after.nlink != links)
+    {
+        return Ok(QuarantineResult::Left);
+    }
+
+    // The only pathname removed here is the entry in the private quarantine
+    // directory, never the attacker-observable source pathname. If a writer
+    // replaced the quarantine entry, the final identity check above leaves
+    // the replacement untouched and retains the quarantine for inspection.
+    let result = unsafe { libc::unlinkat(quarantine.as_raw_fd(), entry_name.as_ptr(), 0) };
     if result < 0 {
         let error = io::Error::last_os_error();
         if error.raw_os_error() == Some(libc::ENOENT) {
-            return Ok(());
+            return Ok(QuarantineResult::Left);
         }
         return Err(storage_io(error));
     }
-    Ok(())
+    sync_directory(&quarantine)?;
+    if !remove_quarantine_directory(directory, &quarantine_name, &quarantine)? {
+        return Ok(QuarantineResult::Left);
+    }
+    sync_directory(directory)?;
+    Ok(QuarantineResult::Removed)
+}
+
+#[cfg(unix)]
+fn create_quarantine_directory(directory: &File) -> Result<(CString, File), RawStorageError> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    for attempt in 0..64_u32 {
+        let name = CString::new(format!(
+            ".velnor-raw-quarantine-{}-{sequence}-{attempt}",
+            std::process::id()
+        ))
+        .map_err(|_| RawStorageError::Refused)?;
+        let result = unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o700) };
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EEXIST) {
+                continue;
+            }
+            return Err(storage_io(error));
+        }
+        let quarantine =
+            match open_directory_at(directory, OsStr::from_bytes(name.as_bytes()), false) {
+                Ok(file) => file,
+                Err(error) => {
+                    let _ = unsafe {
+                        libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR)
+                    };
+                    return Err(storage_io(error));
+                }
+            };
+        restrict_directory(&quarantine).map_err(storage_io)?;
+        return Ok((name, quarantine));
+    }
+    Err(RawStorageError::Unavailable)
+}
+
+#[cfg(unix)]
+fn remove_quarantine_directory(
+    parent: &File,
+    name: &CStr,
+    quarantine: &File,
+) -> Result<bool, RawStorageError> {
+    let expected = stat_fd(quarantine).map_err(storage_io)?;
+    let named = match stat_at(parent, name) {
+        Ok(identity) => identity,
+        Err(RawStorageError::Unavailable) => return Ok(true),
+        Err(error) => return Err(error),
+    };
+    if !named.same_directory(expected) {
+        return Ok(false);
+    }
+    let result = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ENOTEMPTY)) {
+            return Ok(false);
+        }
+        return Err(storage_io(error));
+    }
+    Ok(true)
 }
 
 #[cfg(unix)]
 fn reconcile_temporary(directory: &File, name: &CStr) -> Result<(), RawStorageError> {
-    let Some(file) = open_named(directory, name)? else {
+    let Some(file) = (match open_named(directory, name) {
+        Ok(file) => file,
+        // Leave symlinks and other non-regular hostile entries in place. The
+        // store must not follow or unlink an unknown recovery pathname.
+        Err(RawStorageError::Refused) => return Ok(()),
+        Err(error) => return Err(error),
+    }) else {
         return Ok(());
     };
     let identity = stat_fd(&file).map_err(storage_io)?;
@@ -1208,13 +1379,23 @@ fn publish_if_absent(
 
 #[cfg(unix)]
 fn install_no_clobber(directory: &File, temporary: &CStr, final_name: &CStr) -> io::Result<()> {
+    rename_no_clobber(directory, temporary, directory, final_name)
+}
+
+#[cfg(unix)]
+fn rename_no_clobber(
+    source_directory: &File,
+    source_name: &CStr,
+    destination_directory: &File,
+    destination_name: &CStr,
+) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     let result = unsafe {
         libc::renameatx_np(
-            directory.as_raw_fd(),
-            temporary.as_ptr(),
-            directory.as_raw_fd(),
-            final_name.as_ptr(),
+            source_directory.as_raw_fd(),
+            source_name.as_ptr(),
+            destination_directory.as_raw_fd(),
+            destination_name.as_ptr(),
             libc::RENAME_EXCL,
         )
     };
@@ -1223,16 +1404,21 @@ fn install_no_clobber(directory: &File, temporary: &CStr, final_name: &CStr) -> 
     let result = unsafe {
         libc::syscall(
             libc::SYS_renameat2,
-            directory.as_raw_fd(),
-            temporary.as_ptr(),
-            directory.as_raw_fd(),
-            final_name.as_ptr(),
+            source_directory.as_raw_fd(),
+            source_name.as_ptr(),
+            destination_directory.as_raw_fd(),
+            destination_name.as_ptr(),
             1_i32,
         ) as libc::c_int
     };
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let _ = (directory, temporary, final_name);
+    let _ = (
+        source_directory,
+        source_name,
+        destination_directory,
+        destination_name,
+    );
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -1418,13 +1604,20 @@ impl<'a> TemporaryFile<'a> {
         {
             return Err(RawStorageError::Refused);
         }
-        let result = unsafe { libc::unlinkat(self.directory.as_raw_fd(), self.name.as_ptr(), 0) };
-        if result < 0 {
-            return Err(storage_io(io::Error::last_os_error()));
+        match quarantine_remove(
+            self.directory,
+            &self.name,
+            self.identity,
+            None,
+            None,
+            Some(expected_links),
+        )? {
+            QuarantineResult::Removed => {
+                self.name_removed = true;
+                Ok(())
+            }
+            QuarantineResult::Left => Err(RawStorageError::Refused),
         }
-        self.name_removed = true;
-        sync_directory(self.directory)?;
-        Ok(())
     }
 }
 
@@ -1454,8 +1647,16 @@ impl Drop for TemporaryFile<'_> {
         {
             return;
         }
-        let _ = unsafe { libc::unlinkat(self.directory.as_raw_fd(), self.name.as_ptr(), 0) };
-        let _ = self.directory.sync_all();
+        if let Ok(QuarantineResult::Removed) = quarantine_remove(
+            self.directory,
+            &self.name,
+            self.identity,
+            None,
+            None,
+            Some(named_identity.nlink),
+        ) {
+            self.name_removed = true;
+        }
     }
 }
 

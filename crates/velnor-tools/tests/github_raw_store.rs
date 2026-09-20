@@ -368,6 +368,70 @@ fn recovers_private_temporary_files_but_leaves_replaced_public_entry() {
     remove_fixture(&root);
 }
 
+#[cfg(unix)]
+#[test]
+fn reconciliation_leaves_fifo_symlink_and_unknown_entries() {
+    use std::os::unix::fs::{symlink, FileTypeExt, PermissionsExt};
+
+    let root = fixture("hostile-temporary-entries");
+    let store = must(RawObjectFileStore::new(&root), "open hostile-entry store");
+    drop(store);
+
+    let object_directory = root.join("sha256");
+    let fifo = object_directory.join(".velnor-raw-hostile-fifo.tmp");
+    let fifo_name = must(
+        std::ffi::CString::new(fifo.as_os_str().as_bytes()),
+        "encode hostile FIFO path",
+    );
+    assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+
+    let outside = root.join("hostile-outside");
+    must(
+        fs::write(&outside, b"outside-bytes"),
+        "write hostile target",
+    );
+    let symlink_path = object_directory.join(".velnor-raw-hostile-link.tmp");
+    must(
+        symlink(&outside, &symlink_path),
+        "write hostile temporary symlink",
+    );
+
+    let unknown_directory = object_directory.join(".velnor-raw-hostile-directory.tmp");
+    must(
+        fs::create_dir(&unknown_directory),
+        "write hostile temporary directory",
+    );
+    let public_file = object_directory.join(".velnor-raw-hostile-public.tmp");
+    must(
+        fs::write(&public_file, b"operator-bytes"),
+        "write operator temporary file",
+    );
+    must(
+        fs::set_permissions(&public_file, fs::Permissions::from_mode(0o644)),
+        "make operator temporary file public",
+    );
+
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "reconcile hostile entries without following or deleting them",
+    );
+    drop(reopened);
+    assert!(fs::symlink_metadata(&fifo)
+        .unwrap_or_else(|error| panic!("stat hostile FIFO: {error}"))
+        .file_type()
+        .is_fifo());
+    assert_eq!(
+        must(fs::read_link(&symlink_path), "read hostile symlink"),
+        outside
+    );
+    assert!(unknown_directory.is_dir());
+    assert_eq!(
+        must(fs::read(&public_file), "read operator temporary file"),
+        b"operator-bytes"
+    );
+    remove_fixture(&root);
+}
+
 #[test]
 fn rejects_path_like_raw_id_before_publishing_an_object() {
     let root = fixture("invalid-raw-id");
@@ -802,7 +866,7 @@ fn verification_survives_symlink_and_hardlink_replacement_race() {
 #[test]
 fn cleanup_leaves_replaced_regular_temporary_name_instead_of_unlinking_it() {
     let root = fixture("cleanup-race");
-    let safe = vec![b'z'; 1024 * 1024];
+    let safe = vec![b'z'; 8 * 1024 * 1024];
     let mut store = must(RawObjectFileStore::new(&root), "open cleanup store");
     let reference = must(
         store.store(capture("cleanup-race", b"source", &safe)),
@@ -838,6 +902,10 @@ fn cleanup_leaves_replaced_regular_temporary_name_instead_of_unlinking_it() {
                     continue;
                 }
                 let path = entry.path();
+                if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_file())
+                {
+                    continue;
+                }
                 let _ = fs::remove_file(&attacker_replacement);
                 if fs::write(&attacker_replacement, b"attacker-temporary-file").is_ok()
                     && fs::rename(&attacker_replacement, &path).is_ok()
@@ -851,7 +919,7 @@ fn cleanup_leaves_replaced_regular_temporary_name_instead_of_unlinking_it() {
     });
 
     let started = Instant::now();
-    while !replaced.load(Ordering::Relaxed) && started.elapsed().as_secs() < 5 {
+    while !replaced.load(Ordering::Relaxed) && started.elapsed().as_secs() < 15 {
         let _ = store.store(capture("cleanup-race", b"source", &safe));
         thread::yield_now();
     }
