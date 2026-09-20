@@ -6785,16 +6785,19 @@ mod tests {
         fs::create_dir_all(root.join(".github/ci")).expect("create assembly fixture root");
         fs::create_dir_all(root.join("native-product")).expect("create native-product fixture");
         fs::create_dir_all(root.join("artifacts")).expect("create package fixture");
+        let source_contract = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../.github/ci/native-product-contract.json"),
+        )
+        .expect("read source component contract");
         fs::write(
             root.join(".github/ci/native-product-contract.json"),
-            include_str!("../../../../../.github/ci/native-product-contract.json"),
+            &source_contract,
         )
         .expect("write source component contract");
 
-        let mut contract: Value = serde_json::from_str(include_str!(
-            "../../../../../.github/ci/native-product-contract.json"
-        ))
-        .expect("parse source component contract");
+        let mut contract: Value =
+            serde_json::from_str(&source_contract).expect("parse source component contract");
         contract["schema"] = json!("velnor.product-manifest/v1");
         contract["source_repository"] = json!("tailrocks/velnor");
         contract["source_ref"] = json!("refs/tags/v1.2.3");
