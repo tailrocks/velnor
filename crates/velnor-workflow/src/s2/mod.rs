@@ -7647,6 +7647,7 @@ pub(crate) fn render_tree(
             config.workflow_files.push(file.clone());
         }
     }
+    add_owner_pull_request_role_files(&mut config);
     let files = generated_files_with_surface(&config, Some(&surface))?;
     let inputs = scanned.inputs;
     Ok(RenderedTree {
