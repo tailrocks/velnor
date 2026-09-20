@@ -2026,37 +2026,25 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
     for request in &collector.requests {
         let query = BASE64.decode(&request.query_base64);
         let variables = BASE64.decode(&request.variables_base64);
-        let response_schema = collector
+        let response_contract = collector
             .raw_objects
             .iter()
             .find(|raw| raw.raw_id == request.response_raw_ref)
-            .and_then(|raw| {
-                g0_raw_response_schema(&raw.object_kind, &request.endpoint_or_operation)
-            });
-        let unknown_paginated_response = collector
-            .raw_objects
-            .iter()
-            .find(|raw| raw.raw_id == request.response_raw_ref)
-            .is_some_and(|raw| {
-                g0_endpoint_is_paginated(
-                    &request.endpoint_or_operation,
-                    query.as_ref().ok().map(Vec::as_slice),
-                ) && g0_raw_response_schema(&raw.object_kind, &request.endpoint_or_operation)
-                    .is_none()
-            });
-        if unknown_paginated_response {
+            .map(|raw| g0_endpoint_contract(&raw.object_kind, &request.endpoint_or_operation));
+        if let Some(Err(reason)) = response_contract.as_ref() {
             finding(
                 findings,
-                "g0-response-schema",
+                "g0-endpoint-contract",
                 "",
                 "evidence.g0_inventory.collector_snapshot.raw_objects",
-                "every relevant paginated API stream must use a closed typed response schema",
+                format!("evidence request endpoint contract rejected: {reason}"),
             );
         }
-        let query_contract = match (query.as_ref(), response_schema) {
-            (Ok(bytes), Some(schema)) => g0_response_query_contract(request, bytes, schema),
-            (Err(_), Some(_)) => false,
-            (_, None) => true,
+        let query_contract = match (query.as_ref(), response_contract.as_ref()) {
+            (Ok(bytes), Some(Ok(contract))) => {
+                g0_response_query_contract(request, bytes, *contract)
+            }
+            _ => false,
         };
         if request.request_id.trim().is_empty()
             || request.method.trim().is_empty()
@@ -2321,13 +2309,30 @@ fn check_g0_paginated_response_streams(
             let Some(raw) = collector.raw_objects.iter().find(|raw| {
                 raw.raw_id == request.response_raw_ref && raw.request_id == request.request_id
             }) else {
+                finding(
+                    findings,
+                    "g0-raw-reference",
+                    "",
+                    "evidence.g0_inventory.collector_snapshot.requests.response_raw_ref",
+                    "every paginated request must resolve its captured raw response before stream validation",
+                );
                 continue;
             };
-            let Some(response_schema) =
-                g0_raw_response_schema(&raw.object_kind, &request.endpoint_or_operation)
-            else {
-                continue;
-            };
+            let contract =
+                match g0_endpoint_contract(&raw.object_kind, &request.endpoint_or_operation) {
+                    Ok(contract) => contract,
+                    Err(reason) => {
+                        finding(
+                            findings,
+                            "g0-endpoint-contract",
+                            "",
+                            "evidence.g0_inventory.collector_snapshot.raw_objects",
+                            format!("paginated evidence endpoint contract rejected: {reason}"),
+                        );
+                        continue;
+                    }
+                };
+            let response_schema = contract.response_schema;
             let is_list = !matches!(response_schema, G0RawResponseSchema::Singular);
             if !is_list {
                 continue;
@@ -2512,60 +2517,15 @@ fn g0_valid_app_id(value: &str) -> bool {
     value.parse::<u64>().is_ok_and(|id| id > 0)
 }
 
-fn g0_endpoint_is_paginated(endpoint: &str, query: Option<&[u8]>) -> bool {
-    let Some(parts) = endpoint
-        .strip_prefix('/')
-        .map(|path| path.split('/').collect::<Vec<_>>())
-    else {
-        return false;
-    };
-    if parts.len() < 2 || parts[0] != "repos" {
-        return false;
-    }
-    let known_collection_path = matches!(
-        parts.as_slice(),
-        ["repos", _, _, "pulls"]
-            | ["repos", _, _, "actions", "runs"]
-            | ["repos", _, _, "actions", "workflows"]
-            | ["repos", _, _, "actions", "runs", _, "artifacts"]
-            | ["repos", _, _, "actions", "runs", _, "attempts", _, "jobs"]
-            | ["repos", _, _, "commits", _, "check-runs"]
-            | ["repos", _, _, "commits", _, "check-suites"]
-            | ["repos", _, _, "rulesets"]
-    );
-    let known_collection_segment = parts.iter().any(|part| {
-        [
-            "artifacts",
-            "check-runs",
-            "check-suites",
-            "jobs",
-            "pulls",
-            "rulesets",
-            "workflows",
-        ]
-        .iter()
-        .any(|prefix| *part == *prefix || part.starts_with(&format!("{prefix}-")))
-    });
-    if known_collection_path || known_collection_segment {
-        return true;
-    }
-    query
-        .and_then(g0_rest_query_pairs_ordered)
-        .is_some_and(|pairs| {
-            pairs
-                .iter()
-                .any(|(key, _)| matches!(key.as_str(), "after" | "page" | "per_page"))
-        })
-}
-
 fn g0_response_query_contract(
     request: &G0RequestRecord,
     query: &[u8],
-    response_schema: G0RawResponseSchema,
+    contract: G0EndpointContract,
 ) -> bool {
     let Some(ordered) = g0_rest_query_pairs_ordered(query) else {
         return false;
     };
+    let response_schema = contract.response_schema;
     if matches!(response_schema, G0RawResponseSchema::Singular) {
         return ordered.is_empty() && request.page.number == 1 && !request.page.has_next_page;
     }
@@ -2574,12 +2534,16 @@ fn g0_response_query_contract(
         .iter()
         .map(|(key, _)| key.as_str())
         .collect::<Vec<_>>();
-    let expected_keys = match response_schema {
-        G0RawResponseSchema::CheckRunsPage => vec!["per_page", "filter", "page"],
-        G0RawResponseSchema::CheckSuitesPage
-        | G0RawResponseSchema::JobsPage
-        | G0RawResponseSchema::ArtifactsPage => vec!["per_page", "page"],
-        G0RawResponseSchema::Singular => Vec::new(),
+    let expected_keys = match contract.kind {
+        G0EndpointKind::CheckRunsPage => vec!["per_page", "filter", "page"],
+        G0EndpointKind::CheckSuitesPage
+        | G0EndpointKind::JobsPage
+        | G0EndpointKind::ArtifactsPage => vec!["per_page", "page"],
+        G0EndpointKind::Repository
+        | G0EndpointKind::CheckRun
+        | G0EndpointKind::CheckSuite
+        | G0EndpointKind::WorkflowRun
+        | G0EndpointKind::App => Vec::new(),
     };
     if keys != expected_keys {
         return false;
@@ -2600,8 +2564,8 @@ fn g0_response_query_contract(
         && per_page > 0
         && per_page <= 100
         && page == request.page.number
-        && (response_schema != G0RawResponseSchema::CheckRunsPage
-            || matches!(value("filter"), Some("all" | "latest")))
+        && (contract.coverage != G0CoveragePurpose::CheckInventory
+            || value("filter") == Some("all"))
 }
 
 fn g0_request_semantics(
@@ -4035,9 +3999,10 @@ fn g0_artifact_row_matches_raw(
         "/repos/{repository}/actions/runs/{}/artifacts",
         artifact.run_id
     );
-    let Some(schema) = g0_raw_response_schema("workflow_artifacts", &expected_endpoint) else {
+    let Ok(contract) = g0_endpoint_contract("workflow_artifacts", &expected_endpoint) else {
         return false;
     };
+    let schema = contract.response_schema;
     let Ok(bytes) = BASE64.decode(&raw.bytes_base64) else {
         return false;
     };
@@ -4172,60 +4137,107 @@ enum G0RawResponseSchema {
     ArtifactsPage,
 }
 
-/// Map each retained raw object to the one REST response shape allowed for
-/// its exact endpoint.  A page endpoint never falls back to the singular
-/// object shape: doing so lets a truncated or malformed response masquerade
-/// as a complete relationship.
-fn g0_raw_response_schema(object_kind: &str, endpoint: &str) -> Option<G0RawResponseSchema> {
-    let parts = endpoint.strip_prefix('/')?.split('/').collect::<Vec<_>>();
-    match object_kind {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum G0EndpointKind {
+    Repository,
+    CheckRunsPage,
+    CheckRun,
+    CheckSuitesPage,
+    CheckSuite,
+    JobsPage,
+    ArtifactsPage,
+    WorkflowRun,
+    App,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum G0CoveragePurpose {
+    RepositorySnapshot,
+    CheckInventory,
+    CheckSuiteInventory,
+    JobInventory,
+    ArtifactCensus,
+    WorkflowRunIdentity,
+    ProviderIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct G0EndpointContract {
+    kind: G0EndpointKind,
+    coverage: G0CoveragePurpose,
+    response_schema: G0RawResponseSchema,
+}
+
+/// Parse every evidence-bearing REST response into a closed endpoint and
+/// coverage purpose. Unknown object/path combinations are errors; callers
+/// must report them rather than silently treating them as an untyped stream.
+fn g0_endpoint_contract(object_kind: &str, endpoint: &str) -> Result<G0EndpointContract, String> {
+    let parts = endpoint
+        .strip_prefix('/')
+        .ok_or_else(|| "endpoint must begin with /".to_owned())?
+        .split('/')
+        .collect::<Vec<_>>();
+    let repository_path =
+        parts.len() >= 3 && parts[0] == "repos" && !parts[1].is_empty() && !parts[2].is_empty();
+    let contract = match object_kind {
+        "github-response" if repository_path && parts.len() == 3 => G0EndpointContract {
+            kind: G0EndpointKind::Repository,
+            coverage: G0CoveragePurpose::RepositorySnapshot,
+            response_schema: G0RawResponseSchema::Singular,
+        },
         "check_run"
-            if parts.len() == 6
-                && parts[0] == "repos"
-                && !parts[1].is_empty()
-                && !parts[2].is_empty()
+            if repository_path
+                && parts.len() == 6
                 && parts[3] == "commits"
                 && valid_sha(parts[4])
                 && parts[5] == "check-runs" =>
         {
-            Some(G0RawResponseSchema::CheckRunsPage)
+            G0EndpointContract {
+                kind: G0EndpointKind::CheckRunsPage,
+                coverage: G0CoveragePurpose::CheckInventory,
+                response_schema: G0RawResponseSchema::CheckRunsPage,
+            }
         }
         "check_run"
-            if parts.len() == 5
-                && parts[0] == "repos"
-                && !parts[1].is_empty()
-                && !parts[2].is_empty()
+            if repository_path
+                && parts.len() == 5
                 && parts[3] == "check-runs"
                 && parts[4].parse::<u64>().is_ok_and(|id| id > 0) =>
         {
-            Some(G0RawResponseSchema::Singular)
+            G0EndpointContract {
+                kind: G0EndpointKind::CheckRun,
+                coverage: G0CoveragePurpose::CheckInventory,
+                response_schema: G0RawResponseSchema::Singular,
+            }
         }
         "check_suite"
-            if parts.len() == 6
-                && parts[0] == "repos"
-                && !parts[1].is_empty()
-                && !parts[2].is_empty()
+            if repository_path
+                && parts.len() == 6
                 && parts[3] == "commits"
                 && valid_sha(parts[4])
                 && parts[5] == "check-suites" =>
         {
-            Some(G0RawResponseSchema::CheckSuitesPage)
+            G0EndpointContract {
+                kind: G0EndpointKind::CheckSuitesPage,
+                coverage: G0CoveragePurpose::CheckSuiteInventory,
+                response_schema: G0RawResponseSchema::CheckSuitesPage,
+            }
         }
         "check_suite"
-            if parts.len() == 5
-                && parts[0] == "repos"
-                && !parts[1].is_empty()
-                && !parts[2].is_empty()
+            if repository_path
+                && parts.len() == 5
                 && parts[3] == "check-suites"
                 && parts[4].parse::<u64>().is_ok_and(|id| id > 0) =>
         {
-            Some(G0RawResponseSchema::Singular)
+            G0EndpointContract {
+                kind: G0EndpointKind::CheckSuite,
+                coverage: G0CoveragePurpose::CheckSuiteInventory,
+                response_schema: G0RawResponseSchema::Singular,
+            }
         }
         "job"
-            if parts.len() == 9
-                && parts[0] == "repos"
-                && !parts[1].is_empty()
-                && !parts[2].is_empty()
+            if repository_path
+                && parts.len() == 9
                 && parts[3] == "actions"
                 && parts[4] == "runs"
                 && parts[5].parse::<u64>().is_ok_and(|id| id > 0)
@@ -4233,36 +4245,53 @@ fn g0_raw_response_schema(object_kind: &str, endpoint: &str) -> Option<G0RawResp
                 && parts[7].parse::<u32>().is_ok_and(|attempt| attempt > 0)
                 && parts[8] == "jobs" =>
         {
-            Some(G0RawResponseSchema::JobsPage)
+            G0EndpointContract {
+                kind: G0EndpointKind::JobsPage,
+                coverage: G0CoveragePurpose::JobInventory,
+                response_schema: G0RawResponseSchema::JobsPage,
+            }
         }
         "workflow_artifacts"
-            if parts.len() == 7
-                && parts[0] == "repos"
-                && !parts[1].is_empty()
-                && !parts[2].is_empty()
+            if repository_path
+                && parts.len() == 7
                 && parts[3] == "actions"
                 && parts[4] == "runs"
                 && parts[5].parse::<u64>().is_ok_and(|id| id > 0)
                 && parts[6] == "artifacts" =>
         {
-            Some(G0RawResponseSchema::ArtifactsPage)
+            G0EndpointContract {
+                kind: G0EndpointKind::ArtifactsPage,
+                coverage: G0CoveragePurpose::ArtifactCensus,
+                response_schema: G0RawResponseSchema::ArtifactsPage,
+            }
         }
         "workflow_run"
-            if parts.len() == 6
-                && parts[0] == "repos"
-                && !parts[1].is_empty()
-                && !parts[2].is_empty()
+            if repository_path
+                && parts.len() == 6
                 && parts[3] == "actions"
                 && parts[4] == "runs"
                 && parts[5].parse::<u64>().is_ok_and(|id| id > 0) =>
         {
-            Some(G0RawResponseSchema::Singular)
+            G0EndpointContract {
+                kind: G0EndpointKind::WorkflowRun,
+                coverage: G0CoveragePurpose::WorkflowRunIdentity,
+                response_schema: G0RawResponseSchema::Singular,
+            }
         }
         "app" if parts.len() == 2 && parts[0] == "apps" && !parts[1].is_empty() => {
-            Some(G0RawResponseSchema::Singular)
+            G0EndpointContract {
+                kind: G0EndpointKind::App,
+                coverage: G0CoveragePurpose::ProviderIdentity,
+                response_schema: G0RawResponseSchema::Singular,
+            }
         }
-        _ => None,
-    }
+        _ => {
+            return Err(format!(
+                "unknown evidence endpoint/object kind: {object_kind} {endpoint}"
+            ));
+        }
+    };
+    Ok(contract)
 }
 
 fn g0_capture_raw_json(
@@ -4297,9 +4326,11 @@ fn g0_capture_raw_json(
     {
         return None;
     }
-    let response_schema = g0_raw_response_schema(object_kind, &request.endpoint_or_operation)?;
+    let response_contract =
+        g0_endpoint_contract(object_kind, &request.endpoint_or_operation).ok()?;
+    let response_schema = response_contract.response_schema;
     let query = BASE64.decode(&request.query_base64).ok()?;
-    if !g0_response_query_contract(request, &query, response_schema) {
+    if !g0_response_query_contract(request, &query, response_contract) {
         return None;
     }
     let bytes = BASE64.decode(&raw.bytes_base64).ok()?;
@@ -9528,7 +9559,7 @@ mod tests {
             Some(&unknown_paginated),
             &mut findings,
         );
-        assert!(g0_codes(&findings).contains("g0-response-schema"));
+        assert!(g0_codes(&findings).contains("g0-endpoint-contract"));
 
         let mut unknown_collection_path = inventory.clone();
         let artifact_request_id = unknown_collection_path
@@ -9562,7 +9593,7 @@ mod tests {
             Some(&unknown_collection_path),
             &mut findings,
         );
-        assert!(g0_codes(&findings).contains("g0-response-schema"));
+        assert!(g0_codes(&findings).contains("g0-endpoint-contract"));
 
         let mut conflated_artifact_digest = inventory.clone();
         let page_raw_id = conflated_artifact_digest.collector_snapshot.repositories[0].artifacts[0]
@@ -9918,7 +9949,102 @@ mod tests {
 
     #[test]
     fn complete_g0_fixture_round_trips_through_public_check_paths() {
-        let (manifest, snapshot, inventory) = complete_g0_fixture();
+        let (manifest, snapshot, mut inventory) = complete_g0_fixture();
+        // Add one independently captured provider chain to the serialized
+        // collector.  The 32-repository fixture remains synthetic, but this
+        // path proves the public JSON entrypoint consumes real raw selection
+        // rather than only checking generated fixture rows.
+        let real_source_sha = "df9fb272c025f76cc8711560209afcdfd6cc4e00";
+        let real_check_endpoint =
+            format!("/repos/tailrocks/velnor/commits/{real_source_sha}/check-runs");
+        let real_check_bytes = real_api_fixture_entry(
+            "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs/page-0001.body",
+        );
+        let real_suite_bytes = BASE64
+            .decode(
+                include_str!(
+                    "testdata/g0/real-api-fixture-supplement-20260920-085311/suites/velnor-96108219979.body.base64"
+                )
+                .trim(),
+            )
+            .expect("captured DCO suite base64");
+        let real_app_bytes = BASE64
+            .decode(
+                include_str!(
+                    "testdata/g0/real-api-fixture-supplement-20260920-085311/apps/dco-2.body.base64"
+                )
+                .trim(),
+            )
+            .expect("captured DCO App base64");
+        let mut real_check_request =
+            captured_page_request(&real_check_endpoint, "per_page=100&filter=all&page=1", 70);
+        real_check_request.request_id = "real-public-checks-request".to_owned();
+        real_check_request.response_raw_ref = "real-public-checks-raw".to_owned();
+        let mut real_suite_request =
+            captured_page_request("/repos/tailrocks/velnor/check-suites/96108219979", "", 1);
+        real_suite_request.request_id = "real-public-suite-request".to_owned();
+        real_suite_request.response_raw_ref = "real-public-suite-raw".to_owned();
+        let mut real_app_request = captured_page_request("/apps/dco-2", "", 1);
+        real_app_request.request_id = "real-public-app-request".to_owned();
+        real_app_request.response_raw_ref = "real-public-app-raw".to_owned();
+        inventory.collector_snapshot.requests.extend([
+            real_check_request.clone(),
+            real_suite_request.clone(),
+            real_app_request.clone(),
+        ]);
+        inventory.collector_snapshot.raw_objects.extend([
+            captured_raw_reference(
+                "real-public-checks-raw",
+                "real-public-checks-request",
+                "check_run",
+                &real_check_bytes,
+            ),
+            captured_raw_reference(
+                "real-public-suite-raw",
+                "real-public-suite-request",
+                "check_suite",
+                &real_suite_bytes,
+            ),
+            captured_raw_reference(
+                "real-public-app-raw",
+                "real-public-app-request",
+                "app",
+                &real_app_bytes,
+            ),
+        ]);
+        let serialized_collector =
+            serde_json::to_vec(&inventory.collector_snapshot).expect("serialize actual chain");
+        let round_tripped_collector: G0CollectorSnapshot =
+            serde_json::from_slice(&serialized_collector).expect("deserialize actual chain");
+        let selected_check = g0_capture_raw_json(
+            &["real-public-checks-raw".to_owned()],
+            "check_run",
+            106_031_458_188,
+            std::slice::from_ref(&real_check_endpoint),
+            &round_tripped_collector.requests,
+            &round_tripped_collector.raw_objects,
+        )
+        .expect("public serialized path selects captured DCO check");
+        assert_eq!(g0_json_u64(&selected_check, &["id"]), Some(106_031_458_188));
+        assert!(g0_capture_raw_json(
+            &["real-public-suite-raw".to_owned()],
+            "check_suite",
+            96_108_219_979,
+            &["/repos/tailrocks/velnor/check-suites/96108219979".to_owned()],
+            &round_tripped_collector.requests,
+            &round_tripped_collector.raw_objects,
+        )
+        .is_some());
+        assert!(g0_capture_raw_json(
+            &["real-public-app-raw".to_owned()],
+            "app",
+            974_774,
+            &["/apps/dco-2".to_owned()],
+            &round_tripped_collector.requests,
+            &round_tripped_collector.raw_objects,
+        )
+        .is_some());
+        inventory = typed_inventory(round_tripped_collector);
         let baseline_inventory = inventory.clone();
         let records = manifest
             .repositories
@@ -10003,6 +10129,12 @@ mod tests {
             .findings
             .iter()
             .any(|finding| finding.code == "offline-validation-only"));
+        assert!(!report.findings.iter().any(|finding| {
+            matches!(
+                finding.code.as_str(),
+                "g0-endpoint-contract" | "g0-request-query" | "g0-raw-object"
+            )
+        }));
         assert_eq!(report.status, "fail");
         assert_eq!(report.mode, "offline");
 
@@ -11057,6 +11189,105 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_contract_is_closed_and_coverage_specific() {
+        let source = sha('a');
+        let check_endpoint = format!("/repos/tailrocks/velnor/commits/{source}/check-runs");
+        let cases = [
+            (
+                "github-response",
+                "/repos/tailrocks/velnor",
+                G0EndpointKind::Repository,
+                G0CoveragePurpose::RepositorySnapshot,
+            ),
+            (
+                "check_run",
+                check_endpoint.as_str(),
+                G0EndpointKind::CheckRunsPage,
+                G0CoveragePurpose::CheckInventory,
+            ),
+            (
+                "check_suite",
+                "/repos/tailrocks/velnor/check-suites/1",
+                G0EndpointKind::CheckSuite,
+                G0CoveragePurpose::CheckSuiteInventory,
+            ),
+            (
+                "job",
+                "/repos/tailrocks/velnor/actions/runs/1/attempts/1/jobs",
+                G0EndpointKind::JobsPage,
+                G0CoveragePurpose::JobInventory,
+            ),
+            (
+                "workflow_artifacts",
+                "/repos/tailrocks/velnor/actions/runs/1/artifacts",
+                G0EndpointKind::ArtifactsPage,
+                G0CoveragePurpose::ArtifactCensus,
+            ),
+            (
+                "workflow_run",
+                "/repos/tailrocks/velnor/actions/runs/1",
+                G0EndpointKind::WorkflowRun,
+                G0CoveragePurpose::WorkflowRunIdentity,
+            ),
+            (
+                "app",
+                "/apps/dco-2",
+                G0EndpointKind::App,
+                G0CoveragePurpose::ProviderIdentity,
+            ),
+        ];
+        for (object_kind, endpoint, expected_kind, expected_coverage) in cases {
+            let contract = g0_endpoint_contract(object_kind, endpoint)
+                .expect("known evidence endpoint must have one closed contract");
+            assert_eq!(contract.kind, expected_kind, "{object_kind} {endpoint}");
+            assert_eq!(
+                contract.coverage, expected_coverage,
+                "{object_kind} {endpoint}"
+            );
+        }
+
+        let mut all_request =
+            captured_page_request(&check_endpoint, "per_page=100&filter=all&page=1", 1);
+        let check_contract =
+            g0_endpoint_contract("check_run", &check_endpoint).expect("check inventory contract");
+        assert!(g0_response_query_contract(
+            &all_request,
+            b"per_page=100&filter=all&page=1",
+            check_contract,
+        ));
+        all_request.query_base64 = BASE64.encode(b"per_page=100&filter=latest&page=1");
+        all_request.query_sha256 = digest_bytes(b"per_page=100&filter=latest&page=1");
+        assert!(!g0_response_query_contract(
+            &all_request,
+            b"per_page=100&filter=latest&page=1",
+            check_contract,
+        ));
+
+        for (object_kind, endpoint) in [
+            ("github-response", "/repos/tailrocks/velnor/issues"),
+            (
+                "github-response",
+                "/repos/tailrocks/velnor/actions/runs/1/artifacts-unknown",
+            ),
+            (
+                "check_run",
+                "/repos/tailrocks/velnor/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/issues",
+            ),
+            ("job", "/repos/tailrocks/velnor/actions/runs/1/jobs"),
+            (
+                "workflow_artifacts",
+                "/repos/tailrocks/velnor/actions/runs/1/artifacts?filter=latest",
+            ),
+            ("unknown", "/repos/tailrocks/velnor"),
+        ] {
+            assert!(
+                g0_endpoint_contract(object_kind, endpoint).is_err(),
+                "arbitrary evidence path was accepted: {object_kind} {endpoint}"
+            );
+        }
+    }
+
+    #[test]
     fn paginated_stream_rejects_omitted_duplicate_and_cross_scope_pages() {
         let mut collector = minimal_g0_collector();
         let endpoint = format!("/repos/tailrocks/velnor/commits/{}/check-runs", sha('a'));
@@ -11879,7 +12110,10 @@ mod tests {
                 "real-app-sonar".to_owned(),
             ],
         };
-        assert!(g0_check_raw_evidence_valid(
+        // The captured Homebrew page used GitHub's `filter=latest` provider
+        // query. It is a valid raw diagnostic, but cannot authorize an
+        // all-check-runs inventory or a successful evidence chain.
+        assert!(!g0_check_raw_evidence_valid(
             "jackin-project/homebrew-tap",
             &sonar,
             &requests,
