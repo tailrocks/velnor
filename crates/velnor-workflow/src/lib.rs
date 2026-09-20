@@ -27,6 +27,7 @@ mod runners;
 mod runtime;
 mod scan;
 mod template_memory;
+#[cfg(feature = "tui")]
 mod tui;
 
 use crate::primitives::{WorkflowIr, WorkflowKind};
@@ -4278,10 +4279,33 @@ pub fn run_from_env() -> Result<(), GeneratorError> {
     run(&cli)
 }
 
+/// Interactive dispatch: the TUI owns attached terminals unless `--plain`
+/// forces the line-oriented report. Builds without the `tui` feature always
+/// take the headless path.
+fn use_tui(cli: &Cli) -> bool {
+    if cli.plain {
+        return false;
+    }
+    #[cfg(feature = "tui")]
+    {
+        io::stdin().is_terminal() && io::stdout().is_terminal()
+    }
+    #[cfg(not(feature = "tui"))]
+    {
+        false
+    }
+}
+
 fn run(cli: &Cli) -> Result<(), GeneratorError> {
-    if !cli.plain && io::stdin().is_terminal() && io::stdout().is_terminal() {
+    #[cfg(feature = "tui")]
+    if use_tui(cli) {
         return tui::run(cli);
     }
+    #[cfg(not(feature = "tui"))]
+    debug_assert!(
+        !use_tui(cli),
+        "builds without the `tui` feature always take the headless path"
+    );
     let source = RepositorySource::parse(&cli.target)?;
     let checkout = source.checkout()?;
     let default_branch = match cli.default_branch.as_deref() {
@@ -4335,6 +4359,7 @@ fn run(cli: &Cli) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+#[cfg(any(feature = "tui", test))]
 fn generated_files(config: &ProjectConfig) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
     generated_files_with_surface(config, None)
 }
@@ -5047,6 +5072,7 @@ fn write_generated_with_options(
     apply_generated_write_plan(root, files, inputs, dry_run, check, force, &plan)
 }
 
+#[cfg(any(feature = "tui", test))]
 fn plan_generated_write(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
@@ -6747,6 +6773,19 @@ mod tests {
                 ..
             }) if branch == "trunk"
         ));
+    }
+
+    #[test]
+    fn plain_mode_never_selects_the_tui() {
+        let plain = must(Cli::parse_args([OsString::from("--plain")]), "parse --plain");
+        assert!(!use_tui(&plain));
+    }
+
+    #[cfg(not(feature = "tui"))]
+    #[test]
+    fn lean_builds_always_take_the_headless_path() {
+        let interactive = must(Cli::parse_args([]), "parse default args");
+        assert!(!use_tui(&interactive));
     }
 
     #[test]
