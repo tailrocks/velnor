@@ -65,6 +65,7 @@ enum FailureCase {
     WrongJob,
     HeadWorkflowSubstitution,
     ExtraUploader,
+    DynamicUploader,
 }
 
 struct TransportFixture {
@@ -242,6 +243,11 @@ impl TransportFixture {
                 "        id: candidate_upload\n      - name: Extra uploader\n        id: extra_upload\n        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\n        with:\n          name: extra-upload\n          path: ${{ runner.temp }}/extra-upload\n",
             );
         }
+        if failure == Some(FailureCase::DynamicUploader) {
+            head_contract.push_str(
+                "\n  dynamic_upload:\n    name: dynamic_upload\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Dynamic artifact\n        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\n        with:\n          name: ${{ inputs.artifact_name }}\n          path: dynamic\n",
+            );
+        }
         fs::write(&self.head_contract, head_contract).expect("head contract");
 
         let mut scenario: JsonValue =
@@ -284,7 +290,12 @@ impl TransportFixture {
             Some(FailureCase::MissingArtifact) => scenario["artifacts"] = json!([]),
             Some(FailureCase::FailedRun) => scenario["runs"][0]["conclusion"] = json!("failure"),
             Some(FailureCase::WrongJob) => scenario["jobs"][0]["name"] = json!("other_job"),
-            Some(FailureCase::HeadWorkflowSubstitution | FailureCase::ExtraUploader) | None => {}
+            Some(
+                FailureCase::HeadWorkflowSubstitution
+                | FailureCase::ExtraUploader
+                | FailureCase::DynamicUploader,
+            )
+            | None => {}
         }
         fs::write(
             &self.scenario,
@@ -506,6 +517,7 @@ fn generated_acquire_rejects_transport_and_identity_faults() {
         FailureCase::WrongJob,
         FailureCase::HeadWorkflowSubstitution,
         FailureCase::ExtraUploader,
+        FailureCase::DynamicUploader,
     ];
     for case in cases {
         let fixture = TransportFixture::new();
