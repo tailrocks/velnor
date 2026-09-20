@@ -57,3 +57,29 @@ required validation is unnecessary. Its obligation/optional-provider semantics
 need independent review and explicit failure or verified substitute evidence.
 The committed fix does not claim to resolve that issue. Source-1 parity also
 remains required while source-1 consumers exist.
+
+## Integrated CI observation
+
+Run `35485817832`, attempt 1, source
+`266dd76e314ef9d6a6eb1514b2e96366173abacd`, executed the integrated gate.
+Both `ci-required` (job `106013035837`) and `Control / Required`
+(job `106013043543`) succeeded; every executed job reported success.
+The run-level conclusion is nevertheless `cancelled` after a subsequent push.
+This is retained as an observed gate execution, not a successful full-workflow
+performance baseline or final acceptance. Raw run/jobs and collector output
+are in `observations/velnor-35485817832-*`.
+
+## Admission review
+
+The renderer intentionally omits a provider from `units[].providers` when
+provider policy excludes it; that path may report a skipped caller only when
+the plan carries an explicit exclusion record. A selected `(unit, provider)`
+pair with its admission expression false is different: the plan and caller
+contract disagree, so accepting a skipped result is false green. The generic
+repair is to derive one obligation set from `RequiredCaller`, require
+`admission == true` and terminal `success` for selected pairs, and require an
+identity-matched `EXCLUDED` record with a valid reason for omitted pairs. Do not
+hardcode provider names or treat missing admission as proof that validation is
+unnecessary. A verified substitute artifact could satisfy an excluded
+obligation only through the existing exact product contract; cache presence is
+not a substitute.

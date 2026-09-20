@@ -166,9 +166,11 @@ Do not hand-patch generated YAML.
 
 The manifest contract must bind all of these before execution: repository,
 workflow, producer run and attempt, successful conclusion, source SHA, build
-SHA, canonical generator closure, project configuration/schema digest,
-platform, profile/features, artifact ID and digest, binary SHA, and the
-binary's self-reported revision and closure. Artifact names or latest-run
+SHA, canonical generator closure, platform, profile/features, artifact ID
+and digest, binary SHA, and the
+binary's self-reported revision and closure. A separate consumer receipt binds
+the project configuration/schema digest; it must not enter the reusable binary
+identity or create a self-pin cycle. Artifact names or latest-run
 selection are insufficient. Fork candidates must stay outside privileged
 policy; same-repository candidates still require exact identity and successful
 producer evidence.
@@ -204,3 +206,47 @@ retains the conflict. Fix matched-key/outcome classification before trusting
 summaries. No speedup, warm reuse, or quota plateau is established by this job.
 The overall run still had active jobs and a documentation lint failure when
 this observation was recorded.
+
+## Cache authority and branch scope
+
+The generated hosted Rust reusable workflow at the observed revision invokes
+`jdx/mr-boxington-action` `867fc530...` with `github-cache-mode: objects`,
+MBX `1.12.0`, an explicit unit/platform/trust/dependency/freshness key, and
+`save-on-workflow-dispatch: true` ([`ci-unit-rust.yml`](../../../.github/workflows/ci-unit-rust.yml):337).
+The action's pinned `action.yml` says that this flag enables saving after a
+successful trusted `workflow_dispatch`; its `shouldSave` implementation saves
+only `push` to the repository default branch or a dispatch when the flag is
+true. A `pull_request` run is restore-only. The action's post step also skips
+an exact hit and refuses an empty MBX export.
+
+This explains the cited PR result: run 35484350008 was a `pull_request` run,
+so its explicit `No mbx cache found` result could not seed a later PR. A
+manual dispatch on a feature branch may save, but GitHub cache scope does not
+make that entry visible to a PR from another ref; a default-branch push or a
+trusted default-branch dispatch is the reproducible seed for PR consumers.
+The cache key's explicit source and unit segments prevent unrelated units from
+sharing state, while restore prefixes intentionally permit compatible source
+fallbacks. The 1.12 directory transport therefore changes archive overhead,
+not the branch write policy.
+
+The generated aggregate workflows currently declare `actions: read` and
+`contents: read`, with no explicit `cache-mode`. Under current GitHub cache
+semantics, effective cache mode is trigger-dependent: trusted runs can receive write access while restricted-trust events receive
+read access; the exact effective mode must be observed per run. The MBX
+action itself still applies its stricter branch gate above. A future explicit
+`cache-mode: read`/`write` change must be checked against this action policy;
+do not call an outer cache restore a seed unless the log contains the MBX
+action's `Saved mbx cache ...` line.
+
+The live logs refine this for same-repository pull requests: job
+106008631268 in run 35484350008 reports `Cache mode: write`, yet the MBX action
+reports `No mbx cache found` and emits no `Saved mbx cache` line because the
+event is `pull_request`. The trusted main push job 105966435271 in run
+35468978394 reports `Cache mode: write`, restores a prefix MBX entry, and
+finishes with `Saved mbx cache ... (ID 7886995469)`. Its two command summaries
+show 3 hits/4 misses and 6.04s plus 3.57s estimated compiler time avoided;
+this is a warm-prefix observation, not an exact warm hit or a ten-run cohort.
+
+Primary implementation evidence: [pinned MBX action manifest](https://raw.githubusercontent.com/jdx/mr-boxington-action/867fc530102eec5b756075d70d850dc8330d2272/action.yml),
+[pinned save policy](https://raw.githubusercontent.com/jdx/mr-boxington-action/867fc530102eec5b756075d70d850dc8330d2272/src/lib.ts),
+[GitHub cache scope and mode documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).

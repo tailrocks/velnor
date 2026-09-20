@@ -23,3 +23,14 @@ API response is a current revision. Main is now integrated without force-push.
 
 CLI authentication rechecked 2026-09-20 02:57 UTC: same invalid account token;
 `gh auth status` exited 1. No second permission question or token request sent.
+
+A feasible dispatch alternative remains unimplemented: a generated, trusted
+CI controller can use its own explicitly scoped `actions: write` run token to
+dispatch an existing validation workflow at the exact candidate ref and await
+its real outcome. This needs independent event/trust/recursion review and
+safe non-publishing inputs. It is not proof that local CLI authorization works,
+and no controller dispatch has been performed.
+GitHub documents `workflow_dispatch` as an exception to token-triggered
+workflow suppression; dispatch targets must exist on the default branch. See
+[the token event contract](https://docs.github.com/en/enterprise-cloud@latest/actions/concepts/security/github_token)
+and [workflow dispatch syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatch).

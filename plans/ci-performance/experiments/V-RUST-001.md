@@ -87,3 +87,62 @@ Local dirty builds currently advertise the committed HEAD closure. That defect
 needs its own source-identity repair before local products can serve as immutable
 evidence. Clean committed f0fb1c01 was rebuilt separately and reports its exact
 revision/closure; no dirty binary was published.
+
+## Candidate publication missed the policy wait budget
+
+This is raw timing evidence, not a speed claim. The producer was Velnor run
+`35484350008`, attempt `1`, workflow
+`.github/workflows/ci-pr.yml`, with run `head_sha`
+`f0fb1c012adc2b7e604eaab332785eb5bf780caa`. Its successful generator job was
+`106008631159` (`Rust · velnor-workflow · github-hosted —
+rust-velnor-workflow / GitHub · hosted`). The policy consumer was run
+`35484349032`, attempt `1`, job `106007857121`; its policy job failed after the
+candidate wait. The API's live PR object reports a different current
+`pull_requests[0].head.sha` (`17142395609c29de76d7b99b3f661d55aa95edc5`), so
+the run/job `head_sha` and logged `HEAD_SHA` are the authoritative source
+identity for this historical attempt. The producer log also records
+`CANDIDATE_MERGE_SHA=17677dbc494b7563f18da9d9aaadfb24a5aa088a` and
+`CANDIDATE_BASE_SHA=325719f1e05d3d46322c9fd3eeb9ad545e175638`.
+
+Raw API records:
+
+- Run: <https://api.github.com/repos/tailrocks/velnor/actions/runs/35484350008>
+  (`created_at`/`run_started_at` `2026-09-20T02:34:43Z`, `updated_at`
+  `2026-09-20T02:50:43Z`, conclusion `failure`).
+- Producer jobs page 1:
+  <https://api.github.com/repos/tailrocks/velnor/actions/runs/35484350008/jobs?per_page=100&page=1>
+  (68 total; job `106008631159` started `02:41:18Z`, completed `02:50:30Z`,
+  conclusion `success`). Page 2 was fetched and empty.
+- Artifacts pages 1 and 2:
+  <https://api.github.com/repos/tailrocks/velnor/actions/runs/35484350008/artifacts?per_page=100&page=1>
+  and
+  <https://api.github.com/repos/tailrocks/velnor/actions/runs/35484350008/artifacts?per_page=100&page=2>
+  (2 total on page 1, empty page 2). Candidate artifact ID `10597268252`,
+  name `velnor-workflow-candidate-b510e2700de75668-Linux-X64`, size
+  `41393210`, `expired=false`, created/updated `2026-09-20T02:50:26Z`.
+
+The relevant unmodified log lines are:
+
+```text
+policy 106007857121 2026-09-20T02:35:06.6079897Z head_candidate="$(velnor-workflow closure --rev="$HEAD_SHA" --candidate)"
+policy 106007857121 2026-09-20T02:35:06.6080947Z deadline=$((SECONDS + 900))
+policy 106007857121 2026-09-20T02:50:09.4239821Z ::error::no candidate product velnor-workflow-candidate-b510e2700de75668-Linux-X64 was published within 15 minutes
+producer 106008631159 2026-09-20T02:50:17.9759824Z merge_closure="$(velnor-workflow closure --rev="$CANDIDATE_MERGE_SHA" --candidate)"
+producer 106008631159 2026-09-20T02:50:17.9778763Z echo "name=velnor-workflow-candidate-${head_closure:0:16}-${RUNNER_OS}-${RUNNER_ARCH}" >> "$GITHUB_OUTPUT"
+producer 106008631159 2026-09-20T02:50:20.9674906Z name: velnor-workflow-candidate-b510e2700de75668-Linux-X64
+producer 106008631159 2026-09-20T02:50:26.5408967Z Artifact velnor-workflow-candidate-b510e2700de75668-Linux-X64 has been successfully uploaded! Artifact ID 10597268252
+```
+
+The candidate closure is
+`b510e2700de756686a995968ad999cbfd1b14d170d21e1a18b3e76ed366875e5`.
+The consumer started the 900-second poll at `02:35:06.608`; it exhausted at
+`02:50:09.424`. The artifact upload finalized at `02:50:26.541`: about 17.1 seconds after the consumer's deadline and about
+15.5 seconds after the policy job completed at `02:50:11Z`. The producer did
+not enter candidate packaging until `02:50:17.975`, after the Rust checks, so
+the late producer is the direct cause of the miss. Policy waits for a product
+emitted only after the expensive generator check; these timestamps establish
+late producer coupling, not a reciprocal dependency cycle. A pre-plan bootstrap
+must publish and verify the candidate before policy/plan consumers wait; it
+must bind run/attempt, source SHA, merge SHA, closure, artifact ID/name/digest,
+and successful producer status. Extending the polling timeout would mask the late producer dependency
+and is not a structural fix.
