@@ -592,8 +592,9 @@ pub(crate) struct UnitSection {
 
 /// One named build product a `[[units]]` row declares: the product's name,
 /// the repository task that rebuilds it, the task outputs consumers
-/// receive as environment, and the repo-relative artifact paths the
-/// rebuild materializes.
+/// receive as environment, the repo-relative artifact paths the
+/// rebuild materializes, and the repo-relative input paths and globs
+/// whose bytes feed the rebuild.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProductSection {
@@ -603,6 +604,8 @@ pub(crate) struct ProductSection {
     env: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     outputs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inputs: Option<Vec<String>>,
 }
 
 /// One prerequisite edge a `[[units]]` row declares: the producer unit, the
@@ -1106,7 +1109,7 @@ impl UnitSection {
     ///
     /// # Errors
     /// Returns a usage error for a product without a name, an invalid task,
-    /// env, or output, or a name the row declares twice.
+    /// env, output, or input, or a name the row declares twice.
     pub(crate) fn named_products(
         &self,
         id: &str,
@@ -1149,11 +1152,22 @@ impl UnitSection {
                     }
                 }
             }
+            if let Some(inputs) = product.inputs.as_ref() {
+                for input in inputs {
+                    if !crate::s2::platform::valid_product_input(input) {
+                        return Err(GeneratorError::usage(format!(
+                            "[[units]] {id} declares product `{name}` with input `{input}`, which is not a repo-relative path or glob in normal form; use forward slashes without leading `/`, `.`, `..`, or empty segments"
+                        )));
+                    }
+                }
+            }
             products.push(crate::s2::platform::NamedProduct {
                 name: name.to_owned(),
                 task: product.task.clone(),
                 env: product.env.clone().unwrap_or_default(),
                 outputs: product.outputs.clone().unwrap_or_default(),
+                inputs: product.inputs.clone().unwrap_or_default(),
+                inputs_unknown: Vec::new(),
             });
         }
         Ok(products)
@@ -5956,6 +5970,7 @@ mod tests {
                 task: Some("build-xcframework".to_owned()),
                 env: None,
                 outputs,
+                inputs: None,
             }],
             ..UnitSection::default()
         }
@@ -5971,6 +5986,37 @@ mod tests {
         assert_eq!(
             products[0].outputs,
             vec!["native/out/lib.xcframework".to_owned()]
+        );
+    }
+
+    #[test]
+    fn named_products_carries_declared_inputs() {
+        let mut row = product_row(None);
+        row.products[0].inputs = Some(vec![
+            "libs/ffi/**/*.rs".to_owned(),
+            "libs/ffi/boltffi.toml".to_owned(),
+        ]);
+        let products = must(row.named_products("rust-ffi"), "declared inputs parse");
+        assert_eq!(
+            products[0].inputs,
+            vec![
+                "libs/ffi/**/*.rs".to_owned(),
+                "libs/ffi/boltffi.toml".to_owned(),
+            ]
+        );
+        assert!(products[0].inputs_unknown.is_empty());
+    }
+
+    #[test]
+    fn named_products_rejects_escaping_input() {
+        let mut row = product_row(None);
+        row.products[0].inputs = Some(vec!["../escape/**".to_owned()]);
+        let error = must_fail(row.named_products("rust-ffi"), "escaping input fails");
+        assert!(
+            error
+                .to_string()
+                .contains("not a repo-relative path or glob"),
+            "unexpected error: {error}"
         );
     }
 

@@ -198,6 +198,8 @@ fn wire_native_edge(
                 task: None,
                 env: std::collections::BTreeMap::new(),
                 outputs: vec![producer.output.clone()],
+                inputs: producer.inputs.clone(),
+                inputs_unknown: producer.inputs_unknown.clone(),
             });
     }
     shape.units[consumer_index]

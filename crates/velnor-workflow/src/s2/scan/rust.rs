@@ -1224,6 +1224,11 @@ pub(crate) struct BoltffiProducer {
     pub(crate) output: String,
     /// The Rust unit owning the producing crate, resolved at detect time.
     pub(crate) unit: Option<String>,
+    /// The transitive input closure: sorted patterns whose bytes feed the
+    /// pack, plus the binding manifest itself.
+    pub(crate) inputs: Vec<String>,
+    /// Closure gaps the scan could not resolve; empty means complete.
+    pub(crate) inputs_unknown: Vec<String>,
 }
 
 /// The `boltffi.toml` fields the producer join reads. Everything else in the
@@ -1317,6 +1322,190 @@ fn valid_framework_segment(segment: &str) -> bool {
 /// manifest that cannot join a consumer. Semantic failures stay diagnostics:
 /// a malformed binding manifest must not fail the whole scan when `BoltFFI`
 /// itself will report the error at build time.
+/// The transitive input closure of the native-producing crate at
+/// `crate_root`: per-crate manifest, source, build-script, and `include_str!`
+/// patterns for the crate and every transitive path dependency, plus the
+/// binding `seed` files, shared locks and toolchain pins, and Cargo
+/// configuration. Returns sorted, deduplicated patterns with the closure
+/// gaps the scan could not resolve. Registry and git dependencies resolve
+/// through the lockfiles; a path dependency without a tracked manifest, or
+/// one pointing outside the repository, is a gap, never a silent omission:
+/// exact reuse must stay disabled while any gap remains.
+///
+/// # Errors
+/// Returns an IO error when a tracked manifest cannot be read, and a usage
+/// error when an `include_str!` target is missing, like the Rust unit scan.
+pub(crate) fn native_input_closure(
+    root: &Path,
+    files: &[String],
+    file_set: &BTreeSet<String>,
+    crate_root: &str,
+    seed: &[String],
+) -> Result<(Vec<String>, Vec<String>), GeneratorError> {
+    let mut inputs: Vec<String> = seed.to_vec();
+    for pinned in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "rust-toolchain",
+        "mise.toml",
+        "mise.lock",
+    ] {
+        if file_set.contains(pinned) {
+            inputs.push(pinned.to_owned());
+        }
+    }
+    inputs.push(".cargo/**".to_owned());
+    let local_lock = join_repo_path(crate_root, "Cargo.lock");
+    if local_lock != "Cargo.lock" && file_set.contains(&local_lock) {
+        inputs.push(local_lock);
+    }
+    let mut gaps = Vec::new();
+    let mut visited = BTreeSet::new();
+    let mut stack = vec![crate_root.to_owned()];
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        let manifest_path = join_repo_path(&current, "Cargo.toml");
+        let path = root.join(&manifest_path);
+        let contents = fs::read_to_string(&path)
+            .map_err(|error| GeneratorError::io("read Cargo manifest", &path, &error))?;
+        let facts = parse_cargo_manifest(&current, &contents);
+        let prefix = path_prefix(&current);
+        inputs.extend([
+            manifest_path,
+            format!("{prefix}**/*.rs"),
+            format!("{prefix}src/**"),
+            format!("{prefix}tests/**"),
+            format!("{prefix}examples/**"),
+            format!("{prefix}benches/**"),
+        ]);
+        let build_script = facts.build_script.as_deref().or_else(|| {
+            file_set
+                .contains(&join_repo_path(&current, "build.rs"))
+                .then_some("build.rs")
+        });
+        if let Some(script) = build_script {
+            match resolve_repo_path(&current, script) {
+                Some(script_path) => inputs.push(script_path),
+                None => gaps.push(format!(
+                    "build script `{script}` of crate `{current}` is absolute or escapes the repository"
+                )),
+            }
+        }
+        inputs.extend(include_str_paths(root, files, file_set, &current)?);
+        for dependency in &facts.dependencies {
+            let Some(path) = dependency.path.as_deref() else {
+                continue;
+            };
+            let Some(dep_root) = resolve_repo_path(&current, path) else {
+                gaps.push(format!(
+                    "path dependency `{}` of crate `{current}` is absolute or escapes the repository",
+                    dependency.name
+                ));
+                continue;
+            };
+            if !file_set.contains(&join_repo_path(&dep_root, "Cargo.toml")) {
+                gaps.push(format!(
+                    "path dependency `{}` of crate `{current}` has no tracked Cargo.toml",
+                    dependency.name
+                ));
+                continue;
+            }
+            stack.push(dep_root);
+        }
+    }
+    inputs.sort();
+    inputs.dedup();
+    gaps.sort();
+    gaps.dedup();
+    Ok((inputs, gaps))
+}
+
+/// Parse one `boltffi.toml` into a producer, pushing a diagnostic and
+/// returning `Ok(None)` when the manifest cannot yield a joinable edge.
+/// I/O and closure errors propagate because they may hide a real producer.
+fn boltffi_producer_from_manifest(
+    context: &ScanContext<'_>,
+    manifest_path: &String,
+    diagnostics: &mut Vec<String>,
+) -> Result<Option<BoltffiProducer>, GeneratorError> {
+    let root = parent_path(manifest_path);
+    let path = context.root.join(manifest_path);
+    let contents = fs::read_to_string(&path)
+        .map_err(|error| GeneratorError::io("read BoltFFI manifest", &path, &error))?;
+    let parsed = parse_boltffi_manifest(&contents);
+    if !parsed.enabled {
+        return Ok(None);
+    }
+    let Some(package) = parsed.package_name else {
+        diagnostics.push(format!(
+            "BoltFFI manifest {manifest_path} declares no [package] name; the framework name cannot be derived."
+        ));
+        return Ok(None);
+    };
+    let framework = parsed
+        .xcframework_name
+        .or(parsed.swift_module_name)
+        .unwrap_or_else(|| boltffi_pascal_case(&package));
+    if !valid_framework_segment(&framework) {
+        diagnostics.push(format!(
+            "BoltFFI manifest {manifest_path} resolves framework name `{framework}`, which is not a valid path segment; no producer edge was constructed."
+        ));
+        return Ok(None);
+    }
+    let declared_parent = parsed
+        .xcframework_output
+        .as_deref()
+        .or(parsed.apple_output.as_deref())
+        .unwrap_or("dist/apple");
+    let Some(parent) = resolve_repo_path(&root, declared_parent) else {
+        diagnostics.push(format!(
+            "BoltFFI manifest {manifest_path} declares output `{declared_parent}`, which is absolute or escapes the repository; no producer edge was constructed."
+        ));
+        return Ok(None);
+    };
+    let cargo_manifest = join_repo_path(&root, "Cargo.toml");
+    if !context.file_set.contains(&cargo_manifest) {
+        diagnostics.push(format!(
+            "BoltFFI manifest {manifest_path} has no sibling Cargo.toml; the producing crate cannot be identified."
+        ));
+        return Ok(None);
+    }
+    let cargo_path = context.root.join(&cargo_manifest);
+    let cargo_contents = fs::read_to_string(&cargo_path)
+        .map_err(|error| GeneratorError::io("read Cargo manifest", &cargo_path, &error))?;
+    let cargo = parse_cargo_manifest(&root, &cargo_contents);
+    let crate_name = parsed.package_crate.unwrap_or_else(|| package.clone());
+    if cargo.package_name.as_deref() != Some(crate_name.as_str()) {
+        diagnostics.push(format!(
+            "BoltFFI manifest {manifest_path} names crate `{crate_name}`, but the sibling Cargo.toml declares package `{}`; no producer edge was constructed.",
+            cargo.package_name.as_deref().unwrap_or("<unnamed>"),
+        ));
+        return Ok(None);
+    }
+    let (inputs, inputs_unknown) = native_input_closure(
+        context.root,
+        context.files,
+        context.file_set,
+        &root,
+        std::slice::from_ref(manifest_path),
+    )?;
+    Ok(Some(BoltffiProducer {
+        manifest: manifest_path.to_owned(),
+        root,
+        package,
+        crate_name,
+        ffi_module: format!("{framework}FFI"),
+        output: join_repo_path(&parent, &format!("{framework}.xcframework")),
+        framework,
+        unit: None,
+        inputs,
+        inputs_unknown,
+    }))
+}
+
 pub(crate) fn boltffi_producers(
     context: &ScanContext<'_>,
 ) -> Result<(Vec<BoltffiProducer>, Vec<String>), GeneratorError> {
@@ -1325,75 +1514,11 @@ pub(crate) fn boltffi_producers(
     let mut producers = Vec::new();
     let mut diagnostics = Vec::new();
     for manifest_path in &manifests {
-        let root = parent_path(manifest_path);
-        let path = context.root.join(manifest_path);
-        let contents = fs::read_to_string(&path)
-            .map_err(|error| GeneratorError::io("read BoltFFI manifest", &path, &error))?;
-        let parsed = parse_boltffi_manifest(&contents);
-        if !parsed.enabled {
-            continue;
+        if let Some(producer) =
+            boltffi_producer_from_manifest(context, manifest_path, &mut diagnostics)?
+        {
+            producers.push(producer);
         }
-        let Some(package) = parsed.package_name else {
-            diagnostics.push(format!(
-                "BoltFFI manifest {manifest_path} declares no [package] name; the framework name cannot be derived."
-            ));
-            continue;
-        };
-        let framework = parsed
-            .xcframework_name
-            .or(parsed.swift_module_name)
-            .unwrap_or_else(|| boltffi_pascal_case(&package));
-        if !valid_framework_segment(&framework) {
-            diagnostics.push(format!(
-                "BoltFFI manifest {manifest_path} resolves framework name `{framework}`, which is not a valid path segment; no producer edge was constructed."
-            ));
-            continue;
-        }
-        let parent = parsed
-            .xcframework_output
-            .as_deref()
-            .or(parsed.apple_output.as_deref())
-            .unwrap_or("dist/apple");
-        let Some(parent) = resolve_repo_path(&root, parent) else {
-            diagnostics.push(format!(
-                "BoltFFI manifest {manifest_path} declares output `{}`, which is absolute or escapes the repository; no producer edge was constructed.",
-                parsed
-                    .xcframework_output
-                    .as_deref()
-                    .or(parsed.apple_output.as_deref())
-                    .unwrap_or("dist/apple"),
-            ));
-            continue;
-        };
-        let cargo_manifest = join_repo_path(&root, "Cargo.toml");
-        if !context.file_set.contains(&cargo_manifest) {
-            diagnostics.push(format!(
-                "BoltFFI manifest {manifest_path} has no sibling Cargo.toml; the producing crate cannot be identified."
-            ));
-            continue;
-        }
-        let cargo_path = context.root.join(&cargo_manifest);
-        let cargo_contents = fs::read_to_string(&cargo_path)
-            .map_err(|error| GeneratorError::io("read Cargo manifest", &cargo_path, &error))?;
-        let cargo = parse_cargo_manifest(&root, &cargo_contents);
-        let crate_name = parsed.package_crate.unwrap_or_else(|| package.clone());
-        if cargo.package_name.as_deref() != Some(crate_name.as_str()) {
-            diagnostics.push(format!(
-                "BoltFFI manifest {manifest_path} names crate `{crate_name}`, but the sibling Cargo.toml declares package `{}`; no producer edge was constructed.",
-                cargo.package_name.as_deref().unwrap_or("<unnamed>"),
-            ));
-            continue;
-        }
-        producers.push(BoltffiProducer {
-            manifest: manifest_path.clone(),
-            root,
-            package,
-            crate_name,
-            ffi_module: format!("{framework}FFI"),
-            output: join_repo_path(&parent, &format!("{framework}.xcframework")),
-            framework,
-            unit: None,
-        });
     }
     let mut by_output: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for producer in &producers {
@@ -1972,6 +2097,141 @@ mod tests {
         assert!(diagnostics[0].contains("claim the same XCFramework output"));
         assert!(diagnostics[0].contains("libs/one/boltffi.toml"));
         assert!(diagnostics[0].contains("libs/two/boltffi.toml"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_closure_collects_direct_crate_inputs() {
+        use super::native_input_closure;
+        let (root, files, file_set) = boltffi_fixture(&[
+            ("Cargo.lock", "lock\n"),
+            ("rust-toolchain.toml", "[toolchain]\n"),
+            (
+                "libs/bridge-ffi/Cargo.toml",
+                "[package]\nname = \"bridge-core-ffi\"\nversion = \"0.1.0\"\n",
+            ),
+            ("libs/bridge-ffi/build.rs", "fn main() {}\n"),
+            (
+                "libs/bridge-ffi/src/lib.rs",
+                "const SCHEMA: &str = include_str!(\"schema.json\");\n",
+            ),
+            ("libs/bridge-ffi/src/schema.json", "{}\n"),
+        ]);
+        let seed = vec!["libs/bridge-ffi/boltffi.toml".to_owned()];
+        let (inputs, gaps) = must(
+            native_input_closure(&root, &files, &file_set, "libs/bridge-ffi", &seed),
+            "collect direct closure",
+        );
+        assert!(gaps.is_empty(), "{gaps:?}");
+        for expected in [
+            "libs/bridge-ffi/boltffi.toml",
+            "libs/bridge-ffi/Cargo.toml",
+            "libs/bridge-ffi/**/*.rs",
+            "libs/bridge-ffi/src/**",
+            "libs/bridge-ffi/build.rs",
+            "libs/bridge-ffi/src/schema.json",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            ".cargo/**",
+        ] {
+            assert!(
+                inputs.iter().any(|input| input == expected),
+                "closure contains {expected}: {inputs:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_closure_follows_transitive_path_dependencies() {
+        use super::native_input_closure;
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "libs/bridge-ffi/Cargo.toml",
+                "[package]\nname = \"bridge-core-ffi\"\nversion = \"0.1.0\"\n\n[dependencies]\nsibling = { path = \"../sibling\" }\n",
+            ),
+            (
+                "libs/sibling/Cargo.toml",
+                "[package]\nname = \"sibling\"\nversion = \"0.1.0\"\n\n[dependencies]\nleaf = { path = \"../leaf\" }\n",
+            ),
+            (
+                "libs/leaf/Cargo.toml",
+                "[package]\nname = \"leaf\"\nversion = \"0.1.0\"\n",
+            ),
+        ]);
+        let (inputs, gaps) = must(
+            native_input_closure(&root, &files, &file_set, "libs/bridge-ffi", &[]),
+            "collect transitive closure",
+        );
+        assert!(gaps.is_empty(), "{gaps:?}");
+        for expected in [
+            "libs/bridge-ffi/Cargo.toml",
+            "libs/sibling/Cargo.toml",
+            "libs/sibling/**/*.rs",
+            "libs/leaf/Cargo.toml",
+            "libs/leaf/src/**",
+        ] {
+            assert!(
+                inputs.iter().any(|input| input == expected),
+                "closure contains {expected}: {inputs:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_closure_reports_missing_path_manifest_as_gap() {
+        use super::native_input_closure;
+        let (root, files, file_set) = boltffi_fixture(&[(
+            "libs/bridge-ffi/Cargo.toml",
+            "[package]\nname = \"bridge-core-ffi\"\nversion = \"0.1.0\"\n\n[dependencies]\nmissing = { path = \"../missing\" }\n",
+        )]);
+        let (inputs, gaps) = must(
+            native_input_closure(&root, &files, &file_set, "libs/bridge-ffi", &[]),
+            "collect closure with a missing dep",
+        );
+        assert!(
+            inputs
+                .iter()
+                .any(|input| input == "libs/bridge-ffi/Cargo.toml"),
+            "{inputs:?}"
+        );
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert!(gaps[0].contains("missing"), "{gaps:?}");
+        assert!(gaps[0].contains("no tracked Cargo.toml"), "{gaps:?}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_closure_terminates_on_dependency_cycle() {
+        use super::native_input_closure;
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "libs/one/Cargo.toml",
+                "[package]\nname = \"one\"\nversion = \"0.1.0\"\n\n[dependencies]\ntwo = { path = \"../two\" }\n",
+            ),
+            (
+                "libs/two/Cargo.toml",
+                "[package]\nname = \"two\"\nversion = \"0.1.0\"\n\n[dependencies]\none = { path = \"../one\" }\n",
+            ),
+        ]);
+        let (inputs, gaps) = must(
+            native_input_closure(&root, &files, &file_set, "libs/one", &[]),
+            "collect cyclic closure",
+        );
+        assert!(gaps.is_empty(), "{gaps:?}");
+        assert!(
+            inputs.iter().any(|input| input == "libs/one/**/*.rs"),
+            "{inputs:?}"
+        );
+        assert!(
+            inputs.iter().any(|input| input == "libs/two/**/*.rs"),
+            "{inputs:?}"
+        );
+        let mut deduped = inputs.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(inputs, deduped, "closure patterns are sorted and unique");
         let _ = fs::remove_dir_all(root);
     }
 }

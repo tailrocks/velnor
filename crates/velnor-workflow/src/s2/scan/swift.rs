@@ -1930,6 +1930,67 @@ mod tests {
     }
 
     #[test]
+    fn native_join_populates_product_input_closure() {
+        let root = native_fixture(&[
+            ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
+            (
+                "libs/bridge-ffi/Cargo.toml",
+                "[package]\nname = \"bridge-core-ffi\"\nversion = \"0.1.0\"\n\n[dependencies]\nsibling = { path = \"../sibling\" }\n",
+            ),
+            ("libs/bridge-ffi/build.rs", "fn main() {}\n"),
+            (
+                "libs/sibling/Cargo.toml",
+                "[package]\nname = \"sibling\"\nversion = \"0.1.0\"\n",
+            ),
+            ("rust-toolchain.toml", NATIVE_TOOLCHAIN),
+            (
+                "clients/desktop/Package.swift",
+                &native_package(
+                    ".binaryTarget(path: \"../../target/xcframework/BridgeCore.xcframework\")",
+                ),
+            ),
+        ]);
+        let shape = scan_native(&root);
+        assert!(
+            shape
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("producer step must materialize")),
+            "{:?}",
+            shape.limitations
+        );
+        let producer = must_some(
+            shape.units.iter().find(|unit| {
+                unit.id == "rust-libs-bridge-ffi" || unit.id.starts_with("rust-bridge")
+            }),
+            "rust producer unit",
+        );
+        assert_eq!(producer.products.len(), 1, "{:?}", producer.products);
+        let product = &producer.products[0];
+        for expected in [
+            "libs/bridge-ffi/boltffi.toml",
+            "libs/bridge-ffi/Cargo.toml",
+            "libs/bridge-ffi/**/*.rs",
+            "libs/bridge-ffi/build.rs",
+            "libs/sibling/Cargo.toml",
+            "libs/sibling/**/*.rs",
+            "rust-toolchain.toml",
+        ] {
+            assert!(
+                product.inputs.iter().any(|input| input == expected),
+                "product inputs contain {expected}: {:?}",
+                product.inputs
+            );
+        }
+        assert!(
+            product.inputs_unknown.is_empty(),
+            "{:?}",
+            product.inputs_unknown
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn xcode_scheme_unit_caches_intermediates_with_toolchain_pins() {
         let root = native_fixture(&[(
             "apps/one/One.xcodeproj/xcshareddata/xcschemes/App.xcscheme",

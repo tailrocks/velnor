@@ -25,7 +25,12 @@ use crate::s2::{GeneratorError, ProjectConfig, Unit, UnitKind};
 /// `env` carries the task's outputs — the paths and flags consumers need
 /// once the product exists — and `outputs` declares the repo-relative artifact
 /// paths the rebuild materializes, so later stages can validate, cache, and
-/// transport the product instead of re-running blind.
+/// transport the product instead of re-running blind. `inputs` declares the
+/// product's semantic input closure as repo-relative paths and `hashFiles`
+/// globs: manifests, sources, build scripts, and configuration whose bytes
+/// feed the rebuild. `inputs_unknown` names closure gaps the scanner could
+/// not resolve; an empty list means the closure is complete, and exact reuse
+/// must stay disabled while any gap remains.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub(crate) struct NamedProduct {
     pub(crate) name: String,
@@ -35,6 +40,10 @@ pub(crate) struct NamedProduct {
     pub(crate) env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) outputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) inputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) inputs_unknown: Vec<String>,
 }
 
 /// One prerequisite edge: `producer` builds `product` for this consumer.
@@ -117,6 +126,29 @@ pub(crate) fn valid_product_output(value: &str) -> bool {
         .any(|segment| segment.is_empty() || segment == "." || segment == "..")
 }
 
+/// A declared product input: a repo-relative path in normal form, with the
+/// `hashFiles` glob characters `*?[]` allowed inside segments. Absolute
+/// paths, escapes, `.` segments, backslashes, exclusions, and empty segments
+/// are all refused, so identity hashing never silently widens or narrows the
+/// closure.
+pub(crate) fn valid_product_input(value: &str) -> bool {
+    if value.is_empty() || value.len() > 500 || value.starts_with('/') || value.starts_with('!') {
+        return false;
+    }
+    if value.bytes().any(|byte| byte == b'\\') || value.chars().any(char::is_control) {
+        return false;
+    }
+    if value.split('/').any(|segment| {
+        segment.is_empty() || segment == "." || segment == ".." || segment.contains('!')
+    }) {
+        return false;
+    }
+    value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'_' | b'.' | b'/' | b'*' | b'?' | b'[' | b']')
+    })
+}
+
 /// Validate one env map.
 ///
 /// # Errors
@@ -182,14 +214,39 @@ pub(crate) fn resolve(config: &mut ProjectConfig) -> Result<(), GeneratorError> 
 }
 
 /// Validate the product graph before compilation: every declared output is a
-/// normal-form repo-relative path claimed by exactly one product, no unit
-/// requires its own product, and the consumer-to-producer edges are acyclic.
-/// Unknown producers and products stay `materialize_prerequisites` errors,
-/// which already name the known units and offered products.
+/// normal-form repo-relative path claimed by exactly one product, every
+/// declared input is a normal-form path or glob without duplicates, closure
+/// gaps stay printable diagnostics, no unit requires its own product, and the
+/// consumer-to-producer edges are acyclic. Unknown producers and products
+/// stay `materialize_prerequisites` errors, which already name the known
+/// units and offered products.
 fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> {
     let mut owners: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
     for unit in &config.units {
         for product in &unit.products {
+            let mut seen_inputs = BTreeSet::new();
+            for input in &product.inputs {
+                if !valid_product_input(input) {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` declares product `{}` with input `{input}`, which is not a repo-relative path or glob in normal form; use forward slashes without leading `/`, `.`, `..`, or empty segments",
+                        unit.id, product.name,
+                    )));
+                }
+                if !seen_inputs.insert(input.as_str()) {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` declares product `{}` input `{input}` twice; one entry per pattern",
+                        unit.id, product.name,
+                    )));
+                }
+            }
+            for gap in &product.inputs_unknown {
+                if !valid_env_value(gap) {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` declares product `{}` with an unprintable closure gap; keep gap entries to printable text",
+                        unit.id, product.name,
+                    )));
+                }
+            }
             for output in &product.outputs {
                 if !valid_product_output(output) {
                     return Err(GeneratorError::usage(format!(
@@ -444,7 +501,8 @@ pub(crate) fn agreed_env(
 mod tests {
     use super::{
         agreed_env, is_ffi_crate_type, prepare_command, resolve, valid_env_name, valid_env_value,
-        valid_product_name, valid_product_output, valid_task_name, NamedProduct, Prerequisite,
+        valid_product_input, valid_product_name, valid_product_output, valid_task_name,
+        NamedProduct, Prerequisite,
     };
     use crate::s2::provider::{Capabilities, Platform, ProviderId, TrustReq};
     use crate::s2::scan::default_selectors;
@@ -563,6 +621,8 @@ mod tests {
             task: Some("build-xcframework".to_owned()),
             env: std::collections::BTreeMap::new(),
             outputs: Vec::new(),
+            inputs: Vec::new(),
+            inputs_unknown: Vec::new(),
         };
         let plain = Prerequisite {
             producer: "rust-ffi".to_owned(),
@@ -605,6 +665,8 @@ mod tests {
 
     fn product(name: &str, outputs: &[&str]) -> NamedProduct {
         NamedProduct {
+            inputs: Vec::new(),
+            inputs_unknown: Vec::new(),
             name: name.to_owned(),
             task: Some(format!("build-{name}")),
             env: BTreeMap::new(),
@@ -714,6 +776,70 @@ mod tests {
         for value in rejected {
             assert!(!valid_product_output(value), "should reject `{value}`");
         }
+    }
+
+    #[test]
+    fn product_inputs_accept_globs_and_reject_escapes() {
+        for accepted in [
+            "libs/ffi/Cargo.toml",
+            "libs/ffi/**/*.rs",
+            "libs/ffi/src/**",
+            "**/*.rs",
+            ".cargo/**",
+            "Cargo.lock",
+        ] {
+            assert!(valid_product_input(accepted), "should accept `{accepted}`");
+        }
+        let long = "x".repeat(501);
+        let rejected = vec![
+            "",
+            "/absolute/path",
+            "trailing/slash/",
+            "double//slash",
+            "dot/./segment",
+            "up/../segment",
+            "..",
+            "../escape",
+            "back\\slash",
+            "!excluded/path",
+            "libs/ffi/!negated.rs",
+            long.as_str(),
+        ];
+        for value in rejected {
+            assert!(!valid_product_input(value), "should reject `{value}`");
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_duplicate_input_within_one_product() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.inputs = vec!["libs/ffi/**/*.rs".to_owned(), "libs/ffi/**/*.rs".to_owned()];
+        producer.products = vec![ffi];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer])),
+            "duplicate input fails closed",
+        );
+        assert!(
+            error.to_string().contains("twice"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_unprintable_closure_gap() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.inputs_unknown = vec!["gap with\nnewline".to_owned()];
+        producer.products = vec![ffi];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer])),
+            "unprintable gap fails closed",
+        );
+        assert!(
+            error.to_string().contains("unprintable closure gap"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
