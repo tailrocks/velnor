@@ -5747,6 +5747,100 @@ mod tests {
             })
     }
 
+    /// Build a small, thin 64-bit executable Mach-O for the rendered product
+    /// fixture. A magic/CPU prefix is not a native executable: Homebrew's
+    /// consumer also requires `MH_EXECUTE` and coherent load commands. The
+    /// payload is never executed; its return instruction and trailing label
+    /// make each sibling deterministic and distinct while keeping the fixture
+    /// self-contained on the Linux test runner.
+    #[cfg(unix)]
+    fn synthetic_macho64(binary: &str, target: &str) -> Vec<u8> {
+        let (cpu_type, cpu_subtype, entry_code): (u32, u32, &[u8]) = match target {
+            "aarch64-apple-darwin" => (0x0100_000c, 0, &[0xc0, 0x03, 0x5f, 0xd6]),
+            "x86_64-apple-darwin" => (0x0100_0007, 3, &[0xc3]),
+            other => panic!("Mach-O fixture requested for non-macOS target: {other}"),
+        };
+        let label = format!("{binary}-{target}");
+        let text_offset = 32 + 72 + 24;
+        let file_size = text_offset + entry_code.len() + label.len();
+        let mut bytes = Vec::with_capacity(file_size);
+
+        // mach_header_64, little endian.
+        bytes.extend_from_slice(&0xfeed_facf_u32.to_le_bytes());
+        bytes.extend_from_slice(&cpu_type.to_le_bytes());
+        bytes.extend_from_slice(&cpu_subtype.to_le_bytes());
+        bytes.extend_from_slice(&2_u32.to_le_bytes()); // MH_EXECUTE
+        bytes.extend_from_slice(&2_u32.to_le_bytes()); // LC_SEGMENT_64 + LC_MAIN
+        bytes.extend_from_slice(&96_u32.to_le_bytes()); // 72 + 24
+        bytes.extend_from_slice(&0_u32.to_le_bytes()); // flags
+        bytes.extend_from_slice(&0_u32.to_le_bytes()); // reserved
+
+        // One __TEXT segment covering the complete fixture.
+        bytes.extend_from_slice(&0x19_u32.to_le_bytes()); // LC_SEGMENT_64
+        bytes.extend_from_slice(&72_u32.to_le_bytes());
+        let mut segment_name = [0_u8; 16];
+        segment_name[..6].copy_from_slice(b"__TEXT");
+        bytes.extend_from_slice(&segment_name);
+        bytes.extend_from_slice(&0x1_0000_0000_u64.to_le_bytes()); // vmaddr
+        bytes.extend_from_slice(&0x1000_u64.to_le_bytes()); // vmsize
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // fileoff
+        bytes.extend_from_slice(&(file_size as u64).to_le_bytes()); // filesize
+        bytes.extend_from_slice(&7_u32.to_le_bytes()); // maxprot: rwx
+        bytes.extend_from_slice(&5_u32.to_le_bytes()); // initprot: r-x
+        bytes.extend_from_slice(&0_u32.to_le_bytes()); // nsects
+        bytes.extend_from_slice(&0_u32.to_le_bytes()); // flags
+
+        // A valid entry-point command. No host test executes this payload.
+        bytes.extend_from_slice(&0x8000_0028_u32.to_le_bytes()); // LC_MAIN
+        bytes.extend_from_slice(&24_u32.to_le_bytes());
+        bytes.extend_from_slice(&(text_offset as u64).to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // stacksize
+        bytes.extend_from_slice(entry_code);
+        bytes.extend_from_slice(label.as_bytes());
+        assert_eq!(bytes.len(), file_size);
+        bytes
+    }
+
+    #[cfg(unix)]
+    fn valid_macho64_fixture(bytes: &[u8], target: &str) -> bool {
+        fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
+            Some(u32::from_le_bytes(
+                bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
+            ))
+        }
+        fn u64_at(bytes: &[u8], offset: usize) -> Option<u64> {
+            Some(u64::from_le_bytes(
+                bytes.get(offset..offset.checked_add(8)?)?.try_into().ok()?,
+            ))
+        }
+
+        let (expected_cpu, expected_subtype) = match target {
+            "aarch64-apple-darwin" => (0x0100_000c, 0),
+            "x86_64-apple-darwin" => (0x0100_0007, 3),
+            _ => return false,
+        };
+        let segment_name = b"__TEXT\0\0\0\0\0\0\0\0\0\0";
+        bytes.len() >= 128
+            && u32_at(bytes, 0) == Some(0xfeed_facf)
+            && u32_at(bytes, 4) == Some(expected_cpu)
+            && u32_at(bytes, 8) == Some(expected_subtype)
+            && u32_at(bytes, 12) == Some(2) // MH_EXECUTE
+            && u32_at(bytes, 16) == Some(2)
+            && u32_at(bytes, 20) == Some(96)
+            && u32_at(bytes, 32) == Some(0x19) // LC_SEGMENT_64
+            && u32_at(bytes, 36) == Some(72)
+            && bytes.get(40..56) == Some(segment_name.as_slice())
+            && u64_at(bytes, 72) == Some(0)
+            && u64_at(bytes, 80) == Some(bytes.len() as u64)
+            && u32_at(bytes, 88) == Some(7)
+            && u32_at(bytes, 92) == Some(5)
+            && u32_at(bytes, 96) == Some(0)
+            && u32_at(bytes, 104) == Some(0x8000_0028) // LC_MAIN
+            && u32_at(bytes, 108) == Some(24)
+            && u64_at(bytes, 112) == Some(128)
+            && u64_at(bytes, 120) == Some(0)
+    }
+
     fn rendered(surface: &super::super::Surface, file: &str) -> String {
         let path = PathBuf::from(".github/workflows").join(file);
         must_some(
@@ -6416,6 +6510,27 @@ mod tests {
             divergent.join("\n  ")
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_product_macho_fixture_rejects_truncated_malformed_and_non_execute_bytes() {
+        let valid = synthetic_macho64("velnorctl", "aarch64-apple-darwin");
+        assert!(valid_macho64_fixture(&valid, "aarch64-apple-darwin"));
+
+        let truncated = &valid[..127];
+        assert!(!valid_macho64_fixture(truncated, "aarch64-apple-darwin"));
+
+        let mut non_execute = valid.clone();
+        non_execute[12..16].copy_from_slice(&1_u32.to_le_bytes()); // MH_OBJECT
+        assert!(!valid_macho64_fixture(&non_execute, "aarch64-apple-darwin"));
+
+        let mut malformed_command = valid.clone();
+        malformed_command[36..40].copy_from_slice(&71_u32.to_le_bytes());
+        assert!(!valid_macho64_fixture(
+            &malformed_command,
+            "aarch64-apple-darwin"
+        ));
     }
 
     #[test]
@@ -7270,7 +7385,7 @@ mod tests {
             let mut artifact_rows = String::new();
             for component in &components {
                 let binary = component["binary"].as_str().expect("binary string");
-                let mut bytes = match *target {
+                let bytes = match *target {
                     "x86_64-unknown-linux-gnu" => {
                         let mut bytes = vec![0_u8; 20];
                         bytes[..6].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1]);
@@ -7283,27 +7398,42 @@ mod tests {
                         bytes[18..20].copy_from_slice(&[0xb7, 0]);
                         bytes
                     }
-                    "aarch64-apple-darwin" => {
-                        let mut bytes = vec![0_u8; 8];
-                        bytes[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
-                        bytes[4..8].copy_from_slice(&[0x0c, 0, 0, 1]);
-                        bytes
-                    }
-                    "x86_64-apple-darwin" => {
-                        let mut bytes = vec![0_u8; 8];
-                        bytes[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
-                        bytes[4..8].copy_from_slice(&[0x07, 0, 0, 1]);
-                        bytes
+                    "aarch64-apple-darwin" | "x86_64-apple-darwin" => {
+                        synthetic_macho64(binary, target)
                     }
                     other => panic!("unexpected fixture target: {other}"),
                 };
-                bytes.extend_from_slice(format!("{binary}-{target}").as_bytes());
                 let asset = format!("{binary}-{target}");
                 let digest = digest_of_bytes(&bytes);
                 let sibling = root.join(format!("native-product/{asset}"));
                 fs::write(&sibling, &bytes).expect("write native sibling");
                 fs::set_permissions(&sibling, fs::Permissions::from_mode(0o755))
                     .expect("make native sibling executable");
+                if target.ends_with("-apple-darwin") {
+                    assert!(
+                        valid_macho64_fixture(&bytes, target),
+                        "native fixture is not a structurally valid MH_EXECUTE: {asset}"
+                    );
+                    let file = Command::new("file")
+                        .args(["-b", sibling.to_str().expect("native sibling path")])
+                        .output()
+                        .expect("inspect native Mach-O fixture");
+                    assert!(
+                        file.status.success(),
+                        "file failed for native fixture {asset}: {}",
+                        String::from_utf8_lossy(&file.stderr)
+                    );
+                    let description = String::from_utf8_lossy(&file.stdout);
+                    let expected_arch = if target.starts_with("aarch64") {
+                        "arm64"
+                    } else {
+                        "x86_64"
+                    };
+                    assert!(
+                        description.contains("Mach-O") && description.contains(expected_arch),
+                        "file did not identify {asset} as {expected_arch} Mach-O: {description}"
+                    );
+                }
                 let row = json!({
                     "name": component["name"],
                     "crate": component["crate"],
@@ -7539,7 +7669,14 @@ mod tests {
                 "source_commit".to_owned()
             ]
         );
-        let _ = fs::remove_dir_all(root);
+        if matches!(
+            std::env::var("VELNOR_KEEP_NATIVE_ASSEMBLY").as_deref(),
+            Ok("1")
+        ) {
+            eprintln!("kept native product assembly at {}", root.display());
+        } else {
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
