@@ -141,6 +141,72 @@ and collector/checker binding remain unresolved; no helper output closes G0.
 The scan `38345852` reports five full-suite failures, but exact-parent baseline
 attribution remains pending and must not be called a baseline failure.
 
+## Latest external checkpoint — 2026-09-20
+
+This is a source-document checkpoint over external evidence. It does not alter
+the gate graph, authorize mutation, or claim a gate exit. Authority plan v3
+remains frozen and unapproved. Its immutable successor, v4, is also
+**approval-required with no mutation performed** (observed
+`2026-09-20T00:27:10Z`; Markdown SHA-256
+`48b1e19ac7b9be59d78200f9e5de7b09e9a1de68fba9b41e3192b952ec022e52`). The
+v4 readiness summary has six unresolved classes, not six approvals:
+
+1. Resolve every App/operator/watchdog/integration/source/PR/tree/lease and
+   ruleset placeholder.
+2. Run the real old-parser `static_files` fixture and retain parser,
+   fixed-point, policy, byte, and raw-current-tree outcomes.
+3. Review the source-owned B publisher/generator, recompute its closure and
+   graph, and prove two independent byte-identical renders.
+4. Prove disposable-writer freeze, signed lease/watchdog recovery, ruleset
+   hashes, and merge guards.
+5. Capture the complete live Main-B run/job/check/artifact/release/native
+   census and bind it to B.
+6. Obtain owner approval plus independent `g0_reviewer` and
+   `authority_transition_review` approval, then prove preflight cleanup.
+
+The measured `static_files` result is transport-only: external
+`G1/bootstrap-transition/TYPED-PUBLISHER-INPUT-FEASIBILITY-2026-09-20.{md,json}`
+(SHA-256 `8764712693e2883d05846de05a3c2137fb3d31e3ee97ab0ad129186f3ff960f4`
+and `01ad40d473aa26ae7e5e814ef7c3f93e854d682d2c359fa7588f0bba2b4943e9`). It
+does not admit actual B source, an authority, or a gate. The old raw checker
+failure remains a failure.
+
+The v4 current-main observation is d20
+`d20d4d1d17590cca85b501d982cbaad70d42c641`; its Apple route uses forbidden
+`macos-26`, while exact `xcode-27` is required. Runtime `35475920678`, Preview
+`35475920808`, and CI/Main `35475920826` are historical outcomes, not accepted
+evidence or a reason to weaken the newest-actual-major rule.
+
+The checker seam remains fail-closed. Harness result
+`G0/checker-v2-review/a2bca6e-public-cli-harness/27eb-harness-results.json`
+(SHA-256 `a4e7d7f29289b16438602872867295a84cc39c5ad398b974bb0ef6bd192bead1`)
+is for exact source `27eb094ccd545b642206ea3d52336e0ac74d6abd`; live
+self-authored use exits because authenticated collector/current-API
+reconciliation is unwired, and offline cases are explicitly
+`offline-validation-only`. The related bounded source review is
+`a2bca6e767aa038818a2ffc991401609118600f3`; its 250-test/build/fmt/clippy
+result is not producer integration or G0 proof.
+
+The latest bootstrap owner checkpoint is exact
+`b981f43e8dfd70b4c628d29b0e7e9dce679ce537`: generated workflows/state were
+regenerated and the owner reports 1,727/1,727 library tests plus actionlint and
+format checks passing. Independent security review and real transport
+fixtures remain pending; a full source-suite result is not G1 evidence. Older
+abbreviations such as `7c` or `5cdf` are not the current owner revision.
+
+Other bounded source checkpoints remain incomplete: APT `91bdf6c` is a source
+checkpoint with independent review and native handoff pending; corrected
+source workload index `G0/fleet/workload-contract-index-20260920T002955Z-corrected.json`
+(SHA-256 `2b3bf88b42f291a40dcc2d6eb65a489d72d2a5bdcf9ab094a69a43e01f750c9c`)
+has an exact disjoint 32-row union but is source-only with
+`gate_status=not_evaluated`; native product review `a8d46536e7e11db0bbd5e207be802970362b751f`
+requires changes and grants no G2 approval; action scanner review
+`40ddcc02dde1ff07aff538ea2ca95da091379e17` requires changes; hostile fixture
+review `d60c0e2211b2830c64e7489d05b4cfe0bc77d65f` still has a ZIP-only
+format assertion residual; and scan owner ref `0a15` reports 1,756 full tests
+but remains blocked on immutable pin/closure proof (full SHA/report not
+observed here). None is a gate result.
+
 ## G0 acceptance-matrix handoff
 
 The exact user acceptance matrix is canonical in
@@ -257,12 +323,12 @@ reviewer. Unknown thread/worktree metadata stays `unknown` until observed.
 | ID | Repository/component | Owner | Dependencies | Owned files/worktree | Acceptance commands | Evidence output | Reviewer |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `G0-inventory` | Fixed 32-repository fleet | `/root/g0_inventory` | none | External ledger inventory only; worktree `unknown` | `[pending]` live GitHub inventory with pagination; reconcile static `default_branch`/SHA; type dependency/dependent-workload edges | `G0/inventory.json`, access and dependency graph records | `/root/g0-reviewer` |
-| `G0-bootstrap` | Velnor generator/runtime bootstrap | `/root/g0_bootstrap` | `G0-inventory` findings as needed | Generator worktree `unknown`; no records in source | `[pending]` clean/shallow checkout bootstrap and pin/artifact checks | `G0/bootstrap.json` with source/artifact/output identities | `/root/g0-reviewer` |
+| `G0-bootstrap` | Velnor generator/runtime bootstrap | `/root/g0_bootstrap` | `G0-inventory` findings as needed | Generator worktree `unknown`; no records in source | `[checkpoint]` exact owner ref `b981f43e8dfd70b4c628d29b0e7e9dce679ce537`; generated workflows/state and 1,727/1,727 library + actionlint/fmt report; independent security/transport review pending; full source suite is not G1 proof | `G0/bootstrap.json` with source/artifact/output identities | `/root/g0-reviewer` |
 | `G0-distribution` | Velnor, `velnor-apt`, `homebrew-velnor` | `/root/g0_distribution` | `G0-inventory` | Distribution investigation worktree `unknown`; external evidence only | `[pending]` release discovery/feed/formula inventory | `G0/distribution.json` and access gaps | `/root/g0-reviewer` |
 | `G0-fleet` | Fleet categories/workload matrix | `/root/g0_fleet` | `G0-inventory` | Fleet worktree `unknown`; source edits prohibited in this wave | `[observed]` read-only 32-row workload/platform projection; exact emitted scanner IDs remain partial | External `G0/workload-matrix.json` plus fleet refresh files | `/root/g0-reviewer` |
 | `G0-runtime` | macOS/OrbStack capability analysis | `/root/g0_runtime` | `G0-inventory` | Runtime investigation worktree `unknown`; no live host mutation | `[pending]` source capability and host-access checks | `G0/runtime-capabilities.json` | `/root/g0-reviewer` |
 | `G0-records` | Canonical execution records | `/root/g0_records` | none | `/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-records`; this directory's five docs only | `[verified]` RTK/version/git/model metadata; `[pending]` checker schema validation | These five source docs; external session ownership amendments | `/root/g0-reviewer` |
-| `G0-checker` | Deterministic evidence checker | `/root/g0_checker` | `G0-records` schema | `/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-checker`; checker-owned code/tests | `[rejected]` initial b3b6 unit hygiene passed but semantic review found false-green paths; v2 must bind static/live branch identity and typed dependency edges before review | External checker review and hostile fixtures | `/root/g0-reviewer` |
+| `G0-checker` | Deterministic evidence checker | `/root/g0_checker` | `G0-records` schema | `/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-checker`; checker-owned code/tests | `[fail-closed]` exact harness `27eb094ccd545b642206ea3d52336e0ac74d6abd`; authenticated live collector/API seam is unwired and offline fixtures cannot authorize G0 | External checker review and hostile fixtures | `/root/g0-reviewer` |
 | `G0-reviewer` | Independent G0 records/evidence review | `/root/g0_reviewer` | all initial outputs | Review-only worktree `unknown`; no author approval | `[pending]` fresh read of source docs and external raw evidence | Independent findings and disposition | `/root` |
 | `G1-cache-semantics` | Hosted cache compatibility | `/root/g1_cache_semantics` (Luna/max) | `G0-inventory`, `G0-bootstrap` | Thread `01a0ba76-f725-7022-9cfa-f28456ab67b2`; external findings | `[observed]` stale fixture and PR953 cache-contract diagnosis; refresh pending | `G0/cache-semantics/findings.md` | `/root/g0-reviewer` |
 | `G1-hosted-config` | Hosted-first generator policy | `/root/g1_hosted_config` (Luna/max) | `G0-inventory`, `G0-bootstrap` | Thread `01a0ba77-5222-7e63-97fa-553849b96d7b`; worktree `hosted→g1_hosted_config` | `[in progress]` typed config/regeneration/policy checks | G1 candidate/source/output identity | `/root/g0-reviewer` |

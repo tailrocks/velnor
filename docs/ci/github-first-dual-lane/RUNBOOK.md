@@ -50,6 +50,44 @@ the artifact or that a gate passed.
   pagination, and coverage before invoking the checker. A manual or available
   artifact is not proof until the checker consumes and validates those bindings.
 
+## Latest checkpoint: verified boundary versus pending operation
+
+The following are external, revision-bound observations captured on
+2026-09-20. They were not run by this records worktree and do not authorize a
+gate, mutation, merge, publication, or host operation.
+
+| External observation | Result | Operational meaning |
+| --- | --- | --- |
+| Authority v3/v4 records | v3 remains frozen/unapproved; v4 is approval-required with no mutation (v4 Markdown SHA-256 `48b1e19ac7b9be59d78200f9e5de7b09e9a1de68fba9b41e3192b952ec022e52`) | Do not execute the authority transition. Six readiness classes remain: placeholders, real old-parser fixture, B closure/two renders, freeze/lease/watchdog/ruleset proof, complete Main-B census, and independent/owner approval with cleanup |
+| Old-parser `static_files` feasibility | External MD/JSON hashes `8764712693e2883d05846de05a3c2137fb3d31e3ee97ab0ad129186f3ff960f4` / `01ad40d473aa26ae7e5e814ef7c3f93e854d682d2c359fa7588f0bba2b4943e9` show byte transport only | No actual B source, admission, provenance, or authority was proved |
+| Checker public harness | Exact source `27eb094ccd545b642206ea3d52336e0ac74d6abd`; `27eb-harness-results.json` SHA-256 `a4e7d7f29289b16438602872867295a84cc39c5ad398b974bb0ef6bd192bead1` | Live self-authored use exits because authenticated collector/current API is unwired; offline fixtures are explicitly validation-only and fail closed |
+| Bootstrap owner checkpoint | Exact `b981f43e8dfd70b4c628d29b0e7e9dce679ce537`; owner reports regenerated workflows/state and 1,727/1,727 library plus actionlint/fmt | Treat as owner-reported checkpoint only; independent security review and real transport fixtures remain pending; source full tests are not G1 evidence |
+| APT/native/consumer source reviews | APT `91bdf6c` review pending; corrected workload index is exact-disjoint 32 but `not_evaluated`; native `a8d46536e7e11db0bbd5e207be802970362b751f`, action scanner `40ddcc02dde1ff07aff538ea2ca95da091379e17`, and fixture `d60c0e2211b2830c64e7489d05b4cfe0bc77d65f` remain changes-required | No G2/G3 admission; d60 still requires ZIP-only assertion; source findings do not authorize generated/runtime work |
+| Scan owner checkpoint | Abbreviated `0a15` reports 1,756 full tests | Immutable pin/closure remains blocking; full SHA/report is not verified here |
+
+### Pending authority-transition procedure
+
+Do not replace the following pending items with a green test count, a local
+binary, an old parser transport result, a newest-run shortcut, or a manual
+ledger entry:
+
+1. Resolve all v4 App/operator/watchdog/integration/source/PR/tree/lease and
+   ruleset placeholders.
+2. Run the real old parser against empty candidate input plus the selected
+   `static_files` mappings. Record parser result, old `--plain --check`, old
+   policy result, source/output bytes, and the raw current-tree failure.
+3. Build the reviewed source-owned B generator, recompute source/runtime
+   closure and reachable job graph, and compare two independent renders over
+   workflows, actions, state, actionlint, manifests, and sidecars.
+4. Prove disposable-writer freeze, signed lease/watchdog recovery, ruleset
+   before/after hashes, and merge guards.
+5. Capture complete Main-B run/attempt/job/check/artifact/release/native
+   identity and child census, including provider and raw-digest bindings.
+6. Obtain owner approval and separate `g0_reviewer` plus
+   `authority_transition_review` approval, then remove temporary authority and
+   prove the final cleanup. Until then, no source/GitHub/release/merge/G1
+   operation is authorized.
+
 ## Current candidate-bound checkpoint
 
 The following read-only observations were captured around
@@ -276,6 +314,13 @@ evidence of no PRs, no checks, or no workflow.
 The configuration and generator command below are observed source conventions;
 the command has not been run by this records task. The owning G0/G1 agent must
 run it from the exact candidate revision and attach output/digests.
+
+The latest owner checkpoint is exact
+`b981f43e8dfd70b4c628d29b0e7e9dce679ce537`, with regenerated workflows/state
+and owner-reported 1,727/1,727 library plus actionlint/fmt results. This is an
+external report, not a command verification by this records task. Independent
+security review and real transport fixtures remain pending; do not treat the
+older `7c`/`5cdf` abbreviations or the owner test count as G1 evidence.
 
 ```bash
 # [PENDING] inspect source config/schema and CLI help

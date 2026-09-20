@@ -35,6 +35,36 @@ they do not replace the historical 78-to-77 reconciliation or claim a
 current-forever state. The historical Velnor check contract at `abe9ad82` is
 not reusable against the later live default revision.
 
+## Latest external checkpoint — 2026-09-20
+
+No gate passed. Existing v3 authority records remain frozen and unapproved;
+external v4 is approval-required and performed no mutation. The six remaining
+v4 readiness classes are tracked in `PLAN.md`: resolve all placeholders;
+execute the real old-parser `static_files` fixture; review B source/closure
+and two byte-stable renders; prove writer freeze/lease/watchdog/ruleset
+guards; capture the complete Main-B live census bound to B; and obtain owner
+plus both independent approvals with cleanup proof.
+
+| Checkpoint | Exact observation | Boundary |
+| --- | --- | --- |
+| Authority v4 | External `G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v4.md`, observed `2026-09-20T00:27:10Z`, SHA-256 `48b1e19ac7b9be59d78200f9e5de7b09e9a1de68fba9b41e3192b952ec022e52` | Proposal only; no source edit, dispatch, App/ruleset change, release, merge, host operation, or G1 authorization |
+| `static_files` feasibility | External typed-publisher feasibility MD/JSON; hashes `8764712693e2883d05846de05a3c2137fb3d31e3ee97ab0ad129186f3ff960f4` / `01ad40d473aa26ae7e5e814ef7c3f93e854d682d2c359fa7588f0bba2b4943e9` | Transports source bytes only; no actual B admission or authority |
+| Checker seam | Exact source `27eb094ccd545b642206ea3d52336e0ac74d6abd`; harness JSON SHA-256 `a4e7d7f29289b16438602872867295a84cc39c5ad398b974bb0ef6bd192bead1` | Live authenticated collector/API is unwired; offline cases fail `offline-validation-only`; no G0 proof |
+| Bootstrap owner checkpoint | Exact `b981f43e8dfd70b4c628d29b0e7e9dce679ce537`; generated workflows/state regenerated; owner reports 1,727/1,727 library plus actionlint/fmt pass | Independent security review and real transport fixtures pending; full source suite is not G1 evidence; older `7c`/`5cdf` refs superseded |
+| APT schema-2 | Exact source checkpoint `91bdf6cc1d0a5c429c5c01f17bf15dbb153c661b` | Independent review and native handoff pending; no G2 delivery/publication |
+| Corrected workload index | `G0/fleet/workload-contract-index-20260920T002955Z-corrected.json`, SHA-256 `2b3bf88b42f291a40dcc2d6eb65a489d72d2a5bdcf9ab094a69a43e01f750c9c`; exact disjoint union 32 | Source-derived only, `gate_status=not_evaluated`, no execution/job/provider/Velnor output |
+| Native product review | Exact `a8d46536e7e11db0bbd5e207be802970362b751f` | Changes required; self-authored identity/archive gaps and Intel capability block remain; no G2 approval |
+| Action scanner review | Exact `40ddcc02dde1ff07aff538ea2ca95da091379e17` | Changes required: Docker/action schema and real consumer/runner semantics remain incomplete |
+| Hostile producer fixture | Exact `d60c0e2211b2830c64e7489d05b4cfe0bc77d65f` | ZIP-only assertion residual; source-only, no G1 approval |
+| Scan owner checkpoint | Abbreviated owner ref `0a15` reports 1,756 full tests | Immutable pin/closure proof remains blocking; full SHA/report not observed in this records checkpoint |
+
+Current external main evidence also reports d20
+`d20d4d1d17590cca85b501d982cbaad70d42c641` routing Apple jobs to forbidden
+`macos-26`; exact `xcode-27` is required. Runs `35475920678` (runtime) and
+`35475920808` (preview) / `35475920826` (CI/Main) are historical facts, not
+accepted evidence. This does not weaken the newest-actual-major policy or
+permit an older fallback.
+
 ## User native-version amendment
 
 The amended policy is explicit: every Velnor workload on a GitHub-hosted macOS
@@ -210,12 +240,12 @@ unknown.
 | Task | State | Next action |
 | --- | --- | --- |
 | G0-inventory | Inventory checkpoint complete; follow-up checks pending | Refresh all 32 repos, branches, SHAs, PRs, checks, workflows, access |
-| G0-bootstrap | Assigned; result pending | Verify clean/shallow bootstrap and pin/artifact identity |
+| G0-bootstrap | Owner checkpoint `b981f43e8dfd70b4c628d29b0e7e9dce679ce537`; generated workflows/state regenerated; 1,727/1,727 library plus actionlint/fmt reported; review/transport gaps remain | Independent security review and real transport fixtures; full source suite is not G1 proof |
 | G0-distribution | Assigned; result pending | Revalidate product/runtime discovery and both channels |
 | G0-fleet | 32-row inventory complete; workload matrix/review pending | Build workload/platform/category matrix |
 | G0-runtime | Read-only report complete; actual Mac deferred until G3 | Reuse report for G4/G5 design |
 | G0-records | Docs commit complete; external registry amended | Preserve unknowns; await independent review |
-| G0-checker | Initial commit rejected semantically; v2 architecture/candidate scan pending | Bind canonical scope/live evidence and rerun hostile fixtures; no false completion |
+| G0-checker | Exact harness `27eb094ccd545b642206ea3d52336e0ac74d6abd` remains fail-closed | Wire authenticated collector/current API and bind exact artifact/run tuples; offline fixtures cannot close G0 |
 | G0-reviewer | Independent review rejected initial checker/docs state | Review exact v2 commit and refreshed external evidence |
 | G1-cache-semantics | Jobs/provider adversarial review rejected initial checker paths | Retain external findings; review v2 candidate without rewriting old evidence |
 | G1-hosted-config | In progress; candidate remains unverified | Thread `01a0ba77-5222-7e63-97fa-553849b96d7b`; recheck clean exact commit/output |
