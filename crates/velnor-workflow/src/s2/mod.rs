@@ -4774,10 +4774,11 @@ fn candidate_manifest_validation_script() -> &'static str {
 }
 
 fn candidate_manifest_schema_script() -> String {
-    CANDIDATE_MANIFEST_SCHEMA_JSON
-        .lines()
-        .map(|line| format!("          {line}\n"))
-        .collect()
+    let mut output = String::new();
+    for line in CANDIDATE_MANIFEST_SCHEMA_JSON.lines() {
+        let _ = writeln!(&mut output, "          {line}");
+    }
+    output
 }
 
 /// Owner policy step acquiring the PR producer artifact.
