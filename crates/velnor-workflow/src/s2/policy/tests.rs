@@ -712,13 +712,35 @@ fn namespace_workflow_archive_with_action(
     workflow: &str,
     action_script: &str,
 ) -> PathBuf {
+    namespace_workflow_archive_with_action_and_dependency(
+        root,
+        name,
+        workflow,
+        action_script,
+        action_script,
+    )
+}
+
+fn namespace_workflow_archive_with_action_and_dependency(
+    root: &Path,
+    name: &str,
+    workflow: &str,
+    action_script: &str,
+    dependency_script: &str,
+) -> PathBuf {
     let tree = root.join(format!("{name}-tree"));
     write(&tree.join(".github/workflows/ci-pr.yml"), workflow);
     write(
         &tree.join(".github/actions/setup/action.yml"),
-        "name: setup\nruns:\n  using: composite\n  steps: []\n",
+        "name: setup\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: .github/scripts/publish.sh\n",
     );
     write(&tree.join(".github/actions/setup/script.sh"), action_script);
+    write(&tree.join(".github/scripts/publish.sh"), dependency_script);
+    write(
+        &tree.join("actions/setup/action.yml"),
+        "name: setup\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: .github/scripts/publish.sh\n",
+    );
+    write(&tree.join("actions/setup/script.sh"), action_script);
     let archive = root.join(format!("{name}.tar"));
     let output = must(
         Command::new("tar")
@@ -728,7 +750,7 @@ fn namespace_workflow_archive_with_action(
                 "-C",
             ])
             .arg(must_some(tree.to_str(), "namespace tree path"))
-            .arg(".github")
+            .args([".github", "actions"])
             .env("COPYFILE_DISABLE", "1")
             .output(),
         "create namespace archive",
@@ -754,10 +776,40 @@ fn run_namespace_scanner_with_action(
     base_action_script: &str,
     head_action_script: &str,
 ) -> Output {
-    let base =
-        namespace_workflow_archive_with_action(root, "base", base_workflow, base_action_script);
-    let head =
-        namespace_workflow_archive_with_action(root, "head", head_workflow, head_action_script);
+    run_namespace_scanner_with_action_and_dependency(
+        root,
+        base_workflow,
+        head_workflow,
+        base_action_script,
+        head_action_script,
+        base_action_script,
+        head_action_script,
+    )
+}
+
+fn run_namespace_scanner_with_action_and_dependency(
+    root: &Path,
+    base_workflow: &str,
+    head_workflow: &str,
+    base_action_script: &str,
+    head_action_script: &str,
+    base_dependency_script: &str,
+    head_dependency_script: &str,
+) -> Output {
+    let base = namespace_workflow_archive_with_action_and_dependency(
+        root,
+        "base",
+        base_workflow,
+        base_action_script,
+        base_dependency_script,
+    );
+    let head = namespace_workflow_archive_with_action_and_dependency(
+        root,
+        "head",
+        head_workflow,
+        head_action_script,
+        head_dependency_script,
+    );
     let mut child = must(
         Command::new("python3")
             .arg("-")
@@ -814,6 +866,12 @@ fn candidate_namespace_scan_rejects_unnamed_external_and_shell_publishers() {
         accepted.status.success(),
         "recursive local action contract escaped: {accepted:?}"
     );
+    let generic_local_action = local_action.replace("./.github/actions/setup", "./actions/setup");
+    let accepted = run_namespace_scanner(&root, &generic_local_action, &generic_local_action);
+    assert!(
+        accepted.status.success(),
+        "repository-root local action resolution escaped: {accepted:?}"
+    );
     let rejected = run_namespace_scanner_with_action(
         &root,
         &local_action,
@@ -824,6 +882,19 @@ fn candidate_namespace_scan_rejects_unnamed_external_and_shell_publishers() {
     assert!(
         !rejected.status.success(),
         "local action implementation drift escaped source closure comparison: {rejected:?}"
+    );
+    let rejected = run_namespace_scanner_with_action_and_dependency(
+        &root,
+        &local_action,
+        &local_action,
+        "#!/bin/sh\necho stable action\n",
+        "#!/bin/sh\necho stable action\n",
+        "#!/bin/sh\necho base dependency\n",
+        "#!/bin/sh\necho head dependency\n",
+    );
+    assert!(
+        !rejected.status.success(),
+        "composite action dependency drift escaped trusted .github source closure: {rejected:?}"
     );
 
     let changed_top_level = fixed.replace("jobs:\n", "env:\n  CANDIDATE_FEATURE: changed\njobs:\n");

@@ -4653,8 +4653,8 @@ fn audited_pin_script() -> &'static str {
 const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
           base_workflow_archive="$RUNNER_TEMP/base-github.tar"
           head_workflow_archive="$RUNNER_TEMP/head-github.tar"
-          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$BASE_SHA" .github > "$base_workflow_archive"
-          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$HEAD_SHA" .github > "$head_workflow_archive"
+          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$BASE_SHA" -- > "$base_workflow_archive"
+          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$HEAD_SHA" -- > "$head_workflow_archive"
           python3 - "$base_workflow_archive" "$head_workflow_archive" "$BASE_SHA" "$HEAD_SHA" "$base_tree_sha" "$head_tree_sha" "$base_tree_api_digest" "$head_tree_api_digest" <<'PY' > "$RUNNER_TEMP/candidate-workflow-contract.txt"
           import hashlib
           import re
@@ -4679,8 +4679,7 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
           allowed = {candidate, handoff, result}
           job_pattern = re.compile(r"  ([A-Za-z0-9_-]+):\s*$")
           step_pattern = re.compile(r"^( +)-\s+(?:name|uses|run|id|if|env|shell|working-directory|timeout-minutes|continue-on-error):")
-          local_workflow_pattern = re.compile(r"^\./(.github/workflows/[^ #]+)")
-          local_action_pattern = re.compile(r"^\./(.github/actions/[^ #]+)")
+          local_workflow_prefix = ".github/workflows/"
           external_workflow_pattern = re.compile(r"^[^./][^ ]*/[^ ]+/.github/workflows/[^ #]+@")
           uploads = []
           external_reusable_workflows = {}
@@ -4699,6 +4698,15 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                   return None
               return text[len("uses:"):].split(" #", 1)[0].strip().strip("\\\"'")
 
+          def local_reference(value):
+              if not value.startswith("./"):
+                  return None
+              reference = value[2:]
+              parts = reference.split("/")
+              if not reference or "\\" in reference or any(part in ("", ".", "..") for part in parts):
+                  raise SystemExit(f"unsafe local action/workflow path: {value}")
+              return reference
+
           for archive_name in sys.argv[1:3]:
               archive_edges = {}
               archive_action_edges = {}
@@ -4708,8 +4716,6 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
               archive_source_members = {}
               with tarfile.open(archive_name, "r:") as archive:
                   for member in archive.getmembers():
-                      if not member.name.startswith(".github/"):
-                          continue
                       if member.isdir():
                           continue
                       if not member.isfile():
@@ -4724,20 +4730,20 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                       lines = contents.decode("utf-8").splitlines()
                       archive_workflows[member.name] = lines
                       archive_edges[member.name] = [
-                          match.group(1)
+                          reference
                           for line in lines
                           for value in [uses_value(line)]
                           if value is not None
-                          for match in [local_workflow_pattern.match(value)]
-                          if match is not None
+                          for reference in [local_reference(value)]
+                          if reference is not None and reference.startswith(local_workflow_prefix)
                       ]
                       archive_action_edges[member.name] = [
-                          match.group(1)
+                          reference
                           for line in lines
                           for value in [uses_value(line)]
                           if value is not None
-                          for match in [local_action_pattern.match(value)]
-                          if match is not None
+                          for reference in [local_reference(value)]
+                          if reference is not None and not reference.startswith(local_workflow_prefix)
                       ]
                       for line in lines:
                           value = uses_value(line)
@@ -4795,24 +4801,9 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                   raise SystemExit(f"{reference}: local action implementation is not in the trusted source archive")
               return matches[0]
 
-          resolved_action_edges = {}
-          resolved_action_roots = {}
-          for archive_name in sys.argv[1:3]:
-              files = workflow_lines[archive_name]
-              resolved = {}
-              roots = {}
-              for owner, references in local_action_edges[archive_name].items():
-                  manifests = []
-                  for reference in references:
-                      manifest = resolve_action_manifest(reference, files)
-                      manifests.append(manifest)
-                      roots[manifest] = reference if reference.endswith((".yml", ".yaml")) else reference.rstrip("/")
-                  resolved[owner] = manifests
-              resolved_action_edges[archive_name] = resolved
-              resolved_action_roots[archive_name] = roots
-
-          def reachable_nodes(workflow_edges, action_edges):
+          def reachable_nodes(workflow_edges, action_edges, files):
               reachable = {".github/workflows/ci-pr.yml"}
+              action_roots = {}
               pending = list(reachable)
               while pending:
                   node = pending.pop()
@@ -4820,11 +4811,13 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                       if dependency not in reachable:
                           reachable.add(dependency)
                           pending.append(dependency)
-                  for dependency in action_edges.get(node, []):
-                      if dependency not in reachable:
-                          reachable.add(dependency)
-                          pending.append(dependency)
-              return reachable
+                  for reference in action_edges.get(node, []):
+                      manifest = resolve_action_manifest(reference, files)
+                      action_roots[manifest] = reference
+                      if manifest not in reachable:
+                          reachable.add(manifest)
+                          pending.append(manifest)
+              return reachable, action_roots
 
           def normalized_capability_contract(lines):
               contract = []
@@ -4858,8 +4851,21 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                   if any(path == root or path.startswith(root + "/") for root in roots)
               }
 
-          base_reachable = reachable_nodes(local_workflow_edges[base_archive], resolved_action_edges[base_archive])
-          head_reachable = reachable_nodes(local_workflow_edges[head_archive], resolved_action_edges[head_archive])
+          def trusted_control_files(nodes, action_roots, members):
+              selected = {
+                  path: contents
+                  for path, contents in members.items()
+                  if path.startswith(".github/")
+              }
+              selected.update(reachable_action_files(nodes, action_roots, members))
+              return selected
+
+          base_reachable, base_action_roots = reachable_nodes(
+              local_workflow_edges[base_archive], local_action_edges[base_archive], workflow_lines[base_archive]
+          )
+          head_reachable, head_action_roots = reachable_nodes(
+              local_workflow_edges[head_archive], local_action_edges[head_archive], workflow_lines[head_archive]
+          )
           root_workflow = ".github/workflows/ci-pr.yml"
           if root_workflow not in workflow_lines[base_archive] or root_workflow not in workflow_lines[head_archive]:
               raise SystemExit("candidate workflow graph has no base-owned ci-pr entrypoint")
@@ -4879,24 +4885,24 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                       f"{path}: reachable workflow capability contract differs from the base-owned closed producer contract"
                   )
 
-          base_action_files = reachable_action_files(
-              base_reachable, resolved_action_roots[base_archive], archive_members[base_archive]
+          base_source_files = trusted_control_files(
+              base_reachable, base_action_roots, archive_members[base_archive]
           )
-          head_action_files = reachable_action_files(
-              head_reachable, resolved_action_roots[head_archive], archive_members[head_archive]
+          head_source_files = trusted_control_files(
+              head_reachable, head_action_roots, archive_members[head_archive]
           )
-          if set(base_action_files) != set(head_action_files):
-              raise SystemExit("reachable local action source closure differs from the base-owned contract")
-          for path in sorted(base_action_files):
-              if base_action_files[path] != head_action_files[path]:
-                  raise SystemExit(f"{path}: reachable local action implementation differs from the base-owned contract")
+          if set(base_source_files) != set(head_source_files):
+              raise SystemExit("trusted workflow source closure differs from the base-owned contract")
+          for path in sorted(base_source_files):
+              if base_source_files[path] != head_source_files[path]:
+                  raise SystemExit(f"{path}: trusted workflow source differs from the base-owned contract")
 
           base_contract_sha256 = hashlib.sha256(
               normalized_contract_material(base_reachable, workflow_lines[base_archive])
               + b"\n"
               + "\n".join(
-                      f"action-file:{path}:mode:{base_action_files[path][0]:o}:sha256:{hashlib.sha256(base_action_files[path][1]).hexdigest()}"
-                  for path in sorted(base_action_files)
+                  f"source-file:{path}:mode:{base_source_files[path][0]:o}:sha256:{hashlib.sha256(base_source_files[path][1]).hexdigest()}"
+                  for path in sorted(base_source_files)
               ).encode("utf-8")
           ).hexdigest()
           base_binding_material = "\n".join(
@@ -4912,7 +4918,9 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
           print(f"{base_contract_sha256} {base_binding_sha256}")
 
           for archive_name in (base_archive, head_archive):
-              reachable = reachable_nodes(local_workflow_edges[archive_name], resolved_action_edges[archive_name])
+              reachable, _ = reachable_nodes(
+                  local_workflow_edges[archive_name], local_action_edges[archive_name], workflow_lines[archive_name]
+              )
               # A top-level workflow that is not reachable from ci-pr executes
               # under a different workflow/run identity. Acquisition binds the
               # numeric ci-pr workflow, run, attempt, job, and artifact IDs, so
