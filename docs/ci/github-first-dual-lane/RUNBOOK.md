@@ -60,10 +60,10 @@ gate, mutation, merge, publication, or host operation.
 | --- | --- | --- |
 | Authority v3/v4 records | v3 remains frozen/unapproved; v4 is approval-required with no mutation (v4 Markdown SHA-256 `48b1e19ac7b9be59d78200f9e5de7b09e9a1de68fba9b41e3192b952ec022e52`) | Do not execute the authority transition. Six readiness classes remain: placeholders, real old-parser fixture, B closure/two renders, freeze/lease/watchdog/ruleset proof, complete Main-B census, and independent/owner approval with cleanup |
 | Old-parser `static_files` feasibility | External MD/JSON hashes `8764712693e2883d05846de05a3c2137fb3d31e3ee97ab0ad129186f3ff960f4` / `01ad40d473aa26ae7e5e814ef7c3f93e854d682d2c359fa7588f0bba2b4943e9` show byte transport only | No actual B source, admission, provenance, or authority was proved |
-| Checker public harness | Exact source `27eb094ccd545b642206ea3d52336e0ac74d6abd`; `27eb-harness-results.json` SHA-256 `a4e7d7f29289b16438602872867295a84cc39c5ad398b974bb0ef6bd192bead1` | Live self-authored use exits because authenticated collector/current API is unwired; offline fixtures are explicitly validation-only and fail closed |
+| Checker source rereview | Exact `ca18d01166681269b6eb5fce8d0f6175fc17aad4` closes the reusable child-matrix blocker; exact checks report 258 tests plus build/fmt/clippy/diff pass | Live authenticated collector/current API remains unwired; offline fixtures are explicitly validation-only and fail closed |
 | Bootstrap owner checkpoint | Exact `b981f43e8dfd70b4c628d29b0e7e9dce679ce537`; owner reports regenerated workflows/state and 1,727/1,727 library plus actionlint/fmt | Exact `G1/reviews/bootstrap-b981f43e-independent.md` rejects the G1 source checkpoint for archive/API-tree, freshness, provenance, legacy, fixture, and image-digest gaps; source full tests are not G1 evidence |
 | APT/native/consumer source reviews | APT `91bdf6cc1d0a5c429c5c01f17bf15dbb153c661b` is blocked by `G1/reviews/apt-83e7ab4-91bdf6c-independent.md`; corrected workload index is exact-disjoint 32 but `not_evaluated`; native `a8d46536e7e11db0bbd5e207be802970362b751f`, action scanner `40ddcc02dde1ff07aff538ea2ca95da091379e17`, and fixture `d60c0e2211b2830c64e7489d05b4cfe0bc77d65f` remain changes-required | No G2/G3 admission; d60 still requires ZIP-only assertion; source findings do not authorize generated/runtime work |
-| Scan candidate | Exact `0a15fd06e002f57dca546d5c041754f1ec433508` reports 1,756 full tests | `G1/scan-integrity/source-review-0a15fd06.md` rejects exact D19 closure plus authority, detector-input, rollback, and hostile-fixture gaps; no G1 approval |
+| Scan candidate | Exact `820f6509fe8462265986bacf02e8e86eead26750` reports 1,760 full tests plus clippy/fmt/diff pass | `G1/scan-integrity/source-review-820f6509.md` rejects detector TOCTOU, SI-B3 fixed-point, journal/post-action recovery, typed recovery, generated-state/D19, and authority gaps; owner reactivated fixes; no G1 approval |
 
 ### Pending authority-transition procedure
 
@@ -87,6 +87,23 @@ ledger entry:
    `authority_transition_review` approval, then remove temporary authority and
    prove the final cleanup. Until then, no source/GitHub/release/merge/G1
    operation is authorized.
+
+## Latest live reconciliation snapshot — 2026-09-20T01:28:35Z
+
+External `G0/fleet/push-checkpoint-current.json` (SHA-256
+`d4987b227e79212df2abdf503c33a80daff225ed270ea445f5c657f938fd101a`) binds
+this narrow capture. Treat every result as timestamped evidence, not a
+forever-current state or a gate result.
+
+| Item | Captured fact | Operator boundary |
+| --- | --- | --- |
+| Main / PR965 | API and origin `main` `325719f1e05d3d46322c9fd3eeb9ad545e175638`, parent `e94b48406c4ed206fce2bbf39b788264e72cf39c`; merged PR965 source `6b48f8fff2f4943dbf79c21c3274caecdf77bdd5` | Use only for this capture's identity/merge attribution |
+| PR963 | Open head `6ccf37486d255bbe3656f0066b0f1e5c84753903`, base `e94b48406c4ed206fce2bbf39b788264e72cf39c`, mergeable false/dirty, base stale by main commit `325719f1` | Re-read all paginated feedback for this exact head/base before any merge consideration; prior `c440d4db` review does not transfer |
+| Runtime/native | Run `35481089522` succeeded; macOS job `105998930189` succeeded technically on `macos-26` | Treat as negative native-policy evidence under exact `xcode-27`; do not accept or downgrade the label |
+| Preview/CI | Preview `35481089629` failed at `105998913030` Resolve preview identity; no macOS preview jobs scheduled. CI/Main `35481089696` was in progress with no conclusion | Do not use queued/in-progress/failed output as success; recapture before any gate decision |
+| Authority v5 | v5 Markdown/JSON is approval-required/no mutation; external disposition rejects structural graph/schema/cycle/writer-freeze requirements | Do not execute authority transition or infer approval |
+| Evidence `294de951` | Packaging review passed exact remote/ancestry, 66 checksums, 63 inventory entries, no source paths; two originals changed after cutoff (`distribution/schema2-handoff-0712.md` `01:34:02Z`, `skills-adapter/integration-map.md` `01:31:01Z`) | Packaging-only pass; no attestation, current-equality, or gate approval |
+| Scan/checker | `820f6509` rejected with residual detector TOCTOU, journal/recovery, typed-recovery, stale-output/D19, and authority gaps despite 1,760 tests/clippy/fmt/diff; `ca18d011` bounded child-matrix fix verified but live collector remains unwired | No G1/G0 approval; preserve exact source/review bindings |
 
 ## Current candidate-bound checkpoint
 
@@ -116,14 +133,14 @@ remain timestamped `b5`-bound evidence, not current-main proof. See external
   contains unsigned `857` and DCO is `action_required`. It is not repaired or
   approved. PR963's `fb78d85d464fd5082e5c161922afd7942380fabc` signed
   replacement is historical to the `b5` snapshot; external comparison records
-  the tree-equivalent replacement with `857` excluded. The current query
-  reports head `c440d4db3fd59a9e4abd396d7a75e670c4f3d862` on API base
+  the tree-equivalent replacement with `857` excluded. A prior query reported
+  head `c440d4db3fd59a9e4abd396d7a75e670c4f3d862` on API base
   `1048337062ea625fada1b4f7c07f2feed75f60c7`; no fresh exact-head review or
   approval was observed. The independent review of
   `0c1ec75753cf9f8044a3a2ff01c2d144e9c59132` does not transfer to `c440d4db`.
-  Later remote main `e94b48406c4ed206fce2bbf39b788264e72cf39c` is a separate
-  fresh census under review, while d20 is historical. Never force-push or
-  override required checks.
+  Later remote main `e94b48406c4ed206fce2bbf39b788264e72cf39c` was a separate
+  fresh census at that time; the `325719f1` reconciliation is recorded above,
+  while d20 is historical. Never force-push or override required checks.
 - Product validation uses the separately typed validator-only
   product/publisher design owned by `/root/g0_inventory` and reviewed by
   `/root/g0_reviewer`; publication precedes separate PR957 pin adoption. Do

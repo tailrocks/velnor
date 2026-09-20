@@ -49,14 +49,14 @@ plus both independent approvals with cleanup proof.
 | --- | --- | --- |
 | Authority v4 | External `G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v4.md`, observed `2026-09-20T00:27:10Z`, SHA-256 `48b1e19ac7b9be59d78200f9e5de7b09e9a1de68fba9b41e3192b952ec022e52` | Proposal only; no source edit, dispatch, App/ruleset change, release, merge, host operation, or G1 authorization |
 | `static_files` feasibility | External typed-publisher feasibility MD/JSON; hashes `8764712693e2883d05846de05a3c2137fb3d31e3ee97ab0ad129186f3ff960f4` / `01ad40d473aa26ae7e5e814ef7c3f93e854d682d2c359fa7588f0bba2b4943e9` | Transports source bytes only; no actual B admission or authority |
-| Checker seam | Exact source `27eb094ccd545b642206ea3d52336e0ac74d6abd`; harness JSON SHA-256 `a4e7d7f29289b16438602872867295a84cc39c5ad398b974bb0ef6bd192bead1` | Live authenticated collector/API is unwired; offline cases fail `offline-validation-only`; no G0 proof |
+| Checker seam | Bounded source `ca18d01166681269b6eb5fce8d0f6175fc17aad4` closes the reusable child-matrix blocker; exact source checks report 258 tests plus build/fmt/clippy/diff pass | Live authenticated collector/API remains unwired; offline cases fail `offline-validation-only`; no G0 proof |
 | Bootstrap owner checkpoint | Exact `b981f43e8dfd70b4c628d29b0e7e9dce679ce537`; generated workflows/state regenerated; owner reports 1,727/1,727 library plus actionlint/fmt pass | `G1/reviews/bootstrap-b981f43e-independent.md` rejects the source checkpoint for archive/API-tree, freshness, provenance, legacy, fixture, and image-digest gaps; full source suite is not G1 evidence |
 | APT schema-2 | Exact source checkpoint `91bdf6cc1d0a5c429c5c01f17bf15dbb153c661b` | `G1/reviews/apt-83e7ab4-91bdf6c-independent.md` is **BLOCKED** for authority, verify-to-publish, extraction races, native handoff, and generated actionlint; no G2 delivery/publication |
 | Corrected workload index | `G0/fleet/workload-contract-index-20260920T002955Z-corrected.json`, SHA-256 `2b3bf88b42f291a40dcc2d6eb65a489d72d2a5bdcf9ab094a69a43e01f750c9c`; exact disjoint union 32 | Source-derived only, `gate_status=not_evaluated`, no execution/job/provider/Velnor output |
 | Native product review | Exact `a8d46536e7e11db0bbd5e207be802970362b751f` | Changes required; self-authored identity/archive gaps and Intel capability block remain; no G2 approval |
 | Action scanner review | Exact `40ddcc02dde1ff07aff538ea2ca95da091379e17` | Changes required: Docker/action schema and real consumer/runner semantics remain incomplete |
 | Hostile producer fixture | Exact `d60c0e2211b2830c64e7489d05b4cfe0bc77d65f` | ZIP-only assertion residual; source-only, no G1 approval |
-| Scan candidate | Exact `0a15fd06e002f57dca546d5c041754f1ec433508` reports 1,756 library tests | `G1/scan-integrity/source-review-0a15fd06.md` rejects exact D19 closure plus authority, detector-input, rollback, and hostile-fixture gaps; no G1 approval |
+| Scan candidate | Exact `820f6509fe8462265986bacf02e8e86eead26750` reports 1,760 library tests plus clippy/fmt/diff pass | `G1/scan-integrity/source-review-820f6509.md` rejects detector TOCTOU, SI-B3 fixed-point, journal/post-action recovery, typed recovery, generated-state/D19, and authority gaps; owner reactivated fixes; no G1 approval |
 
 The v4-capture external main evidence (historical at its capture) reports d20
 `d20d4d1d17590cca85b501d982cbaad70d42c641` routing Apple jobs to forbidden
@@ -64,6 +64,23 @@ The v4-capture external main evidence (historical at its capture) reports d20
 `35475920808` (preview) / `35475920826` (CI/Main) are historical facts, not
 accepted evidence. This does not weaken the newest-actual-major policy or
 permit an older fallback.
+
+## Latest live reconciliation — 2026-09-20T01:28:35Z
+
+External `G0/fleet/push-checkpoint-current.json` (SHA-256
+`d4987b227e79212df2abdf503c33a80daff225ed270ea445f5c657f938fd101a`) binds
+this narrow snapshot. It is not a forever-current claim and does not close G0
+or any later gate.
+
+| Item | Captured fact | Boundary |
+| --- | --- | --- |
+| Main / PR965 | Live/origin `main` is `325719f1e05d3d46322c9fd3eeb9ad545e175638`, parent `e94b48406c4ed206fce2bbf39b788264e72cf39c`; merged PR965 source `6b48f8fff2f4943dbf79c21c3274caecdf77bdd5` produced it | Timestamped identity/merge observation only |
+| PR963 | Open head `6ccf37486d255bbe3656f0066b0f1e5c84753903` on API base `e94b48406c4ed206fce2bbf39b788264e72cf39c`; mergeable `false`, state `dirty`, base stale by one main commit | No review/approval transfer; earlier `c440d4db` query is superseded only for this capture |
+| Runtime / native | Runtime-products `35481089522` succeeded; macOS job `105998930189` succeeded technically on `macos-26` | Negative native-policy observation because exact `xcode-27` is required; no G1 proof |
+| Preview / CI | Preview `35481089629` failed at identity job `105998913030`; no macOS preview jobs scheduled. CI/Main `35481089696` was `in_progress` with no conclusion | Failure/incomplete; no gate result |
+| Authority v5 | Markdown/JSON pair remains approval-required with no mutation; external disposition rejects structural graph/schema/cycle/writer-freeze requirements | No authority approval or execution |
+| Evidence `294de951` | Independent packaging review passed exact remote/ancestry, 66 checksums, 63 inventory entries, and no source paths | Packaging-only pass; two originals changed after cutoff (`distribution/schema2-handoff-0712.md` at `01:34:02Z`; `skills-adapter/integration-map.md` at `01:31:01Z`); no attestation/current-equality/gate approval |
+| Scan / checker | Scan `820f6509` is rejected despite 1,760 tests/clippy/fmt/diff; checker `ca18d011` closes the reusable child-matrix blocker with 258 tests/build/fmt/clippy | Scan residuals and live collector/API wiring remain; no G1/G0 proof |
 
 ## User native-version amendment
 
@@ -112,14 +129,15 @@ timestamped `b5`-bound observations, not current-main proof. See external
   contains unsigned `857` and DCO is `action_required`. It is not repaired or
   approved. PR963's `fb78d85d464fd5082e5c161922afd7942380fabc` signed
   replacement is also historical to the `b5` snapshot; external comparison
-  records the tree-equivalent replacement with `857` excluded. The current
-  read-only query reports head
+  records the tree-equivalent replacement with `857` excluded. A prior
+  read-only query reported head
   `c440d4db3fd59a9e4abd396d7a75e670c4f3d862` on API base
   `1048337062ea625fada1b4f7c07f2feed75f60c7`; no fresh exact-head review or
   approval was observed. The independent `0c1ec75753cf9f8044a3a2ff01c2d144e9c59132`
   review does not transfer to `c440d4db`. Later remote main
-  `e94b48406c4ed206fce2bbf39b788264e72cf39c` is a separate fresh census;
-  d20 is a historical main observation. Force/override remains forbidden.
+  `e94b48406c4ed206fce2bbf39b788264e72cf39c` was a separate fresh census at
+  that time; the later `325719f1` reconciliation is recorded above. d20 is a
+  historical main observation. Force/override remains forbidden.
 - The selected product boundary is a separately typed validator-only
   product/publisher owned by `/root/g0_inventory` and reviewed by
   `/root/g0_reviewer`; no three-platform runtime reuse or platform-selection
@@ -250,15 +268,15 @@ unknown.
 | G0-fleet | 32-row inventory complete; workload matrix/review pending | Build workload/platform/category matrix |
 | G0-runtime | Read-only report complete; actual Mac deferred until G3 | Reuse report for G4/G5 design |
 | G0-records | Docs commit complete; external registry amended | Preserve unknowns; await independent review |
-| G0-checker | Exact harness `27eb094ccd545b642206ea3d52336e0ac74d6abd` remains fail-closed | Wire authenticated collector/current API and bind exact artifact/run tuples; offline fixtures cannot close G0 |
+| G0-checker | Bounded exact source `ca18d01166681269b6eb5fce8d0f6175fc17aad4` closes the reusable child-matrix blocker; source checks report 258 tests/build/fmt/clippy/diff pass | Wire authenticated collector/current API and bind exact artifact/run tuples; offline fixtures cannot close G0 |
 | G0-reviewer | Independent review rejected initial checker/docs state | Review exact v2 commit and refreshed external evidence |
 | G1-cache-semantics | Jobs/provider adversarial review rejected initial checker paths | Retain external findings; review v2 candidate without rewriting old evidence |
 | G1-hosted-config | In progress; candidate remains unverified | Thread `01a0ba77-5222-7e63-97fa-553849b96d7b`; recheck clean exact commit/output |
-| G1-review952 | Scan candidates `6409a086`, `7e9a2b5f`, corrected `3c46b9e`, and current `0a15fd06` rejected/blocked by exact external reviews | Thread `01a0ba77-dd88-7ac2-9fb7-118f3c09d1af`; do not combine historical test counts or transfer review across heads |
+| G1-review952 | Scan candidates `6409a086`, `7e9a2b5f`, corrected `3c46b9e`, `0a15fd06`, and current `820f6509` rejected/blocked by exact external reviews | Thread `01a0ba77-dd88-7ac2-9fb7-118f3c09d1af`; do not combine historical test counts or transfer review across heads |
 | G1-run-operations | In progress; stale-runs evidence updated | Thread `01a0ba7a-9d5d-7291-a2f5-357ff78dba5e`; trace child outcomes |
 | G1-runtime-product-audit | Evidence written; next publish verification pending | Same operations thread; old pin verified, candidate remains unpublished |
 | G1-seed-pin | Source review written; pin adoption pending | Thread `01a0ba72-3925-7141-b1f7-5529a5cf6c98`; clean regeneration remains required |
-| G1-scan-integrity | Rejected exact candidates `6409a086`, `7e9a2b5f`, `3c46b9e`, and `0a15fd06` | Repair D19-compatible pin/closure, detector inputs, rollback identity, authority, and hostile fixtures; obtain fresh exact-head review |
+| G1-scan-integrity | Rejected exact candidates `6409a086`, `7e9a2b5f`, `3c46b9e`, `0a15fd06`, and `820f6509`; 820 reports 1,760 tests/clippy/fmt/diff but residual detector TOCTOU, SI-B3, journal/recovery, generated-state/D19, and authority gaps | Owner reactivated fixes; do not treat the test count as G1 evidence or transfer review across heads |
 | G2-native-packages | Compile/smoke observed; now owns product/manifest contract | Thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`; no install/publication claim |
 | G2-homebrew-contract | Assigned; producer contract coordination pending | Thread `01a0ba80-8408-7380-8ac2-b743eb4494a5`; coordinate with native packages |
 | G2-native-product | Source implementation assigned to native-packages worker | `/root/g2_native_packages`, thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`, worktree `dual-lane-native-product`; define application/runtime component identity and authoritative package manifest |
