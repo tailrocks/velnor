@@ -622,6 +622,22 @@ fn owner_entrypoint_renders_the_isolated_candidate_transport() {
     assert!(job.contains(".commit.tree.sha"), "{job}");
     assert!(job.contains("repository_api"), "{job}");
     assert!(job.contains("artifact_raw_zip_sha256"), "{job}");
+    assert!(
+        job.contains("test \"$raw_zip_sha256\" = \"$service_digest\""),
+        "{job}"
+    );
+    assert!(
+        job.contains("test \"$result_raw_zip_sha256\" = \"$result_service_digest\""),
+        "{job}"
+    );
+    assert!(
+        job.contains("test \"$handoff_raw_zip_sha256\" = \"$handoff_service_digest\""),
+        "{job}"
+    );
+    assert!(
+        job.contains("test \"$(sha256sum \"$producer_archive\" | awk '{print $1}')\" = \"$producer_service_digest\""),
+        "{job}"
+    );
     assert!(job.contains("candidate_closure"), "{job}");
     assert!(
         job.contains("Verify candidate transport provenance"),

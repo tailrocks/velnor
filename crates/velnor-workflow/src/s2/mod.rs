@@ -4686,6 +4686,7 @@ fn policy_candidate_step(revision: &str) -> String {
           service_digest="$(printf '%s' "$artifact_digest" | sed 's/^sha256://')"
           test "$raw_zip_sha256" != ''
           test "$service_digest" != ''
+          test "$raw_zip_sha256" = "$service_digest"
           candidate="$RUNNER_TEMP/candidate"
           rm -rf "$candidate"
           mkdir -p "$candidate"
@@ -5170,6 +5171,8 @@ fn policy_candidate_result_verification_step() -> String {
             --output "$result_archive"
           result_raw_zip_sha256="$(sha256sum "$result_archive" | awk '{{print $1}}')"
           case "$result_raw_zip_sha256" in [0-9a-f]{{64}}) ;; *) exit 1 ;; esac
+          result_service_digest="${{RESULT_DIGEST#sha256:}}"
+          test "$result_raw_zip_sha256" = "$result_service_digest"
           result_dir="$RUNNER_TEMP/candidate-result-verified"
           rm -rf "$result_dir"; mkdir -m 0700 "$result_dir"
           python3 - "$result_archive" "$result_dir" <<'PY'
@@ -5253,6 +5256,8 @@ fn policy_candidate_result_verification_step() -> String {
             --output "$handoff_archive"
           handoff_raw_zip_sha256="$(sha256sum "$handoff_archive" | awk '{{print $1}}')"
           case "$handoff_raw_zip_sha256" in [0-9a-f]{{64}}) ;; *) exit 1 ;; esac
+          handoff_service_digest="${{handoff_digest#sha256:}}"
+          test "$handoff_raw_zip_sha256" = "$handoff_service_digest"
           handoff_dir="$RUNNER_TEMP/candidate-handoff-verified"
           rm -rf "$handoff_dir"; mkdir -m 0700 "$handoff_dir"
           python3 - "$handoff_archive" "$handoff_dir" <<'PY'
@@ -5309,6 +5314,8 @@ fn policy_candidate_result_verification_step() -> String {
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$producer_id/zip" \
             --output "$producer_archive"
           test "$(sha256sum "$producer_archive" | awk '{{print $1}}')" = "$(jq -er .artifact_raw_zip_sha256 "$handoff_json")"
+          producer_service_digest="${{producer_digest#sha256:}}"
+          test "$(sha256sum "$producer_archive" | awk '{{print $1}}')" = "$producer_service_digest"
           producer_dir="$RUNNER_TEMP/candidate-producer-verified"
           rm -rf "$producer_dir"; mkdir -m 0700 "$producer_dir"
           python3 - "$producer_archive" "$producer_dir" <<'PY'
