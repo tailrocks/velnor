@@ -45,9 +45,11 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
   producer facts mirroring boltffi_cli 0.30.1, path+module join to
   local binaryTargets, taskless NamedProduct/Prerequisite edges,
   conflict/mismatch/escape diagnostics; 16 new tests, lib 1892
-  green, no Jackin literals). Remaining in 3: xcode scheme-id
-  collision follow-up (same-named schemes in different containers
-  share an id today).
+  green, no Jackin literals). 3d done (`10709118`: colliding Xcode
+  scheme unit ids gain their container path; lone schemes keep
+  existing ids; 2 new tests, lib 1894 green). Increment 3 complete:
+  static Package.swift/Xcode/XcodeGen/BoltFFI discovery with
+  product edges, no project-code execution, no Jackin literals.
 - Increments 4-8 per goal: cache/artifact, hosted macOS, Jackin
   migration (#1013 incl. Landlock P1), native provider, proof/cleanup.
 - Benchmarks: none yet; set latency goals after first controlled baseline.
