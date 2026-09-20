@@ -391,10 +391,10 @@ mod tests {
             .find(|unit| unit.root == "ui")
             .ok_or_else(|| std::io::Error::other("nested Bun unit missing"))?;
 
-        assert!(root_unit.watch.contains(&"**/*.ts".to_owned()));
+        assert!(root_unit.watch.contains(&"**".to_owned()));
         assert!(root_unit.watch.contains(&"src/**".to_owned()));
         assert!(root_unit.watch.contains(&"scripts/**".to_owned()));
-        assert!(nested_unit.watch.contains(&"ui/**/*.ts".to_owned()));
+        assert!(nested_unit.watch.contains(&"ui/**".to_owned()));
         assert!(nested_unit.watch.contains(&"ui/package.json".to_owned()));
         assert!(nested_unit.watch.contains(&"ui/tsconfig.json".to_owned()));
         assert!(nested_unit.watch.contains(&"ui/vite.config.ts".to_owned()));

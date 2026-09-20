@@ -60,6 +60,8 @@ struct PackageJsonFacts {
     workspace_root: bool,
 }
 
+type DetectedPackage = (String, String, BTreeSet<String>, crate::s2::Unit);
+
 fn parse_package_json(
     root: &Path,
     relative_root: &str,
@@ -265,6 +267,121 @@ fn package_commands(root: &str, facts: &PackageJsonFacts, locked: bool) -> Vec<S
     commands
 }
 
+/// Package commands and bundlers can consume any file under their package
+/// root. Keep the default watch conservative; an explicit config override is
+/// responsible for proving a narrower closure.
+fn package_watch_paths(package_root: &str, manifest: &str, lockfile: Option<&str>) -> Vec<String> {
+    let prefix = path_prefix(package_root);
+    let mut paths = vec![manifest.to_owned(), format!("{prefix}**")];
+    paths.extend([
+        join_repo_path(package_root, "bun.lock"),
+        join_repo_path(package_root, "bun.lockb"),
+        join_repo_path(package_root, "package-lock.json"),
+    ]);
+    if let Some(lockfile) = lockfile {
+        paths.push(lockfile.to_owned());
+    }
+    paths
+}
+
+fn detect_package(
+    context: &ScanContext<'_>,
+    shape: &mut RepositoryShape,
+    package_root: &str,
+) -> Result<Option<DetectedPackage>, GeneratorError> {
+    let manifest = join_repo_path(package_root, "package.json");
+    let contents = fs::read_to_string(context.root.join(&manifest)).map_err(|error| {
+        GeneratorError::io(
+            "read package manifest",
+            &context.root.join(&manifest),
+            &error,
+        )
+    })?;
+    let Some(facts) = parse_package_json(context.root, package_root, &contents, context.file_set)?
+    else {
+        shape.limitations.push(format!(
+            "Skipped {manifest}: package manager is unsupported or unresolved; supported package managers are Bun and npm."
+        ));
+        return Ok(None);
+    };
+    let manager_lockfile = package_lockfile_path(package_root, facts.manager, context.file_set);
+    let kind = if facts.manager == PackageManager::Bun {
+        UnitKind::Bun
+    } else {
+        UnitKind::Node
+    };
+    shape.detected.push(format!(
+        "package-manager:{}:{package_root}",
+        facts.manager.detected()
+    ));
+    if facts.workspace_root {
+        shape
+            .detected
+            .push(format!("package-workspace:{package_root}"));
+    }
+    for script in ["lint", "typecheck", "build", "test"] {
+        if facts.scripts.contains(script) {
+            shape
+                .detected
+                .push(format!("package-script:{package_root}:{script}"));
+        }
+    }
+    if !facts.scripts.contains("test") {
+        shape.limitations.push(format!(
+            "No test script is declared in {manifest}; no package test command was invented."
+        ));
+    }
+    if manager_lockfile.is_none() {
+        shape.limitations.push(format!(
+            "No {} lockfile is present for {manifest}; dependency installation is intentionally unlocked.",
+            facts.manager.detected()
+        ));
+    }
+    let lockfiles = ["bun.lock", "bun.lockb", "package-lock.json"]
+        .into_iter()
+        .filter(|lockfile| {
+            context
+                .file_set
+                .contains(&join_repo_path(package_root, lockfile))
+        })
+        .count();
+    if lockfiles > 1 {
+        shape.limitations.push(format!(
+            "Multiple package lockfiles are present under {package_root}; the detected manager chooses one, review the package boundary."
+        ));
+    }
+    let package_watch = package_watch_paths(package_root, &manifest, manager_lockfile.as_deref());
+    shape.limitations.push(format!(
+        "Package inputs under {package_root} are conservatively watched as a complete package root because package scripts and bundlers may consume arbitrary files; an explicit watch override must prove a complete closure."
+    ));
+    let package_cache = manager_lockfile.as_ref().map(|manager_lockfile| CacheSpec {
+        key_files: vec![manifest.clone(), manager_lockfile.clone()],
+        paths: vec![if facts.manager == PackageManager::Bun {
+            "~/.bun/install/cache".to_owned()
+        } else {
+            "~/.npm".to_owned()
+        }],
+        purpose: CachePurpose::Generic,
+        mbx_output_cache_justification: None,
+        mutable_mount_seed: false,
+    });
+    let mut package_unit = unit(
+        kind,
+        package_root,
+        package_watch,
+        package_commands(package_root, &facts, manager_lockfile.is_some()),
+        package_cache,
+    );
+    package_unit.label = format!("{} package ({})", kind.label(), facts.name);
+    package_unit.tool_version.clone_from(&facts.manager_version);
+    Ok(Some((
+        package_root.to_owned(),
+        facts.name,
+        facts.dependencies,
+        package_unit,
+    )))
+}
+
 pub(crate) fn detect(
     context: &ScanContext<'_>,
     shape: &mut RepositoryShape,
@@ -273,99 +390,16 @@ pub(crate) fn detect(
     let mut package_units = Vec::<(String, String, BTreeSet<String>, String)>::new();
     let mut package_id_counts = BTreeMap::new();
     for package_root in roots_for_manifests(&package_manifests) {
-        let prefix = path_prefix(&package_root);
-        let manifest = join_repo_path(&package_root, "package.json");
-        let contents = fs::read_to_string(context.root.join(&manifest)).map_err(|error| {
-            GeneratorError::io(
-                "read package manifest",
-                &context.root.join(&manifest),
-                &error,
-            )
-        })?;
-        let Some(facts) =
-            parse_package_json(context.root, &package_root, &contents, context.file_set)?
+        let Some((package_root, name, dependencies, mut package_unit)) =
+            detect_package(context, shape, &package_root)?
         else {
-            shape.limitations.push(format!(
-                "Skipped {manifest}: package manager is unsupported or unresolved; supported package managers are Bun and npm."
-            ));
             continue;
         };
-        let manager_lockfile =
-            package_lockfile_path(&package_root, facts.manager, context.file_set);
-        let kind = if facts.manager == PackageManager::Bun {
-            UnitKind::Bun
-        } else {
-            UnitKind::Node
-        };
-        shape.detected.push(format!(
-            "package-manager:{}:{}",
-            facts.manager.detected(),
-            package_root
-        ));
-        if facts.workspace_root {
-            shape
-                .detected
-                .push(format!("package-workspace:{package_root}"));
-        }
-        for script in ["lint", "typecheck", "build", "test"] {
-            if facts.scripts.contains(script) {
-                shape
-                    .detected
-                    .push(format!("package-script:{package_root}:{script}"));
-            }
-        }
-        if !facts.scripts.contains("test") {
-            shape.limitations.push(format!(
-                "No test script is declared in {manifest}; no package test command was invented."
-            ));
-        }
-        if manager_lockfile.is_none() {
-            shape.limitations.push(format!(
-                "No {} lockfile is present for {manifest}; dependency installation is intentionally unlocked.",
-                facts.manager.detected()
-            ));
-        }
-        let lockfiles = ["bun.lock", "bun.lockb", "package-lock.json"]
-            .into_iter()
-            .filter(|lockfile| {
-                context
-                    .file_set
-                    .contains(&join_repo_path(&package_root, lockfile))
-            })
-            .count();
-        if lockfiles > 1 {
-            shape.limitations.push(format!(
-                "Multiple package lockfiles are present under {package_root}; the detected manager chooses one, review the package boundary."
-            ));
-        }
-        let commands = package_commands(&package_root, &facts, manager_lockfile.is_some());
-        let mut package_watch = vec![
-            manifest.clone(),
-            format!("{prefix}**/*.js"),
-            format!("{prefix}**/*.jsx"),
-            format!("{prefix}**/*.ts"),
-            format!("{prefix}**/*.tsx"),
-            format!("{prefix}**/*.json"),
-            join_repo_path(&package_root, "bun.lock"),
-            join_repo_path(&package_root, "bun.lockb"),
-            join_repo_path(&package_root, "package-lock.json"),
-        ];
-        if let Some(lockfile) = &manager_lockfile {
-            package_watch.push(lockfile.clone());
-        }
-        let package_cache = manager_lockfile.as_ref().map(|manager_lockfile| CacheSpec {
-            key_files: vec![manifest.clone(), manager_lockfile.clone()],
-            paths: vec![if facts.manager == PackageManager::Bun {
-                "~/.bun/install/cache".to_owned()
-            } else {
-                "~/.npm".to_owned()
-            }],
-            purpose: CachePurpose::Generic,
-            mbx_output_cache_justification: None,
-            mutable_mount_seed: false,
-        });
-        let mut package_unit = unit(kind, &package_root, package_watch, commands, package_cache);
-        let base_id = format!("{}-{}", kind.id_prefix(), identifier_suffix(&facts.name));
+        let base_id = format!(
+            "{}-{}",
+            package_unit.kind.id_prefix(),
+            identifier_suffix(&name)
+        );
         let count = package_id_counts.entry(base_id.clone()).or_insert(0_usize);
         *count += 1;
         package_unit.id = if *count == 1 {
@@ -373,14 +407,7 @@ pub(crate) fn detect(
         } else {
             format!("{base_id}-{count}")
         };
-        package_unit.label = format!("{} package ({})", kind.label(), facts.name);
-        package_unit.tool_version.clone_from(&facts.manager_version);
-        package_units.push((
-            package_root,
-            facts.name.clone(),
-            facts.dependencies.clone(),
-            package_unit.id.clone(),
-        ));
+        package_units.push((package_root, name, dependencies, package_unit.id.clone()));
         shape.units.push(package_unit);
     }
     let mut package_ids = BTreeMap::new();
