@@ -12652,6 +12652,47 @@ lockfile = true
         )
     }
 
+    #[test]
+    fn generated_rust_surface_declares_and_passes_mbx_input() {
+        let config = scanned_fixture(all_providers());
+        let files = must(generated_files(&config), "render fixture files");
+        let rust = must_some(
+            files.get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
+            "generated Rust reusable",
+        );
+        assert!(
+            rust.contains(
+                "      mbx_enabled:\n        required: false\n        type: boolean\n        default: false"
+            ),
+            "the Rust reusable declares the typed MBX input: {rust}"
+        );
+
+        let mut caller_count = 0;
+        for aggregate in ["ci-pr.yml", "ci-main.yml"] {
+            let workflow = must_some(
+                files.get(&PathBuf::from(".github/workflows").join(aggregate)),
+                aggregate,
+            );
+            for (_, block) in static_workflow_job_blocks(workflow) {
+                if !block.contains("uses: ./.github/workflows/ci-unit-rust.yml")
+                    || !(block.contains("provider: github-hosted")
+                        || block.contains("provider: velnor"))
+                {
+                    continue;
+                }
+                caller_count += 1;
+                assert!(
+                    block.contains("      mbx_enabled: true\n"),
+                    "{aggregate} Rust caller passes the typed MBX value: {block}"
+                );
+            }
+        }
+        assert!(
+            caller_count > 0,
+            "generated aggregate workflows contain Rust provider callers"
+        );
+    }
+
     /// The fixture configuration with two cargo-restricted Rust units: the
     /// clones keep the scanned commands (which resolve no inputs of their
     /// own) and pin their lockfiles, so the prepare-cargo aggregate and
