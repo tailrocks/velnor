@@ -141,6 +141,7 @@ fn derive_source(
         let job = job_value
             .as_mapping()
             .ok_or_else(|| anyhow!("workflow job {job_id} must be a mapping"))?;
+        reject_continue_on_error(job, &format!("workflow job {job_id}"))?;
         if let Some(condition) = mapping_value(job, "if")
             && !constant_condition(condition)?
         {
@@ -298,6 +299,7 @@ fn action_sources(
         let Some(step) = step.as_mapping() else {
             bail!("workflow step {index} must be a mapping");
         };
+        reject_continue_on_error(step, &format!("workflow job step {index}"))?;
         if let Some(condition) = mapping_value(step, "if")
             && !constant_condition(condition)?
         {
@@ -434,6 +436,17 @@ fn constant_condition(value: &Value) -> Result<bool> {
     }
 }
 
+fn reject_continue_on_error(mapping: &Mapping, subject: &str) -> Result<()> {
+    let Some(value) = mapping_value(mapping, "continue-on-error") else {
+        return Ok(());
+    };
+    match constant_condition(value) {
+        Ok(false) => Ok(()),
+        Ok(true) => bail!("{subject} enables continue-on-error"),
+        Err(_) => bail!("{subject} has a dynamic continue-on-error expression"),
+    }
+}
+
 fn resolve_source_target(
     reference: &str,
     current: &G0WorkflowSource,
@@ -504,11 +517,12 @@ fn workflow_events(mapping: &Mapping) -> Result<BTreeSet<String>> {
             }
         }
         Value::Mapping(values) => {
-            for key in values.keys() {
+            for (key, configuration) in values {
                 let event = key.as_str();
                 if event.trim().is_empty() {
                     bail!("workflow trigger key is not a non-empty string");
                 }
+                validate_trigger_configuration(event, configuration)?;
                 events.insert(event.to_owned());
             }
         }
@@ -518,6 +532,18 @@ fn workflow_events(mapping: &Mapping) -> Result<BTreeSet<String>> {
         bail!("workflow source has no trigger events");
     }
     Ok(events)
+}
+
+fn validate_trigger_configuration(event: &str, configuration: &Value) -> Result<()> {
+    match configuration {
+        Value::Null => Ok(()),
+        Value::Mapping(values) if values.is_empty() => Ok(()),
+        Value::Mapping(_) if matches!(event, "workflow_call" | "workflow_dispatch") => Ok(()),
+        Value::Mapping(_) => bail!(
+            "workflow trigger {event} has branch/path/type conditions that require event-aware derivation"
+        ),
+        _ => bail!("workflow trigger {event} has an unsupported configuration"),
+    }
 }
 
 fn runner_target(value: &Value) -> Result<(String, String, String)> {
@@ -612,8 +638,7 @@ mod tests {
     fn derives_jobs_recursive_reusable_workflow_and_triggers() {
         let root_yaml = r#"
 on:
-  workflow_run:
-    workflows: [Build]
+  workflow_run: {}
   workflow_dispatch: {}
 jobs:
   scan:
@@ -772,6 +797,55 @@ jobs:
         let error = derive_workflow_plan(&root, &dependencies)
             .expect_err("a job-level uses source must be reusable");
         assert!(error.to_string().contains("must declare workflow_call"));
+    }
+
+    #[test]
+    fn conditional_trigger_filters_are_rejected() {
+        let yaml = r#"
+on:
+  push:
+    branches: [main]
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    steps: []
+"#;
+        let root = source("tailrocks/velnor", ".github/workflows/ci.yml", yaml);
+        let error = derive_workflow_plan(&root, &[])
+            .expect_err("branch filters need event-aware source derivation");
+        assert!(error.to_string().contains("event-aware derivation"));
+    }
+
+    #[test]
+    fn continue_on_error_is_rejected_for_jobs_and_steps() {
+        let job_yaml = r#"
+on: [push]
+jobs:
+  scan:
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    steps: []
+"#;
+        let root = source("tailrocks/velnor", ".github/workflows/ci.yml", job_yaml);
+        assert!(derive_workflow_plan(&root, &[])
+            .expect_err("required jobs cannot hide failures")
+            .to_string()
+            .contains("continue-on-error"));
+
+        let step_yaml = r#"
+on: [push]
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - continue-on-error: true
+        run: ./scan
+"#;
+        let root = source("tailrocks/velnor", ".github/workflows/ci.yml", step_yaml);
+        assert!(derive_workflow_plan(&root, &[])
+            .expect_err("required steps cannot hide failures")
+            .to_string()
+            .contains("continue-on-error"));
     }
 
     #[test]

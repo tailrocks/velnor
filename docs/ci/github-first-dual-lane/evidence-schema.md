@@ -342,6 +342,11 @@ The current v2 row has no concrete matrix-assignment identity. A finite matrix
 that expands one logical job into multiple instances therefore fails closed
 until the reviewed plan and source-job contract enumerate those instances; the
 checker never collapses them into one self-attested row.
+Source derivation accepts only literal `if` conditions and unconditional event
+maps (plus input declarations for `workflow_call`/`workflow_dispatch`).
+Branch/path/type/workflow filters, dynamic conditions, and
+`continue-on-error` are explicit unsupported blockers; they are never treated
+as unconditional coverage.
 
 The dependency graph is also typed source evidence, not a summary digest.
 Every node and edge has an immutable source SHA/ref, raw-object references,
