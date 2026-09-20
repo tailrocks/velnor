@@ -243,9 +243,10 @@ id = "rust-production-topology"
 label = "Rust production topology"
 kind = "rust"
 root = "."
-watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/velnor-runner/**", "docker/**", "microvm/**", "mise.lock", "mise.toml", "rust-toolchain", "rust-toolchain.toml", "scripts/check-release-feature-boundary.sh", "scripts/test-check-release-feature-boundary.sh"]
+watch = [".cargo/**", ".pre-commit-config.yaml", "Cargo.lock", "Cargo.toml", "crates/velnor-runner/**", "docker/**", "microvm/**", "mise.lock", "mise.toml", "rust-toolchain", "rust-toolchain.toml", "scripts/check-release-feature-boundary.sh", "scripts/test-check-release-feature-boundary.sh", "scripts/install-hooks.mjs", "scripts/pre-commit-snapshot.mjs", "scripts/pre-commit-snapshot.test.mjs"]
 workspace_check = true
-ci_tasks = ["test-release-feature-boundary", "test-release-boundary-script"]
+ci_tasks = ["test-release-feature-boundary", "test-release-boundary-script", "test-hooks"]
+mise_tools = ["aqua:oven-sh/bun", "aqua:j178/prek"]
 pinned_lockfile = true
 
 [units.cache]

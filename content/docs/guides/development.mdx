@@ -18,8 +18,23 @@ shared dependency table. The pinned toolchain is Rust 1.98.1 with `rustfmt` and
 `mise` is the task entrypoint. Install the pinned Rust toolchain selected by
 `rust-toolchain.toml`, then install the tools declared in `mise.toml`: mise,
 `actionlint`, `cargo-deny`, `cargo-nextest`, `cargo-zigbuild`, `cargo-deb`, and
-Zig. The lockfile is mandatory, and CI/jobs use locked artifacts. Run these
-current gates:
+Zig, plus the pinned Bun and prek used by local commit checks. The lockfile is
+mandatory, and CI/jobs use locked artifacts. Prepare each clone or agent checkout:
+
+```sh
+mise trust
+mise install
+mise run bootstrap
+```
+
+Bootstrap installs a repository-local hook shared by linked worktrees. Normal
+commits validate their complete staged snapshot with formatting first and Clippy
+second, including configuration-only commits. Unstaged fixes, helper changes,
+and untracked dependencies cannot supply missing staged inputs. Checks preserve
+the original staged, unstaged, and untracked content. Apply formatting separately
+with `mise run fmt-fix`, then review and stage it. Rerun bootstrap after hook
+tooling changes; existing foreign hooks or configured hook paths require explicit
+integration and are never overwritten. Run these current gates:
 
 ```text
 mise run fmt
@@ -30,6 +45,7 @@ mise run test-release-feature-boundary
 mise run actionlint
 mise run deny
 mise run check
+mise run test-hooks
 ```
 
 - `fmt` is read-only: `cargo fmt --all --check`. `fmt-fix` is the in-place formatter.
@@ -39,8 +55,10 @@ mise run check
 - `test-production-topology` checks every workspace target with default production
   features. The release-boundary task must fail if release code is built with the
   loopback-only `test-support` feature.
-- `actionlint` checks workflow syntax; `deny` runs advisory checks. `check` is the
-  aggregate gate and also runs the offline CI/fleet policy tasks. Fleet policy
+- `actionlint` checks workflow syntax; `deny` checks advisories, bans, licenses,
+  and sources. `check` runs formatting, Clippy, then tests in order and preserves
+  the remaining validation gates, including isolated-hook regressions and the
+  offline CI/fleet policy tasks. Fleet policy
   generation is a privileged publisher operation: set
   `VELNOR_FLEET_POLICY_OUT_DIR` to the provisioned absolute root-owned directory.
   `audit-ci`, `fleet-plan`, and the runtime read that same directory when the
