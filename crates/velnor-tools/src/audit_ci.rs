@@ -248,6 +248,54 @@ struct EstateRepository {
     concerns: BTreeMap<String, ConcernContract>,
 }
 
+/// Concern metadata selected only from the reviewed auxiliary source.
+///
+/// The caller estate supplies identities and checkout paths.  It must never
+/// supply the concern/default plan used for workload selection or contract
+/// auditing.  Keeping this projection separate from `EstateRepository` makes
+/// that authority boundary visible at every call site.
+struct AcceptedConcernPlan<'a> {
+    name: &'a str,
+    repository_concerns: Option<&'a BTreeMap<String, ConcernContract>>,
+    defaults: &'a BTreeMap<String, ConcernContract>,
+}
+
+impl<'a> AcceptedConcernPlan<'a> {
+    fn from_manifest(manifest: &'a EstateManifest, name: &'a str) -> Self {
+        Self {
+            name,
+            repository_concerns: manifest
+                .repositories
+                .iter()
+                .find(|repository| repository.name == name)
+                .map(|repository| &repository.concerns),
+            defaults: &manifest.defaults,
+        }
+    }
+
+    fn has_repository_projection(&self) -> bool {
+        self.repository_concerns.is_some()
+    }
+
+    fn concern(&self, name: &str) -> Option<&'a ConcernContract> {
+        self.repository_concerns
+            .and_then(|concerns| concerns.get(name))
+            .or_else(|| self.defaults.get(name))
+    }
+
+    fn workflow_files(&self, name: &str) -> BTreeSet<&'a str> {
+        self.concern(name)
+            .map(|concern| {
+                concern
+                    .implementations
+                    .iter()
+                    .map(|implementation| implementation.workflow.as_str())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct EstateAuditResult {
     default_branch: String,
@@ -292,7 +340,7 @@ impl Drop for RemoteCheckout {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum ConcernClassification {
     Required,
@@ -301,7 +349,7 @@ enum ConcernClassification {
     RepoSpecific,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ConcernContract {
     classification: ConcernClassification,
@@ -310,7 +358,7 @@ struct ConcernContract {
     implementations: Vec<ConcernImplementation>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConcernImplementation {
     workflow: String,
@@ -436,6 +484,13 @@ fn validate_auxiliary_contract_binding(
     observed: &EstateManifest,
     accepted: &EstateManifest,
 ) -> Result<()> {
+    let differences = auxiliary_contract_differences(observed, accepted);
+    if !differences.is_empty() {
+        bail!(
+            "estate manifest auxiliary contract mismatch (caller-plan-not-authority, concern-plan-mismatch): {}; external concern rewrites cannot downgrade required concerns",
+            differences.join("; ")
+        );
+    }
     let observed_digest = auxiliary_contract_digest(observed)?;
     let accepted_digest = auxiliary_contract_digest(accepted)?;
     if observed_digest != accepted_digest {
@@ -446,14 +501,86 @@ fn validate_auxiliary_contract_binding(
     Ok(())
 }
 
-fn authoritative_auxiliary_repository<'a>(
-    accepted: &'a EstateManifest,
-    name: &str,
-) -> Option<&'a EstateRepository> {
-    accepted
+fn auxiliary_contract_differences(
+    observed: &EstateManifest,
+    accepted: &EstateManifest,
+) -> Vec<String> {
+    let mut differences = Vec::new();
+    let mut default_names = observed.defaults.keys().collect::<BTreeSet<_>>();
+    default_names.extend(accepted.defaults.keys());
+    for name in default_names {
+        append_concern_difference(
+            &mut differences,
+            &format!("default concern {name}"),
+            accepted.defaults.get(name),
+            observed.defaults.get(name),
+        );
+    }
+
+    let accepted_repositories = accepted
         .repositories
         .iter()
-        .find(|repository| repository.name == name)
+        .map(|repository| (repository.name.as_str(), &repository.concerns))
+        .collect::<BTreeMap<_, _>>();
+    let observed_repositories = observed
+        .repositories
+        .iter()
+        .map(|repository| (repository.name.as_str(), &repository.concerns))
+        .collect::<BTreeMap<_, _>>();
+    let mut repository_names = observed_repositories.keys().collect::<BTreeSet<_>>();
+    repository_names.extend(accepted_repositories.keys());
+    for repository in repository_names {
+        let empty = BTreeMap::new();
+        let accepted_concerns = accepted_repositories
+            .get(repository)
+            .copied()
+            .unwrap_or(&empty);
+        let observed_concerns = observed_repositories
+            .get(repository)
+            .copied()
+            .unwrap_or(&empty);
+        let mut concern_names = accepted_concerns.keys().collect::<BTreeSet<_>>();
+        concern_names.extend(observed_concerns.keys());
+        for concern in concern_names {
+            append_concern_difference(
+                &mut differences,
+                &format!("repository {repository} concern {concern}"),
+                accepted_concerns.get(concern),
+                observed_concerns.get(concern),
+            );
+        }
+    }
+    differences
+}
+
+fn append_concern_difference(
+    differences: &mut Vec<String>,
+    location: &str,
+    accepted: Option<&ConcernContract>,
+    observed: Option<&ConcernContract>,
+) {
+    if accepted == observed {
+        return;
+    }
+    match (accepted, observed) {
+        (Some(accepted), Some(observed))
+            if accepted.classification != observed.classification
+                && matches!(
+                    accepted.classification,
+                    ConcernClassification::Required | ConcernClassification::Applicable
+                )
+                && matches!(
+                    observed.classification,
+                    ConcernClassification::NonApplicable | ConcernClassification::RepoSpecific
+                ) =>
+        {
+            differences.push(format!(
+                "{location} classification downgrade {:?} -> {:?}",
+                accepted.classification, observed.classification
+            ));
+        }
+        _ => differences.push(format!("{location} differs from accepted source plan")),
+    }
 }
 
 fn auxiliary_metadata_output(manifest: &EstateManifest) -> AuxiliaryMetadataOutput {
@@ -706,14 +833,8 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
             bail!("estate audit cannot skip delivered-default freshness checks");
         }
         for repo in &estate.repositories {
-            let accepted_repo = authoritative_auxiliary_repository(accepted_auxiliary, &repo.name);
-            let fallback_repo = EstateRepository {
-                name: repo.name.clone(),
-                path: None,
-                concerns: BTreeMap::new(),
-            };
-            let authoritative_repo = accepted_repo.unwrap_or(&fallback_repo);
-            let missing_auxiliary = accepted_repo.is_none();
+            let accepted_plan = AcceptedConcernPlan::from_manifest(accepted_auxiliary, &repo.name);
+            let missing_auxiliary = !accepted_plan.has_repository_projection();
             let expected_class = canonical_classes
                 .get(&repo.name)
                 .copied()
@@ -760,19 +881,7 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
                     root.display()
                 )
             })?;
-            let workload_files = concern_implementations(
-                authoritative_repo,
-                &accepted_auxiliary.defaults,
-                "lane-selection",
-            )
-            .map(|concern| {
-                concern
-                    .implementations
-                    .iter()
-                    .map(|implementation| implementation.workflow.as_str())
-                    .collect::<BTreeSet<_>>()
-            })
-            .unwrap_or_default();
+            let workload_files = accepted_plan.workflow_files("lane-selection");
             let mut findings = audit_repo_profile(
                 &canonical,
                 args.offline,
@@ -788,11 +897,7 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
                     "fixed-scope repository has no accepted auxiliary concern projection; dependent concern checks are blocked",
                 ));
             }
-            findings.extend(audit_concern_contract(
-                authoritative_repo,
-                &accepted_auxiliary.defaults,
-                &canonical,
-            )?);
+            findings.extend(audit_concern_contract(&accepted_plan, &canonical)?);
             let generated_ci_sha256 =
                 generated_caller_sample(&canonical, &repo.name, expected_class)?.map(|sample| {
                     let sha256 = sample.sha256.clone();
@@ -1125,11 +1230,7 @@ fn verify_checkout_identity(
     Ok(())
 }
 
-fn audit_concern_contract(
-    repo: &EstateRepository,
-    defaults: &BTreeMap<String, ConcernContract>,
-    root: &Path,
-) -> Result<Vec<Finding>> {
+fn audit_concern_contract(plan: &AcceptedConcernPlan<'_>, root: &Path) -> Result<Vec<Finding>> {
     const REQUIRED_CONCERNS: [&str; 14] = [
         "lane-selection",
         "checkout",
@@ -1148,24 +1249,24 @@ fn audit_concern_contract(
     ];
     let mut findings = Vec::new();
     for name in REQUIRED_CONCERNS {
-        if !repo.concerns.contains_key(name) && !defaults.contains_key(name) {
+        if plan.concern(name).is_none() {
             findings.push(Finding::error(
                 "missing-required",
                 "config/estate-repositories.json",
-                format!("$.repositories[{}].concerns.{name}", repo.name),
+                format!("$.repositories[{}].concerns.{name}", plan.name),
                 "classify this concern with evidence; absence is not non-applicability",
             ));
         }
     }
     for name in REQUIRED_CONCERNS {
-        let Some(concern) = repo.concerns.get(name).or_else(|| defaults.get(name)) else {
+        let Some(concern) = plan.concern(name) else {
             continue;
         };
         if concern.evidence.trim().is_empty() {
             findings.push(Finding::error(
                 "missing-required",
                 "config/estate-repositories.json",
-                format!("$.repositories[{}].concerns.{name}.evidence", repo.name),
+                format!("$.repositories[{}].concerns.{name}.evidence", plan.name),
                 "add evidence for this classification",
             ));
         }
@@ -1182,7 +1283,7 @@ fn audit_concern_contract(
                 findings.push(Finding::info(
                     rule,
                     "config/estate-repositories.json",
-                    format!("$.repositories[{}].concerns.{name}", repo.name),
+                    format!("$.repositories[{}].concerns.{name}", plan.name),
                     &concern.evidence,
                 ));
             }
@@ -1193,7 +1294,7 @@ fn audit_concern_contract(
                         "config/estate-repositories.json",
                         format!(
                             "$.repositories[{}].concerns.{name}.implementations",
-                            repo.name
+                            plan.name
                         ),
                         "required/applicable concern must name every implementing workflow",
                     ));
@@ -1281,14 +1382,6 @@ fn audit_concern_contract(
         }
     }
     Ok(findings)
-}
-
-fn concern_implementations<'a>(
-    repo: &'a EstateRepository,
-    defaults: &'a BTreeMap<String, ConcernContract>,
-    name: &str,
-) -> Option<&'a ConcernContract> {
-    repo.concerns.get(name).or_else(|| defaults.get(name))
 }
 
 #[cfg(test)]
@@ -4749,6 +4842,17 @@ jobs:
         canonical_auxiliary_manifest(&root).unwrap()
     }
 
+    fn local_concern_plan<'a>(
+        repository: &'a EstateRepository,
+        defaults: &'a BTreeMap<String, ConcernContract>,
+    ) -> AcceptedConcernPlan<'a> {
+        AcceptedConcernPlan {
+            name: &repository.name,
+            repository_concerns: Some(&repository.concerns),
+            defaults,
+        }
+    }
+
     #[test]
     fn hostile_concern_rewrite_cannot_downgrade_required_plan() {
         let accepted = reviewed_auxiliary_manifest();
@@ -4771,7 +4875,8 @@ jobs:
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("auxiliary contract digest mismatch"),
+            error.contains("caller-plan-not-authority")
+                && error.contains("classification downgrade"),
             "{error}"
         );
         assert!(
@@ -4804,8 +4909,7 @@ jobs:
                 }
             }
         }
-        let accepted_repository =
-            authoritative_auxiliary_repository(&accepted, "tailrocks/velnor").unwrap();
+        let accepted_plan = AcceptedConcernPlan::from_manifest(&accepted, "tailrocks/velnor");
         let caller_repository = caller
             .repositories
             .iter()
@@ -4816,12 +4920,11 @@ jobs:
             ConcernClassification::NonApplicable
         ));
         assert!(matches!(
-            accepted_repository.concerns["rust-ci"].classification,
+            accepted_plan.concern("rust-ci").unwrap().classification,
             ConcernClassification::Required
         ));
         let root = TestRepo::new();
-        let findings =
-            audit_concern_contract(accepted_repository, &accepted.defaults, &root.path).unwrap();
+        let findings = audit_concern_contract(&accepted_plan, &root.path).unwrap();
         assert!(findings.iter().any(|finding| {
             finding.rule == "missing-required" && finding.message.contains("rust-ci")
         }));
@@ -4860,7 +4963,9 @@ jobs:
             path: Some(root.path.clone()),
             concerns: BTreeMap::new(),
         };
-        let findings = audit_concern_contract(&repo, &BTreeMap::new(), &root.path).unwrap();
+        let defaults = BTreeMap::new();
+        let plan = local_concern_plan(&repo, &defaults);
+        let findings = audit_concern_contract(&plan, &root.path).unwrap();
         assert!(has_rule(&findings, "missing-required"));
     }
 
@@ -4874,7 +4979,8 @@ jobs:
         };
         let mut defaults = required_concern_defaults();
         defaults.remove("required-aggregator");
-        let findings = audit_concern_contract(&repo, &defaults, &root.path).unwrap();
+        let plan = local_concern_plan(&repo, &defaults);
+        let findings = audit_concern_contract(&plan, &root.path).unwrap();
         assert!(findings.iter().any(|finding| {
             finding.rule == "missing-required"
                 && finding.path.ends_with("concerns.required-aggregator")
@@ -4902,7 +5008,8 @@ jobs:
             )]),
         };
         let defaults = required_concern_defaults();
-        let findings = audit_concern_contract(&repo, &defaults, &root.path).unwrap();
+        let plan = local_concern_plan(&repo, &defaults);
+        let findings = audit_concern_contract(&plan, &root.path).unwrap();
         assert!(!has_rule(&findings, "canonical-drift"));
     }
 
@@ -4931,7 +5038,8 @@ jobs:
             path: Some(root.path.clone()),
             concerns: BTreeMap::new(),
         };
-        let findings = audit_concern_contract(&repo, &defaults, &root.path).unwrap();
+        let plan = local_concern_plan(&repo, &defaults);
+        let findings = audit_concern_contract(&plan, &root.path).unwrap();
         assert!(findings.iter().any(|finding| {
             finding.rule == "canonical-drift" && finding.message.contains("out of order")
         }));
