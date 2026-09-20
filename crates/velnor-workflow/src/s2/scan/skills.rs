@@ -217,7 +217,7 @@ pub(crate) fn detect(
             "skills/**".to_owned(),
             "docs/index.json".to_owned(),
             "docs/README.md".to_owned(),
-            "docs/skills/**".to_owned(),
+            "docs/**".to_owned(),
             "scripts/**".to_owned(),
         ],
         Vec::new(),
@@ -1109,11 +1109,14 @@ fn reject_yaml_tags(value: &serde_yaml::Value, path: &str) -> Result<(), Generat
     }
 }
 
-const FRONTMATTER_KEYS: [&str; 6] = [
+const FRONTMATTER_KEYS: [&str; 9] = [
     "name",
     "description",
     "argument-hint",
     "license",
+    "compatibility",
+    "metadata",
+    "allowed-tools",
     "user-invocable",
     "disable-model-invocation",
 ];
@@ -1129,11 +1132,33 @@ fn validate_frontmatter_mapping(
                 "{path} frontmatter contains unsupported key `{key}`"
             )));
         }
-        if matches!(key, "name" | "description" | "argument-hint" | "license") && !value.is_string()
+        if matches!(
+            key,
+            "name"
+                | "description"
+                | "argument-hint"
+                | "license"
+                | "compatibility"
+                | "allowed-tools"
+        ) && !value.is_string()
         {
             return Err(GeneratorError::usage(format!(
                 "{path} frontmatter {key} must be a YAML string"
             )));
+        }
+        if key == "metadata" {
+            let Some(metadata) = value.as_mapping() else {
+                return Err(GeneratorError::usage(format!(
+                    "{path} frontmatter metadata must be a YAML mapping"
+                )));
+            };
+            for (metadata_key, metadata_value) in metadata {
+                if metadata_key.is_empty() || !metadata_value.is_string() {
+                    return Err(GeneratorError::usage(format!(
+                        "{path} frontmatter metadata keys and values must be YAML strings"
+                    )));
+                }
+            }
         }
         if matches!(key, "user-invocable" | "disable-model-invocation") && !value.is_bool() {
             return Err(GeneratorError::usage(format!(
@@ -1384,6 +1409,7 @@ mod tests {
                 ".claude-plugin/marketplace.json",
                 "docs/index.json",
                 "docs/README.md",
+                "docs/reference.md",
                 "docs/skills/example/index.md",
                 "docs/skills/example/definition.md",
                 "skills/example/SKILL.md",
@@ -1419,9 +1445,10 @@ mod tests {
                         r#"{"plugins":[{"name":"example-plugin","source":"./","version":"1.0.0"}]}"#
                     }
                     "docs/index.json" => {
-                        r#"[{"name":"example","description":"Example","overview":"skills/example/index.md","definition":"skills/example/definition.md","source":"https://example.invalid/example"}]"#
+                        r#"[{"name":"example","description":"Example","overview":"reference.md","definition":"skills/example/definition.md","source":"https://example.invalid/example"}]"#
                     }
                     "docs/README.md" => "- [example](skills/example/index.md)\n",
+                    "docs/reference.md" => "# Reference\n",
                     "docs/skills/example/index.md" => "# Example\n",
                     "docs/skills/example/definition.md" => "# Definition\n",
                     "skills/example/SKILL.md" => {
@@ -1540,6 +1567,18 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
     }
 
     #[test]
+    fn frontmatter_parser_accepts_standard_agent_skills_fields() {
+        let parsed = parse_frontmatter(
+            "---\nname: example\ndescription: A skill.\ncompatibility: Bun 1.4.0\nallowed-tools: Read Bash\nmetadata:\n  author: Velnor\n  category: testing\n---\n",
+            "skills/example/SKILL.md",
+            FrontmatterMode::LiveDefinition,
+        )
+        .unwrap_or_else(|error| panic!("standard Agent Skills fields parse: {error}"));
+        assert_eq!(parsed.values["compatibility"], "Bun 1.4.0");
+        assert_eq!(parsed.values["allowed-tools"], "Read Bash");
+    }
+
+    #[test]
     fn frontmatter_parser_rejects_missing_delimiter() {
         let error = match parse_frontmatter(
             "# not frontmatter\n",
@@ -1618,6 +1657,14 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
         reject_skill_frontmatter_variant(
             |skill| skill.replacen("user-invocable: true", "user-invocable: \"true\"", 1),
             "user-invocable must be a YAML boolean",
+        );
+        reject_skill_frontmatter_variant(
+            |skill| skill.replacen("license: Apache-2.0", "compatibility: [Bun, Node.js]", 1),
+            "compatibility must be a YAML string",
+        );
+        reject_skill_frontmatter_variant(
+            |skill| skill.replacen("license: Apache-2.0", "metadata: [author, Velnor]", 1),
+            "metadata must be a YAML mapping",
         );
     }
 
@@ -1819,6 +1866,15 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
             .pr_commands
             .iter()
             .all(|command| !command.contains("generate-docs.ts")));
+    }
+
+    #[test]
+    fn generated_docs_unit_watches_every_docs_path() {
+        let fixture = Fixture::new();
+        let (_, shape) = fixture
+            .run_detect()
+            .unwrap_or_else(|error| panic!("docs fixture must detect: {error}"));
+        assert!(shape.units[0].watch.iter().any(|file| file == "docs/**"));
     }
 
     #[test]
