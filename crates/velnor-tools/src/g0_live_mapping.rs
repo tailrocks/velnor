@@ -1,8 +1,9 @@
 //! Strict mapping from the live GitHub observation ledger to the checker G0
 //! contract.  This adapter is deliberately fail-closed: optional provider
-//! fields, unresolved action revisions, missing rate/request identities, and
-//! external checks without workflow associations are errors, never synthetic
-//! IDs or successful empty rows.
+//! fields, unresolved action revisions, and missing rate/request identities
+//! are errors, never synthetic IDs or successful empty rows.  External checks
+//! remain typed observations and are never assigned synthetic Actions run/job
+//! identities.
 
 use super::live_collector::{
     LiveCheck, LiveCheckoutObservation, LiveCollection, LiveDependency, LiveExecution,
@@ -1301,6 +1302,39 @@ fn map_check(
         .app_id
         .clone()
         .ok_or_else(|| anyhow!("check {} lacks provider App identity", check.context))?;
+    if check.app_slug.trim().is_empty() {
+        bail!("check {} lacks provider App slug", check.context);
+    }
+    let check_suite_id = check
+        .check_suite_id
+        .ok_or_else(|| anyhow!("check {} lacks suite identity", check.context))?;
+
+    // External providers are represented as typed observations.  They must
+    // retain their App/check URL identity, but must never be given synthetic
+    // Actions run/job identities merely because the check suite happened to
+    // contain a workflow run.
+    if check.app_slug != "github-actions" {
+        let event = check
+            .event
+            .clone()
+            .ok_or_else(|| anyhow!("external check {} lacks event", check.context))?;
+        return Ok(G0CheckProducer {
+            context: check.context.clone(),
+            app_id,
+            app_slug: check.app_slug.clone(),
+            provider: G0CheckProvider::ExternalApp,
+            api: G0ApiKind::Rest,
+            check_suite_id,
+            check_run_id: check.check_run_id,
+            source_sha: check.source_sha.clone(),
+            event,
+            status: check.status.clone(),
+            conclusion: check.conclusion.clone().unwrap_or_default(),
+            html_url: check.source_url.clone(),
+            raw_object_refs: check.raw_object_refs.clone(),
+        });
+    }
+
     let workflow_run_id = check.workflow_run_id.ok_or_else(|| {
         anyhow!(
             "external check {} lacks workflow association",
@@ -1404,19 +1438,29 @@ fn map_check(
     Ok(G0CheckProducer {
         context: check.context.clone(),
         app_id,
-        check_suite_id: check
-            .check_suite_id
-            .ok_or_else(|| anyhow!("check {} lacks suite identity", check.context))?,
+        app_slug: check.app_slug.clone(),
+        provider: G0CheckProvider::GithubActions {
+            workflow_run_id,
+            run_attempt,
+            job_id,
+            job_run_id: job.run_id,
+            job_run_attempt: job.run_attempt,
+            job_check_run_id: job.check_run_id,
+            job_source_sha: job
+                .source_sha
+                .clone()
+                .ok_or_else(|| anyhow!("check {} job lacks source SHA", check.context))?,
+            job_html_url: job.source_url.clone(),
+            actual_checkout_sha,
+        },
+        api: G0ApiKind::Rest,
+        check_suite_id,
         check_run_id: check.check_run_id,
-        workflow_run_id,
-        run_attempt,
-        job_id,
         source_sha: check.source_sha.clone(),
-        actual_checkout_sha,
         event,
         status: check.status.clone(),
         conclusion: check.conclusion.clone().unwrap_or_else(|| "".to_owned()),
-        source_url: check.source_url.clone(),
+        html_url: check.source_url.clone(),
         raw_object_refs: check.raw_object_refs.clone(),
     })
 }

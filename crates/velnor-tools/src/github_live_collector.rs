@@ -214,6 +214,7 @@ pub struct LiveExecution {
 pub struct LiveCheck {
     pub context: String,
     pub app_id: Option<String>,
+    pub app_slug: String,
     pub check_suite_id: Option<u64>,
     pub check_run_id: u64,
     pub workflow_run_id: Option<u64>,
@@ -2565,6 +2566,7 @@ fn parse_check(
         bail!("associated workflow run head SHA differs from check run");
     }
     let app_id = optional_u64(value, &["app", "id"]).map(|id| id.to_string());
+    let app_slug = required_string(value, &["app", "slug"])?;
     let check_run_id = required_u64(value, &["id"])?;
     validate_api_url(
         &required_string(value, &["url"])?,
@@ -2576,6 +2578,7 @@ fn parse_check(
     Ok(LiveCheck {
         context: required_string(value, &["name"])?,
         app_id,
+        app_slug,
         check_suite_id: Some(check_suite_id),
         check_run_id,
         workflow_run_id,
@@ -3868,7 +3871,7 @@ jobs:
                     "event": "pull_request"
                 }
             },
-            "app": {"id": 123},
+            "app": {"id": 123, "slug": "github-actions"},
             "status": "completed",
             "conclusion": "success",
             "url": "https://api.github.com/repos/tailrocks/example/check-runs/17",
