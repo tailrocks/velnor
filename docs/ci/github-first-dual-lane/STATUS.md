@@ -66,8 +66,10 @@ The v4-capture external main evidence (historical at its capture) reports d20
 accepted evidence. This does not weaken the newest-actual-major policy or
 permit an older fallback.
 
-## Latest live reconciliation — 2026-09-20T01:28:35Z
+## Historical live reconciliation — 2026-09-20T01:28:35Z (superseded by 2026-09-20T02:54:52Z census)
 
+This is historical, capture-bound evidence; the later `2026-09-20T02:54:52Z`
+paginated census supersedes its “latest” status.
 External `G0/fleet/push-checkpoint-current.json` (SHA-256
 `d4987b227e79212df2abdf503c33a80daff225ed270ea445f5c657f938fd101a`) binds
 this narrow snapshot. It is not a forever-current claim and does not close G0
@@ -83,21 +85,22 @@ or any later gate.
 | Post-census packaging review `294de951` | Independent packaging review passed at cutoff `2026-09-20T01:28:49Z`: exact remote/ancestry, 66 checksums, 63 inventory entries, and no source paths | Packaging-only pass; later review observed `distribution/schema2-handoff-0712.md` changed at `01:34:02Z` and `skills-adapter/integration-map.md` at `01:31:01Z`; those observations are separate from the `01:28:35Z` census, with no attestation/current-equality/gate approval |
 | Scan / checker | Scan `820f6509` is rejected despite 1,760 tests/clippy/fmt/diff; checker `ca18d011` closes the reusable child-matrix blocker with 258 tests/build/fmt/clippy | Scan residuals and live collector/API wiring remain; no G1/G0 proof |
 
-## Latest paginated live census and dependency ledger — 2026-09-20T02:54:52Z
+## Paginated live census (capture: 2026-09-20T02:54:52Z)
 
 External `G0/fleet/push-checkpoint-current.json` (SHA-256
 `5326b47a65d35196816a62783dba60cf0afc58f6d258aae5a90688ca7fd865a0`) records
 a fresh paginated read-only census. It binds exact main/PR/run/check pages and
 does not use a newest-green shortcut. It is timestamped evidence only; no gate
-passed.
+passed. Task/dependency state remains in the separate task ledger below; this
+section is only the paginated census.
 
 | Item | Exact observation | Boundary/status |
 | --- | --- | --- |
-| Main / PR identities | Main `89f82dd8b287f46a3cf4c0920f341f6ca6c736db`, parent `325719f1e05d3d46322c9fd3eeb9ad545e175638`; PR957 `92387e88c32f933a9061b819256e535662655cb2`/base `b5a4b4af`; PR960 `c8f7a2b353f9d2d6a60d3ad8bb2dc6299a108ceb`/base `1048337062`; PR962 `ea9686f0eb522e402441ecd461bd1f458b731d06`/same; PR963 `f46fe7c2c3ca7635c44eab21cc6bf616709c7a50`/base `325719f1` | Snapshot identity only. PR963 open, mergeable `true`, state `blocked`; no review/merge/gate approval transfer |
+| Main / PR identities | Main `89f82dd8b287f46a3cf4c0920f341f6ca6c736db`, parent `325719f1e05d3d46322c9fd3eeb9ad545e175638`; PR957 `92387e88c32f933a9061b819256e535662655cb2`/base `b5a4b4afaa6ca807927cacc03659b570a895dd5c`; PR960 `c8f7a2b353f9d2d6a60d3ad8bb2dc6299a108ceb`/base `1048337062ea625fada1b4f7c07f2feed75f60c7`; PR962 `ea9686f0eb522e402441ecd461bd1f458b731d06`/base `1048337062ea625fada1b4f7c07f2feed75f60c7`; PR963 `f46fe7c2c3ca7635c44eab21cc6bf616709c7a50`/base `325719f1e05d3d46322c9fd3eeb9ad545e175638` | Snapshot identity only. PR963 open, mergeable `true`, state `blocked`; no review/merge/gate approval transfer |
 | Main execution | Runtime `35484968618` success with 5/5 child jobs; macOS job `106009574341` used forbidden `macos-26`. Preview `35484968732` failed identity job `106009550596`, remaining children skipped. CI `35484968706` remained in progress with Policy in progress | Negative/incomplete; no G1/G0 result |
 | Records docs | `06edf31faa2c855a7eff4d7821903f296b8adef1` | Focused docs checkpoint accepted; docs-only, no implementation/gate approval |
 | Scan review | `29d6a9caf64d625799efa1ad52c3bba0e4f52db2`; `G1/scan-integrity/source-review-29d6a9.md`, SHA-256 `0bb1e2ba64dc8c452f76161fbba6ea4a0d4376caefbc0fe63395f97a1fbdd732` | Conditional source-level pass for injected journal regression; no G1 approval; D19/generated/authority/recovery gaps remain |
-| Bootstrap review | Frozen `7d409afdd61a87080be4439d29563313169537`; report SHA-256 `180fb0e150f2bffabe162fbc115a5ca1b425ccdc316e47da96e9349bc62eaa0c`; owner later moved to `07c35f83d1a7353331c910d1d3b728aba1dc7add` | Changes required on frozen review; `07c35f83` is unreviewed and receives no disposition transfer |
+| Bootstrap review | Frozen `7d409afdd61a87080be4439d29563313169537`; report SHA-256 `180fb0e150f2bffabe162fbc115a5ca1b425ccdc316e47da96e9349bc62eaa0c`; owner later moved to `07c35f83d1a7353331c910d1d3b728aba1dc7add`, unreviewed at the `02:54:52Z` capture | Changes required on frozen review; a later exact-head review at `03:00:49Z` reports **CHANGES REQUIRED** (report SHA-256 `9cf552e8ca59fc920bbb70a692a4958300c4a27028a907258afbd8503a6c2d07`); do not backdate that disposition into this capture; no disposition transfer |
 | Homebrew / native | Consumer `6520aad7bd66d53349e040508146956e9c4f0c1e`, producer/native `2f7d5fbae420d00d8105d4e8cbe0fed78d761b98`; report hashes `dfd870b2188fd64ca1c39386c478f645cf101f1f0d6321e01c2763d8e009a547` / `cb27b9b38eed2c94f7091e606b5271e43f132f98dc17022ad132f3845afe7a20` | Both rejected/changes required: sidecar and canonical schema/parent/preview/generated wiring blockers; no G2 approval/publication |
 | Checker / collector / store | Checker `2d436be96b24a6a02cc047604c7899eaea4a16f9`, report SHA-256 `089b0d9155dd4c3e244684ef6576b55ba6022b84e8c773014729c044aed2b241`; collector `0882aac85b62d3962049a8dc5094f25ca5187c20`, report SHA-256 `91cc5333b392c8838f51d94b7b49dd84a6f933c22c147cd3bcc4083fa8736e1a`; store `0d7713cd15cefb554fda5954e2d3320968aa31e7`, report SHA-256 `bc6114c279882c5e7675e0116781618e4807d873639c3a22b4ccc6af69f01282` | Checker parser migration bounded-pass only; collector rejected for authoritative live G0; store rejected for bounded retention; producer/live wiring absent |
 | Authority | v7 Markdown SHA-256 `7339996f7c3d76fe4e750cb9036b474beb7e0d20ae7b2b7e7a9f0787cd81b72e`, JSON SHA-256 `1a1cc175b36611f6ce175f4c82b6f6ce51f36f74bfb22a5d8e1abb9cc5647826` | Frozen proposal, approval required, no mutation, no authority approval |
@@ -284,7 +287,7 @@ unknown.
 | Task | State | Next action |
 | --- | --- | --- |
 | G0-inventory | Inventory checkpoint complete; follow-up checks pending | Refresh all 32 repos, branches, SHAs, PRs, checks, workflows, access |
-| G0-bootstrap | Owner checkpoint `b981f43e8dfd70b4c628d29b0e7e9dce679ce537` rejected; frozen follow-up `7d409afdd61a87080be4439d29563313169537` changes-required; owner-advanced `07c35f83d1a7353331c910d1d3b728aba1dc7add` unreviewed | Schema-1/legacy transport, uploader census, clippy, hosted-proof, archive/API-tree, freshness, provenance, fixture, and image-digest gaps remain; no G1 approval transfers |
+| G0-bootstrap | Owner checkpoint `b981f43e8dfd70b4c628d29b0e7e9dce679ce537` rejected; frozen follow-up `7d409afdd61a87080be4439d29563313169537` changes-required; owner-advanced `07c35f83d1a7353331c910d1d3b728aba1dc7add` was unreviewed at the `02:54:52Z` census, with a later exact-head `03:00:49Z` CHANGES REQUIRED review (SHA-256 `9cf552e8ca59fc920bbb70a692a4958300c4a27028a907258afbd8503a6c2d07`) | Schema-1/legacy transport, uploader census, clippy, hosted-proof, archive/API-tree, freshness, provenance, fixture, and image-digest gaps remain; no G1 approval transfers |
 | G0-distribution | Assigned; result pending | Revalidate product/runtime discovery and both channels |
 | G0-fleet | 32-row inventory complete; workload matrix/review pending | Build workload/platform/category matrix |
 | G0-runtime | Collector `0882aac85b62d3962049a8dc5094f25ca5187c20` rejected for authoritative live G0; raw-store `0d7713cd15cefb554fda5954e2d3320968aa31e7` rejected for bounded retention/production wiring | Keep actual Mac deferred until G3; no authenticated collector or authoritative raw capture |
