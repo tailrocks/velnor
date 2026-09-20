@@ -115,6 +115,8 @@ mod tests {
             slot_store_key: None,
             env: Vec::new(),
             options: Vec::new(),
+            ports: Vec::new(),
+            volumes: Vec::new(),
             services: Vec::new(),
             node_action_image: "node:24-bookworm".into(),
             docker_cli_host_path: None,

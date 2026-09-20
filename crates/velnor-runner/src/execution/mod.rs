@@ -30,6 +30,8 @@ pub use artifacts::{
     verify_microvm_artifacts, ArtifactChecksums, MicroVmArtifactSet, MicroVmGeneration,
     FIRECRACKER_VERSION, JAILER_VERSION, PACKAGED_MICROVM_ROOT,
 };
+#[cfg(test)]
+pub(crate) use backend::validated_step;
 pub use backend::{
     BackendPhase, BackendSession, ExecutionError, ExecutionEvent, ExecutionOutcome, ValidatedPlan,
     ValidatedService, ValidatedStep,
@@ -82,9 +84,10 @@ pub use net::{
     teardown_net_invocations,
 };
 pub(crate) use post_drain::{
-    docker_post_log_prelude, drain_post_stack, javascript_post_log_prelude, native_post_condition,
-    native_post_log_prelude, post_step_display_name, reserve_github_post_step_orders, PostAction,
-    PostDockerAction, PostDrainItem, PostJavaScriptAction, PostNativeAction,
+    docker_post_log_prelude, drain_post_stack, evaluate_post_action, javascript_post_log_prelude,
+    native_post_condition, native_post_log_prelude, post_step_display_name,
+    reserve_github_post_step_orders, PostAction, PostDockerAction, PostDrainItem,
+    PostJavaScriptAction, PostNativeAction,
 };
 pub use snapshot::{GuestReady, SnapshotIdentity};
 pub(crate) use step_conditions::condition_is_statically_false;

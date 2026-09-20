@@ -19,6 +19,18 @@ pub struct GuestJobPlan {
     /// join the same ownership reclaim graph.
     pub daemon_id: String,
     pub image: String,
+    /// Workflow job-container `.env`; kept apart from step expression env.
+    #[serde(default)]
+    pub container_env: Vec<GuestEnvVar>,
+    /// Admitted job-container Docker options, in Runner input order.
+    #[serde(default)]
+    pub container_options: Vec<String>,
+    /// Job-container port mappings accepted by the adapter.
+    #[serde(default)]
+    pub container_ports: Vec<String>,
+    /// Job-container volumes accepted by the adapter.
+    #[serde(default)]
+    pub container_volumes: Vec<String>,
     pub services: Vec<GuestService>,
     pub steps: Vec<GuestStep>,
     pub timeout_ms: u64,
@@ -58,6 +70,9 @@ pub struct GuestService {
     pub network_alias: String,
     #[serde(default)]
     pub ports: Vec<String>,
+    /// Admitted service-container Docker options, in Runner input order.
+    #[serde(default)]
+    pub options: Vec<String>,
     #[serde(default)]
     pub env: Vec<GuestEnvVar>,
 }
@@ -95,6 +110,9 @@ pub struct GuestStep {
     /// Admitted action inputs (clone URL, cache key, paths). Never host sockets.
     #[serde(default)]
     pub inputs: Vec<GuestEnvVar>,
+    /// Input names whose expression values must be rendered inside the guest.
+    #[serde(default)]
+    pub input_expression_values: Vec<String>,
     /// Step `env:` pairs. Applied on `docker exec -e`.
     #[serde(default)]
     pub env: Vec<GuestEnvVar>,
@@ -107,6 +125,10 @@ pub struct GuestStep {
     /// GitHub `continue-on-error` behavior.
     #[serde(default)]
     pub continue_on_error: bool,
+    /// Deferred action-manifest expression, evaluated only after a failed
+    /// command has updated this step's command state.
+    #[serde(default)]
+    pub continue_on_error_expression: Option<String>,
     /// Per-step timeout in milliseconds. `None` uses the runner default.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
@@ -212,11 +234,19 @@ mod tests {
             job_id: "job-1".into(),
             daemon_id: "test-daemon".into(),
             image: "velnor/job-ubuntu:26.04".into(),
+            container_env: vec![GuestEnvVar {
+                name: "JOB_CONTAINER_FLAG".into(),
+                value: "enabled".into(),
+            }],
+            container_options: vec!["--shm-size".into(), "2g".into()],
+            container_ports: vec!["8080:80".into()],
+            container_volumes: vec!["cache:/cache".into()],
             services: vec![GuestService {
                 name: "pg".into(),
                 image: "postgres:16".into(),
                 network_alias: "postgres".into(),
                 ports: vec!["5432".into()],
+                options: vec!["--health-cmd".into(), "pg_isready".into()],
                 env: vec![GuestEnvVar {
                     name: "POSTGRES_PASSWORD".into(),
                     value: "ci".into(),
@@ -227,10 +257,12 @@ mod tests {
                 script: "echo hi".into(),
                 action: None,
                 inputs: Vec::new(),
+                input_expression_values: Vec::new(),
                 env: Vec::new(),
                 working_directory: String::new(),
                 condition: None,
                 continue_on_error: false,
+                continue_on_error_expression: Some("steps.first.outputs.ignore == 'true'".into()),
                 timeout_ms: None,
             }],
             timeout_ms: 1000,
@@ -264,6 +296,8 @@ mod tests {
         };
         let bytes = plan.encode().unwrap();
         assert_eq!(GuestJobPlan::decode(&bytes).unwrap(), plan);
+        assert_eq!(plan.container_options, ["--shm-size", "2g"]);
+        assert_eq!(plan.services[0].options, ["--health-cmd", "pg_isready"]);
         let json = String::from_utf8(bytes).unwrap();
         assert!(!json.contains("docker.sock"));
         assert!(!json.contains("signing"));

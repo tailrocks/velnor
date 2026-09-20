@@ -17,6 +17,26 @@ use crate::{
 use serde_json::Value;
 
 impl JobExecutionState {
+    /// Evaluate an action-manifest `continue-on-error` expression in the
+    /// current BooleanStepsContext. Call only after the step has failed, as
+    /// Runner's `ApplyContinueOnError` does.
+    pub(crate) fn evaluate_boolean_step_expression(
+        &self,
+        expression: &str,
+    ) -> Result<bool, expression::ExpressionError> {
+        let context = self.expression_context();
+        let Some(node) = velnor_expression::parse(expression.trim(), &context)? else {
+            return Ok(false);
+        };
+        match expression::evaluate_node(&node, &context)? {
+            velnor_expression::Value::Boolean(value) => Ok(value),
+            value => Err(expression::ExpressionError::evaluation(format!(
+                "continue-on-error expression must evaluate to a Boolean, got {}",
+                value.kind().as_str()
+            ))),
+        }
+    }
+
     /// Whether this job has been cancelled.
     ///
     /// Upstream sets `JobContext.Status` to `cancelled` on the cancellation
@@ -53,16 +73,13 @@ impl JobExecutionState {
     }
 
     /// `job.status` — `cancelled` once the job is cancelled, otherwise
-    /// `success` unless a step has already concluded failed. Converted
-    /// inner ids (see `convert_conclusions`) do not count: upstream
-    /// derives the status from top-level step results only.
+    /// `success` unless a root step has already concluded failed. Embedded
+    /// step conclusions remain local to their composite until its umbrella
+    /// completes, as in Runner's root `JobContext`.
     pub(crate) fn job_status(&self) -> &'static str {
         if self.is_cancelled() {
             "cancelled"
-        } else if self
-            .composite_scopes
-            .top_level_has_failure(&self.conclusions)
-        {
+        } else if self.composite_scopes.top_level_has_failure() {
             "failure"
         } else {
             "success"
@@ -83,7 +100,7 @@ impl JobExecutionState {
     }
 
     fn status_scope_has_failure(&self) -> bool {
-        self.composite_scopes.scope_has_failure(&self.conclusions)
+        self.composite_scopes.scope_has_failure()
     }
 
     /// Evaluate a step condition.
@@ -134,7 +151,7 @@ impl JobExecutionState {
         expression: &str,
     ) -> Result<bool, expression::ExpressionError> {
         let context = self.expression_context();
-        let Some(node) = expression::parse(expression, &context)? else {
+        let Some(node) = velnor_expression::parse(expression, &context)? else {
             return Ok(self.success_status());
         };
         // `success() && (...)` short-circuits, so a job that has already failed
@@ -167,7 +184,7 @@ pub(crate) fn condition_is_statically_false(
         return false;
     };
     let context = state.expression_context();
-    let Ok(Some(node)) = expression::parse(strip_expression(condition), &context) else {
+    let Ok(Some(node)) = velnor_expression::parse(strip_expression(condition), &context) else {
         // An expression that does not even parse is not provably false.
         return false;
     };
@@ -176,8 +193,8 @@ pub(crate) fn condition_is_statically_false(
 
 /// Whether the tree calls one of the runner's status functions, which is what
 /// suppresses the implicit `success() &&` prefix.
-fn node_references_status_function(node: &expression::Node) -> bool {
-    if let expression::Node::Function { name, .. } = node
+fn node_references_status_function(node: &velnor_expression::Node) -> bool {
+    if let velnor_expression::Node::Function { name, .. } = node
         && matches!(
             name.to_ascii_lowercase().as_str(),
             "success" | "failure" | "always" | "cancelled"
@@ -194,14 +211,14 @@ fn node_references_status_function(node: &expression::Node) -> bool {
 /// false when any operand is, a disjunction only when every operand is, and a
 /// leaf counts only when it reads exclusively immutable `github` context.
 fn immutable_expression_is_false(
-    node: &expression::Node,
+    node: &velnor_expression::Node,
     context: &JobExpressionContext<'_>,
 ) -> bool {
     match node {
-        expression::Node::And(parameters) => parameters
+        velnor_expression::Node::And(parameters) => parameters
             .iter()
             .any(|parameter| immutable_expression_is_false(parameter, context)),
-        expression::Node::Or(parameters) => parameters
+        velnor_expression::Node::Or(parameters) => parameters
             .iter()
             .all(|parameter| immutable_expression_is_false(parameter, context)),
         node => {
@@ -219,18 +236,21 @@ fn immutable_expression_is_false(
 /// True when the subtree reads the `github` context and nothing that only
 /// exists once the job is running: other root contexts, the status functions,
 /// or `hashFiles`.
-fn reads_only_immutable_github(node: &expression::Node) -> bool {
-    fn walk(node: &expression::Node, saw_github: &mut bool, immutable: &mut bool) {
+fn reads_only_immutable_github(node: &velnor_expression::Node) -> bool {
+    fn walk(node: &velnor_expression::Node, saw_github: &mut bool, immutable: &mut bool) {
         match node {
-            expression::Node::NamedValue(name) => {
+            velnor_expression::Node::NamedValue(name) => {
                 if name.eq_ignore_ascii_case("github") {
                     *saw_github = true;
                 } else {
                     *immutable = false;
                 }
             }
-            expression::Node::Function { .. } => *immutable = false,
+            velnor_expression::Node::Function { .. } => *immutable = false,
             _ => {}
+        }
+        if reads_dynamic_github_field(node) {
+            *immutable = false;
         }
         for child in node.children() {
             walk(child, saw_github, immutable);
@@ -241,6 +261,27 @@ fn reads_only_immutable_github(node: &expression::Node) -> bool {
     let mut immutable = true;
     walk(node, &mut saw_github, &mut immutable);
     saw_github && immutable
+}
+
+/// These context entries are set for each running action. They can differ
+/// from the immutable job-context snapshot used by admission preflight, so
+/// they cannot prove a local action's condition false before step execution.
+fn reads_dynamic_github_field(node: &velnor_expression::Node) -> bool {
+    let velnor_expression::Node::Index(root, key) = node else {
+        return false;
+    };
+    let (
+        velnor_expression::Node::NamedValue(root),
+        velnor_expression::Node::Literal(velnor_expression::Value::String(key)),
+    ) = (root.as_ref(), key.as_ref())
+    else {
+        return false;
+    };
+    root.eq_ignore_ascii_case("github")
+        && matches!(
+            key.to_ascii_lowercase().as_str(),
+            "action" | "action_repository" | "action_ref"
+        )
 }
 
 fn strip_expression(condition: &str) -> &str {
@@ -359,5 +400,50 @@ mod tests {
             &[],
             &context
         ));
+    }
+
+    #[test]
+    fn per_step_github_action_fields_do_not_prove_a_condition_false() {
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({
+                "ref": "refs/heads/main",
+                "action": "",
+                "action_repository": "",
+                "action_ref": ""
+            }),
+        )];
+
+        for condition in [
+            "github.action == 'run-step'",
+            "github.action_repository == 'owner/action'",
+            "github.action_ref == 'v1'",
+            "github['action'] == 'run-step'",
+        ] {
+            assert!(
+                !condition_is_statically_false(Some(condition), &[], &context),
+                "{condition} depends on step-time GitHub context"
+            );
+        }
+
+        assert!(condition_is_statically_false(
+            Some("github.ref == 'refs/heads/other' && github.action == 'run-step'"),
+            &[],
+            &context
+        ));
+    }
+
+    #[test]
+    fn continue_on_error_expression_requires_a_boolean_value() {
+        let state = JobExecutionState::default();
+
+        assert!(state.evaluate_boolean_step_expression("true").unwrap());
+        assert!(!state.evaluate_boolean_step_expression("false").unwrap());
+        for expression in ["'false'", "0", "null", "fromJSON('{}')"] {
+            assert!(
+                state.evaluate_boolean_step_expression(expression).is_err(),
+                "{expression} is not a Boolean template result"
+            );
+        }
     }
 }

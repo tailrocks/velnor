@@ -35,6 +35,8 @@ use sha2::{Digest, Sha256};
 /// Closure paths, mirroring `closure::CLOSURE_PATHS`.
 const CLOSURE_PATHS: &[&str] = &[
     "crates/velnor-workflow",
+    "crates/velnor-action-manifest",
+    "crates/velnor-expression",
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
@@ -43,7 +45,7 @@ const CLOSURE_PATHS: &[&str] = &[
 ];
 
 /// Closure algorithm version, mirroring `closure::CLOSURE_VERSION`.
-const CLOSURE_VERSION: u8 = 1;
+const CLOSURE_VERSION: u8 = 2;
 
 fn main() {
     let manifest_dir =

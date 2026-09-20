@@ -276,7 +276,7 @@ jobs:
       unit_admission: velnor-trust-gated
   prepare-cargo:
     name: "Control / Prepare Cargo"
-    if: ${{ always() && needs.plan.result == 'success' && (contains(needs.plan.outputs.units, '"unit_id":"rust-unit-collector"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-bench"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-client"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-control"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-model"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-render"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-runner"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-tools"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow-contract"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnorctl"') || contains(needs.plan.outputs.units, '"unit_id":"rust-production-topology"')) && ((((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))))) }}
+    if: ${{ always() && needs.plan.result == 'success' && (contains(needs.plan.outputs.units, '"unit_id":"rust-unit-collector"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-action-manifest"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-bench"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-client"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-control"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-expression"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-model"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-render"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-runner"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-tools"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow-contract"') || contains(needs.plan.outputs.units, '"unit_id":"rust-velnorctl"') || contains(needs.plan.outputs.units, '"unit_id":"rust-production-topology"')) && ((((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -413,6 +413,76 @@ jobs:
       unit_platform: linux-x64
       unit_trust: untrusted-ok
       unit_admission: velnor-trust-gated
+  github-hosted-rust-velnor-action-manifest:
+    name: "Rust · velnor-action-manifest · github-hosted — rust-velnor-action-manifest"
+    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-action-manifest"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
+    needs: [plan]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-velnor-action-manifest
+      provider: github-hosted
+      selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_compat: aca0fb6d5248
+      mbx_dependency_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain
+        rust-toolchain.toml
+      mbx_freshness_files: |
+        crates/velnor-action-manifest/**/*.rs
+        crates/velnor-action-manifest/benches/**
+        crates/velnor-action-manifest/examples/**
+        crates/velnor-action-manifest/src/**
+        crates/velnor-action-manifest/tests/**
+        crates/velnor-expression/**/*.rs
+        crates/velnor-expression/benches/**
+        crates/velnor-expression/examples/**
+        crates/velnor-expression/src/**
+        crates/velnor-expression/tests/**
+        mise.lock
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
+      cargo_root: "crates/velnor-action-manifest"
+      cargo_net_offline: true
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+      unit_dependencies: rust-velnor-expression
+      unit_admission: github-hosted
+  velnor-rust-velnor-action-manifest:
+    name: "Rust · velnor-action-manifest · velnor — rust-velnor-action-manifest"
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-expression.result == 'success' || needs.velnor-rust-velnor-expression.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-action-manifest"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    needs: [plan, prepare-cargo, velnor-rust-velnor-expression]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-velnor-action-manifest
+      provider: velnor
+      selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+      unit_dependencies: rust-velnor-expression
+      unit_admission: velnor-trust-gated
   github-hosted-rust-velnor-bench:
     name: "Rust · velnor-bench · github-hosted — rust-velnor-bench"
     if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-bench"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
@@ -437,6 +507,11 @@ jobs:
         rust-toolchain.toml
       mbx_freshness_files: |
         config/fleet/**
+        crates/velnor-action-manifest/**/*.rs
+        crates/velnor-action-manifest/benches/**
+        crates/velnor-action-manifest/examples/**
+        crates/velnor-action-manifest/src/**
+        crates/velnor-action-manifest/tests/**
         crates/velnor-bench/**/*.rs
         crates/velnor-bench/benches/**
         crates/velnor-bench/examples/**
@@ -447,6 +522,11 @@ jobs:
         crates/velnor-control/examples/**
         crates/velnor-control/src/**
         crates/velnor-control/tests/**
+        crates/velnor-expression/**/*.rs
+        crates/velnor-expression/benches/**
+        crates/velnor-expression/examples/**
+        crates/velnor-expression/src/**
+        crates/velnor-expression/tests/**
         crates/velnor-model/**/*.rs
         crates/velnor-model/benches/**
         crates/velnor-model/examples/**
@@ -677,6 +757,69 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: rust-velnor-model
       unit_admission: velnor-trust-gated
+  github-hosted-rust-velnor-expression:
+    name: "Rust · velnor-expression · github-hosted — rust-velnor-expression"
+    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-expression"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
+    needs: [plan]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-velnor-expression
+      provider: github-hosted
+      selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_compat: "82318b6d8080"
+      mbx_dependency_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain
+        rust-toolchain.toml
+      mbx_freshness_files: |
+        crates/velnor-expression/**/*.rs
+        crates/velnor-expression/benches/**
+        crates/velnor-expression/examples/**
+        crates/velnor-expression/src/**
+        crates/velnor-expression/tests/**
+        mise.lock
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
+      cargo_root: "crates/velnor-expression"
+      cargo_net_offline: true
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+      unit_admission: github-hosted
+  velnor-rust-velnor-expression:
+    name: "Rust · velnor-expression · velnor — rust-velnor-expression"
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-expression"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    needs: [plan, prepare-cargo]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-velnor-expression
+      provider: velnor
+      selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+      unit_admission: velnor-trust-gated
   github-hosted-rust-velnor-model:
     name: "Rust · velnor-model · github-hosted — rust-velnor-model"
     if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-model"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
@@ -838,11 +981,21 @@ jobs:
         rust-toolchain.toml
       mbx_freshness_files: |
         config/fleet/**
+        crates/velnor-action-manifest/**/*.rs
+        crates/velnor-action-manifest/benches/**
+        crates/velnor-action-manifest/examples/**
+        crates/velnor-action-manifest/src/**
+        crates/velnor-action-manifest/tests/**
         crates/velnor-control/**/*.rs
         crates/velnor-control/benches/**
         crates/velnor-control/examples/**
         crates/velnor-control/src/**
         crates/velnor-control/tests/**
+        crates/velnor-expression/**/*.rs
+        crates/velnor-expression/benches/**
+        crates/velnor-expression/examples/**
+        crates/velnor-expression/src/**
+        crates/velnor-expression/tests/**
         crates/velnor-model/**/*.rs
         crates/velnor-model/benches/**
         crates/velnor-model/examples/**
@@ -905,12 +1058,12 @@ jobs:
       cargo_net_offline: true
       unit_platform: linux-x64
       unit_trust: untrusted-ok
-      unit_dependencies: "rust-velnor-control,rust-velnor-model"
+      unit_dependencies: "rust-velnor-action-manifest,rust-velnor-control,rust-velnor-expression,rust-velnor-model"
       unit_admission: github-hosted
   velnor-rust-velnor-runner:
     name: "Rust · velnor-runner · velnor — rust-velnor-runner"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-runner"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
-    needs: [plan, prepare-cargo, velnor-rust-velnor-control, velnor-rust-velnor-model]
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-action-manifest.result == 'success' || needs.velnor-rust-velnor-action-manifest.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-expression.result == 'success' || needs.velnor-rust-velnor-expression.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-runner"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    needs: [plan, prepare-cargo, velnor-rust-velnor-action-manifest, velnor-rust-velnor-control, velnor-rust-velnor-expression, velnor-rust-velnor-model]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-runner
@@ -927,7 +1080,7 @@ jobs:
       host_warm_layers: "rustup,mold,mbx,cargo"
       unit_platform: linux-x64
       unit_trust: untrusted-ok
-      unit_dependencies: "rust-velnor-control,rust-velnor-model"
+      unit_dependencies: "rust-velnor-action-manifest,rust-velnor-control,rust-velnor-expression,rust-velnor-model"
       unit_admission: velnor-trust-gated
   github-hosted-rust-velnor-tools:
     name: "Rust · velnor-tools · github-hosted — rust-velnor-tools"
@@ -1033,11 +1186,21 @@ jobs:
       mbx_freshness_files: |
         Dockerfile
         config/fleet/**
+        crates/velnor-action-manifest/**/*.rs
+        crates/velnor-action-manifest/benches/**
+        crates/velnor-action-manifest/examples/**
+        crates/velnor-action-manifest/src/**
+        crates/velnor-action-manifest/tests/**
         crates/velnor-control/**/*.rs
         crates/velnor-control/benches/**
         crates/velnor-control/examples/**
         crates/velnor-control/src/**
         crates/velnor-control/tests/**
+        crates/velnor-expression/**/*.rs
+        crates/velnor-expression/benches/**
+        crates/velnor-expression/examples/**
+        crates/velnor-expression/src/**
+        crates/velnor-expression/tests/**
         crates/velnor-model/**/*.rs
         crates/velnor-model/benches/**
         crates/velnor-model/examples/**
@@ -1113,12 +1276,12 @@ jobs:
       candidate_publish: true
       unit_platform: linux-x64
       unit_trust: untrusted-ok
-      unit_dependencies: rust-velnor-runner
+      unit_dependencies: "rust-velnor-action-manifest,rust-velnor-expression,rust-velnor-runner"
       unit_admission: github-hosted
   velnor-rust-velnor-workflow:
     name: "Rust · velnor-workflow · velnor — rust-velnor-workflow"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
-    needs: [plan, prepare-cargo, velnor-rust-velnor-runner]
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-action-manifest.result == 'success' || needs.velnor-rust-velnor-action-manifest.result == 'skipped') && (needs.velnor-rust-velnor-expression.result == 'success' || needs.velnor-rust-velnor-expression.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    needs: [plan, prepare-cargo, velnor-rust-velnor-action-manifest, velnor-rust-velnor-expression, velnor-rust-velnor-runner]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-workflow
@@ -1136,7 +1299,7 @@ jobs:
       policy_runtime: true
       unit_platform: linux-x64
       unit_trust: untrusted-ok
-      unit_dependencies: rust-velnor-runner
+      unit_dependencies: "rust-velnor-action-manifest,rust-velnor-expression,rust-velnor-runner"
       unit_admission: velnor-trust-gated
   github-hosted-rust-velnor-workflow-contract:
     name: "Rust · velnor-workflow-contract · github-hosted — rust-velnor-workflow-contract"
@@ -1226,6 +1389,11 @@ jobs:
         rust-toolchain.toml
       mbx_freshness_files: |
         config/fleet/**
+        crates/velnor-action-manifest/**/*.rs
+        crates/velnor-action-manifest/benches/**
+        crates/velnor-action-manifest/examples/**
+        crates/velnor-action-manifest/src/**
+        crates/velnor-action-manifest/tests/**
         crates/velnor-client/**/*.rs
         crates/velnor-client/benches/**
         crates/velnor-client/examples/**
@@ -1236,6 +1404,11 @@ jobs:
         crates/velnor-control/examples/**
         crates/velnor-control/src/**
         crates/velnor-control/tests/**
+        crates/velnor-expression/**/*.rs
+        crates/velnor-expression/benches/**
+        crates/velnor-expression/examples/**
+        crates/velnor-expression/src/**
+        crates/velnor-expression/tests/**
         crates/velnor-model/**/*.rs
         crates/velnor-model/benches/**
         crates/velnor-model/examples/**
@@ -1355,6 +1528,8 @@ jobs:
         Cargo.toml
       mbx_freshness_files: |
         ./**/*.rs
+        crates/velnor-action-manifest/**
+        crates/velnor-expression/**
         crates/velnor-runner/**
         docker/**
         microvm/**
@@ -1395,7 +1570,7 @@ jobs:
   ci-required:
     name: ci-required
     if: ${{ always() }}
-    needs: [plan, github-hosted-bun-velnor, velnor-bun-velnor, github-hosted-docker, velnor-docker, github-hosted-docs, velnor-docs, github-hosted-opentofu, velnor-opentofu, prepare-cargo, github-hosted-rust-policy, velnor-rust-policy, github-hosted-rust-unit-collector, velnor-rust-unit-collector, github-hosted-rust-velnor-bench, velnor-rust-velnor-bench, github-hosted-rust-velnor-client, velnor-rust-velnor-client, github-hosted-rust-velnor-control, velnor-rust-velnor-control, github-hosted-rust-velnor-model, velnor-rust-velnor-model, github-hosted-rust-velnor-render, velnor-rust-velnor-render, github-hosted-rust-velnor-runner, velnor-rust-velnor-runner, github-hosted-rust-velnor-tools, velnor-rust-velnor-tools, github-hosted-rust-velnor-workflow, velnor-rust-velnor-workflow, github-hosted-rust-velnor-workflow-contract, velnor-rust-velnor-workflow-contract, github-hosted-rust-velnorctl, velnor-rust-velnorctl, github-hosted-rust-production-topology, velnor-rust-production-topology]
+    needs: [plan, github-hosted-bun-velnor, velnor-bun-velnor, github-hosted-docker, velnor-docker, github-hosted-docs, velnor-docs, github-hosted-opentofu, velnor-opentofu, prepare-cargo, github-hosted-rust-policy, velnor-rust-policy, github-hosted-rust-unit-collector, velnor-rust-unit-collector, github-hosted-rust-velnor-action-manifest, velnor-rust-velnor-action-manifest, github-hosted-rust-velnor-bench, velnor-rust-velnor-bench, github-hosted-rust-velnor-client, velnor-rust-velnor-client, github-hosted-rust-velnor-control, velnor-rust-velnor-control, github-hosted-rust-velnor-expression, velnor-rust-velnor-expression, github-hosted-rust-velnor-model, velnor-rust-velnor-model, github-hosted-rust-velnor-render, velnor-rust-velnor-render, github-hosted-rust-velnor-runner, velnor-rust-velnor-runner, github-hosted-rust-velnor-tools, velnor-rust-velnor-tools, github-hosted-rust-velnor-workflow, velnor-rust-velnor-workflow, github-hosted-rust-velnor-workflow-contract, velnor-rust-velnor-workflow-contract, github-hosted-rust-velnorctl, velnor-rust-velnorctl, github-hosted-rust-production-topology, velnor-rust-production-topology]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1615,7 +1790,7 @@ jobs:
               *) echo "unexpected CI job velnor-opentofu ran outside the expected set: $result" >&2; exit 1 ;;
             esac
           fi
-          if plan_expects_local "rust-unit-collector" || plan_expects_local "rust-velnor-bench" || plan_expects_local "rust-velnor-client" || plan_expects_local "rust-velnor-control" || plan_expects_local "rust-velnor-model" || plan_expects_local "rust-velnor-render" || plan_expects_local "rust-velnor-runner" || plan_expects_local "rust-velnor-tools" || plan_expects_local "rust-velnor-workflow" || plan_expects_local "rust-velnor-workflow-contract" || plan_expects_local "rust-velnorctl" || plan_expects_local "rust-production-topology"; then
+          if plan_expects_local "rust-unit-collector" || plan_expects_local "rust-velnor-action-manifest" || plan_expects_local "rust-velnor-bench" || plan_expects_local "rust-velnor-client" || plan_expects_local "rust-velnor-control" || plan_expects_local "rust-velnor-expression" || plan_expects_local "rust-velnor-model" || plan_expects_local "rust-velnor-render" || plan_expects_local "rust-velnor-runner" || plan_expects_local "rust-velnor-tools" || plan_expects_local "rust-velnor-workflow" || plan_expects_local "rust-velnor-workflow-contract" || plan_expects_local "rust-velnorctl" || plan_expects_local "rust-production-topology"; then
             result="$(result_for_job prepare-cargo)"
             if [[ "$PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED" == true ]]; then
               case "$result" in
@@ -1728,6 +1903,52 @@ jobs:
               skipped) ;;
               success) echo "unexpected CI job velnor-rust-unit-collector succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
               *) echo "unexpected CI job velnor-rust-unit-collector ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "rust-velnor-action-manifest" "github-hosted"; then
+            result="$(result_for_job github-hosted-rust-velnor-action-manifest)"
+            if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job github-hosted-rust-velnor-action-manifest was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job github-hosted-rust-velnor-action-manifest was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job github-hosted-rust-velnor-action-manifest did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-hosted-rust-velnor-action-manifest ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job github-hosted-rust-velnor-action-manifest)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job github-hosted-rust-velnor-action-manifest succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job github-hosted-rust-velnor-action-manifest ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "rust-velnor-action-manifest" "velnor"; then
+            result="$(result_for_job velnor-rust-velnor-action-manifest)"
+            if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job velnor-rust-velnor-action-manifest was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job velnor-rust-velnor-action-manifest was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job velnor-rust-velnor-action-manifest did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-velnor-action-manifest ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job velnor-rust-velnor-action-manifest)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job velnor-rust-velnor-action-manifest succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job velnor-rust-velnor-action-manifest ran outside the expected set: $result" >&2; exit 1 ;;
             esac
           fi
           if plan_expects "rust-velnor-bench" "github-hosted"; then
@@ -1866,6 +2087,52 @@ jobs:
               skipped) ;;
               success) echo "unexpected CI job velnor-rust-velnor-control succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
               *) echo "unexpected CI job velnor-rust-velnor-control ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "rust-velnor-expression" "github-hosted"; then
+            result="$(result_for_job github-hosted-rust-velnor-expression)"
+            if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job github-hosted-rust-velnor-expression was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job github-hosted-rust-velnor-expression was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job github-hosted-rust-velnor-expression did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-hosted-rust-velnor-expression ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job github-hosted-rust-velnor-expression)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job github-hosted-rust-velnor-expression succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job github-hosted-rust-velnor-expression ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "rust-velnor-expression" "velnor"; then
+            result="$(result_for_job velnor-rust-velnor-expression)"
+            if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job velnor-rust-velnor-expression was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job velnor-rust-velnor-expression was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job velnor-rust-velnor-expression did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-velnor-expression ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job velnor-rust-velnor-expression)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job velnor-rust-velnor-expression succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job velnor-rust-velnor-expression ran outside the expected set: $result" >&2; exit 1 ;;
             esac
           fi
           if plan_expects "rust-velnor-model" "github-hosted"; then

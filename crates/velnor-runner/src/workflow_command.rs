@@ -886,7 +886,7 @@ mod tests {
              ::notice::noted\n",
         );
 
-        assert_eq!(state.outputs["answer"], "42");
+        assert_eq!(state.outputs.get("answer").unwrap(), "42");
         assert!(state.env.is_empty());
         assert!(state.path.is_empty());
         assert_eq!(state.state["cleanup"], "yes");
@@ -919,7 +919,7 @@ mod tests {
     fn unescapes_command_data_and_properties() {
         let state = parse_for_test("::set-output name=one%2Ctwo::a%0Ab%25c\n");
 
-        assert_eq!(state.outputs["one,two"], "a\nb%c");
+        assert_eq!(state.outputs.get("one,two").unwrap(), "a\nb%c");
     }
 
     #[test]
@@ -930,7 +930,7 @@ mod tests {
         );
 
         assert_eq!(state.masks, vec!["indented-secret"]);
-        assert_eq!(state.outputs["answer"], "42");
+        assert_eq!(state.outputs.get("answer").unwrap(), "42");
     }
 
     #[test]
@@ -975,7 +975,7 @@ mod tests {
         );
 
         assert!(!state.outputs.contains_key("ignored"));
-        assert_eq!(state.outputs["answer"], "42");
+        assert_eq!(state.outputs.get("answer").unwrap(), "42");
         assert_eq!(state.error_count, 0);
         assert_eq!(state.warning_count, 2);
         assert_eq!(state.telemetry.len(), 1);
@@ -1114,7 +1114,7 @@ mod tests {
         );
 
         assert!(!state.outputs.contains_key("ignored"));
-        assert_eq!(state.outputs["answer"], "42");
+        assert_eq!(state.outputs.get("answer").unwrap(), "42");
     }
 
     #[test]
@@ -1150,7 +1150,7 @@ mod tests {
             &mut scope,
         );
 
-        assert_eq!(second.outputs["three"], "3");
+        assert_eq!(second.outputs.get("three").unwrap(), "3");
         assert_eq!(second.state["later"], "yes");
         assert_eq!(second.warning_count, 2);
         assert!(second.telemetry.is_empty());
@@ -1177,8 +1177,8 @@ mod tests {
              ::save-state name=cleanup::yes\n",
         );
 
-        assert_eq!(state.outputs["one"], "1");
-        assert_eq!(state.outputs["two"], "2");
+        assert_eq!(state.outputs.get("one").unwrap(), "1");
+        assert_eq!(state.outputs.get("two").unwrap(), "2");
         assert_eq!(state.state["cleanup"], "yes");
         assert_eq!(state.error_count, 0);
         assert_eq!(state.warning_count, 3);
@@ -1349,7 +1349,7 @@ mod tests {
         let started = Instant::now();
         for _ in 0..2_000 {
             let state = parse_for_test(black_box(&output));
-            assert_eq!(state.outputs["answer"], "42");
+            assert_eq!(state.outputs.get("answer").unwrap(), "42");
             assert_eq!(state.warning_count, 500);
         }
         let elapsed = started.elapsed();

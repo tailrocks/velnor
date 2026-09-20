@@ -1,5 +1,6 @@
 //! Typed backend session. Wrong-phase calls fail; teardown cannot be skipped.
 
+use std::collections::BTreeMap;
 use velnor_model::{
     ExecutionBackendKind, ExecutionConfigError, JobConclusion, MicroVmPreflightFailure,
 };
@@ -30,10 +31,12 @@ pub struct ValidatedStep {
     pub script: String,
     pub action: Option<String>,
     pub inputs: Vec<(String, String)>,
+    pub input_expression_values: Vec<String>,
     pub env: Vec<(String, String)>,
     pub working_directory: String,
     pub condition: Option<String>,
     pub continue_on_error: bool,
+    pub continue_on_error_expression: Option<String>,
     pub timeout_ms: Option<u64>,
 }
 
@@ -44,6 +47,7 @@ pub struct ValidatedService {
     pub image: String,
     pub network_alias: String,
     pub ports: Vec<String>,
+    pub options: Vec<String>,
     pub env: Vec<(String, String)>,
 }
 
@@ -55,6 +59,10 @@ pub struct ValidatedPlan {
     pub daemon_id: String,
     pub steps: Vec<ValidatedStep>,
     pub job_container_image: String,
+    pub job_container_env: Vec<(String, String)>,
+    pub job_container_options: Vec<String>,
+    pub job_container_ports: Vec<String>,
+    pub job_container_volumes: Vec<String>,
     pub services: Vec<ValidatedService>,
     pub timeout_ms: u64,
     pub cancel_requested: bool,
@@ -83,6 +91,10 @@ impl ValidatedPlan {
             job_id: self.job_id.clone(),
             daemon_id: self.daemon_id.clone(),
             image: self.job_container_image.clone(),
+            container_env: guest_env(&self.job_container_env),
+            container_options: self.job_container_options.clone(),
+            container_ports: self.job_container_ports.clone(),
+            container_volumes: self.job_container_volumes.clone(),
             services: self
                 .services
                 .iter()
@@ -91,6 +103,7 @@ impl ValidatedPlan {
                     image: service.image.clone(),
                     network_alias: service.network_alias.clone(),
                     ports: service.ports.clone(),
+                    options: service.options.clone(),
                     env: guest_env(&service.env),
                 })
                 .collect(),
@@ -102,10 +115,12 @@ impl ValidatedPlan {
                     script: step.script.clone(),
                     action: step.action.clone(),
                     inputs: guest_env(&step.inputs),
+                    input_expression_values: step.input_expression_values.clone(),
                     env: guest_env(&step.env),
                     working_directory: step.working_directory.clone(),
                     condition: step.condition.clone(),
                     continue_on_error: step.continue_on_error,
+                    continue_on_error_expression: step.continue_on_error_expression.clone(),
                     timeout_ms: step.timeout_ms,
                 })
                 .collect(),
@@ -161,18 +176,25 @@ impl ValidatedPlan {
                 script: "echo run".into(),
                 action: None,
                 inputs: Vec::new(),
+                input_expression_values: Vec::new(),
                 env: Vec::new(),
                 working_directory: String::new(),
                 condition: None,
                 continue_on_error: false,
+                continue_on_error_expression: None,
                 timeout_ms: None,
             }],
             job_container_image: "velnor/job-ubuntu:26.04".into(),
+            job_container_env: Vec::new(),
+            job_container_options: Vec::new(),
+            job_container_ports: Vec::new(),
+            job_container_volumes: Vec::new(),
             services: vec![ValidatedService {
                 name: "svc-0".into(),
                 image: "postgres:16".into(),
                 network_alias: "postgres".into(),
                 ports: vec!["5432".into()],
+                options: Vec::new(),
                 env: Vec::new(),
             }],
             timeout_ms: 60_000,
@@ -205,8 +227,12 @@ impl ValidatedPlan {
         Self {
             job_id: plan.identity.job_id.clone(),
             daemon_id: plan.execution.job_container.daemon_id.clone(),
-            steps: plan.steps.iter().map(validated_step).collect(),
+            steps: validated_steps(&plan.steps),
             job_container_image: plan.execution.job_container.image.clone(),
+            job_container_env: sanitized_pairs(&plan.execution.job_container.env),
+            job_container_options: plan.execution.job_container.options.clone(),
+            job_container_ports: plan.execution.job_container.ports.clone(),
+            job_container_volumes: plan.execution.job_container.volumes.clone(),
             services: plan
                 .execution
                 .services
@@ -265,14 +291,20 @@ impl ValidatedPlan {
                     script: step.script.clone(),
                     action: None,
                     inputs: Vec::new(),
+                    input_expression_values: Vec::new(),
                     env: step.env.clone(),
                     working_directory: step.working_directory_container.clone(),
                     condition: step.condition.clone(),
                     continue_on_error: step.continue_on_error,
+                    continue_on_error_expression: None,
                     timeout_ms: step.timeout_minutes.map(minutes_to_ms),
                 })
                 .collect(),
             job_container_image: docker_image.into(),
+            job_container_env: Vec::new(),
+            job_container_options: Vec::new(),
+            job_container_ports: Vec::new(),
+            job_container_volumes: Vec::new(),
             services: service_images
                 .into_iter()
                 .enumerate()
@@ -281,6 +313,7 @@ impl ValidatedPlan {
                     image,
                     network_alias: format!("svc-{index}"),
                     ports: Vec::new(),
+                    options: Vec::new(),
                     env: Vec::new(),
                 })
                 .collect(),
@@ -326,7 +359,7 @@ fn minutes_to_ms(minutes: u64) -> u64 {
     minutes.max(1).saturating_mul(60_000)
 }
 
-fn validated_step(step: &crate::executor::ExecutableStep) -> ValidatedStep {
+pub(crate) fn validated_step(step: &crate::executor::ExecutableStep) -> ValidatedStep {
     ValidatedStep {
         id: step.id().to_string(),
         script: match step {
@@ -335,11 +368,49 @@ fn validated_step(step: &crate::executor::ExecutableStep) -> ValidatedStep {
         },
         action: executable_action(step),
         inputs: executable_inputs(step),
+        input_expression_values: executable_input_expression_values(step),
         env: executable_env(step),
         working_directory: executable_working_directory(step),
         condition: step.condition().map(ToOwned::to_owned),
         continue_on_error: step.continue_on_error(),
+        continue_on_error_expression: executable_continue_on_error_expression(step),
         timeout_ms: step.timeout_minutes().map(minutes_to_ms),
+    }
+}
+
+fn validated_steps(steps: &[crate::executor::ExecutableStep]) -> Vec<ValidatedStep> {
+    let mut deferred_expressions = BTreeMap::new();
+    let mut validated = Vec::with_capacity(steps.len());
+    for step in steps {
+        if let crate::executor::ExecutableStep::StepContinueOnError { step_id, value } = step {
+            if let crate::action::ActionBooleanValue::Expression(expression) = value {
+                deferred_expressions.insert(step_id.clone(), expression.clone());
+            }
+            continue;
+        }
+        let mut step = validated_step(step);
+        if step.continue_on_error_expression.is_none() {
+            step.continue_on_error_expression = deferred_expressions.remove(&step.id);
+        }
+        validated.push(step);
+    }
+    validated
+}
+
+fn executable_continue_on_error_expression(
+    step: &crate::executor::ExecutableStep,
+) -> Option<String> {
+    let value = match step {
+        crate::executor::ExecutableStep::CompositeStart {
+            continue_on_error_expression,
+            ..
+        } => continue_on_error_expression.as_ref(),
+        crate::executor::ExecutableStep::StepContinueOnError { value, .. } => Some(value),
+        _ => None,
+    }?;
+    match value {
+        crate::action::ActionBooleanValue::Expression(expression) => Some(expression.clone()),
+        crate::action::ActionBooleanValue::Literal(_) => None,
     }
 }
 
@@ -402,6 +473,24 @@ pub(crate) fn executable_inputs(step: &crate::executor::ExecutableStep) -> Vec<(
     }
 }
 
+fn executable_input_expression_values(step: &crate::executor::ExecutableStep) -> Vec<String> {
+    match step {
+        crate::executor::ExecutableStep::Native { invocation, .. } => invocation
+            .input_expression_values
+            .iter()
+            .filter(|name| {
+                invocation.inputs.iter().any(|(input_name, value)| {
+                    input_name.eq_ignore_ascii_case(name)
+                        && !input_name.contains("docker.sock")
+                        && !value.contains("docker.sock")
+                })
+            })
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn guest_env(pairs: &[(String, String)]) -> Vec<velnor_model::GuestEnvVar> {
     sanitized_pairs(pairs)
         .into_iter()
@@ -423,6 +512,7 @@ fn validated_service(service: &crate::container::ServiceContainerSpec) -> Valida
         image: service.image.clone(),
         network_alias: service.network_alias.clone(),
         ports: service.ports.clone(),
+        options: service.options.clone(),
         env: sanitized_pairs(&service.env),
     }
 }
@@ -528,7 +618,8 @@ fn executable_action(step: &crate::executor::ExecutableStep) -> Option<String> {
         crate::executor::ExecutableStep::Script(_) => None,
         crate::executor::ExecutableStep::Checkout(_) => Some("actions/checkout".into()),
         crate::executor::ExecutableStep::Native { invocation, .. } => {
-            Some(invocation.git_ref.clone())
+            crate::action::native_action_repository(invocation.adapter)
+                .map(|repository| format!("{repository}@{}", invocation.git_ref))
         }
         crate::executor::ExecutableStep::JavaScript { invocation, .. } => {
             Some(invocation.action_container_path.clone())
@@ -537,6 +628,7 @@ fn executable_action(step: &crate::executor::ExecutableStep) -> Option<String> {
             Some(invocation.image.clone())
         }
         crate::executor::ExecutableStep::CompositeStart { .. } => Some("composite".into()),
+        crate::executor::ExecutableStep::StepContinueOnError { .. } => None,
         crate::executor::ExecutableStep::CompositeEnd { .. }
         | crate::executor::ExecutableStep::CompositeOutputs { .. } => None,
     }
@@ -618,6 +710,69 @@ pub enum ExecutionError {
     DockerExecute(String),
     CollectBeforeStop,
     TeardownSkipped,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests may panic")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deferred_continue_on_error_expression_reaches_the_validated_step() {
+        let steps = [
+            crate::executor::ExecutableStep::StepContinueOnError {
+                step_id: "run".into(),
+                value: crate::action::ActionBooleanValue::Expression(
+                    "steps.run.outputs.ignore == 'true'".into(),
+                ),
+            },
+            crate::executor::ExecutableStep::Script(crate::script_step::ScriptStep {
+                id: "run".into(),
+                display_name: "Run".into(),
+                script: "exit 1".into(),
+                shell: crate::container::Shell::BashDefault,
+                working_directory_container: "/__w".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+        ];
+
+        let validated = validated_steps(&steps);
+
+        assert_eq!(validated.len(), 1);
+        assert_eq!(validated[0].id, "run");
+        assert!(!validated[0].continue_on_error);
+        assert_eq!(
+            validated[0].continue_on_error_expression.as_deref(),
+            Some("steps.run.outputs.ignore == 'true'")
+        );
+    }
+
+    #[test]
+    fn container_settings_survive_the_validated_plan_guest_boundary() {
+        let mut plan = ValidatedPlan::example_success("job-1");
+        plan.job_container_env = vec![("JOB_FLAG".into(), "enabled".into())];
+        plan.job_container_options = vec!["--shm-size".into(), "2g".into()];
+        plan.job_container_ports = vec!["8080:80".into()];
+        plan.job_container_volumes = vec!["cache:/cache".into()];
+        plan.services[0].options = vec!["--health-cmd".into(), "pg_isready".into()];
+
+        let guest = plan.to_guest("isolation-1", 1);
+
+        assert_eq!(
+            guest.container_env,
+            [velnor_model::GuestEnvVar {
+                name: "JOB_FLAG".into(),
+                value: "enabled".into(),
+            }]
+        );
+        assert_eq!(guest.container_options, ["--shm-size", "2g"]);
+        assert_eq!(guest.container_ports, ["8080:80"]);
+        assert_eq!(guest.container_volumes, ["cache:/cache"]);
+        assert_eq!(guest.services[0].options, ["--health-cmd", "pg_isready"]);
+    }
 }
 
 impl std::fmt::Display for ExecutionError {

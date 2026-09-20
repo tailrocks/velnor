@@ -80,14 +80,14 @@ runs:
         [[ "$INSTALL_REV" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::runtime revision must be a full commit SHA, got $INSTALL_REV" >&2; exit 1; }
         listing=""
         if git -C "$CHECKOUT_PATH" cat-file -e "$INSTALL_REV^{commit}" 2>/dev/null; then
-          listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$INSTALL_REV" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"
+          listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$INSTALL_REV" -- crates/velnor-workflow crates/velnor-action-manifest crates/velnor-expression Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"
         else
           tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/$INSTALL_REV?recursive=1")" || { echo "::error::unknown generator revision $INSTALL_REV" >&2; exit 1; }
           [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }
-          listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"
+          listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "crates/velnor-workflow" or (.path | startswith("crates/velnor-workflow/")) or .path == "crates/velnor-action-manifest" or (.path | startswith("crates/velnor-action-manifest/")) or .path == "crates/velnor-expression" or (.path | startswith("crates/velnor-expression/")) or .path == "Cargo.toml" or (.path | startswith("Cargo.toml/")) or .path == "Cargo.lock" or (.path | startswith("Cargo.lock/")) or .path == "rust-toolchain.toml" or (.path | startswith("rust-toolchain.toml/")) or .path == "rust-toolchain" or (.path | startswith("rust-toolchain/")) or .path == ".cargo" or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"
         fi
         test "$listing" != '' || { echo "::error::revision $INSTALL_REV has no closure inputs" >&2; exit 1; }
-        closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256_digest)"
+        closure="$(printf '%s\nclosure-version:2\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256_digest)"
         [[ "$closure" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::closure resolution failed" >&2; exit 1; }
         echo "value=$closure" >> "$GITHUB_OUTPUT"
 

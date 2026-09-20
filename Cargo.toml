@@ -6,6 +6,8 @@ members = [
   "crates/velnor-render",
   "crates/velnorctl",
   "crates/velnor-runner",
+  "crates/velnor-expression",
+  "crates/velnor-action-manifest",
   "crates/velnor-workflow",
   "crates/velnor-bench",
   "crates/velnor-tools",

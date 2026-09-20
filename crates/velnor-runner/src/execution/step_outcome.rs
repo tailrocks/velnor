@@ -14,11 +14,25 @@
 use crate::{
     execution::StepOutcome,
     executor::{JobExecutionState, JobExpressionContext, StepExecutionResult},
-    expression,
 };
 
 impl JobExecutionState {
     pub(crate) fn apply(&mut self, step_id: &str, result: &StepExecutionResult) {
+        self.apply_command_state(step_id, result);
+        self.apply_step_outcome(step_id, result);
+    }
+
+    /// Apply command-file side effects before `continue-on-error` is
+    /// evaluated. Runner processes action files before applying COE, so the
+    /// expression can read this step's outputs and the next step can observe
+    /// env/path changes even when the action later fails.
+    pub(crate) fn apply_command_state(&mut self, step_id: &str, result: &StepExecutionResult) {
+        self.apply_command_effects(step_id, result, true, true);
+    }
+
+    /// Record outcome/conclusion after all command-file state and any
+    /// continue-on-error expression have been applied.
+    pub(crate) fn apply_step_outcome(&mut self, step_id: &str, result: &StepExecutionResult) {
         let outcome = if result.skipped {
             StepOutcome::Skipped
         } else if result.exit_code == 0 {
@@ -31,15 +45,44 @@ impl JobExecutionState {
         } else {
             outcome
         };
+        self.expose_root_step_context(step_id);
         self.outcomes.insert(step_id.to_string(), outcome);
         self.conclusions.insert(step_id.to_string(), conclusion);
         self.composite_scopes.record(step_id, conclusion);
+    }
 
-        if !result.state.outputs.is_empty() {
+    /// Post children have no context name in actions/runner. Their results
+    /// update root job status, but their random execution ids must not appear
+    /// in `steps.*` or output lookups.
+    pub(crate) fn apply_post(&mut self, step_id: &str, result: &StepExecutionResult) {
+        self.apply_command_effects(step_id, result, false, false);
+        let outcome = if result.skipped {
+            StepOutcome::Skipped
+        } else if result.exit_code == 0 {
+            StepOutcome::Success
+        } else {
+            StepOutcome::Failure
+        };
+        let conclusion = if result.failure_ignored && outcome == StepOutcome::Failure {
+            StepOutcome::Success
+        } else {
+            outcome
+        };
+        self.composite_scopes.record_job(step_id, conclusion);
+    }
+
+    fn apply_command_effects(
+        &mut self,
+        step_id: &str,
+        result: &StepExecutionResult,
+        expose_outputs: bool,
+        expose_action_state: bool,
+    ) {
+        if expose_outputs && !result.state.outputs.is_empty() {
             self.outputs
                 .insert(step_id.to_string(), result.state.outputs.clone());
         }
-        if !result.state.state.is_empty() {
+        if expose_action_state && !result.state.state.is_empty() {
             self.action_states
                 .entry(step_id.to_string())
                 .or_default()
@@ -69,7 +112,13 @@ impl JobExecutionState {
     /// — never `failure`, and never converted by `continue-on-error`
     /// (`ApplyContinueOnError` only converts `Failed`).
     pub(crate) fn apply_cancelled(&mut self, step_id: &str, result: &StepExecutionResult) {
-        self.apply(step_id, result);
+        self.apply_command_state(step_id, result);
+        self.apply_cancelled_outcome(step_id);
+    }
+
+    /// Record the canceled conclusion after callers already applied the
+    /// command-file effects from this step.
+    pub(crate) fn apply_cancelled_outcome(&mut self, step_id: &str) {
         self.outcomes
             .insert(step_id.to_string(), StepOutcome::Cancelled);
         self.conclusions
@@ -82,58 +131,61 @@ impl JobExecutionState {
 impl JobExpressionContext<'_> {
     /// `steps.<id>.{outputs,outcome,conclusion}`, built from the runtime
     /// step state rather than parsed out of the expression text.
-    pub(crate) fn steps_context(&self) -> expression::Value {
-        let mut ids: Vec<&String> = Vec::new();
-        for id in self
-            .state
-            .outputs
-            .keys()
-            .chain(self.state.outcomes.keys())
-            .chain(self.state.conclusions.keys())
-        {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
+    pub(crate) fn steps_context(&self) -> velnor_expression::Value {
+        let ids: Vec<(String, String)> =
+            if let Some(visible) = self.state.active_composite_step_ids() {
+                visible
+                    .iter()
+                    .map(|(visible_id, runtime_id)| (visible_id.clone(), runtime_id.clone()))
+                    .collect()
+            } else {
+                self.state
+                    .root_step_context_ids
+                    .iter()
+                    .map(|id| (id.clone(), id.clone()))
+                    .collect()
+            };
 
         let entries = ids
             .into_iter()
-            .map(|id| {
-                let mut step: Vec<(String, expression::Value)> = Vec::new();
+            .map(|(visible_id, runtime_id)| {
+                let mut step: Vec<(String, velnor_expression::Value)> = Vec::new();
                 let outputs = self
                     .state
                     .outputs
-                    .get(id)
+                    .get(&runtime_id)
                     .map(|outputs| {
                         outputs
                             .iter()
-                            .map(|(name, value)| (name.clone(), expression::Value::string(value)))
+                            .map(|(name, value)| {
+                                (name.clone(), velnor_expression::Value::string(value))
+                            })
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
                 step.push((
                     "outputs".to_string(),
-                    expression::Value::Object(expression::ObjectValue::new(outputs)),
+                    velnor_expression::Value::Object(velnor_expression::ObjectValue::new(outputs)),
                 ));
-                if let Some(outcome) = self.state.outcomes.get(id) {
+                if let Some(outcome) = self.state.outcomes.get(&runtime_id) {
                     step.push((
                         "outcome".to_string(),
-                        expression::Value::string(outcome.as_str()),
+                        velnor_expression::Value::string(outcome.as_str()),
                     ));
                 }
-                if let Some(conclusion) = self.state.conclusions.get(id) {
+                if let Some(conclusion) = self.state.conclusions.get(&runtime_id) {
                     step.push((
                         "conclusion".to_string(),
-                        expression::Value::string(conclusion.as_str()),
+                        velnor_expression::Value::string(conclusion.as_str()),
                     ));
                 }
                 (
-                    id.clone(),
-                    expression::Value::Object(expression::ObjectValue::new(step)),
+                    visible_id,
+                    velnor_expression::Value::Object(velnor_expression::ObjectValue::new(step)),
                 )
             })
             .collect();
-        expression::Value::Object(expression::ObjectValue::new(entries))
+        velnor_expression::Value::Object(velnor_expression::ObjectValue::new(entries))
     }
 }
 
@@ -223,5 +275,32 @@ mod tests {
             .unwrap();
 
         assert_eq!(env, vec![("INPUT_TAGS".into(), "image:latest".into())]);
+    }
+
+    #[test]
+    fn step_output_json_keeps_first_key_spelling_and_latest_value() {
+        let mut command_state = StepCommandState::default();
+        command_state.outputs.insert("z".into(), "old".into());
+        command_state.outputs.insert("a".into(), "first".into());
+        command_state.outputs.insert("Z".into(), "new".into());
+        let mut state = JobExecutionState::default();
+        state.apply(
+            "x",
+            &StepExecutionResult {
+                exit_code: 0,
+                skipped: false,
+                failure_ignored: false,
+                state: command_state,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        assert_eq!(
+            state
+                .resolve_expressions("outputs=${{ toJSON(steps.x.outputs) }}")
+                .unwrap(),
+            "outputs={\n  \"z\": \"new\",\n  \"a\": \"first\"\n}"
+        );
     }
 }

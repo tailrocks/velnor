@@ -904,11 +904,12 @@ const CANCEL_POLL: Duration = Duration::from_millis(10);
 /// newline or finish instead, so `::group::` / `::error::` stay intact.
 const PARTIAL_FLUSH: Duration = Duration::from_millis(250);
 
-/// Drive `future` unless the active job cancels first: `None` is the
-/// cancelled leg winning, and the facade answers it with the CLI fallback —
-/// the same spawn-and-ladder-kill the CLI path has always run under cancel,
-/// so cancellation keeps its historical shape. Without an active token
-/// (maintenance/host path) this is a direct await with zero overhead.
+/// Drive `future` unless cancellation should abort the current work: `None`
+/// is the cancelled leg winning, and the facade answers it with the CLI
+/// fallback. A Requested job cancel preserves API work for an active step
+/// whose condition still passes; Forced cancellation and work without an
+/// active step still abort. Without an active token (maintenance/host path)
+/// this is a direct await with zero overhead.
 pub(crate) async fn cancel_race<F>(future: F) -> Option<F::Output>
 where
     F: std::future::Future,
@@ -917,7 +918,7 @@ where
     let Some(token) = token else {
         return Some(future.await);
     };
-    if token.is_cancelled() {
+    if token.should_abort_work() {
         return None;
     }
     tokio::select! {
@@ -927,12 +928,13 @@ where
     }
 }
 
-/// Resolve when `token` fires. Polling, because the token is a level flag,
-/// not a waker — and a 10 ms sleep is nothing next to a socket wait.
+/// Resolve when cancellation should abort the current work. Polling, because
+/// the token is a level flag, not a waker — and a 10 ms sleep is nothing next
+/// to a socket wait.
 async fn wait_cancelled(token: crate::execution::cancel::JobCancellation) {
     loop {
         tokio::time::sleep(CANCEL_POLL).await;
-        if token.is_cancelled() {
+        if token.should_abort_work() {
             return;
         }
     }
@@ -2103,6 +2105,9 @@ pub(crate) struct EngineContainer {
     pub health: Option<String>,
     pub finished_at: String,
     pub ports: Vec<super::client::PortMapping>,
+    /// The first exact `PATH=` entry from the inspected container Config.Env,
+    /// matching Runner's `DockerUtil.ParsePathFromConfigEnv`.
+    pub runtime_path: Option<String>,
 }
 
 impl EngineContainer {
@@ -2224,7 +2229,31 @@ fn parse_container(value: &serde_json::Value) -> FaultResult<EngineContainer> {
             .map(str::to_string),
         finished_at: require_str(value, "/State/FinishedAt")?.to_string(),
         ports: parse_inspect_ports(value)?,
+        runtime_path: parse_runtime_path(value)?,
     })
+}
+
+/// Parse the first exact `PATH=` line from a container's Config.Env. Missing
+/// Config.Env or PATH returns `None`; an explicit empty value stays `Some("")`.
+fn parse_runtime_path(value: &serde_json::Value) -> FaultResult<Option<String>> {
+    let Some(environment) = value.pointer("/Config/Env") else {
+        return Ok(None);
+    };
+    if environment.is_null() {
+        return Ok(None);
+    }
+    let environment = environment
+        .as_array()
+        .ok_or_else(|| schema_missing("/Config/Env"))?;
+    for entry in environment {
+        let entry = entry
+            .as_str()
+            .ok_or_else(|| schema_missing("/Config/Env[]"))?;
+        if let Some(path) = entry.strip_prefix("PATH=") {
+            return Ok(Some(path.to_owned()));
+        }
+    }
+    Ok(None)
 }
 
 /// Published bindings from `NetworkSettings.Ports` into the exact shape
@@ -2851,6 +2880,36 @@ mod tests {
         assert_eq!(container.readiness_word(), "created");
         assert_eq!(container.finished_at, "0001-01-01T00:00:00Z");
         assert!(container.ports.is_empty());
+    }
+
+    #[test]
+    fn inspect_parse_keeps_the_first_exact_config_path_like_runner() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{"Id":"id","State":{"Running":true,"Status":"running","FinishedAt":"x"},"Config":{"Env":["HOME=/root","PATH=/image/bin:/usr/bin=custom","Path=/ignored","PATH=/later"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parse_container(&value).unwrap().runtime_path.as_deref(),
+            Some("/image/bin:/usr/bin=custom")
+        );
+
+        let without_path: serde_json::Value = serde_json::from_str(
+            r#"{"Id":"id","State":{"Running":true,"Status":"running","FinishedAt":"x"},"Config":{"Env":["HOME=/root"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(parse_container(&without_path).unwrap().runtime_path, None);
+
+        let empty_path: serde_json::Value = serde_json::from_str(
+            r#"{"Id":"id","State":{"Running":true,"Status":"running","FinishedAt":"x"},"Config":{"Env":["PATH="]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parse_container(&empty_path)
+                .unwrap()
+                .runtime_path
+                .as_deref(),
+            Some("")
+        );
     }
 
     #[test]

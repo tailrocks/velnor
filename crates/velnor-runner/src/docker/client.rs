@@ -487,6 +487,7 @@ const CONTAINER_READINESS_FORMAT: &str =
     "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}";
 const CONTAINER_RUNNING_FORMAT: &str = "{{.State.Running}}";
 const CONTAINER_ID_FORMAT: &str = "{{.Id}}";
+const CONTAINER_RUNTIME_PATH_FORMAT: &str = "{{range .Config.Env}}{{println .}}{{end}}";
 const CONTAINER_EXIT_FORMAT: &str = "{{.State.Status}} {{.State.FinishedAt}}";
 const IMAGE_ID_FORMAT: &str = "{{.Id}}";
 const CGROUP_FORMAT: &str = "{{.CgroupDriver}} {{.CgroupVersion}}";
@@ -516,6 +517,15 @@ pub(crate) fn container_id_args(name: &str) -> Vec<String> {
     vec![
         "inspect".to_string(),
         format!("--format={CONTAINER_ID_FORMAT}"),
+        "--".to_string(),
+        name.to_string(),
+    ]
+}
+
+pub(crate) fn container_runtime_path_args(name: &str) -> Vec<String> {
+    vec![
+        "inspect".to_string(),
+        format!("--format={CONTAINER_RUNTIME_PATH_FORMAT}"),
         "--".to_string(),
         name.to_string(),
     ]
@@ -691,6 +701,14 @@ pub(crate) fn parse_port_mappings(text: &str) -> Vec<PortMapping> {
     }
     sort_port_mappings(&mut mappings);
     mappings
+}
+
+fn parse_runtime_path_output(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        line.split_once('=')
+            .filter(|(name, _)| *name == "PATH")
+            .map(|(_, value)| value.to_owned())
+    })
 }
 
 /// Parse the cgroup projection (`<driver> <version>`) into its typed fact.
@@ -1966,6 +1984,20 @@ impl<'r> Docker<'r> {
         Ok(self.call(&args, name)?.trim().to_string())
     }
 
+    /// The first exact `PATH=` entry in the inspected container Config.Env.
+    /// Mirrors Runner's `DockerUtil.ParsePathFromConfigEnv`; `None` means the
+    /// image/container did not define PATH, while `Some("")` preserves an
+    /// explicitly empty PATH.
+    pub(crate) fn container_runtime_path(&mut self, name: &str) -> Result<Option<String>> {
+        let args = container_runtime_path_args(name);
+        if let Some(path) = self.engine_or_cli(&args, |engine, budget| async move {
+            Ok(engine.inspect_container(name, budget).await?.runtime_path)
+        }) {
+            return Ok(path);
+        }
+        Ok(parse_runtime_path_output(&self.call(&args, name)?))
+    }
+
     /// Resolved id of one image reference.
     pub(crate) fn image_id(&mut self, reference: &str) -> Result<String> {
         if let Some(id) = self
@@ -2485,6 +2517,7 @@ mod tests {
             readiness_args("velnor-service-postgres"),
             running_args("velnor-job-1"),
             container_id_args("velnor-service-postgres"),
+            container_runtime_path_args("velnor-job-1"),
             daemon_cgroup_args(),
             mapped_ports_args("velnor-service-postgres"),
             image_id_args("velnor/job-ubuntu:26.04"),
@@ -2616,6 +2649,35 @@ mod tests {
                 daemon_cgroup_args(),
             ]
         );
+    }
+
+    #[test]
+    fn container_runtime_path_cli_projection_matches_runner() {
+        let mut runner = ScriptRunner::scripted(vec![ok(
+            "HOME=/root\nPATH=/image/bin:/usr/bin=custom\nPath=/ignored\nPATH=/later\n",
+        )]);
+        let path = {
+            let mut docker = Docker::job(&mut runner);
+            docker
+                .container_runtime_path("velnor-job-1")
+                .expect("runtime path")
+        };
+
+        assert_eq!(path.as_deref(), Some("/image/bin:/usr/bin=custom"));
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *runner
+                .seen_args
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            vec![container_runtime_path_args("velnor-job-1")]
+        );
+    }
+
+    #[test]
+    fn runtime_path_cli_projection_preserves_missing_and_empty_values() {
+        assert_eq!(parse_runtime_path_output("HOME=/root\n"), None);
+        assert_eq!(parse_runtime_path_output("PATH=\n"), Some(String::new()));
     }
 
     #[test]
@@ -2761,7 +2823,7 @@ Total:\t\t6.054MB
     // Engine-API routing: identical values, subprocesses only on fallback
     // ------------------------------------------------------------------
 
-    const ROUTED_INSPECT: &str = r#"{"Id":"a530e70d9e1e35941b6fc12db9b51a7b19c6d02","State":{"Running":true,"Status":"running","FinishedAt":"0001-01-01T00:00:00Z","Health":{"Status":"healthy"}},"NetworkSettings":{"Ports":{"8080/tcp":[{"HostIp":"0.0.0.0","HostPort":"41062"},{"HostIp":"::","HostPort":"41062"}]}}}"#;
+    const ROUTED_INSPECT: &str = r#"{"Id":"a530e70d9e1e35941b6fc12db9b51a7b19c6d02","State":{"Running":true,"Status":"running","FinishedAt":"0001-01-01T00:00:00Z","Health":{"Status":"healthy"}},"Config":{"Env":["HOME=/root","PATH=/image/bin:/usr/bin"]},"NetworkSettings":{"Ports":{"8080/tcp":[{"HostIp":"0.0.0.0","HostPort":"41062"},{"HostIp":"::","HostPort":"41062"}]}}}"#;
     const ROUTED_IMAGE: &str = r#"{"Id":"sha256:feedface"}"#;
     const ROUTED_INFO: &str = r#"{"CgroupDriver":"systemd","CgroupVersion":2}"#;
 
@@ -2778,6 +2840,24 @@ Total:\t\t6.054MB
             },
             connections,
         )
+    }
+
+    #[test]
+    fn container_runtime_path_uses_inspected_config_env_without_cli() {
+        let mock = routed_mock(1);
+        let _serial = crate::docker::metrics::lock_serial_for_test();
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("runtime-path-api");
+        let mut runner = ScriptRunner::scripted_host(Vec::new());
+        let path = {
+            let mut docker = Docker::job(&mut runner);
+            docker
+                .container_runtime_path("velnor-job-1")
+                .expect("Engine inspect serves runtime path")
+        };
+
+        assert_eq!(path.as_deref(), Some("/image/bin:/usr/bin"));
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
     }
 
     /// The seven migrated queries in one fixed order, returning their typed
@@ -4019,6 +4099,62 @@ Total:\t\t6.054MB
             "a mid-stream cancel must abandon the 500ms socket delay, took {:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn script_exec_survives_requested_cancel_for_eligible_always_step() {
+        let _serial = crate::docker::metrics::lock_serial_for_test();
+        let mock = MockEngine::serve(
+            |request| {
+                if request.contains("POST /containers/") {
+                    error_response("201 Created", r#"{"Id":"abc"}"#)
+                } else if request.contains("POST /exec/") {
+                    std::thread::sleep(Duration::from_millis(250));
+                    start_response(&exec_frame(1, b"always-step-ran\n"))
+                } else {
+                    json_response(r#"{"ID":"abc","Running":false,"ExitCode":0}"#)
+                }
+            },
+            3,
+        );
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let token = JobCancellation::recording(None);
+        let _active = set_active(token.clone());
+        // This models ScriptHandler rechecking `if: always()` after the job
+        // receives a Requested cancellation. Runner keeps the active step.
+        let step_guard = token.begin_step(|| Ok(true));
+        let cancel_token = token.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            cancel_token.request(CancelReason::ServerRequested);
+        });
+        let _scope = begin_job("exec-cancel-always");
+        let mut runner = ScriptRunner::scripted_host(Vec::new());
+        let route = {
+            let docker = Docker::job(&mut runner);
+            docker.try_exec_script(
+                "velnor-job-1",
+                &script_exec_cli_args(),
+                &script_exec_config(),
+                Duration::from_secs(10),
+                &mut |_, _| {},
+            )
+        };
+        canceller.join().expect("canceller joins");
+
+        assert!(
+            !step_guard.is_cancelled(),
+            "Runner's condition recheck must keep always() work alive"
+        );
+        assert_eq!(
+            route,
+            ScriptExecRoute::Served(CommandResult {
+                code: 0,
+                stdout: "always-step-ran\n".into(),
+                stderr: String::new(),
+            })
+        );
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -7,9 +7,9 @@
 //!
 //! # Closure inputs
 //!
-//! * the `crates/velnor-workflow` subtree (all sources, `build.rs`, the
-//!   crate manifest, and embedded templates — captured as a file set, so a
-//!   newly added file can never escape the digest);
+//! * the `crates/velnor-workflow` subtree plus every transitive non-dev local
+//!   dependency subtree needed by its runtime/build dependencies (captured as
+//!   file sets, so a newly added file cannot escape the digest);
 //! * the workspace root `Cargo.toml` (profiles, lints, workspace settings);
 //! * `Cargo.lock` (every dependency version, including git revisions);
 //! * the toolchain pins (`rust-toolchain.toml`, `rust-toolchain`);
@@ -31,7 +31,7 @@
 //! order, followed by the footer:
 //!
 //! ```text
-//! closure-version:1
+//! closure-version:2
 //! features:<sorted-comma-list-or-empty>
 //! profile:<release|debug>
 //! ```
@@ -57,7 +57,7 @@ use super::GeneratorError;
 /// Closure algorithm version. Bump when the inputs or canonical form change;
 /// digests minted under different versions never compare equal because the
 /// version is part of the hashed footer.
-pub(crate) const CLOSURE_VERSION: u8 = 1;
+pub(crate) const CLOSURE_VERSION: u8 = 2;
 
 /// Cargo profile of Stage-0 release products.
 pub(crate) const PROFILE_RELEASE: &str = "release";
@@ -83,6 +83,8 @@ pub(crate) const PRODUCT_TAG_PREFIX: &str = "velnor-workflow-runtime-v1-";
 /// files inside these directories are covered without updating this list.
 pub(crate) const CLOSURE_PATHS: &[&str] = &[
     "crates/velnor-workflow",
+    "crates/velnor-action-manifest",
+    "crates/velnor-expression",
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
@@ -184,6 +186,8 @@ mod tests {
         reason = "tests need setup failures to name their root cause"
     )]
 
+    use std::collections::{BTreeSet, VecDeque};
+
     use super::*;
 
     fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
@@ -198,6 +202,114 @@ mod tests {
             Some(value) => value,
             None => panic!("{context}: missing value"),
         }
+    }
+
+    fn dependency_sections(manifest: &toml::Value) -> Vec<&toml::map::Map<String, toml::Value>> {
+        let mut sections = Vec::new();
+        for section_name in ["dependencies", "build-dependencies"] {
+            if let Some(section) = manifest.get(section_name).and_then(toml::Value::as_table) {
+                sections.push(section);
+            }
+        }
+        if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+            for target in targets.values() {
+                for section_name in ["dependencies", "build-dependencies"] {
+                    if let Some(section) = target.get(section_name).and_then(toml::Value::as_table)
+                    {
+                        sections.push(section);
+                    }
+                }
+            }
+        }
+        sections
+    }
+
+    /// Resolve the transitive non-dev local dependency directories of the
+    /// workflow package. Cargo workspace inheritance makes `workspace = true`
+    /// paths relative to the workspace root; ordinary paths are relative to
+    /// the manifest that declares them.
+    fn local_path_dependency_directories(
+        workspace_root: &std::path::Path,
+        package_manifest: &std::path::Path,
+    ) -> BTreeSet<String> {
+        let workspace_root = must(
+            std::fs::canonicalize(workspace_root),
+            "canonicalize workspace root",
+        );
+        let workspace_manifest_text = must(
+            std::fs::read_to_string(workspace_root.join("Cargo.toml")),
+            "read workspace manifest for closure completeness",
+        );
+        let workspace_manifest: toml::Value = must(
+            toml::from_str(&workspace_manifest_text),
+            "parse workspace manifest for closure completeness",
+        );
+        let workspace_dependencies = workspace_manifest
+            .get("workspace")
+            .and_then(|workspace| workspace.get("dependencies"))
+            .and_then(toml::Value::as_table);
+
+        let package_manifest = must(
+            std::fs::canonicalize(package_manifest),
+            "canonicalize package manifest",
+        );
+        let mut pending = VecDeque::from([package_manifest]);
+        let mut visited_manifests = BTreeSet::new();
+        let mut dependency_directories = BTreeSet::new();
+
+        while let Some(manifest_path) = pending.pop_front() {
+            if !visited_manifests.insert(manifest_path.clone()) {
+                continue;
+            }
+            let manifest_dir = must_some(manifest_path.parent(), "package manifest directory");
+            let manifest_text = must(
+                std::fs::read_to_string(&manifest_path),
+                "read path dependency manifest",
+            );
+            let manifest: toml::Value = must(
+                toml::from_str(&manifest_text),
+                "parse path dependency manifest",
+            );
+
+            for section in dependency_sections(&manifest) {
+                for (name, declaration) in section {
+                    let Some(options) = declaration.as_table() else {
+                        continue;
+                    };
+                    let inherited =
+                        options.get("workspace").and_then(toml::Value::as_bool) == Some(true);
+                    let resolved_declaration = if inherited {
+                        workspace_dependencies.and_then(|dependencies| dependencies.get(name))
+                    } else {
+                        Some(declaration)
+                    };
+                    let Some(path) = resolved_declaration
+                        .and_then(|dependency| dependency.get("path"))
+                        .and_then(toml::Value::as_str)
+                    else {
+                        continue;
+                    };
+                    let base = if inherited {
+                        workspace_root.as_path()
+                    } else {
+                        manifest_dir
+                    };
+                    let dependency_dir = must(
+                        std::fs::canonicalize(base.join(path)),
+                        "canonicalize local path dependency",
+                    );
+                    let relative = must(
+                        dependency_dir.strip_prefix(&workspace_root),
+                        "local path dependency must stay inside the source repository",
+                    );
+                    let relative = relative.to_string_lossy().replace('\\', "/");
+                    dependency_directories.insert(relative);
+                    pending.push_back(dependency_dir.join("Cargo.toml"));
+                }
+            }
+        }
+
+        dependency_directories
     }
 
     fn write_closure_fixture(root: &std::path::Path) {
@@ -420,22 +532,13 @@ mod tests {
         // Byte-sort the real `git ls-tree` output exactly like the shell
         // consumer does (`LC_ALL=C sort`) and hash it with the system tool,
         // proving the Rust canonicalizer agrees byte-for-byte.
+        let mut ls_tree_arguments = vec!["ls-tree", "-r", "HEAD", "--"];
+        ls_tree_arguments.extend_from_slice(CLOSURE_PATHS);
         let ls_tree = must(
             Command::new("git")
                 .arg("-C")
                 .arg(&root)
-                .args([
-                    "ls-tree",
-                    "-r",
-                    "HEAD",
-                    "--",
-                    "crates/velnor-workflow",
-                    "Cargo.toml",
-                    "Cargo.lock",
-                    "rust-toolchain.toml",
-                    "rust-toolchain",
-                    ".cargo",
-                ])
+                .args(&ls_tree_arguments)
                 .output(),
             "ls-tree",
         );
@@ -456,7 +559,12 @@ mod tests {
         );
         let sorted = must(child.wait_with_output(), "sort").stdout;
         let mut canonical = sorted;
-        canonical.extend_from_slice("closure-version:1\nfeatures:\nprofile:release\n".as_bytes());
+        canonical.extend_from_slice(
+            format!(
+                "closure-version:{CLOSURE_VERSION}\nfeatures:{CI_FEATURES}\nprofile:{PROFILE_RELEASE}\n"
+            )
+            .as_bytes(),
+        );
         let mut digest_child = must(
             Command::new("sh")
                 .arg("-c")
@@ -485,100 +593,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Every `[dependencies]`-shaped section of the crate manifest that can
-    /// feed the shipped binary. Dev-dependencies are excluded by
-    /// construction: they never enter release products, so the dev-only
-    /// `velnor-runner` path dependency (contract tests proving emitted
-    /// `install_args` pass the runner's own lock gate) needs no closure
-    /// coverage.
-    fn binary_dependency_sections(manifest: &str) -> Vec<(String, Vec<String>)> {
-        let mut sections = Vec::new();
-        let mut current: Option<(String, Vec<String>)> = None;
-        for line in manifest.lines() {
-            let trimmed = line.trim();
-            if let Some(header) = trimmed.strip_prefix('[') {
-                if let Some(section) = current.take() {
-                    sections.push(section);
-                }
-                let name = header
-                    .split(']')
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    .to_owned();
-                current = Some((name, Vec::new()));
-            } else if let Some((_, body)) = current.as_mut() {
-                body.push(trimmed.to_owned());
-            }
-        }
-        if let Some(section) = current.take() {
-            sections.push(section);
-        }
-        sections
-            .into_iter()
-            .filter(|(name, _)| {
-                let segments: Vec<&str> = name.split('.').map(str::trim).collect();
-                !segments.contains(&"dev-dependencies")
-                    && segments.iter().any(|segment| {
-                        *segment == "dependencies" || *segment == "build-dependencies"
-                    })
-            })
-            .collect()
-    }
-
-    /// Whether a manifest code line (comments stripped) names a local `path`
-    /// dependency. Matches the TOML key only, so a crate whose name merely
-    /// contains "path" never trips the guard.
-    fn names_local_path(code: &str) -> bool {
-        for (index, _) in code.match_indices("path") {
-            let boundary = code[..index]
-                .chars()
-                .next_back()
-                .is_none_or(|before| !(before.is_alphanumeric() || before == '_' || before == '-'));
-            if boundary && code[index + "path".len()..].trim_start().starts_with('=') {
-                return true;
-            }
-        }
-        false
-    }
-
     #[test]
     fn crate_inputs_stay_closure_complete() {
-        // A local path dependency outside the closure paths would silently
-        // escape the digest: two trees with different dependency bytes would
-        // mint the same product tag. Any non-dev `path =` dependency fails
-        // here until its tree is folded into `CLOSURE_PATHS` (or the
-        // dependency goes away).
+        // A local runtime or build path dependency outside the closure paths
+        // would let different source trees mint the same product tag. Walk
+        // the transitive dependency graph, resolving workspace inheritance,
+        // and require every package source subtree to be covered.
         let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let manifest = must(
-            std::fs::read_to_string(manifest_dir.join("Cargo.toml")),
-            "read crate manifest for closure completeness",
-        );
-        for (section, lines) in binary_dependency_sections(&manifest) {
-            for line in &lines {
-                let code = line.split('#').next().unwrap_or_default();
-                assert!(
-                    !names_local_path(code),
-                    "section [{section}] names a local path dependency that the source closure does not cover: {line}"
-                );
-            }
-        }
-        assert!(
-            names_local_path("velnor-runner = { path = \"../velnor-runner\" }"),
-            "the guard matches a real path dependency"
-        );
-        for innocent in [
-            "xpath = \"1.0\"",
-            "some-path = { version = \"1\" }",
-            "my_path = { git = \"https://example.invalid/x\" }",
-        ] {
-            assert!(
-                !names_local_path(innocent),
-                "the guard ignores a name that merely contains path: {innocent}"
-            );
-        }
-        // Workspace-inherited dependencies resolve in the workspace root:
-        // a `path` there would escape the same way.
         let workspace = must(
             manifest_dir
                 .ancestors()
@@ -586,24 +607,25 @@ mod tests {
                 .ok_or_else(|| "crate manifest has no workspace root".to_owned()),
             "locate the workspace root",
         );
-        let root_manifest = must(
-            std::fs::read_to_string(workspace.join("Cargo.toml")),
-            "read workspace manifest for closure completeness",
+        let dependencies =
+            local_path_dependency_directories(workspace, &manifest_dir.join("Cargo.toml"));
+        for expected in ["crates/velnor-action-manifest", "crates/velnor-expression"] {
+            assert!(
+                dependencies.contains(expected),
+                "the expected local package is reachable through Cargo manifests: {expected}"
+            );
+        }
+        assert!(
+            !dependencies.contains("crates/velnor-runner"),
+            "the runner is dev-only and cannot affect the shipped workflow product"
         );
-        let mut in_workspace_dependencies = false;
-        for line in root_manifest.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') {
-                in_workspace_dependencies = trimmed == "[workspace.dependencies]";
-                continue;
-            }
-            if in_workspace_dependencies {
-                let code = trimmed.split('#').next().unwrap_or_default();
-                assert!(
-                    !names_local_path(code),
-                    "workspace dependencies name a local path the source closure does not cover: {line}"
-                );
-            }
+        for dependency in dependencies {
+            assert!(
+                CLOSURE_PATHS
+                    .iter()
+                    .any(|path| std::path::Path::new(&dependency).starts_with(path)),
+                "local runtime/build path dependency source is missing from CLOSURE_PATHS: {dependency}"
+            );
         }
     }
 

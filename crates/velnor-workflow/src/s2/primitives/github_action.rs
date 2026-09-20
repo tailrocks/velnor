@@ -410,6 +410,7 @@ mod tests {
                 &LocalActionPlan {
                     step_id: "consumer".to_owned(),
                     action_dir,
+                    workspace_host: root.to_path_buf(),
                     inputs: BTreeMap::from([
                         ("mode".to_owned(), mode.to_owned()),
                         (
@@ -418,6 +419,7 @@ mod tests {
                         ),
                         ("marker".to_owned(), marker.to_string_lossy().into_owned()),
                     ]),
+                    expression_inputs: std::collections::BTreeSet::new(),
                 },
                 &metadata,
                 &root.to_string_lossy(),
@@ -427,18 +429,31 @@ mod tests {
         )
     }
 
-    fn condition_runs(condition: Option<&str>) -> bool {
+    fn condition_runs(condition: Option<&str>, skip_build: bool) -> bool {
         match condition {
             None => true,
+            Some(condition) if condition.contains("inputs.skip-build != 'true'") => !skip_build,
             Some(condition) if condition.contains("'true' != 'true'") => false,
             Some(condition) if condition.contains("'false' != 'true'") => true,
             Some(condition) => panic!("unexpected runner condition: {condition}"),
         }
     }
 
+    fn render_fixture_value(value: &str, mode: &str, skip_build: bool, marker: &Path) -> String {
+        value
+            .replace("${{ inputs.mode }}", mode)
+            .replace(
+                "${{ inputs.skip-build }}",
+                if skip_build { "true" } else { "false" },
+            )
+            .replace("${{ inputs.marker }}", &marker.to_string_lossy())
+    }
+
     fn execute_local_action_scripts(
         root: &Path,
         invocations: &[velnor_runner::action_contract::CompositeActionInvocation],
+        mode: &str,
+        skip_build: bool,
         marker: &Path,
         downstream: &Path,
         output_file: &Path,
@@ -449,7 +464,7 @@ mod tests {
             let CompositeActionInvocation::Script(step) = invocation else {
                 continue;
             };
-            if !condition_runs(step.condition.as_deref()) {
+            if !condition_runs(step.condition.as_deref(), skip_build) {
                 continue;
             }
             let mut command = Command::new("bash");
@@ -460,7 +475,7 @@ mod tests {
                 .env("DOWNSTREAM_MARKER", downstream)
                 .env("GITHUB_OUTPUT", output_file);
             for (name, value) in &step.env {
-                command.env(name, value);
+                command.env(name, render_fixture_value(value, mode, skip_build, marker));
             }
             let output = must(command.output(), "execute expanded action script");
             if !output.status.success() {
@@ -510,10 +525,14 @@ mod tests {
             repository.git_ref,
             "0123456789abcdef0123456789abcdef01234567"
         );
-        assert_eq!(repository.inputs.get("mode"), Some(&"success".to_owned()));
+        assert_eq!(
+            repository.inputs.get("mode"),
+            Some(&"${{ inputs.mode }}".to_owned())
+        );
+        assert!(repository.expression_inputs.contains("mode"));
         assert_eq!(
             repository.env,
-            vec![("ACTION_MODE".to_owned(), "success".to_owned())]
+            vec![("ACTION_MODE".to_owned(), "${{ inputs.mode }}".to_owned())]
         );
         let outputs = success
             .iter()
@@ -522,13 +541,32 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("runner graph lost action outputs"));
+        let downloader_scope = success
+            .iter()
+            .find_map(|invocation| match invocation {
+                CompositeActionInvocation::CompositeStart {
+                    step_id,
+                    visible_step_ids,
+                    ..
+                } if step_id == "consumer-downloader" => Some(visible_step_ids),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("runner graph lost downloader's embedded step scope"));
+        // Runner exposes manifest IDs inside each composite's own `steps`
+        // scope; the generated ID only backs the `run` entry at execution.
+        assert_eq!(
+            downloader_scope.get("run").map(String::as_str),
+            Some("consumer-downloader-run")
+        );
         assert_eq!(
             outputs.outputs.get("result").map(String::as_str),
-            Some("${{ steps.consumer-downloader-run.outputs.result }}")
+            Some("${{ steps.run.outputs.result }}")
         );
         let success_result = execute_local_action_scripts(
             &root,
             &success,
+            "success",
+            false,
             &success_marker,
             &success_downstream,
             &success_output,
@@ -566,6 +604,8 @@ mod tests {
             let result = execute_local_action_scripts(
                 &root,
                 &invocations,
+                mode,
+                false,
                 &marker,
                 &downstream,
                 &output_file,
@@ -600,10 +640,12 @@ mod tests {
             })
             .find(|step| step.id.ends_with("-buildx"))
             .unwrap_or_else(|| panic!("runner graph lost conditional Buildx step"));
-        assert!(!condition_runs(skip_build.condition.as_deref()));
+        assert!(!condition_runs(skip_build.condition.as_deref(), true));
         let skip_result = execute_local_action_scripts(
             &root,
             &skip,
+            "success",
+            true,
             &skip_marker,
             &skip_downstream,
             &skip_output,

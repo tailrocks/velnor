@@ -2,8 +2,8 @@
 
 use crate::{
     action::{
-        CacheActionKind, DockerActionInvocation, JavaScriptActionInvocation, NativeActionAdapter,
-        NativeActionInvocation,
+        ActionBooleanValue, ActionTemplateMap, CacheActionKind, DockerActionInvocation,
+        JavaScriptActionInvocation, NativeActionAdapter, NativeActionInvocation,
     },
     cache::CacheEntryLock,
     checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
@@ -12,7 +12,7 @@ use crate::{
         classify_docker_stderr, docker_error_category, DockerCommandError, DockerErrorCategory,
     },
     execution::{
-        apply_command_result, docker_post_log_prelude, drain_post_stack,
+        apply_command_result, docker_post_log_prelude, drain_post_stack, evaluate_post_action,
         javascript_post_log_prelude, native_post_condition, native_post_log_prelude,
         parse_workflow_commands_from_output, post_step_display_name,
         reserve_github_post_step_orders, rewrite_command_file_env_for_action_container,
@@ -20,7 +20,7 @@ use crate::{
         PostDockerAction, PostDrainItem, PostJavaScriptAction, PostNativeAction, StepOutcome,
     },
     expression,
-    script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
+    script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState, StepOutputMap},
     workflow_command::{
         parse_workflow_commands_with_job_env, rendered_output_lines_with_policy,
         step_debug_enabled, DeprecatedCommandScope,
@@ -39,6 +39,7 @@ use std::os::unix::{
     io::{AsRawFd, FromRawFd},
 };
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ffi::OsString,
     fs::{self, File, OpenOptions},
@@ -363,6 +364,8 @@ pub(crate) enum ExpressionInterpolationError {
     MismatchedDelimiter { offset: usize },
     Parse { offset: usize },
     Evaluation { offset: usize },
+    MappingKeyNotString,
+    DuplicateMappingKey,
 }
 
 impl std::fmt::Display for ExpressionInterpolationError {
@@ -383,6 +386,12 @@ impl std::fmt::Display for ExpressionInterpolationError {
                     f,
                     "expression interpolation evaluation failure at byte {offset}"
                 )
+            }
+            Self::MappingKeyNotString => {
+                f.write_str("expression mapping key must resolve to a scalar string")
+            }
+            Self::DuplicateMappingKey => {
+                f.write_str("expression mapping contains an empty or duplicate key")
             }
         }
     }
@@ -533,7 +542,7 @@ pub(crate) fn validate_deferred_expression_template(
     let state = JobExecutionState::try_new_with_context(&[], &[])?;
     let context = state.expression_context();
     for span in spans {
-        expression::parse(span.expression(value).trim(), &context).map_err(|_| {
+        velnor_expression::parse(span.expression(value).trim(), &context).map_err(|_| {
             ExpressionInterpolationError::Parse {
                 offset: span.start(),
             }
@@ -556,11 +565,12 @@ pub(crate) fn template_reads_runtime_context(
     let context = state.expression_context();
     let mut reads_runtime = false;
     for span in spans {
-        let node = expression::parse(span.expression(value).trim(), &context).map_err(|_| {
-            ExpressionInterpolationError::Parse {
-                offset: span.start(),
-            }
-        })?;
+        let node =
+            velnor_expression::parse(span.expression(value).trim(), &context).map_err(|_| {
+                ExpressionInterpolationError::Parse {
+                    offset: span.start(),
+                }
+            })?;
         if let Some(node) = node {
             reads_runtime |= node_reads_runtime_context(&node);
         }
@@ -592,6 +602,15 @@ pub(crate) fn render_context_expressions_bounded(
     render_context_expressions_checked(value, context_data)
 }
 
+pub(crate) fn render_context_expressions_bounded_with_deferred(
+    value: &str,
+    context_data: &[(String, Value)],
+) -> Result<(String, bool), ExpressionInterpolationError> {
+    let _ = expression_template_spans(value)?;
+    JobExecutionState::try_new_with_context(&[], context_data)?
+        .resolve_job_context_expressions_with_deferred(value)
+}
+
 pub(crate) fn render_expressions_with_context_checked(
     value: &str,
     base_env: &[(String, String)],
@@ -611,10 +630,8 @@ pub fn render_expressions_with_context(
 }
 
 fn node_action_image(runtime: &str, fallback: &str) -> String {
-    if !fallback.trim().is_empty() {
-        return fallback.to_string();
-    }
     match runtime.strip_prefix("node") {
+        Some("12" | "16") => "node:20-bookworm".to_string(),
         Some("20") => "node:20-bookworm".to_string(),
         Some("24") => "node:24-bookworm".to_string(),
         Some(major) if major.chars().all(|ch| ch.is_ascii_digit()) && !major.is_empty() => {
@@ -666,10 +683,11 @@ fn register_process_group(
     program: &str,
 ) -> Option<crate::execution::cancel::TargetRegistration> {
     let token = crate::execution::cancel::active()?;
-    // After the job is cancelled, new host children are cleanup (`docker rm`,
-    // network delete), not workload. Registering them with the cancelled
-    // token makes the fan-out SIGKILL the teardown it is supposed to finish.
-    if token.is_cancelled() {
+    // Job cancellation does not decide whether current work stops: the active
+    // step's condition is rechecked, and an `always()` step may still spawn
+    // required work after the job token is requested. Register every process
+    // so cancellation-versus-spawn races are resolved by that step scope.
+    if !token.should_track_process_group() {
         return None;
     }
     Some(
@@ -1416,13 +1434,26 @@ pub enum ExecutableStep {
         step_id: String,
         display_name: String,
         inputs: BTreeMap<String, String>,
+        input_diagnostics: Vec<String>,
+        expression_inputs: BTreeSet<String>,
+        input_templates: Option<ActionTemplateMap>,
+        input_defaults: ActionTemplateMap,
+        visible_step_ids: BTreeMap<String, String>,
         env: Vec<(String, String)>,
+        action_path: Option<String>,
         condition: Option<String>,
         /// The umbrella step's own `continue-on-error`: it converts the
         /// umbrella conclusion only, exactly like upstream's
         /// `ApplyContinueOnError` on the composite step — never ORed into
         /// the inner steps' flags.
         continue_on_error: bool,
+        continue_on_error_expression: Option<ActionBooleanValue>,
+    },
+    /// Carries a composite step's deferred expression to the step result
+    /// boundary, where Runner evaluates it only after that step fails.
+    StepContinueOnError {
+        step_id: String,
+        value: ActionBooleanValue,
     },
     CompositeEnd {
         step_id: String,
@@ -1650,6 +1681,11 @@ struct CompositeFrame {
     telemetry: Vec<crate::script_step::StepCommandTelemetry>,
     exit_code: i32,
     skipped: bool,
+    /// Any embedded child was cancelled by its active condition guard. The
+    /// enclosing action still uses its own guard for cancellation-time
+    /// re-evaluation, but a cancelled child must remain a cancelled umbrella
+    /// result when the action handler returns.
+    cancelled: bool,
     failure_ignored: bool,
     error_count: i32,
     warning_count: i32,
@@ -1659,17 +1695,17 @@ struct CompositeFrame {
     /// converts the umbrella conclusion at `CompositeEnd`, never the
     /// inner steps'.
     continue_on_error: bool,
-    /// True when the umbrella's OWN `if` could not be evaluated.
-    /// Upstream completes such a step as failed without ever running it
-    /// (`StepsRunner` bypasses `RunStepAsync`), so `continue-on-error`
-    /// — applied inside `RunStepAsync` — never converts it. Inner
-    /// failures, including inner condition errors, still convert.
-    condition_failed: bool,
+    /// True when the umbrella never entered `RunStepAsync` because a
+    /// pre-run setup/condition failure stopped it. Runner applies
+    /// continue-on-error inside `RunStepAsync`, so these failures bypass it.
+    continue_on_error_blocked: bool,
     /// Length of the job `results` vec when this composite started: the
     /// `results[results_start..]` range is exactly this composite's own
     /// step results, which an ignored umbrella conclusion converts so
     /// the job-conclusion scan (which reads `results`) honors the flag.
     results_start: usize,
+    continue_on_error_expression: Option<ActionBooleanValue>,
+    action_scope_pushed: bool,
 }
 
 impl CompositeFrame {
@@ -1733,18 +1769,18 @@ impl CompositeFrame {
     /// failure was ignored the exit code is already 0 (outcome success),
     /// and when any failure stands the umbrella conclusion stays failure
     /// even if some other inner step was ignored. The umbrella's own
-    /// condition failure never converts (see `condition_failed`), and
+    /// pre-run failure never converts (see `continue_on_error_blocked`), and
     /// conversion is gated on not-cancelled: upstream completes a killed
     /// step `Canceled`, and `ApplyContinueOnError` converts `Failed`
     /// only, so a cancelled umbrella never converts.
-    fn umbrella_result(&self, cancelled: bool) -> StepExecutionResult {
+    fn umbrella_result(&self, cancelled: bool, continue_on_error: bool) -> StepExecutionResult {
         StepExecutionResult {
             exit_code: self.exit_code,
             state: StepCommandState::default(),
             skipped: self.skipped,
             failure_ignored: self.exit_code != 0
-                && self.continue_on_error
-                && !self.condition_failed
+                && (self.continue_on_error || continue_on_error)
+                && !self.continue_on_error_blocked
                 && !cancelled,
             stdout: String::new(),
             stderr: String::new(),
@@ -1765,6 +1801,7 @@ impl CompositeFrame {
         self.error_count += nested.error_count;
         self.warning_count += nested.warning_count;
         self.notice_count += nested.notice_count;
+        self.cancelled |= nested.cancelled;
         if !nested.summary.is_empty() {
             if !self.summary.is_empty() {
                 self.summary.push('\n');
@@ -1777,6 +1814,24 @@ impl CompositeFrame {
         // No flag OR here either: the merged nested region is log only,
         // and this frame's row flag derives from its own umbrella
         // conversion at End (see `absorb`).
+    }
+
+    fn add_input_diagnostics(&mut self, diagnostics: &[String]) {
+        for message in diagnostics {
+            eprintln!("##[warning]{message}");
+            self.lines.push(format!("##[warning]{message}"));
+            self.annotations.push(StepAnnotation {
+                level: crate::script_step::StepAnnotationLevel::Warning,
+                message: message.clone(),
+                title: None,
+                path: None,
+                start_line: None,
+                end_line: None,
+                start_column: None,
+                end_column: None,
+            });
+            self.warning_count += 1;
+        }
     }
 
     fn into_step_log(self, completed_at: &str) -> StepLog {
@@ -1805,6 +1860,60 @@ impl CompositeFrame {
     }
 }
 
+fn step_result_continue_on_error(
+    step: &ExecutableStep,
+    state: &JobExecutionState,
+    deferred: Option<&ActionBooleanValue>,
+) -> bool {
+    if step.continue_on_error() {
+        return true;
+    }
+    match deferred {
+        Some(ActionBooleanValue::Literal(value)) => *value,
+        Some(ActionBooleanValue::Expression(expression)) => state
+            .evaluate_boolean_step_expression(expression)
+            .unwrap_or_else(|error| {
+                eprintln!(
+                    "Step '{}' continue-on-error could not be evaluated: {error}",
+                    step.id()
+                );
+                false
+            }),
+        None => false,
+    }
+}
+
+/// Failures while preparing a step happen before Runner enters `RunStepAsync`,
+/// where `ApplyContinueOnError` lives. Keep those failures unconverted so
+/// `continue-on-error` only handles a dispatched step's execution result.
+fn step_preparation_failure(message: String) -> StepExecutionResult {
+    StepExecutionResult {
+        exit_code: 1,
+        state: StepCommandState::default(),
+        skipped: false,
+        failure_ignored: false,
+        stdout: String::new(),
+        stderr: message,
+    }
+}
+
+fn add_input_diagnostics(result: &mut StepExecutionResult, diagnostics: &[String]) {
+    for message in diagnostics {
+        eprintln!("##[warning]{message}");
+        result.state.annotations.push(StepAnnotation {
+            level: crate::script_step::StepAnnotationLevel::Warning,
+            message: message.clone(),
+            title: None,
+            path: None,
+            start_line: None,
+            end_line: None,
+            start_column: None,
+            end_column: None,
+        });
+        result.state.warning_count += 1;
+    }
+}
+
 /// Verdict of a composite umbrella's own display-name and `if`
 /// evaluation, reached in the enclosing scope before the composite's
 /// scope is pushed (F1).
@@ -1818,6 +1927,7 @@ impl ExecutableStep {
     pub(crate) fn id(&self) -> &str {
         match self {
             ExecutableStep::CompositeStart { step_id, .. } => step_id,
+            ExecutableStep::StepContinueOnError { step_id, .. } => step_id,
             ExecutableStep::CompositeEnd { step_id } => step_id,
             ExecutableStep::Checkout(plan) => &plan.step_id,
             ExecutableStep::Script(step) => &step.id,
@@ -1831,6 +1941,7 @@ impl ExecutableStep {
     pub(crate) fn condition(&self) -> Option<&str> {
         match self {
             ExecutableStep::CompositeStart { condition, .. } => condition.as_deref(),
+            ExecutableStep::StepContinueOnError { .. } => None,
             ExecutableStep::CompositeEnd { .. } => None,
             ExecutableStep::Checkout(plan) => plan.condition.as_deref(),
             ExecutableStep::Script(step) => step.condition.as_deref(),
@@ -1846,6 +1957,7 @@ impl ExecutableStep {
             ExecutableStep::CompositeStart {
                 continue_on_error, ..
             } => *continue_on_error,
+            ExecutableStep::StepContinueOnError { .. } => false,
             ExecutableStep::CompositeEnd { .. } => false,
             ExecutableStep::Checkout(plan) => plan.continue_on_error,
             ExecutableStep::Script(step) => step.continue_on_error,
@@ -1879,6 +1991,18 @@ impl ExecutableStep {
         }
     }
 
+    fn input_diagnostics(&self) -> &[String] {
+        match self {
+            ExecutableStep::CompositeStart {
+                input_diagnostics, ..
+            } => input_diagnostics,
+            ExecutableStep::JavaScript { invocation, .. } => &invocation.input_diagnostics,
+            ExecutableStep::Docker { invocation, .. } => &invocation.input_diagnostics,
+            ExecutableStep::Native { invocation, .. } => &invocation.input_diagnostics,
+            _ => &[],
+        }
+    }
+
     fn effective_timeout(&self, job_timeout_minutes: Option<u64>) -> Duration {
         effective_step_timeout(self.timeout_minutes(), job_timeout_minutes)
     }
@@ -1887,6 +2011,7 @@ impl ExecutableStep {
         !matches!(
             self,
             ExecutableStep::CompositeStart { .. }
+                | ExecutableStep::StepContinueOnError { .. }
                 | ExecutableStep::CompositeEnd { .. }
                 | ExecutableStep::CompositeOutputs { .. }
         )
@@ -1895,6 +2020,7 @@ impl ExecutableStep {
     pub fn display_name(&self) -> &str {
         match self {
             ExecutableStep::CompositeStart { display_name, .. } => display_name,
+            ExecutableStep::StepContinueOnError { step_id, .. } => step_id,
             ExecutableStep::CompositeEnd { step_id } => step_id,
             ExecutableStep::Checkout(plan) => {
                 if plan.display_name.is_empty() {
@@ -2077,6 +2203,9 @@ impl LifecycleTelemetry {
 pub(crate) struct JobEnvironmentGuards {
     pub(crate) docker_lease: Option<crate::docker_lease::DockerLeaseGuard>,
     pub(crate) job_network: Option<crate::docker_lease::JobNetworkGuard>,
+    /// Runtime PATH inspected from the started job container. Carries across
+    /// the pre-create executor handoff with the environment-owned guards.
+    pub(crate) runtime_path: Option<String>,
 }
 
 /// Host-Docker step engine owned by the docker backend.
@@ -2111,6 +2240,9 @@ pub(crate) struct DockerJobEngine<R> {
     /// removed it. Drop then removes the network, so no executor exit path can
     /// leak a `velnor-net-*` network (address-pool exhaustion class).
     job_network_guard: Option<crate::docker_lease::JobNetworkGuard>,
+    /// The image PATH from the running job container's Config.Env. `Some("")`
+    /// preserves an explicitly empty PATH; `None` means no PATH was set.
+    job_container_runtime_path: Option<String>,
     /// False when another owner runs the job's terminal cleanup — the slot's
     /// teardown handle, recorded before this executor exists and run on
     /// every exit path until it succeeds. This executor then never holds a
@@ -2141,6 +2273,25 @@ struct LiveStepIdentity {
     started_at: String,
 }
 
+fn attach_services_to_job_context(context_data: &mut Vec<(String, Value)>, services: Value) {
+    let mut job = context_data
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("job"))
+        .and_then(|(_, value)| value.as_object().cloned())
+        .unwrap_or_default();
+    let existing_services: Vec<String> = job
+        .keys()
+        .filter(|name| name.eq_ignore_ascii_case("services"))
+        .cloned()
+        .collect();
+    for name in existing_services {
+        job.remove(&name);
+    }
+    job.insert("services".to_string(), services);
+    context_data.retain(|(name, _)| !name.eq_ignore_ascii_case("job"));
+    context_data.push(("job".to_string(), Value::Object(job)));
+}
+
 impl<R> DockerJobEngine<R>
 where
     R: CommandRunner,
@@ -2161,6 +2312,7 @@ where
             job_environment_started: false,
             docker_lease: None,
             job_network_guard: None,
+            job_container_runtime_path: None,
             arm_job_network_guard: true,
             lifecycle_telemetry: None,
             cancellation,
@@ -2252,6 +2404,7 @@ where
     pub(crate) fn with_job_environment_guards(mut self, guards: JobEnvironmentGuards) -> Self {
         self.docker_lease = guards.docker_lease;
         self.job_network_guard = guards.job_network;
+        self.job_container_runtime_path = guards.runtime_path;
         self
     }
 
@@ -2262,6 +2415,7 @@ where
         JobEnvironmentGuards {
             docker_lease: self.docker_lease.take(),
             job_network: self.job_network_guard.take(),
+            runtime_path: self.job_container_runtime_path.take(),
         }
     }
 
@@ -2438,8 +2592,7 @@ where
         }
         let mut runtime_context = context_data.to_vec();
         if let Some(services) = self.service_context(container)? {
-            runtime_context.retain(|(name, _)| !name.eq_ignore_ascii_case("services"));
-            runtime_context.push(("services".to_string(), services));
+            attach_services_to_job_context(&mut runtime_context, services);
         }
 
         self.execute_ordered_steps_in_started_container(
@@ -2545,6 +2698,12 @@ where
         // the pop, so it is not discarded with the nested scope) and
         // merges the nested log into the parent frame.
         let mut composite_frames: Vec<CompositeFrame> = Vec::new();
+        // A composite umbrella remains an active Runner step for the whole
+        // embedded run. Its condition callback must survive child boundaries
+        // and be dropped with the matching frame.
+        let mut composite_cancellation_guards: Vec<
+            Option<crate::execution::cancel::ActiveStepGuard>,
+        > = Vec::new();
         // Lexical composite nesting depth. While `skip_depth` holds the
         // depth a skipped/failed umbrella started at, every step —
         // including nested composite boundaries, which only move this
@@ -2555,6 +2714,7 @@ where
         // (job/parent) scope while inner conditions keep their own.
         let mut composite_depth: usize = 0;
         let mut skip_depth: Option<usize> = None;
+        let mut continue_on_error_expressions = BTreeMap::<String, ActionBooleanValue>::new();
         // Resume depth for an embedded condition-eval error. Upstream breaks
         // the active composite loop, and a nested composite reports that
         // failure to its parent loop. A failure therefore propagates through
@@ -2567,10 +2727,21 @@ where
                     step_id,
                     display_name,
                     inputs,
+                    input_diagnostics,
                     env,
+                    expression_inputs,
+                    input_templates,
+                    input_defaults,
+                    visible_step_ids,
+                    action_path,
                     condition,
                     continue_on_error,
+                    continue_on_error_expression,
                 } => {
+                    let continue_on_error_expression = continue_on_error_expression
+                        .clone()
+                        .or_else(|| continue_on_error_expressions.remove(step_id));
+                    let input_diagnostics = input_diagnostics.clone();
                     // A nested boundary inside a skipped or broken umbrella
                     // only moves the lexical counter: no scope is pushed
                     // for it, so its matching End must not pop either.
@@ -2592,6 +2763,15 @@ where
                     // composite's own empty scope, so `if: failure()`
                     // never fired and `if: success()` never skipped here.
                     let frame_state = state.with_step_action(step_id);
+                    // StepsRunner evaluates a step's env before its `if`.
+                    // Keep it in a temporary state for the wrapper's display,
+                    // condition, and input evaluation, then install the
+                    // action-local input/steps scope only if the wrapper runs.
+                    let (action_env, environment_error) = match frame_state.resolve_env(env) {
+                        Ok(action_env) => (action_env, None),
+                        Err(error) => (Vec::new(), Some(error.to_string())),
+                    };
+                    let condition_state = frame_state.with_env(action_env.clone());
                     let nested = !composite_frames.is_empty();
                     let backend_step_id = github_backend_step_id(step_id);
                     // A display name that cannot be evaluated never fails
@@ -2599,7 +2779,7 @@ where
                     // best-effort (`ActionRunner.cs`: the catch only
                     // traces), so the raw name carries on into condition
                     // evaluation and the run.
-                    let display = frame_state.resolve_expressions(display_name);
+                    let display = condition_state.resolve_expressions(display_name);
                     let resolved_display = match &display {
                         Ok(resolved_display) => resolved_display.clone(),
                         Err(error) => {
@@ -2609,7 +2789,28 @@ where
                             display_name.clone()
                         }
                     };
-                    let verdict = match frame_state.evaluate_condition(condition.as_deref()) {
+                    let composite_guard = if environment_error.is_none() || nested {
+                        let recheck_state = condition_state.clone();
+                        let recheck_condition = condition.clone();
+                        Some(self.cancellation.begin_step(move || {
+                            recheck_state
+                                .evaluate_condition(recheck_condition.as_deref())
+                                .map_err(|error| error.to_string())
+                        }))
+                    } else {
+                        None
+                    };
+                    let mut verdict = if let Some(error) = environment_error.as_ref()
+                        && !nested
+                    {
+                        UmbrellaVerdict::EvalFailed {
+                            message: format!(
+                                "Step '{resolved_display}' environment could not be evaluated: {error}"
+                            ),
+                            display: resolved_display,
+                        }
+                    } else {
+                        match condition_state.evaluate_condition(condition.as_deref()) {
                         Ok(true) => UmbrellaVerdict::Run(resolved_display),
                         Ok(false) => UmbrellaVerdict::Skip(resolved_display),
                         // actions/runner fails the step when its
@@ -2625,24 +2826,69 @@ where
                             ),
                             display: resolved_display,
                         },
+                        }
                     };
+                    let mut action_inputs = inputs.clone();
+                    if let UmbrellaVerdict::Run(resolved_display) = &verdict {
+                        match condition_state.resolve_action_inputs(
+                            inputs,
+                            expression_inputs,
+                            input_templates.as_ref(),
+                            input_defaults,
+                        ) {
+                            Ok(resolved_inputs) => action_inputs = resolved_inputs,
+                            Err(error) => {
+                                verdict = UmbrellaVerdict::EvalFailed {
+                                    message: format!(
+                                        "Step '{resolved_display}' inputs could not be evaluated: {error}"
+                                    ),
+                                    display: resolved_display.clone(),
+                                };
+                            }
+                        }
+                    }
+                    let action_scope_pushed = matches!(&verdict, UmbrellaVerdict::Run(_));
+                    if !nested && action_scope_pushed {
+                        state.expose_root_step_context(step_id);
+                    }
+                    if action_scope_pushed {
+                        state.push_composite_action_scope(
+                            step_id,
+                            action_inputs.clone(),
+                            visible_step_ids.clone(),
+                            action_env.clone(),
+                            action_path.clone(),
+                        );
+                    }
                     state.push_composite(step_id);
                     let resume_depth = composite_depth;
                     composite_depth += 1;
                     let results_start = results.len();
                     match verdict {
                         UmbrellaVerdict::Run(resolved_display) => {
+                            composite_cancellation_guards.push(composite_guard);
                             if nested {
-                                composite_frames.push(CompositeFrame {
+                                let mut frame = CompositeFrame {
                                     step_id: step_id.clone(),
                                     backend_step_id,
-                                    display_name: resolved_display,
+                                    display_name: resolved_display.clone(),
                                     order: timeline_order,
                                     started_at: unix_now_rfc3339(),
                                     continue_on_error: *continue_on_error,
+                                    continue_on_error_expression: continue_on_error_expression
+                                        .clone(),
+                                    action_scope_pushed,
                                     results_start,
+                                    exit_code: i32::from(environment_error.is_some()),
                                     ..CompositeFrame::default()
-                                });
+                                };
+                                if let Some(error) = environment_error.as_ref() {
+                                    frame.lines.push(format!(
+                                        "Step '{resolved_display}' environment could not be evaluated: {error}"
+                                    ));
+                                }
+                                frame.add_input_diagnostics(&input_diagnostics);
+                                composite_frames.push(frame);
                             } else {
                                 let started_at = self.emit_step_started(
                                     backend_step_id.clone(),
@@ -2650,22 +2896,38 @@ where
                                     &mut timeline_order,
                                 );
                                 let mut lines = vec![format!("##[group]{resolved_display}")];
-                                lines.extend(action_log_prelude(inputs, env, &frame_state));
+                                lines.extend(action_log_prelude(
+                                    &action_inputs,
+                                    &action_env,
+                                    &frame_state,
+                                ));
                                 lines.push("##[endgroup]".to_string());
-                                composite_frames.push(CompositeFrame {
+                                let mut frame = CompositeFrame {
                                     step_id: step_id.clone(),
                                     backend_step_id,
-                                    display_name: resolved_display,
+                                    display_name: resolved_display.clone(),
                                     order: timeline_order,
                                     started_at,
                                     lines,
                                     continue_on_error: *continue_on_error,
+                                    continue_on_error_expression: continue_on_error_expression
+                                        .clone(),
+                                    action_scope_pushed,
                                     results_start,
+                                    exit_code: i32::from(environment_error.is_some()),
                                     ..CompositeFrame::default()
-                                });
+                                };
+                                if let Some(error) = environment_error.as_ref() {
+                                    frame.lines.push(format!(
+                                        "Step '{resolved_display}' environment could not be evaluated: {error}"
+                                    ));
+                                }
+                                frame.add_input_diagnostics(&input_diagnostics);
+                                composite_frames.push(frame);
                             }
                         }
                         UmbrellaVerdict::Skip(resolved_display) => {
+                            composite_cancellation_guards.push(None);
                             eprintln!(
                                 "forensics.lifecycle event=step-skipped step={resolved_display}"
                             );
@@ -2678,14 +2940,21 @@ where
                             let mut frame = CompositeFrame {
                                 step_id: step_id.clone(),
                                 backend_step_id,
-                                display_name: resolved_display,
+                                display_name: resolved_display.clone(),
                                 order: timeline_order,
                                 started_at: unix_now_rfc3339(),
-                                skipped: true,
+                                skipped: environment_error.is_none(),
+                                exit_code: i32::from(environment_error.is_some()),
+                                continue_on_error_blocked: environment_error.is_some(),
                                 continue_on_error: *continue_on_error,
                                 results_start,
                                 ..CompositeFrame::default()
                             };
+                            if let Some(error) = environment_error.as_ref() {
+                                frame.lines.push(format!(
+                                    "Step '{resolved_display}' environment could not be evaluated: {error}"
+                                ));
+                            }
                             if !nested {
                                 frame.started_at = self.emit_step_started(
                                     frame.backend_step_id.clone(),
@@ -2697,6 +2966,7 @@ where
                             composite_frames.push(frame);
                         }
                         UmbrellaVerdict::EvalFailed { display, message } => {
+                            composite_cancellation_guards.push(None);
                             eprintln!("{message}");
                             skip_depth = Some(resume_depth);
                             let result = StepExecutionResult {
@@ -2721,14 +2991,14 @@ where
                                 started_at: unix_now_rfc3339(),
                                 exit_code: 1,
                                 continue_on_error: *continue_on_error,
-                                condition_failed: true,
+                                continue_on_error_blocked: true,
                                 results_start,
                                 ..CompositeFrame::default()
                             };
                             if nested {
                                 frame.append_inner(
                                     &display,
-                                    &action_log_prelude(inputs, env, &frame_state),
+                                    &action_log_prelude(&action_inputs, &action_env, &frame_state),
                                     &result,
                                     state.step_debug(),
                                 );
@@ -2740,13 +3010,23 @@ where
                                 );
                                 frame.order = timeline_order;
                                 let mut lines = vec![format!("##[group]{display}")];
-                                lines.extend(action_log_prelude(inputs, env, &frame_state));
+                                lines.extend(action_log_prelude(
+                                    &action_inputs,
+                                    &action_env,
+                                    &frame_state,
+                                ));
                                 lines.push("##[endgroup]".to_string());
                                 lines.push(message);
                                 frame.lines = lines;
                             }
                             composite_frames.push(frame);
                         }
+                    }
+                    continue;
+                }
+                ExecutableStep::StepContinueOnError { step_id, value } => {
+                    if skip_depth.is_none() && break_depth.is_none() {
+                        continue_on_error_expressions.insert(step_id.clone(), value.clone());
                     }
                     continue;
                 }
@@ -2771,6 +3051,17 @@ where
                     if break_depth.is_some_and(|resume| composite_depth <= resume) {
                         break_depth = None;
                     }
+                    let cancellation_guard = if closes_active_frame {
+                        composite_cancellation_guards.pop().flatten()
+                    } else {
+                        None
+                    };
+                    let mut closing_frame = composite_frames.pop();
+                    if let Some(frame) = closing_frame.as_ref()
+                        && frame.action_scope_pushed
+                    {
+                        state.pop_composite_action_scope(step_id);
+                    }
                     let inner_ids = state.pop_composite(step_id);
                     // F6: the umbrella records its own outcome/conclusion
                     // under its step id, so later steps read
@@ -2780,8 +3071,32 @@ where
                     // nested scope, so this apply lands in the parent
                     // scope and the merged exit fails the parent when the
                     // nested umbrella failed.
-                    if let Some(mut frame) = composite_frames.pop() {
-                        let umbrella = frame.umbrella_result(state.is_cancelled());
+                    if let Some(mut frame) = closing_frame.take() {
+                        let cancelled = frame.cancelled
+                            || cancellation_guard
+                                .as_ref()
+                                .is_some_and(|guard| guard.is_cancelled());
+                        let dynamic_continue_on_error = if frame.exit_code != 0
+                            && !frame.continue_on_error_blocked
+                            && !cancelled
+                        {
+                            match frame.continue_on_error_expression.as_ref() {
+                                Some(ActionBooleanValue::Expression(expression)) => state
+                                    .evaluate_boolean_step_expression(expression)
+                                    .unwrap_or_else(|error| {
+                                        eprintln!(
+                                            "Step '{}' continue-on-error could not be evaluated: {error}",
+                                            frame.display_name
+                                        );
+                                        false
+                                    }),
+                                Some(ActionBooleanValue::Literal(value)) => *value,
+                                None => false,
+                            }
+                        } else {
+                            false
+                        };
+                        let umbrella = frame.umbrella_result(cancelled, dynamic_continue_on_error);
                         // The timeline row flag derives from the umbrella
                         // conversion only — never ORed from inner ignored
                         // flags (see `absorb`).
@@ -2836,8 +3151,82 @@ where
                 }
             }
             let step_context_id = step.id().to_string();
+            if composite_frames.is_empty() {
+                state.expose_root_step_context(&step_context_id);
+            }
             let step_backend_id = github_backend_step_id(&step_context_id);
-            let step_state = state.with_step_action(&step_context_id);
+            let step_state_base = state.with_step_action(&step_context_id);
+            let deferred_continue_on_error = continue_on_error_expressions.remove(&step_context_id);
+            let raw_step_env = executable_step_env(step);
+            let (resolved_step_env, embedded_environment_error) =
+                match step_state_base.resolve_env(raw_step_env) {
+                    Ok(resolved) => (resolved, None),
+                    Err(error) if !composite_frames.is_empty() => {
+                        // CompositeActionHandler records the environment failure,
+                        // then still evaluates the child's condition and invokes
+                        // RunStepAsync with its incomplete environment. COE is
+                        // therefore eligible after that child runs.
+                        let message = format!(
+                            "Step '{}' environment could not be evaluated: {error}",
+                            step.display_name()
+                        );
+                        eprintln!("{message}");
+                        (Vec::new(), Some(message))
+                    }
+                    Err(error) => {
+                        let message = format!(
+                            "Step '{}' environment could not be evaluated: {error}",
+                            step.display_name()
+                        );
+                        eprintln!("{message}");
+                        let display_name = step_state_base
+                            .resolve_expressions(step.display_name())
+                            .unwrap_or_else(|_| step.display_name().to_string());
+                        let reports = composite_frames.is_empty() && step.reports_timeline_start();
+                        let mut failed_started_at = String::new();
+                        if reports {
+                            failed_started_at = self.emit_step_started(
+                                step_backend_id.clone(),
+                                &display_name,
+                                &mut timeline_order,
+                            );
+                        }
+                        // Runner fails before `RunStepAsync` for environment
+                        // expression errors; `continue-on-error` is not applied.
+                        let result = step_preparation_failure(message);
+                        if let Some(frame) = composite_frames.last_mut() {
+                            if step.reports_timeline_start() {
+                                frame.append_inner(
+                                    &display_name,
+                                    &step_log_prelude(step, &step_state_base),
+                                    &result,
+                                    state.step_debug(),
+                                );
+                            } else {
+                                frame.absorb(&result);
+                            }
+                        } else if reports {
+                            let log = step_log_with_name(
+                                &step_backend_id,
+                                &display_name,
+                                timeline_order,
+                                &failed_started_at,
+                                &unix_now_rfc3339(),
+                                &result,
+                                &step_log_prelude(step, &step_state_base),
+                                state.step_debug(),
+                            );
+                            self.emit_step_log(&log);
+                            step_logs.push(log);
+                        }
+                        state.apply(&step_context_id, &result);
+                        results.push(result);
+                        continue;
+                    }
+                };
+            let step_state = step_state_base.with_env(resolved_step_env.clone());
+            let environment_prepared_step = prepare_executable_step_env(step, &resolved_step_env);
+            let step = &environment_prepared_step;
             // Display names are resolved at the same execution boundary as
             // the step, but a failure never fails the step: upstream's
             // `TryUpdateDisplayName` is best-effort
@@ -2852,6 +3241,13 @@ where
                     step.display_name().to_string()
                 }
             };
+            let recheck_state = step_state.clone();
+            let recheck_condition = step.condition().map(ToOwned::to_owned);
+            let step_cancellation_guard = self.cancellation.begin_step(move || {
+                recheck_state
+                    .evaluate_condition(recheck_condition.as_deref())
+                    .map_err(|error| error.to_string())
+            });
             let condition_met = match step_state.evaluate_condition(step.condition()) {
                 Ok(condition_met) => condition_met,
                 Err(error) => {
@@ -2872,24 +3268,20 @@ where
                             &mut timeline_order,
                         );
                     }
-                    let result = StepExecutionResult {
-                        exit_code: 1,
-                        state: StepCommandState::default(),
-                        skipped: false,
-                        failure_ignored: false,
-                        stdout: String::new(),
-                        stderr: message,
-                    };
+                    let cancelled = step_cancellation_guard.is_cancelled();
+                    let mut result = step_preparation_failure(message);
+                    if let Some(error) = step_cancellation_guard.condition_error() {
+                        result.stderr.push_str(&format!(
+                            "\nStep cancellation condition could not be evaluated: {error}"
+                        ));
+                    }
                     if let Some(frame) = composite_frames.last_mut() {
-                        // An unevaluable inner condition still fails the
-                        // composite: without the absorb the umbrella would
-                        // render exit 0 while the job fails. It also
-                        // breaks the current composite loop here
-                        // (`CompositeActionHandler.cs`). A nested composite
-                        // returns that failure to its parent, so the parent
-                        // loop must also stop before its sibling steps; the
-                        // outermost frame's outputs and the job itself still
-                        // continue below.
+                        frame.cancelled |= cancelled;
+                        // An unevaluable inner condition fails and breaks
+                        // only the current composite loop
+                        // (`CompositeActionHandler.cs`). The failing nested
+                        // composite returns to its parent handler, whose
+                        // sibling steps continue.
                         if step.reports_timeline_start() {
                             frame.append_inner(
                                 &display_name,
@@ -2900,7 +3292,7 @@ where
                         } else {
                             frame.absorb(&result);
                         }
-                        break_depth = Some(0);
+                        break_depth = Some(composite_depth.saturating_sub(1));
                     } else if reports {
                         let log = step_log_with_name(
                             &step_backend_id,
@@ -2915,7 +3307,11 @@ where
                         self.emit_step_log(&log);
                         step_logs.push(log);
                     }
-                    state.apply(&step_context_id, &result);
+                    if cancelled {
+                        state.apply_cancelled(&step_context_id, &result);
+                    } else {
+                        state.apply(&step_context_id, &result);
+                    }
                     results.push(result);
                     continue;
                 }
@@ -2933,14 +3329,41 @@ where
                         &mut timeline_order,
                     );
                 }
-                let result = StepExecutionResult {
-                    exit_code: 0,
-                    state: StepCommandState::default(),
-                    skipped: true,
-                    failure_ignored: false,
-                    stdout: String::new(),
-                    stderr: String::new(),
+                let cancelled = step_cancellation_guard.is_cancelled();
+                let result = if let Some(message) = embedded_environment_error.clone() {
+                    step_preparation_failure(message)
+                } else if cancelled {
+                    StepExecutionResult {
+                        exit_code: 1,
+                        state: StepCommandState::default(),
+                        skipped: false,
+                        failure_ignored: false,
+                        stdout: String::new(),
+                        stderr: "Step was cancelled while evaluating its condition".to_string(),
+                    }
+                } else {
+                    StepExecutionResult {
+                        exit_code: 0,
+                        state: StepCommandState::default(),
+                        skipped: true,
+                        failure_ignored: false,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    }
                 };
+                if let Some(frame) = composite_frames.last_mut() {
+                    frame.cancelled |= cancelled;
+                    if step.reports_timeline_start() {
+                        frame.append_inner(
+                            &display_name,
+                            &step_log_prelude(step, &step_state),
+                            &result,
+                            state.step_debug(),
+                        );
+                    } else {
+                        frame.absorb(&result);
+                    }
+                }
                 if reports {
                     let log = step_log_with_name(
                         &step_backend_id,
@@ -2955,11 +3378,28 @@ where
                     self.emit_step_log(&log);
                     step_logs.push(log);
                 }
-                state.apply(&step_context_id, &result);
+                if cancelled {
+                    state.apply_cancelled(&step_context_id, &result);
+                } else {
+                    state.apply(&step_context_id, &result);
+                }
                 results.push(result);
                 continue;
             }
+            let (prepared_action_step, action_prepare_error) =
+                match prepare_executable_action_inputs(step, &step_state) {
+                    Ok(Some(prepared)) => (prepared, None),
+                    Ok(None) => ((*step).clone(), None),
+                    Err(error) => (
+                        (*step).clone(),
+                        Some(anyhow::anyhow!(
+                            "Step '{display_name}' action inputs could not be evaluated: {error}"
+                        )),
+                    ),
+                };
+            let step = &prepared_action_step;
             let mut post_registered = false;
+            let mut diagnostics_reported = false;
             // The pre step's own condition (`runs.pre-if`), evaluated once.
             // False skips the pre while main still runs; unevaluable fails
             // the step without running main or registering post — upstream's
@@ -2967,18 +3407,26 @@ where
             // registered (`src/Runner.Worker/ActionRunner.cs` registers post from
             // a pre or main that runs, and a failed pre fails the job while
             // main skips).
-            let pre_condition = match step {
-                ExecutableStep::JavaScript { invocation, .. }
-                    if invocation.pre_container_path.is_some() =>
-                {
-                    Some(step_state.evaluate_post_condition(invocation.pre_condition.as_deref()))
+            let pre_condition = if action_prepare_error.is_some() {
+                None
+            } else {
+                match step {
+                    ExecutableStep::JavaScript { invocation, .. }
+                        if invocation.pre_container_path.is_some() =>
+                    {
+                        Some(
+                            step_state.evaluate_post_condition(invocation.pre_condition.as_deref()),
+                        )
+                    }
+                    ExecutableStep::Docker { invocation, .. }
+                        if invocation.pre_entrypoint.is_some() =>
+                    {
+                        Some(
+                            step_state.evaluate_post_condition(invocation.pre_condition.as_deref()),
+                        )
+                    }
+                    _ => None,
                 }
-                ExecutableStep::Docker { invocation, .. }
-                    if invocation.pre_entrypoint.is_some() =>
-                {
-                    Some(step_state.evaluate_post_condition(invocation.pre_condition.as_deref()))
-                }
-                _ => None,
             };
             if let Some(Err(error)) = pre_condition.as_ref() {
                 let message =
@@ -2993,7 +3441,7 @@ where
                         &mut timeline_order,
                     );
                 }
-                let result = StepExecutionResult {
+                let mut result = StepExecutionResult {
                     exit_code: 1,
                     state: StepCommandState::default(),
                     skipped: false,
@@ -3001,7 +3449,26 @@ where
                     stdout: String::new(),
                     stderr: message,
                 };
+                let cancelled = step_cancellation_guard.is_cancelled();
+                if let Some(error) = step_cancellation_guard.condition_error() {
+                    result.stderr.push_str(&format!(
+                        "\nStep cancellation condition could not be evaluated: {error}"
+                    ));
+                }
+                add_input_diagnostics(&mut result, step.input_diagnostics());
+                state.apply_command_state(&step_context_id, &result);
+                if result.exit_code != 0
+                    && !cancelled
+                    && step_result_continue_on_error(
+                        step,
+                        &state,
+                        deferred_continue_on_error.as_ref(),
+                    )
+                {
+                    result.failure_ignored = true;
+                }
                 if let Some(frame) = composite_frames.last_mut() {
+                    frame.cancelled |= cancelled;
                     // An unevaluable inner pre-condition still fails the
                     // composite: without the absorb the umbrella would
                     // render exit 0 while the job fails.
@@ -3029,7 +3496,11 @@ where
                     self.emit_step_log(&log);
                     step_logs.push(log);
                 }
-                state.apply(&step_context_id, &result);
+                if cancelled {
+                    state.apply_cancelled_outcome(&step_context_id);
+                } else {
+                    state.apply_step_outcome(&step_context_id, &result);
+                }
                 results.push(result);
                 continue;
             }
@@ -3066,7 +3537,6 @@ where
                 // Whether the pre below was killed by cancellation, so its
                 // record carries the `cancelled` outcome (F5) instead of
                 // `failure`.
-                let mut pre_cancelled = false;
                 let mut result = match self.execute_javascript_action_in_started_container(
                     container,
                     step_id,
@@ -3085,8 +3555,7 @@ where
                     // early return that would also drop the post drain below.
                     // The post stays registered: the pre ran, which is what
                     // registers it upstream (`src/Runner.Worker/ActionRunner.cs`).
-                    Err(error) if state.is_cancelled() => {
-                        pre_cancelled = true;
+                    Err(error) if step_cancellation_guard.is_cancelled() => {
                         eprintln!("Step '{display_name}' pre step was cancelled: {error:#}");
                         StepExecutionResult {
                             exit_code: 1,
@@ -3121,11 +3590,41 @@ where
                         }
                     }
                 };
+                let pre_cancelled = step_cancellation_guard.is_cancelled();
+                if let Some(message) = embedded_environment_error.as_ref() {
+                    if result.exit_code == 0 {
+                        result.exit_code = 1;
+                    }
+                    if !result.stderr.is_empty() {
+                        result.stderr.push('\n');
+                    }
+                    result.stderr.push_str(message);
+                }
+                if let Some(error) = step_cancellation_guard.condition_error() {
+                    result.stderr.push_str(&format!(
+                        "\nStep cancellation condition could not be evaluated: {error}"
+                    ));
+                }
+                if !diagnostics_reported && !step.input_diagnostics().is_empty() {
+                    add_input_diagnostics(&mut result, step.input_diagnostics());
+                    diagnostics_reported = true;
+                }
+                state.apply_command_state(step_id, &result);
                 let failed = result.exit_code != 0;
-                if failed && *continue_on_error && !state.is_cancelled() {
+                if pre_cancelled {
+                    result.exit_code = 1;
+                    result.failure_ignored = false;
+                } else if failed
+                    && step_result_continue_on_error(
+                        step,
+                        &state,
+                        deferred_continue_on_error.as_ref(),
+                    )
+                {
                     result.failure_ignored = true;
                 }
                 if let Some(frame) = composite_frames.last_mut() {
+                    frame.cancelled |= pre_cancelled;
                     frame.append_inner(
                         &display_name,
                         &step_log_prelude(step, &step_state),
@@ -3147,9 +3646,9 @@ where
                     step_logs.push(log);
                 }
                 if pre_cancelled {
-                    state.apply_cancelled(step_id, &result);
+                    state.apply_cancelled_outcome(step_id);
                 } else {
-                    state.apply(step_id, &result);
+                    state.apply_step_outcome(step_id, &result);
                 }
                 executed_physical_actions += 1;
                 results.push(result);
@@ -3192,7 +3691,6 @@ where
                 };
                 let mut pre_invocation = invocation.clone();
                 pre_invocation.entrypoint = Some(pre_entrypoint.to_string());
-                let mut pre_cancelled = false;
                 let mut result = match self.execute_docker_action_in_started_container(
                     container,
                     step_id,
@@ -3202,8 +3700,7 @@ where
                     effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
                 ) {
                     Ok(result) => result,
-                    Err(error) if state.is_cancelled() => {
-                        pre_cancelled = true;
+                    Err(error) if step_cancellation_guard.is_cancelled() => {
                         eprintln!("Step '{display_name}' pre step was cancelled: {error:#}");
                         StepExecutionResult {
                             exit_code: 1,
@@ -3232,11 +3729,41 @@ where
                         }
                     }
                 };
+                let pre_cancelled = step_cancellation_guard.is_cancelled();
+                if let Some(message) = embedded_environment_error.as_ref() {
+                    if result.exit_code == 0 {
+                        result.exit_code = 1;
+                    }
+                    if !result.stderr.is_empty() {
+                        result.stderr.push('\n');
+                    }
+                    result.stderr.push_str(message);
+                }
+                if let Some(error) = step_cancellation_guard.condition_error() {
+                    result.stderr.push_str(&format!(
+                        "\nStep cancellation condition could not be evaluated: {error}"
+                    ));
+                }
+                if !diagnostics_reported && !step.input_diagnostics().is_empty() {
+                    add_input_diagnostics(&mut result, step.input_diagnostics());
+                    diagnostics_reported = true;
+                }
+                state.apply_command_state(step_id, &result);
                 let failed = result.exit_code != 0;
-                if failed && *continue_on_error && !state.is_cancelled() {
+                if pre_cancelled {
+                    result.exit_code = 1;
+                    result.failure_ignored = false;
+                } else if failed
+                    && step_result_continue_on_error(
+                        step,
+                        &state,
+                        deferred_continue_on_error.as_ref(),
+                    )
+                {
                     result.failure_ignored = true;
                 }
                 if let Some(frame) = composite_frames.last_mut() {
+                    frame.cancelled |= pre_cancelled;
                     frame.append_inner(
                         &display_name,
                         &step_log_prelude(step, &step_state),
@@ -3258,9 +3785,9 @@ where
                     step_logs.push(log);
                 }
                 if pre_cancelled {
-                    state.apply_cancelled(step_id, &result);
+                    state.apply_cancelled_outcome(step_id);
                 } else {
-                    state.apply(step_id, &result);
+                    state.apply_step_outcome(step_id, &result);
                 }
                 executed_physical_actions += 1;
                 results.push(result);
@@ -3332,7 +3859,6 @@ where
                         .map(|frame| frame.display_name.clone()),
                 }));
             }
-            let step_state = state.with_step_action(&step_context_id);
             let main_started_at = if composite_frames.is_empty() && step.reports_timeline_start() {
                 self.emit_step_started(step_backend_id.clone(), &display_name, &mut timeline_order)
             } else {
@@ -3371,211 +3897,262 @@ where
             // security-relevant).
             let mut script_plan: Option<ScriptStepPlan> = None;
             let mut streamed_masks: Vec<String> = Vec::new();
-            let result = (|| match step {
-                // Proof: the outer step dispatch matches boundary steps in
-                // earlier arms that always `continue`, so execution only sees
-                // non-boundary steps.
-                #[allow(clippy::unreachable, reason = "boundaries dispatch before execution")]
-                ExecutableStep::CompositeStart { .. } | ExecutableStep::CompositeEnd { .. } => {
-                    unreachable!("composite boundary steps are handled before execution")
-                }
-                ExecutableStep::Checkout(plan) => {
-                    self.execute_checkout_step(container, plan, &step_state)
-                }
-                ExecutableStep::Script(step) => {
-                    let step = step_state.resolve_script_step(step)?;
-                    let test_runner = test_command_kind(&step.script);
-                    let test_started = test_runner.map(|_| Instant::now());
-                    let compiler = compile_command_kind(&step.script);
-                    let linker = link_command_kind(&step.script);
-                    let plan =
-                        ScriptStepPlan::prepare_with_path(&step, temp_host, &step_state.path)?;
-                    let plan = script_plan.insert(plan);
-                    let mut env = step_state.step_env(&[]);
-                    env.extend(step.env.iter().cloned());
-                    env.extend(plan.env.iter().cloned());
-                    let secret_masks = step_state.secret_masks(&self.secret_masks);
-                    let exec_args = container.prepare_exec_script_args(
-                        &plan.script_container_path,
-                        plan.shell,
-                        &plan.working_directory_container,
-                        &env,
-                        &secret_masks,
-                    )?;
-                    let live_sender = self.step_log_sender.clone();
-                    let mut on_output = |_: CommandStream, line: &str| {
-                        // Mask-only: the throwaway scope keeps streaming from
-                        // consuming the job's telemetry once-flags.
-                        streamed_masks.extend(
-                            parse_workflow_commands_with_job_env(
+            let result = if let Some(error) = action_prepare_error {
+                Err(error)
+            } else {
+                (|| match step {
+                    // Boundary steps are consumed by the loop before this
+                    // execution match; report a typed state error if that
+                    // invariant ever changes instead of panicking.
+                    ExecutableStep::CompositeStart { .. }
+                    | ExecutableStep::StepContinueOnError { .. }
+                    | ExecutableStep::CompositeEnd { .. } => {
+                        bail!("composite boundary step reached ordinary step execution")
+                    }
+                    ExecutableStep::Checkout(plan) => {
+                        self.execute_checkout_step(container, plan, &step_state)
+                    }
+                    ExecutableStep::Script(step) => {
+                        let step = step_state.resolve_script_step(step)?;
+                        let test_runner = test_command_kind(&step.script);
+                        let test_started = test_runner.map(|_| Instant::now());
+                        let compiler = compile_command_kind(&step.script);
+                        let linker = link_command_kind(&step.script);
+                        let plan =
+                            ScriptStepPlan::prepare_with_path(&step, temp_host, &step_state.path)?;
+                        let plan = script_plan.insert(plan);
+                        let mut env = step_state.step_env(&[]);
+                        env.extend(step.env.iter().cloned());
+                        env.extend(plan.env.iter().cloned());
+                        let secret_masks = step_state.secret_masks(&self.secret_masks);
+                        let is_action_step = !composite_frames.is_empty();
+                        let exec_args = container.prepare_exec_script_args_for_step(
+                            &plan.script_container_path,
+                            plan.shell.clone(),
+                            &plan.working_directory_container,
+                            &env,
+                            &secret_masks,
+                            crate::container::ScriptExecOptions {
+                                is_action_step,
+                                runtime_path: self.job_container_runtime_path.as_deref(),
+                            },
+                        )?;
+                        let live_sender = self.step_log_sender.clone();
+                        let mut on_output = |_: CommandStream, line: &str| {
+                            // Mask-only: the throwaway scope keeps streaming from
+                            // consuming the job's telemetry once-flags.
+                            streamed_masks.extend(
+                                parse_workflow_commands_with_job_env(
+                                    line,
+                                    &env,
+                                    &mut DeprecatedCommandScope::default(),
+                                )
+                                .masks,
+                            );
+                            emit_live_step_log(
+                                &live_sender,
+                                &live_step_id,
+                                &live_display_name,
+                                live_order,
+                                &live_started_at,
                                 line,
+                                &streamed_masks,
+                            );
+                        };
+                        let compile_started = match (compiler, self.lifecycle_telemetry.as_ref()) {
+                            (Some(compiler), Some(telemetry)) => {
+                                telemetry.emit_compile_start(compiler);
+                                Some(Instant::now())
+                            }
+                            _ => None,
+                        };
+                        let link_started = match (linker, self.lifecycle_telemetry.as_ref()) {
+                            (Some(_), Some(_)) => Some(Instant::now()),
+                            _ => None,
+                        };
+                        let step_timeout =
+                            effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes);
+                        // Engine-API fast path for run steps in containers: the
+                        // same command, environment, and workdir the CLI leg
+                        // below receives, served with zero subprocesses when
+                        // the daemon answers. Any API failure (or a non-host
+                        // runner) runs the historical CLI call unchanged.
+                        let exec_config = crate::docker::engine::ExecConfig {
+                            cmd: plan.shell.command_args_for_step(
+                                &plan.script_container_path,
+                                is_action_step,
+                            )?,
+                            env: container.script_exec_env_with_runtime_path(
                                 &env,
-                                &mut DeprecatedCommandScope::default(),
-                            )
-                            .masks,
+                                self.job_container_runtime_path.as_deref(),
+                            ),
+                            workdir: plan.working_directory_container.clone(),
+                        };
+                        let route = crate::docker::Docker::job(&mut self.runner).try_exec_script(
+                            &container.name,
+                            exec_args.args(),
+                            &exec_config,
+                            step_timeout,
+                            &mut on_output,
                         );
-                        emit_live_step_log(
-                            &live_sender,
-                            &live_step_id,
-                            &live_display_name,
-                            live_order,
-                            &live_started_at,
-                            line,
-                            &streamed_masks,
-                        );
-                    };
-                    let compile_started = match (compiler, self.lifecycle_telemetry.as_ref()) {
-                        (Some(compiler), Some(telemetry)) => {
-                            telemetry.emit_compile_start(compiler);
-                            Some(Instant::now())
+                        let step_result = match route {
+                            crate::docker::client::ScriptExecRoute::Served(result)
+                            | crate::docker::client::ScriptExecRoute::Expired(result) => result,
+                            crate::docker::client::ScriptExecRoute::UseCli => {
+                                self.runner.run_streaming_timeout_with_env(
+                                    "docker",
+                                    exec_args.args(),
+                                    exec_args.process_env(),
+                                    step_timeout,
+                                    &mut on_output,
+                                )?
+                            }
+                        };
+                        if let (Some(compiler), Some(compile_started), Some(telemetry)) =
+                            (compiler, compile_started, self.lifecycle_telemetry.as_ref())
+                        {
+                            telemetry.emit_compile_end(
+                                compiler,
+                                step_result.code,
+                                compile_started.elapsed(),
+                            );
                         }
-                        _ => None,
-                    };
-                    let link_started = match (linker, self.lifecycle_telemetry.as_ref()) {
-                        (Some(_), Some(_)) => Some(Instant::now()),
-                        _ => None,
-                    };
-                    let step_timeout =
-                        effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes);
-                    // Engine-API fast path for run steps in containers: the
-                    // same command, environment, and workdir the CLI leg
-                    // below receives, served with zero subprocesses when
-                    // the daemon answers. Any API failure (or a non-host
-                    // runner) runs the historical CLI call unchanged.
-                    let exec_config = crate::docker::engine::ExecConfig {
-                        cmd: plan.shell.command_args(&plan.script_container_path),
-                        env: container.script_exec_env(&env),
-                        workdir: plan.working_directory_container.clone(),
-                    };
-                    let route = crate::docker::Docker::job(&mut self.runner).try_exec_script(
-                        &container.name,
-                        exec_args.args(),
-                        &exec_config,
-                        step_timeout,
-                        &mut on_output,
-                    );
-                    let step_result = match route {
-                        crate::docker::client::ScriptExecRoute::Served(result)
-                        | crate::docker::client::ScriptExecRoute::Expired(result) => result,
-                        crate::docker::client::ScriptExecRoute::UseCli => {
-                            self.runner.run_streaming_timeout_with_env(
-                                "docker",
-                                exec_args.args(),
-                                exec_args.process_env(),
-                                step_timeout,
-                                &mut on_output,
-                            )?
+                        if let (Some(runner_kind), Some(link_started), Some(telemetry)) =
+                            (linker, link_started, self.lifecycle_telemetry.as_ref())
+                        {
+                            telemetry.emit_link_end(
+                                runner_kind,
+                                step_result.code,
+                                link_started.elapsed(),
+                            );
                         }
-                    };
-                    if let (Some(compiler), Some(compile_started), Some(telemetry)) =
-                        (compiler, compile_started, self.lifecycle_telemetry.as_ref())
-                    {
-                        telemetry.emit_compile_end(
-                            compiler,
-                            step_result.code,
-                            compile_started.elapsed(),
-                        );
+                        if let (Some(test_runner), Some(test_started), Some(telemetry)) =
+                            (test_runner, test_started, self.lifecycle_telemetry.as_ref())
+                        {
+                            telemetry.emit_test_end(
+                                test_runner,
+                                step_result.code,
+                                test_started.elapsed(),
+                            );
+                        }
+                        let mut command_state = plan.collect_state()?;
+                        command_state.merge(parse_workflow_commands_from_output(
+                            &step_result.stdout,
+                            &step_result.stderr,
+                            &env,
+                            &mut self.deprecated_command_scope,
+                        ));
+                        Ok(apply_command_result(StepExecutionResult {
+                            exit_code: step_result.code,
+                            state: command_state,
+                            skipped: false,
+                            failure_ignored: false,
+                            stdout: step_result.stdout,
+                            stderr: step_result.stderr,
+                        }))
                     }
-                    if let (Some(runner_kind), Some(link_started), Some(telemetry)) =
-                        (linker, link_started, self.lifecycle_telemetry.as_ref())
-                    {
-                        telemetry.emit_link_end(
-                            runner_kind,
-                            step_result.code,
-                            link_started.elapsed(),
-                        );
-                    }
-                    if let (Some(test_runner), Some(test_started), Some(telemetry)) =
-                        (test_runner, test_started, self.lifecycle_telemetry.as_ref())
-                    {
-                        telemetry.emit_test_end(
-                            test_runner,
-                            step_result.code,
-                            test_started.elapsed(),
-                        );
-                    }
-                    let mut command_state = plan.collect_state()?;
-                    command_state.merge(parse_workflow_commands_from_output(
-                        &step_result.stdout,
-                        &step_result.stderr,
-                        &env,
-                        &mut self.deprecated_command_scope,
-                    ));
-                    Ok(apply_command_result(StepExecutionResult {
-                        exit_code: step_result.code,
-                        state: command_state,
+                    ExecutableStep::JavaScript {
+                        step_id,
+                        invocation,
+                        timeout_minutes,
+                        ..
+                    } => self.execute_javascript_action_in_started_container(
+                        container,
+                        step_id,
+                        invocation,
+                        &invocation.main_container_path,
+                        &step_state.action_state_env(step_id),
+                        temp_host,
+                        &step_state,
+                        effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
+                    ),
+                    ExecutableStep::Docker {
+                        step_id,
+                        invocation,
+                        timeout_minutes,
+                        ..
+                    } => self.execute_docker_action_in_started_container(
+                        container,
+                        step_id,
+                        invocation,
+                        temp_host,
+                        &step_state,
+                        effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
+                    ),
+                    ExecutableStep::Native {
+                        step_id,
+                        invocation,
+                        timeout_minutes,
+                        ..
+                    } => self.execute_native_action_in_started_container(
+                        container,
+                        step_id,
+                        invocation,
+                        &step_state,
+                        effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
+                    ),
+                    ExecutableStep::CompositeOutputs { outputs, .. } => Ok(StepExecutionResult {
+                        exit_code: 0,
+                        state: StepCommandState {
+                            outputs: step_state
+                                .evaluate_named_outputs(outputs)?
+                                .into_iter()
+                                .collect(),
+                            ..StepCommandState::default()
+                        },
                         skipped: false,
                         failure_ignored: false,
-                        stdout: step_result.stdout,
-                        stderr: step_result.stderr,
-                    }))
-                }
-                ExecutableStep::JavaScript {
-                    step_id,
-                    invocation,
-                    timeout_minutes,
-                    ..
-                } => self.execute_javascript_action_in_started_container(
-                    container,
-                    step_id,
-                    invocation,
-                    &invocation.main_container_path,
-                    &step_state.action_state_env(step_id),
-                    temp_host,
-                    &step_state,
-                    effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
-                ),
-                ExecutableStep::Docker {
-                    step_id,
-                    invocation,
-                    timeout_minutes,
-                    ..
-                } => self.execute_docker_action_in_started_container(
-                    container,
-                    step_id,
-                    invocation,
-                    temp_host,
-                    &step_state,
-                    effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
-                ),
-                ExecutableStep::Native {
-                    step_id,
-                    invocation,
-                    timeout_minutes,
-                    ..
-                } => self.execute_native_action_in_started_container(
-                    container,
-                    step_id,
-                    invocation,
-                    &step_state,
-                    effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
-                ),
-                ExecutableStep::CompositeOutputs { outputs, .. } => Ok(StepExecutionResult {
-                    exit_code: 0,
-                    state: StepCommandState {
-                        outputs: step_state.evaluate_named_outputs(outputs)?,
-                        ..StepCommandState::default()
-                    },
-                    skipped: false,
-                    failure_ignored: false,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                }),
-            })();
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    }),
+                })()
+            };
 
             match result {
                 Ok(mut result) => {
+                    if !diagnostics_reported {
+                        add_input_diagnostics(&mut result, step.input_diagnostics());
+                    }
+                    if let Some(message) = embedded_environment_error.as_ref() {
+                        if result.exit_code == 0 {
+                            result.exit_code = 1;
+                        }
+                        if !result.stderr.is_empty() {
+                            result.stderr.push('\n');
+                        }
+                        result.stderr.push_str(message);
+                    }
+                    let cancelled = step_cancellation_guard.is_cancelled();
+                    if let Some(error) = step_cancellation_guard.condition_error() {
+                        if !result.stderr.is_empty() {
+                            result.stderr.push('\n');
+                        }
+                        result.stderr.push_str(&format!(
+                            "Step cancellation condition could not be evaluated: {error}"
+                        ));
+                    }
+                    if cancelled {
+                        result.exit_code = 1;
+                        result.failure_ignored = false;
+                    }
+                    // Runner processes command files and merges the step's
+                    // outputs before evaluating `continue-on-error`. This
+                    // lets a failing step base COE on its own GITHUB_OUTPUT.
+                    state.apply_command_state(&step_context_id, &result);
                     let failed = result.exit_code != 0;
-                    // `continue-on-error` is gated on not-cancelled. Without
-                    // this gate a cancelled job promoted its killed step's
-                    // conclusion to success, `success()` stayed true, and every
-                    // remaining step was dispatched — the "a cancelled job keeps
-                    // running ordinary steps" defect, removed at its root rather
-                    // than by a flag check in the step loop.
-                    if failed && step.continue_on_error() && !state.is_cancelled() {
+                    if failed
+                        && !cancelled
+                        && !matches!(step, ExecutableStep::CompositeOutputs { .. })
+                        && step_result_continue_on_error(
+                            step,
+                            &state,
+                            deferred_continue_on_error.as_ref(),
+                        )
+                    {
                         result.failure_ignored = true;
                     }
                     if let Some(frame) = composite_frames.last_mut() {
+                        frame.cancelled |= cancelled;
                         // Bookkeeping steps (CompositeOutputs) contribute state
                         // but never a visible section — otherwise their raw
                         // step id leaks as a `##[group]<uuid>` header.
@@ -3603,7 +4180,14 @@ where
                         self.emit_step_log(&log);
                         step_logs.push(log);
                     }
-                    state.apply(&step_context_id, &result);
+                    if matches!(step, ExecutableStep::CompositeOutputs { .. }) {
+                        // Composite ProcessOutputs mutates the wrapper's
+                        // output object but is not a child step outcome.
+                    } else if cancelled {
+                        state.apply_cancelled_outcome(&step_context_id);
+                    } else {
+                        state.apply_step_outcome(&step_context_id, &result);
+                    }
                     if step.reports_timeline_start() {
                         executed_physical_actions += 1;
                     }
@@ -3627,10 +4211,43 @@ where
                     // `RunStepAsync` OperationCanceledException catch): a step
                     // killed by cancellation records `cancelled` (F5) and the
                     // loop continues likewise.
-                    let cancelled = state.is_cancelled();
+                    let cancelled = step_cancellation_guard.is_cancelled();
+                    let mut salvaged_state = script_plan
+                        .as_ref()
+                        .and_then(|plan| plan.collect_state().ok())
+                        .unwrap_or_default();
+                    salvaged_state.masks.extend(streamed_masks.iter().cloned());
+                    let mut result = StepExecutionResult {
+                        exit_code: 1,
+                        state: salvaged_state,
+                        skipped: false,
+                        failure_ignored: false,
+                        stdout: String::new(),
+                        stderr: format!("{error:#}"),
+                    };
+                    if !diagnostics_reported {
+                        add_input_diagnostics(&mut result, step.input_diagnostics());
+                    }
+                    if let Some(message) = embedded_environment_error.as_ref() {
+                        result.stderr.push('\n');
+                        result.stderr.push_str(message);
+                    }
+                    if let Some(condition_error) = step_cancellation_guard.condition_error() {
+                        result.stderr.push_str(&format!(
+                            "\nStep cancellation condition could not be evaluated: {condition_error}"
+                        ));
+                    }
+                    state.apply_command_state(&step_context_id, &result);
+                    let continue_on_error = !cancelled
+                        && !matches!(step, ExecutableStep::CompositeOutputs { .. })
+                        && step_result_continue_on_error(
+                            step,
+                            &state,
+                            deferred_continue_on_error.as_ref(),
+                        );
                     if cancelled {
                         eprintln!("Step '{display_name}' was cancelled: {error:#}");
-                    } else if step.continue_on_error() {
+                    } else if continue_on_error {
                         eprintln!(
                             "Step '{display_name}' failed with an execution error but continue-on-error is set: {error:#}"
                         );
@@ -3639,24 +4256,9 @@ where
                             "Step '{display_name}' failed with an execution error: {error:#}"
                         );
                     }
-                    let mut salvaged_state = script_plan
-                        .as_ref()
-                        .and_then(|plan| plan.collect_state().ok())
-                        .unwrap_or_default();
-                    salvaged_state.masks.extend(streamed_masks.iter().cloned());
-                    let result = StepExecutionResult {
-                        exit_code: 1,
-                        state: salvaged_state,
-                        skipped: false,
-                        // `continue-on-error` stays gated on
-                        // not-cancelled: a killed step never reports
-                        // success, which is what keeps `success()` false
-                        // for every re-evaluated remaining step.
-                        failure_ignored: step.continue_on_error() && !cancelled,
-                        stdout: String::new(),
-                        stderr: format!("{error:#}"),
-                    };
+                    result.failure_ignored = continue_on_error;
                     if let Some(frame) = composite_frames.last_mut() {
+                        frame.cancelled |= cancelled;
                         if step.reports_timeline_start() {
                             frame.append_inner(
                                 &display_name,
@@ -3682,9 +4284,13 @@ where
                         step_logs.push(log);
                     }
                     if cancelled {
-                        state.apply_cancelled(&step_context_id, &result);
+                        state.apply_cancelled_outcome(&step_context_id);
                     } else {
-                        state.apply(&step_context_id, &result);
+                        if matches!(step, ExecutableStep::CompositeOutputs { .. }) {
+                            // Output processing has no standalone outcome.
+                        } else {
+                            state.apply_step_outcome(&step_context_id, &result);
+                        }
                     }
                     if step.reports_timeline_start() {
                         executed_physical_actions += 1;
@@ -3706,16 +4312,34 @@ where
             // this pop, so `pop` is `Some`.
             #[allow(clippy::expect_used, reason = "loop holds at least two frames")]
             let nested = composite_frames.pop().expect("nested frame");
-            let nested_result = nested.umbrella_result(state.is_cancelled());
+            let cancellation_guard = composite_cancellation_guards.pop().flatten();
+            if nested.action_scope_pushed {
+                state.pop_composite_action_scope(&nested.step_id);
+            }
+            state.pop_composite(&nested.step_id);
+            let nested_cancelled = nested.cancelled
+                || cancellation_guard
+                    .as_ref()
+                    .is_some_and(|guard| guard.is_cancelled());
+            let nested_result = nested.umbrella_result(nested_cancelled, false);
             if let Some(parent) = composite_frames.last_mut() {
                 parent.merge_nested(nested, &nested_result);
             }
         }
         if let Some(mut frame) = composite_frames.pop() {
+            let cancellation_guard = composite_cancellation_guards.pop().flatten();
+            if frame.action_scope_pushed {
+                state.pop_composite_action_scope(&frame.step_id);
+            }
+            state.pop_composite(&frame.step_id);
             if frame.exit_code == 0 {
                 frame.exit_code = 1;
             }
-            let umbrella = frame.umbrella_result(state.is_cancelled());
+            let frame_cancelled = frame.cancelled
+                || cancellation_guard
+                    .as_ref()
+                    .is_some_and(|guard| guard.is_cancelled());
+            let umbrella = frame.umbrella_result(frame_cancelled, false);
             frame.failure_ignored = umbrella.failure_ignored;
             let umbrella_id = frame.step_id.clone();
             state.apply(&umbrella_id, &umbrella);
@@ -3729,7 +4353,7 @@ where
             self.emit_step_log(&log);
             step_logs.push(log);
         }
-        let post_actions = drain_post_stack(post_actions, &state);
+        let post_actions = drain_post_stack(post_actions);
         // Every post step's condition above was evaluated against the job's
         // real status, so `always()` and `cancelled()` posts are selected on a
         // cancelled job. Their *execution* then runs under a fresh unlinked
@@ -3753,12 +4377,13 @@ where
         // only consecutive natives group — but every entry still executes in
         // the stack's LIFO position.
         let mut post_iter = post_actions.into_iter().peekable();
-        while let Some(item) = post_iter.next() {
-            let post_action = match item {
+        while let Some(post_action) = post_iter.next() {
+            let post_action = match evaluate_post_action(post_action, &state) {
+                None => continue,
                 // The failed record keeps its LIFO position; the drain
                 // continues with the remaining posts, and the failed result
                 // flips the job conclusion like any step failure.
-                PostDrainItem::ConditionFailed { action, message } => {
+                Some(PostDrainItem::ConditionFailed { action, message }) => {
                     let failed_step_id = uuid::Uuid::new_v4().to_string();
                     let failed_name = post_step_display_name(action.display_name());
                     let failed_started_at = self.emit_step_started(
@@ -3797,12 +4422,12 @@ where
                     );
                     self.emit_step_log(&log);
                     step_logs.push(log);
-                    state.apply(&failed_step_id, &result);
+                    state.apply_post(&failed_step_id, &result);
                     executed_physical_actions += 1;
                     results.push(result);
                     continue;
                 }
-                PostDrainItem::Run(post_action) => post_action,
+                Some(PostDrainItem::Run(post_action)) => post_action,
             };
             let first = match post_action {
                 PostAction::JavaScript(post_action) => {
@@ -3843,7 +4468,7 @@ where
                             );
                             self.emit_step_log(&log);
                             step_logs.push(log);
-                            state.apply(&js_post_step_id, &result);
+                            state.apply_post(&js_post_step_id, &result);
                             executed_physical_actions += 1;
                             results.push(result);
                         }
@@ -3879,7 +4504,7 @@ where
                             );
                             self.emit_step_log(&log);
                             step_logs.push(log);
-                            state.apply(&js_post_step_id, &result);
+                            state.apply_post(&js_post_step_id, &result);
                             executed_physical_actions += 1;
                             results.push(result);
                         }
@@ -3938,7 +4563,7 @@ where
                             );
                             self.emit_step_log(&log);
                             step_logs.push(log);
-                            state.apply(&docker_post_step_id, &result);
+                            state.apply_post(&docker_post_step_id, &result);
                             executed_physical_actions += 1;
                             results.push(result);
                         }
@@ -3972,7 +4597,7 @@ where
                             );
                             self.emit_step_log(&log);
                             step_logs.push(log);
-                            state.apply(&docker_post_step_id, &result);
+                            state.apply_post(&docker_post_step_id, &result);
                             executed_physical_actions += 1;
                             results.push(result);
                         }
@@ -3983,20 +4608,13 @@ where
             };
             let mut group = vec![first];
             if let Some(umbrella) = group[0].umbrella_display.clone() {
-                while post_iter.peek().is_some_and(|next| {
+                while let Some(PostAction::Native(next)) = post_iter.next_if(|next| {
                     matches!(
                         next,
-                        PostDrainItem::Run(PostAction::Native(candidate))
+                        PostAction::Native(candidate)
                             if candidate.umbrella_display.as_deref() == Some(umbrella.as_str())
                     )
                 }) {
-                    // Proof: the `while` condition peeked `Some` matching this
-                    // exact pattern with no iterator mutation between peek
-                    // and `next`, so `next` returns it.
-                    #[allow(clippy::unreachable, reason = "peek just matched this pattern")]
-                    let Some(PostDrainItem::Run(PostAction::Native(next))) = post_iter.next() else {
-                        unreachable!("peeked a native post sharing the umbrella");
-                    };
                     group.push(next);
                 }
             }
@@ -4025,23 +4643,71 @@ where
                 stdout: String::new(),
                 stderr: String::new(),
             };
-            for member in &group {
+            for (member_index, member) in group.iter().enumerate() {
+                let member_action = PostAction::Native(member.clone());
+                let member_action = if member_index == 0 {
+                    Some(PostDrainItem::Run(member_action))
+                } else {
+                    evaluate_post_action(member_action, &state)
+                };
+                let member_action = match member_action {
+                    None => continue,
+                    Some(PostDrainItem::Run(PostAction::Native(member))) => member,
+                    Some(PostDrainItem::ConditionFailed { action, message }) => {
+                        let failed_step_id = uuid::Uuid::new_v4().to_string();
+                        let result = StepExecutionResult {
+                            exit_code: 1,
+                            state: StepCommandState::default(),
+                            skipped: false,
+                            failure_ignored: false,
+                            stdout: String::new(),
+                            stderr: message,
+                        };
+                        if umbrella_group {
+                            combined_lines.push(format!("##[group]Post {}", action.display_name()));
+                            if let PostAction::Native(post) = &action {
+                                combined_lines
+                                    .extend(native_post_log_prelude(&post.invocation, &state));
+                            }
+                            combined_lines.push("##[endgroup]".to_string());
+                        }
+                        combined_lines.extend(rendered_output_lines_with_policy(
+                            &result.stdout,
+                            &result.stderr,
+                            state.step_debug(),
+                            result.state.allow_unsecure_stop_command_tokens,
+                        ));
+                        if combined.exit_code == 0 {
+                            combined.exit_code = result.exit_code;
+                        }
+                        combined.state.merge(result.state.clone());
+                        state.apply_post(&failed_step_id, &result);
+                        executed_physical_actions += 1;
+                        results.push(result);
+                        continue;
+                    }
+                    Some(PostDrainItem::Run(PostAction::JavaScript(_)))
+                    | Some(PostDrainItem::Run(PostAction::Docker(_))) => {
+                        bail!("non-native action reached grouped native post execution")
+                    }
+                };
                 let result = self.execute_native_post_action(
                     container,
-                    &member.step_id,
-                    &member.invocation,
+                    &member_action.step_id,
+                    &member_action.invocation,
                     &state,
-                    effective_step_timeout(member.timeout_minutes, self.job_timeout_minutes),
+                    effective_step_timeout(member_action.timeout_minutes, self.job_timeout_minutes),
                 );
                 match result {
                     Ok(mut result) => {
-                        if result.exit_code != 0 && member.continue_on_error {
+                        if result.exit_code != 0 && member_action.continue_on_error {
                             result.failure_ignored = true;
                         }
                         if umbrella_group {
-                            combined_lines.push(format!("##[group]Post {}", member.display_name));
                             combined_lines
-                                .extend(native_post_log_prelude(&member.invocation, &state));
+                                .push(format!("##[group]Post {}", member_action.display_name));
+                            combined_lines
+                                .extend(native_post_log_prelude(&member_action.invocation, &state));
                             combined_lines.push("##[endgroup]".to_string());
                         }
                         combined_lines.extend(rendered_output_lines_with_policy(
@@ -4058,7 +4724,7 @@ where
                         }
                         combined.failure_ignored |= result.failure_ignored;
                         combined.state.merge(result.state.clone());
-                        state.apply(&post_step_id, &result);
+                        state.apply_post(&uuid::Uuid::new_v4().to_string(), &result);
                         executed_physical_actions += 1;
                         results.push(result);
                     }
@@ -4069,7 +4735,7 @@ where
                     Err(error) => {
                         eprintln!(
                             "Post step '{}' failed with an execution error: {error:#}",
-                            member.display_name
+                            member_action.display_name
                         );
                         let mut result = StepExecutionResult {
                             exit_code: 1,
@@ -4079,13 +4745,14 @@ where
                             stdout: String::new(),
                             stderr: format!("{error:#}"),
                         };
-                        if member.continue_on_error {
+                        if member_action.continue_on_error {
                             result.failure_ignored = true;
                         }
                         if umbrella_group {
-                            combined_lines.push(format!("##[group]Post {}", member.display_name));
                             combined_lines
-                                .extend(native_post_log_prelude(&member.invocation, &state));
+                                .push(format!("##[group]Post {}", member_action.display_name));
+                            combined_lines
+                                .extend(native_post_log_prelude(&member_action.invocation, &state));
                             combined_lines.push("##[endgroup]".to_string());
                         }
                         combined_lines.extend(rendered_output_lines_with_policy(
@@ -4099,7 +4766,7 @@ where
                         }
                         combined.failure_ignored |= result.failure_ignored;
                         combined.state.merge(result.state.clone());
-                        state.apply(&post_step_id, &result);
+                        state.apply_post(&uuid::Uuid::new_v4().to_string(), &result);
                         executed_physical_actions += 1;
                         results.push(result);
                     }
@@ -4187,9 +4854,20 @@ where
             },
             temp_host,
         )?;
+        let inputs = state.resolve_action_inputs(
+            &action.inputs,
+            &action.input_expression_values,
+            action.input_templates.as_ref(),
+            &action.input_defaults,
+        )?;
         let action_state = state.with_env(action_context_env(&action.env));
         let mut env = action_state.step_env(&[]);
-        env.extend(action_state.resolve_env(&action.env)?);
+        for (name, value) in &action.env {
+            set_env_value(&mut env, name, value);
+        }
+        for (name, value) in &inputs {
+            set_env_value(&mut env, &crate::action::input_env_name(name), value);
+        }
         env.extend(action_state_env.iter().cloned());
         env.extend(command_files.env.iter().cloned());
         rewrite_command_file_env_for_action_container(&mut env);
@@ -4322,23 +5000,45 @@ where
             },
             temp_host,
         )?;
+        let inputs = state.resolve_action_inputs(
+            &action.inputs,
+            &action.input_expression_values,
+            action.input_templates.as_ref(),
+            &action.input_defaults,
+        )?;
         let action_state = state.with_env(action_context_env(&action.env));
         let mut env = action_state.step_env(&[]);
-        env.extend(action_state.resolve_env(&action.env)?);
+        for (name, value) in &action.env {
+            set_env_value(&mut env, name, value);
+        }
+        for (name, value) in &inputs {
+            set_env_value(&mut env, &crate::action::input_env_name(name), value);
+        }
         set_env_value(&mut env, "GITHUB_WORKSPACE", "/github/workspace");
         set_env_value(&mut env, "RUNNER_TEMP", "/github/runner_temp");
+        let runs_env =
+            state.resolve_template_mapping_with_inputs(&action.runs_env, Some(&inputs))?;
+        add_missing_docker_action_environment(&mut env, runs_env);
         env.extend(command_files.env.iter().cloned());
         rewrite_command_file_env_for_action_container(&mut env);
         let entrypoint = action
             .entrypoint
             .as_ref()
-            .map(|value| state.resolve_expressions(value))
-            .transpose()?;
-        let args = action
-            .args
-            .iter()
-            .map(|value| state.resolve_expressions(value))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .map(|value| state.resolve_expressions_with_inputs(value, &inputs))
+            .transpose()?
+            .filter(|value| !value.is_empty())
+            .or_else(|| inputs.get("entrypoint").cloned());
+        let args = if let Some(args) = &action.args {
+            args.iter()
+                .map(|value| state.resolve_expressions_with_inputs(value, &inputs))
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            inputs
+                .get("args")
+                .map(|value| crate::script_step::parse_command_line_arguments(value))
+                .transpose()?
+                .unwrap_or_default()
+        };
         let secret_masks = action_state.secret_masks(&self.secret_masks);
         let exec_args = container.prepare_run_docker_action_args(
             "/github/workspace",
@@ -4379,6 +5079,28 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
+        let environment = if action.step_env.is_empty() {
+            // Ordered-step preparation already rendered this mapping before
+            // the condition and stored the result in `env`.
+            action.env.clone()
+        } else {
+            state.resolve_env(&action.step_env)?
+        };
+        let action_state = state.with_env(environment);
+        let mut prepared_action = action.clone();
+        prepared_action.inputs = action_state.resolve_action_inputs(
+            &action.inputs,
+            &action.input_expression_values,
+            action.input_templates.as_ref(),
+            &action.input_defaults,
+        )?;
+        prepared_action.input_templates = None;
+        prepared_action.input_expression_values.clear();
+        prepared_action.input_defaults = ActionTemplateMap::default();
+        prepared_action.env.clear();
+        prepared_action.step_env.clear();
+        let action = &prepared_action;
+        let state = &action_state;
         let cache_store = match action.adapter {
             NativeActionAdapter::Cache
                 if !matches!(action.cache_kind, Some(CacheActionKind::Save)) =>
@@ -4477,6 +5199,26 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
+        let environment = if action.step_env.is_empty() {
+            action.env.clone()
+        } else {
+            state.resolve_env(&action.step_env)?
+        };
+        let action_state = state.with_env(environment);
+        let mut prepared_action = action.clone();
+        prepared_action.inputs = action_state.resolve_action_inputs(
+            &action.inputs,
+            &action.input_expression_values,
+            action.input_templates.as_ref(),
+            &action.input_defaults,
+        )?;
+        prepared_action.input_templates = None;
+        prepared_action.input_expression_values.clear();
+        prepared_action.input_defaults = ActionTemplateMap::default();
+        prepared_action.env.clear();
+        prepared_action.step_env.clear();
+        let action = &prepared_action;
+        let state = &action_state;
         match action.adapter {
             NativeActionAdapter::Cache => native_cache_save(step_id, action, state),
             NativeActionAdapter::RustCache => native_rust_cache_save(step_id, action, state),
@@ -4824,7 +5566,7 @@ where
         let result =
             self.native_shell(container, &action_state, &hadolint_script(&inputs), timeout)?;
         let findings = result.stdout.trim_end().to_string();
-        let mut outputs = BTreeMap::new();
+        let mut outputs = StepOutputMap::default();
         outputs.insert("results".to_string(), findings.clone());
         let mut env = BTreeMap::new();
         env.insert("HADOLINT_RESULTS".to_string(), findings.replace('\n', ""));
@@ -4912,7 +5654,7 @@ where
             platforms.clone(),
         ];
         let result = self.run_docker_args_timeout(&args, timeout)?;
-        let mut outputs = BTreeMap::new();
+        let mut outputs = StepOutputMap::default();
         outputs.insert("platforms".to_string(), platforms);
         Ok(native_command_result(
             result,
@@ -4992,11 +5734,12 @@ where
             // adapter invocation read; it persists for the whole job through
             // the home bind mount.
             let secret_masks = state.secret_masks(&self.secret_masks);
-            let exec_args = container.prepare_exec_process_stdin_args(
+            let exec_args = container.prepare_exec_process_stdin_args_with_runtime_path(
                 "/__w",
                 &env,
                 &secret_masks,
                 &["sh".to_string(), "-c".to_string(), cmd],
+                self.job_container_runtime_path.as_deref(),
             )?;
             return self.runner.run_with_stdin_timeout_with_env(
                 "docker",
@@ -5039,7 +5782,10 @@ where
         // (JobContainerSpec::append_base_exec_env) — the old HOME=/root +
         // CARGO_HOME=/root/.cargo exports here redirected cargo downloads into
         // the unmounted container /root, making `~` caches unsaveable.
-        let container_default_path = container.default_exec_path();
+        let container_default_path = self
+            .job_container_runtime_path
+            .as_deref()
+            .unwrap_or_else(|| container.default_exec_path());
         let path_entries: Vec<&str> = state
             .path
             .iter()
@@ -5049,11 +5795,12 @@ where
         let path = path_entries.join(":");
         let wrapped = format!("export PATH={path}; {script}");
         let secret_masks = state.secret_masks(&self.secret_masks);
-        let args = container.prepare_exec_process_args(
+        let args = container.prepare_exec_process_args_with_runtime_path(
             "/__w",
             &env,
             &secret_masks,
             &["sh".to_string(), "-c".to_string(), wrapped],
+            self.job_container_runtime_path.as_deref(),
         )?;
         // Stream adapter output to the live feed as it happens — a minutes-long
         // native step (mise install on a cold store) must not look frozen in
@@ -5485,7 +6232,7 @@ where
             .unwrap_or_default();
         let filters = parse_paths_filter_rules(&filters_input)?;
         let changed_files = self.changed_files_for_paths_filter(state)?;
-        let mut outputs = BTreeMap::new();
+        let mut outputs = StepOutputMap::default();
         let mut matched_names = Vec::new();
 
         for (name, patterns) in filters {
@@ -5853,35 +6600,52 @@ where
         let deadline = Instant::now() + DOCKER_START_RETRY_DEADLINE;
         let mut attempt = 1_u32;
         loop {
-            let Err(error) = self.start_job_environment_once(container) else {
-                return Ok(());
-            };
-            self.cleanup_stale(container);
-
-            let category = docker_error_category(&error);
-            let (max_attempts, delay) = match category {
-                DockerErrorCategory::Terminal => return Err(error),
-                DockerErrorCategory::Conflict => {
-                    (DOCKER_START_CONFLICT_MAX_ATTEMPTS, Duration::ZERO)
+            match self.start_job_environment_once(container) {
+                Ok(()) => {
+                    self.job_container_runtime_path =
+                        match crate::docker::Docker::job(&mut self.runner)
+                            .container_runtime_path(&container.name)
+                        {
+                            Ok(runtime_path) => runtime_path,
+                            Err(error) => {
+                                eprintln!(
+                                "Warning: could not inspect job-container PATH for '{}': {error:#}",
+                                container.name
+                            );
+                                None
+                            }
+                        };
+                    return Ok(());
                 }
-                DockerErrorCategory::Transient => (
-                    DOCKER_START_TRANSIENT_MAX_ATTEMPTS,
-                    docker_start_retry_delay(attempt),
-                ),
-            };
-            if attempt >= max_attempts || Instant::now() >= deadline {
-                return Err(error);
-            }
-            eprintln!(
-                "Docker job environment start failed ({category:?}; attempt \
+                Err(error) => {
+                    self.cleanup_stale(container);
+
+                    let category = docker_error_category(&error);
+                    let (max_attempts, delay) = match category {
+                        DockerErrorCategory::Terminal => return Err(error),
+                        DockerErrorCategory::Conflict => {
+                            (DOCKER_START_CONFLICT_MAX_ATTEMPTS, Duration::ZERO)
+                        }
+                        DockerErrorCategory::Transient => (
+                            DOCKER_START_TRANSIENT_MAX_ATTEMPTS,
+                            docker_start_retry_delay(attempt),
+                        ),
+                    };
+                    if attempt >= max_attempts || Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                    eprintln!(
+                        "Docker job environment start failed ({category:?}; attempt \
                  {attempt}/{max_attempts}); removed stale resources; retrying \
                  in {}ms: {error:#}",
-                delay.as_millis()
-            );
-            if !delay.is_zero() {
-                thread::sleep(delay);
+                        delay.as_millis()
+                    );
+                    if !delay.is_zero() {
+                        thread::sleep(delay);
+                    }
+                    attempt += 1;
+                }
             }
-            attempt += 1;
         }
     }
 
@@ -6377,6 +7141,34 @@ fn set_env_value(env: &mut Vec<(String, String)>, name: &str, value: &str) {
     } else {
         env.push((name.to_string(), value.to_string()));
     }
+}
+
+/// ContainerActionHandler adds manifest env only when the handler environment
+/// lacks the key. The comparer comes from `VarUtil.EnvironmentVariableKeyComparer`
+/// in ActionRunner: ordinal on Linux/macOS, ordinal-ignore-case on Windows.
+fn add_missing_docker_action_environment(
+    env: &mut Vec<(String, String)>,
+    runs_env: Vec<(String, String)>,
+) {
+    for (name, value) in runs_env {
+        if !env
+            .iter()
+            .any(|(existing, _)| environment_key_eq(existing, &name))
+        {
+            env.push((name, value));
+        }
+    }
+}
+
+#[cfg(windows)]
+fn environment_key_eq(left: &str, right: &str) -> bool {
+    crate::action::runner_ordinal_ignore_case_key(left)
+        == crate::action::runner_ordinal_ignore_case_key(right)
+}
+
+#[cfg(not(windows))]
+fn environment_key_eq(left: &str, right: &str) -> bool {
+    left == right
 }
 
 fn set_env_default(env: &mut Vec<(String, String)>, name: &str, value: &str) {
@@ -6933,7 +7725,7 @@ fn native_cache_restore_main(
     let restore_ms = t0.elapsed().as_millis();
     let exact_hit = matched_key.as_deref() == Some(key.as_str());
 
-    let mut outputs = BTreeMap::new();
+    let mut outputs = StepOutputMap::default();
     outputs.insert("cache-hit".to_string(), exact_hit.to_string());
     // Upstream root emits only `cache-hit`; `/restore` emits all three.
     if kind == CacheActionKind::Restore {
@@ -7056,7 +7848,7 @@ fn native_rust_cache(
     let covered_by_persistent_storage =
         rust_cache_covered_by_persistent_storage(&cache_directories);
     let cache_hit = matched.is_some() || covered_by_persistent_storage;
-    let mut outputs = BTreeMap::new();
+    let mut outputs = StepOutputMap::default();
     outputs.insert("cache-hit".to_string(), cache_hit.to_string());
     if !shared_key.is_empty() {
         outputs.insert("cache-primary-key".to_string(), shared_key.clone());
@@ -8648,7 +9440,7 @@ fn native_upload_artifact(
         "{}/artifacts/{artifact_id}",
         results_url.trim_end_matches('/')
     );
-    let mut outputs = BTreeMap::new();
+    let mut outputs = StepOutputMap::default();
     outputs.insert("artifact-id".to_string(), artifact_id);
     outputs.insert("artifact-url".to_string(), artifact_url);
     outputs.insert("artifact-digest".to_string(), digest);
@@ -8784,7 +9576,7 @@ fn native_download_artifact(
         artifacts.len()
     };
 
-    let mut outputs = BTreeMap::new();
+    let mut outputs = StepOutputMap::default();
     outputs.insert(
         "download-path".to_string(),
         resolve_container_path(state, &destination_input),
@@ -9401,7 +10193,7 @@ fn native_attest_build_provenance(
             repository,
             repository_visibility: visibility.as_deref(),
         })?;
-    let mut outputs = BTreeMap::new();
+    let mut outputs = StepOutputMap::default();
     outputs.insert("bundle-path".to_string(), result.bundle_path.clone());
     outputs.insert("attestation-id".to_string(), result.attestation_id.clone());
     outputs.insert(
@@ -9466,7 +10258,10 @@ fn native_configure_pages(
         .and_then(Value::as_str)
         .context("Pages response is missing html_url")?;
     let outputs = pages_site_outputs(html_url)?;
-    let base_url = outputs["base_url"].clone();
+    let base_url = outputs
+        .get("base_url")
+        .context("Pages outputs are missing base_url")?
+        .clone();
 
     Ok(StepExecutionResult {
         exit_code: 0,
@@ -9660,7 +10455,7 @@ fn native_revoke_github_app_token(state: &JobExecutionState) -> Result<StepExecu
     })
 }
 
-fn pages_site_outputs(html_url: &str) -> Result<BTreeMap<String, String>> {
+fn pages_site_outputs(html_url: &str) -> Result<StepOutputMap> {
     let site_url = url::Url::parse(html_url).context("Pages html_url is invalid")?;
     let base_url = site_url.as_str().trim_end_matches('/').to_string();
     let base_path = site_url.path().trim_end_matches('/').to_string();
@@ -10590,11 +11385,6 @@ fn preflight_prepared_artifact_zip<R: Read + std::io::Seek>(
     Ok(entries)
 }
 
-// Proof: the retry guard `attempt < MAX_ATTEMPTS` forbids `continue` on the
-// final attempt, and every other path returns or bails, so the loop never
-// falls through to the trailing `unreachable!`. (Function-level: lint
-// attributes do not attach to a trailing macro call.)
-#[allow(clippy::unreachable, reason = "bounded retry loop always returns")]
 fn repository_artifact_archive_response(
     mut request: impl FnMut() -> reqwest::blocking::RequestBuilder,
     operation: &str,
@@ -10633,14 +11423,9 @@ fn repository_artifact_archive_response(
             .with_context(|| format!("rewind {operation} response"))?;
         return Ok(file);
     }
-    unreachable!("repository artifact retry loop always returns")
+    bail!("{operation} response retry loop produced no result")
 }
 
-// Proof: the retry guard `attempt < MAX_ATTEMPTS` forbids `continue` on the
-// final attempt, and every other path returns or bails, so the loop never
-// falls through to the trailing `unreachable!`. (Function-level: lint
-// attributes do not attach to a trailing macro call.)
-#[allow(clippy::unreachable, reason = "bounded retry loop always returns")]
 fn repository_artifact_response(
     mut request: impl FnMut() -> reqwest::blocking::RequestBuilder,
     operation: &str,
@@ -10675,7 +11460,7 @@ fn repository_artifact_response(
         }
         return Ok(body);
     }
-    unreachable!("repository artifact retry loop always returns")
+    bail!("{operation} response retry loop produced no result")
 }
 
 fn repository_artifact_retryable(error: &reqwest::Error) -> bool {
@@ -10813,8 +11598,20 @@ fn native_input(
         .inputs
         .iter()
         .find(|(input_name, _)| input_name.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value)
-        .map(|value| state.resolve_expressions(value))
+        .map(|(input_name, value)| {
+            if action
+                .input_expression_values
+                .iter()
+                .any(|expression_name| {
+                    crate::action::runner_ordinal_ignore_case_key(expression_name)
+                        == crate::action::runner_ordinal_ignore_case_key(input_name)
+                })
+            {
+                state.resolve_expressions(value)
+            } else {
+                Ok(value.clone())
+            }
+        })
         .unwrap_or_else(|| Ok(String::new()))
 }
 
@@ -12436,7 +13233,7 @@ fn paths_filter_head_ref(state: &JobExecutionState) -> Option<String> {
         .or_else(|| state.env.get("GITHUB_SHA").cloned())
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct JobExecutionState {
     /// The trust scope in effect for this job (the pool ceiling narrowed by
     /// the job's trust class at admission). The engine installs it when the
@@ -12456,14 +13253,21 @@ pub(crate) struct JobExecutionState {
     context_data: BTreeMap<String, Value>,
     workspace_host: Option<PathBuf>,
     temp_host: Option<PathBuf>,
-    pub(crate) outputs: BTreeMap<String, BTreeMap<String, String>>,
+    pub(crate) outputs: BTreeMap<String, StepOutputMap>,
     pub(crate) action_states: BTreeMap<String, BTreeMap<String, String>>,
     pub(crate) outcomes: BTreeMap<String, StepOutcome>,
     pub(crate) conclusions: BTreeMap<String, StepOutcome>,
+    /// Step ids installed in the root StepsContext. Composite child ids stay
+    /// available only through their active composite scope mapping.
+    pub(crate) root_step_context_ids: BTreeSet<String>,
     /// Nested composite conclusion scopes (open-umbrella stack plus the
     /// ignored-umbrella conversion set). The scope machinery lives in
     /// `execution::composite_scopes`; this state only delegates to it.
     pub(crate) composite_scopes: CompositeConclusionScopes,
+    /// Action-local expression scopes. Each nested composite action gets its
+    /// own `inputs` mapping and action path, as Runner creates an independent
+    /// embedded `StepsContext` for every CompositeActionHandler.
+    composite_action_scopes: Vec<CompositeActionScope>,
     pub(crate) path: Vec<String>,
     pub(crate) masks: Vec<String>,
     /// The running job's cancellation, so `success()`, `failure()` and
@@ -12473,7 +13277,21 @@ pub(crate) struct JobExecutionState {
     pub(crate) cancellation: crate::execution::cancel::JobCancellation,
 }
 
+#[derive(Debug, Clone)]
+struct CompositeActionScope {
+    step_id: String,
+    inputs: BTreeMap<String, String>,
+    visible_step_ids: BTreeMap<String, String>,
+    previous_env: BTreeMap<String, Option<String>>,
+}
+
 impl JobExecutionState {
+    pub(crate) fn expose_root_step_context(&mut self, step_id: &str) {
+        if !self.composite_scopes.has_open_scope() {
+            self.root_step_context_ids.insert(step_id.to_string());
+        }
+    }
+
     fn new(base_env: &[(String, String)]) -> Self {
         Self::new_with_context(base_env, &[])
     }
@@ -12550,7 +13368,9 @@ impl JobExecutionState {
             action_states: BTreeMap::new(),
             outcomes: BTreeMap::new(),
             conclusions: BTreeMap::new(),
+            root_step_context_ids: BTreeSet::new(),
             composite_scopes: CompositeConclusionScopes::default(),
+            composite_action_scopes: Vec::new(),
             path: Vec::new(),
             masks: Vec::new(),
             cancellation: crate::execution::cancel::JobCancellation::inert(),
@@ -12604,7 +13424,9 @@ impl JobExecutionState {
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
             conclusions: self.conclusions.clone(),
+            root_step_context_ids: self.root_step_context_ids.clone(),
             composite_scopes: self.composite_scopes.clone(),
+            composite_action_scopes: self.composite_action_scopes.clone(),
             path: self.path.clone(),
             masks: self.masks.clone(),
             // A derived state is the same job, so it carries the same
@@ -12634,7 +13456,9 @@ impl JobExecutionState {
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
             conclusions: self.conclusions.clone(),
+            root_step_context_ids: self.root_step_context_ids.clone(),
             composite_scopes: self.composite_scopes.clone(),
+            composite_action_scopes: self.composite_action_scopes.clone(),
             path: self.path.clone(),
             masks: self.masks.clone(),
             // A derived state is the same job, so it carries the same
@@ -12650,6 +13474,58 @@ impl JobExecutionState {
 
     fn push_composite(&mut self, step_id: &str) {
         self.composite_scopes.push(step_id);
+    }
+
+    fn push_composite_action_scope(
+        &mut self,
+        step_id: &str,
+        inputs: BTreeMap<String, String>,
+        visible_step_ids: BTreeMap<String, String>,
+        mut env: Vec<(String, String)>,
+        action_path: Option<String>,
+    ) {
+        if let Some(action_path) = action_path {
+            env.push(("GITHUB_ACTION_PATH".to_string(), action_path));
+        }
+        let mut previous_env = BTreeMap::new();
+        for (name, value) in env {
+            previous_env
+                .entry(name.clone())
+                .or_insert_with(|| self.env.get(&name).cloned());
+            self.env.insert(name, value);
+        }
+        self.composite_action_scopes.push(CompositeActionScope {
+            step_id: step_id.to_owned(),
+            inputs,
+            visible_step_ids,
+            previous_env,
+        });
+    }
+
+    fn pop_composite_action_scope(&mut self, step_id: &str) {
+        let Some(scope) = self.composite_action_scopes.pop() else {
+            return;
+        };
+        debug_assert_eq!(scope.step_id, step_id);
+        for inner_step_id in scope.visible_step_ids.into_values() {
+            self.outputs.remove(&inner_step_id);
+            self.action_states.remove(&inner_step_id);
+            self.outcomes.remove(&inner_step_id);
+            self.conclusions.remove(&inner_step_id);
+        }
+        for (name, previous) in scope.previous_env {
+            if let Some(value) = previous {
+                self.env.insert(name, value);
+            } else {
+                self.env.remove(&name);
+            }
+        }
+    }
+
+    pub(crate) fn active_composite_step_ids(&self) -> Option<&BTreeMap<String, String>> {
+        self.composite_action_scopes
+            .last()
+            .map(|scope| &scope.visible_step_ids)
     }
 
     /// Pop a composite scope, returning the transitive inner step ids.
@@ -12689,14 +13565,49 @@ impl JobExecutionState {
         &self,
         step: &ScriptStep,
     ) -> Result<ScriptStep, ExpressionInterpolationError> {
+        let working_directory = self.resolve_expressions(&step.working_directory_container)?;
+        let working_directory_container = if working_directory.starts_with('/') {
+            working_directory
+        } else {
+            let workspace = self
+                .immutable_env
+                .get("GITHUB_WORKSPACE")
+                .cloned()
+                .or_else(|| self.context_string("github.workspace"))
+                .unwrap_or_else(|| "/__w".to_owned());
+            crate::action::workspace_path(&workspace, &working_directory)
+        };
+        let shell = match &step.shell {
+            Shell::Deferred { template, fallback } => {
+                let rendered = self.resolve_expressions(template)?;
+                let rendered = if rendered.is_empty() {
+                    fallback
+                        .as_deref()
+                        .map(|fallback| self.resolve_expressions(fallback))
+                        .transpose()?
+                        .unwrap_or_default()
+                } else {
+                    rendered
+                };
+                if rendered.is_empty() {
+                    Shell::BashDefault
+                } else {
+                    crate::script_step::github_shell(&rendered)
+                        .map_err(|_| ExpressionInterpolationError::Evaluation { offset: 0 })?
+                }
+            }
+            shell => shell.clone(),
+        };
         Ok(ScriptStep {
             id: step.id.clone(),
             display_name: step.display_name.clone(),
             script: self.resolve_expressions(&step.script)?,
-            shell: step.shell,
-            working_directory_container: self
-                .resolve_expressions(&step.working_directory_container)?,
-            env: self.resolve_env(&step.env)?,
+            shell,
+            working_directory_container,
+            // Ordered-step preparation resolves env before the condition.
+            // Keep the rendered values as data here; reparsing could turn a
+            // returned string such as `${{ secrets.X }}` back into code.
+            env: step.env.clone(),
             condition: step.condition.clone(),
             continue_on_error: step.continue_on_error,
             timeout_minutes: step.timeout_minutes,
@@ -12743,12 +13654,104 @@ impl JobExecutionState {
         &self,
         env: &[(String, String)],
     ) -> Result<Vec<(String, String)>, ExpressionInterpolationError> {
-        env.iter()
+        let resolved = env
+            .iter()
             .map(|(name, value)| {
-                self.resolve_expressions(value)
-                    .map(|value| (name.clone(), value))
+                self.resolve_mapping_key(name, None)
+                    .and_then(|name| self.resolve_expressions(value).map(|value| (name, value)))
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_resolved_mapping_keys(&resolved)?;
+        Ok(resolved)
+    }
+
+    pub(crate) fn resolve_template_mapping(
+        &self,
+        mapping: &ActionTemplateMap,
+    ) -> Result<Vec<(String, String)>, ExpressionInterpolationError> {
+        self.resolve_template_mapping_with_inputs(mapping, None)
+    }
+
+    pub(crate) fn resolve_template_mapping_with_inputs(
+        &self,
+        mapping: &ActionTemplateMap,
+        inputs: Option<&BTreeMap<String, String>>,
+    ) -> Result<Vec<(String, String)>, ExpressionInterpolationError> {
+        let resolved = mapping
+            .iter()
+            .map(|entry| {
+                let key = if entry.key_is_template {
+                    self.resolve_mapping_key(&entry.key, inputs)?
+                } else {
+                    entry.key.clone()
+                };
+                let value = if entry.value_is_template {
+                    self.resolve_expressions_in_context(&entry.value, inputs)?
+                } else {
+                    entry.value.clone()
+                };
+                Ok((key, value))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_resolved_mapping_keys(&resolved)?;
+        Ok(resolved)
+    }
+
+    fn resolve_mapping_key(
+        &self,
+        value: &str,
+        inputs: Option<&BTreeMap<String, String>>,
+    ) -> Result<String, ExpressionInterpolationError> {
+        let spans = expression_template_spans(value)?;
+        if let [span] = spans.as_slice()
+            && span.start() == 0
+            && span.end() == value.len()
+        {
+            let context = JobExpressionContext {
+                state: self,
+                inputs_override: inputs,
+                named_values: RefCell::default(),
+            };
+            let node = velnor_expression::parse(span.expression(value).trim(), &context)
+                .map_err(|_| ExpressionInterpolationError::Parse {
+                    offset: span.start(),
+                })?
+                .ok_or(ExpressionInterpolationError::Parse {
+                    offset: span.start(),
+                })?;
+            let resolved = expression::evaluate_node(&node, &context).map_err(|_| {
+                ExpressionInterpolationError::Evaluation {
+                    offset: span.start(),
+                }
+            })?;
+            if matches!(
+                resolved,
+                velnor_expression::Value::Array(_) | velnor_expression::Value::Object(_)
+            ) {
+                return Err(ExpressionInterpolationError::MappingKeyNotString);
+            }
+            return Ok(resolved.convert_to_string());
+        }
+        self.resolve_expressions_in_context(value, inputs)
+    }
+
+    pub(crate) fn resolve_action_inputs(
+        &self,
+        inputs: &BTreeMap<String, String>,
+        expression_values: &BTreeSet<String>,
+        input_templates: Option<&ActionTemplateMap>,
+        input_defaults: &ActionTemplateMap,
+    ) -> Result<BTreeMap<String, String>, ExpressionInterpolationError> {
+        // A dynamic key requires the complete source mapping. Without one,
+        // static keys and the explicit value-provenance set are sufficient.
+        let provided_templates = input_templates
+            .cloned()
+            .unwrap_or_else(|| ActionTemplateMap::from_btree_map(inputs, expression_values));
+        let defaults = self.resolve_template_mapping(input_defaults)?;
+        let provided = self.resolve_template_mapping(&provided_templates)?;
+        Ok(crate::action::effective_action_inputs_from_pairs(
+            &defaults, &provided,
+        ))
     }
 
     fn evaluate_named_outputs(
@@ -12762,12 +13765,6 @@ impl JobExecutionState {
                     .map(|value| (name.clone(), value))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()
-            .map(|outputs| {
-                outputs
-                    .into_iter()
-                    .filter(|(_, value)| !value.is_empty())
-                    .collect()
-            })
     }
 
     /// Interpolate every `${{ ... }}` span in `value`.
@@ -12782,6 +13779,24 @@ impl JobExecutionState {
         value: &str,
     ) -> Result<String, ExpressionInterpolationError> {
         self.render_template(value, false)
+    }
+
+    pub(crate) fn resolve_expressions_with_inputs(
+        &self,
+        value: &str,
+        inputs: &BTreeMap<String, String>,
+    ) -> Result<String, ExpressionInterpolationError> {
+        self.render_template_with_deferred_and_inputs(value, false, Some(inputs))
+            .map(|(rendered, _)| rendered)
+    }
+
+    fn resolve_expressions_in_context(
+        &self,
+        value: &str,
+        inputs: Option<&BTreeMap<String, String>>,
+    ) -> Result<String, ExpressionInterpolationError> {
+        self.render_template_with_deferred_and_inputs(value, false, inputs)
+            .map(|(rendered, _)| rendered)
     }
 
     /// Render only the spans the job message alone can answer, leaving every
@@ -12801,22 +13816,52 @@ impl JobExecutionState {
         self.render_template(value, true)
     }
 
+    pub(crate) fn resolve_job_context_expressions_with_deferred(
+        &self,
+        value: &str,
+    ) -> Result<(String, bool), ExpressionInterpolationError> {
+        self.render_template_with_deferred(value, true)
+    }
+
     fn render_template(
         &self,
         value: &str,
         defer_runtime_contexts: bool,
     ) -> Result<String, ExpressionInterpolationError> {
+        self.render_template_with_deferred(value, defer_runtime_contexts)
+            .map(|(rendered, _)| rendered)
+    }
+
+    fn render_template_with_deferred(
+        &self,
+        value: &str,
+        defer_runtime_contexts: bool,
+    ) -> Result<(String, bool), ExpressionInterpolationError> {
+        self.render_template_with_deferred_and_inputs(value, defer_runtime_contexts, None)
+    }
+
+    fn render_template_with_deferred_and_inputs(
+        &self,
+        value: &str,
+        defer_runtime_contexts: bool,
+        inputs_override: Option<&BTreeMap<String, String>>,
+    ) -> Result<(String, bool), ExpressionInterpolationError> {
         let spans = expression_template_spans(value)?;
         if spans.is_empty() {
-            return Ok(value.to_string());
+            return Ok((value.to_string(), false));
         }
         let mut rendered = String::with_capacity(value.len());
         let mut cursor = 0usize;
+        let mut deferred = false;
         for span in spans {
             rendered.push_str(&value[cursor..span.start()]);
             let expression = span.expression(value).trim();
-            let context = self.expression_context();
-            let node = expression::parse(expression, &context).map_err(|_| {
+            let context = JobExpressionContext {
+                state: self,
+                inputs_override,
+                named_values: RefCell::default(),
+            };
+            let node = velnor_expression::parse(expression, &context).map_err(|_| {
                 ExpressionInterpolationError::Parse {
                     offset: span.start(),
                 }
@@ -12824,6 +13869,7 @@ impl JobExecutionState {
             if let Some(node) = node {
                 if defer_runtime_contexts && node_reads_runtime_context(&node) {
                     rendered.push_str(span.source(value));
+                    deferred = true;
                 } else {
                     let value = expression::evaluate_node(&node, &context).map_err(|_| {
                         ExpressionInterpolationError::Evaluation {
@@ -12836,7 +13882,7 @@ impl JobExecutionState {
             cursor = span.end();
         }
         rendered.push_str(&value[cursor..]);
-        Ok(rendered)
+        Ok((rendered, deferred))
     }
 
     /// Whether step-debug output (`::debug::` lines, command echo) is on
@@ -12864,20 +13910,24 @@ impl JobExecutionState {
     }
 
     pub(crate) fn expression_context(&self) -> JobExpressionContext<'_> {
-        JobExpressionContext { state: self }
+        JobExpressionContext {
+            state: self,
+            inputs_override: None,
+            named_values: RefCell::default(),
+        }
     }
 }
 
 /// Whether the tree reads state that may only be authoritative once the job
 /// is running. Plan-time rendering defers those spans to the step-time pass;
 /// parsing still happens before deferral, so malformed source cannot pass.
-fn node_reads_runtime_context(node: &expression::Node) -> bool {
+fn node_reads_runtime_context(node: &velnor_expression::Node) -> bool {
     match node {
-        expression::Node::NamedValue(name) => matches!(
+        velnor_expression::Node::NamedValue(name) => matches!(
             name.to_ascii_lowercase().as_str(),
             "env" | "steps" | "job" | "jobs" | "runner"
         ),
-        expression::Node::Function { name, .. } => {
+        velnor_expression::Node::Function { name, .. } => {
             matches!(
                 name.to_ascii_lowercase().as_str(),
                 "success" | "failure" | "always" | "cancelled" | "hashfiles"
@@ -12898,6 +13948,8 @@ fn node_reads_runtime_context(node: &expression::Node) -> bool {
 /// `ExpressionFunctions` (`src/Runner.Worker/StepsRunner.cs:92-106`).
 pub(crate) struct JobExpressionContext<'a> {
     pub(crate) state: &'a JobExecutionState,
+    inputs_override: Option<&'a BTreeMap<String, String>>,
+    named_values: RefCell<HashMap<String, velnor_expression::Value>>,
 }
 
 /// The root contexts GitHub always defines for a step. Referencing anything
@@ -12958,10 +14010,22 @@ const RUNNER_ENV_KEYS: &[(&str, &str)] = &[
     ("workspace", "RUNNER_WORKSPACE"),
 ];
 
+fn validate_resolved_mapping_keys(
+    entries: &[(String, String)],
+) -> Result<(), ExpressionInterpolationError> {
+    let mut seen = BTreeSet::new();
+    for (key, _) in entries {
+        if key.is_empty() || !seen.insert(crate::action::runner_ordinal_ignore_case_key(key)) {
+            return Err(ExpressionInterpolationError::DuplicateMappingKey);
+        }
+    }
+    Ok(())
+}
+
 fn upsert_entry(
-    entries: &mut Vec<(String, expression::Value)>,
+    entries: &mut Vec<(String, velnor_expression::Value)>,
     name: &str,
-    value: expression::Value,
+    value: velnor_expression::Value,
 ) {
     if let Some(existing) = entries
         .iter_mut()
@@ -12974,7 +14038,7 @@ fn upsert_entry(
 }
 
 impl JobExpressionContext<'_> {
-    fn context_data_entries(&self, root: &str) -> Vec<(String, expression::Value)> {
+    fn context_data_entries(&self, root: &str) -> Vec<(String, velnor_expression::Value)> {
         match self.state.context_data.get(root) {
             Some(Value::Object(map)) => map
                 .iter()
@@ -12984,64 +14048,91 @@ impl JobExpressionContext<'_> {
         }
     }
 
-    fn github_context(&self) -> expression::Value {
+    fn github_context(&self) -> velnor_expression::Value {
         let mut entries = self.context_data_entries("github");
         for (name, variable) in GITHUB_ENV_KEYS {
             if let Some(value) = self.state.env.get(*variable) {
-                upsert_entry(&mut entries, name, expression::Value::string(value));
+                upsert_entry(&mut entries, name, velnor_expression::Value::string(value));
             }
         }
         upsert_entry(
             &mut entries,
             "action_status",
-            expression::Value::string(self.state.action_status()),
+            velnor_expression::Value::string(self.state.action_status()),
         );
-        expression::Value::Object(expression::ObjectValue::new(entries))
+        velnor_expression::Value::Object(velnor_expression::ObjectValue::new(entries))
     }
 
-    fn runner_context(&self) -> expression::Value {
+    fn runner_context(&self) -> velnor_expression::Value {
         let mut entries = self.context_data_entries("runner");
         for (name, variable) in RUNNER_ENV_KEYS {
             if let Some(value) = self.state.env.get(*variable) {
-                upsert_entry(&mut entries, name, expression::Value::string(value));
+                upsert_entry(&mut entries, name, velnor_expression::Value::string(value));
             }
         }
         if entries
             .iter()
             .all(|(name, _)| !name.eq_ignore_ascii_case("os"))
         {
-            upsert_entry(&mut entries, "os", expression::Value::string("Linux"));
+            upsert_entry(
+                &mut entries,
+                "os",
+                velnor_expression::Value::string("Linux"),
+            );
         }
-        expression::Value::Object(expression::ObjectValue::new(entries))
+        velnor_expression::Value::Object(velnor_expression::ObjectValue::new(entries))
     }
 
     /// The `env` context is case-sensitive on every non-Windows runner
     /// (`src/Runner.Worker/StepsRunner.cs:101-106`).
-    fn env_context(&self) -> expression::Value {
-        expression::Value::Object(expression::ObjectValue::case_sensitive(
+    fn env_context(&self) -> velnor_expression::Value {
+        velnor_expression::Value::Object(velnor_expression::ObjectValue::case_sensitive(
             self.state
                 .env
                 .iter()
-                .map(|(name, value)| (name.clone(), expression::Value::string(value)))
+                .map(|(name, value)| (name.clone(), velnor_expression::Value::string(value)))
                 .collect(),
         ))
     }
 
-    fn job_context(&self) -> expression::Value {
+    fn job_context(&self) -> velnor_expression::Value {
         let mut entries = self.context_data_entries("job");
         upsert_entry(
             &mut entries,
             "status",
-            expression::Value::string(self.state.job_status()),
+            velnor_expression::Value::string(self.state.job_status()),
         );
-        expression::Value::Object(expression::ObjectValue::new(entries))
+        velnor_expression::Value::Object(velnor_expression::ObjectValue::new(entries))
+    }
+
+    fn inputs_context(&self) -> velnor_expression::Value {
+        if let Some(inputs) = self.inputs_override {
+            return velnor_expression::Value::Object(velnor_expression::ObjectValue::new(
+                inputs
+                    .iter()
+                    .map(|(name, value)| (name.clone(), velnor_expression::Value::string(value)))
+                    .collect(),
+            ));
+        }
+        if let Some(scope) = self.state.composite_action_scopes.last() {
+            return velnor_expression::Value::Object(velnor_expression::ObjectValue::new(
+                scope
+                    .inputs
+                    .iter()
+                    .map(|(name, value)| (name.clone(), velnor_expression::Value::string(value)))
+                    .collect(),
+            ));
+        }
+        velnor_expression::Value::Object(velnor_expression::ObjectValue::new(
+            self.context_data_entries("inputs"),
+        ))
     }
 
     /// `hashFiles(...)` — `src/Runner.Worker/Expressions/HashFilesFunction.cs:19-60`.
     fn hash_files_function(
         &self,
-        args: &[expression::Value],
-    ) -> Result<expression::Value, expression::ExpressionError> {
+        args: &[velnor_expression::Value],
+    ) -> Result<velnor_expression::Value, expression::ExpressionError> {
         let mut patterns: Vec<String> = Vec::new();
         let mut follow_symbolic_links = false;
         for (position, arg) in args.iter().enumerate() {
@@ -13062,9 +14153,9 @@ impl JobExpressionContext<'_> {
         // evaluation before checkout may correctly be empty, and must not
         // poison the same expression after checkout populated the tree.
         let Some(workspace) = self.state.workspace_host.as_ref() else {
-            return Ok(expression::Value::string(""));
+            return Ok(velnor_expression::Value::string(""));
         };
-        Ok(expression::Value::string(hash_files(
+        Ok(velnor_expression::Value::string(hash_files(
             workspace,
             &patterns,
             follow_symbolic_links,
@@ -13072,7 +14163,7 @@ impl JobExpressionContext<'_> {
     }
 }
 
-impl expression::ParseEnvironment for JobExpressionContext<'_> {
+impl velnor_expression::ParseEnvironment for JobExpressionContext<'_> {
     fn is_named_value(&self, name: &str) -> bool {
         ROOT_CONTEXTS
             .iter()
@@ -13095,13 +14186,19 @@ impl expression::ParseEnvironment for JobExpressionContext<'_> {
 }
 
 impl expression::EvaluationContext for JobExpressionContext<'_> {
-    fn named_value(&self, name: &str) -> expression::Value {
-        match name.to_ascii_lowercase().as_str() {
+    fn named_value(&self, name: &str) -> velnor_expression::Value {
+        let key = name.to_ascii_lowercase();
+        if let Some(value) = self.named_values.borrow().get(&key).cloned() {
+            return value;
+        }
+
+        let value = match key.as_str() {
             "github" => self.github_context(),
             "env" => self.env_context(),
             "runner" => self.runner_context(),
             "steps" => self.steps_context(),
             "job" => self.job_context(),
+            "inputs" => self.inputs_context(),
             other => {
                 let entries = self.context_data_entries(other);
                 if entries.is_empty()
@@ -13112,30 +14209,37 @@ impl expression::EvaluationContext for JobExpressionContext<'_> {
                         .find(|(root, _)| root.eq_ignore_ascii_case(other))
                         .map(|(_, value)| value)
                 {
-                    return expression::eval::from_serde_json(value);
+                    expression::eval::from_serde_json(value)
+                } else {
+                    velnor_expression::Value::Object(velnor_expression::ObjectValue::new(entries))
                 }
-                expression::Value::Object(expression::ObjectValue::new(entries))
             }
-        }
+        };
+        self.named_values.borrow_mut().insert(key, value.clone());
+        value
     }
 
     fn call_function(
         &self,
         name: &str,
-        args: &[expression::Value],
-    ) -> Result<expression::Value, expression::ExpressionError> {
+        args: &[velnor_expression::Value],
+    ) -> Result<velnor_expression::Value, expression::ExpressionError> {
         match name.to_ascii_lowercase().as_str() {
             // `src/Runner.Worker/Expressions/SuccessFunction.cs:28-39`
-            "success" => Ok(expression::Value::Boolean(self.state.success_status())),
+            "success" => Ok(velnor_expression::Value::Boolean(
+                self.state.success_status(),
+            )),
             // `src/Runner.Worker/Expressions/FailureFunction.cs:28-39`
-            "failure" => Ok(expression::Value::Boolean(self.state.failure_status())),
+            "failure" => Ok(velnor_expression::Value::Boolean(
+                self.state.failure_status(),
+            )),
             // `src/Runner.Worker/Expressions/AlwaysFunction.cs:19-23`
-            "always" => Ok(expression::Value::Boolean(true)),
+            "always" => Ok(velnor_expression::Value::Boolean(true)),
             // `src/Runner.Worker/Expressions/CancelledFunction.cs:20-29` returns
             // `job.status == cancelled`. The job's cancellation token is that
             // status: it is a required field of the state, so this can never
             // fall back to a constant again.
-            "cancelled" => Ok(expression::Value::Boolean(self.state.is_cancelled())),
+            "cancelled" => Ok(velnor_expression::Value::Boolean(self.state.is_cancelled())),
             "hashfiles" => self.hash_files_function(args),
             other => Err(expression::ExpressionError::evaluation(format!(
                 "Unrecognized function: '{other}'"
@@ -13285,6 +14389,7 @@ fn step_log(step_id: &str, order: i32, result: &StepExecutionResult, step_debug:
 fn step_log_prelude(step: &ExecutableStep, state: &JobExecutionState) -> Vec<String> {
     match step {
         ExecutableStep::CompositeStart { .. }
+        | ExecutableStep::StepContinueOnError { .. }
         | ExecutableStep::CompositeEnd { .. }
         | ExecutableStep::CompositeOutputs { .. } => Vec::new(),
         ExecutableStep::Checkout(plan) => checkout_log_prelude(plan, state),
@@ -13301,6 +14406,91 @@ fn step_log_prelude(step: &ExecutableStep, state: &JobExecutionState) -> Vec<Str
     }
 }
 
+fn executable_step_env(step: &ExecutableStep) -> &[(String, String)] {
+    match step {
+        ExecutableStep::Script(step) => &step.env,
+        ExecutableStep::JavaScript { invocation, .. } => &invocation.step_env,
+        ExecutableStep::Docker { invocation, .. } => &invocation.step_env,
+        ExecutableStep::Native { invocation, .. } => &invocation.step_env,
+        _ => &[],
+    }
+}
+
+fn prepare_executable_step_env(
+    step: &ExecutableStep,
+    resolved_env: &[(String, String)],
+) -> ExecutableStep {
+    let mut prepared = step.clone();
+    match &mut prepared {
+        ExecutableStep::Script(step) => step.env = resolved_env.to_vec(),
+        ExecutableStep::JavaScript { invocation, .. } => {
+            invocation.step_env.clear();
+            for (name, value) in resolved_env {
+                set_env_value(&mut invocation.env, name, value);
+            }
+        }
+        ExecutableStep::Docker { invocation, .. } => {
+            invocation.step_env.clear();
+            for (name, value) in resolved_env {
+                set_env_value(&mut invocation.env, name, value);
+            }
+        }
+        ExecutableStep::Native { invocation, .. } => {
+            invocation.step_env.clear();
+            invocation.env = resolved_env.to_vec();
+        }
+        _ => {}
+    }
+    prepared
+}
+
+fn prepare_executable_action_inputs(
+    step: &ExecutableStep,
+    state: &JobExecutionState,
+) -> Result<Option<ExecutableStep>, ExpressionInterpolationError> {
+    let mut prepared = step.clone();
+    let is_action = match &mut prepared {
+        ExecutableStep::JavaScript { invocation, .. } => {
+            invocation.inputs = state.resolve_action_inputs(
+                &invocation.inputs,
+                &invocation.input_expression_values,
+                invocation.input_templates.as_ref(),
+                &invocation.input_defaults,
+            )?;
+            invocation.input_templates = None;
+            invocation.input_expression_values.clear();
+            invocation.input_defaults = ActionTemplateMap::default();
+            true
+        }
+        ExecutableStep::Docker { invocation, .. } => {
+            invocation.inputs = state.resolve_action_inputs(
+                &invocation.inputs,
+                &invocation.input_expression_values,
+                invocation.input_templates.as_ref(),
+                &invocation.input_defaults,
+            )?;
+            invocation.input_templates = None;
+            invocation.input_expression_values.clear();
+            invocation.input_defaults = ActionTemplateMap::default();
+            true
+        }
+        ExecutableStep::Native { invocation, .. } => {
+            invocation.inputs = state.resolve_action_inputs(
+                &invocation.inputs,
+                &invocation.input_expression_values,
+                invocation.input_templates.as_ref(),
+                &invocation.input_defaults,
+            )?;
+            invocation.input_templates = None;
+            invocation.input_expression_values.clear();
+            invocation.input_defaults = ActionTemplateMap::default();
+            true
+        }
+        _ => false,
+    };
+    Ok(is_action.then_some(prepared))
+}
+
 fn script_log_prelude(step: &ScriptStep, state: &JobExecutionState) -> Vec<String> {
     let mut lines = Vec::new();
     let script = state.resolve_for_log(&step.script);
@@ -13313,7 +14503,10 @@ fn script_log_prelude(step: &ScriptStep, state: &JobExecutionState) -> Vec<Strin
                 .map(|line| format!("\u{1b}[36;1m{line}\u{1b}[0m")),
         );
     }
-    lines.push(format!("shell: {}", shell_log_name(step.shell)));
+    lines.push(format!(
+        "shell: {}",
+        shell_log_name(&step.shell, state.active_composite_step_ids().is_some())
+    ));
     if step.working_directory_container != "/__w" {
         lines.push(format!(
             "working-directory: {}",
@@ -13451,11 +14644,16 @@ fn looks_like_sensitive_value(value: &str) -> bool {
     value.contains("-----BEGIN ") && value.contains(" PRIVATE KEY-----")
 }
 
-fn shell_log_name(shell: Shell) -> &'static str {
+fn shell_log_name(shell: &Shell, is_action_step: bool) -> String {
     match shell {
-        Shell::Bash => "bash --noprofile --norc -e -o pipefail {0}",
-        Shell::BashDefault => "bash -e {0}",
-        Shell::Sh => "sh -e {0}",
+        Shell::Bash if is_action_step => "bash --noprofile --norc -e -o pipefail {0}".to_owned(),
+        Shell::Bash => "bash -e {0}".to_owned(),
+        Shell::BashDefault | Shell::Sh => "sh -e {0}".to_owned(),
+        Shell::Pwsh { command } => format!("{command} -command \". '{{0}}'\""),
+        Shell::Custom { command, arguments } => {
+            format!("{command} {}", arguments.join(" "))
+        }
+        Shell::Deferred { template, .. } => template.clone(),
     }
 }
 
@@ -14311,6 +15509,7 @@ mod tests {
             )
             .unwrap(),
             env: Vec::new(),
+            ..Default::default()
         };
         assert_eq!(
             native_input(&action, &JobExecutionState::default(), "lookup-only").unwrap(),
@@ -14672,6 +15871,7 @@ mod tests {
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -14749,6 +15949,7 @@ mod tests {
                 .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
                 .collect(),
             env: Vec::new(),
+            ..Default::default()
         };
         let state = JobExecutionState::new_with_workspace(&[], &[], &workspace, &temp);
         let job_container = container(&temp);
@@ -14768,7 +15969,7 @@ mod tests {
                 Duration::from_secs(1),
             )
             .unwrap();
-        assert_eq!(root_result.state.outputs["cache-hit"], "false");
+        assert_eq!(root_result.state.outputs.get("cache-hit").unwrap(), "false");
 
         let restore_error = executor.execute_native_action_in_started_container(
             &job_container,
@@ -14799,7 +16000,7 @@ mod tests {
                 Duration::from_secs(1),
             )
             .unwrap();
-        assert_eq!(rust_result.state.outputs["cache-hit"], "false");
+        assert_eq!(rust_result.state.outputs.get("cache-hit").unwrap(), "false");
 
         let telemetry = fs::read_to_string(temp.join("state.test-instance.telemetry.jsonl"))
             .expect("cache lookup telemetry");
@@ -15311,6 +16512,32 @@ mod tests {
         fs::remove_dir_all(temp).ok();
     }
 
+    #[test]
+    fn service_context_is_nested_under_job_for_expressions() {
+        let mut context_data = vec![(
+            "job".to_string(),
+            serde_json::json!({
+                "id": "job-id",
+                "Services": { "stale": {} }
+            }),
+        )];
+        attach_services_to_job_context(
+            &mut context_data,
+            serde_json::json!({
+                "postgres": { "ports": { "5432": "32768" } }
+            }),
+        );
+
+        assert!(context_data.iter().all(|(name, _)| name != "services"));
+        let state = JobExecutionState::new_with_context(&[], &context_data);
+        assert_eq!(
+            state
+                .resolve_expressions("host=${{ job.services.postgres.ports['5432'] }}")
+                .unwrap(),
+            "host=32768"
+        );
+    }
+
     #[derive(Default)]
     struct GitDiffRunner {
         calls: Vec<(String, Vec<String>)>,
@@ -15585,6 +16812,9 @@ mod tests {
                 if has_container_env_path(args, "GITHUB_OUTPUT", "producer_output") {
                     fs::write(self.temp.join("producer_output"), "answer=42\n")?;
                 }
+                if has_container_env_path(args, "GITHUB_OUTPUT", "build_output") {
+                    fs::write(self.temp.join("build_output"), "answer=true\n")?;
+                }
                 if has_container_env_path(args, "GITHUB_OUTPUT", "check-image_output") {
                     fs::write(self.temp.join("check-image_output"), "exists=false\n")?;
                 }
@@ -15638,10 +16868,80 @@ mod tests {
                 }
             }
             Ok(CommandResult {
-                code: 0,
+                code: if args.iter().any(|arg| arg == "/__t/build.sh") {
+                    1
+                } else {
+                    0
+                },
                 stdout: String::new(),
                 stderr: String::new(),
             })
+        }
+    }
+
+    struct CompositeParityRunner {
+        calls: Vec<(String, Vec<String>)>,
+        temp: PathBuf,
+    }
+
+    impl CommandRunner for CompositeParityRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let expanded = crate::execution::expand_env_file_args(args);
+            if is_seed_probe(&expanded) {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            self.calls.push((program.to_string(), expanded.clone()));
+            if program == "docker" {
+                if has_container_env_path(&expanded, "GITHUB_OUTPUT", "producer_output") {
+                    fs::write(self.temp.join("producer_output"), "answer=42\n")?;
+                }
+                if has_container_env_path(&expanded, "GITHUB_OUTPUT", "nested-producer_output") {
+                    fs::write(self.temp.join("nested-producer_output"), "ignore=yes\n")?;
+                }
+            }
+            let code = if expanded
+                .iter()
+                .any(|arg| arg == "/__t/runtime-nested-fail.sh")
+            {
+                1
+            } else {
+                0
+            };
+            Ok(CommandResult {
+                code,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            _timeout: Duration,
+        ) -> Result<CommandResult> {
+            let mut args = args.to_vec();
+            for (name, value) in env {
+                args.push("-e".to_string());
+                args.push(format!("{name}={value}"));
+            }
+            self.run(program, &args)
+        }
+
+        fn run_streaming_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            timeout: Duration,
+            _on_output: &mut dyn FnMut(CommandStream, &str),
+        ) -> Result<CommandResult> {
+            self.run_timeout_with_env(program, args, env, timeout)
         }
     }
 
@@ -16298,6 +17598,8 @@ esac
             slot_store_key: None,
             env: Vec::new(),
             options: Vec::new(),
+            ports: Vec::new(),
+            volumes: Vec::new(),
             services: Vec::new(),
             node_action_image: String::new(),
             docker_cli_host_path: None,
@@ -16659,6 +17961,7 @@ esac
         .with_job_environment_guards(JobEnvironmentGuards {
             docker_lease: Some(lease),
             job_network: None,
+            runtime_path: None,
         });
         executor.cleanup(&spec).unwrap();
         let runner = executor.into_runner();
@@ -16742,6 +18045,7 @@ esac
         .with_job_environment_guards(JobEnvironmentGuards {
             docker_lease: Some(lease),
             job_network: None,
+            runtime_path: None,
         });
         executor.cleanup_without_buildkit(&spec).unwrap();
         let runner = executor.into_runner();
@@ -16883,12 +18187,20 @@ esac
     fn selects_node_action_image_from_runtime() {
         assert_eq!(
             node_action_image("node24", "velnor/job-ubuntu:26.04"),
+            "node:24-bookworm"
+        );
+        assert_eq!(node_action_image("node12", ""), "node:20-bookworm");
+        assert_eq!(node_action_image("node16", ""), "node:20-bookworm");
+        assert_eq!(node_action_image("node20", ""), "node:20-bookworm");
+        assert_eq!(
+            node_action_image("node20", "node:24-bookworm"),
+            "node:20-bookworm"
+        );
+        assert_eq!(node_action_image("node24", ""), "node:24-bookworm");
+        assert_eq!(
+            node_action_image("bogus", "velnor/job-ubuntu:26.04"),
             "velnor/job-ubuntu:26.04"
         );
-        assert_eq!(node_action_image("node20", ""), "node:20-bookworm");
-        assert_eq!(node_action_image("node24", ""), "node:24-bookworm");
-        assert_eq!(node_action_image("node16", ""), "node:16");
-        assert_eq!(node_action_image("bogus", ""), "");
     }
 
     #[test]
@@ -17195,6 +18507,7 @@ esac
                 source_path: None,
                 inputs: [("github-token".into(), "ghs_token".into())].into(),
                 env: vec![("ACTIONS_CUSTOM".into(), "${{ env.CUSTOM_RUNTIME }}".into())],
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -17261,10 +18574,11 @@ esac
             )]
             .into(),
             env: vec![("CONTRACT".into(), "contract-sha".into())],
+            ..Default::default()
         };
         let state = JobExecutionState::new(&[]);
         let result = native_github_script(&action, &state).unwrap();
-        assert_eq!(result.state.outputs["docs-xtask"], "contract-sha");
+        assert_eq!(result.state.outputs.get("docs-xtask").unwrap(), "contract-sha");
     }
 
     #[test]
@@ -17317,7 +18631,8 @@ esac
                     "construct:\n  - 'docker/construct/**'\n  - '.github/workflows/construct.yml'\ndocs:\n  - 'content/docs/**'\n".into(),
                 )]
                 .into(),
-                env: Vec::new(),
+                env: Vec::new(),                ..Default::default()
+
             },
             condition: None,
             continue_on_error: false,
@@ -17350,15 +18665,15 @@ esac
             .unwrap();
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].state.outputs["construct"], "true");
-        assert_eq!(results[0].state.outputs["construct_count"], "1");
+        assert_eq!(results[0].state.outputs.get("construct").unwrap(), "true");
+        assert_eq!(results[0].state.outputs.get("construct_count").unwrap(), "1");
         assert_eq!(
-            results[0].state.outputs["construct_files"],
+            results[0].state.outputs.get("construct_files").unwrap(),
             "docker/construct/Dockerfile"
         );
-        assert_eq!(results[0].state.outputs["docs"], "true");
+        assert_eq!(results[0].state.outputs.get("docs").unwrap(), "true");
         assert_eq!(
-            results[0].state.outputs["changes"],
+            results[0].state.outputs.get("changes").unwrap(),
             "[\"construct\",\"docs\"]"
         );
         assert!(results[0].stdout.contains("changed: Cargo.toml"));
@@ -17436,6 +18751,7 @@ esac
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -17458,7 +18774,7 @@ esac
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].exit_code, 0);
-        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(results[0].state.outputs.get("cache-hit").unwrap(), "false");
         // Root exposes only `cache-hit`; the primary key stays internal state.
         assert!(!results[0].state.outputs.contains_key("cache-primary-key"));
         assert!(!results[0].state.outputs.contains_key("cache-matched-key"));
@@ -17617,6 +18933,7 @@ esac
                     ]
                     .into(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -17656,9 +18973,9 @@ esac
             )
             .unwrap();
 
-        assert_eq!(exact_results[0].state.outputs["cache-hit"], "true");
-        assert_eq!(partial_results[0].state.outputs["cache-hit"], "false");
-        assert_eq!(miss_results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(exact_results[0].state.outputs.get("cache-hit").unwrap(), "true");
+        assert_eq!(partial_results[0].state.outputs.get("cache-hit").unwrap(), "false");
+        assert_eq!(miss_results[0].state.outputs.get("cache-hit").unwrap(), "false");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -17794,7 +19111,7 @@ esac
                 &restore_temp,
             )
             .unwrap();
-        assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(restore_results[0].state.outputs.get("cache-hit").unwrap(), "true");
         assert_eq!(
             fs::read_to_string(restore_workspace.join("target/root.bin")).unwrap(),
             "root target\n"
@@ -17964,7 +19281,7 @@ esac
         let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
-        assert_eq!(results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(results[0].state.outputs.get("cache-hit").unwrap(), "true");
         assert_eq!(
             fs::read_to_string(restore_temp.join("work/cache/state.bin")).unwrap(),
             "state\n"
@@ -18121,6 +19438,7 @@ esac
             ]
             .into(),
             env: Vec::new(),
+            ..Default::default()
         };
 
         let error = native_rust_cache_save("rust-cache", &action, &state).unwrap_err();
@@ -18219,6 +19537,7 @@ esac
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -18310,7 +19629,7 @@ esac
         let restore_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
-        assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(restore_results[0].state.outputs.get("cache-hit").unwrap(), "true");
         assert_eq!(
             fs::read_to_string(restore_temp.join("work/target/debug/app")).unwrap(),
             "target\n"
@@ -18385,7 +19704,7 @@ esac
         let restore_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
-        assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(restore_results[0].state.outputs.get("cache-hit").unwrap(), "true");
         assert_eq!(
             fs::read_to_string(restore_temp.join("work/target/root.txt")).unwrap(),
             "root\n"
@@ -18467,7 +19786,7 @@ esac
         let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
-        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(results[0].state.outputs.get("cache-hit").unwrap(), "false");
         assert!(!root.join("restore-job/escape").exists());
         fs::remove_dir_all(root).unwrap();
     }
@@ -18486,6 +19805,7 @@ esac
                 source_path: None,
                 inputs: [("shared-key".into(), "ci-default-dev-workspace-v2".into())].into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -18500,7 +19820,7 @@ esac
         // plain miss and the post step has nothing to save.
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].exit_code, 0);
-        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(results[0].state.outputs.get("cache-hit").unwrap(), "false");
         assert!(results[0].stdout.contains("Rust cache miss"));
         assert!(results[0]
             .state
@@ -18531,6 +19851,7 @@ esac
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -18541,7 +19862,7 @@ esac
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
-        assert_eq!(results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(results[0].state.outputs.get("cache-hit").unwrap(), "true");
         assert!(results[0]
             .stdout
             .contains("Rust cache paths live on Velnor host-persistent storage"));
@@ -18572,6 +19893,7 @@ esac
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -18584,7 +19906,7 @@ esac
             .unwrap();
 
         assert_eq!(results[0].exit_code, 1);
-        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(results[0].state.outputs.get("cache-hit").unwrap(), "false");
         assert!(results[0].stderr.contains("fail-on-cache-miss"));
 
         fs::remove_dir_all(temp).unwrap();
@@ -18617,6 +19939,7 @@ esac
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -18641,6 +19964,7 @@ esac
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -18651,7 +19975,7 @@ esac
             .unwrap();
 
         assert_eq!(restore_results[0].exit_code, 0);
-        assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(restore_results[0].state.outputs.get("cache-hit").unwrap(), "true");
         assert!(restore_results[0].stderr.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
@@ -18684,6 +20008,7 @@ esac
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -18724,6 +20049,7 @@ esac
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -18733,7 +20059,7 @@ esac
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
-        assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(restore_results[0].state.outputs.get("cache-hit").unwrap(), "true");
         assert_eq!(
             fs::read_to_string(root.join("restore-job/home/.cache/rust-script/state.bin")).unwrap(),
             "cached\n"
@@ -18831,6 +20157,7 @@ esac
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -18841,7 +20168,7 @@ esac
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
-        assert_eq!(save_results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(save_results[0].state.outputs.get("cache-hit").unwrap(), "false");
         assert!(save_results[1]
             .stdout
             .contains("Saved cache 'linux-rust-script-abc'"));
@@ -18865,6 +20192,7 @@ esac
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -18874,7 +20202,7 @@ esac
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
-        assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(restore_results[0].state.outputs.get("cache-hit").unwrap(), "true");
         // Root exposes only `cache-hit`, not `cache-matched-key`.
         assert!(!restore_results[0]
             .state
@@ -18917,6 +20245,7 @@ esac
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -18942,6 +20271,7 @@ esac
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -18952,7 +20282,7 @@ esac
             .unwrap();
 
         assert_eq!(lookup_results[0].exit_code, 0);
-        assert_eq!(lookup_results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(lookup_results[0].state.outputs.get("cache-hit").unwrap(), "true");
         assert!(lookup_results[0].stdout.contains("Cache lookup found key"));
         assert!(!root
             .join("lookup-job/home/.cache/rust-script/state.bin")
@@ -18996,6 +20326,7 @@ esac
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -19006,9 +20337,9 @@ esac
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
-        assert_eq!(restore_results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(restore_results[0].state.outputs.get("cache-hit").unwrap(), "false");
         assert_eq!(
-            restore_results[0].state.outputs["cache-matched-key"],
+            restore_results[0].state.outputs.get("cache-matched-key").unwrap(),
             "rust-linux-z-new"
         );
         // `/restore` performs no post save.
@@ -19038,6 +20369,7 @@ esac
                     .map(|(name, value)| (name.to_string(), value.to_string()))
                     .collect(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -19069,7 +20401,7 @@ esac
         // `/restore` registers no post action.
         assert_eq!(results.len(), 1);
         // `/restore` exposes all three outputs.
-        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(results[0].state.outputs.get("cache-hit").unwrap(), "false");
         assert!(results[0].state.outputs.contains_key("cache-primary-key"));
         assert!(results[0].state.outputs.contains_key("cache-matched-key"));
         // A restore never writes an entry, even when the workspace path exists.
@@ -19259,7 +20591,7 @@ esac
         let win_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&win_temp), &restore, &win_env, &win_temp)
             .unwrap();
-        assert_eq!(win_results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(win_results[0].state.outputs.get("cache-hit").unwrap(), "false");
         assert!(!root.join("win/home/.cache/rust-script/state.bin").exists());
 
         // Same RUNNER_OS restores the entry.
@@ -19269,7 +20601,7 @@ esac
         let lin_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&lin_temp), &restore, &lin_env, &lin_temp)
             .unwrap();
-        assert_eq!(lin_results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(lin_results[0].state.outputs.get("cache-hit").unwrap(), "true");
         assert_eq!(
             fs::read_to_string(root.join("lin/home/.cache/rust-script/state.bin")).unwrap(),
             "linux\n"
@@ -19385,6 +20717,7 @@ esac
                     ]
                     .into(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -19404,6 +20737,7 @@ esac
                     ]
                     .into(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -19428,6 +20762,7 @@ type=sha,format=long,prefix=,enable=true"
                     ]
                     .into(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -19466,6 +20801,7 @@ type=sha,format=long,prefix=,enable=true"
                     ]
                     .into(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -19503,6 +20839,7 @@ type=sha,format=long,prefix=,enable=true"
                         ),
                     ]
                     .into(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -19550,10 +20887,10 @@ type=sha,format=long,prefix=,enable=true"
         // 5 main steps + the login-logout and buildx-rm posts (GitHub parity).
         assert_eq!(results.len(), 7);
         assert_eq!(
-            results[2].state.outputs["tags"],
+            results[2].state.outputs.get("tags").unwrap(),
             "chainargos/rust-bitcoin-processor:abcdef1234567890"
         );
-        assert!(results[2].state.outputs["labels"].contains(
+        assert!(results[2].state.outputs.get("labels").unwrap().contains(
             "org.opencontainers.image.source=https://github.com/ChainArgos/java-monorepo"
         ));
         let runner = executor.runner();
@@ -19669,6 +21006,7 @@ type=sha,format=long,prefix=,enable=true"
                     ]
                     .into(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 &JobExecutionState::default(),
                 DEFAULT_STEP_TIMEOUT,
@@ -19692,6 +21030,7 @@ type=sha,format=long,prefix=,enable=true"
             source_path: None,
             inputs: [("secrets".into(), "github_token=secret-value".into())].into(),
             env: Vec::new(),
+            ..Default::default()
         };
         let state = JobExecutionState::new_with_workspace(&[], &[], &temp.join("work"), &temp);
 
@@ -19727,6 +21066,7 @@ type=sha,format=long,prefix=,enable=true"
                     source_path: None,
                     inputs: [("secrets".into(), "github_token=secret-value".into())].into(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 &JobExecutionState::new_with_workspace(&[], &[], &temp.join("work"), &temp),
                 DEFAULT_STEP_TIMEOUT,
@@ -19743,10 +21083,10 @@ type=sha,format=long,prefix=,enable=true"
     #[test]
     fn configure_pages_outputs_match_upstream_url_surface() {
         let outputs = pages_site_outputs("https://octocat.github.io/example/").unwrap();
-        assert_eq!(outputs["base_url"], "https://octocat.github.io/example");
-        assert_eq!(outputs["origin"], "https://octocat.github.io");
-        assert_eq!(outputs["host"], "octocat.github.io");
-        assert_eq!(outputs["base_path"], "/example");
+        assert_eq!(outputs.get("base_url").unwrap(), "https://octocat.github.io/example");
+        assert_eq!(outputs.get("origin").unwrap(), "https://octocat.github.io");
+        assert_eq!(outputs.get("host").unwrap(), "octocat.github.io");
+        assert_eq!(outputs.get("base_path").unwrap(), "/example");
     }
 
     #[cfg(feature = "test-support")]
@@ -19787,6 +21127,7 @@ type=sha,format=long,prefix=,enable=true"
                 source_path: None,
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
+                ..Default::default()
             },
             &state,
         )
@@ -19794,7 +21135,7 @@ type=sha,format=long,prefix=,enable=true"
         server.join().unwrap();
 
         assert_eq!(result.exit_code, 0);
-        assert_eq!(result.state.outputs["base_path"], "/example");
+        assert_eq!(result.state.outputs.get("base_path").unwrap(), "/example");
         assert_eq!(result.state.env["GITHUB_PAGES"], "true");
     }
 
@@ -19887,6 +21228,7 @@ type=sha,format=long,prefix=,enable=true"
                 source_path: None,
                 inputs: [("reporting_interval".into(), "0".into())].into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             &state,
         )
@@ -19894,7 +21236,7 @@ type=sha,format=long,prefix=,enable=true"
         server.join().unwrap();
 
         assert_eq!(
-            result.state.outputs["page_url"],
+            result.state.outputs.get("page_url").unwrap(),
             "https://deployed.example/"
         );
         let requests = requests.lock().unwrap();
@@ -19931,6 +21273,7 @@ type=sha,format=long,prefix=,enable=true"
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -19992,6 +21335,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -20029,7 +21373,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .unwrap();
 
         assert_eq!(
-            results[0].state.outputs["tags"],
+            results[0].state.outputs.get("tags").unwrap(),
             "chainargos/rust-bitcoin-processor:pr-42"
         );
 
@@ -20061,10 +21405,11 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             ]
             .into(),
             env: Vec::new(),
+            ..Default::default()
         };
         let publish_result = native_docker_metadata(&publish_action, &publish_state).unwrap();
         assert_eq!(
-            publish_result.state.outputs["tags"],
+            publish_result.state.outputs.get("tags").unwrap(),
             "chainargos/rust-bitcoin-processor:latest\nchainargos/rust-bitcoin-processor:abcdef1234567890"
         );
         fs::remove_dir_all(temp).unwrap();
@@ -20094,10 +21439,11 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             ]
             .into(),
             env: Vec::new(),
+            ..Default::default()
         };
         let result = native_docker_metadata(&action, &state).unwrap();
         assert_eq!(
-            result.state.outputs["tags"],
+            result.state.outputs.get("tags").unwrap(),
             "ghcr.io/org/repo/fixture:main\nghcr.io/org/repo/fixture:sha-abcdef1"
         );
     }
@@ -20123,10 +21469,11 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             ]
             .into(),
             env: Vec::new(),
+            ..Default::default()
         };
         let result = native_docker_metadata(&action, &state).unwrap();
         // no branch ref → falls back to sha default
-        assert!(result.state.outputs["tags"].starts_with("ghcr.io/org/repo/fixture:sha-"));
+        assert!(result.state.outputs.get("tags").unwrap().starts_with("ghcr.io/org/repo/fixture:sha-"));
     }
 
     #[test]
@@ -20151,6 +21498,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                     source_path: None,
                     inputs: [("install".into(), "false".into())].into(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -20166,6 +21514,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                     source_path: None,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -20181,6 +21530,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                     source_path: None,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -20196,6 +21546,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                     source_path: None,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -20215,6 +21566,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                     ]
                     .into(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -20257,7 +21609,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert_eq!(results[0].state.env["RUSTUP_TOOLCHAIN"], "1.97.1");
         // just is now a locked mise tool exposed via the mise shims dir.
         assert!(results[3].state.path.contains(&"/opt/mise/shims".into()));
-        assert_eq!(results[4].state.outputs["cache-hit"], "false");
+        assert_eq!(results[4].state.outputs.get("cache-hit").unwrap(), "false");
         assert_eq!(results[4].state.env["CACHE_ON_FAILURE"], "true");
         let docker_exec_calls = executor
             .runner()
@@ -20871,6 +22223,197 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     }
 
     #[test]
+    fn action_mapping_keys_use_runner_scalar_and_collision_rules() {
+        let state = JobExecutionState::new(&[]);
+        let inputs = [
+            ("name".to_string(), "BUILD".to_string()),
+            ("value".to_string(), "${{ secrets.X }}".to_string()),
+        ]
+        .into();
+        let map = ActionTemplateMap::from_entries([
+            crate::action::ActionTemplateEntry {
+                key: "${{ inputs.name }}_TOKEN".into(),
+                value: "${{ inputs.value }}".into(),
+                key_is_template: true,
+                value_is_template: true,
+            },
+            crate::action::ActionTemplateEntry {
+                key: "STATIC".into(),
+                value: "literal".into(),
+                key_is_template: false,
+                value_is_template: false,
+            },
+        ]);
+
+        let resolved = state
+            .resolve_template_mapping_with_inputs(&map, Some(&inputs))
+            .unwrap();
+        assert_eq!(
+            resolved,
+            vec![
+                ("BUILD_TOKEN".to_string(), "${{ secrets.X }}".to_string()),
+                ("STATIC".to_string(), "literal".to_string()),
+            ],
+            "Runner evaluates a key once, preserves pair order, and keeps returned strings as data"
+        );
+
+        let mut caller_env = vec![("BUILD_TOKEN".to_string(), "caller".to_string())];
+        add_missing_docker_action_environment(&mut caller_env, resolved);
+        assert_eq!(caller_env[0], ("BUILD_TOKEN".into(), "caller".into()));
+
+        let colliding = ActionTemplateMap::from_entries([
+            crate::action::ActionTemplateEntry {
+                key: "TOKEN".into(),
+                value: "one".into(),
+                key_is_template: false,
+                value_is_template: false,
+            },
+            crate::action::ActionTemplateEntry {
+                key: "${{ inputs.name }}".into(),
+                value: "two".into(),
+                key_is_template: true,
+                value_is_template: false,
+            },
+        ]);
+        let token_inputs = [("name".to_string(), "token".to_string())].into();
+        assert!(matches!(
+            state.resolve_template_mapping_with_inputs(&colliding, Some(&token_inputs)),
+            Err(ExpressionInterpolationError::DuplicateMappingKey)
+        ));
+
+        let object_key = ActionTemplateMap::from_entries([crate::action::ActionTemplateEntry {
+            key: "${{ fromJSON('{\"name\":\"token\"}') }}".into(),
+            value: "value".into(),
+            key_is_template: true,
+            value_is_template: false,
+        }]);
+        assert!(matches!(
+            state.resolve_template_mapping(&object_key),
+            Err(ExpressionInterpolationError::MappingKeyNotString)
+        ));
+
+        let null_key = ActionTemplateMap::from_entries([crate::action::ActionTemplateEntry {
+            key: "${{ null }}".into(),
+            value: "value".into(),
+            key_is_template: true,
+            value_is_template: false,
+        }]);
+        assert!(matches!(
+            state.resolve_template_mapping(&null_key),
+            Err(ExpressionInterpolationError::DuplicateMappingKey)
+        ));
+    }
+
+    #[test]
+    fn composite_with_and_env_dynamic_keys_resolve_in_child_scope() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let nested_with = ActionTemplateMap::from_entries([
+            crate::action::ActionTemplateEntry {
+                key: "${{ inputs.key_name }}".into(),
+                value: "${{ inputs.key_value }}".into(),
+                key_is_template: true,
+                value_is_template: true,
+            },
+            crate::action::ActionTemplateEntry {
+                key: "env_name".into(),
+                value: "${{ inputs.env_name }}".into(),
+                key_is_template: false,
+                value_is_template: true,
+            },
+            crate::action::ActionTemplateEntry {
+                key: "env_value".into(),
+                value: "${{ inputs.env_value }}".into(),
+                key_is_template: false,
+                value_is_template: true,
+            },
+            crate::action::ActionTemplateEntry {
+                key: "enclosing_action_path".into(),
+                value: "${{ github.action_path }}".into(),
+                key_is_template: false,
+                value_is_template: true,
+            },
+        ]);
+        let steps = vec![
+            ExecutableStep::CompositeStart {
+                step_id: "outer".into(),
+                display_name: "Run outer".into(),
+                input_diagnostics: Vec::new(),
+                inputs: [
+                    ("key_name".into(), "build_token".into()),
+                    ("key_value".into(), "42".into()),
+                    ("env_name".into(), "CHILD_ENV".into()),
+                    ("env_value".into(), "active".into()),
+                ]
+                .into(),
+                expression_inputs: BTreeSet::new(),
+                input_templates: None,
+                input_defaults: ActionTemplateMap::default(),
+                visible_step_ids: [
+                    ("nested".into(), "nested".into()),
+                    ("reader".into(), "reader".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+                action_path: Some("/__a/outer".into()),
+                condition: None,
+                continue_on_error: false,
+                continue_on_error_expression: None,
+            },
+            ExecutableStep::CompositeStart {
+                step_id: "nested".into(),
+                display_name: "Run nested".into(),
+                input_diagnostics: Vec::new(),
+                inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                input_templates: Some(nested_with),
+                input_defaults: ActionTemplateMap::default(),
+                visible_step_ids: [("reader".into(), "reader".into())].into(),
+                env: Vec::new(),
+                action_path: Some("/__a/nested".into()),
+                condition: None,
+                continue_on_error: false,
+                continue_on_error_expression: None,
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "reader".into(),
+                display_name: String::new(),
+                script: "echo '${{ inputs.build_token }}|${{ inputs.enclosing_action_path }}|${{ github.action_path }}'".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: vec![(
+                    "${{ inputs.env_name }}".into(),
+                    "${{ inputs.env_value }}".into(),
+                )],
+                condition: Some("env.CHILD_ENV == 'active'".into()),
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::CompositeEnd {
+                step_id: "nested".into(),
+            },
+            ExecutableStep::CompositeEnd {
+                step_id: "outer".into(),
+            },
+        ];
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps_with_context(&container(&temp), &steps, &[], &[], &temp)
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(temp.join("reader.sh")).unwrap(),
+            "echo '42|/__a/outer|/__a/nested'\n"
+        );
+        assert!(executor.runner().calls.iter().any(|(_, args)| {
+            args.iter().any(|arg| arg == "CHILD_ENV=active")
+                && args.iter().any(|arg| arg == "/__t/reader.sh")
+        }));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn resolves_github_and_runner_context_expressions() {
         let state = JobExecutionState::new(&[
             ("GITHUB_ACTION".into(), "setup".into()),
@@ -21156,6 +22699,29 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert!(!false_state
             .evaluate_condition(Some("matrix.zigbuild"))
             .unwrap());
+    }
+
+    #[test]
+    fn named_context_values_preserve_reference_identity_per_expression() {
+        let state = JobExecutionState::new_with_context(
+            &[],
+            &[(
+                "github".into(),
+                serde_json::json!({"repository": "acme/widgets"}),
+            )],
+        );
+
+        let context = state.expression_context();
+        let first = expression::EvaluationContext::named_value(&context, "github");
+        let repeated = expression::EvaluationContext::named_value(&context, "GITHUB");
+        assert!(first.abstract_equal(&repeated));
+
+        let separate_context = state.expression_context();
+        let distinct = expression::EvaluationContext::named_value(&separate_context, "github");
+        assert!(!first.abstract_equal(&distinct));
+
+        assert!(state.evaluate_condition(Some("github == github")).unwrap());
+        assert!(state.evaluate_condition(Some("steps == steps")).unwrap());
     }
 
     #[test]
@@ -21601,6 +23167,7 @@ fi"#
                             "${{ secrets.DOCKERHUB_TOKEN }}".into(),
                         ),
                     ],
+                    ..Default::default()
                 },
                 condition: Some(condition.into()),
                 continue_on_error: false,
@@ -21620,6 +23187,7 @@ fi"#
                     action_container_path: "/__a/_actions/docker_setup-buildx-action/v4".into(),
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: Some(condition.into()),
                 continue_on_error: false,
@@ -21662,7 +23230,7 @@ fi"#
 
         assert_eq!(results.len(), 4);
         assert!(results.iter().all(|result| !result.skipped));
-        assert_eq!(results[0].state.outputs["exists"], "false");
+        assert_eq!(results[0].state.outputs.get("exists").unwrap(), "false");
         assert_eq!(
             fs::read_to_string(temp.join("build-docker-image.sh")).unwrap(),
             "just build-bitcoin-processor-app\n"
@@ -21690,6 +23258,23 @@ fi"#
         assert!(build_exec.1.contains(&"GITHUB_TOKEN=ghs_token".into()));
         assert!(build_exec.1.contains(&"--env-file".into()));
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn composite_outputs_keep_declared_empty_values() {
+        let state = JobExecutionState::new(&[]);
+        let outputs = BTreeMap::from([
+            ("explicit".to_string(), String::new()),
+            (
+                "evaluated".to_string(),
+                "${{ steps.missing.outputs.value }}".to_string(),
+            ),
+        ]);
+
+        let evaluated = state.evaluate_named_outputs(&outputs).unwrap();
+
+        assert_eq!(evaluated.get("explicit"), Some(&String::new()));
+        assert_eq!(evaluated.get("evaluated"), Some(&String::new()));
     }
 
     #[test]
@@ -22158,7 +23743,7 @@ fi"#
             .unwrap();
 
         assert_eq!(results.len(), 3);
-        assert_eq!(results[1].state.outputs["artifact-id"], "42");
+        assert_eq!(results[1].state.outputs.get("artifact-id").unwrap(), "42");
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
             "echo artifact=42\n"
@@ -22185,10 +23770,17 @@ fi"#
             ExecutableStep::CompositeStart {
                 step_id: "composite".into(),
                 display_name: "Run local composite".into(),
+                input_diagnostics: Vec::new(),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
                 env: Vec::new(),
                 condition: Some("always()".into()),
                 continue_on_error: false,
+                input_templates: None,
+                input_defaults: ActionTemplateMap::default(),
             },
             ExecutableStep::Script(ScriptStep {
                 id: "composite-first".into(),
@@ -22279,10 +23871,17 @@ fi"#
             ExecutableStep::CompositeStart {
                 step_id: "first".into(),
                 display_name: "Run first composite".into(),
+                input_diagnostics: Vec::new(),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
                 env: Vec::new(),
                 condition: Some("failure()".into()),
                 continue_on_error: false,
+                input_templates: None,
+                input_defaults: ActionTemplateMap::default(),
             },
             script_step("inner1", "echo inner1", None),
             ExecutableStep::CompositeEnd {
@@ -22291,10 +23890,17 @@ fi"#
             ExecutableStep::CompositeStart {
                 step_id: "second".into(),
                 display_name: "Run second composite".into(),
+                input_diagnostics: Vec::new(),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
                 env: Vec::new(),
                 condition: Some("success()".into()),
                 continue_on_error: false,
+                input_templates: None,
+                input_defaults: ActionTemplateMap::default(),
             },
             script_step("inner2", "echo inner2", None),
             ExecutableStep::CompositeEnd {
@@ -22373,10 +23979,17 @@ fi"#
             ExecutableStep::CompositeStart {
                 step_id: "composite".into(),
                 display_name: "Run local composite".into(),
+                input_diagnostics: Vec::new(),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
                 env: Vec::new(),
                 condition: None,
-                continue_on_error: false,
+                continue_on_error: false,                input_templates: None,
+input_defaults: ActionTemplateMap::default(),
+
             },
             script_step("inner", "echo inner", None),
             ExecutableStep::CompositeEnd {
@@ -22419,10 +24032,17 @@ fi"#
         let start = |step_id: &str, condition: Option<&str>| ExecutableStep::CompositeStart {
             step_id: step_id.into(),
             display_name: format!("Run {step_id}"),
+            input_diagnostics: Vec::new(),
             inputs: BTreeMap::new(),
+            expression_inputs: BTreeSet::new(),
+            visible_step_ids: BTreeMap::new(),
+            action_path: None,
+            continue_on_error_expression: None,
             env: Vec::new(),
             condition: condition.map(str::to_string),
             continue_on_error: false,
+            input_templates: None,
+            input_defaults: ActionTemplateMap::default(),
         };
         let end = |step_id: &str| ExecutableStep::CompositeEnd {
             step_id: step_id.into(),
@@ -22502,6 +24122,175 @@ fi"#
         fs::remove_dir_all(temp).unwrap();
     }
 
+    #[test]
+    fn composite_scopes_defer_inputs_and_continue_on_error_until_runtime() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let top_level_action_steps: Vec<crate::job_message::ActionStep> =
+            serde_json::from_value(serde_json::json!([{
+                "id": "outer",
+                "reference": {
+                    "type": "Repository",
+                    "name": "./.github/actions/outer"
+                },
+                "inputs": {
+                    "opaque": "${{ vars.payload }}"
+                }
+            }]))
+            .unwrap();
+        let planning_context = vec![(
+            "vars".into(),
+            serde_json::json!({ "payload": "${{ secrets.X }}" }),
+        )];
+        let top_level_plan = crate::action::local_action_plans_with_context(
+            &top_level_action_steps,
+            &temp,
+            &planning_context,
+        )
+        .unwrap()
+        .remove(0);
+        let top_level_metadata = crate::action::parse_action_metadata(
+            "inputs:\n  opaque:\n    default: fallback\nruns:\n  using: composite\n  steps: []\n",
+        )
+        .unwrap();
+        let (top_level_inputs, top_level_expression_inputs) =
+            crate::action::composite_action_input_scope(
+                &top_level_metadata,
+                &top_level_plan.inputs,
+                &top_level_plan.expression_inputs,
+            )
+            .unwrap();
+        assert_eq!(top_level_inputs["opaque"], "${{ secrets.X }}");
+        assert!(top_level_expression_inputs.is_empty());
+
+        let steps = vec![
+            ExecutableStep::CompositeStart {
+                step_id: "outer".into(),
+                display_name: "Run outer composite".into(),
+                input_diagnostics: Vec::new(),
+                inputs: top_level_inputs,
+                expression_inputs: top_level_expression_inputs,
+                visible_step_ids: [
+                    ("producer".to_string(), "producer".to_string()),
+                    ("nested".to_string(), "nested".to_string()),
+                ]
+                .into(),
+                action_path: Some("/__a/outer".into()),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                continue_on_error_expression: None,                input_templates: None,
+input_defaults: ActionTemplateMap::default(),
+
+            },
+            script_step(
+                "producer",
+                "echo 'answer=42' >> \"$GITHUB_OUTPUT\"",
+                None,
+            ),
+            ExecutableStep::CompositeStart {
+                step_id: "nested".into(),
+                display_name: "Run nested composite".into(),
+                input_diagnostics: Vec::new(),
+                inputs: [
+                    (
+                        "copy".into(),
+                        "${{ steps.producer.outputs.answer }}".into(),
+                    ),
+                    ("opaque".into(), "${{ inputs.opaque }}".into()),
+                ]
+                .into(),
+                expression_inputs: ["copy".to_string(), "opaque".to_string()].into(),
+                visible_step_ids: [
+                    ("nested-producer".to_string(), "nested-producer".to_string()),
+                    (
+                        "nested-fail".to_string(),
+                        "runtime-nested-fail".to_string(),
+                    ),
+                    ("nested-observe".to_string(), "nested-observe".to_string()),
+                    (
+                        "nested-after-failure".to_string(),
+                        "nested-after-failure".to_string(),
+                    ),
+                ]
+                .into(),
+                action_path: Some("/__a/nested".into()),
+                env: vec![("NESTED_ENABLED".into(), "yes".into())],
+                condition: Some("env.NESTED_ENABLED == 'yes'".into()),
+                continue_on_error: false,
+                continue_on_error_expression: None,                input_templates: None,
+input_defaults: ActionTemplateMap::default(),
+
+            },
+            script_step(
+                "nested-producer",
+                "echo 'ignore=yes' >> \"$GITHUB_OUTPUT\"",
+                None,
+            ),
+            ExecutableStep::StepContinueOnError {
+                step_id: "runtime-nested-fail".into(),
+                value: ActionBooleanValue::Expression(
+                    "steps.nested-producer.outputs.ignore == 'yes'".into(),
+                ),
+            },
+            script_step("runtime-nested-fail", "exit 1", None),
+            script_step(
+                "nested-observe",
+                "printf '%s' '${{ inputs.copy }}|${{ inputs.opaque }}'",
+                Some(
+                    "steps.nested-fail.outcome == 'failure' && steps.nested-fail.conclusion == 'success'",
+                ),
+            ),
+            script_step(
+                "nested-after-failure",
+                "echo should-not-run",
+                Some("failure()"),
+            ),
+            ExecutableStep::CompositeEnd {
+                step_id: "nested".into(),
+            },
+            script_step("outer-after-failure", "echo should-not-run", Some("failure()")),
+            ExecutableStep::CompositeEnd {
+                step_id: "outer".into(),
+            },
+        ];
+        let context = vec![("secrets".into(), serde_json::json!({"X": "runner-secret"}))];
+        let mut executor = DockerJobEngine::inert(CompositeParityRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        executor
+            .execute_ordered_steps_with_context(&container(&temp), &steps, &[], &context, &temp)
+            .unwrap();
+
+        let observed = fs::read_to_string(temp.join("nested-observe.sh")).unwrap();
+        assert!(
+            observed.contains("42|${{ secrets.X }}"),
+            "resolved input strings must remain data instead of being evaluated again: {observed:?}"
+        );
+        assert!(
+            !observed.contains("runner-secret"),
+            "the rendered input must not be reactivated as an expression"
+        );
+        assert!(
+            !temp.join("nested-after-failure.sh").exists(),
+            "a deferred COE true value must turn off failure() inside its action scope"
+        );
+        assert!(
+            !temp.join("outer-after-failure.sh").exists(),
+            "a handled nested step failure must not poison the enclosing composite"
+        );
+        assert!(
+            executor.runner().calls.iter().any(|(_, args)| {
+                args.iter().any(|arg| arg == "NESTED_ENABLED=yes")
+                    && args.iter().any(|arg| arg == "/__t/nested-observe.sh")
+            }),
+            "the nested wrapper env must reach children, and its env-backed condition must run"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
     /// The umbrella's own `continue-on-error` converts the umbrella
     /// conclusion only (upstream `ApplyContinueOnError`): inner steps
     /// keep their own outcomes/conclusions and their own `failure()`
@@ -22515,10 +24304,17 @@ fi"#
             ExecutableStep::CompositeStart {
                 step_id: "comp".into(),
                 display_name: "Run comp".into(),
+                input_diagnostics: Vec::new(),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
                 env: Vec::new(),
                 condition: None,
-                continue_on_error: true,
+                continue_on_error: true,                input_templates: None,
+input_defaults: ActionTemplateMap::default(),
+
             },
             script_step("boom", "exit 1", None),
             script_step("inner-cleanup", "echo cleanup", Some("failure()")),
@@ -22571,6 +24367,87 @@ fi"#
         fs::remove_dir_all(temp).unwrap();
     }
 
+    /// The root `JobContext.Status` is not updated by embedded step results
+    /// while a composite handler is running (`StepsRunner.RunAsync` updates it
+    /// only after the top-level step returns). Composite-local `success()`
+    /// still sees the inner failure, while explicit `job.status` stays
+    /// success until the umbrella concludes.
+    #[test]
+    fn composite_inner_failure_does_not_update_root_job_status_until_end() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::CompositeStart {
+                step_id: "comp".into(),
+                display_name: "Run comp".into(),
+                input_diagnostics: Vec::new(),
+                inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                input_templates: None,
+                input_defaults: ActionTemplateMap::default(),
+            },
+            script_step("boom", "exit 1", None),
+            script_step("inner-success", "echo must-not-run", Some("success()")),
+            script_step(
+                "inner-job-status",
+                "echo status=${{ job.status }}",
+                Some("always() && job.status == 'success'"),
+            ),
+            ExecutableStep::CompositeEnd {
+                step_id: "comp".into(),
+            },
+            script_step(
+                "after-failure",
+                "echo after=${{ job.status }}",
+                Some("failure()"),
+            ),
+            script_step(
+                "job-status-reader",
+                "echo status=${{ job.status }}",
+                Some("always()"),
+            ),
+        ];
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: vec![1, 0, 0],
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert!(!temp.join("inner-success.sh").exists());
+        assert_eq!(
+            fs::read_to_string(temp.join("inner-job-status.sh")).unwrap(),
+            "echo status=success\n"
+        );
+        assert!(temp.join("after-failure.sh").exists());
+        assert_eq!(
+            fs::read_to_string(temp.join("job-status-reader.sh")).unwrap(),
+            "echo status=failure\n"
+        );
+        assert_eq!(summary.step_results[0].exit_code, 1);
+        assert!(summary.step_results[1].skipped);
+        assert_eq!(summary.step_results[2].exit_code, 0);
+        assert_eq!(summary.step_results[3].exit_code, 1);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
     /// An ignored umbrella converts job-scope status: the inner `Failure`
     /// entries stay raw in `steps.*`, but later `failure()`/`success()`
     /// readers and `job.status` must not see them (upstream `job.status`
@@ -22585,10 +24462,17 @@ fi"#
             ExecutableStep::CompositeStart {
                 step_id: "comp".into(),
                 display_name: "Run comp".into(),
+                input_diagnostics: Vec::new(),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: true,
+                input_templates: None,
+                input_defaults: ActionTemplateMap::default(),
             },
             script_step("boom", "exit 1", None),
             ExecutableStep::CompositeEnd {
@@ -22658,18 +24542,32 @@ fi"#
             ExecutableStep::CompositeStart {
                 step_id: "outer".into(),
                 display_name: "Run outer".into(),
+                input_diagnostics: Vec::new(),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: true,
+                input_templates: None,
+                input_defaults: ActionTemplateMap::default(),
             },
             ExecutableStep::CompositeStart {
                 step_id: "inner".into(),
                 display_name: "Run inner".into(),
+                input_diagnostics: Vec::new(),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                input_templates: None,
+                input_defaults: ActionTemplateMap::default(),
             },
             script_step("boom", "exit 1", None),
             ExecutableStep::CompositeEnd {
@@ -22731,8 +24629,8 @@ fi"#
             continue_on_error: true,
             ..CompositeFrame::default()
         };
-        assert!(frame.umbrella_result(false).failure_ignored);
-        assert!(!frame.umbrella_result(true).failure_ignored);
+        assert!(frame.umbrella_result(false, false).failure_ignored);
+        assert!(!frame.umbrella_result(true, false).failure_ignored);
     }
 
     /// The umbrella timeline row flag derives from the umbrella conversion
@@ -22758,10 +24656,17 @@ fi"#
             ExecutableStep::CompositeStart {
                 step_id: "comp".into(),
                 display_name: "Run comp".into(),
+                input_diagnostics: Vec::new(),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
                 env: Vec::new(),
                 condition: None,
-                continue_on_error: false,
+                continue_on_error: false,                input_templates: None,
+input_defaults: ActionTemplateMap::default(),
+
             },
             ignored_inner,
             script_step("standing-inner", "exit 1", None),
@@ -22822,10 +24727,17 @@ fi"#
             ExecutableStep::CompositeStart {
                 step_id: "comp".into(),
                 display_name: "Run comp".into(),
+                input_diagnostics: Vec::new(),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                input_templates: None,
+                input_defaults: ActionTemplateMap::default(),
             },
             script_step("bad-if", "echo bad", Some("noSuchFunction('a')")),
             script_step("never-runs", "echo never", None),
@@ -22877,31 +24789,43 @@ fi"#
         fs::remove_dir_all(temp).unwrap();
     }
 
-    /// A nested composite condition failure breaks the parent composite loop
-    /// too. Both handlers still process their own outputs before closing, and
-    /// the job resumes only after the outer umbrella — parent siblings must
-    /// not run between the nested End and the outer outputs.
+    /// A nested composite condition failure breaks that nested handler, runs
+    /// its outputs, then returns control to the parent composite's siblings.
     #[test]
-    fn nested_condition_error_propagates_to_parent_composite_loop() {
+    fn nested_condition_error_resumes_parent_composite_siblings() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![
             ExecutableStep::CompositeStart {
                 step_id: "outer".into(),
                 display_name: "Run outer".into(),
+                input_diagnostics: Vec::new(),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                input_templates: None,
+                input_defaults: ActionTemplateMap::default(),
             },
             script_step("outer-before", "echo outer-before", None),
             ExecutableStep::CompositeStart {
                 step_id: "inner".into(),
                 display_name: "Run inner".into(),
+                input_diagnostics: Vec::new(),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                input_templates: None,
+                input_defaults: ActionTemplateMap::default(),
             },
             script_step("inner-bad-if", "echo never", Some("noSuchFunction('a')")),
             script_step("inner-sibling", "echo inner-sibling", None),
@@ -22913,7 +24837,7 @@ fi"#
             ExecutableStep::CompositeEnd {
                 step_id: "inner".into(),
             },
-            script_step("outer-sibling", "echo outer-sibling", None),
+            script_step("outer-sibling", "echo outer-sibling", Some("always()")),
             ExecutableStep::CompositeOutputs {
                 step_id: "outer-outputs".into(),
                 outputs: [("outer-answer".to_string(), "43".to_string())].into(),
@@ -22943,7 +24867,7 @@ fi"#
             .unwrap();
 
         assert!(!temp.join("inner-sibling.sh").exists());
-        assert!(!temp.join("outer-sibling.sh").exists());
+        assert!(temp.join("outer-sibling.sh").exists());
         assert!(temp.join("follower.sh").exists());
         assert!(summary
             .step_results
@@ -22967,10 +24891,17 @@ fi"#
             ExecutableStep::CompositeStart {
                 step_id: "composite".into(),
                 display_name: "${{ noSuchFunction('x') }}".into(),
+                input_diagnostics: Vec::new(),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                input_templates: None,
+                input_defaults: ActionTemplateMap::default(),
             },
             script_step("inner", "echo inner", None),
             ExecutableStep::CompositeEnd {
@@ -23029,6 +24960,7 @@ fi"#
                 action_container_path: "/__a/_actions/acme_action/v1".into(),
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -23486,7 +25418,7 @@ fi"#
 
         let results = &summary.step_results;
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].state.outputs["answer"], "42");
+        assert_eq!(results[0].state.outputs.get("answer").unwrap(), "42");
         assert_eq!(results[0].state.error_count, 1);
         assert_eq!(results[0].state.warning_count, 1);
         assert_eq!(results[0].state.notice_count, 0);
@@ -23546,7 +25478,7 @@ fi"#
 
         let results = &summary.step_results;
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].state.outputs["answer"], "42");
+        assert_eq!(results[0].state.outputs.get("answer").unwrap(), "42");
         assert_eq!(results[0].state.warning_count, 2);
         assert_eq!(summary.step_logs[0].masks, vec!["hidden"]);
         assert_eq!(summary.step_logs[0].warning_count, 2);
@@ -23603,7 +25535,7 @@ fi"#
                 .count()
         };
         for result in results {
-            assert_eq!(result.state.outputs["answer"], "42");
+            assert_eq!(result.state.outputs.get("answer").unwrap(), "42");
             assert_eq!(result.state.warning_count, 2);
         }
         assert_eq!(deprecated_entries(&results[0].state), 1);
@@ -23688,7 +25620,8 @@ fi"#
                         "INPUT_RESTORE-KEYS".into(),
                         "rust-script-${{ runner.os }}-\n".into(),
                     ),
-                ],
+                ],                ..Default::default()
+
             },
             condition: None,
             continue_on_error: false,
@@ -24199,6 +26132,7 @@ fi"#
                     action_container_path: "/__a/_actions/sccache".into(),
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: true,
@@ -24254,6 +26188,106 @@ fi"#
             })
             .count();
         assert_eq!(exec_count, 2);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn dynamic_job_continue_on_error_evaluates_matrix_boolean() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::StepContinueOnError {
+                step_id: "build".into(),
+                value: ActionBooleanValue::Expression("matrix.keep_going".into()),
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "build".into(),
+                display_name: String::new(),
+                script: "exit 1".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "cleanup".into(),
+                display_name: String::new(),
+                script: "echo cleanup".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: Some("success()".into()),
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+        ];
+        let context = vec![("matrix".into(), serde_json::json!({"keep_going": true}))];
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: vec![1, 0],
+        });
+
+        let results = executor
+            .execute_ordered_steps_with_context(&container(&temp), &steps, &[], &context, &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].failure_ignored);
+        assert!(!results[1].skipped);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn continue_on_error_expression_sees_outputs_from_failed_step() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::StepContinueOnError {
+                step_id: "build".into(),
+                value: ActionBooleanValue::Expression(
+                    "steps.build.outputs.answer == 'true'".into(),
+                ),
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "build".into(),
+                display_name: String::new(),
+                script: "echo answer=true >> $GITHUB_OUTPUT\nexit 1".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "cleanup".into(),
+                display_name: String::new(),
+                script: "echo cleanup".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: Some("success()".into()),
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+        ];
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].state.outputs.get("answer").unwrap(), "true");
+        assert!(results[0].failure_ignored);
+        assert!(!results[1].skipped);
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -24434,6 +26468,7 @@ fi"#
                     action_container_path: "/__a/_actions/guarded".into(),
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -24590,6 +26625,7 @@ fi"#
                 action_container_path: "/__a/_actions/acme_action/v1".into(),
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: true,
@@ -24651,6 +26687,7 @@ fi"#
                 source_path: None,
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: true,
@@ -24766,6 +26803,7 @@ fi"#
                     ]
                     .into(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: true,
@@ -25127,11 +27165,12 @@ fi"#
                 skipped: false,
                 failure_ignored: false,
                 state: StepCommandState {
-                    outputs: BTreeMap::from([
+                    outputs: [
                         ("count".to_string(), "0".to_string()),
                         ("flag".to_string(), "false".to_string()),
                         ("blank".to_string(), String::new()),
-                    ]),
+                    ]
+                    .into(),
                     ..StepCommandState::default()
                 },
                 stdout: String::new(),
@@ -25438,8 +27477,12 @@ fi"#
     fn unevaluable_condition_fails_step_and_continues() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
+        let mut bad_if = script_step("bad-if", "echo bad", Some("noSuchFunction('a')"));
+        if let ExecutableStep::Script(script) = &mut bad_if {
+            script.continue_on_error = true;
+        }
         let steps = vec![
-            script_step("bad-if", "echo bad", Some("noSuchFunction('a')")),
+            bad_if,
             script_step("ordinary", "echo ordinary", None),
             script_step("on-failure", "echo failure", Some("failure()")),
         ];
@@ -25470,6 +27513,72 @@ fi"#
         fs::remove_dir_all(temp).unwrap();
     }
 
+    /// A step-env evaluation error is a failed step. Later cleanup runs and
+    /// previously registered post actions still drain after the step loop.
+    #[test]
+    fn step_environment_error_fails_step_and_drains_post_actions() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let mut bad_environment = script_step("bad-env", "echo must-not-run", None);
+        if let ExecutableStep::Script(script) = &mut bad_environment {
+            script.env = vec![("BROKEN".into(), "${{ noSuchFunction('x') }}".into())];
+            script.continue_on_error = true;
+        }
+        let steps = vec![
+            ExecutableStep::JavaScript {
+                step_id: "guarded".into(),
+                display_name: "Run guarded-action".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/guarded/dist/main.js".into(),
+                    post_container_path: Some("/__a/_actions/guarded/dist/post.js".into()),
+                    post_condition: Some("always()".into()),
+                    action_container_path: "/__a/_actions/guarded".into(),
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                    ..Default::default()
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+            bad_environment,
+            script_step("cleanup", "echo cleanup", Some("always()")),
+        ];
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert!(summary.step_results.len() >= 4);
+        assert_eq!(summary.step_results[1].exit_code, 1);
+        assert!(!summary.step_results[1].failure_ignored);
+        assert!(summary.step_results[1]
+            .stderr
+            .contains("environment could not be evaluated"));
+        assert_eq!(summary.step_results[2].exit_code, 0);
+        assert!(summary.step_logs.iter().any(|log| {
+            log.display_name.starts_with("Post ") && log.display_name.contains("guarded-action")
+        }));
+        assert_eq!(exec_count(&executor.runner().calls), 1);
+        assert!(executor
+            .runner()
+            .calls
+            .iter()
+            .any(|(_, args)| { args.iter().any(|arg| arg.ends_with("/post.js")) }));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
     /// An unevaluable `runs.pre-if` fails the step without running main and
     /// without registering post: upstream's pre never runs, so neither its
     /// main nor its post is registered, and the failed pre fails the job.
@@ -25490,6 +27599,7 @@ fi"#
                 action_container_path: "/__a/_actions/guarded".into(),
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -25549,6 +27659,7 @@ fi"#
                     action_container_path: "/__a/_actions/guarded".into(),
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -25564,6 +27675,7 @@ fi"#
                     source_path: None,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -25684,10 +27796,17 @@ fi"#
             ExecutableStep::CompositeStart {
                 step_id: "composite".into(),
                 display_name: "Run local composite".into(),
+                input_diagnostics: Vec::new(),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                input_templates: None,
+                input_defaults: ActionTemplateMap::default(),
             },
             script_step("bad-if", "echo bad", Some("noSuchFunction('a')")),
             ExecutableStep::CompositeEnd {
@@ -25748,10 +27867,17 @@ fi"#
             ExecutableStep::CompositeStart {
                 step_id: "composite".into(),
                 display_name: "Run local composite".into(),
+                input_diagnostics: Vec::new(),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                input_templates: None,
+                input_defaults: ActionTemplateMap::default(),
             },
             ExecutableStep::JavaScript {
                 step_id: "guarded".into(),
@@ -25766,6 +27892,7 @@ fi"#
                     action_container_path: "/__a/_actions/guarded".into(),
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -25896,6 +28023,7 @@ fi"#
                     action_container_path: "/__a/_actions/guarded".into(),
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -26105,6 +28233,7 @@ fi"#
                     "${{ github.action_path }}".into(),
                 ),
             ],
+            ..Default::default()
         };
         let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
@@ -26135,6 +28264,51 @@ fi"#
     }
 
     #[test]
+    fn javascript_action_exports_declared_missing_inputs_as_empty() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let metadata = crate::action::parse_action_metadata(
+            "inputs:\n  optional:\n    description: optional\nruns:\n  using: node24\n  main: dist/index.js\n",
+        )
+        .unwrap();
+        let steps = vec![ExecutableStep::JavaScript {
+            step_id: "empty-input".into(),
+            display_name: String::new(),
+            invocation: JavaScriptActionInvocation {
+                node: "node24".into(),
+                main_container_path: "/__a/action/dist/index.js".into(),
+                action_container_path: "/__a/action".into(),
+                input_defaults: crate::action::action_input_default_templates(&metadata),
+                ..Default::default()
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        let action_call = executor
+            .runner()
+            .calls
+            .iter()
+            .find(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.iter().any(|arg| arg == "node:24-bookworm")
+            })
+            .expect("JavaScript action should run");
+        assert!(
+            action_call.1.iter().any(|value| value == "INPUT_OPTIONAL="),
+            "missing declared inputs must reach the handler as empty INPUT_* values: {:?}",
+            action_call.1
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn executes_docker_action_with_inputs_and_command_files() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -26156,11 +28330,12 @@ fi"#
                 ),
             ],
             entrypoint: Some("/entrypoint.sh".into()),
-            args: vec!["arg1".into()],
+            args: Some(vec!["arg1".into()]),
             pre_entrypoint: None,
             post_entrypoint: None,
             pre_condition: None,
             post_condition: None,
+            ..Default::default()
         };
         let steps = vec![ExecutableStep::Docker {
             step_id: "docker1".into(),
@@ -26230,11 +28405,12 @@ fi"#
             inputs: BTreeMap::new(),
             env: Vec::new(),
             entrypoint: Some("/main.sh".into()),
-            args: vec!["arg1".into()],
+            args: Some(vec!["arg1".into()]),
             pre_entrypoint: Some("/pre.sh".into()),
             post_entrypoint: Some("/post.sh".into()),
             pre_condition: None,
             post_condition: None,
+            ..Default::default()
         };
         let steps = vec![ExecutableStep::Docker {
             step_id: "docker1".into(),
@@ -26310,14 +28486,15 @@ fi"#
             inputs: BTreeMap::new(),
             env: Vec::new(),
             entrypoint: Some("${{ env.DOCKER_ENTRYPOINT }}".into()),
-            args: vec![
+            args: Some(vec![
                 "pr-${{ github.event.pull_request.number }}".into(),
                 "${{ secrets.DOCKER_TOKEN }}".into(),
-            ],
+            ]),
             pre_entrypoint: None,
             post_entrypoint: None,
             pre_condition: None,
             post_condition: None,
+            ..Default::default()
         };
         let steps = vec![ExecutableStep::Docker {
             step_id: "docker1".into(),
@@ -26364,6 +28541,92 @@ fi"#
     }
 
     #[test]
+    fn docker_action_uses_with_fallbacks_and_runs_env_only_fills_missing_keys() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let action = DockerActionInvocation {
+            image: "alpine:3.20".into(),
+            action_container_path: "/__a/_actions/acme_docker/v1".into(),
+            inputs: BTreeMap::from([
+                ("entryPoint".into(), "/with-entrypoint.sh".into()),
+                ("args".into(), "--flag 'two words'".into()),
+            ]),
+            step_env: vec![("RUNS_ENV".into(), "from-step".into())],
+            runs_env: ActionTemplateMap::from_entries([
+                crate::action::ActionTemplateEntry {
+                    key: "RUNS_ENV".into(),
+                    value: "from-runs".into(),
+                    key_is_template: false,
+                    value_is_template: false,
+                },
+                crate::action::ActionTemplateEntry {
+                    key: "MANIFEST_ONLY".into(),
+                    value: "manifest".into(),
+                    key_is_template: false,
+                    value_is_template: false,
+                },
+            ]),
+            entrypoint: None,
+            args: None,
+            ..Default::default()
+        };
+        let steps = vec![ExecutableStep::Docker {
+            step_id: "docker-fallback".into(),
+            display_name: "Docker fallback".into(),
+            invocation: action,
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        let run = &executor.runner().calls[2].1;
+        assert!(run
+            .windows(2)
+            .any(|pair| pair == ["--entrypoint", "/with-entrypoint.sh"]));
+        assert!(run.ends_with(&["alpine:3.20".into(), "--flag".into(), "two words".into(),]));
+        assert!(run.contains(&"RUNS_ENV=from-step".into()));
+        assert!(run.contains(&"MANIFEST_ONLY=manifest".into()));
+        assert!(!run.contains(&"RUNS_ENV=from-runs".into()));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn explicit_empty_docker_runs_args_suppresses_with_args_fallback() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let action = DockerActionInvocation {
+            image: "alpine:3.20".into(),
+            action_container_path: "/__a/_actions/acme_docker/v1".into(),
+            inputs: BTreeMap::from([("args".into(), "--must-not-run".into())]),
+            args: Some(Vec::new()),
+            ..Default::default()
+        };
+        let steps = vec![ExecutableStep::Docker {
+            step_id: "docker-empty-args".into(),
+            display_name: "Docker empty args".into(),
+            invocation: action,
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        let run = &executor.runner().calls[2].1;
+        assert!(run.ends_with(&["alpine:3.20".into()]));
+        assert!(!run.contains(&"--must-not-run".into()));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn builds_local_docker_action_before_running_it() {
         let temp = temp_dir();
         let action_dir = temp.join("actions/acme");
@@ -26376,11 +28639,12 @@ fi"#
             inputs: BTreeMap::new(),
             env: Vec::new(),
             entrypoint: None,
-            args: Vec::new(),
+            args: Some(Vec::new()),
             pre_entrypoint: None,
             post_entrypoint: None,
             pre_condition: None,
             post_condition: None,
+            ..Default::default()
         };
         let steps = vec![ExecutableStep::Docker {
             step_id: "docker1".into(),
@@ -26456,6 +28720,7 @@ fi"#
                         ("INPUT_NAME".into(), "value".into()),
                         ("TOKEN".into(), "${{ github.token }}".into()),
                     ],
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -26530,7 +28795,8 @@ fi"#
                         ),
                     ]
                     .into(),
-                    env: Vec::new(),
+                    env: Vec::new(),                    ..Default::default()
+
                 },
                 condition: None,
                 continue_on_error: false,
@@ -26557,7 +28823,8 @@ fi"#
                         ("retention-days".into(), "1".into()),
                     ]
                     .into(),
-                    env: Vec::new(),
+                    env: Vec::new(),                    ..Default::default()
+
                 },
                 condition: None,
                 continue_on_error: false,
@@ -26579,7 +28846,8 @@ fi"#
                     .into(),
                     // Keep this broad adapter-contract test offline. Dedicated
                     // protocol tests cover the authenticated Results Service path.
-                    env: vec![("ACTIONS_RUNTIME_TOKEN".into(), String::new())],
+                    env: vec![("ACTIONS_RUNTIME_TOKEN".into(), String::new())],                    ..Default::default()
+
                 },
                 condition: None,
                 continue_on_error: false,
@@ -26594,7 +28862,8 @@ fi"#
                     cache_kind: None,
                     source_path: None,
                     inputs: [("github-token".into(), "ghs_token".into())].into(),
-                    env: Vec::new(),
+                    env: Vec::new(),                    ..Default::default()
+
                 },
                 condition: None,
                 continue_on_error: false,
@@ -26662,7 +28931,7 @@ fi"#
             .map(|(_, args)| args)
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 0);
-        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(results[0].state.outputs.get("cache-hit").unwrap(), "false");
         // Root exposes only `cache-hit`; the primary key stays internal state.
         assert!(!results[0].state.outputs.contains_key("cache-primary-key"));
         assert_eq!(
@@ -26677,14 +28946,14 @@ fi"#
             "construct-digest-linux-amd64",
         );
         assert_eq!(
-            results[1].state.outputs["artifact-id"],
+            results[1].state.outputs.get("artifact-id").unwrap(),
             expected_artifact_id
         );
         assert_eq!(
-            results[1].state.outputs["artifact-url"],
+            results[1].state.outputs.get("artifact-url").unwrap(),
             format!("https://results.actions/artifacts/{expected_artifact_id}")
         );
-        assert_eq!(results[2].state.outputs["download-path"], "/__w/digests");
+        assert_eq!(results[2].state.outputs.get("download-path").unwrap(), "/__w/digests");
         assert_eq!(
             results[3].state.env["ACTIONS_RUNTIME_TOKEN"],
             "runtime-token"
@@ -26725,6 +28994,7 @@ fi"#
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -26745,6 +29015,7 @@ fi"#
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -26812,6 +29083,7 @@ fi"#
                     ]
                     .into(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -26836,6 +29108,7 @@ fi"#
                 source_path: None,
                 inputs: [("path".into(), "/__w/downloaded".into())].into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -26901,6 +29174,7 @@ fi"#
             ]
             .into(),
             env: Vec::new(),
+            ..Default::default()
         };
 
         let error = native_download_artifact(&action, &state).unwrap_err();
@@ -26953,6 +29227,7 @@ fi"#
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -26980,6 +29255,7 @@ fi"#
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -26997,7 +29273,7 @@ fi"#
 
         assert_eq!(results[0].exit_code, 0);
         assert_eq!(
-            results[0].state.outputs["download-path"],
+            results[0].state.outputs.get("download-path").unwrap(),
             "/github/workspace/downloads/output"
         );
         assert_eq!(
@@ -27038,6 +29314,7 @@ fi"#
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -27065,6 +29342,7 @@ fi"#
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -27413,6 +29691,7 @@ fi"#
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -27435,7 +29714,7 @@ fi"#
         let fields = record["fields"].as_object().expect("artifact fields");
         assert_eq!(
             fields["digest"],
-            results[0].state.outputs["artifact-digest"]
+            results[0].state.outputs.get("artifact-digest").unwrap()
         );
         assert_eq!(fields["subset"], "artifact");
         assert!(fields["ms"]
@@ -27486,6 +29765,7 @@ fi"#
             ]
             .into(),
             env: Vec::new(),
+            ..Default::default()
         };
         let state = JobExecutionState::new_with_workspace(&[], &[], &workspace, &temp);
 
@@ -27541,6 +29821,7 @@ fi"#
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -27592,6 +29873,7 @@ fi"#
                     source_path: None,
                     inputs,
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -27665,6 +29947,7 @@ fi"#
             ]
             .into(),
             env: Vec::new(),
+            ..Default::default()
         };
         let normal_state = JobExecutionState::new_with_workspace(&[], &[], &workspace, &root);
         native_upload_artifact(&upload("normal.txt", "normal-file"), &normal_state).unwrap();
@@ -27815,6 +30098,7 @@ fi"#
                 source_path: None,
                 inputs: [("path".into(), "site".into())].into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -27827,8 +30111,8 @@ fi"#
 
         assert_eq!(results[0].exit_code, 0);
         assert_eq!(
-            results[0].state.outputs["artifact_id"],
-            results[0].state.outputs["artifact-id"]
+            results[0].state.outputs.get("artifact_id").unwrap(),
+            results[0].state.outputs.get("artifact-id").unwrap()
         );
         let artifact_dir = temp.join("_velnor_artifacts/local-1/github-pages");
         let files = fs::read_dir(&artifact_dir)
@@ -28024,6 +30308,7 @@ fi"#
                     ]
                     .into(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -28088,6 +30373,7 @@ fi"#
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -28129,6 +30415,7 @@ fi"#
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -28205,6 +30492,7 @@ fi"#
                                 .into(),
                         ),
                     ],
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -28258,8 +30546,8 @@ fi"#
             .unwrap();
 
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].state.outputs["construct"], "true");
-        assert_eq!(results[0].state.outputs["construct_count"], "1");
+        assert_eq!(results[0].state.outputs.get("construct").unwrap(), "true");
+        assert_eq!(results[0].state.outputs.get("construct_count").unwrap(), "1");
         assert!(!results[1].skipped);
         let node_call = executor
             .runner()
@@ -28303,10 +30591,17 @@ fi"#
             ExecutableStep::CompositeStart {
                 step_id: "pages-artifact".into(),
                 display_name: "Run actions/upload-pages-artifact@v4".into(),
+                input_diagnostics: Vec::new(),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
+                visible_step_ids: BTreeMap::new(),
+                action_path: None,
+                continue_on_error_expression: None,
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                input_templates: None,
+                input_defaults: ActionTemplateMap::default(),
             },
             ExecutableStep::Script(ScriptStep {
                 id: "pages-artifact-1".into(),
@@ -28336,6 +30631,7 @@ fi"#
                     ]
                     .into(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -28363,6 +30659,7 @@ fi"#
                     ]
                     .into(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 // The full network-backed deployment is covered by
                 // deploy_pages_runs_artifact_oidc_create_and_status_loop.
@@ -28412,7 +30709,7 @@ fi"#
         let expected_artifact_id =
             artifact_id_for_name(&JobExecutionState::new(&runtime_env), "github-pages");
         assert_eq!(
-            results[2].state.outputs["artifact_id"],
+            results[2].state.outputs.get("artifact_id").unwrap(),
             expected_artifact_id
         );
         assert!(results[3].skipped);
@@ -28463,6 +30760,7 @@ fi"#
                     action_container_path: "/__a/_actions/docker_setup-buildx-action".into(),
                     inputs: BTreeMap::new(),
                     env: vec![("INPUT_INSTALL".into(), "true".into())],
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -28484,6 +30782,7 @@ fi"#
                         ("INPUT_USERNAME".into(), "docker-user".into()),
                         ("INPUT_PASSWORD".into(), "docker-token".into()),
                     ],
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -28506,6 +30805,7 @@ fi"#
                         ("INPUT_IMAGES".into(), "ghcr.io/chainargos/app".into()),
                         ("INPUT_TAGS".into(), "type=sha".into()),
                     ],
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -28528,6 +30828,7 @@ fi"#
                         ("INPUT_CONTEXT".into(), ".".into()),
                         ("INPUT_PUSH".into(), "false".into()),
                     ],
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -28551,6 +30852,7 @@ fi"#
                         ("INPUT_FILES".into(), "docker-bake.hcl".into()),
                         ("INPUT_TARGETS".into(), "app".into()),
                     ],
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -28630,6 +30932,7 @@ fi"#
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -28652,7 +30955,7 @@ fi"#
             "velnor-builder-shared-untrusted-unknown-unknown-repository-jackin-construct"
         );
         assert_eq!(results[0].exit_code, 0);
-        assert_eq!(results[0].state.outputs["name"], builder);
+        assert_eq!(results[0].state.outputs.get("name").unwrap(), builder);
         assert_eq!(results[0].state.env["BUILDX_BUILDER"], builder);
         let calls = docker_call_strings(&executor.runner().calls);
         let inspect_call = calls
@@ -28697,6 +31000,7 @@ fi"#
                     ]
                     .into(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -28769,7 +31073,8 @@ fi"#
                         ),
                         ("INPUT_DRIVER".into(), "docker-container".into()),
                         ("INPUT_CLEANUP".into(), "false".into()),
-                    ],
+                    ],                    ..Default::default()
+
                 },
                 condition: None,
                 continue_on_error: false,
@@ -28791,7 +31096,8 @@ fi"#
                     env: vec![
                         ("INPUT_NAME".into(), "${{ env.BUILDX_BUILDER }}".into()),
                         ("INPUT_DRIVER".into(), "docker-container".into()),
-                    ],
+                    ],                    ..Default::default()
+
                 },
                 condition: None,
                 continue_on_error: false,
@@ -28819,7 +31125,8 @@ type=sha,format=long,prefix=,enable=${{ inputs.publish }}\n\
 type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.publish && github.event_name == 'pull_request' }}"
                                 .into(),
                         ),
-                    ],
+                    ],                    ..Default::default()
+
                 },
                 condition: None,
                 continue_on_error: false,
@@ -28876,7 +31183,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                         ("INPUT_LABELS".into(), "${{ steps.meta.outputs.labels }}".into()),
                         ("INPUT_CACHE-FROM".into(), "${{ steps.cache.outputs.from }}".into()),
                         ("INPUT_CACHE-TO".into(), "${{ steps.cache.outputs.to }}".into()),
-                    ],
+                    ],                    ..Default::default()
+
                 },
                 condition: None,
                 continue_on_error: false,
@@ -28904,7 +31212,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
 bitcoin-processor-app.push=${{ (github.event_name == 'push' && needs.changes.outputs.bitcoin-processor == 'true') || (github.event_name == 'workflow_dispatch' && inputs.push) }}"
                                 .into(),
                         ),
-                    ],
+                    ],                    ..Default::default()
+
                 },
                 condition: None,
                 continue_on_error: false,
@@ -29044,6 +31353,7 @@ bitcoin-processor-app.push=true")
                     ("RENOVATE_ONBOARDING".into(), "false".into()),
                     ("LOG_LEVEL".into(), "debug".into()),
                 ],
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -29136,6 +31446,7 @@ bitcoin-processor-app.push=true")
                     action_container_path: "/__a/_actions/cargo-install".into(),
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -29194,6 +31505,7 @@ bitcoin-processor-app.push=true")
                         ("INPUT_CACHE".into(), "false".into()),
                         ("INPUT_GITHUB_TOKEN".into(), "${{ github.token }}".into()),
                     ],
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -29222,6 +31534,7 @@ bitcoin-processor-app.push=true")
                                 .into(),
                         ),
                     ],
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -29333,7 +31646,8 @@ bitcoin-processor-app.push=true")
                     env: vec![
                         ("INPUT_REPO".into(), "casey/just".into()),
                         ("INPUT_GITHUB-TOKEN".into(), "${{ github.token }}".into()),
-                    ],
+                    ],                    ..Default::default()
+
                 },
                 condition: None,
                 continue_on_error: false,
@@ -29356,7 +31670,8 @@ bitcoin-processor-app.push=true")
                         ("INPUT_CRATE".into(), "cargo-binstall".into()),
                         ("INPUT_VERSION".into(), "latest".into()),
                         ("INPUT_LOCKED".into(), "true".into()),
-                    ],
+                    ],                    ..Default::default()
+
                 },
                 condition: None,
                 continue_on_error: false,
@@ -29456,6 +31771,7 @@ bitcoin-processor-app.push=true")
                     action_container_path: "/__a/_actions/baptiste0928_cargo-install".into(),
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -29525,6 +31841,7 @@ bitcoin-processor-app.push=true")
                     action_container_path: "/__a/_actions/cache".into(),
                     inputs: BTreeMap::new(),
                     env: vec![("INPUT_KEY".into(), "linux-cache".into())],
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -29543,6 +31860,7 @@ bitcoin-processor-app.push=true")
                     action_container_path: "/__a/_actions/docker_login".into(),
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -29626,6 +31944,7 @@ bitcoin-processor-app.push=true")
                 source_path: None,
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -29646,6 +31965,7 @@ bitcoin-processor-app.push=true")
                     action_container_path: "/__a/_actions/middle".into(),
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -29729,6 +32049,7 @@ bitcoin-processor-app.push=true")
                     source_path: None,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -29747,6 +32068,7 @@ bitcoin-processor-app.push=true")
                     action_container_path: "/__a/_actions/guarded".into(),
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -29765,6 +32087,7 @@ bitcoin-processor-app.push=true")
                     action_container_path: "/__a/_actions/plain".into(),
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -29839,6 +32162,7 @@ bitcoin-processor-app.push=true")
                 action_container_path: "/__a/_actions/cache".into(),
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -29893,6 +32217,7 @@ bitcoin-processor-app.push=true")
                 action_container_path: "/__a/_actions/wrapped".into(),
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -29939,6 +32264,7 @@ bitcoin-processor-app.push=true")
                 action_container_path: "/__a/_actions/wrapped".into(),
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -29997,6 +32323,7 @@ bitcoin-processor-app.push=true")
                     action_container_path: "/__a/_actions/cache".into(),
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -30057,6 +32384,7 @@ bitcoin-processor-app.push=true")
                 action_container_path: "/__a/_actions/sccache".into(),
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: true,
@@ -30105,6 +32433,7 @@ bitcoin-processor-app.push=true")
                         ),
                         ("INPUT_DISABLE_ANNOTATIONS".into(), "false".into()),
                     ],
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: true,
@@ -30190,6 +32519,7 @@ bitcoin-processor-app.push=true")
                     action_container_path: "/__a/_actions/rust-cache".into(),
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -30275,6 +32605,7 @@ bitcoin-processor-app.push=true")
                         ("INPUT_SHARED-KEY".into(), "kestra-rust-build-cache".into()),
                         ("INPUT_CACHE-ON-FAILURE".into(), "true".into()),
                     ],
+                    ..Default::default()
                 },
                 condition: None,
                 continue_on_error: false,
@@ -30628,12 +32959,13 @@ bitcoin-processor-app.push=true")
         // GitHub's explicit `shell: bash` is
         // `bash --noprofile --norc -e -o pipefail {0}` — omitting pipefail
         // masks pipeline failures the hosted lane would catch.
+        assert_eq!(shell_log_name(&Shell::Bash, false), "bash -e {0}");
         assert_eq!(
-            shell_log_name(Shell::Bash),
+            shell_log_name(&Shell::Bash, true),
             "bash --noprofile --norc -e -o pipefail {0}"
         );
-        assert_eq!(shell_log_name(Shell::BashDefault), "bash -e {0}");
-        assert_eq!(shell_log_name(Shell::Sh), "sh -e {0}");
+        assert_eq!(shell_log_name(&Shell::BashDefault, false), "sh -e {0}");
+        assert_eq!(shell_log_name(&Shell::Sh, false), "sh -e {0}");
     }
 
     #[test]
@@ -30874,6 +33206,7 @@ bitcoin-processor-app.push=true")
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -30919,6 +33252,7 @@ bitcoin-processor-app.push=true")
                 ]
                 .into(),
                 env: Vec::new(),
+                ..Default::default()
             },
             condition: None,
             continue_on_error: false,
@@ -31006,6 +33340,7 @@ bitcoin-processor-app.push=true")
                     source_path: None,
                     inputs,
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 &JobExecutionState::default(),
                 DEFAULT_STEP_TIMEOUT,
@@ -31036,6 +33371,7 @@ bitcoin-processor-app.push=true")
                     source_path: None,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
+                    ..Default::default()
                 },
                 &JobExecutionState::default(),
                 DEFAULT_STEP_TIMEOUT,

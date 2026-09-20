@@ -144,6 +144,10 @@ pub struct JobContainerSpec {
     /// Admitted workflow `container.options`. Quota flags never survive to
     /// emission: job containers run unbounded.
     pub options: Vec<String>,
+    /// Admitted `job.container.ports`, emitted as Docker `-p` mappings.
+    pub ports: Vec<String>,
+    /// Admitted `job.container.volumes`, emitted after runner mounts.
+    pub volumes: Vec<String>,
     pub services: Vec<ServiceContainerSpec>,
     pub node_action_image: String,
     pub docker_cli_host_path: Option<PathBuf>,
@@ -286,6 +290,15 @@ impl JobContainerSpec {
             self.name.clone(),
             "--workdir".into(),
             "/__w".into(),
+        ]);
+        // Runner adds user volumes before its well-known mounts. Docker uses
+        // the last mount for a destination, so the runner-owned mounts below
+        // remain authoritative when a user volume names the same container
+        // path.
+        for volume in &self.volumes {
+            args.flags(["-v".into(), volume.clone()]);
+        }
+        args.flags([
             "-v".into(),
             self.mount_arg(&self.workspace_host, "/__w"),
             "-v".into(),
@@ -376,10 +389,13 @@ impl JobContainerSpec {
             "-v".into(),
             self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
             "-v".into(),
-            format!("{}:ro", self.mount_arg(&self.actions_host, "/__a")),
+            self.mount_arg(&self.actions_host, "/__a"),
             "-v".into(),
             self.mount_arg(&self.tools_host, "/__tool"),
         ]);
+        for port in &self.ports {
+            args.flags(["-p".into(), port.clone()]);
+        }
         args.env("HOME", "/github/home");
         args.env("DOCKER_HOST", JOB_DOCKER_HOST);
         args.env("RUSTUP_HOME", "/root/.rustup");
@@ -501,11 +517,61 @@ impl JobContainerSpec {
         env: &[(String, String)],
         secret_masks: &[String],
     ) -> io::Result<PreparedDockerArgs> {
-        self.prepare_exec_process_args(
+        self.prepare_exec_script_args_with_runtime_path(
+            script_path_in_container,
+            shell,
             working_directory,
             env,
             secret_masks,
-            &shell.command_args(script_path_in_container),
+            None,
+        )
+    }
+
+    /// Build script exec args while retaining the PATH from the inspected
+    /// job-container image. An explicit step PATH still follows and overrides
+    /// this base, as it does for Runner's `docker exec` environment.
+    pub fn prepare_exec_script_args_with_runtime_path(
+        &self,
+        script_path_in_container: &str,
+        shell: Shell,
+        working_directory: &str,
+        env: &[(String, String)],
+        secret_masks: &[String],
+        runtime_path: Option<&str>,
+    ) -> io::Result<PreparedDockerArgs> {
+        self.prepare_exec_script_args_for_step(
+            script_path_in_container,
+            shell,
+            working_directory,
+            env,
+            secret_masks,
+            ScriptExecOptions {
+                is_action_step: false,
+                runtime_path,
+            },
+        )
+    }
+
+    /// Build script exec args with ScriptHandler's action-step shell rules.
+    /// Explicit `bash` gets the full default Bash format in action/composite
+    /// steps and the POSIX `-e {0}` format for ordinary workflow run steps.
+    pub fn prepare_exec_script_args_for_step(
+        &self,
+        script_path_in_container: &str,
+        shell: Shell,
+        working_directory: &str,
+        env: &[(String, String)],
+        secret_masks: &[String],
+        options: ScriptExecOptions<'_>,
+    ) -> io::Result<PreparedDockerArgs> {
+        self.prepare_exec_process_args_with_runtime_path(
+            working_directory,
+            env,
+            secret_masks,
+            &shell
+                .command_args_for_step(script_path_in_container, options.is_action_step)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?,
+            options.runtime_path,
         )
     }
 
@@ -519,7 +585,33 @@ impl JobContainerSpec {
         secret_masks: &[String],
         command: &[String],
     ) -> io::Result<PreparedDockerArgs> {
-        self.exec_command(working_directory, env, secret_masks, command, false)
+        self.prepare_exec_process_args_with_runtime_path(
+            working_directory,
+            env,
+            secret_masks,
+            command,
+            None,
+        )
+    }
+
+    /// Like [`Self::prepare_exec_process_args`], using the inspected image
+    /// PATH as the base exec environment. Step environment follows it.
+    pub fn prepare_exec_process_args_with_runtime_path(
+        &self,
+        working_directory: &str,
+        env: &[(String, String)],
+        secret_masks: &[String],
+        command: &[String],
+        runtime_path: Option<&str>,
+    ) -> io::Result<PreparedDockerArgs> {
+        self.exec_command(
+            working_directory,
+            env,
+            secret_masks,
+            command,
+            false,
+            runtime_path,
+        )
     }
 
     /// Like prepare_exec_process_args, but with stdin kept open (`docker exec
@@ -535,7 +627,33 @@ impl JobContainerSpec {
         secret_masks: &[String],
         command: &[String],
     ) -> io::Result<PreparedDockerArgs> {
-        self.exec_command(working_directory, env, secret_masks, command, true)
+        self.prepare_exec_process_stdin_args_with_runtime_path(
+            working_directory,
+            env,
+            secret_masks,
+            command,
+            None,
+        )
+    }
+
+    /// Like [`Self::prepare_exec_process_stdin_args`], using the inspected
+    /// image PATH as the base exec environment. Step environment follows it.
+    pub fn prepare_exec_process_stdin_args_with_runtime_path(
+        &self,
+        working_directory: &str,
+        env: &[(String, String)],
+        secret_masks: &[String],
+        command: &[String],
+        runtime_path: Option<&str>,
+    ) -> io::Result<PreparedDockerArgs> {
+        self.exec_command(
+            working_directory,
+            env,
+            secret_masks,
+            command,
+            true,
+            runtime_path,
+        )
     }
 
     /// The ordered environment for one Engine-API script exec: base exec
@@ -546,8 +664,18 @@ impl JobContainerSpec {
     /// and authoritative filtering is shared, not duplicated, with the CLI
     /// leg by construction.
     pub fn script_exec_env(&self, env: &[(String, String)]) -> Vec<(String, String)> {
+        self.script_exec_env_with_runtime_path(env, None)
+    }
+
+    /// The Engine-API script environment with the inspected image PATH as
+    /// the base. Its ordering matches the CLI exec builder exactly.
+    pub fn script_exec_env_with_runtime_path(
+        &self,
+        env: &[(String, String)],
+        runtime_path: Option<&str>,
+    ) -> Vec<(String, String)> {
         let mut builder = DockerCommand::new(self.env_dir(), ["exec"]);
-        self.append_base_exec_env(&mut builder);
+        self.append_base_exec_env(&mut builder, runtime_path);
         self.append_step_env(&mut builder, env);
         self.append_authoritative_runner_env(&mut builder);
         builder.recorded_env()
@@ -560,13 +688,14 @@ impl JobContainerSpec {
         secret_masks: &[String],
         command: &[String],
         stdin: bool,
+        runtime_path: Option<&str>,
     ) -> io::Result<PreparedDockerArgs> {
         let mut builder = DockerCommand::new(self.env_dir(), ["exec"]);
         if stdin {
             builder.flag("-i");
         }
         builder.pair("--workdir", working_directory);
-        self.append_base_exec_env(&mut builder);
+        self.append_base_exec_env(&mut builder, runtime_path);
         self.append_step_env(&mut builder, env);
         self.append_authoritative_runner_env(&mut builder);
         let prepared = builder
@@ -586,7 +715,23 @@ impl JobContainerSpec {
     /// would otherwise route to `-e` while the clean value goes to
     /// `--env-file`, and Docker resolves `-e` over `--env-file`.
     fn append_step_env(&self, command: &mut DockerCommand, env: &[(String, String)]) {
+        self.append_filtered_step_env(command, env, None);
+    }
+
+    fn append_node_action_env(&self, command: &mut DockerCommand, env: &[(String, String)]) {
+        self.append_filtered_step_env(command, env, Some("NODE_ICU_DATA"));
+    }
+
+    fn append_filtered_step_env(
+        &self,
+        command: &mut DockerCommand,
+        env: &[(String, String)],
+        excluded_name: Option<&str>,
+    ) {
         for (name, value) in env {
+            if excluded_name.is_some_and(|excluded| name == excluded) {
+                continue;
+            }
             if is_docker_control_env(name) {
                 continue;
             }
@@ -627,24 +772,25 @@ impl JobContainerSpec {
         command.env("CARGO_TARGET_DIR", self.mbx_target_container_dir());
     }
 
-    /// Truthful base env for every exec'd process: the job home is the
-    /// bind-mounted /github/home (so `~` caches and docker client state
-    /// persist on the host), the rustup toolchain store stays at the
-    /// image-baked /root/.rustup, and cargo's registry/git live under the
-    /// job home (backed by the host-persistent cargo store mounts).
-    /// PATH resolves the image-baked rustup proxy before mise shims. Otherwise
-    /// a shimmed tool such as `gh` can make mise probe shimmed `rustup`,
-    /// recursively forking until the job exhausts its cgroup.
+    /// Base env for every exec'd process: the job home is the bind-mounted
+    /// /github/home (so `~` caches and Docker client state persist on the
+    /// host), the rustup toolchain store stays at image-baked /root/.rustup,
+    /// and Cargo registry/git live under the job home. PATH uses the inspected
+    /// image Config.Env value, preserving image-defined order; `default_exec_path`
+    /// is only the fallback when the image has no PATH entry.
     /// Re-asserted per exec because OrbStack (macOS dev hosts) injects the
     /// host user's HOME into exec'd processes; explicit -e wins. Docker
     /// endpoint/context/config overrides from workflow and step env are
     /// dropped, so every in-container Docker client stays on the lease.
-    fn append_base_exec_env(&self, command: &mut DockerCommand) {
+    fn append_base_exec_env(&self, command: &mut DockerCommand, runtime_path: Option<&str>) {
         command.env("HOME", "/github/home");
         command.env("DOCKER_HOST", JOB_DOCKER_HOST);
         command.env("RUSTUP_HOME", "/root/.rustup");
         command.env("CARGO_HOME", "/github/home/.cargo");
-        command.env("PATH", self.default_exec_path());
+        command.env(
+            "PATH",
+            runtime_path.map_or_else(|| self.default_exec_path().to_owned(), str::to_owned),
+        );
         command.env(
             "VELNOR_DOCKER_HOST_TEMP",
             self.docker_host_path(&self.temp_host).display().to_string(),
@@ -657,10 +803,9 @@ impl JobContainerSpec {
         );
     }
 
-    /// Runtime PATH for commands executed inside the job container. The image
-    /// puts the MBX cargo shim first, but every `docker exec` receives an
-    /// explicit PATH to defeat host-runtime injection; omitting it silently
-    /// turns the default acceleration path back into ordinary Cargo.
+    /// Fallback PATH when the inspected job image has no `Config.Env` PATH.
+    /// The image normally defines its own order, including the MBX shim; the
+    /// fallback keeps that behavior deterministic for images without PATH.
     pub(crate) fn default_exec_path(&self) -> &'static str {
         if self.mbx_store_host.is_some() {
             MBX_CONTAINER_EXEC_PATH
@@ -705,7 +850,7 @@ impl JobContainerSpec {
             self.mount_arg(&self.temp_host, "/github/file_commands"),
             self.mount_arg(&self.home_host, "/github/home"),
             self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
-            format!("{}:ro", self.mount_arg(&self.actions_host, "/__a")),
+            self.mount_arg(&self.actions_host, "/__a"),
             self.mount_arg(&self.tools_host, "/__tool"),
         ];
         mounts.extend(self.node_action_path_mounts(path_prepend, &mounts));
@@ -724,16 +869,21 @@ impl JobContainerSpec {
         self.append_docker_cli_mounts(args);
         self.append_rust_acceleration(args)?;
         self.append_job_cgroup_parent(args);
+        self.append_node_action_env(args, env);
         if !path_prepend.is_empty() {
-            let path = path_prepend
+            let prefix = path_prepend.join(":");
+            let current_path = env
                 .iter()
-                .cloned()
-                .chain(std::iter::once(NODE_ACTION_BASE_PATH.to_owned()))
-                .collect::<Vec<_>>()
-                .join(":");
+                .rev()
+                .find(|(name, _)| name == "PATH")
+                .map_or(NODE_ACTION_BASE_PATH, |(_, value)| value.as_str());
+            let path = if current_path.is_empty() {
+                prefix
+            } else {
+                format!("{prefix}:{current_path}")
+            };
             args.env("PATH", path);
         }
-        self.append_step_env(args, env);
         self.append_authoritative_runner_env(args);
         let prepared = command
             .image(&image)
@@ -908,7 +1058,7 @@ impl JobContainerSpec {
             "-v".to_owned(),
             self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
             "-v".to_owned(),
-            format!("{}:ro", self.mount_arg(&self.actions_host, "/__a")),
+            self.mount_arg(&self.actions_host, "/__a"),
             "-v".to_owned(),
             self.mount_arg(&self.tools_host, "/__tool"),
         ]);
@@ -1579,35 +1729,192 @@ impl ServiceContainerSpec {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+/// Runner-specific inputs that affect one script's Docker exec arguments.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScriptExecOptions<'a> {
+    /// Whether ScriptHandler is running a script embedded in an action.
+    pub is_action_step: bool,
+    /// PATH read from the running job container's Config.Env.
+    pub runtime_path: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Shell {
-    /// Explicit `shell: bash` — GitHub runs `bash --noprofile --norc -e -o
-    /// pipefail {0}` (actions/runner ScriptHandlerHelpers); omitting pipefail
-    /// silently masks pipeline failures the hosted lane would catch.
+    /// Explicit `shell: bash` in a workflow run step. Runner's system-shell
+    /// path uses its `sh` argument format for this spelling (`-e {0}`).
     Bash,
-    /// No shell specified anywhere — GitHub's fallback is plain `bash -e {0}`.
+    /// No shell specified anywhere — Runner executes `sh` in a container and
+    /// applies its POSIX default argument format (`-e {0}`).
     BashDefault,
     Sh,
+    Pwsh {
+        command: String,
+    },
+    Custom {
+        command: String,
+        arguments: Vec<String>,
+    },
+    /// An expression-backed shell stays intact until step execution.
+    Deferred {
+        template: String,
+        fallback: Option<String>,
+    },
 }
 
 impl Shell {
     /// The argv a script step runs under this shell. Shared by the CLI exec
     /// leg and the Engine-API exec leg so the executed command is identical.
-    pub(crate) fn command_args(self, script_path: &str) -> Vec<String> {
-        match self {
-            Self::Bash => vec![
-                "bash".into(),
-                "--noprofile".into(),
-                "--norc".into(),
-                "-e".into(),
-                "-o".into(),
-                "pipefail".into(),
-                script_path.into(),
-            ],
-            Self::BashDefault => vec!["bash".into(), "-e".into(), script_path.into()],
-            Self::Sh => vec!["sh".into(), "-e".into(), script_path.into()],
+    pub(crate) fn command_args(&self, script_path: &str) -> anyhow::Result<Vec<String>> {
+        self.command_args_for_step(script_path, false)
+    }
+
+    pub(crate) fn command_args_for_step(
+        &self,
+        script_path: &str,
+        is_action_step: bool,
+    ) -> anyhow::Result<Vec<String>> {
+        let (command, arguments) = match self {
+            Self::Bash if is_action_step => (
+                "bash",
+                vec![
+                    "--noprofile".to_owned(),
+                    "--norc".to_owned(),
+                    "-e".to_owned(),
+                    "-o".to_owned(),
+                    "pipefail".to_owned(),
+                    "{0}".to_owned(),
+                ],
+            ),
+            Self::Bash => ("bash", vec!["-e".to_owned(), "{0}".to_owned()]),
+            Self::BashDefault => ("sh", vec!["-e".to_owned(), "{0}".to_owned()]),
+            Self::Sh => ("sh", vec!["-e".to_owned(), "{0}".to_owned()]),
+            Self::Pwsh { command } => (
+                command.as_str(),
+                vec!["-command".to_owned(), ". '{0}'".to_owned()],
+            ),
+            Self::Custom { command, arguments } => (command.as_str(), arguments.clone()),
+            Self::Deferred { .. } => anyhow::bail!("shell expression was not resolved"),
+        };
+        Ok(std::iter::once(command.to_owned())
+            .chain(
+                arguments
+                    .iter()
+                    .map(|argument| format_script_argument(argument, script_path))
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+            )
+            .collect())
+    }
+
+    pub(crate) fn script_extension(&self) -> anyhow::Result<&'static str> {
+        let command = match self {
+            Self::Bash => "bash",
+            Self::BashDefault | Self::Sh => "sh",
+            Self::Pwsh { command } | Self::Custom { command, .. } => command,
+            Self::Deferred { .. } => anyhow::bail!("shell expression was not resolved"),
+        };
+        Ok(
+            if command.eq_ignore_ascii_case("pwsh") || command.eq_ignore_ascii_case("powershell") {
+                ".ps1"
+            } else if command.eq_ignore_ascii_case("python") {
+                ".py"
+            } else if command.eq_ignore_ascii_case("cmd") {
+                ".cmd"
+            } else if command.eq_ignore_ascii_case("bash") || command.eq_ignore_ascii_case("sh") {
+                ".sh"
+            } else {
+                ""
+            },
+        )
+    }
+
+    pub(crate) fn fixup_script(&self, contents: &str) -> anyhow::Result<String> {
+        let command = match self {
+            Self::Bash => "bash",
+            Self::BashDefault | Self::Sh => "sh",
+            Self::Pwsh { command } | Self::Custom { command, .. } => command,
+            Self::Deferred { .. } => anyhow::bail!("shell expression was not resolved"),
+        };
+        if command.eq_ignore_ascii_case("pwsh") || command.eq_ignore_ascii_case("powershell") {
+            Ok(format!(
+                "$ErrorActionPreference = 'stop'\n{contents}\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) {{ exit $LASTEXITCODE }}"
+            ))
+        } else if command.eq_ignore_ascii_case("cmd") {
+            Ok(format!("@echo off\n{contents}"))
+        } else {
+            Ok(contents.to_owned())
         }
     }
+}
+
+/// Apply the same one-argument composite formatting `ScriptHandler` uses for
+/// its shell argument string. `{0}` is the only supplied item; `{1}` therefore
+/// fails at execution just as `string.Format(argFormat, scriptPath)` does.
+fn format_script_argument(format: &str, script_path: &str) -> anyhow::Result<String> {
+    let mut formatted = String::with_capacity(format.len() + script_path.len());
+    let mut chars = format.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next();
+                formatted.push('{');
+            }
+            '{' => {
+                let mut item = String::new();
+                let mut closed = false;
+                for character in chars.by_ref() {
+                    match character {
+                        '}' => {
+                            closed = true;
+                            break;
+                        }
+                        '{' => anyhow::bail!("invalid shell argument format string"),
+                        _ => item.push(character),
+                    }
+                }
+                if !closed {
+                    anyhow::bail!("invalid shell argument format string");
+                }
+                let item_end = item.find([',', ':']).unwrap_or(item.len());
+                let index = item[..item_end]
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| anyhow::anyhow!("invalid shell argument format string"))?;
+                if index != 0 {
+                    anyhow::bail!("shell argument format references unavailable index {index}");
+                }
+                let alignment = item[item_end..]
+                    .strip_prefix(',')
+                    .map(|alignment| {
+                        alignment
+                            .split_once(':')
+                            .map_or(alignment, |(width, _)| width)
+                            .trim()
+                            .parse::<i32>()
+                            .map_err(|_| anyhow::anyhow!("invalid shell argument format string"))
+                    })
+                    .transpose()?;
+                let padding = alignment.map(i32::unsigned_abs).map_or(0, |width| {
+                    usize::try_from(width)
+                        .unwrap_or(usize::MAX)
+                        .saturating_sub(script_path.encode_utf16().count())
+                });
+                if alignment.is_some_and(|width| width > 0) {
+                    formatted.extend(std::iter::repeat_n(' ', padding));
+                }
+                formatted.push_str(script_path);
+                if alignment.is_some_and(|width| width < 0) {
+                    formatted.extend(std::iter::repeat_n(' ', padding));
+                }
+            }
+            '}' if chars.peek() == Some(&'}') => {
+                chars.next();
+                formatted.push('}');
+            }
+            '}' => anyhow::bail!("invalid shell argument format string"),
+            _ => formatted.push(character),
+        }
+    }
+    Ok(formatted)
 }
 
 fn mount(host: &Path, container: &str) -> String {
@@ -2022,6 +2329,8 @@ mod tests {
             slot_store_key: None,
             env: vec![("NODE_OPTIONS".into(), "--max-old-space-size=4096".into())],
             options: Vec::new(),
+            ports: Vec::new(),
+            volumes: Vec::new(),
             services: Vec::new(),
             node_action_image: "node:24-bookworm".into(),
             docker_cli_host_path: None,
@@ -2580,8 +2889,8 @@ mod tests {
             &workflow_host(&job.temp_host),
             "/github/workflow"
         ));
-        assert!(has_read_only_mount(&args, &job.actions_host, "/__a"));
-        assert!(!has_mount(&args, &job.actions_host, "/__a"));
+        assert!(has_mount(&args, &job.actions_host, "/__a"));
+        assert!(!has_read_only_mount(&args, &job.actions_host, "/__a"));
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx/slots/slot-1".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
@@ -3088,7 +3397,7 @@ mod tests {
         assert!(args.contains(&"/daemon/work/_velnor_mbx/trusted:/var/cache/mbx".into()));
         assert!(args.contains(&"/daemon/work/job-1/home:/github/home".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp/_github_workflow:/github/workflow".into()));
-        assert!(args.contains(&"/daemon/work/job-1/actions:/__a:ro".into()));
+        assert!(args.contains(&"/daemon/work/job-1/actions:/__a".into()));
         assert!(args.contains(&"/daemon/work/job-1/tools:/__tool".into()));
         assert!(args.contains(&"VELNOR_DOCKER_HOST_TEMP=/daemon/work/job-1/temp".into()));
         assert!(args.contains(&"VELNOR_DOCKER_HOST_WORKSPACE=/daemon/work/job-1/workspace".into()));
@@ -3209,14 +3518,149 @@ mod tests {
                 "--",
                 "velnor-job-1",
                 "bash",
+                "-e",
+                "/__t/step.sh"
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_bash_action_step_uses_runner_default_bash_options() {
+        let prepared = spec()
+            .prepare_exec_script_args_for_step(
+                "/__t/action-step.sh",
+                Shell::Bash,
+                "/__w/repo",
+                &[],
+                &[],
+                ScriptExecOptions {
+                    is_action_step: true,
+                    runtime_path: None,
+                },
+            )
+            .unwrap();
+        let args = rendered(&prepared);
+        let shell_args = args
+            .iter()
+            .position(|argument| *argument == "bash")
+            .unwrap();
+        assert_eq!(
+            &args[shell_args..],
+            [
+                "bash",
                 "--noprofile",
                 "--norc",
                 "-e",
                 "-o",
                 "pipefail",
-                "/__t/step.sh"
+                "/__t/action-step.sh",
             ]
         );
+    }
+
+    #[test]
+    fn builds_default_container_shell_args_like_runner() {
+        let prepared = spec()
+            .prepare_exec_script_args("/__t/step.sh", Shell::BashDefault, "/__w/repo", &[], &[])
+            .unwrap();
+        let args = rendered(&prepared);
+        let shell_args = args.iter().position(|argument| *argument == "sh").unwrap();
+        assert_eq!(&args[shell_args..], ["sh", "-e", "/__t/step.sh"]);
+    }
+
+    #[test]
+    fn inspected_image_path_is_base_for_cli_and_engine_exec_envs() {
+        let mut job = spec();
+        job.temp_host = container_test_temp("runtime-path-builder");
+        let runtime_path = "/image/custom/bin:/usr/bin";
+        let path_from_args = |prepared: &PreparedDockerArgs| {
+            rendered(prepared)
+                .into_iter()
+                .rfind(|entry| entry.starts_with("PATH="))
+        };
+
+        let script = job
+            .prepare_exec_script_args_with_runtime_path(
+                "/__t/step.sh",
+                Shell::Sh,
+                "/__w",
+                &[],
+                &[],
+                Some(runtime_path),
+            )
+            .unwrap();
+        assert_eq!(
+            path_from_args(&script).as_deref(),
+            Some("PATH=/image/custom/bin:/usr/bin")
+        );
+
+        let process = job
+            .prepare_exec_process_args_with_runtime_path(
+                "/__w",
+                &[],
+                &[],
+                &["printenv".into()],
+                Some(runtime_path),
+            )
+            .unwrap();
+        assert_eq!(
+            path_from_args(&process).as_deref(),
+            Some("PATH=/image/custom/bin:/usr/bin")
+        );
+
+        let stdin = job
+            .prepare_exec_process_stdin_args_with_runtime_path(
+                "/__w",
+                &[],
+                &[],
+                &["cat".into()],
+                Some(runtime_path),
+            )
+            .unwrap();
+        assert_eq!(
+            path_from_args(&stdin).as_deref(),
+            Some("PATH=/image/custom/bin:/usr/bin")
+        );
+
+        let engine_env = job.script_exec_env_with_runtime_path(&[], Some(runtime_path));
+        assert_eq!(
+            engine_env
+                .iter()
+                .rev()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value.as_str()),
+            Some(runtime_path)
+        );
+
+        let step_env = [("PATH".to_owned(), "/step/bin".to_owned())];
+        let overlaid = job
+            .prepare_exec_process_args_with_runtime_path(
+                "/__w",
+                &step_env,
+                &[],
+                &["printenv".into()],
+                Some(runtime_path),
+            )
+            .unwrap();
+        assert_eq!(path_from_args(&overlaid).as_deref(), Some("PATH=/step/bin"));
+    }
+
+    #[test]
+    fn shell_argument_format_matches_runner_single_argument_rules() {
+        let shell = Shell::Custom {
+            command: "bash".into(),
+            arguments: vec!["--script={0}".into(), "{{literal}}".into()],
+        };
+        assert_eq!(
+            shell.command_args("/__t/step.sh").unwrap(),
+            ["bash", "--script=/__t/step.sh", "{literal}"]
+        );
+
+        let shell = Shell::Custom {
+            command: "bash".into(),
+            arguments: vec!["--script={0} {1}".into()],
+        };
+        assert!(shell.command_args("/__t/step.sh").is_err());
     }
 
     #[test]
@@ -3664,8 +4108,8 @@ mod tests {
             &workflow_host(&spec.temp_host),
             "/github/workflow"
         ));
-        assert!(has_read_only_mount(&args, &spec.actions_host, "/__a"));
-        assert!(!has_mount(&args, &spec.actions_host, "/__a"));
+        assert!(has_mount(&args, &spec.actions_host, "/__a"));
+        assert!(!has_read_only_mount(&args, &spec.actions_host, "/__a"));
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
@@ -3706,6 +4150,51 @@ mod tests {
             &args[args.len() - 2..],
             ["node:20-bookworm", "/__a/action/dist/index.js"]
         );
+    }
+
+    #[test]
+    fn node_action_prepended_path_follows_step_env_and_drops_node_icu_data() {
+        let env = [
+            ("PATH".into(), "/step/tools".into()),
+            ("NODE_ICU_DATA".into(), "/runner/node-icu".into()),
+        ];
+        let prepared = spec()
+            .prepare_run_node_action_args(
+                "/__w",
+                &env,
+                &[],
+                &["/prepended/bin".into()],
+                "node:20-bookworm",
+                "/__a/action/dist/index.js",
+            )
+            .unwrap();
+        let args = rendered(&prepared);
+        let path_values = args
+            .iter()
+            .filter(|entry| entry.starts_with("PATH="))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            path_values
+                .iter()
+                .map(|entry| entry.as_str())
+                .collect::<Vec<_>>(),
+            ["PATH=/step/tools", "PATH=/prepended/bin:/step/tools"]
+        );
+        assert!(!args.iter().any(|entry| entry.starts_with("NODE_ICU_DATA=")));
+
+        let docker_action = spec()
+            .prepare_run_docker_action_args(
+                "/__w",
+                &env,
+                &[],
+                "alpine:3.20",
+                None,
+                &["true".into()],
+            )
+            .unwrap();
+        assert!(rendered(&docker_action)
+            .iter()
+            .any(|entry| entry == "NODE_ICU_DATA=/runner/node-icu"));
     }
 
     /// Spec owned by daemon slot 1, so the persistent per-slot stores resolve
@@ -3870,7 +4359,8 @@ mod tests {
                 .count(),
             1
         );
-        assert!(has_read_only_mount(&args, &spec.actions_host, "/__a"));
+        assert!(has_mount(&args, &spec.actions_host, "/__a"));
+        assert!(!has_read_only_mount(&args, &spec.actions_host, "/__a"));
         assert!(has_mount(&args, &spec.tools_host, "/__tool"));
         // Every mount touching a runner-owned container path is the required
         // one, present exactly once: no PATH entry rebinds it.
@@ -3884,7 +4374,7 @@ mod tests {
             mount(&spec.temp_host, "/github/file_commands"),
             mount(&spec.home_host, "/github/home"),
             mount(&workflow_host(&spec.temp_host), "/github/workflow"),
-            format!("{}:ro", mount(&spec.actions_host, "/__a")),
+            mount(&spec.actions_host, "/__a"),
             mount(&spec.tools_host, "/__tool"),
         ];
         for required_mount in &required {
@@ -4173,8 +4663,8 @@ mod tests {
             &workflow_host(&spec.temp_host),
             "/github/workflow"
         ));
-        assert!(has_read_only_mount(&args, &spec.actions_host, "/__a"));
-        assert!(!has_mount(&args, &spec.actions_host, "/__a"));
+        assert!(has_mount(&args, &spec.actions_host, "/__a"));
+        assert!(!has_read_only_mount(&args, &spec.actions_host, "/__a"));
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
@@ -4303,6 +4793,48 @@ mod tests {
             .filter(|pair| pair[0] == "--network")
             .collect::<Vec<_>>();
         assert_eq!(network_pairs.last().unwrap()[1], "velnor-net-1");
+    }
+
+    #[test]
+    fn job_container_emits_ports_and_volumes_with_runner_mount_precedence() {
+        let mut job = spec();
+        job.ports = vec!["8080:80/tcp".into(), "443:443".into()];
+        job.volumes = vec![
+            "/host/data:/data:ro".into(),
+            "/host/override:/__w".into(),
+            "cache:/cache".into(),
+        ];
+
+        let args = rendered(&job.start_args().unwrap());
+        let ports = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-p")
+            .map(|pair| pair[1].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ports, ["8080:80/tcp", "443:443"]);
+
+        let volumes = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-v")
+            .map(|pair| pair[1].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &volumes[..3],
+            ["/host/data:/data:ro", "/host/override:/__w", "cache:/cache"]
+        );
+        let user_workspace_mount = volumes
+            .iter()
+            .position(|volume| *volume == "/host/override:/__w")
+            .unwrap();
+        let runner_workspace_mount = volumes
+            .iter()
+            .position(|volume| *volume == job.mount_arg(&job.workspace_host, "/__w"))
+            .unwrap();
+        assert!(user_workspace_mount < runner_workspace_mount);
+        assert!(
+            args.iter().position(|arg| arg == "-p").unwrap()
+                < args.iter().position(|arg| arg == "--network").unwrap()
+        );
     }
 
     #[test]

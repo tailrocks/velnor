@@ -7,9 +7,9 @@
 //!
 //! # Closure inputs
 //!
-//! * the `crates/velnor-workflow` subtree (all sources, `build.rs`, the
-//!   crate manifest, and embedded templates — captured as a file set, so a
-//!   newly added file can never escape the digest);
+//! * the `crates/velnor-workflow` subtree plus every transitive non-dev local
+//!   dependency subtree needed by its runtime/build dependencies (captured as
+//!   file sets, so a newly added file cannot escape the digest);
 //! * the workspace root `Cargo.toml` (profiles, lints, workspace settings);
 //! * `Cargo.lock` (every dependency version, including git revisions);
 //! * the toolchain pins (`rust-toolchain.toml`, `rust-toolchain`);
@@ -31,7 +31,7 @@
 //! order, followed by the footer:
 //!
 //! ```text
-//! closure-version:1
+//! closure-version:2
 //! features:<sorted-comma-list-or-empty>
 //! profile:<release|debug>
 //! ```
@@ -57,7 +57,7 @@ use super::GeneratorError;
 /// Closure algorithm version. Bump when the inputs or canonical form change;
 /// digests minted under different versions never compare equal because the
 /// version is part of the hashed footer.
-pub(crate) const CLOSURE_VERSION: u8 = 1;
+pub(crate) const CLOSURE_VERSION: u8 = 2;
 
 /// Cargo profile of Stage-0 release products.
 pub(crate) const PROFILE_RELEASE: &str = "release";
@@ -83,6 +83,8 @@ pub(crate) const PRODUCT_TAG_PREFIX: &str = "velnor-workflow-runtime-v1-";
 /// files inside these directories are covered without updating this list.
 pub(crate) const CLOSURE_PATHS: &[&str] = &[
     "crates/velnor-workflow",
+    "crates/velnor-action-manifest",
+    "crates/velnor-expression",
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
@@ -262,6 +264,12 @@ mod tests {
     }
 
     #[test]
+    fn s2_closure_tracks_the_manifest_complete_active_spec() {
+        assert_eq!(CLOSURE_VERSION, crate::closure::CLOSURE_VERSION);
+        assert_eq!(CLOSURE_PATHS, crate::closure::CLOSURE_PATHS);
+    }
+
+    #[test]
     fn dev_features_pin_the_candidate_build() {
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         let content = must(
@@ -314,7 +322,7 @@ mod tests {
         // merge-tree build iff the merge and head candidate closures agree,
         // which holds iff main's side of the merge avoids `CLOSURE_PATHS`.
         let root =
-            std::env::temp_dir().join(format!("velnor-closure-merge-{}", std::process::id()));
+            std::env::temp_dir().join(format!("velnor-s2-closure-merge-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         write_closure_fixture(&root);
         git_in(&root, &["init", "--quiet", "-b", "main"]);
@@ -386,7 +394,7 @@ mod tests {
         use std::io::Write as _;
 
         let root =
-            std::env::temp_dir().join(format!("velnor-closure-fixture-{}", std::process::id()));
+            std::env::temp_dir().join(format!("velnor-s2-closure-fixture-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         write_closure_fixture(&root);
         git_in(&root, &["init", "--quiet"]);
@@ -420,22 +428,13 @@ mod tests {
         // Byte-sort the real `git ls-tree` output exactly like the shell
         // consumer does (`LC_ALL=C sort`) and hash it with the system tool,
         // proving the Rust canonicalizer agrees byte-for-byte.
+        let mut ls_tree_arguments = vec!["ls-tree", "-r", "HEAD", "--"];
+        ls_tree_arguments.extend_from_slice(CLOSURE_PATHS);
         let ls_tree = must(
             Command::new("git")
                 .arg("-C")
                 .arg(&root)
-                .args([
-                    "ls-tree",
-                    "-r",
-                    "HEAD",
-                    "--",
-                    "crates/velnor-workflow",
-                    "Cargo.toml",
-                    "Cargo.lock",
-                    "rust-toolchain.toml",
-                    "rust-toolchain",
-                    ".cargo",
-                ])
+                .args(&ls_tree_arguments)
                 .output(),
             "ls-tree",
         );
@@ -456,7 +455,12 @@ mod tests {
         );
         let sorted = must(child.wait_with_output(), "sort").stdout;
         let mut canonical = sorted;
-        canonical.extend_from_slice("closure-version:1\nfeatures:\nprofile:release\n".as_bytes());
+        canonical.extend_from_slice(
+            format!(
+                "closure-version:{CLOSURE_VERSION}\nfeatures:{CI_FEATURES}\nprofile:{PROFILE_RELEASE}\n"
+            )
+            .as_bytes(),
+        );
         let mut digest_child = must(
             Command::new("sh")
                 .arg("-c")

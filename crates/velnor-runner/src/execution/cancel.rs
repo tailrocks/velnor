@@ -9,13 +9,19 @@
 //!
 //! This module is the whole model. It has three parts:
 //!
-//! * [`JobCancellation`] — the token. Two levels, `Requested` then `Forced`,
-//!   matching how `JobDispatcher` first cancels the worker and only then hard
-//!   kills it (`src/Runner.Listener/JobDispatcher.cs:1280-1285`).
+//! * [`JobCancellation`] — the job token. Two levels, `Requested` then
+//!   `Forced`, matching how `JobDispatcher` first cancels the worker and only
+//!   then hard kills it (`src/Runner.Listener/JobDispatcher.cs:1280-1285`). A
+//!   request first updates job status; the active step re-evaluates its own
+//!   condition and only a false/error result cancels that step's work, matching
+//!   `StepsRunner` and `CompositeActionHandler`.
 //! * [`TerminationTarget`] — everything a cancelled job can still be holding.
 //!   Targets register themselves as they are created and deregister when they
 //!   are gone, so the fan-out set is derived from what actually exists rather
 //!   than from a hardcoded list of two container names.
+//! * [`ActiveStepGuard`] — a running step's cancellation callback. The guard
+//!   re-evaluates the condition on a job request and deregisters at the step
+//!   boundary, so `always()` and `cancelled()` work can survive job cancellation.
 //! * [`terminate`] — the one ladder, SIGINT then SIGTERM then SIGKILL, with
 //!   upstream's timings (`src/Runner.Sdk/ProcessInvoker.cs:32-33`, escalated in
 //!   `CancelAndKillProcessTree`, `:443-447`).
@@ -82,9 +88,9 @@ impl CancelReason {
 pub enum CancelLevel {
     /// Not cancelled.
     None,
-    /// Cancellation requested. Steps stop being dispatched, the running step is
-    /// walked down the termination ladder, and `always()`/`cancelled()` post
-    /// work still runs.
+    /// Cancellation requested. Job conditions now read as cancelled; the
+    /// active step re-evaluates its condition and is terminated only if that
+    /// condition is false or cannot be evaluated. Later eligible work can run.
     Requested,
     /// The grace period is spent. Everything still alive is killed outright.
     Forced,
@@ -224,6 +230,16 @@ pub enum TerminationTarget {
         /// What the group is, for logs. Never an argument vector.
         label: String,
     },
+    /// A job-level process group that must survive the Requested pass so its
+    /// runtime can finish eligible `always()`/`cancelled()` work.
+    ProcessGroupAt {
+        /// Group id, equal to the direct child's pid.
+        pgid: u32,
+        /// What the group is, for logs. Never an argument vector.
+        label: String,
+        /// Earliest cancellation level allowed to terminate this process group.
+        terminate_at: CancelLevel,
+    },
     /// A Docker container this job owns: the job container, a service
     /// container, a Docker-action sidecar, or a BuildKit builder.
     Container {
@@ -251,6 +267,16 @@ impl std::fmt::Debug for TerminationTarget {
                 .field("pgid", pgid)
                 .field("label", label)
                 .finish(),
+            Self::ProcessGroupAt {
+                pgid,
+                label,
+                terminate_at,
+            } => formatter
+                .debug_struct("ProcessGroupAt")
+                .field("pgid", pgid)
+                .field("label", label)
+                .field("terminate_at", terminate_at)
+                .finish(),
             Self::Container { name, role } => formatter
                 .debug_struct("Container")
                 .field("name", name)
@@ -269,18 +295,15 @@ impl TerminationTarget {
     ///
     /// Not everything a cancelled job holds may die at the first request. The
     /// job container and its service containers must outlive cancellation long
-    /// enough for `always()` and `cancelled()` post steps to run *against a
-    /// container that still exists* — upstream stops them in an `always()` post
-    /// step, "Stop containers"
-    /// (`src/Runner.Worker/ContainerOperationProvider.cs:57-63`), not on the
-    /// cancellation callback. Everything that is the current step's own work —
-    /// its host process tree, its Docker-action sidecar, its BuildKit builder —
-    /// dies immediately, which is what upstream's
-    /// `step.ExecutionContext.CancelToken()` does
-    /// (`src/Runner.Worker/StepsRunner.cs:181-186`).
-    ///
-    /// This is why Velnor previously recorded post-step cleanup as a *failure*:
-    /// the container was already gone when the post step ran.
+    /// enough for `always()` and `cancelled()` steps to run *against a container
+    /// that still exists* — upstream stops them in an `always()` post step,
+    /// "Stop containers" (`src/Runner.Worker/ContainerOperationProvider.cs:57-63`),
+    /// not on the cancellation callback. Process groups, Docker-action
+    /// sidecars, and BuildKit builders are eligible at `Requested`, but the
+    /// active step's condition must first be re-evaluated. Upstream calls
+    /// `step.ExecutionContext.CancelToken()` only if that condition becomes
+    /// false (`src/Runner.Worker/StepsRunner.cs:146-185` and
+    /// `src/Runner.Worker/Handlers/CompositeActionHandler.cs:331-371`).
     #[must_use]
     pub const fn terminate_at(&self) -> CancelLevel {
         match self {
@@ -288,6 +311,7 @@ impl TerminationTarget {
                 role: ContainerRole::Job | ContainerRole::Service,
                 ..
             } => CancelLevel::Forced,
+            Self::ProcessGroupAt { terminate_at, .. } => *terminate_at,
             _ => CancelLevel::Requested,
         }
     }
@@ -301,7 +325,7 @@ impl TerminationTarget {
     pub const fn termination_rank(&self) -> u8 {
         match self {
             Self::Hook { .. } => 0,
-            Self::ProcessGroup { .. } => 1,
+            Self::ProcessGroup { .. } | Self::ProcessGroupAt { .. } => 1,
             Self::Container {
                 role: ContainerRole::DockerAction | ContainerRole::BuildKit,
                 ..
@@ -316,7 +340,7 @@ impl TerminationTarget {
     /// Deterministic ordering within one fan-out pass.
     fn termination_order(&self) -> (u8, u8) {
         let subrank = match self {
-            Self::Hook { .. } | Self::ProcessGroup { .. } => 0,
+            Self::Hook { .. } | Self::ProcessGroup { .. } | Self::ProcessGroupAt { .. } => 0,
             Self::Container {
                 role: ContainerRole::DockerAction,
                 ..
@@ -342,6 +366,7 @@ impl TerminationTarget {
     pub fn key(&self) -> String {
         match self {
             Self::ProcessGroup { pgid, .. } => format!("pgid:{pgid}"),
+            Self::ProcessGroupAt { pgid, .. } => format!("pgid:{pgid}"),
             Self::Container { name, .. } => format!("container:{name}"),
             Self::Hook { label, .. } => format!("hook:{label}"),
         }
@@ -544,7 +569,8 @@ pub fn terminate_with(
             }
             return outcome;
         }
-        TerminationTarget::ProcessGroup { pgid, .. } => {
+        TerminationTarget::ProcessGroup { pgid, .. }
+        | TerminationTarget::ProcessGroupAt { pgid, .. } => {
             let pgid = *pgid;
             let alive = move || process_group_alive(pgid);
             run_ladder(
@@ -618,9 +644,32 @@ fn run_ladder(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FanOutScope {
+    All,
+    Job,
+    Step(u64),
+}
+
+impl FanOutScope {
+    fn includes(self, step_id: Option<u64>) -> bool {
+        match self {
+            Self::All => true,
+            Self::Job => step_id.is_none(),
+            Self::Step(expected) => step_id == Some(expected),
+        }
+    }
+}
+
+struct RegisteredTarget {
+    id: u64,
+    step_id: Option<u64>,
+    target: TerminationTarget,
+}
+
 #[derive(Default)]
 struct Registry {
-    targets: Vec<(u64, TerminationTarget)>,
+    targets: Vec<RegisteredTarget>,
     /// Ids already put through the ladder. Termination is idempotent per
     /// target: a fan-out triggered by a late registration must not replay the
     /// ladder against targets an earlier fan-out already terminated, or a
@@ -647,8 +696,15 @@ struct Inner {
     forced_deadline: Mutex<Option<Instant>>,
     registry: Mutex<Registry>,
     next_id: AtomicU64,
-    /// Set once so repeated cancellation never starts a second fan-out.
-    fan_out_started: AtomicBool,
+    request_observers: Mutex<Vec<(u64, Arc<RequestObserver>)>>,
+    next_observer_id: AtomicU64,
+    active_steps: Mutex<Vec<Arc<ActiveStep>>>,
+    next_step_id: AtomicU64,
+    /// Set once so a repeated request never starts a second deadline watcher.
+    deadline_watcher_started: AtomicBool,
+    /// Whether this token owns its escalation deadline. Remote workers use
+    /// the host's Forced pass as the authority for their grace period.
+    auto_force: bool,
     /// Outcomes of the last fan-out, for tests and forensics.
     outcomes: Mutex<Vec<TerminationOutcome>>,
     /// When `false` the token records state and runs registered hooks but
@@ -713,12 +769,75 @@ impl Drop for TargetRegistration {
     }
 }
 
+/// A registration for a job-status notification callback.
+#[derive(Debug)]
+pub struct RequestObserverRegistration {
+    token: JobCancellation,
+    id: u64,
+    registered: bool,
+}
+
+impl Drop for RequestObserverRegistration {
+    fn drop(&mut self) {
+        if self.registered {
+            self.token.end_request_observer(self.id);
+        }
+    }
+}
+
+type StepConditionRecheck = dyn Fn() -> Result<bool, String> + Send + Sync + 'static;
+type RequestObserver = dyn Fn(CancelReason) -> Result<(), String> + Send + Sync + 'static;
+
+struct ActiveStep {
+    id: u64,
+    /// Absent when the job was already cancelled before this step registered,
+    /// matching Runner's callback registration guard.
+    recheck: Option<Arc<StepConditionRecheck>>,
+    cancelled: AtomicBool,
+    condition_error: Mutex<Option<String>>,
+}
+
+/// Cancellation callback registration for one running step.
+///
+/// The callback returns the running step condition after the job token has
+/// become cancelled. `Ok(true)` keeps the step running; `Ok(false)` or `Err`
+/// cancels its current work. The error is retained for the executor to report
+/// on that step, as Runner does through `ExecutionContext.Error`.
+pub struct ActiveStepGuard {
+    token: JobCancellation,
+    step: Arc<ActiveStep>,
+}
+
+impl ActiveStepGuard {
+    /// Whether the job cancellation callback cancelled this step.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.step.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Condition error from cancellation-time re-evaluation, if any.
+    #[must_use]
+    pub fn condition_error(&self) -> Option<String> {
+        self.step
+            .condition_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl Drop for ActiveStepGuard {
+    fn drop(&mut self) {
+        self.token.end_step(self.step.id);
+    }
+}
+
 impl JobCancellation {
     /// A token for a job that can be cancelled, with the forced-escalation
     /// delay derived from the server-supplied cancel timeout.
     #[must_use]
     pub fn new(cancel_timeout: Option<Duration>) -> Self {
-        Self::with_forced_delay(forced_kill_delay(cancel_timeout), true)
+        Self::with_forced_delay(forced_kill_delay(cancel_timeout), true, true)
     }
 
     /// A token that can never be cancelled.
@@ -731,17 +850,29 @@ impl JobCancellation {
     /// `CreatePostChild`, `:1384-1395`).
     #[must_use]
     pub fn inert() -> Self {
-        Self::with_forced_delay(forced_kill_delay(None), true)
+        Self::with_forced_delay(forced_kill_delay(None), true, true)
     }
 
     /// A token whose ladder records what it would do without signalling
     /// anything. Registered hooks still run.
     #[must_use]
     pub fn recording(cancel_timeout: Option<Duration>) -> Self {
-        Self::with_forced_delay(forced_kill_delay(cancel_timeout), false)
+        Self::with_forced_delay(forced_kill_delay(cancel_timeout), false, true)
     }
 
-    fn with_forced_delay(forced_after: Duration, live: bool) -> Self {
+    /// A live token whose Forced pass is owned by a remote supervisor.
+    ///
+    /// Requested cancellation still rechecks step conditions and interrupts
+    /// false-condition work. This token does not start its own deadline
+    /// watcher; the supervisor's Forced pass is authoritative. Use this for a
+    /// guest process controlled by a host cancellation token with its own
+    /// server-supplied grace period.
+    #[must_use]
+    pub fn remote() -> Self {
+        Self::with_forced_delay(forced_kill_delay(None), true, false)
+    }
+
+    fn with_forced_delay(forced_after: Duration, live: bool, auto_force: bool) -> Self {
         Self(Arc::new(Inner {
             level: AtomicU8::new(CancelLevel::None.as_u8()),
             reason: Mutex::new(None),
@@ -752,7 +883,12 @@ impl JobCancellation {
             forced_deadline: Mutex::new(None),
             registry: Mutex::new(Registry::default()),
             next_id: AtomicU64::new(0),
-            fan_out_started: AtomicBool::new(false),
+            request_observers: Mutex::new(Vec::new()),
+            next_observer_id: AtomicU64::new(0),
+            active_steps: Mutex::new(Vec::new()),
+            next_step_id: AtomicU64::new(0),
+            deadline_watcher_started: AtomicBool::new(false),
+            auto_force,
             outcomes: Mutex::new(Vec::new()),
             live,
         }))
@@ -765,7 +901,7 @@ impl JobCancellation {
     /// (`src/Runner.Worker/ExecutionContext.cs:436`, `:1384-1395`).
     #[must_use]
     pub fn unlinked(&self) -> Self {
-        Self::with_forced_delay(self.forced_after(), self.0.live)
+        Self::with_forced_delay(self.forced_after(), self.0.live, self.0.auto_force)
     }
 
     /// Current escalation level.
@@ -784,6 +920,150 @@ impl JobCancellation {
     #[must_use]
     pub fn is_forced(&self) -> bool {
         self.level() == CancelLevel::Forced
+    }
+
+    /// Register a one-shot observer for the job-status transition.
+    ///
+    /// Observers run on every first request, whether or not the current step's
+    /// condition permits cancelling that step. A runtime bridge uses this to
+    /// tell a remote executor that job status changed; that executor then
+    /// re-evaluates its own active step condition. If registration happens
+    /// after cancellation, the observer runs immediately with the original
+    /// reason.
+    #[must_use]
+    pub fn register_request_observer<F>(&self, observer: F) -> RequestObserverRegistration
+    where
+        F: Fn(CancelReason) -> Result<(), String> + Send + Sync + 'static,
+    {
+        let _request_state = self
+            .0
+            .request_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = self.0.next_observer_id.fetch_add(1, Ordering::SeqCst);
+        let observer = Arc::new(observer) as Arc<RequestObserver>;
+        let reason = self.reason();
+        if let Some(reason) = reason {
+            drop(_request_state);
+            Self::notify_request_observer(&observer, reason);
+            RequestObserverRegistration {
+                token: self.clone(),
+                id,
+                registered: false,
+            }
+        } else {
+            self.0
+                .request_observers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((id, observer));
+            RequestObserverRegistration {
+                token: self.clone(),
+                id,
+                registered: true,
+            }
+        }
+    }
+
+    fn notify_request_observer(observer: &Arc<RequestObserver>, reason: CancelReason) {
+        if let Err(error) = observer(reason) {
+            eprintln!(
+                "job cancellation notification failed ({}): {error}",
+                reason.label()
+            );
+        }
+    }
+
+    /// Register the active step's condition recheck for job cancellation.
+    ///
+    /// Call before evaluating the initial condition. A cancellation that
+    /// arrives during this scope marks job status cancelled, calls `recheck`,
+    /// and terminates Requested targets only for `Ok(false)` or `Err`. If the
+    /// token was already cancelled, no callback is registered and the initial
+    /// condition evaluation observes the cancelled job state, matching Runner.
+    /// Dropping the guard deactivates the callback at the step boundary.
+    #[must_use]
+    pub fn begin_step<F>(&self, recheck: F) -> ActiveStepGuard
+    where
+        F: Fn() -> Result<bool, String> + Send + Sync + 'static,
+    {
+        // Serialize with the first cancellation transition so a cancellation
+        // can either capture this callback or observe that Runner would have
+        // skipped callback registration because the token was already fired.
+        let _request_state = self
+            .0
+            .request_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let recheck =
+            (!self.is_cancelled()).then(|| Arc::new(recheck) as Arc<StepConditionRecheck>);
+        let step = Arc::new(ActiveStep {
+            id: self.0.next_step_id.fetch_add(1, Ordering::SeqCst),
+            recheck,
+            cancelled: AtomicBool::new(false),
+            condition_error: Mutex::new(None),
+        });
+        self.0
+            .active_steps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Arc::clone(&step));
+        ActiveStepGuard {
+            token: self.clone(),
+            step,
+        }
+    }
+
+    /// Whether any currently active step was cancelled after re-evaluation.
+    #[must_use]
+    pub fn active_step_cancelled(&self) -> bool {
+        self.0
+            .active_steps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|step| step.cancelled.load(Ordering::SeqCst))
+    }
+
+    /// The innermost active step, matching nested Runner execution contexts.
+    fn current_active_step(&self) -> Option<Arc<ActiveStep>> {
+        self.0
+            .active_steps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last()
+            .cloned()
+    }
+
+    /// Whether cancellation should stop the work currently using this token.
+    ///
+    /// A requested job cancellation does not stop the innermost active step
+    /// whose condition still passes (`always()` / `cancelled()` work), even if
+    /// an enclosing composite condition fails. With no active step, new
+    /// job-scoped work must stop. Forced always stops work that a Requested
+    /// pass spared.
+    #[must_use]
+    pub fn should_abort_work(&self) -> bool {
+        match self.level() {
+            CancelLevel::None => false,
+            CancelLevel::Forced => true,
+            CancelLevel::Requested => {
+                let Some(step) = self.current_active_step() else {
+                    return true;
+                };
+                self.is_forced() || step.cancelled.load(Ordering::SeqCst)
+            }
+        }
+    }
+
+    /// Whether a spawned process should be registered for cancellation.
+    ///
+    /// Always register. `register` associates the target with the innermost
+    /// active step, then applies the correct Requested or Forced fan-out. This
+    /// also closes the spawn/register race for work whose condition just failed.
+    #[must_use]
+    pub fn should_track_process_group(&self) -> bool {
+        true
     }
 
     /// Why the job is being cancelled, once it is.
@@ -823,7 +1103,7 @@ impl JobCancellation {
             .request_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.is_cancelled() || self.0.fan_out_started.load(Ordering::SeqCst) {
+        if self.is_cancelled() || self.0.deadline_watcher_started.load(Ordering::SeqCst) {
             return;
         }
         self.0.forced_after_ms.store(
@@ -832,14 +1112,15 @@ impl JobCancellation {
         );
     }
 
-    /// Request cancellation, running the termination fan-out once.
+    /// Request job cancellation and re-evaluate every active step condition.
     ///
     /// Returns `true` when this call is the one that cancelled the job.
     /// Repeated cancellation is idempotent: the reason of the first request
-    /// stands and no second fan-out starts, which is what keeps a cancel storm
-    /// from turning into a signal storm.
+    /// stands. The active step's work enters the termination ladder only when
+    /// its re-evaluated condition is false or errors; Forced still kills every
+    /// registered target at the deadline.
     pub fn request(&self, reason: CancelReason) -> bool {
-        let (transitioned, should_spawn) = {
+        let (transitioned, observers, current_step) = {
             let _request_state = self
                 .0
                 .request_state
@@ -868,18 +1149,98 @@ impl JobCancellation {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(deadline);
             }
-            let should_spawn = self.level() != CancelLevel::Forced
-                && self
-                    .0
-                    .fan_out_started
-                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok();
-            (transitioned, should_spawn)
+            let observers = if transitioned {
+                self.0
+                    .request_observers
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .map(|(_, observer)| Arc::clone(observer))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let current_step = transitioned.then(|| self.current_active_step()).flatten();
+            (transitioned, observers, current_step)
         };
-        if should_spawn {
-            self.spawn_fan_out();
+        if !transitioned {
+            return false;
         }
-        transitioned
+
+        self.recheck_active_steps(reason);
+        let fan_out_scope = Self::requested_fan_out_scope(reason, current_step.as_deref());
+        if let Some(scope) = fan_out_scope {
+            self.spawn_requested_fan_out(scope);
+        }
+        if self.0.auto_force {
+            self.spawn_deadline_watcher();
+        }
+        // Remote notification can block on its transport. Complete local
+        // condition rechecks and start the forced deadline first so a stalled
+        // guest cannot hold up cancellation of the host's active step.
+        for observer in observers {
+            Self::notify_request_observer(&observer, reason);
+        }
+        true
+    }
+
+    fn requested_fan_out_scope(
+        reason: CancelReason,
+        current_step: Option<&ActiveStep>,
+    ) -> Option<FanOutScope> {
+        if reason == CancelReason::DaemonShutdown {
+            Some(FanOutScope::All)
+        } else if let Some(step) = current_step {
+            step.cancelled
+                .load(Ordering::SeqCst)
+                .then_some(FanOutScope::Step(step.id))
+        } else {
+            // Job setup has no step callback yet. Stop job-scoped processes;
+            // later step work registers under its own condition guard.
+            Some(FanOutScope::Job)
+        }
+    }
+
+    fn recheck_active_steps(&self, reason: CancelReason) {
+        let active_steps = self
+            .0
+            .active_steps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        for step in active_steps {
+            let result = if reason == CancelReason::DaemonShutdown {
+                // Runner shutdown skips condition evaluation and leaves the
+                // default recheck result false before calling `CancelToken`.
+                Ok(false)
+            } else if let Some(recheck) = step.recheck.as_ref() {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| recheck()))
+                    .unwrap_or_else(|_| Err("condition re-evaluation panicked".to_string()))
+            } else {
+                continue;
+            };
+            let still_active = self
+                .0
+                .active_steps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|active| active.id == step.id);
+            if !still_active {
+                continue;
+            }
+            match result {
+                Ok(true) => {}
+                Ok(false) => step.cancelled.store(true, Ordering::SeqCst),
+                Err(error) => {
+                    *step
+                        .condition_error
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+                    step.cancelled.store(true, Ordering::SeqCst);
+                }
+            }
+        }
     }
 
     /// Escalate to `Forced` without waiting for the grace period.
@@ -904,23 +1265,60 @@ impl JobCancellation {
         self.fan_out_once_at(Some(deadline));
     }
 
+    fn end_step(&self, id: u64) {
+        self.0
+            .active_steps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|step| step.id != id);
+    }
+
+    fn end_request_observer(&self, id: u64) {
+        self.0
+            .request_observers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(existing, _)| *existing != id);
+    }
+
     /// Register a target with the fan-out. The registration removes it on drop.
     #[must_use]
     pub fn register(&self, target: TerminationTarget) -> TargetRegistration {
         let id = self.0.next_id.fetch_add(1, Ordering::SeqCst);
+        let active_step = self.current_active_step();
+        let step_id = active_step.as_ref().map(|step| step.id);
         self.0
             .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .targets
-            .push((id, target));
-        // A target created after cancellation was requested is still a target:
-        // terminate it now rather than leaking it because it lost a race.
-        if self.is_cancelled() {
+            .push(RegisteredTarget {
+                id,
+                step_id,
+                target,
+            });
+        // A late target belongs to the innermost step that registered it.
+        // Kill only that step's work when its condition failed; a cancelled
+        // composite wrapper must not kill an eligible embedded child. With no
+        // active step, a requested cancellation still stops job-scoped setup.
+        let fan_out_scope = if self.is_forced() {
+            Some(FanOutScope::All)
+        } else if self.is_cancelled() {
+            match active_step {
+                Some(step) if step.cancelled.load(Ordering::SeqCst) => {
+                    Some(FanOutScope::Step(step.id))
+                }
+                Some(_) => None,
+                None => Some(FanOutScope::Job),
+            }
+        } else {
+            None
+        };
+        if let Some(scope) = fan_out_scope {
             // Registration may happen from inside a running hook. Keep this
             // pass non-blocking so a hook cannot wait on the fan-out thread
             // that is currently invoking it.
-            self.fan_out_once_at(self.forced_deadline());
+            self.fan_out_scope_at(scope, self.forced_deadline());
         }
         TargetRegistration {
             token: self.clone(),
@@ -934,7 +1332,7 @@ impl JobCancellation {
             .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        registry.targets.retain(|(existing, _)| *existing != id);
+        registry.targets.retain(|target| target.id != id);
         // Ids are never reused (`next_id` only increments), so forgetting the
         // termination mark here keeps the set bounded by the live registry
         // rather than by the number of targets the job ever created.
@@ -951,7 +1349,7 @@ impl JobCancellation {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .targets
             .iter()
-            .map(|(_, target)| target.key())
+            .map(|target| target.target.key())
             .collect()
     }
 
@@ -965,16 +1363,16 @@ impl JobCancellation {
             .clone()
     }
 
-    fn spawn_fan_out(&self) {
+    fn spawn_requested_fan_out(&self, scope: FanOutScope) {
         let token = self.clone();
         let forced_deadline = self
             .forced_deadline()
             .unwrap_or_else(|| deadline_after(Instant::now(), self.forced_after()));
         let initial_token = token.clone();
-        let initial_spawned = std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("velnor-cancel-ladder".into())
             .spawn(move || {
-                initial_token.fan_out_once_at(Some(forced_deadline));
+                initial_token.fan_out_scope_at(scope, Some(forced_deadline));
                 // If the deadline watcher had to skip a target still being
                 // processed by this pass, retry it after the in-flight work
                 // releases its claim.
@@ -982,7 +1380,30 @@ impl JobCancellation {
                     initial_token.fan_out_once_at(Some(forced_deadline));
                 }
             });
-        let timer_token = token;
+        if let Err(error) = spawned {
+            // A host that cannot spawn a thread still has to terminate the
+            // cancelled step rather than leaving its process group alive.
+            eprintln!("cancellation ladder thread could not be spawned ({error}); running inline");
+            self.fan_out_scope_at(scope, Some(forced_deadline));
+            if self.is_forced() {
+                self.fan_out_once_at(Some(forced_deadline));
+            }
+        }
+    }
+
+    fn spawn_deadline_watcher(&self) {
+        if self
+            .0
+            .deadline_watcher_started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        let forced_deadline = self
+            .forced_deadline()
+            .unwrap_or_else(|| deadline_after(Instant::now(), self.forced_after()));
+        let timer_token = self.clone();
         let timer_spawned = std::thread::Builder::new()
             .name("velnor-cancel-deadline".into())
             .spawn(move || {
@@ -997,15 +1418,6 @@ impl JobCancellation {
                     timer_token.force_at(forced_deadline);
                 }
             });
-        if let Err(error) = initial_spawned {
-            // A host that cannot spawn a thread still has to terminate the job:
-            // run the initial fan-out inline rather than leaving it running.
-            eprintln!("cancellation ladder thread could not be spawned ({error}); running inline");
-            self.fan_out_once_at(Some(forced_deadline));
-            if self.is_forced() {
-                self.fan_out_once_at(Some(forced_deadline));
-            }
-        }
         if let Err(error) = timer_spawned {
             // Preserve the absolute deadline even if the timer thread cannot
             // be created. This rare fallback may block the request caller, but
@@ -1039,7 +1451,7 @@ impl JobCancellation {
             if !in_flight {
                 return;
             }
-            // `request` starts the initial pass asynchronously. A synchronous
+            // Cancellation starts its condition-approved pass asynchronously. A synchronous
             // caller must not return while that pass still owns a target, or
             // it can observe an incomplete outcome set.
             std::thread::yield_now();
@@ -1047,6 +1459,10 @@ impl JobCancellation {
     }
 
     fn fan_out_once_at(&self, forced_deadline: Option<Instant>) {
+        self.fan_out_scope_at(FanOutScope::All, forced_deadline);
+    }
+
+    fn fan_out_scope_at(&self, scope: FanOutScope, forced_deadline: Option<Instant>) {
         // Claim the unterminated targets under one lock, marking them before
         // the ladder runs, so a concurrent registration cannot select the same
         // target for a second fan-out.
@@ -1057,8 +1473,9 @@ impl JobCancellation {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             // A target is eligible only once the escalation has reached the
-            // level it is allowed to die at, so a plain cancellation request
-            // does not destroy the container the post steps still need.
+            // level it is allowed to die at. The Requested pass starts only
+            // after the active step's condition re-evaluates false, so a
+            // job-level request can preserve `always()`/`cancelled()` work.
             //
             // An explicit fan-out on an uncancelled token is a teardown sweep,
             // not a no-op: floor the comparison at `Requested` so a caller that
@@ -1068,15 +1485,21 @@ impl JobCancellation {
                 CancelLevel::None => CancelLevel::Requested,
                 level => level,
             };
+            let scope = if level == CancelLevel::Forced {
+                FanOutScope::All
+            } else {
+                scope
+            };
             let mut pending: Vec<(u64, TerminationTarget)> = registry
                 .targets
                 .iter()
-                .filter(|(id, target)| {
-                    !registry.terminated.contains(id)
-                        && !registry.in_flight.contains(id)
-                        && target.terminate_at().as_u8() <= level.as_u8()
+                .filter(|registered| {
+                    scope.includes(registered.step_id)
+                        && !registry.terminated.contains(&registered.id)
+                        && !registry.in_flight.contains(&registered.id)
+                        && registered.target.terminate_at().as_u8() <= level.as_u8()
                 })
-                .map(|(id, target)| (*id, target.clone()))
+                .map(|registered| (registered.id, registered.target.clone()))
                 .collect();
             // Registration order is an accident of startup sequencing. Sort
             // all classes explicitly so reverse registration produces the
@@ -1153,7 +1576,7 @@ impl JobCancellation {
                 && registry
                     .targets
                     .iter()
-                    .any(|(registered_id, _)| registered_id == id)
+                    .any(|registered| registered.id == *id)
             {
                 registry.terminated.insert(*id);
             }
@@ -1294,11 +1717,11 @@ mod tests {
 
     /// Wait for the shared outcomes log to reach `expected` entries.
     ///
-    /// `request` starts the detached ladder thread, so a synchronous
-    /// `fan_out_once` can observe an empty log while that thread still holds
-    /// the targets. Both passes append to the same log in deterministic
-    /// order; waiting keeps the ordering assertions exact without racing
-    /// the scheduler. Times out rather than hanging a wedged ladder.
+    /// A failed step-condition recheck starts a detached ladder thread, so a
+    /// synchronous `fan_out_once` can observe an empty log while that thread
+    /// still holds the targets. Both passes append to the same log in
+    /// deterministic order; waiting keeps ordering assertions exact without
+    /// racing the scheduler. Times out rather than hanging a wedged ladder.
     fn wait_for_outcomes(token: &JobCancellation, expected: usize) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while token.outcomes().len() < expected && std::time::Instant::now() < deadline {
@@ -1335,6 +1758,379 @@ mod tests {
         assert!(!token.request(CancelReason::JobTimeout));
         assert_eq!(token.reason(), Some(CancelReason::ServerRequested));
         assert_eq!(token.level(), CancelLevel::Requested);
+    }
+
+    #[test]
+    fn abort_predicate_tracks_active_step_decision_not_job_status_alone() {
+        let token = JobCancellation::recording(None);
+        assert!(!token.should_abort_work());
+        let always_step = token.begin_step(|| Ok(true));
+
+        assert!(token.request(CancelReason::ServerRequested));
+        assert!(token.is_cancelled());
+        assert!(!always_step.is_cancelled());
+        assert!(
+            !token.should_abort_work(),
+            "requested cancellation must let eligible active work finish"
+        );
+
+        drop(always_step);
+        assert!(
+            token.should_abort_work(),
+            "requested cancellation must prevent new work between steps"
+        );
+
+        let ordinary = JobCancellation::recording(None);
+        let ordinary_step = ordinary.begin_step(|| Ok(false));
+        assert!(ordinary.request(CancelReason::JobTimeout));
+        assert!(ordinary_step.is_cancelled());
+        assert!(ordinary.should_abort_work());
+
+        let forced = JobCancellation::recording(None);
+        let surviving_step = forced.begin_step(|| Ok(true));
+        assert!(forced.request(CancelReason::ServerRequested));
+        assert!(!surviving_step.is_cancelled());
+        assert!(!forced.should_abort_work());
+        forced.force();
+        assert!(forced.should_abort_work());
+    }
+
+    #[test]
+    fn nested_always_child_survives_rejected_composite_scope() {
+        let token = JobCancellation::recording(None);
+        let composite = token.begin_step(|| Ok(false));
+        let _composite_process = token.register(TerminationTarget::ProcessGroup {
+            pgid: 401,
+            label: "composite-scope".into(),
+        });
+        let child = token.begin_step(|| Ok(true));
+        let _child_process = token.register(TerminationTarget::ProcessGroup {
+            pgid: 402,
+            label: "always-child".into(),
+        });
+
+        assert!(token.request(CancelReason::ServerRequested));
+        assert!(composite.is_cancelled());
+        assert!(!child.is_cancelled());
+        assert!(token.active_step_cancelled());
+        assert!(
+            !token.should_abort_work(),
+            "the innermost always child controls the current operation"
+        );
+        assert_eq!(
+            JobCancellation::requested_fan_out_scope(
+                CancelReason::ServerRequested,
+                Some(&child.step)
+            ),
+            None,
+            "the rejected composite wrapper must not start a Requested fan-out"
+        );
+        let _late_child_process = token.register(TerminationTarget::ProcessGroup {
+            pgid: 403,
+            label: "late-always-child".into(),
+        });
+        assert!(token.outcomes().is_empty());
+
+        token.force();
+        wait_for_outcomes(&token, 3);
+        assert_eq!(
+            token
+                .outcomes()
+                .iter()
+                .map(|outcome| outcome.target.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                "pgid:401".to_string(),
+                "pgid:402".to_string(),
+                "pgid:403".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_false_child_fan_out_targets_only_its_own_scope() {
+        let token = JobCancellation::recording(None);
+        let composite = token.begin_step(|| Ok(false));
+        let _composite_process = token.register(TerminationTarget::ProcessGroup {
+            pgid: 411,
+            label: "composite-scope".into(),
+        });
+        let child = token.begin_step(|| Ok(false));
+        let _child_process = token.register(TerminationTarget::ProcessGroup {
+            pgid: 412,
+            label: "ordinary-child".into(),
+        });
+
+        assert!(token.request(CancelReason::JobTimeout));
+        assert!(composite.is_cancelled());
+        assert!(child.is_cancelled());
+        assert!(token.should_abort_work());
+        assert_eq!(
+            JobCancellation::requested_fan_out_scope(CancelReason::JobTimeout, Some(&child.step)),
+            Some(FanOutScope::Step(child.step.id))
+        );
+        wait_for_outcomes(&token, 1);
+        assert_eq!(token.outcomes()[0].target, "pgid:412");
+
+        let _late_child_process = token.register(TerminationTarget::ProcessGroup {
+            pgid: 413,
+            label: "late-ordinary-child".into(),
+        });
+        wait_for_outcomes(&token, 2);
+        let requested_targets = token
+            .outcomes()
+            .iter()
+            .map(|outcome| outcome.target.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            requested_targets,
+            ["pgid:412".to_string(), "pgid:413".to_string()].into()
+        );
+
+        token.force();
+        wait_for_outcomes(&token, 3);
+        let all_targets = token
+            .outcomes()
+            .iter()
+            .map(|outcome| outcome.target.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            all_targets,
+            [
+                "pgid:411".to_string(),
+                "pgid:412".to_string(),
+                "pgid:413".to_string()
+            ]
+            .into()
+        );
+    }
+
+    #[test]
+    fn remote_token_waits_for_supervisor_forced_pass() {
+        let token = JobCancellation::remote();
+        let always_step = token.begin_step(|| Ok(true));
+
+        assert!(token.request(CancelReason::ServerRequested));
+        assert_eq!(token.level(), CancelLevel::Requested);
+        assert!(!always_step.is_cancelled());
+        assert!(
+            !token.0.deadline_watcher_started.load(Ordering::SeqCst),
+            "remote guest must honor the host's server-configured cancellation grace"
+        );
+
+        token.force();
+        assert_eq!(token.level(), CancelLevel::Forced);
+    }
+
+    #[test]
+    fn cancellation_rechecks_active_conditions_and_preserves_eligible_work() {
+        let token = JobCancellation::recording(None);
+        let mut state = crate::executor::JobExecutionState::default();
+        state.set_cancellation(token.clone());
+        assert!(state.evaluate_condition(Some("always()")).unwrap());
+        assert!(!state.evaluate_condition(Some("cancelled()")).unwrap());
+        assert!(state.evaluate_condition(None).unwrap());
+
+        let always_cancellation = token.clone();
+        let always_step = token.begin_step(move || {
+            let mut state = crate::executor::JobExecutionState::default();
+            state.set_cancellation(always_cancellation.clone());
+            state
+                .evaluate_condition(Some("always()"))
+                .map_err(|error| error.to_string())
+        });
+        let _always_process = token.register(TerminationTarget::ProcessGroup {
+            pgid: 101,
+            label: "always-step".into(),
+        });
+
+        assert!(token.request(CancelReason::ServerRequested));
+        assert!(!always_step.is_cancelled());
+        assert!(token.outcomes().is_empty());
+        assert!(state.evaluate_condition(Some("always()")).unwrap());
+        assert!(state.evaluate_condition(Some("cancelled()")).unwrap());
+        assert!(!state.evaluate_condition(None).unwrap());
+
+        // `cancelled()` work begins after job status changed, so Runner would
+        // not attach a cancellation callback to it. It must still run.
+        drop(always_step);
+        let cancelled_cancellation = token.clone();
+        let cancelled_step = token.begin_step(move || {
+            let mut state = crate::executor::JobExecutionState::default();
+            state.set_cancellation(cancelled_cancellation.clone());
+            state
+                .evaluate_condition(Some("cancelled()"))
+                .map_err(|error| error.to_string())
+        });
+        let _cancelled_process = token.register(TerminationTarget::ProcessGroup {
+            pgid: 102,
+            label: "cancelled-step".into(),
+        });
+        assert!(!cancelled_step.is_cancelled());
+        assert!(token.outcomes().is_empty());
+        assert!(token.should_track_process_group());
+        drop(cancelled_step);
+        assert!(
+            token.should_track_process_group(),
+            "registering a post-step spawn closes the spawn/register race"
+        );
+    }
+
+    #[test]
+    fn request_observers_notify_remote_job_status_when_active_step_survives() {
+        let token = JobCancellation::recording(None);
+        let always_step = token.begin_step(|| Ok(true));
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_by_callback = Arc::clone(&observed);
+        let _observer = token.register_request_observer(move |reason| {
+            observed_by_callback
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(reason);
+            Ok(())
+        });
+
+        assert!(token.request(CancelReason::ServerRequested));
+        assert!(!always_step.is_cancelled());
+        assert_eq!(
+            *observed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![CancelReason::ServerRequested]
+        );
+        assert!(token.outcomes().is_empty());
+
+        let late_observer_called = Arc::new(AtomicBool::new(false));
+        let late_observer_flag = Arc::clone(&late_observer_called);
+        let _late_observer = token.register_request_observer(move |reason| {
+            assert_eq!(reason, CancelReason::ServerRequested);
+            late_observer_flag.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        assert!(late_observer_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn local_step_recheck_runs_before_remote_observers() {
+        let token = JobCancellation::recording(None);
+        let _ordinary_step = token.begin_step(|| Ok(false));
+        let observed_token = token.clone();
+        let _observer = token.register_request_observer(move |_| {
+            assert!(
+                observed_token.active_step_cancelled(),
+                "remote notification must not block the host step recheck"
+            );
+            Ok(())
+        });
+
+        assert!(token.request(CancelReason::ServerRequested));
+    }
+
+    #[test]
+    fn deferred_process_groups_survive_requested_and_die_at_forced() {
+        let token = JobCancellation::recording(None);
+        let _step = token.begin_step(|| Ok(false));
+        let _ordinary = token.register(TerminationTarget::ProcessGroup {
+            pgid: 301,
+            label: "step-process".into(),
+        });
+        let _jailer = token.register(TerminationTarget::ProcessGroupAt {
+            pgid: 302,
+            label: "microvm-jailer".into(),
+            terminate_at: CancelLevel::Forced,
+        });
+
+        assert!(token.request(CancelReason::ServerRequested));
+        wait_for_outcomes(&token, 1);
+        assert_eq!(
+            token
+                .outcomes()
+                .iter()
+                .map(|outcome| outcome.target.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pgid:301"]
+        );
+
+        token.force();
+        wait_for_outcomes(&token, 2);
+        assert_eq!(
+            token
+                .outcomes()
+                .iter()
+                .map(|outcome| outcome.target.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pgid:301", "pgid:302"]
+        );
+    }
+
+    #[test]
+    fn timeout_rechecks_ordinary_step_and_starts_with_interrupt() {
+        let token = JobCancellation::recording(None);
+        let mut state = crate::executor::JobExecutionState::default();
+        state.set_cancellation(token.clone());
+        assert!(state.evaluate_condition(None).unwrap());
+
+        let step_cancellation = token.clone();
+        let step = token.begin_step(move || {
+            let mut state = crate::executor::JobExecutionState::default();
+            state.set_cancellation(step_cancellation.clone());
+            state
+                .evaluate_condition(None)
+                .map_err(|error| error.to_string())
+        });
+        let _ordinary_process = token.register(TerminationTarget::ProcessGroup {
+            pgid: 202,
+            label: "ordinary-step".into(),
+        });
+
+        assert!(token.request(CancelReason::JobTimeout));
+        assert_eq!(token.reason(), Some(CancelReason::JobTimeout));
+        assert!(step.is_cancelled());
+        assert!(token.active_step_cancelled());
+        assert!(token.should_track_process_group());
+        assert!(!state.evaluate_condition(None).unwrap());
+        assert!(state.evaluate_condition(Some("always()")).unwrap());
+        assert!(state.evaluate_condition(Some("cancelled()")).unwrap());
+
+        // The recording token proves the same termination ladder starts at
+        // SIGINT without signalling a real process group in this unit test.
+        token.fan_out_once();
+        let outcomes = token.outcomes();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].target, "pgid:202");
+        assert_eq!(outcomes[0].escalated_to, Some(TerminationSignal::Interrupt));
+        assert!(outcomes[0].gone);
+    }
+
+    #[test]
+    fn condition_recheck_error_is_retained_and_cancels_the_step() {
+        let token = JobCancellation::recording(None);
+        let step = token.begin_step(|| Err("invalid expression".to_string()));
+        token.request(CancelReason::ServerRequested);
+
+        assert!(step.is_cancelled());
+        assert_eq!(
+            step.condition_error().as_deref(),
+            Some("invalid expression")
+        );
+    }
+
+    #[test]
+    fn daemon_shutdown_cancels_without_rechecking_an_always_step() {
+        let token = JobCancellation::recording(None);
+        let step = token.begin_step(|| Ok(true));
+        let _process = token.register(TerminationTarget::ProcessGroup {
+            pgid: 303,
+            label: "shutdown-step".into(),
+        });
+
+        token.request(CancelReason::DaemonShutdown);
+
+        assert!(step.is_cancelled());
+        assert!(step.condition_error().is_none());
+        token.fan_out_once();
+        assert_eq!(token.outcomes().len(), 1);
+        assert_eq!(token.outcomes()[0].target, "pgid:303");
     }
 
     #[test]
@@ -1386,9 +2182,10 @@ mod tests {
                 Ok(())
             }),
         });
-        // At `Requested` the step's own work dies and the containers the post
-        // steps still need survive; forcing reaches the rest. Asserting both
-        // phases is the contract, not just that the fan-out visits everything.
+        // The Requested pass represents a running step whose rechecked
+        // condition is false; the job and service containers still survive.
+        // Forcing reaches the rest. Asserting both phases is the contract, not
+        // just that the fan-out visits everything.
         token.fan_out_once();
         let after_request: Vec<String> = token
             .outcomes()
@@ -1422,7 +2219,7 @@ mod tests {
                 "container:velnor-job-1",
                 "container:velnor-service-1-postgres",
             ],
-            "the step's own work dies on request; the containers post steps need die on escalation, and every class is reached exactly once"
+            "the failed step's work dies at Requested; the containers post steps need die on escalation, and every class is reached exactly once"
         );
         assert!(hook_ran.load(Ordering::SeqCst));
     }
@@ -1644,13 +2441,12 @@ mod tests {
         );
     }
 
-    /// Registration order must not decide termination order. The microVM
-    /// registers its jailer when the VM is created and the guest's `Cancel`
-    /// hook only once the session exists, so ordering by registration killed
-    /// the VM before asking it to stop.
+    /// Registration order must not decide termination order: a cooperative
+    /// hook always runs before process and container termination targets.
     #[test]
     fn a_hook_runs_before_terminations_registered_earlier() {
         let token = JobCancellation::recording(None);
+        let _step = token.begin_step(|| Ok(false));
         let _jailer = token.register(TerminationTarget::ProcessGroup {
             pgid: 4242,
             label: "microvm-jailer".into(),
@@ -1673,74 +2469,56 @@ mod tests {
         );
     }
 
-    /// The graceful half runs before the bounded one. A hook and the jailer are
-    /// both step-scoped, so a single cancellation request fires the guest's own
-    /// `Cancel` and, if that does not stop it, terminates the jailer — rather
-    /// than only ever killing the VM out from under the guest.
+    /// A MicroVM cancellation first updates remote job status. The guest then
+    /// re-evaluates its own active step; the jailer survives Requested so later
+    /// `always()`/`cancelled()` work can finish.
     #[test]
     fn a_microvm_cancels_the_guest_before_it_kills_the_jailer() {
         let token = JobCancellation::recording(None);
+        let _step = token.begin_step(|| Ok(false));
         let guest_cancelled = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&guest_cancelled);
-        let _guest = token.register(TerminationTarget::Hook {
-            label: "microvm-guest-cancel".into(),
-            run: Arc::new(move |_| {
-                flag.store(true, Ordering::SeqCst);
-                Ok(())
-            }),
+        let _guest = token.register_request_observer(move |_| {
+            flag.store(true, Ordering::SeqCst);
+            Ok(())
         });
-        let _jailer = token.register(TerminationTarget::ProcessGroup {
+        let _jailer = token.register(TerminationTarget::ProcessGroupAt {
             pgid: 4242,
             label: "microvm-jailer".into(),
+            terminate_at: CancelLevel::Forced,
         });
 
         token.request(CancelReason::ServerRequested);
-        token.fan_out_once();
-
-        // `request` starts the detached ladder thread. The explicit
-        // `fan_out_once` above can race that worker while it is processing the
-        // same targets, so wait for the recorded outcomes before observing the
-        // hook's side effect.
-        wait_for_outcomes(&token, 2);
         assert!(
             guest_cancelled.load(Ordering::SeqCst),
-            "the guest is told to stop"
+            "remote job status is updated even when the host step's condition was rechecked"
         );
-        wait_for_outcomes(&token, 2);
-        assert_eq!(
-            token
-                .outcomes()
-                .into_iter()
-                .map(|outcome| outcome.target)
-                .collect::<Vec<_>>(),
-            vec!["hook:microvm-guest-cancel", "pgid:4242"],
-            "registration order is the termination order: guest first, jailer after"
-        );
+        assert!(token.outcomes().is_empty(), "jailer survives Requested");
+
+        token.force();
+        assert_eq!(token.outcomes()[0].target, "pgid:4242");
     }
 
-    /// A microVM job used to be entirely uncancellable: the only cancellation
-    /// path killed a host container that does not exist on that backend, so the
-    /// guest kept running while GitHub was told the job was cancelled. The
-    /// jailer is an ordinary host process, so it belongs on the same ladder as
-    /// every other target — and it must die on the first request, not only on
-    /// escalation, because it is the job's work rather than a container that
-    /// post steps still need.
+    /// A MicroVM jailer owns the job runtime and survives Requested, like the
+    /// job and service containers. Forced still reaches it as a process group.
     #[test]
     fn a_microvm_jailer_is_reachable_from_the_fan_out() {
         let token = JobCancellation::recording(None);
-        let jailer = TerminationTarget::ProcessGroup {
+        let _step = token.begin_step(|| Ok(false));
+        let jailer = TerminationTarget::ProcessGroupAt {
             pgid: 4242,
             label: "microvm-jailer".into(),
+            terminate_at: CancelLevel::Forced,
         };
         assert_eq!(
             jailer.terminate_at(),
-            CancelLevel::Requested,
-            "the guest is the job's own work, not a container post steps need"
+            CancelLevel::Forced,
+            "the guest must outlive Requested for later eligible steps"
         );
         let registration = token.register(jailer);
         token.request(CancelReason::ServerRequested);
-        // `request` spawns the fan-out, so drive it here rather than racing the
-        // thread; what this asserts is that the jailer is *in* the fan-out set.
+        assert!(token.outcomes().is_empty());
+        token.force();
         token.fan_out_once();
         assert_eq!(
             token
@@ -1759,11 +2537,12 @@ mod tests {
     #[test]
     fn a_target_registered_after_cancellation_is_terminated_immediately() {
         let token = JobCancellation::recording(None);
+        let _step = token.begin_step(|| Ok(false));
         token.request(CancelReason::ServerRequested);
         assert!(token.outcomes().is_empty());
 
-        // A step-scoped target that appears after the request lost a race; it
-        // must not be leaked just because the fan-out already ran.
+        // A target for the failed step that appears after the request lost a
+        // race must not be leaked just because the fan-out already ran.
         let _late = token.register(TerminationTarget::ProcessGroup {
             pgid: 4242,
             label: "late-step".into(),

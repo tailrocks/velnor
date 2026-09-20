@@ -32,9 +32,9 @@ use crate::{
         composite_action_invocations, composite_repository_action_plans,
         composite_repository_action_plans_from_resolved, download_repository_actions,
         is_local_action_step, local_action_plans_with_context, native_invocation_from_plan,
-        repository_action_plans, resolve_local_action, unsupported_action_error, ActionAdapter,
-        ActionMetadata, CompositeActionInvocation, LocalActionPlan, RepositoryActionPlan,
-        ResolvedAction,
+        repository_action_plans_with_context, resolve_local_action, unsupported_action_error,
+        ActionAdapter, ActionMetadata, ActionTemplateMap, CompositeActionInvocation,
+        LocalActionPlan, RepositoryActionPlan, ResolvedAction,
     },
     args::{ConfigureArgs, DaemonArgs, DoctorArgs, PreflightArgs, RemoveArgs, RunArgs, StatusArgs},
     checkout::{
@@ -11058,7 +11058,8 @@ fn execute_microvm_script_job(
             "false",
         ));
     }
-    let steps = microvm_executable_steps(job, script_steps)?;
+    let context_data = job_context_data(job);
+    let steps = microvm_executable_steps(job, script_steps, &context_data)?;
     let normalized = crate::github_adapter::github_normalized_job_plan(
         job,
         run_service_url,
@@ -11066,7 +11067,7 @@ fn execute_microvm_script_job(
         container,
         steps,
         crate::runtime_env::job_environment_variables(job),
-        job_context_data(job),
+        context_data,
     );
     reject_incomplete_microvm_plan(job, &normalized)?;
     let validated = crate::execution::ValidatedPlan::from_normalized(&normalized);
@@ -11111,6 +11112,7 @@ fn execute_microvm_script_job(
 fn microvm_executable_steps(
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
+    context_data: &[(String, serde_json::Value)],
 ) -> Result<Vec<crate::executor::ExecutableStep>> {
     let mut scripts = script_steps.iter();
     let mut ordered = Vec::new();
@@ -11126,6 +11128,11 @@ fn microvm_executable_steps(
                 let script = scripts
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("script step mapping count mismatch"))?;
+                append_deferred_step_continue_on_error(
+                    &mut ordered,
+                    &script.id,
+                    crate::script_step::step_continue_on_error_expression(step),
+                );
                 ordered.push(crate::executor::ExecutableStep::Script(script.clone()));
             }
             Some(crate::job_message::ActionReferenceType::Repository) => {
@@ -11135,6 +11142,12 @@ fn microvm_executable_steps(
                     .and_then(|reference| reference.name.as_deref())
                     .unwrap_or("");
                 if crate::checkout::is_checkout_step(step) {
+                    let step_id = crate::checkout::checkout_step_id(step, index);
+                    append_deferred_step_continue_on_error(
+                        &mut ordered,
+                        &step_id,
+                        crate::script_step::step_continue_on_error_expression(step),
+                    );
                     ordered.push(crate::executor::ExecutableStep::Checkout(
                         crate::checkout::checkout_plan(job, workspace, step, index)?,
                     ));
@@ -11152,7 +11165,10 @@ fn microvm_executable_steps(
                     .as_ref()
                     .and_then(|reference| reference.git_ref.clone())
                     .unwrap_or_else(|| repository.to_string());
-                let inputs = crate::action::string_inputs(step)?;
+                let (inputs, input_expression_values) = crate::action::render_inputs(
+                    &crate::action::string_inputs(step)?,
+                    context_data,
+                )?;
                 let invocation = crate::action::NativeActionInvocation {
                     git_ref,
                     adapter,
@@ -11167,10 +11183,21 @@ fn microvm_executable_steps(
                         .as_ref()
                         .and_then(|reference| reference.path.clone()),
                     inputs: crate::action::canonicalize_input_map(&inputs)?,
-                    env: crate::script_step::step_environment(step)?,
+                    input_diagnostics: Vec::new(),
+                    input_templates: None,
+                    input_expression_values,
+                    input_defaults: Default::default(),
+                    step_env: crate::script_step::step_environment(step)?,
+                    env: Vec::new(),
                 };
+                let step_id = step.id.clone().unwrap_or_else(|| format!("step-{index}"));
+                append_deferred_step_continue_on_error(
+                    &mut ordered,
+                    &step_id,
+                    crate::script_step::step_continue_on_error_expression(step),
+                );
                 ordered.push(crate::executor::ExecutableStep::Native {
-                    step_id: step.id.clone().unwrap_or_else(|| format!("step-{index}")),
+                    step_id,
                     display_name: step.display_name_template().unwrap_or_default(),
                     invocation,
                     condition: step.condition.clone(),
@@ -11745,7 +11772,8 @@ fn execute_script_job_inner(
         .iter()
         .filter_map(|(plan, metadata)| metadata.clone().map(|metadata| (plan.clone(), metadata)))
         .collect::<Vec<_>>();
-    let mut repository_action_plans = repository_action_plans(&job.steps, &actions)?;
+    let mut repository_action_plans =
+        repository_action_plans_with_context(&job.steps, &actions, &context_data)?;
     repository_action_plans.extend(composite_repository_action_plans(
         &resolved_local_actions,
         &actions,
@@ -11763,6 +11791,7 @@ fn execute_script_job_inner(
             &mut command_runner,
             &repository_action_plans,
             &actions,
+            &workspace,
         )?;
         JobSideEffectCounters::record(&side_effects.action_download, resolved_actions.len());
         // Nested actions discovered while downloading remote composites must
@@ -13216,6 +13245,7 @@ fn download_repository_actions_recursive<R>(
     runner: &mut R,
     initial_plans: &[RepositoryActionPlan],
     actions_host: &std::path::Path,
+    workspace_host: &std::path::Path,
 ) -> Result<Vec<ResolvedAction>>
 where
     R: crate::executor::CommandRunner,
@@ -13234,7 +13264,11 @@ where
         let next = download_repository_actions(runner, &downloadable, actions_host)?;
         resolved.extend(next);
 
-        let nested = composite_repository_action_plans_from_resolved(&resolved, actions_host)?;
+        let nested = composite_repository_action_plans_from_resolved(
+            &resolved,
+            actions_host,
+            workspace_host,
+        )?;
         let previous_pending = pending;
         pending = nested
             .into_iter()
@@ -13292,47 +13326,248 @@ fn ordered_executable_steps(
                 let script = script_iter
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("script step mapping count mismatch"))?;
+                append_deferred_step_continue_on_error(
+                    &mut ordered,
+                    &script.id,
+                    crate::script_step::step_continue_on_error_expression(step),
+                );
                 ordered.push(ExecutableStep::Script(script.clone()));
+            }
+            Some(ActionReferenceType::ContainerRegistry) => {
+                let reference = step
+                    .reference
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Docker action is missing its reference"))?;
+                let image = reference
+                    .image
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("Docker action is missing its image"))?;
+                let inputs = crate::action::string_inputs(step)?;
+                let invocation = crate::action::docker_registry_invocation(
+                    image,
+                    inputs.clone(),
+                    None,
+                    crate::action::expression_input_names(&inputs)?,
+                    crate::script_step::step_environment(step)?,
+                    "",
+                )?;
+                let step_id = crate::action::step_id(step, step_index);
+                append_deferred_step_continue_on_error(
+                    &mut ordered,
+                    &step_id,
+                    crate::script_step::step_continue_on_error_expression(step),
+                );
+                ordered.push(ExecutableStep::Docker {
+                    step_id,
+                    display_name: action_step_display_name(step),
+                    invocation,
+                    condition: step.condition.clone(),
+                    continue_on_error: crate::script_step::step_continue_on_error(step),
+                    timeout_minutes: crate::script_step::step_timeout_minutes(step),
+                });
             }
             Some(ActionReferenceType::Repository) => {
                 if is_local_action_step(step) {
                     let (plan, metadata) = local_iter
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("local action mapping count mismatch"))?;
-                    // The step's own `if` belongs to the umbrella alone:
-                    // the executor evaluates it in the enclosing scope and
-                    // the verdict gates the inner steps, exactly like
-                    // upstream (`step.Condition = stepData.Condition` —
-                    // `CompositeActionHandler.cs` never re-tests the parent
-                    // inside its children). ANDing the parent text into
-                    // every inner condition re-evaluated it in the
-                    // composite scope, where `failure()`/`success()` read
-                    // the wrong status.
-                    //
-                    // Likewise the step's own `continue-on-error` belongs
-                    // to the umbrella alone: upstream applies it to the
-                    // composite step's conclusion
-                    // (`ApplyContinueOnError`), never ORed into the inner
-                    // steps' flags.
-                    let umbrella_condition = step.condition.as_deref();
-                    ordered.push(ExecutableStep::CompositeStart {
-                        step_id: plan.step_id.clone(),
-                        display_name: action_step_display_name(step),
-                        inputs: plan.inputs.clone(),
-                        env: crate::script_step::step_environment(step)?,
-                        condition: umbrella_condition.map(ToOwned::to_owned),
-                        continue_on_error: crate::script_step::step_continue_on_error(step),
-                    });
+                    let display_name = action_step_display_name(step);
+                    let condition = step.condition.clone();
+                    let continue_on_error = crate::script_step::step_continue_on_error(step);
+                    let timeout_minutes = crate::script_step::step_timeout_minutes(step);
+                    let step_env = crate::script_step::step_environment(step)?;
+                    append_deferred_step_continue_on_error(
+                        &mut ordered,
+                        &plan.step_id,
+                        crate::script_step::step_continue_on_error_expression(step),
+                    );
                     let Some(metadata) = metadata else {
+                        // This action was statically skipped before metadata
+                        // resolution. Keep a skipped wrapper result in the
+                        // step scope, but do not invent an action runtime.
+                        ordered.push(ExecutableStep::CompositeStart {
+                            step_id: plan.step_id.clone(),
+                            display_name,
+                            inputs: plan.inputs.clone(),
+                            input_diagnostics: Vec::new(),
+                            expression_inputs: plan.expression_inputs.clone(),
+                            input_templates: None,
+                            input_defaults: ActionTemplateMap::default(),
+                            visible_step_ids: BTreeMap::new(),
+                            env: step_env,
+                            action_path: Some(crate::action::workspace_container_path(
+                                "/__w",
+                                &plan.workspace_host,
+                                &plan.action_dir,
+                            )?),
+                            condition,
+                            continue_on_error,
+                            continue_on_error_expression: None,
+                        });
                         ordered.push(ExecutableStep::CompositeEnd {
                             step_id: plan.step_id.clone(),
                         });
                         continue;
                     };
+                    match metadata.runtime()? {
+                        crate::action::ActionRuntime::JavaScript { .. } => {
+                            let invocation = crate::action::local_javascript_invocation(
+                                plan, metadata, step_env,
+                            )?;
+                            ordered.push(ExecutableStep::JavaScript {
+                                step_id: plan.step_id.clone(),
+                                display_name,
+                                invocation,
+                                condition,
+                                continue_on_error,
+                                timeout_minutes,
+                            });
+                            continue;
+                        }
+                        crate::action::ActionRuntime::Docker { .. } => {
+                            let invocation =
+                                crate::action::local_docker_invocation(plan, metadata, step_env)?;
+                            ordered.push(ExecutableStep::Docker {
+                                step_id: plan.step_id.clone(),
+                                display_name,
+                                invocation,
+                                condition,
+                                continue_on_error,
+                                timeout_minutes,
+                            });
+                            continue;
+                        }
+                        crate::action::ActionRuntime::Composite => {}
+                    }
+                    // A composite step's condition belongs to its umbrella;
+                    // child conditions run in the action-local steps scope.
+                    let (action_inputs, expression_inputs) =
+                        crate::action::composite_action_input_scope(
+                            metadata,
+                            &plan.inputs,
+                            &plan.expression_inputs,
+                        )?;
+                    let input_diagnostics = crate::action::action_input_diagnostics(
+                        metadata,
+                        &plan.inputs,
+                        ActionReferenceType::Repository,
+                    );
+                    ordered.push(ExecutableStep::CompositeStart {
+                        step_id: plan.step_id.clone(),
+                        display_name,
+                        inputs: action_inputs,
+                        input_diagnostics,
+                        expression_inputs,
+                        input_templates: None,
+                        input_defaults: crate::action::action_input_default_templates(metadata),
+                        visible_step_ids: crate::action::composite_visible_step_ids(
+                            &plan.step_id,
+                            metadata,
+                        ),
+                        env: step_env,
+                        action_path: Some(crate::action::workspace_container_path(
+                            "/__w",
+                            &plan.workspace_host,
+                            &plan.action_dir,
+                        )?),
+                        condition,
+                        continue_on_error,
+                        continue_on_error_expression: None,
+                    });
+                    let composite_action_path = crate::action::workspace_container_path(
+                        "/__w",
+                        &plan.workspace_host,
+                        &plan.action_dir,
+                    )?;
+                    let mut composite_action_paths = vec![composite_action_path];
                     for invocation in
                         composite_action_invocations(plan, metadata, "/__w", actions_host)?
                     {
                         match invocation {
+                            CompositeActionInvocation::CompositeStart {
+                                step_id,
+                                display_name,
+                                inputs,
+                                input_diagnostics,
+                                expression_inputs,
+                                input_templates,
+                                input_defaults,
+                                visible_step_ids,
+                                env,
+                                condition,
+                                continue_on_error,
+                                continue_on_error_expression,
+                                action_path,
+                            } => {
+                                composite_action_paths.push(action_path.clone());
+                                ordered.push(ExecutableStep::CompositeStart {
+                                    step_id,
+                                    display_name,
+                                    inputs,
+                                    input_diagnostics,
+                                    expression_inputs,
+                                    input_templates,
+                                    input_defaults,
+                                    visible_step_ids,
+                                    env,
+                                    action_path: Some(action_path),
+                                    condition,
+                                    continue_on_error,
+                                    continue_on_error_expression,
+                                });
+                            }
+                            CompositeActionInvocation::CompositeEnd { step_id } => {
+                                composite_action_paths.pop();
+                                ordered.push(ExecutableStep::CompositeEnd { step_id });
+                            }
+                            CompositeActionInvocation::ContinueOnError { step_id, value } => {
+                                ordered
+                                    .push(ExecutableStep::StepContinueOnError { step_id, value });
+                            }
+                            CompositeActionInvocation::LocalAction {
+                                step_id,
+                                invocation,
+                                display_name,
+                                condition,
+                                continue_on_error,
+                            } => match invocation {
+                                crate::action::LocalActionInvocation::JavaScript(invocation) => {
+                                    ordered.push(ExecutableStep::JavaScript {
+                                        step_id,
+                                        display_name,
+                                        invocation,
+                                        condition,
+                                        continue_on_error,
+                                        timeout_minutes: None,
+                                    });
+                                }
+                                crate::action::LocalActionInvocation::Docker(invocation) => {
+                                    ordered.push(ExecutableStep::Docker {
+                                        step_id,
+                                        display_name,
+                                        invocation,
+                                        condition,
+                                        continue_on_error,
+                                        timeout_minutes: None,
+                                    });
+                                }
+                            },
+                            CompositeActionInvocation::Docker {
+                                step_id,
+                                display_name,
+                                invocation,
+                                condition,
+                                continue_on_error,
+                            } => {
+                                ordered.push(ExecutableStep::Docker {
+                                    step_id,
+                                    display_name,
+                                    invocation,
+                                    condition,
+                                    continue_on_error,
+                                    timeout_minutes: None,
+                                });
+                            }
                             CompositeActionInvocation::Script(script) => {
                                 ordered.push(ExecutableStep::Script(script));
                             }
@@ -13363,6 +13598,7 @@ fn ordered_executable_steps(
                                     workspace_host,
                                     actions_host,
                                     "",
+                                    composite_action_paths.last().map(String::as_str),
                                 )?;
                             }
                             CompositeActionInvocation::Outputs(outputs) => {
@@ -13397,6 +13633,11 @@ fn ordered_executable_steps(
                         .iter()
                         .find(|plan| plan.step_id == checkout_step_id(step, step_index))
                     {
+                        append_deferred_step_continue_on_error(
+                            &mut ordered,
+                            &plan.step_id,
+                            crate::script_step::step_continue_on_error_expression(step),
+                        );
                         ordered.push(ExecutableStep::Checkout(plan.clone()));
                     }
                     continue;
@@ -13405,6 +13646,11 @@ fn ordered_executable_steps(
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("repository action mapping count mismatch"))?;
                 let step_display_name = action_step_display_name(step);
+                append_deferred_step_continue_on_error(
+                    &mut ordered,
+                    &plan.step_id,
+                    crate::script_step::step_continue_on_error_expression(step),
+                );
                 if append_native_action_step_from_plan(
                     &mut ordered,
                     plan,
@@ -13432,12 +13678,26 @@ fn ordered_executable_steps(
                     workspace_host,
                     actions_host,
                     &step_display_name,
+                    None,
                 )?;
             }
             _ => bail!("unsupported enabled step in job"),
         }
     }
     Ok(ordered)
+}
+
+fn append_deferred_step_continue_on_error(
+    ordered: &mut Vec<ExecutableStep>,
+    step_id: &str,
+    value: Option<crate::action::ActionBooleanValue>,
+) {
+    if let Some(value) = value {
+        ordered.push(ExecutableStep::StepContinueOnError {
+            step_id: step_id.to_owned(),
+            value,
+        });
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13449,6 +13709,7 @@ fn append_resolved_action_steps(
     workspace_host: &std::path::Path,
     actions_host: &std::path::Path,
     display_name: &str,
+    enclosing_action_path: Option<&str>,
 ) -> Result<()> {
     // Planning consumes the admission graph and never re-resolves identity here:
     // the closure was validated in full by `admit_job` before any side effect,
@@ -13500,7 +13761,8 @@ fn append_resolved_action_steps(
         ActionAdapter::Docker => ordered.push(ExecutableStep::Docker {
             step_id: action.plan.step_id.clone(),
             display_name: display_name.to_string(),
-            invocation: action.docker_invocation(actions_host)?,
+            invocation: action
+                .docker_invocation_with_action_path(actions_host, enclosing_action_path)?,
             condition: action.plan.condition.clone(),
             continue_on_error,
             timeout_minutes: action.plan.timeout_minutes,
@@ -13508,7 +13770,8 @@ fn append_resolved_action_steps(
         ActionAdapter::JavaScript => ordered.push(ExecutableStep::JavaScript {
             step_id: action.plan.step_id.clone(),
             display_name: display_name.to_string(),
-            invocation: action.javascript_invocation(actions_host)?,
+            invocation: action
+                .javascript_invocation_with_action_path(actions_host, enclosing_action_path)?,
             condition: action.plan.condition.clone(),
             continue_on_error,
             timeout_minutes: action.plan.timeout_minutes,
@@ -13525,16 +13788,122 @@ fn append_resolved_action_steps(
             } else {
                 display_name.to_string()
             };
+            let (action_inputs, expression_inputs) = crate::action::composite_action_input_scope(
+                &action.metadata,
+                &action.plan.inputs,
+                &action.plan.expression_inputs,
+            )?;
+            let input_diagnostics = crate::action::action_input_diagnostics(
+                &action.metadata,
+                &action.plan.inputs,
+                crate::job_message::ActionReferenceType::Repository,
+            );
+            let composite_action_path =
+                crate::action::container_path(actions_host, &action.plan.action_dir)?;
             ordered.push(ExecutableStep::CompositeStart {
                 step_id: action.plan.step_id.clone(),
                 display_name: composite_display,
-                inputs: action.plan.inputs.clone(),
+                inputs: action_inputs,
+                input_diagnostics,
+                expression_inputs,
+                input_templates: action.plan.input_templates.clone(),
+                input_defaults: crate::action::action_input_default_templates(&action.metadata),
+                visible_step_ids: crate::action::composite_visible_step_ids(
+                    &action.plan.step_id,
+                    &action.metadata,
+                ),
                 env: action.plan.env.clone(),
+                action_path: Some(composite_action_path.clone()),
                 condition: action_condition.clone(),
                 continue_on_error,
+                continue_on_error_expression: None,
             });
-            for invocation in action.composite_invocations("/__w", actions_host)? {
+            let mut composite_action_paths = vec![composite_action_path];
+            for invocation in action.composite_invocations("/__w", actions_host, workspace_host)? {
                 match invocation {
+                    CompositeActionInvocation::CompositeStart {
+                        step_id,
+                        display_name,
+                        inputs,
+                        input_diagnostics,
+                        expression_inputs,
+                        input_templates,
+                        input_defaults,
+                        visible_step_ids,
+                        env,
+                        condition,
+                        continue_on_error,
+                        continue_on_error_expression,
+                        action_path,
+                    } => {
+                        composite_action_paths.push(action_path.clone());
+                        ordered.push(ExecutableStep::CompositeStart {
+                            step_id,
+                            display_name,
+                            inputs,
+                            input_diagnostics,
+                            expression_inputs,
+                            input_templates,
+                            input_defaults,
+                            visible_step_ids,
+                            env,
+                            action_path: Some(action_path),
+                            condition,
+                            continue_on_error,
+                            continue_on_error_expression,
+                        });
+                    }
+                    CompositeActionInvocation::CompositeEnd { step_id } => {
+                        composite_action_paths.pop();
+                        ordered.push(ExecutableStep::CompositeEnd { step_id });
+                    }
+                    CompositeActionInvocation::ContinueOnError { step_id, value } => {
+                        ordered.push(ExecutableStep::StepContinueOnError { step_id, value });
+                    }
+                    CompositeActionInvocation::LocalAction {
+                        step_id,
+                        invocation,
+                        display_name,
+                        condition,
+                        continue_on_error,
+                    } => match invocation {
+                        crate::action::LocalActionInvocation::JavaScript(invocation) => {
+                            ordered.push(ExecutableStep::JavaScript {
+                                step_id,
+                                display_name,
+                                invocation,
+                                condition,
+                                continue_on_error,
+                                timeout_minutes: None,
+                            });
+                        }
+                        crate::action::LocalActionInvocation::Docker(invocation) => {
+                            ordered.push(ExecutableStep::Docker {
+                                step_id,
+                                display_name,
+                                invocation,
+                                condition,
+                                continue_on_error,
+                                timeout_minutes: None,
+                            });
+                        }
+                    },
+                    CompositeActionInvocation::Docker {
+                        step_id,
+                        display_name,
+                        invocation,
+                        condition,
+                        continue_on_error,
+                    } => {
+                        ordered.push(ExecutableStep::Docker {
+                            step_id,
+                            display_name,
+                            invocation,
+                            condition,
+                            continue_on_error,
+                            timeout_minutes: None,
+                        });
+                    }
                     CompositeActionInvocation::Script(script) => {
                         ordered.push(ExecutableStep::Script(script));
                     }
@@ -13565,6 +13934,7 @@ fn append_resolved_action_steps(
                             workspace_host,
                             actions_host,
                             "",
+                            composite_action_paths.last().map(String::as_str),
                         )?;
                     }
                     CompositeActionInvocation::Outputs(outputs) => {
@@ -14386,6 +14756,11 @@ fn action_step_display_name(step: &crate::job_message::ActionStep) -> String {
         return name;
     }
     if let Some(reference) = &step.reference {
+        if step.reference_type() == Some(crate::job_message::ActionReferenceType::ContainerRegistry)
+            && let Some(image) = reference.image.as_deref()
+        {
+            return format!("Run docker://{image}");
+        }
         let action_name = reference.name.as_deref().unwrap_or("");
         let path = reference.path.as_deref().unwrap_or("");
         let mut repo_string = action_name.to_string();
@@ -17090,6 +17465,7 @@ fn default_agent_name() -> String {
 )]
 mod tests {
     use super::*;
+    use crate::action::repository_action_plans;
     use crate::executor::STEP_PUBLISH_OVERFLOW_CAPACITY;
     use crate::protocol::acquire_reply_is_definitely_gone;
     use crate::slot_log::LIFECYCLE_LOG;
@@ -18286,6 +18662,113 @@ mod tests {
                 || error.contains("guest"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn microvm_native_input_expression_provenance_reaches_guest_execution() {
+        let job: crate::job_message::AgentJobRequestMessage =
+            serde_json::from_value(serde_json::json!({
+                "messageType": "PipelineAgentJobRequest",
+                "plan": { "planId": "plan" },
+                "timeline": { "id": "timeline" },
+                "jobId": "job-native-input",
+                "jobDisplayName": "Native input",
+                "requestId": 1,
+                "environmentVariables": [{
+                    "name": "CACHE_PATH",
+                    "value": "/__w/cache-source"
+                }],
+                "contextData": {
+                    "github": {
+                        "repository": "acme/repo",
+                        "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                    }
+                },
+                "steps": [{
+                    "id": "cache",
+                    "enabled": true,
+                    "reference": {
+                        "type": "Repository",
+                        "name": "actions/cache",
+                        "ref": "v4"
+                    },
+                    "inputs": {
+                        "path": { "expr": "env.CACHE_PATH" },
+                        "key": "source-cache"
+                    }
+                }]
+            }))
+            .unwrap();
+        let context_data = job_context_data(&job);
+        let steps = microvm_executable_steps(&job, &[], &context_data).unwrap();
+        let crate::executor::ExecutableStep::Native { invocation, .. } = &steps[0] else {
+            panic!("native action should map to a native execution step")
+        };
+        assert_eq!(
+            invocation.inputs.get("path").map(String::as_str),
+            Some("${{env.CACHE_PATH}}")
+        );
+        assert!(invocation.input_expression_values.contains("path"));
+
+        let mut plan = crate::execution::ValidatedPlan::example_success("job-native-input");
+        plan.steps = vec![crate::execution::validated_step(&steps[0])];
+        plan.env = crate::runtime_env::job_environment_variables(&job);
+        plan.context_data = context_data;
+        let guest = plan.to_guest("job-native-input", 1);
+        assert_eq!(guest.steps[0].action.as_deref(), Some("actions/cache@v4"));
+        assert_eq!(
+            guest.steps[0].input_expression_values,
+            vec!["path".to_string()]
+        );
+
+        // Exercise guest resolution too: the action input must be evaluated
+        // from the guest's job environment before it becomes VELNOR_INPUT_*.
+        let mut commands = crate::execution::RecordingCommands::default();
+        crate::execution::execute_guest_plan(&guest, &mut commands, &mut Vec::new(), false)
+            .unwrap();
+        assert!(commands
+            .call_env
+            .iter()
+            .flatten()
+            .any(|pair| pair == "VELNOR_INPUT_path=/__w/cache-source"));
+    }
+
+    #[test]
+    fn microvm_top_level_coe_expression_precedes_its_exact_script_step_id() {
+        let job: crate::job_message::AgentJobRequestMessage =
+            serde_json::from_value(serde_json::json!({
+                "messageType": "PipelineAgentJobRequest",
+                "plan": { "planId": "plan" },
+                "timeline": { "id": "timeline" },
+                "jobId": "job-coe",
+                "jobDisplayName": "Continue on error expression",
+                "requestId": 1,
+                "steps": [{
+                    "id": "internal-step-id",
+                    "contextName": "keep-going-step",
+                    "enabled": true,
+                    "reference": { "type": "Script" },
+                    "inputs": { "script": "exit 1" },
+                    "continueOnError": {
+                        "type": 3,
+                        "expr": "matrix.keep_going"
+                    }
+                }]
+            }))
+            .unwrap();
+        let scripts = crate::script_step::github_script_steps(&job.steps, "/__w").unwrap();
+        let ordered = microvm_executable_steps(&job, &scripts, &job_context_data(&job)).unwrap();
+
+        let [ExecutableStep::StepContinueOnError {
+            step_id,
+            value: crate::action::ActionBooleanValue::Expression(expression),
+        }, ExecutableStep::Script(script)] = ordered.as_slice()
+        else {
+            panic!("COE marker must immediately precede its script step")
+        };
+        assert_eq!(step_id, "keep-going-step");
+        assert_eq!(script.id, *step_id);
+        assert_eq!(expression, "matrix.keep_going");
     }
 
     #[test]
@@ -25034,7 +25517,9 @@ jobs:
         let local_plan = LocalActionPlan {
             step_id: "aggregate".into(),
             action_dir: Path::new("/tmp/workspace").join(".github/actions/aggregate-needs"),
+            workspace_host: Path::new("/tmp/workspace").into(),
             inputs: [("workflow-label".to_string(), "CI".to_string())].into(),
+            expression_inputs: std::collections::BTreeSet::new(),
         };
         let metadata = parse_action_metadata(
             r#"
@@ -25064,6 +25549,8 @@ runs:
         assert!(matches!(ordered[0], ExecutableStep::Script(_)));
         let ExecutableStep::CompositeStart {
             step_id,
+            inputs,
+            expression_inputs,
             continue_on_error: umbrella_continue_on_error,
             ..
         } = &ordered[1]
@@ -25075,11 +25562,15 @@ runs:
         // steps keep their own flags (upstream applies the parent flag to
         // the umbrella conclusion only, never ORed into inners).
         assert!(*umbrella_continue_on_error);
+        assert_eq!(inputs["workflow-label"], "CI");
+        assert!(!expression_inputs.contains("workflow-label"));
         let ExecutableStep::Script(step) = &ordered[2] else {
             panic!("local composite should expand to script step")
         };
         assert_eq!(step.id, "aggregate-1");
-        assert!(step.script.contains("echo \"CI\""));
+        assert!(step
+            .script
+            .contains(r#"echo "${{ inputs.workflow-label }}""#));
         // F1: inner steps carry their own `if` only; the umbrella verdict
         // (`always()` here) gates them in the executor instead of being
         // re-tested in the composite scope.
@@ -25125,7 +25616,9 @@ runs:
         let local_plan = LocalActionPlan {
             step_id: "closure".into(),
             action_dir: Path::new("/tmp/workspace").join(".github/actions/l2-root"),
+            workspace_host: Path::new("/tmp/workspace").into(),
             inputs: BTreeMap::new(),
+            expression_inputs: std::collections::BTreeSet::new(),
         };
         let metadata = parse_action_metadata(
             r#"
@@ -25341,7 +25834,9 @@ runs:
         let local_plan = LocalActionPlan {
             step_id: "docs".into(),
             action_dir: Path::new("/tmp/workspace").join(".github/actions/check-deployed-docs"),
+            workspace_host: Path::new("/tmp/workspace").into(),
             inputs: [("github-token".to_string(), "ghs_token".to_string())].into(),
+            expression_inputs: std::collections::BTreeSet::new(),
         };
         let local_metadata = parse_action_metadata(
             r#"
@@ -25364,10 +25859,12 @@ runs:
             repository_dir: Path::new("/tmp/actions").join("_actions/jdx_mise-action/v4"),
             action_dir: Path::new("/tmp/actions").join("_actions/jdx_mise-action/v4"),
             inputs: [("github_token".to_string(), "ghs_token".to_string())].into(),
+            expression_inputs: BTreeSet::new(),
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
             timeout_minutes: None,
+            ..Default::default()
         };
         let resolved = ResolvedAction {
             plan: nested_plan,
@@ -25414,7 +25911,11 @@ runs:
         };
         assert_eq!(step_id, "docs-1");
         assert_eq!(invocation.adapter, crate::action::NativeActionAdapter::Mise);
-        assert_eq!(invocation.inputs["github_token"], "ghs_token");
+        assert_eq!(
+            invocation.inputs["github_token"],
+            "${{ inputs.github-token }}"
+        );
+        assert!(invocation.input_expression_values.contains("github_token"));
         // F1: the inner step carries its own `if` (none here) only; the
         // umbrella's `github.event_name == 'push'` gates it in the
         // executor instead of being re-tested in the composite scope.
@@ -25460,10 +25961,12 @@ runs:
             repository_dir: actions_host.join("_actions/acme_action/v1"),
             action_dir: actions_host.join("_actions/acme_action/v1"),
             inputs: BTreeMap::new(),
+            expression_inputs: BTreeSet::new(),
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
             timeout_minutes: None,
+            ..Default::default()
         };
         let sub_plan = RepositoryActionPlan {
             step_id: "sub".into(),
@@ -25473,10 +25976,12 @@ runs:
             repository_dir: actions_host.join("_actions/acme_action/v1"),
             action_dir: actions_host.join("_actions/acme_action/v1/sub/action"),
             inputs: BTreeMap::new(),
+            expression_inputs: BTreeSet::new(),
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
             timeout_minutes: None,
+            ..Default::default()
         };
         let root_metadata =
             parse_action_metadata("runs:\n  using: node20\n  main: root.js\n").unwrap();
@@ -25545,10 +26050,12 @@ runs:
                 repository_dir: actions_host.join("_actions/step/stable"),
                 action_dir: actions_host.join("_actions/step/stable"),
                 inputs: BTreeMap::new(),
+                expression_inputs: BTreeSet::new(),
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
                 timeout_minutes: None,
+                ..Default::default()
             };
             let resolved = vec![ResolvedAction {
                 plan: plan.clone(),
@@ -25738,7 +26245,8 @@ runs:
         }))
         .unwrap();
         let plans = repository_action_plans(&job.steps, actions_host).unwrap();
-        let resolved = resolve_actions_from_cache(&plans, actions_host);
+        let workspace_host = Path::new("/tmp/workspace");
+        let resolved = resolve_actions_from_cache(&plans, actions_host, workspace_host);
 
         let ordered = ordered_executable_steps(
             &job,
@@ -25746,7 +26254,7 @@ runs:
             &plans,
             &resolved,
             &[],
-            Path::new("/tmp/workspace"),
+            workspace_host,
             actions_host,
             &[],
         )
@@ -25804,10 +26312,12 @@ runs:
                 "ghcr.io/renovatebot/renovate".to_string(),
             )]
             .into(),
+            expression_inputs: BTreeSet::new(),
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
             timeout_minutes: None,
+            ..Default::default()
         };
         let metadata = parse_action_metadata(
             r#"
@@ -25858,6 +26368,62 @@ runs:
             invocation.inputs["renovate-image"],
             "ghcr.io/renovatebot/renovate"
         );
+    }
+
+    #[test]
+    fn ordered_steps_expand_case_insensitive_docker_registry_reference() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job-docker-registry",
+            "jobDisplayName": "Docker registry action",
+            "requestId": 1,
+            "steps": [{
+                "id": "registry-action",
+                "reference": {
+                    "type": "ContainerRegistry",
+                    "image": "Docker://alpine:3.20"
+                },
+                "inputs": {
+                    "entryPoint": "/with-entrypoint.sh",
+                    "args": "--flag value"
+                },
+                "environment": { "REGISTRY_STEP_ENV": "step" }
+            }]
+        }))
+        .unwrap();
+
+        let ordered = ordered_executable_steps(
+            &job,
+            &[],
+            &[],
+            &[],
+            &[],
+            Path::new("/tmp/workspace"),
+            Path::new("/tmp/actions"),
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(ordered.len(), 1);
+        let ExecutableStep::Docker { invocation, .. } = &ordered[0] else {
+            panic!("ContainerRegistry reference should dispatch as a Docker action")
+        };
+        assert_eq!(invocation.image, "alpine:3.20");
+        assert_eq!(
+            invocation.inputs.get("entryPoint").map(String::as_str),
+            Some("/with-entrypoint.sh")
+        );
+        assert_eq!(
+            invocation.inputs.get("args").map(String::as_str),
+            Some("--flag value")
+        );
+        assert_eq!(
+            invocation.step_env,
+            [("REGISTRY_STEP_ENV".into(), "step".into())]
+        );
+        assert!(invocation.args.is_none());
     }
 
     #[test]
@@ -25973,10 +26539,12 @@ runs:
             repository_dir: actions_host.join("_actions/actions_upload-pages-artifact/v5"),
             action_dir: actions_host.join("_actions/actions_upload-pages-artifact/v5"),
             inputs: BTreeMap::new(),
+            expression_inputs: BTreeSet::new(),
             env: Vec::new(),
             condition: Some("runner.os == 'Linux'".into()),
             continue_on_error: false,
             timeout_minutes: None,
+            ..Default::default()
         };
         let metadata = parse_action_metadata(
             r#"
@@ -26060,10 +26628,12 @@ runs:
             repository_dir: actions_host.join("_actions/actions_upload-pages-artifact/v5"),
             action_dir: actions_host.join("_actions/actions_upload-pages-artifact/v5"),
             inputs: BTreeMap::new(),
+            expression_inputs: BTreeSet::new(),
             env: Vec::new(),
             condition: None,
             continue_on_error: true,
             timeout_minutes: None,
+            ..Default::default()
         };
         let pages_metadata = parse_action_metadata(
             r#"
@@ -26083,10 +26653,12 @@ runs:
             repository_dir: actions_host.join("_actions/actions_upload-artifact/v7"),
             action_dir: actions_host.join("_actions/actions_upload-artifact/v7"),
             inputs: BTreeMap::new(),
+            expression_inputs: BTreeSet::new(),
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
             timeout_minutes: None,
+            ..Default::default()
         };
         let upload_metadata =
             parse_action_metadata("runs:\n  using: node20\n  main: dist/upload/index.js\n")
@@ -26177,7 +26749,7 @@ runs:
 
     fn target_repository_uses(value: &serde_yaml::Value) -> Option<TargetActionReference> {
         let uses = value.as_str()?.trim();
-        if uses.starts_with('.') || uses.starts_with("docker://") {
+        if uses.starts_with('.') || crate::action::docker_scheme_image(uses).is_some() {
             return None;
         }
         let (path, git_ref) = uses.rsplit_once('@')?;
@@ -26224,6 +26796,7 @@ runs:
     fn resolve_actions_from_cache(
         initial_plans: &[RepositoryActionPlan],
         actions_host: &Path,
+        workspace_host: &Path,
     ) -> Vec<ResolvedAction> {
         let mut resolved = Vec::new();
         let mut pending = initial_plans.to_vec();
@@ -26239,18 +26812,22 @@ runs:
                 }
             }
             let previous_pending = pending;
-            pending = composite_repository_action_plans_from_resolved(&resolved, actions_host)
-                .unwrap()
-                .into_iter()
-                .filter(|plan| {
-                    !resolved
+            pending = composite_repository_action_plans_from_resolved(
+                &resolved,
+                actions_host,
+                workspace_host,
+            )
+            .unwrap()
+            .into_iter()
+            .filter(|plan| {
+                !resolved
+                    .iter()
+                    .any(|action| same_action(&action.plan, plan))
+                    && !previous_pending
                         .iter()
-                        .any(|action| same_action(&action.plan, plan))
-                        && !previous_pending
-                            .iter()
-                            .any(|existing| same_action(existing, plan))
-                })
-                .collect();
+                        .any(|existing| same_action(existing, plan))
+            })
+            .collect();
         }
         resolved
     }
@@ -27249,6 +27826,8 @@ runs:
             slot_store_key: None,
             env: Vec::new(),
             options: Vec::new(),
+            ports: Vec::new(),
+            volumes: Vec::new(),
             services: Vec::new(),
             node_action_image: String::new(),
             docker_cli_host_path: None,
@@ -27302,6 +27881,7 @@ runs:
                         "daemon".into(),
                     )?),
                     job_network: None,
+                    runtime_path: None,
                 })
             },
         );
@@ -27358,6 +27938,7 @@ runs:
                         "daemon".into(),
                     )?),
                     job_network: None,
+                    runtime_path: None,
                 })
             });
             // Dropped without claim: Drop runs cleanup with a real docker CLI
@@ -27644,7 +28225,9 @@ runs:
         let plan = LocalActionPlan {
             step_id: "download-ci-xtask".into(),
             action_dir: Path::new("/path/that/does/not/exist").into(),
+            workspace_host: Path::new("/path/that/does/not").into(),
             inputs: BTreeMap::new(),
+            expression_inputs: std::collections::BTreeSet::new(),
         };
 
         let ordered = ordered_executable_steps(
@@ -27705,6 +28288,11 @@ runs:
                     "/var/run/docker.sock".to_string(),
                 ))
                 .collect(),
+                input_diagnostics: Vec::new(),
+                input_templates: None,
+                input_expression_values: Default::default(),
+                input_defaults: Default::default(),
+                step_env: Vec::new(),
                 env: Vec::new(),
             },
             condition: None,

@@ -3,12 +3,12 @@
 //! Moved out of `executor.rs` (decomposition slice 4, GOAL 49/58). The
 //! unified post stack — one `Vec` drained in exact reverse registration
 //! order like upstream's `PostJobSteps` — plus the registration gates
-//! (JavaScript entrypoint presence, native adapter conditions), the
-//! condition-selected LIFO drain items, and the `Post <name>` record
+//! (JavaScript entrypoint presence, native adapter conditions), per-action
+//! condition evaluation in LIFO order, and the `Post <name>` record
 //! helpers live here behind a narrow `pub(crate)` API so the
-//! register-then-drain-LIFO invariant holds in one place. Behavior is
-//! byte-identical to the pre-move code: bodies moved verbatim,
-//! visibility widened only where a cross-module caller needs it.
+//! register-then-drain-LIFO invariant holds in one place. Conditions are
+//! deliberately evaluated only when a post is consumed, after prior post
+//! results have updated job status.
 
 use crate::{
     action::{
@@ -143,50 +143,51 @@ impl PostAction {
     }
 }
 
-/// One LIFO drain position after its post condition was evaluated.
+/// One post action whose condition was evaluated against the current job state.
 ///
-/// A post whose condition cannot be evaluated is not dropped: upstream fails
-/// the post step (`src/Runner.Worker/StepsRunner.cs:231-242`), so the drain
-/// emits a failed record in position and keeps draining — the failed result
-/// flips the job conclusion exactly like a main-step failure.
+/// A false condition has no item. A condition that cannot be evaluated is not
+/// dropped: upstream fails the post step (`src/Runner.Worker/StepsRunner.cs:231-242`),
+/// so the drain emits a failed record in position and keeps draining.
 #[derive(Debug, Clone)]
 pub(crate) enum PostDrainItem {
     Run(PostAction),
     ConditionFailed { action: PostAction, message: String },
 }
 
-/// Drain a registration-order post stack into LIFO drain items.
+/// Reverse registration order into the order Runner pops post actions.
 ///
-/// Registration order is step order, so reverse is upstream's `TryPop`
-/// sequence; every entry keeps its own post condition evaluated against
-/// the job's final status. False drops the entry; unevaluable keeps its
-/// LIFO position as a failed record (never a silent skip — upstream
-/// fails the post step).
-pub(crate) fn drain_post_stack(
-    stack: Vec<PostAction>,
+/// Conditions are evaluated separately by [`evaluate_post_action`] immediately
+/// before each action runs. This lets a failure from one post update job
+/// status before the next post's `failure()` or `success()` condition is read,
+/// matching Runner's queued-step loop (`src/Runner.Worker/StepsRunner.cs`).
+pub(crate) fn drain_post_stack(stack: Vec<PostAction>) -> Vec<PostAction> {
+    stack.into_iter().rev().collect()
+}
+
+/// Evaluate one LIFO post against the job state after all earlier posts.
+///
+/// Returns `None` for a false condition, and a failed drain item for an
+/// evaluation error because Runner fails the owning post step instead of
+/// silently skipping it.
+pub(crate) fn evaluate_post_action(
+    post_action: PostAction,
     state: &JobExecutionState,
-) -> Vec<PostDrainItem> {
-    stack
-        .into_iter()
-        .rev()
-        .filter_map(
-            |post_action| match state.evaluate_post_condition(post_action.condition()) {
-                Ok(true) => Some(PostDrainItem::Run(post_action)),
-                Ok(false) => None,
-                Err(error) => {
-                    let message = format!(
-                        "Post step '{}' condition could not be evaluated: {error}",
-                        post_action.display_name()
-                    );
-                    eprintln!("{message}");
-                    Some(PostDrainItem::ConditionFailed {
-                        action: post_action,
-                        message,
-                    })
-                }
-            },
-        )
-        .collect::<Vec<_>>()
+) -> Option<PostDrainItem> {
+    match state.evaluate_post_condition(post_action.condition()) {
+        Ok(true) => Some(PostDrainItem::Run(post_action)),
+        Ok(false) => None,
+        Err(error) => {
+            let message = format!(
+                "Post step '{}' condition could not be evaluated: {error}",
+                post_action.display_name()
+            );
+            eprintln!("{message}");
+            Some(PostDrainItem::ConditionFailed {
+                action: post_action,
+                message,
+            })
+        }
+    }
 }
 
 pub(crate) fn post_step_display_name(display_name: &str) -> String {
@@ -266,30 +267,81 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    fn native_post(step_id: &str, condition: &str) -> PostAction {
+        PostAction::Native(PostNativeAction {
+            step_id: step_id.into(),
+            display_name: step_id.into(),
+            invocation: NativeActionInvocation {
+                git_ref: "v1".into(),
+                adapter: NativeActionAdapter::Sccache,
+                cache_kind: None,
+                source_path: None,
+                inputs: BTreeMap::new(),
+                input_diagnostics: Vec::new(),
+                input_templates: None,
+                input_expression_values: Default::default(),
+                input_defaults: Default::default(),
+                step_env: Vec::new(),
+                env: Vec::new(),
+            },
+            condition: Some(condition.into()),
+            continue_on_error: false,
+            timeout_minutes: None,
+            umbrella_display: None,
+        })
+    }
+
+    fn post_result(exit_code: i32) -> crate::executor::StepExecutionResult {
+        crate::executor::StepExecutionResult {
+            exit_code,
+            state: crate::script_step::StepCommandState::default(),
+            skipped: false,
+            failure_ignored: false,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    #[test]
+    fn each_lifo_post_condition_uses_status_after_earlier_post_results() {
+        // Registration order is the reverse of execution order. The newest
+        // always() post fails; then failure() must run; finally success() must
+        // skip, even though both conditions had the opposite value before the
+        // first post ran.
+        let mut posts = drain_post_stack(vec![
+            native_post("older-success", "success()"),
+            native_post("middle-failure", "failure()"),
+            native_post("newest-always", "always()"),
+        ])
+        .into_iter();
+        let mut state = JobExecutionState::default();
+
+        let newest = posts.next().expect("three registered post actions");
+        assert!(matches!(
+            evaluate_post_action(newest, &state),
+            Some(PostDrainItem::Run(action)) if action.step_id() == "newest-always"
+        ));
+
+        state.apply("post-newest", &post_result(1));
+        let middle = posts.next().expect("two registered post actions remain");
+        assert!(matches!(
+            evaluate_post_action(middle, &state),
+            Some(PostDrainItem::Run(action)) if action.step_id() == "middle-failure"
+        ));
+
+        state.apply("post-middle", &post_result(0));
+        let oldest = posts.next().expect("one registered post action remains");
+        assert!(evaluate_post_action(oldest, &state).is_none());
+        assert!(posts.next().is_none());
+    }
+
     #[test]
     fn unified_post_stack_drain_benchmark() {
         use std::hint::black_box;
 
         // A mixed stack like the conformance tests above: two `always()`
         // native posts around one `failure()` JavaScript post.
-        let native = |step_id: &str| {
-            PostAction::Native(PostNativeAction {
-                step_id: step_id.into(),
-                display_name: step_id.into(),
-                invocation: NativeActionInvocation {
-                    git_ref: "v1".into(),
-                    adapter: NativeActionAdapter::Sccache,
-                    cache_kind: None,
-                    source_path: None,
-                    inputs: BTreeMap::new(),
-                    env: Vec::new(),
-                },
-                condition: Some("always()".into()),
-                continue_on_error: false,
-                timeout_minutes: None,
-                umbrella_display: None,
-            })
-        };
+        let native = |step_id: &str| native_post(step_id, "always()");
         let stack = vec![
             native("sccache-first"),
             PostAction::JavaScript(PostJavaScriptAction {
@@ -304,6 +356,11 @@ mod tests {
                     post_condition: Some("failure()".into()),
                     action_container_path: "/__a/_actions/guarded".into(),
                     inputs: BTreeMap::new(),
+                    input_diagnostics: Vec::new(),
+                    input_templates: None,
+                    input_expression_values: Default::default(),
+                    input_defaults: Default::default(),
+                    step_env: Vec::new(),
                     env: Vec::new(),
                 },
                 post_entrypoint: "/__a/_actions/guarded/dist/post.js".into(),

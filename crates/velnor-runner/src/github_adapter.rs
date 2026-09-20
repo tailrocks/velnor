@@ -108,7 +108,9 @@ pub fn github_job_container_spec(
         slot_store_key: paths.slot_store_key,
         env: backend_advertising_env(job_container_env(job), paths.execution_backend),
         options: job_container_options(job, trust_scope),
-        services: service_containers(job, trust_scope),
+        ports: job_container_ports(job, paths.execution_backend, trust_scope),
+        volumes: job_container_volumes(job, paths.execution_backend, trust_scope),
+        services: service_containers(job, trust_scope, paths.execution_backend),
         node_action_image: node_action_image.to_string(),
         docker_cli_host_path: None,
         docker_cli_plugin_host_dir: None,
@@ -515,6 +517,66 @@ fn job_container_options(job: &AgentJobRequestMessage, trust_scope: &str) -> Vec
     )
 }
 
+fn job_container_ports(
+    job: &AgentJobRequestMessage,
+    backend: velnor_model::ExecutionBackendKind,
+    trust_scope: &str,
+) -> Vec<String> {
+    if backend != velnor_model::ExecutionBackendKind::MicroVm
+        && !github_trust_scope_allows_host_docker(trust_scope)
+    {
+        return Vec::new();
+    }
+    if let Some(container) = &job.job_container {
+        return container_ports(&expand_template_token(container));
+    }
+    job.resources
+        .containers
+        .iter()
+        .find(|container| {
+            container
+                .alias
+                .as_deref()
+                .is_some_and(|alias| alias == "__job" || alias.eq_ignore_ascii_case("job"))
+        })
+        .map(service_ports)
+        .unwrap_or_default()
+}
+
+fn job_container_volumes(
+    job: &AgentJobRequestMessage,
+    backend: velnor_model::ExecutionBackendKind,
+    trust_scope: &str,
+) -> Vec<String> {
+    // Bind mounts on the host Docker backend expose runner files. Guest-local
+    // mounts stay inside the per-job VM, so they do not grant host access.
+    if backend != velnor_model::ExecutionBackendKind::MicroVm
+        && !github_trust_scope_allows_host_docker(trust_scope)
+    {
+        return Vec::new();
+    }
+    let Some(container) = &job.job_container else {
+        return Vec::new();
+    };
+    let expanded = expand_template_token(container);
+    expanded
+        .as_object()
+        .and_then(|object| object.get("volumes").or_else(|| object.get("Volumes")))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|volume| {
+            if volume.to_ascii_lowercase().contains("docker.sock") {
+                log_dropped_container_option(volume, "Docker socket mounts are runner-owned");
+                None
+            } else {
+                Some(volume.to_string())
+            }
+        })
+        .collect()
+}
+
 /// Names of the `services:` containers a job owns, for cancellation fan-out.
 ///
 /// Same authority as the container spec below: a name registered here is the
@@ -523,7 +585,7 @@ pub(crate) fn service_container_names(
     job: &AgentJobRequestMessage,
     trust_scope: &str,
 ) -> Vec<String> {
-    service_containers(job, trust_scope)
+    service_containers(job, trust_scope, velnor_model::ExecutionBackendKind::Docker)
         .into_iter()
         .map(|service| service.name)
         .collect()
@@ -532,10 +594,13 @@ pub(crate) fn service_container_names(
 fn service_containers(
     job: &AgentJobRequestMessage,
     trust_scope: &str,
+    backend: velnor_model::ExecutionBackendKind,
 ) -> Vec<ServiceContainerSpec> {
     let network = job_network_name(job);
     let allow_privileged = github_trust_scope_allows_host_docker(trust_scope)
         && privileged_container_options_allowed_from_env();
+    let allow_port_publishing = backend == velnor_model::ExecutionBackendKind::MicroVm
+        || github_trust_scope_allows_host_docker(trust_scope);
     if let Some(services) = job
         .job_service_containers
         .as_ref()
@@ -556,7 +621,7 @@ fn service_containers(
                     network_alias: alias,
                     network: network.clone(),
                     env: container_env(&container),
-                    ports: if github_trust_scope_allows_host_docker(trust_scope) {
+                    ports: if allow_port_publishing {
                         container_ports(&container)
                     } else {
                         Vec::new()
@@ -588,7 +653,7 @@ fn service_containers(
                 network_alias: alias.to_string(),
                 network: network.clone(),
                 env: service_env(container),
-                ports: if github_trust_scope_allows_host_docker(trust_scope) {
+                ports: if allow_port_publishing {
                     service_ports(container)
                 } else {
                     Vec::new()
@@ -607,7 +672,7 @@ fn service_containers(
 }
 
 fn container_ports(value: &Value) -> Vec<String> {
-    let mut ports = value
+    value
         .as_object()
         .and_then(|object| object.get("ports").or_else(|| object.get("Ports")))
         .and_then(Value::as_array)
@@ -615,9 +680,7 @@ fn container_ports(value: &Value) -> Vec<String> {
         .flatten()
         .filter_map(Value::as_str)
         .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    ports.sort();
-    ports
+        .collect()
 }
 
 /// Convert the current V2 broker TemplateToken JSON (`map` entries with
@@ -1164,6 +1227,8 @@ mod tests {
             slot_store_key: None,
             env: Vec::new(),
             options: Vec::new(),
+            ports: Vec::new(),
+            volumes: Vec::new(),
             services: Vec::new(),
             node_action_image: "node:24-bookworm".into(),
             docker_cli_host_path: None,
@@ -1312,7 +1377,12 @@ mod tests {
             "jobId": "job-1",
             "jobDisplayName": "Rust",
             "requestId": 42,
-            "jobContainer": { "image": "ubuntu:24.04", "options": "--privileged" },
+            "jobContainer": {
+                "image": "ubuntu:24.04",
+                "options": "--privileged",
+                "ports": ["8080:80"],
+                "volumes": ["/host/cache:/cache"]
+            },
             "jobServiceContainers": {
                 "redis": {
                     "image": "redis:7",
@@ -1353,6 +1423,8 @@ mod tests {
         assert!(!spec.mount_docker_socket);
         // Job container options.
         assert!(!spec.options.iter().any(|option| option == "--privileged"));
+        assert!(spec.ports.is_empty());
+        assert!(spec.volumes.is_empty());
         // Service container privilege and host port publishing.
         let service = spec.services.first().expect("one service container");
         assert!(!service
@@ -1430,6 +1502,50 @@ mod tests {
                 None => std::env::remove_var("VELNOR_TRUST_SCOPE"),
             }
         }
+    }
+
+    #[test]
+    fn job_container_ports_and_volumes_are_admitted_in_runner_order() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Container settings",
+            "requestId": 1,
+            "jobContainer": {
+                "image": "ubuntu:24.04",
+                "options": "--shm-size 2g",
+                "env": {"CONTAINER_FLAG": "enabled"},
+                "ports": ["8080:80", "5432"],
+                "volumes": ["cache:/cache", "./data:/data:ro", "/var/run/docker.sock:/docker.sock"]
+            }
+        }))
+        .unwrap();
+        let temp = std::env::temp_dir().join("velnor-job-container-settings");
+        let spec = github_job_container_spec(
+            &job,
+            GitHubJobContainerPaths {
+                workspace_host: temp.join("workspace"),
+                temp_host: temp.join("temp"),
+                home_host: temp.join("home"),
+                actions_host: temp.join("actions"),
+                tools_host: temp.join("tools"),
+                docker_host_work_dir: None,
+                execution_backend: velnor_model::ExecutionBackendKind::MicroVm,
+                slot_store_key: None,
+            },
+            "ubuntu:24.04",
+            "",
+            "daemon".into(),
+            "untrusted",
+        )
+        .unwrap();
+
+        assert_eq!(spec.env, [("CONTAINER_FLAG".into(), "enabled".into())]);
+        assert_eq!(spec.options, ["--shm-size", "2g"]);
+        assert_eq!(spec.ports, ["8080:80", "5432"]);
+        assert_eq!(spec.volumes, ["cache:/cache", "./data:/data:ro"]);
     }
 
     #[test]
@@ -2361,7 +2477,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            service_containers(&job, "trusted"),
+            service_containers(&job, "trusted", velnor_model::ExecutionBackendKind::Docker,),
             vec![ServiceContainerSpec {
                 name: "velnor-service-job_1-postgres".into(),
                 image: "postgres:16".into(),
@@ -2383,6 +2499,7 @@ mod tests {
             "type": 2,
             "map": [
                 { "Key": scalar("image"), "Value": scalar("postgres:16") },
+                { "Key": scalar("options"), "Value": scalar("--health-cmd \"pg_isready -U postgres\"") },
                 { "Key": scalar("ports"), "Value": { "type": 1, "seq": [scalar("5432")] } },
                 { "Key": scalar("env"), "Value": { "type": 2, "map": [
                     { "Key": scalar("POSTGRES_PASSWORD"), "Value": scalar("postgres") }
@@ -2405,11 +2522,19 @@ mod tests {
         }))
         .unwrap();
 
-        let services = service_containers(&job, "trusted");
+        let services = service_containers(
+            &job,
+            "untrusted",
+            velnor_model::ExecutionBackendKind::MicroVm,
+        );
         assert_eq!(services.len(), 1);
         assert_eq!(services[0].network_alias, "postgres");
         assert_eq!(services[0].image, "postgres:16");
         assert_eq!(services[0].ports, vec!["5432"]);
+        assert_eq!(
+            services[0].options,
+            vec!["--health-cmd", "pg_isready -U postgres"]
+        );
         assert_eq!(
             services[0].env,
             vec![("POSTGRES_PASSWORD".into(), "postgres".into())]

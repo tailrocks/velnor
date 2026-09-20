@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
 use crate::{
-    command_files::{parse_command_file_contents, FileCommand},
+    command_files::{decode_file_contents, parse_command_file_contents, FileCommand},
     container::Shell,
-    expression::{self, Node},
+    expression,
     fs_copy::NoFollowDestinationDir,
     job_message::{ActionReferenceType, ActionStep},
 };
@@ -15,6 +15,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
 };
+use velnor_expression::Node;
 
 #[derive(Debug, Clone)]
 pub struct ScriptStep {
@@ -113,11 +114,21 @@ fn github_script_step_with_context(
             input_summary(inputs)
         )
     })?;
-    let shell = string_input_field(inputs, &["shell", "Shell"])
-        .or(defaults.shell.as_deref())
-        .map(github_shell)
-        .transpose()?
-        .unwrap_or(Shell::BashDefault);
+    let default_shell = defaults.shell.clone().filter(|shell| !shell.is_empty());
+    let shell_template = string_input_field(inputs, &["shell", "Shell"])
+        .filter(|shell| !shell.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            expr_input_field(inputs, &["shell", "Shell"])
+                .map(|expression| format!("${{{{ {expression} }}}}"))
+        });
+    let shell = if let Some(template) = shell_template {
+        shell_from_template(template, default_shell)?
+    } else if let Some(template) = default_shell {
+        shell_from_template(template, None)?
+    } else {
+        Shell::BashDefault
+    };
     const WORKING_DIRECTORY_NAMES: &[&str] = &[
         "workingDirectory",
         "working-directory",
@@ -399,7 +410,7 @@ fn expr_input_field<'a>(
 /// `resolve_job_context_expressions` defers such spans in `executor.rs`.
 fn render_setup_expression(expr: &str, context_data: &[(String, Value)]) -> Result<String> {
     let context = SetupExpressionContext { context_data };
-    let node = expression::parse(expr, &context)
+    let node = velnor_expression::parse(expr, &context)
         .with_context(|| format!("evaluating step input expression `{expr}`"))?;
     let Some(node) = node else {
         // `ExpressionParser.cs:60-64` — an empty expression is null, and
@@ -441,7 +452,7 @@ fn render_format_call(
     if expression::reads_runtime_context(&args[0]) {
         return Ok(None);
     }
-    let Some((_, spans)) = expression::function_call_argument_spans(expr) else {
+    let Some((_, spans)) = velnor_expression::function_call_argument_spans(expr) else {
         return Ok(None);
     };
     if spans.len() != args.len() {
@@ -455,7 +466,7 @@ fn render_format_call(
         let argument = &args[index + 1];
         if expression::reads_runtime_context(argument) {
             // Verbatim hand-off to the step-time pass.
-            Ok(expression::Value::string(format!(
+            Ok(velnor_expression::Value::string(format!(
                 "${{{{ {} }}}}",
                 spans[index + 1]
             )))
@@ -473,7 +484,7 @@ struct SetupExpressionContext<'a> {
     context_data: &'a [(String, Value)],
 }
 
-impl expression::ParseEnvironment for SetupExpressionContext<'_> {
+impl velnor_expression::ParseEnvironment for SetupExpressionContext<'_> {
     fn is_named_value(&self, name: &str) -> bool {
         expression::ROOT_CONTEXTS
             .iter()
@@ -492,12 +503,12 @@ impl expression::EvaluationContext for SetupExpressionContext<'_> {
     /// A context the job message did not carry is null, which
     /// `convert_to_string` renders as `""` — upstream's coercion
     /// (`Sdk/Value.cs`), not the old resolver's "leave the text alone".
-    fn named_value(&self, name: &str) -> expression::Value {
+    fn named_value(&self, name: &str) -> velnor_expression::Value {
         self.context_data
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| expression::eval::from_serde_json(value))
-            .unwrap_or(expression::Value::Null)
+            .unwrap_or(velnor_expression::Value::Null)
     }
 
     /// Never reached: `reads_runtime_context` defers any tree containing a
@@ -505,8 +516,8 @@ impl expression::EvaluationContext for SetupExpressionContext<'_> {
     fn call_function(
         &self,
         name: &str,
-        _args: &[expression::Value],
-    ) -> std::result::Result<expression::Value, expression::ExpressionError> {
+        _args: &[velnor_expression::Value],
+    ) -> std::result::Result<velnor_expression::Value, expression::ExpressionError> {
         Err(expression::ExpressionError::evaluation(format!(
             "{name}() cannot be evaluated before the job runs"
         )))
@@ -581,6 +592,35 @@ fn json_type(value: &Value) -> &'static str {
 
 pub(crate) fn step_continue_on_error(step: &ActionStep) -> bool {
     step.continue_on_error.as_ref().is_some_and(value_truthy)
+}
+
+/// Preserve a broker-serialized expression token until the failed step has
+/// applied its command-file outputs. Literal booleans stay on the existing
+/// `continue_on_error` field; only expression tokens need a deferred step.
+pub(crate) fn step_continue_on_error_expression(
+    step: &ActionStep,
+) -> Option<crate::action::ActionBooleanValue> {
+    fn expression(value: &Value) -> Option<&str> {
+        match value {
+            Value::Object(object) => object
+                .get("expr")
+                .or_else(|| object.get("Expr"))
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    object
+                        .get("value")
+                        .or_else(|| object.get("Value"))
+                        .or_else(|| object.get("lit"))
+                        .or_else(|| object.get("Lit"))
+                        .and_then(expression)
+                }),
+            _ => None,
+        }
+    }
+
+    let expression = expression(step.continue_on_error.as_ref()?)?.trim();
+    (!expression.is_empty())
+        .then(|| crate::action::ActionBooleanValue::Expression(expression.to_string()))
 }
 
 pub(crate) fn step_timeout_minutes(step: &ActionStep) -> Option<u64> {
@@ -701,15 +741,111 @@ fn environment_value(value: &Value) -> String {
     }
 }
 
-pub(crate) fn github_shell(shell: &str) -> Result<Shell> {
-    let shell = shell.split_whitespace().next().unwrap_or(shell);
-    if shell.eq_ignore_ascii_case("bash") {
-        Ok(Shell::Bash)
-    } else if shell.eq_ignore_ascii_case("sh") {
-        Ok(Shell::Sh)
-    } else {
-        bail!("unsupported run step shell '{shell}'")
+pub(crate) fn shell_from_template(template: String, fallback: Option<String>) -> Result<Shell> {
+    if template.contains("${{") {
+        return Ok(Shell::Deferred { template, fallback });
     }
+    if template.is_empty() {
+        return fallback
+            .map(|value| shell_from_template(value, None))
+            .transpose()
+            .map(|shell| shell.unwrap_or(Shell::BashDefault));
+    }
+    github_shell(&template)
+}
+
+pub(crate) fn github_shell(shell: &str) -> Result<Shell> {
+    if shell == "bash" {
+        return Ok(Shell::Bash);
+    }
+    if shell == "sh" {
+        return Ok(Shell::Sh);
+    }
+    if shell == "pwsh" || shell == "powershell" {
+        return Ok(Shell::Pwsh {
+            command: shell.to_owned(),
+        });
+    }
+
+    // ScriptHandlerHelpers.ParseShellOptionString splits at the first literal
+    // space. Runner trims the argument prefix, then uses a known shell's
+    // default format when that prefix is empty.
+    let (command, raw_arguments) = shell
+        .split_once(' ')
+        .map_or((shell, ""), |(command, args)| (command, args.trim_start()));
+    let arguments = if raw_arguments.is_empty() {
+        runner_default_shell_arguments(command).unwrap_or_default()
+    } else {
+        raw_arguments.to_owned()
+    };
+    if arguments.is_empty() || !arguments.contains("{0}") {
+        bail!("invalid shell option; shell arguments must contain '{{0}}'");
+    }
+    Ok(Shell::Custom {
+        command: command.to_owned(),
+        arguments: parse_command_line_arguments(&arguments)?,
+    })
+}
+
+fn runner_default_shell_arguments(command: &str) -> Option<String> {
+    let arguments = if command.eq_ignore_ascii_case("bash") {
+        "--noprofile --norc -e -o pipefail {0}"
+    } else if command.eq_ignore_ascii_case("sh") {
+        "-e {0}"
+    } else if command.eq_ignore_ascii_case("pwsh") || command.eq_ignore_ascii_case("powershell") {
+        "-command \". '{0}'\""
+    } else if command.eq_ignore_ascii_case("python") {
+        "{0}"
+    } else {
+        return None;
+    };
+    Some(arguments.to_owned())
+}
+
+pub(crate) fn parse_command_line_arguments(format: &str) -> Result<Vec<String>> {
+    let mut arguments = Vec::new();
+    let mut argument = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut started = false;
+    for character in format.chars() {
+        if escaped {
+            argument.push(character);
+            escaped = false;
+            started = true;
+            continue;
+        }
+        match (quote, character) {
+            (Some('"'), '\\') => escaped = true,
+            (Some(active), character) if active == character => quote = None,
+            (Some(_), character) => argument.push(character),
+            (None, '\\') => {
+                escaped = true;
+                started = true;
+            }
+            (None, '\'' | '"') => {
+                quote = Some(character);
+                started = true;
+            }
+            (None, character) if character.is_whitespace() => {
+                if started {
+                    arguments.push(std::mem::take(&mut argument));
+                    started = false;
+                }
+            }
+            (None, character) => {
+                argument.push(character);
+                started = true;
+            }
+        }
+    }
+    if escaped || quote.is_some() {
+        bail!("invalid quoted shell arguments");
+    }
+    if started {
+        arguments.push(argument);
+    }
+    Ok(arguments)
 }
 
 fn workspace_path(workspace_container: &str, path: &str) -> String {
@@ -773,9 +909,10 @@ impl ScriptStepPlan {
         path_prepend: &[String],
     ) -> Result<Self> {
         fs::create_dir_all(temp_host).with_context(|| format!("create {}", temp_host.display()))?;
-        let script_name = format!("{}.sh", step.id);
+        let script_name = format!("{}{}", step.id, step.shell.script_extension()?);
         let script_host_path = temp_host.join(&script_name);
-        let script = script_with_path_prelude(&step.script, path_prepend);
+        let fixed_script = step.shell.fixup_script(&step.script)?;
+        let script = script_with_path_prelude(&fixed_script, path_prepend, &step.shell);
         let temp_dir = open_step_file_dir(temp_host)?;
         write_step_file(&temp_dir, &script_name, &script)?;
 
@@ -785,7 +922,7 @@ impl ScriptStepPlan {
         Ok(Self {
             script_host_path,
             script_container_path: format!("/__t/{script_name}"),
-            shell: step.shell,
+            shell: step.shell.clone(),
             working_directory_container: step.working_directory_container.clone(),
             env: command_files.env(),
             command_files,
@@ -845,7 +982,7 @@ impl CommandFileSet {
     fn collect_state(&self) -> Result<StepCommandState> {
         let temp_dir = open_step_file_dir(&self.temp_host)?;
         let mut state = StepCommandState {
-            outputs: commands_to_map(parse_command_file_contents(&read_step_file(
+            outputs: commands_to_outputs(parse_command_file_contents(&read_step_file(
                 &temp_dir,
                 &self.output.name,
             )?)?),
@@ -948,10 +1085,10 @@ impl CommandFileSet {
             });
             return Ok(());
         }
-        let mut summary = String::new();
-        Read::read_to_string(&mut file, &mut summary)
+        let mut summary = Vec::new();
+        Read::read_to_end(&mut file, &mut summary)
             .with_context(|| format!("read step file {}", self.summary.name))?;
-        state.summary = summary;
+        state.summary = decode_file_contents(&summary);
         Ok(())
     }
 }
@@ -1015,10 +1152,10 @@ fn read_step_file(temp_dir: &NoFollowDestinationDir, name: &str) -> Result<Strin
     let Some(mut file) = open_step_file(temp_dir, name)? else {
         return Ok(String::new());
     };
-    let mut contents = String::new();
-    Read::read_to_string(&mut file, &mut contents)
+    let mut contents = Vec::new();
+    Read::read_to_end(&mut file, &mut contents)
         .with_context(|| format!("read step file {name}"))?;
-    Ok(contents)
+    Ok(decode_file_contents(&contents))
 }
 
 /// Step files keep the owner-writable, world-readable mode the runner's umask
@@ -1065,7 +1202,7 @@ impl PathMapping {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StepCommandState {
-    pub outputs: BTreeMap<String, String>,
+    pub outputs: StepOutputMap,
     pub env: BTreeMap<String, String>,
     pub path: Vec<String>,
     pub state: BTreeMap<String, String>,
@@ -1116,7 +1253,9 @@ pub enum StepAnnotationLevel {
 
 impl StepCommandState {
     pub fn merge(&mut self, other: StepCommandState) {
-        self.outputs.extend(other.outputs);
+        for (name, value) in other.outputs.into_ordered_entries() {
+            self.outputs.insert(name, value);
+        }
         self.env.extend(other.env);
         self.path.extend(other.path);
         self.state.extend(other.state);
@@ -1138,11 +1277,124 @@ impl StepCommandState {
     }
 }
 
+/// Step outputs use Runner's insertion-ordered, case-insensitive context
+/// dictionary. Values stay indexed for action consumers while `order` carries
+/// their original context order through file parsing and result application.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StepOutputMap {
+    values: BTreeMap<String, String>,
+    order: Vec<String>,
+}
+
+impl StepOutputMap {
+    pub fn insert(&mut self, name: String, value: String) -> Option<String> {
+        if let Some(previous_name) = self
+            .order
+            .iter()
+            .find(|previous_name| previous_name.eq_ignore_ascii_case(&name))
+            .cloned()
+        {
+            // DictionaryContextData updates an existing key in place and
+            // retains the first spelling and insertion position.
+            self.values.insert(previous_name, value)
+        } else {
+            self.order.push(name.clone());
+            self.values.insert(name, value)
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&String> {
+        self.order
+            .iter()
+            .find(|previous_name| previous_name.eq_ignore_ascii_case(name))
+            .and_then(|previous_name| self.values.get(previous_name))
+    }
+
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.get(name).is_some()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.order.iter()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.order
+            .iter()
+            .filter_map(|name| self.values.get(name).map(|value| (name, value)))
+    }
+
+    fn into_ordered_entries(self) -> Vec<(String, String)> {
+        let mut values = self.values;
+        self.order
+            .into_iter()
+            .filter_map(|name| values.remove_entry(&name))
+            .collect()
+    }
+}
+
+impl<const N: usize> From<[(String, String); N]> for StepOutputMap {
+    fn from(entries: [(String, String); N]) -> Self {
+        entries.into_iter().collect()
+    }
+}
+
+impl FromIterator<(String, String)> for StepOutputMap {
+    fn from_iter<T: IntoIterator<Item = (String, String)>>(entries: T) -> Self {
+        let mut outputs = Self::default();
+        for (name, value) in entries {
+            outputs.insert(name, value);
+        }
+        outputs
+    }
+}
+
+impl<'a> IntoIterator for &'a StepOutputMap {
+    type Item = (&'a String, &'a String);
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter().collect::<Vec<_>>().into_iter()
+    }
+}
+
+fn commands_to_outputs(commands: Vec<FileCommand>) -> StepOutputMap {
+    let mut values = StepOutputMap::default();
+    for command in commands {
+        values.insert(command.name, command.value);
+    }
+    values
+}
+
 fn commands_to_map(commands: Vec<FileCommand>) -> BTreeMap<String, String> {
-    commands
-        .into_iter()
-        .map(|command| (command.name, command.value))
-        .collect()
+    let mut values = BTreeMap::new();
+    for command in commands {
+        insert_case_insensitive(&mut values, command.name, command.value);
+    }
+    values
+}
+
+fn insert_case_insensitive(values: &mut BTreeMap<String, String>, name: String, value: String) {
+    if let Some(previous_name) = values
+        .keys()
+        .find(|previous_name| previous_name.eq_ignore_ascii_case(&name))
+        .cloned()
+    {
+        // Runner's DictionaryContextData updates an existing key without
+        // changing its original spelling; ToJSON(steps.<id>.outputs) exposes
+        // that first spelling.
+        values.insert(previous_name, value);
+    } else {
+        values.insert(name, value);
+    }
 }
 
 /// `SetEnvFileCommand._setEnvBlockList` (@397b032,
@@ -1164,7 +1416,7 @@ fn fix_script(script: &str) -> String {
     fixed
 }
 
-fn script_with_path_prelude(script: &str, path_prepend: &[String]) -> String {
+fn script_with_path_prelude(script: &str, path_prepend: &[String], shell: &Shell) -> String {
     let fixed = fix_script(script);
     // HOME/RUSTUP_HOME/CARGO_HOME are asserted as explicit `docker exec -e`
     // base env (JobContainerSpec::append_base_exec_env): HOME=/github/home is
@@ -1179,12 +1431,23 @@ fn script_with_path_prelude(script: &str, path_prepend: &[String]) -> String {
     // with the real rustup proxy before mise's generic shims.
     let mut prelude = Vec::new();
     if !path_prepend.is_empty() {
-        let joined = path_prepend
-            .iter()
-            .map(|path| shell_single_quote(path))
-            .collect::<Vec<_>>()
-            .join(":");
-        prelude.push(format!("export PATH={joined}:\"$PATH\""));
+        if matches!(shell, Shell::Pwsh { .. })
+            || matches!(shell, Shell::Custom { command, .. } if command.eq_ignore_ascii_case("pwsh") || command.eq_ignore_ascii_case("powershell"))
+        {
+            let joined = path_prepend
+                .iter()
+                .map(|path| powershell_single_quote(path))
+                .collect::<Vec<_>>()
+                .join(":");
+            prelude.push(format!("$env:PATH = {joined} + ':' + $env:PATH"));
+        } else {
+            let joined = path_prepend
+                .iter()
+                .map(|path| shell_single_quote(path))
+                .collect::<Vec<_>>()
+                .join(":");
+            prelude.push(format!("export PATH={joined}:\"$PATH\""));
+        }
     }
     if prelude.is_empty() {
         return fixed;
@@ -1194,6 +1457,10 @@ fn script_with_path_prelude(script: &str, path_prepend: &[String]) -> String {
 
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn powershell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 #[cfg(test)]
@@ -1325,7 +1592,7 @@ mod tests {
 
         fs::write(
             temp.join("step1_output"),
-            "answer=42\nmulti<<EOF\none\ntwo\nEOF\n",
+            "z=first\na=middle\nZ=latest\nanswer=42\nmulti<<EOF\none\ntwo\nEOF\n",
         )
         .unwrap();
         fs::write(
@@ -1339,8 +1606,23 @@ mod tests {
 
         let state = plan.collect_state().unwrap();
 
-        assert_eq!(state.outputs["answer"], "42");
-        assert_eq!(state.outputs["multi"], "one\ntwo");
+        assert_eq!(state.outputs.get("z").unwrap(), "latest");
+        assert_eq!(state.outputs.get("a").unwrap(), "middle");
+        assert_eq!(state.outputs.get("answer").unwrap(), "42");
+        assert_eq!(state.outputs.get("multi").unwrap(), "one\ntwo");
+        assert_eq!(
+            state
+                .outputs
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("z", "latest"),
+                ("a", "middle"),
+                ("answer", "42"),
+                ("multi", "one\ntwo")
+            ]
+        );
         assert_eq!(state.env["NAME"], "value");
         assert_eq!(state.env["ACTIONS_RUNTIME_URL"], "https://runtime");
         // Upstream blocks NODE_OPTIONS alone, loudly; every other name applies.
@@ -1595,6 +1877,76 @@ mod tests {
     }
 
     #[test]
+    fn preserves_top_level_continue_on_error_expression_token() {
+        let step: ActionStep = serde_json::from_value(serde_json::json!({
+            "continueOnError": { "type": 3, "expr": "matrix.keep_going" },
+            "reference": { "type": "Script" },
+            "inputs": { "script": "exit 1" }
+        }))
+        .unwrap();
+
+        assert!(!step_continue_on_error(&step));
+        assert_eq!(
+            step_continue_on_error_expression(&step),
+            Some(crate::action::ActionBooleanValue::Expression(
+                "matrix.keep_going".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn command_outputs_replace_keys_case_insensitively() {
+        let outputs = commands_to_outputs(vec![
+            FileCommand {
+                name: "z".into(),
+                value: "old".into(),
+            },
+            FileCommand {
+                name: "a".into(),
+                value: "middle".into(),
+            },
+            FileCommand {
+                name: "Z".into(),
+                value: "new".into(),
+            },
+        ]);
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs.get("z").map(String::as_str), Some("new"));
+        assert_eq!(
+            outputs
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("z", "new"), ("a", "middle")]
+        );
+    }
+
+    #[test]
+    fn merged_command_outputs_replace_keys_case_insensitively() {
+        let mut state = StepCommandState {
+            outputs: [("z".into(), "old".into()), ("a".into(), "middle".into())].into(),
+            ..Default::default()
+        };
+
+        state.merge(StepCommandState {
+            outputs: [("b".into(), "last".into()), ("Z".into(), "new".into())].into(),
+            ..Default::default()
+        });
+
+        assert_eq!(state.outputs.len(), 3);
+        assert_eq!(state.outputs.get("z").map(String::as_str), Some("new"));
+        assert_eq!(
+            state
+                .outputs
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("z", "new"), ("a", "middle"), ("b", "last")]
+        );
+    }
+
+    #[test]
     fn maps_run_service_capitalized_script_inputs() {
         let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
             {
@@ -1786,7 +2138,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_github_shell() {
+    fn maps_pwsh_workflow_shell() {
         let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
             {
                 "reference": { "type": "Script" },
@@ -1795,9 +2147,56 @@ mod tests {
         ]))
         .unwrap();
 
-        let error = github_script_steps(&steps, "/__w/repo").unwrap_err();
+        let mapped = github_script_steps(&steps, "/__w/repo").unwrap();
 
-        assert!(error.to_string().contains("unsupported run step shell"));
+        assert_eq!(
+            mapped[0].shell,
+            Shell::Pwsh {
+                command: "pwsh".to_string()
+            }
+        );
+        assert_eq!(mapped[0].shell.script_extension().unwrap(), ".ps1");
+    }
+
+    #[test]
+    fn defers_expression_shell_and_preserves_custom_arguments() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "reference": { "type": "Script" },
+                "inputs": {
+                    "script": "echo hi",
+                    "map": [{
+                        "key": { "lit": "shell", "type": 0 },
+                        "value": { "expr": "inputs.shell", "type": 3 }
+                    }]
+                }
+            }
+        ]))
+        .unwrap();
+
+        let mapped = github_script_steps(&steps, "/__w/repo").unwrap();
+
+        assert_eq!(
+            mapped[0].shell,
+            Shell::Deferred {
+                template: "${{ inputs.shell }}".to_string(),
+                fallback: None,
+            }
+        );
+
+        let custom = github_shell("bash --noprofile --norc -e -o pipefail {0}").unwrap();
+        assert_eq!(
+            custom.command_args("/tmp/run.sh").unwrap(),
+            [
+                "bash",
+                "--noprofile",
+                "--norc",
+                "-e",
+                "-o",
+                "pipefail",
+                "/tmp/run.sh",
+            ]
+        );
     }
 
     #[test]

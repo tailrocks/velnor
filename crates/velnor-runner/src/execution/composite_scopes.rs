@@ -53,9 +53,17 @@ pub(crate) struct CompositeConclusionScopes {
     converted: BTreeSet<String>,
     /// One frame per open composite, outermost first.
     frames: Vec<CompositeConclusionFrame>,
+    /// Conclusions visible to the job's root `JobContext`. Embedded step
+    /// conclusions stay in `frames` until their composite umbrella ends;
+    /// only root steps and completed umbrella steps enter this map.
+    job_conclusions: BTreeMap<String, StepOutcome>,
 }
 
 impl CompositeConclusionScopes {
+    pub(crate) fn has_open_scope(&self) -> bool {
+        !self.frames.is_empty()
+    }
+
     pub(crate) fn push(&mut self, step_id: &str) {
         self.stack.push(step_id.to_string());
         self.frames.push(CompositeConclusionFrame {
@@ -124,38 +132,43 @@ impl CompositeConclusionScopes {
     }
 
     /// Record a completed step's conclusion in the innermost open scope,
-    /// if any. This is the scope half of umbrella result application: the
-    /// job state records its own outcome/conclusion maps and delegates
-    /// the scope write here (both the normal and the cancelled paths).
+    /// or in the root job context once no composite is open. This is the
+    /// scope half of umbrella result application: the job state records its
+    /// raw `steps.*` maps and delegates status visibility here (both the
+    /// normal and the cancelled paths).
     pub(crate) fn record(&mut self, step_id: &str, conclusion: StepOutcome) {
         if let Some(frame) = self.frames.last_mut() {
             frame.conclusions.insert(step_id.to_string(), conclusion);
+        } else {
+            self.record_job(step_id, conclusion);
         }
     }
 
-    /// Job-scope status scan: an unconverted `Failure` anywhere in the
-    /// top-level conclusions. Converted inner ids (see [`Self::convert`])
-    /// do not count: upstream derives the status from top-level step
-    /// results only.
-    pub(crate) fn top_level_has_failure(
-        &self,
-        conclusions: &BTreeMap<String, StepOutcome>,
-    ) -> bool {
-        conclusions
+    /// Record a post-child result in root job status without adding the
+    /// context-less post execution id to `steps.*` maps.
+    pub(crate) fn record_job(&mut self, step_id: &str, conclusion: StepOutcome) {
+        self.job_conclusions.insert(step_id.to_string(), conclusion);
+    }
+
+    /// Job-scope status scan: root steps only. Embedded conclusions do not
+    /// affect `job.status` until their umbrella step completes and is recorded
+    /// in `job_conclusions`, matching Runner's root `JobContext` lifecycle.
+    pub(crate) fn top_level_has_failure(&self) -> bool {
+        self.job_conclusions
             .iter()
             .any(|(id, outcome)| *outcome == StepOutcome::Failure && !self.converted.contains(id))
     }
 
     /// Scope status scan: the innermost open scope's conclusions when
-    /// inside a composite, else the top-level conclusions. Same conversion
+    /// inside a composite, else the root job conclusions. Same conversion
     /// rule as [`Self::top_level_has_failure`].
-    pub(crate) fn scope_has_failure(&self, conclusions: &BTreeMap<String, StepOutcome>) -> bool {
+    pub(crate) fn scope_has_failure(&self) -> bool {
         if let Some(frame) = self.frames.last() {
             frame.conclusions.iter().any(|(id, outcome)| {
                 *outcome == StepOutcome::Failure && !self.converted.contains(id)
             })
         } else {
-            self.top_level_has_failure(conclusions)
+            self.top_level_has_failure()
         }
     }
 }

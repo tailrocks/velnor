@@ -106,6 +106,10 @@ units = ["rust-unit-collector"]
 
 [[declare]]
 primitive = "rust-crate-pipeline"
+units = ["rust-velnor-action-manifest"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
 units = ["rust-velnor-bench"]
 
 [[declare]]
@@ -115,6 +119,10 @@ units = ["rust-velnor-client"]
 [[declare]]
 primitive = "rust-crate-pipeline"
 units = ["rust-velnor-control"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-velnor-expression"]
 
 [[declare]]
 primitive = "rust-crate-pipeline"
@@ -240,7 +248,7 @@ id = "rust-production-topology"
 label = "Rust production topology"
 kind = "rust"
 root = "."
-watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/velnor-runner/**", "docker/**", "microvm/**", "mise.lock", "mise.toml", "rust-toolchain", "rust-toolchain.toml", "scripts/check-release-feature-boundary.sh", "scripts/test-check-release-feature-boundary.sh"]
+watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/velnor-action-manifest/**", "crates/velnor-expression/**", "crates/velnor-runner/**", "docker/**", "microvm/**", "mise.lock", "mise.toml", "rust-toolchain", "rust-toolchain.toml", "scripts/check-release-feature-boundary.sh", "scripts/test-check-release-feature-boundary.sh"]
 workspace_check = true
 ci_tasks = ["test-release-feature-boundary", "test-release-boundary-script"]
 pinned_lockfile = true

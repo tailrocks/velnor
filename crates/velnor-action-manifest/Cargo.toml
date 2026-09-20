@@ -1,0 +1,12 @@
+[package]
+name = "velnor-action-manifest"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared actions/runner action-manifest scalar and expression rules"
+
+[dependencies]
+serde_json.workspace = true
+serde_yaml.workspace = true
+velnor-expression = { path = "../velnor-expression", version = "0.1.0" }

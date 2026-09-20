@@ -27,7 +27,10 @@ use anyhow::Result;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::action::{native_action_adapter, ActionAdapter, ActionMetadata, NATIVE_ACTION_REF};
+use crate::action::{
+    native_action_adapter, ActionAdapter, ActionBooleanValue, ActionMetadata, ActionTemplateMap,
+    NATIVE_ACTION_REF,
+};
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 use crate::manifest::{self, CapabilityViolation};
 use crate::protocol::GitHubScope;
@@ -138,6 +141,8 @@ pub enum AdmissionNodeKind {
     LocalAction,
     /// A server-expanded reusable workflow (`jobs.<id>.uses`).
     ReusableWorkflow,
+    /// A container action referenced directly by image.
+    ContainerRegistryAction,
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +245,7 @@ fn graph_node_key(
     let class = match kind {
         AdmissionNodeKind::LocalAction => 0,
         AdmissionNodeKind::ReusableWorkflow => 2,
+        AdmissionNodeKind::ContainerRegistryAction => 3,
         AdmissionNodeKind::NativeAction
         | AdmissionNodeKind::RemoteComposite
         | AdmissionNodeKind::RemoteAction => 1,
@@ -487,6 +493,7 @@ struct Walk<'a> {
     expanded: BTreeSet<InvocationKey>,
     step_visits: usize,
     context_data: &'a [(String, Value)],
+    workspace_source: Option<(String, String)>,
     deadline: Instant,
 }
 
@@ -507,6 +514,7 @@ pub fn admit_job(
             Vec::new(),
         ));
     }
+    let workspace_source = workflow_source(context_data);
     let mut walk = Walk {
         graph: AdmissionGraph::default(),
         source,
@@ -515,6 +523,7 @@ pub fn admit_job(
         expanded: BTreeSet::new(),
         step_visits: 0,
         context_data,
+        workspace_source: workspace_source.clone(),
         deadline: Instant::now() + MAX_ADMISSION_DURATION,
     };
     let root = Ancestry::default();
@@ -524,7 +533,7 @@ pub fn admit_job(
     // graph root; never parse jobs.<id>.uses as a runner action.
     admit_reusable_workflow(&mut walk, &root)?;
 
-    let workflow = workflow_source(context_data);
+    let workflow = workspace_source;
     if job.steps.len() > MAX_ADMISSION_ROOT_STEPS {
         return Err(AdmissionError::new(
             &root,
@@ -540,6 +549,37 @@ pub fn admit_job(
         .enumerate()
         .filter(|(_, step)| step.enabled)
     {
+        let step_label = step
+            .display_name_template()
+            .or_else(|| step.name.clone())
+            .unwrap_or_else(|| format!("step-{index}"));
+        if step.reference_type() == Some(ActionReferenceType::ContainerRegistry) {
+            let ancestry = root.child(format!("step '{step_label}' (container action)"));
+            let reference = step.reference.as_ref().ok_or_else(|| {
+                AdmissionError::new(
+                    &ancestry,
+                    "reference",
+                    "container action reference is missing",
+                    Vec::new(),
+                )
+            })?;
+            let image = reference.image.as_deref().ok_or_else(|| {
+                AdmissionError::new(
+                    &ancestry,
+                    "image",
+                    "container action image is missing",
+                    Vec::new(),
+                )
+            })?;
+            admit_container_registry(&mut walk, &ancestry, None, image)?;
+            crate::action::string_inputs(step).map_err(|error| {
+                AdmissionError::new(&ancestry, "inputs", error.to_string(), Vec::new())
+            })?;
+            crate::script_step::step_environment(step).map_err(|error| {
+                AdmissionError::new(&ancestry, "env", error.to_string(), Vec::new())
+            })?;
+            continue;
+        }
         if step.reference_type() != Some(ActionReferenceType::Repository) {
             continue;
         }
@@ -549,10 +589,6 @@ pub fn admit_job(
         let Some(repository) = reference.name.as_deref() else {
             continue;
         };
-        let step_label = step
-            .display_name_template()
-            .or_else(|| step.name.clone())
-            .unwrap_or_else(|| format!("step-{index}"));
 
         if is_local_reference(reference.name.as_deref(), reference.path.as_deref()) {
             let (workflow_repo, workflow_sha) = workflow.as_ref().ok_or_else(|| {
@@ -567,7 +603,7 @@ pub fn admit_job(
                 .path
                 .as_deref()
                 .or(reference.name.as_deref())
-                .map(|value| value.trim_start_matches("./").to_string())
+                .map(normalize_local_action_subpath)
                 .unwrap_or_default();
             let ancestry = root.child(format!("step '{step_label}' (local ./{subpath})"));
             admit_local(
@@ -723,6 +759,36 @@ fn admit_reusable_workflow(walk: &mut Walk, root: &Ancestry) -> Result<(), Admis
     Ok(())
 }
 
+/// Admit a Docker action as a validated image leaf. `uses: docker://...` and
+/// the runner's parsed image field share the same OCI-reference validation.
+fn admit_container_registry(
+    walk: &mut Walk,
+    ancestry: &Ancestry,
+    parent: Option<usize>,
+    image: &str,
+) -> Result<(), AdmissionError> {
+    let image = crate::action::docker_scheme_image(image).unwrap_or(image);
+    let image = crate::docker_argv::ImageReference::parse(image).map_err(|_| {
+        AdmissionError::new(
+            ancestry,
+            "image",
+            "invalid container image reference",
+            Vec::new(),
+        )
+    })?;
+    let index = walk.graph.intern(
+        ActionIdentity {
+            repository: image.as_str().to_owned(),
+            sha: "container-registry".to_owned(),
+            subpath: None,
+        },
+        AdmissionNodeKind::ContainerRegistryAction,
+        ancestry,
+    )?;
+    walk.graph.link(parent, index, ancestry)?;
+    Ok(())
+}
+
 /// Admit a remote action: validate identity/subpath/inputs, then (for a
 /// non-native action) fetch metadata and recurse.
 #[allow(clippy::too_many_arguments)]
@@ -792,9 +858,7 @@ fn admit_remote(
         return Ok(());
     }
     walk.graph.nodes[index].kind = AdmissionNodeKind::RemoteComposite;
-    recurse_composite_invocation(
-        walk, ancestry, index, repository, action_ref, &inputs, &metadata, 1,
-    )
+    recurse_composite_invocation(walk, ancestry, index, &inputs, &metadata, 1)
 }
 
 /// Admit a local action read from the workflow repository at the workflow SHA.
@@ -869,16 +933,7 @@ fn admit_local(
         .resolve()
         .map_err(|error| AdmissionError::new(ancestry, "inputs", error.to_string(), Vec::new()))?;
     let provided_inputs = canonicalize_admission_inputs(provided_inputs.as_ref(), ancestry)?;
-    recurse_composite_invocation(
-        walk,
-        ancestry,
-        index,
-        repository,
-        sha,
-        &provided_inputs,
-        &metadata,
-        depth,
-    )
+    recurse_composite_invocation(walk, ancestry, index, &provided_inputs, &metadata, depth)
 }
 
 fn cached_metadata(
@@ -928,8 +983,6 @@ fn recurse_composite_invocation(
     walk: &mut Walk,
     ancestry: &Ancestry,
     parent: usize,
-    repo_ctx: &str,
-    ref_ctx: &str,
     inputs: &BTreeMap<String, String>,
     metadata: &ActionMetadata,
     depth: usize,
@@ -950,9 +1003,7 @@ fn recurse_composite_invocation(
         ));
     }
     walk.expanded.insert(invocation.clone());
-    recurse_composite(
-        walk, ancestry, parent, repo_ctx, ref_ctx, inputs, metadata, depth,
-    )
+    recurse_composite(walk, ancestry, parent, inputs, metadata, depth)
 }
 
 /// Walk a composite action's steps, resolving each nested `uses`.
@@ -961,8 +1012,6 @@ fn recurse_composite(
     walk: &mut Walk,
     ancestry: &Ancestry,
     parent: usize,
-    repo_ctx: &str,
-    ref_ctx: &str,
     provided_inputs: &BTreeMap<String, String>,
     metadata: &ActionMetadata,
     depth: usize,
@@ -1007,30 +1056,43 @@ fn recurse_composite(
             .or_else(|| step.id.clone())
             .unwrap_or_else(|| format!("nested-step-{child_index}"));
         let child_ancestry = ancestry.child(format!("nested '{label}'"));
-        let child_inputs = render_inputs(&step.with, &inputs_context).map_err(|error| {
-            AdmissionError::new(&child_ancestry, "inputs", error.to_string(), Vec::new())
-        })?;
+        // Admission can project only statically named inputs. Runtime-evaluated
+        // keys remain in the metadata for the execution pass.
+        let child_inputs =
+            render_static_action_inputs(&step.with, &inputs_context).map_err(|error| {
+                AdmissionError::new(&child_ancestry, "inputs", error.to_string(), Vec::new())
+            })?;
 
-        if uses.starts_with("docker://") {
-            return Err(AdmissionError::new(
-                &ancestry.child(format!("nested '{label}' ({uses})")),
-                "uses",
-                "nested container action (docker://) is not admitted",
-                Vec::new(),
-            ));
+        if crate::action::docker_scheme_image(uses).is_some() {
+            admit_container_registry(
+                walk,
+                &ancestry.child(format!("nested '{label}' (container action)")),
+                Some(parent),
+                uses,
+            )?;
+            continue;
         }
-        if uses.starts_with('.') {
-            // A composite-local `uses: ./path` is relative to the current
-            // action's repository root; strip only the single `./` prefix.
-            let nested_subpath = uses.strip_prefix("./").unwrap_or(uses);
+        if let Some(nested_subpath) = local_action_subpath(uses) {
+            // Runner resolves every local action path from github.workspace,
+            // including local references nested in a downloaded composite.
+            // Those files therefore belong to the workflow repository, not
+            // the repository that supplied this composite's action.yml.
+            let Some((workspace_repository, workspace_sha)) = walk.workspace_source.clone() else {
+                return Err(AdmissionError::new(
+                    &child_ancestry,
+                    "uses",
+                    "nested local action requires the exact workflow repository and SHA",
+                    Vec::new(),
+                ));
+            };
             let ancestry = ancestry.child(format!("nested '{label}' (local ./{nested_subpath})"));
             admit_local(
                 walk,
                 &ancestry,
                 Some(parent),
-                repo_ctx,
-                ref_ctx,
-                nested_subpath,
+                &workspace_repository,
+                &workspace_sha,
+                &nested_subpath,
                 LocalInputSource::Resolved(&child_inputs),
                 depth + 1,
             )?;
@@ -1186,6 +1248,13 @@ fn render_inputs(
         .collect()
 }
 
+fn render_static_action_inputs(
+    with: &ActionTemplateMap,
+    inputs_context: &[(String, Value)],
+) -> Result<BTreeMap<String, String>> {
+    render_inputs(&with.static_key_values(), inputs_context)
+}
+
 /// Resolve what admission can know now, while preserving valid runtime
 /// contexts for the execution pass. The checked executor boundary rejects
 /// malformed, unevaluable, and over-budget templates; it never returns the
@@ -1198,8 +1267,23 @@ fn render_admission_expression(value: &str, context_data: &[(String, Value)]) ->
 }
 
 fn is_local_reference(name: Option<&str>, path: Option<&str>) -> bool {
-    path.is_some_and(|value| value.starts_with('.'))
-        || name.is_some_and(|value| value.starts_with('.'))
+    path.is_some_and(is_local_action_reference) || name.is_some_and(is_local_action_reference)
+}
+
+fn is_local_action_reference(value: &str) -> bool {
+    value.starts_with("./") || value.starts_with(".\\")
+}
+
+fn local_action_subpath(value: &str) -> Option<String> {
+    is_local_action_reference(value).then(|| normalize_local_action_subpath(value))
+}
+
+fn normalize_local_action_subpath(value: &str) -> String {
+    let normalized = value.replace('\\', "/");
+    normalized
+        .strip_prefix("./")
+        .unwrap_or(&normalized)
+        .to_string()
 }
 
 fn is_full_sha(value: &str) -> bool {
@@ -1380,16 +1464,22 @@ fn validate_metadata_bounds(metadata: &ActionMetadata) -> Result<()> {
     ] {
         validate_metadata_text(value, field, &mut total_string_bytes)?;
     }
-    if metadata.runs.args.len() > MAX_METADATA_MAP_ENTRIES {
-        anyhow::bail!("metadata argument count exceeds {MAX_METADATA_MAP_ENTRIES}");
-    }
-    for value in &metadata.runs.args {
-        validate_metadata_text(Some(value), "runs.args", &mut total_string_bytes)?;
+    if let Some(args) = metadata.runs.args.as_deref() {
+        if args.len() > MAX_METADATA_MAP_ENTRIES {
+            anyhow::bail!("metadata argument count exceeds {MAX_METADATA_MAP_ENTRIES}");
+        }
+        for value in args {
+            validate_metadata_text(Some(value), "runs.args", &mut total_string_bytes)?;
+        }
     }
     if metadata.runs.steps.len() > MAX_COMPOSITE_STEPS {
         anyhow::bail!("metadata step count exceeds {MAX_COMPOSITE_STEPS}");
     }
     for step in &metadata.runs.steps {
+        let continue_on_error = step
+            .continue_on_error
+            .as_ref()
+            .map(action_boolean_metadata_text);
         for (field, value) in [
             ("steps.id", step.id.as_deref()),
             ("steps.name", step.name.as_deref()),
@@ -1398,7 +1488,7 @@ fn validate_metadata_bounds(metadata: &ActionMetadata) -> Result<()> {
             ("steps.uses", step.uses.as_deref()),
             ("steps.if", step.condition.as_deref()),
             ("steps.working-directory", step.working_directory.as_deref()),
-            ("steps.continue-on-error", step.continue_on_error.as_deref()),
+            ("steps.continue-on-error", continue_on_error.as_deref()),
         ] {
             validate_metadata_text(value, field, &mut total_string_bytes)?;
         }
@@ -1427,16 +1517,16 @@ fn validate_metadata_text(
 }
 
 fn validate_metadata_string_map(
-    values: &BTreeMap<String, String>,
+    values: &ActionTemplateMap,
     field: &str,
     total_string_bytes: &mut usize,
 ) -> Result<()> {
-    if values.len() > MAX_METADATA_MAP_ENTRIES {
+    if values.iter().count() > MAX_METADATA_MAP_ENTRIES {
         anyhow::bail!("metadata {field} count exceeds {MAX_METADATA_MAP_ENTRIES}");
     }
-    for (name, value) in values {
-        validate_metadata_text(Some(name), field, total_string_bytes)?;
-        validate_metadata_text(Some(value), field, total_string_bytes)?;
+    for entry in values.iter() {
+        validate_metadata_text(Some(&entry.key), field, total_string_bytes)?;
+        validate_metadata_text(Some(&entry.value), field, total_string_bytes)?;
     }
     Ok(())
 }
@@ -1496,9 +1586,11 @@ fn metadata_retained_bytes(metadata: &ActionMetadata) -> usize {
     fn add(total: &mut usize, value: Option<&str>) {
         *total = total.saturating_add(value.map_or(0, str::len));
     }
-    fn add_map(total: &mut usize, values: &BTreeMap<String, String>) {
-        for (name, value) in values {
-            *total = total.saturating_add(name.len()).saturating_add(value.len());
+    fn add_map(total: &mut usize, values: &ActionTemplateMap) {
+        for entry in values.iter() {
+            *total = total
+                .saturating_add(entry.key.len())
+                .saturating_add(entry.value.len());
         }
     }
 
@@ -1527,10 +1619,16 @@ fn metadata_retained_bytes(metadata: &ActionMetadata) -> usize {
     ] {
         add(&mut total, value);
     }
-    for value in &metadata.runs.args {
-        total = total.saturating_add(value.len());
+    if let Some(args) = metadata.runs.args.as_deref() {
+        for value in args {
+            total = total.saturating_add(value.len());
+        }
     }
     for step in &metadata.runs.steps {
+        let continue_on_error = step
+            .continue_on_error
+            .as_ref()
+            .map(action_boolean_metadata_text);
         for value in [
             step.id.as_deref(),
             step.name.as_deref(),
@@ -1539,7 +1637,7 @@ fn metadata_retained_bytes(metadata: &ActionMetadata) -> usize {
             step.uses.as_deref(),
             step.condition.as_deref(),
             step.working_directory.as_deref(),
-            step.continue_on_error.as_deref(),
+            continue_on_error.as_deref(),
         ] {
             add(&mut total, value);
         }
@@ -1547,6 +1645,13 @@ fn metadata_retained_bytes(metadata: &ActionMetadata) -> usize {
         add_map(&mut total, &step.env);
     }
     total
+}
+
+fn action_boolean_metadata_text(value: &ActionBooleanValue) -> String {
+    match value {
+        ActionBooleanValue::Literal(value) => value.to_string(),
+        ActionBooleanValue::Expression(expression) => format!("${{{{ {expression} }}}}"),
+    }
 }
 
 #[cfg(test)]
@@ -1695,6 +1800,81 @@ mod tests {
     }
 
     #[test]
+    fn admission_projects_static_composite_keys_and_bounds_all_mapping_entries() {
+        let dynamic_key = "${{ inputs.dynamic_name }}";
+        let dynamic_value = "${{ inputs.lookup_only }}";
+        let with = ActionTemplateMap::from_entries([
+            crate::action::ActionTemplateEntry {
+                key: dynamic_key.to_string(),
+                value: "unprojected".to_string(),
+                key_is_template: true,
+                value_is_template: false,
+            },
+            crate::action::ActionTemplateEntry {
+                key: "lookup-only".to_string(),
+                value: dynamic_value.to_string(),
+                key_is_template: false,
+                value_is_template: true,
+            },
+        ]);
+        let context = vec![(
+            "inputs".to_string(),
+            serde_json::json!({
+                "dynamic_name": "dynamic-child-input",
+                "lookup_only": "true"
+            }),
+        )];
+
+        let projected = render_static_action_inputs(&with, &context).unwrap();
+        assert_eq!(projected.len(), 1);
+        assert_eq!(
+            projected.get("lookup-only").map(String::as_str),
+            Some("true")
+        );
+
+        let mut total_string_bytes = 0;
+        validate_metadata_string_map(&with, "steps.with", &mut total_string_bytes).unwrap();
+        assert_eq!(
+            total_string_bytes,
+            dynamic_key.len() + "unprojected".len() + "lookup-only".len() + dynamic_value.len()
+        );
+
+        let too_many_dynamic_entries =
+            ActionTemplateMap::from_entries((0..=MAX_METADATA_MAP_ENTRIES).map(|_| {
+                crate::action::ActionTemplateEntry {
+                    key: dynamic_key.to_string(),
+                    value: "v".to_string(),
+                    key_is_template: true,
+                    value_is_template: false,
+                }
+            }));
+        let mut total_string_bytes = 0;
+        assert!(validate_metadata_string_map(
+            &too_many_dynamic_entries,
+            "steps.with",
+            &mut total_string_bytes,
+        )
+        .is_err());
+
+        let mut oversized_dynamic_key = dynamic_key.to_string();
+        oversized_dynamic_key.push_str(&"x".repeat(MAX_METADATA_STRING_BYTES));
+        let oversized_dynamic_entry =
+            ActionTemplateMap::from_entries([crate::action::ActionTemplateEntry {
+                key: oversized_dynamic_key,
+                value: "v".to_string(),
+                key_is_template: true,
+                value_is_template: false,
+            }]);
+        let mut total_string_bytes = 0;
+        assert!(validate_metadata_string_map(
+            &oversized_dynamic_entry,
+            "steps.with",
+            &mut total_string_bytes,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn oversized_metadata_body_rejected_before_parse() {
         let body = vec![b'x'; MAX_ACTION_METADATA_BYTES + 1];
         let error = read_bounded_metadata_body(body.as_slice(), None).unwrap_err();
@@ -1751,6 +1931,64 @@ mod tests {
             .nodes
             .iter()
             .any(|node| node.kind == AdmissionNodeKind::LocalAction));
+    }
+
+    #[test]
+    fn nested_local_reference_in_remote_composite_uses_workflow_identity() {
+        let workflow_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let outer_sha = "041f17a6d32f8fd2a8ef03c2a63be58346993136";
+        let job = job(serde_json::json!([repo_step(
+            "jackin-project/jackin-role-action",
+            outer_sha,
+            None,
+            serde_json::json!({})
+        )]));
+        let source = FakeMetadataSource::new(&[
+            (
+                &format!("jackin-project/jackin-role-action@{outer_sha}"),
+                "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/child\n",
+            ),
+            (
+                &format!("acme/repo/.github/actions/child@{workflow_sha}"),
+                "runs:\n  using: node24\n  main: dist/index.js\n",
+            ),
+        ]);
+
+        let graph = admit_job(&job, &workflow_context(), &source).unwrap();
+
+        assert_eq!(source.reads(), 2);
+        assert!(graph.nodes.iter().any(|node| {
+            node.kind == AdmissionNodeKind::LocalAction
+                && node.identity.repository == "acme/repo"
+                && node.identity.sha == workflow_sha
+                && node.identity.subpath.as_deref() == Some(".github/actions/child")
+        }));
+        assert!(!graph.nodes.iter().any(|node| {
+            node.identity.repository == "jackin-project/jackin-role-action"
+                && node.identity.subpath.as_deref() == Some(".github/actions/child")
+        }));
+    }
+
+    #[test]
+    fn docker_registry_admission_accepts_case_insensitive_scheme() {
+        let job = job(serde_json::json!([{
+            "type": "Action",
+            "displayName": "container action",
+            "reference": {
+                "type": "ContainerRegistry",
+                "image": "Docker://alpine:3.20"
+            },
+            "inputs": {}
+        }]));
+        let source = FakeMetadataSource::new(&[]);
+
+        let graph = admit_job(&job, &workflow_context(), &source).unwrap();
+
+        assert_eq!(source.reads(), 0);
+        assert!(graph.nodes.iter().any(|node| {
+            node.kind == AdmissionNodeKind::ContainerRegistryAction
+                && node.identity.repository == "alpine:3.20"
+        }));
     }
 
     #[test]

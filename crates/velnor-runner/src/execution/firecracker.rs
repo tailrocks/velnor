@@ -150,10 +150,10 @@ pub struct FirecrackerBackend {
     pub started: bool,
     pub restored: bool,
     pub jailer: Option<SpawnedProcess>,
-    /// Keeps the graceful guest cancel registered; dropped with the session.
-    pub guest_cancel_registration: Option<crate::execution::cancel::TargetRegistration>,
-    /// Keeps the jailer registered with the job's cancellation fan-out; dropped
-    /// with the session, which deregisters it.
+    /// Keeps the job-status notification registered; dropped with the session.
+    pub guest_cancel_registration: Option<crate::execution::cancel::RequestObserverRegistration>,
+    /// Keeps the jailer registered for Forced teardown; it survives Requested
+    /// so the guest can finish eligible `always()`/`cancelled()` work.
     pub cancellation_registration: Option<crate::execution::cancel::TargetRegistration>,
     pub(crate) execution: Option<GuestExecutionState>,
     pub(crate) session_challenge: Option<String>,
@@ -442,12 +442,12 @@ impl FirecrackerBackend {
         }
     }
 
-    /// Register the graceful half of microVM cancellation.
+    /// Notify the guest when job status becomes cancelled.
     ///
-    /// The jailer registration below is a bounded kill. This hook runs first,
-    /// on the same connection the session uses, so the guest's own loop reads
-    /// `Cancel` and returns — which is what upstream's worker cancellation
-    /// does. If the guest does not stop, the jailer target still terminates it.
+    /// The guest re-evaluates its own active step and decides whether its
+    /// current process should stop. This notification runs even when the host
+    /// step remains eligible, because later guest steps must see cancelled job
+    /// status. The jailer has a separate Forced-only registration.
     fn register_guest_cancel(&mut self, world: &mut ExecutionWorld<'_>) {
         let Some(token) = crate::execution::cancel::active() else {
             return;
@@ -456,23 +456,18 @@ impl FirecrackerBackend {
             return;
         };
         let handle = std::sync::Arc::new(handle);
-        self.guest_cancel_registration = Some(token.register(
-            crate::execution::cancel::TerminationTarget::Hook {
-                label: "microvm-guest-cancel".to_string(),
-                run: std::sync::Arc::new(move |_level| handle.cancel()),
-            },
-        ));
+        self.guest_cancel_registration =
+            Some(token.register_request_observer(move |_reason| handle.cancel()));
     }
 
-    /// Make the running microVM reachable from the job's cancellation fan-out.
+    /// Make the running microVM reachable at forced cancellation.
     ///
     /// A microVM job used to be entirely uncancellable: the only cancellation
     /// path killed a host container that does not exist on this backend, so the
     /// guest and its jailer kept running while GitHub was told the job was
-    /// cancelled. The jailer is an ordinary host process, so registering its pid
-    /// as a termination target puts the microVM on the same ladder as every
-    /// other target, without the fan-out needing to touch session state from
-    /// another thread.
+    /// cancelled. The jailer is an ordinary host process, so registering its
+    /// pid as a Forced-only process-group target puts the microVM on the final
+    /// teardown pass without killing the guest before eligible post work runs.
     ///
     /// The registration is held for the session's lifetime and released on
     /// drop, so a completed job leaves nothing registered.
@@ -484,9 +479,10 @@ impl FirecrackerBackend {
             return;
         };
         self.cancellation_registration = Some(token.register(
-            crate::execution::cancel::TerminationTarget::ProcessGroup {
+            crate::execution::cancel::TerminationTarget::ProcessGroupAt {
                 pgid: jailer.pid,
                 label: "microvm-jailer".to_string(),
+                terminate_at: crate::execution::cancel::CancelLevel::Forced,
             },
         ));
     }
@@ -1247,6 +1243,31 @@ mod tests {
     }
 
     #[test]
+    fn jailer_survives_requested_cancellation_until_forced() {
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let _active = crate::execution::cancel::set_active(token.clone());
+        let mut backend = FirecrackerBackend {
+            jailer: Some(SpawnedProcess { pid: 7 }),
+            ..FirecrackerBackend::default()
+        };
+
+        backend.register_jailer_with_cancellation();
+        assert_eq!(token.target_keys(), vec!["pgid:7"]);
+        assert!(token.request(crate::execution::cancel::CancelReason::ServerRequested));
+        assert!(token.outcomes().is_empty());
+
+        token.force();
+        assert_eq!(
+            token
+                .outcomes()
+                .iter()
+                .map(|outcome| outcome.target.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pgid:7"]
+        );
+    }
+
+    #[test]
     fn direct_cancel_reports_terminal_after_jailer_kill() {
         let mut backend = FirecrackerBackend {
             jailer: Some(SpawnedProcess { pid: 7 }),
@@ -1280,16 +1301,14 @@ mod tests {
     #[test]
     fn failed_direct_cancel_keeps_owned_jailer_and_registrations() {
         let token = crate::execution::cancel::JobCancellation::recording(None);
-        let jailer_registration =
-            token.register(crate::execution::cancel::TerminationTarget::ProcessGroup {
+        let jailer_registration = token.register(
+            crate::execution::cancel::TerminationTarget::ProcessGroupAt {
                 pgid: 7,
                 label: "microvm-jailer".into(),
-            });
-        let guest_registration =
-            token.register(crate::execution::cancel::TerminationTarget::Hook {
-                label: "microvm-guest-cancel".into(),
-                run: std::sync::Arc::new(|_| Ok(())),
-            });
+                terminate_at: crate::execution::cancel::CancelLevel::Forced,
+            },
+        );
+        let guest_registration = token.register_request_observer(|_| Ok(()));
         let mut backend = FirecrackerBackend {
             jailer: Some(SpawnedProcess { pid: 7 }),
             guest_cancel_registration: Some(guest_registration),
@@ -1313,7 +1332,7 @@ mod tests {
         assert!(backend.jailer.is_some());
         assert!(backend.guest_cancel_registration.is_some());
         assert!(backend.cancellation_registration.is_some());
-        assert_eq!(token.target_keys().len(), 2);
+        assert_eq!(token.target_keys(), vec!["pgid:7"]);
         assert!(!events
             .iter()
             .any(|event| matches!(event, ExecutionEvent::JobCompleted { .. })));

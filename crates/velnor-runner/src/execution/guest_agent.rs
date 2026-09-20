@@ -1,6 +1,7 @@
 //! Guest-side vsock session. Production binds AF_VSOCK inside the microVM.
 
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -92,8 +93,8 @@ pub fn serve_guest_session<S, F>(
     run_plan: F,
 ) -> Result<(), String>
 where
-    S: Read + Write,
-    F: FnMut(&[u8]) -> Result<(i32, Vec<super::backend::ExecutionEvent>), String>,
+    S: Read + Write + AsRawFd,
+    F: FnMut(&[u8]) -> Result<(i32, Vec<super::backend::ExecutionEvent>), String> + Send,
 {
     let mut state = GuestAgentState::default();
     serve_guest_session_with_state(stream, env, &mut state, run_plan)
@@ -107,11 +108,31 @@ pub fn serve_guest_session_with_state<S, F>(
     stream: &mut S,
     env: &GuestSessionEnv,
     state: &mut GuestAgentState,
+    run_plan: F,
+) -> Result<(), String>
+where
+    S: Read + Write + AsRawFd,
+    F: FnMut(&[u8]) -> Result<(i32, Vec<super::backend::ExecutionEvent>), String> + Send,
+{
+    serve_guest_session_with_state_and_cancellation(
+        stream,
+        env,
+        state,
+        crate::execution::cancel::JobCancellation::remote(),
+        run_plan,
+    )
+}
+
+fn serve_guest_session_with_state_and_cancellation<S, F>(
+    stream: &mut S,
+    env: &GuestSessionEnv,
+    state: &mut GuestAgentState,
+    cancellation: crate::execution::cancel::JobCancellation,
     mut run_plan: F,
 ) -> Result<(), String>
 where
-    S: Read + Write,
-    F: FnMut(&[u8]) -> Result<(i32, Vec<super::backend::ExecutionEvent>), String>,
+    S: Read + Write + AsRawFd,
+    F: FnMut(&[u8]) -> Result<(i32, Vec<super::backend::ExecutionEvent>), String> + Send,
 {
     if env.isolation_id.is_empty() || env.generation == 0 {
         return Err("guest readiness proof has incomplete isolation identity".into());
@@ -162,8 +183,8 @@ where
     loop {
         match VsockMessage::read_from(&mut *stream) {
             Ok(VsockMessage::Cancel) => {
-                state.session_active = false;
-                return Ok(());
+                cancellation.request(crate::execution::cancel::CancelReason::ServerRequested);
+                continue;
             }
             Ok(VsockMessage::TeardownAck { .. }) => {
                 return Err(guest_capability_error(
@@ -261,7 +282,12 @@ where
                     let merged = plan
                         .encode()
                         .map_err(|error| format!("guest plan encode after import: {error}"))?;
-                    let (code, events) = run_plan(&merged)?;
+                    let (code, events) = run_plan_with_cancel_poll(
+                        stream,
+                        &merged,
+                        cancellation.clone(),
+                        &mut run_plan,
+                    )?;
                     (
                         if code == 0 {
                             JobConclusion::Success
@@ -271,6 +297,11 @@ where
                         code,
                         events,
                     )
+                };
+                let (conclusion, code) = if cancellation.is_cancelled() {
+                    (JobConclusion::Cancelled, 1)
+                } else {
+                    (conclusion, code)
                 };
                 write_result_bridge(stream, &events)?;
                 VsockMessage::JobCompleted {
@@ -305,6 +336,102 @@ where
             Err(error) => return Err(format!("protocol v{PROTOCOL_VERSION}: {error}")),
         }
     }
+}
+
+const GUEST_CANCEL_POLL_MS: i32 = 25;
+
+/// Run a plan while the session thread remains able to receive cancellation.
+/// The worker installs the guest-local job token as active; runtime commands
+/// register against that token and its current step condition decides whether
+/// cancellation terminates them.
+fn run_plan_with_cancel_poll<S, F>(
+    stream: &mut S,
+    plan_bytes: &[u8],
+    cancellation: crate::execution::cancel::JobCancellation,
+    run_plan: &mut F,
+) -> Result<(i32, Vec<super::backend::ExecutionEvent>), String>
+where
+    S: Read + AsRawFd,
+    F: FnMut(&[u8]) -> Result<(i32, Vec<super::backend::ExecutionEvent>), String> + Send,
+{
+    let plan_bytes = plan_bytes.to_vec();
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+    let worker_cancellation = cancellation.clone();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let _active = crate::execution::cancel::set_active(worker_cancellation.clone());
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_plan(&plan_bytes)))
+                    .unwrap_or_else(|_| Err("guest plan runner panicked".into()));
+            let _ = result_tx.send(result);
+        });
+
+        let mut connection_lost = false;
+        loop {
+            match result_rx.try_recv() {
+                Ok(result) => return result,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Err("guest plan worker stopped without a result".into());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+
+            if connection_lost {
+                match result_rx.recv_timeout(Duration::from_millis(25)) {
+                    Ok(result) => return result,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err("guest plan worker stopped without a result".into());
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                }
+            }
+
+            let mut descriptor = libc::pollfd {
+                fd: stream.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: descriptor points to one initialized pollfd for the
+            // duration of the call; the stream owns the referenced fd.
+            let ready = unsafe { libc::poll(&mut descriptor, 1, GUEST_CANCEL_POLL_MS) };
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                cancellation.request(crate::execution::cancel::CancelReason::RegistrationLost);
+                return Err(format!("poll guest cancellation: {error}"));
+            }
+            if ready == 0 {
+                continue;
+            }
+            if descriptor.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) == 0 {
+                continue;
+            }
+
+            match VsockMessage::read_from(&mut *stream) {
+                Ok(VsockMessage::Cancel) => {
+                    cancellation.request(crate::execution::cancel::CancelReason::ServerRequested);
+                }
+                Ok(message) => {
+                    cancellation.request(crate::execution::cancel::CancelReason::RegistrationLost);
+                    return Err(guest_capability_error(
+                        "guest.protocol",
+                        &format!("unexpected message {message:?} during plan execution"),
+                        "Cancel while one DeliverPlan is executing",
+                    ));
+                }
+                Err(error) => {
+                    cancellation.request(crate::execution::cancel::CancelReason::RegistrationLost);
+                    if descriptor.revents & libc::POLLHUP != 0 {
+                        connection_lost = true;
+                        continue;
+                    }
+                    return Err(format!("read cancellation during guest plan: {error}"));
+                }
+            }
+        }
+    })
 }
 
 fn write_result_bridge<S: Write>(
@@ -740,6 +867,7 @@ mod tests {
             other => panic!("expected restored GuestReady, got {other:?}"),
         }
         VsockMessage::Cancel.write_to(&mut restored_host).unwrap();
+        drop(restored_host);
         first.join().unwrap().unwrap();
     }
 
@@ -757,6 +885,10 @@ mod tests {
             job_id: "boot-identity".into(),
             daemon_id: "test-daemon".into(),
             image: "velnor/job-ubuntu:26.04".into(),
+            container_env: Vec::new(),
+            container_options: Vec::new(),
+            container_ports: Vec::new(),
+            container_volumes: Vec::new(),
             services: Vec::new(),
             steps: Vec::new(),
             timeout_ms: 1000,
@@ -860,6 +992,10 @@ mod tests {
             job_id: "job-1".into(),
             daemon_id: "test-daemon".into(),
             image: "velnor/job-ubuntu:26.04".into(),
+            container_env: Vec::new(),
+            container_options: Vec::new(),
+            container_ports: Vec::new(),
+            container_volumes: Vec::new(),
             services: Vec::new(),
             steps: Vec::new(),
             timeout_ms: 1000,
@@ -931,6 +1067,140 @@ mod tests {
                 exit_code: 0
             }
         ));
+        assert!(matches!(
+            VsockMessage::read_from(&mut host).unwrap(),
+            VsockMessage::TeardownAck { generation: 7, .. }
+        ));
+        thread.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn in_flight_guest_plan_receives_cancel_and_preserves_always_work() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        let env = GuestSessionEnv {
+            isolation_id: "job-cancel-active".into(),
+            generation: 7,
+            docker_healthy: true,
+            job_credentials_absent: true,
+        };
+        let plan = GuestJobPlan {
+            isolation_id: "job-cancel-active".into(),
+            generation: 7,
+            job_id: "job-cancel-active".into(),
+            daemon_id: "test-daemon".into(),
+            image: "velnor/job-ubuntu:26.04".into(),
+            container_env: Vec::new(),
+            container_options: Vec::new(),
+            container_ports: Vec::new(),
+            container_volumes: Vec::new(),
+            services: Vec::new(),
+            steps: Vec::new(),
+            timeout_ms: 1000,
+            cancel_requested: false,
+            fail: false,
+            cache_digest: None,
+            command_files: Vec::new(),
+            outputs: Vec::new(),
+            env: Vec::new(),
+            workspace: "/__w".into(),
+            context_data: Vec::new(),
+            cache: Vec::new(),
+            artifacts: Vec::new(),
+            annotations: Vec::new(),
+            summary: String::new(),
+            buildx: false,
+            testcontainers: false,
+        };
+        let plan_bytes = plan.encode().unwrap();
+        let plan_sha256 = hex_sha256(&plan_bytes);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let guest_env = env.clone();
+        let cancellation = crate::execution::cancel::JobCancellation::recording(None);
+        let thread = std::thread::spawn(move || {
+            let mut state = GuestAgentState::default();
+            serve_guest_session_with_state_and_cancellation(
+                &mut guest,
+                &guest_env,
+                &mut state,
+                cancellation,
+                move |_| {
+                    let token = crate::execution::cancel::active()
+                        .expect("plan worker installs its guest cancellation token");
+                    let mut state = crate::executor::JobExecutionState::default();
+                    state.set_cancellation(token.clone());
+                    assert!(state.evaluate_condition(Some("always()")).unwrap());
+                    assert!(!state.evaluate_condition(Some("cancelled()")).unwrap());
+
+                    let active_state = state.clone();
+                    let active_step = token.begin_step(move || {
+                        active_state
+                            .evaluate_condition(Some("always()"))
+                            .map_err(|error| error.to_string())
+                    });
+                    started_tx.send(()).unwrap();
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while !token.is_cancelled() && Instant::now() < deadline {
+                        std::thread::yield_now();
+                    }
+                    assert!(
+                        token.is_cancelled(),
+                        "guest agent must receive Cancel mid-plan"
+                    );
+                    assert!(!active_step.is_cancelled());
+                    assert!(state.evaluate_condition(Some("always()")).unwrap());
+                    assert!(state.evaluate_condition(Some("cancelled()")).unwrap());
+                    assert!(!state.evaluate_condition(None).unwrap());
+
+                    let later_cancelled_step = token.begin_step(|| Ok(false));
+                    assert!(
+                        !later_cancelled_step.is_cancelled(),
+                        "later eligible steps do not inherit a stale callback"
+                    );
+                    Ok((0, Vec::new()))
+                },
+            )
+        });
+
+        VsockMessage::GuestIdentity {
+            isolation_id: "job-cancel-active".into(),
+            generation: 7,
+            restored: false,
+        }
+        .write_to(&mut host)
+        .unwrap();
+        let session_challenge = match VsockMessage::read_from(&mut host).unwrap() {
+            VsockMessage::GuestReady {
+                session_challenge, ..
+            } => session_challenge,
+            other => panic!("expected GuestReady, got {other:?}"),
+        };
+        VsockMessage::DeliverPlan {
+            job_id: "job-cancel-active".into(),
+            isolation_id: "job-cancel-active".into(),
+            generation: 7,
+            execution_nonce: derive_execution_nonce(
+                &session_challenge,
+                "job-cancel-active",
+                "job-cancel-active",
+                7,
+                &plan_sha256,
+            ),
+            plan_sha256,
+            plan_bytes,
+        }
+        .write_to(&mut host)
+        .unwrap();
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("guest plan worker should start");
+        VsockMessage::Cancel.write_to(&mut host).unwrap();
+        assert_eq!(
+            VsockMessage::read_from(&mut host).unwrap(),
+            VsockMessage::JobCompleted {
+                conclusion: JobConclusion::Cancelled,
+                exit_code: 1,
+            }
+        );
         assert!(matches!(
             VsockMessage::read_from(&mut host).unwrap(),
             VsockMessage::TeardownAck { generation: 7, .. }
@@ -1036,6 +1306,10 @@ mod tests {
             job_id: "job-expected".into(),
             daemon_id: "test-daemon".into(),
             image: "velnor/job-ubuntu:26.04".into(),
+            container_env: Vec::new(),
+            container_options: Vec::new(),
+            container_ports: Vec::new(),
+            container_volumes: Vec::new(),
             services: Vec::new(),
             steps: Vec::new(),
             timeout_ms: 1000,

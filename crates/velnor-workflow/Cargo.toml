@@ -25,6 +25,8 @@ serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 termrock = { git = "https://github.com/tailrocks/termrock.git", rev = "5283c2acf9154d0cfcd37b1ffe821c00faf90ea2", features = ["crossterm"], optional = true }
 toml = { workspace = true }
+velnor-expression = { path = "../velnor-expression", version = "0.1.0" }
+velnor-action-manifest = { path = "../velnor-action-manifest", version = "0.1.0" }
 
 [features]
 default = ["tui"]
