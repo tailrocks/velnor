@@ -2872,7 +2872,7 @@ fn render_native_publish_job(
             PRODUCT_RELEASE_ID="$provider_release_id"
             tag_ref="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag")"
             jq -e --arg commit "$COMMIT" '.object.type == "commit" and .object.sha == $commit' <<<"$tag_ref" >/dev/null || { echo '::error::published stable release tag moved' >&2; exit 1; }
-            product_release_id="$(jq -er '.release_id | numbers | tostring' "$tmp/product-manifest.json")"
+            product_release_id="$(jq -er '.release_id | strings | select(test("^[1-9][0-9]*$"))' "$tmp/product-manifest.json")"
             [ "$provider_release_id" = "$product_release_id" ] || { echo '::error::published product manifest release id differs from provider release' >&2; exit 1; }
             jq -e --arg version "$VERSION" --arg commit "$COMMIT" --arg tag "$tag" --arg repository "$GITHUB_REPOSITORY" '
               .schema == "velnor.product-manifest/v1" and
@@ -2991,11 +2991,7 @@ fn render_native_publish_job(
             rm -rf -- "$boundary_dir"
 "#
         .replace("{binary}", &release.binary)
-        .replace("__RUNTIME_ASSETS__", &assets)
-        .replace(
-            r#"product_release_id="$(jq -er '.release_id | numbers | tostring' "$tmp/product-manifest.json")""#,
-            r#"product_release_id="$(jq -er '.release_id | strings | select(test("^[1-9][0-9]*$"))' "$tmp/product-manifest.json")""#,
-        );
+        .replace("__RUNTIME_ASSETS__", &assets);
         create_verify = create_verify.replace(
             "            # The record must name this exact tag, source commit, crate version\n",
             &format!("{product_existing}            # The record must name this exact tag, source commit, crate version\n"),
@@ -7312,6 +7308,12 @@ mod tests {
             "published product rerun must consume the canonical string release id: {publish}"
         );
         assert!(
+            !publish.contains(
+                "product_release_id=\"$(jq -er '.release_id | numbers | tostring'"
+            ),
+            "published product rerun must not coerce a JSON number into a release id string: {publish}"
+        );
+        assert!(
             !publish.contains("cp -- \"$deb\" \"product-assets/$name\""),
             "runtime Debian subjects must not be copied into product-assets: {publish}"
         );
@@ -7414,55 +7416,50 @@ mod tests {
             crate::s2::unique_suffix()
         ));
         fs::create_dir_all(&rerun_root).expect("create rerun fixture");
-        fs::write(
-            rerun_root.join("product-manifest.json"),
-            r#"{"release_id":"12345"}"#,
-        )
-        .expect("write canonical string release id");
-        let rerun = Command::new("bash")
-            .current_dir(&rerun_root)
-            .args([
-                "-eu",
-                "-o",
-                "pipefail",
-                "-c",
-                &format!(
-                    "tmp=.; {}; printf '%s' \"$product_release_id\"",
-                    release_id_line.trim()
+        let release_id_cases = [
+            ("good string", r#"{"release_id":"12345"}"#, Some("12345")),
+            ("number", r#"{"release_id":12345}"#, None),
+            ("leading zeros", r#"{"release_id":"0012345"}"#, None),
+            (
+                "numeric overflow",
+                r#"{"release_id":18446744073709551616}"#,
+                None,
+            ),
+            ("provider mismatch", r#"{"release_id":"54321"}"#, None),
+        ];
+        for (label, manifest, expected_output) in release_id_cases {
+            fs::write(rerun_root.join("product-manifest.json"), manifest)
+                .unwrap_or_else(|error| panic!("write {label} release id fixture: {error}"));
+            let script = format!(
+                "tmp=.; provider_release_id=12345; {}; [ \"$provider_release_id\" = \"$product_release_id\" ]; printf '%s' \"$product_release_id\"",
+                release_id_line.trim()
+            );
+            let result = Command::new("bash")
+                .current_dir(&rerun_root)
+                .args(["-eu", "-o", "pipefail", "-c", &script])
+                .output()
+                .unwrap_or_else(|error| {
+                    panic!("run rendered {label} release id admission: {error}")
+                });
+            match expected_output {
+                Some(expected) => {
+                    assert!(
+                        result.status.success(),
+                        "{label} release id must pass rendered rerun: {}",
+                        String::from_utf8_lossy(&result.stderr)
+                    );
+                    assert_eq!(
+                        String::from_utf8_lossy(&result.stdout),
+                        expected,
+                        "rendered {label} rerun must preserve the canonical decimal string"
+                    );
+                }
+                None => assert!(
+                    !result.status.success(),
+                    "{label} release id must fail the rendered string-only rerun"
                 ),
-            ])
-            .output()
-            .expect("run rendered stable rerun admission");
-        assert!(
-            rerun.status.success(),
-            "canonical string release id must pass rendered rerun: {}",
-            String::from_utf8_lossy(&rerun.stderr)
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&rerun.stdout),
-            "12345",
-            "rendered rerun must preserve the canonical decimal string"
-        );
-        fs::write(
-            rerun_root.join("product-manifest.json"),
-            r#"{"release_id":12345}"#,
-        )
-        .expect("write numeric release id regression fixture");
-        let rejected = Command::new("bash")
-            .current_dir(&rerun_root)
-            .args([
-                "-eu",
-                "-o",
-                "pipefail",
-                "-c",
-                &format!("tmp=.; {}", release_id_line.trim()),
-            ])
-            .output()
-            .expect("run numeric release id rejection");
-        assert!(
-            !rejected.status.success(),
-            "numeric release id must fail the rendered string-only rerun"
-        );
+            }
+        }
         fs::remove_dir_all(rerun_root).expect("remove rerun fixture");
     }
 
