@@ -106,6 +106,29 @@ pub(crate) const MANIFEST_SIDECAR: &str = "manifest.json.sha256";
 pub(crate) const PREVIEW_MANIFEST_FILE: &str = "release-manifest.json";
 /// The preview checksum list binding both preview debs.
 pub(crate) const SHA256SUMS_FILE: &str = "SHA256SUMS";
+/// Names owned by the discovery/control contract, never by a product
+/// artifact row. `discovery.json` is the persisted selection rather than a
+/// release asset; the other nine names are required release controls.
+pub(crate) const RESERVED_CONTROL_ASSET_NAMES: [&str; 10] = [
+    DISCOVERY_SELECTION_FILE,
+    PRODUCT_MANIFEST_ASSET,
+    "product-manifest.json.sha256",
+    PREVIEW_MANIFEST_FILE,
+    SHA256SUMS_FILE,
+    RECORD_FILE,
+    RECORD_SIDECAR,
+    MANIFEST_FILE,
+    MANIFEST_SIDECAR,
+    RELEASE_ATTESTATION_FILE,
+];
+
+fn release_control_asset_names() -> impl Iterator<Item = &'static str> {
+    RESERVED_CONTROL_ASSET_NAMES
+        .iter()
+        .copied()
+        .filter(|name| *name != DISCOVERY_SELECTION_FILE)
+}
+
 /// The only implemented previous-version retention count.
 pub(crate) const IMPLEMENTED_RETENTION: u32 = 1;
 /// The longest accepted feed description line.
@@ -2040,10 +2063,7 @@ fn validate_product_manifest_selection(
                 "discovery product artifact has an unsafe name",
             ));
         }
-        if name == DISCOVERY_SELECTION_FILE
-            || name == PRODUCT_MANIFEST_ASSET
-            || !artifact_names.insert(name)
-        {
+        if RESERVED_CONTROL_ASSET_NAMES.contains(&name) || !artifact_names.insert(name) {
             return Err(GeneratorError::usage(
                 "discovery product artifact name is reserved or duplicated",
             ));
@@ -2487,17 +2507,7 @@ fn parse_discovery_selection(
             )));
         }
     }
-    for required in [
-        PRODUCT_MANIFEST_ASSET,
-        "product-manifest.json.sha256",
-        RECORD_FILE,
-        RECORD_SIDECAR,
-        MANIFEST_FILE,
-        MANIFEST_SIDECAR,
-        PREVIEW_MANIFEST_FILE,
-        SHA256SUMS_FILE,
-        RELEASE_ATTESTATION_FILE,
-    ] {
+    for required in release_control_asset_names() {
         if !seen_names.contains(required) {
             return Err(GeneratorError::usage(format!(
                 "discovery release asset inventory lacks {required}"
@@ -2513,17 +2523,7 @@ fn parse_discovery_selection(
             allowed_names.insert(format!("{}.sha256", field(artifact, "name")?));
         }
     }
-    allowed_names.extend([
-        PRODUCT_MANIFEST_ASSET.to_owned(),
-        "product-manifest.json.sha256".to_owned(),
-        RECORD_FILE.to_owned(),
-        RECORD_SIDECAR.to_owned(),
-        MANIFEST_FILE.to_owned(),
-        MANIFEST_SIDECAR.to_owned(),
-        PREVIEW_MANIFEST_FILE.to_owned(),
-        SHA256SUMS_FILE.to_owned(),
-        RELEASE_ATTESTATION_FILE.to_owned(),
-    ]);
+    allowed_names.extend(release_control_asset_names().map(str::to_owned));
     if seen_names != allowed_names {
         return Err(GeneratorError::usage(
             "discovery release asset census differs from the canonical manifest and allowed subordinate records",
@@ -9733,6 +9733,32 @@ mod tests {
             "fetch directory created before configured-source admission"
         );
         let _ = std::fs::remove_dir_all(fixture.root);
+    }
+
+    #[test]
+    fn discovery_product_manifest_rejects_every_reserved_control_name() {
+        for (index, reserved_name) in RESERVED_CONTROL_ASSET_NAMES.iter().enumerate() {
+            let fixture = discovery_fixture(&format!("reserved-control-{index}"));
+            let mut tampered = fixture.document.clone();
+            tampered["manifest"]["artifacts"][0]["name"] =
+                serde_json::Value::String((*reserved_name).to_owned());
+            write_bytes(
+                &fixture.selection_path,
+                &must(
+                    serde_json::to_vec(&tampered),
+                    "serialize reserved control artifact",
+                ),
+            );
+            let error = must_fail(
+                read_discovery_selection(&fixture.selection_path),
+                "reject reserved control artifact",
+            );
+            assert!(
+                error.contains("reserved or duplicated"),
+                "{reserved_name}: {error}"
+            );
+            let _ = std::fs::remove_dir_all(fixture.root);
+        }
     }
 
     #[cfg(unix)]
