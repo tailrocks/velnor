@@ -16,6 +16,7 @@ use anyhow::{bail, Result};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::OnceLock;
 
 /// Versioned seam between the authenticated producer and deterministic
 /// checker.  A producer must implement this exact contract before live mode
@@ -52,7 +53,7 @@ impl VerifiedRawStoreHandle {
     /// Producer adapter constructor.  The caller must pass the production
     /// descriptor-relative store, never a deserialized path or caller digest.
     #[allow(dead_code, reason = "used by the producer adapter when integrated")]
-    pub(super) fn from_producer(verifier: Box<dyn VerifiedRawStore>) -> Self {
+    pub(crate) fn from_producer(verifier: Box<dyn VerifiedRawStore>) -> Self {
         Self { verifier }
     }
 
@@ -75,7 +76,7 @@ impl AuthenticatedClosingCapture {
     /// Producer adapter constructor. The collector must have independently
     /// authenticated, captured, and closing-reconciled all returned values.
     #[allow(dead_code, reason = "used by the producer adapter when integrated")]
-    pub(super) fn from_producer(
+    pub(crate) fn from_producer(
         manifest: ManifestDocument,
         snapshot: SnapshotDocument,
         evidence: EvidenceDocument,
@@ -121,6 +122,9 @@ pub(crate) trait AuthenticatedClosingCollector: Send + Sync {
 
 struct UnavailableCollector;
 
+static UNAVAILABLE_COLLECTOR: UnavailableCollector = UnavailableCollector;
+static CURRENT_COLLECTOR: OnceLock<Box<dyn AuthenticatedClosingCollector>> = OnceLock::new();
+
 impl AuthenticatedClosingCollector for UnavailableCollector {
     fn collect_closing<'a>(&'a self, request: ClosingCaptureRequest) -> CollectorFuture<'a> {
         Box::pin(async move {
@@ -132,10 +136,27 @@ impl AuthenticatedClosingCollector for UnavailableCollector {
     }
 }
 
-/// Current capability provider. Until the producer adapter is integrated,
-/// every live invocation reaches the explicit fail-closed error above.
-pub(crate) fn current_collector() -> impl AuthenticatedClosingCollector {
-    UnavailableCollector
+/// Install the one authenticated producer for this process. The registration
+/// is immutable: a later caller cannot replace a collector after live work has
+/// started, and no caller-supplied JSON can register one. Until a producer
+/// installs its adapter, every live invocation reaches the explicit
+/// fail-closed error above.
+#[allow(dead_code, reason = "called by the authenticated producer during CLI setup")]
+pub(crate) fn install_collector(
+    collector: Box<dyn AuthenticatedClosingCollector>,
+) -> Result<()> {
+    CURRENT_COLLECTOR
+        .set(collector)
+        .map_err(|_| anyhow::anyhow!("authenticated collector is already installed"))
+}
+
+/// Current capability provider. The producer-owned adapter is selected once
+/// during process setup; the unavailable value is the fail-closed default.
+pub(crate) fn current_collector() -> &'static dyn AuthenticatedClosingCollector {
+    CURRENT_COLLECTOR
+        .get()
+        .map(Box::as_ref)
+        .unwrap_or(&UNAVAILABLE_COLLECTOR)
 }
 
 #[cfg(test)]

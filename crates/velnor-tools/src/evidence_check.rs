@@ -12,7 +12,6 @@
 use crate::g0_contract::*;
 use crate::g0_workflow::{derive_workflow_plan, DerivedWorkflowPlan};
 use crate::github_raw_store::RawEvidenceStore;
-use crate::live_authority::AuthenticatedClosingCollector;
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use clap::Args;
