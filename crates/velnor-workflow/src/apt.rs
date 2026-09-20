@@ -1638,20 +1638,34 @@ fn run_fixed(
     Ok(output.stdout)
 }
 
-/// Extract the one signer fingerprint that gpgv status output reported.
-/// Success from gpgv alone is insufficient when a keyring can contain more
-/// than the configured publisher: the cryptographic signer must equal the
-/// typed expected identity.
+/// Extract one VALIDSIG and bind its signing key to the configured primary.
+/// GnuPG reports the signing-subkey fingerprint first and the primary-key
+/// fingerprint last; accepting any valid signing subkey under the pinned
+/// primary keeps normal keyrings usable without broadening publisher trust.
 fn gpgv_signer(output: &[u8], expected: &str, label: &str) -> Result<(), GeneratorError> {
     let text = String::from_utf8(output.to_vec())
         .map_err(|_| GeneratorError::usage(format!("{label} signer status is not UTF-8")))?;
     let signers = text
         .lines()
         .filter_map(|line| line.strip_prefix("[GNUPG:] VALIDSIG "))
-        .filter_map(|line| line.split_whitespace().next())
-        .map(normalize_fingerprint)
-        .collect::<Vec<_>>();
-    if signers.len() != 1 || !signers.iter().all(|signer| signer == expected) {
+        .map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.len() != 10 {
+                return Err(GeneratorError::usage(format!(
+                    "{label} VALIDSIG status has an unexpected field count"
+                )));
+            }
+            let signer = normalize_fingerprint(fields[0]);
+            let primary = normalize_fingerprint(fields[9]);
+            if !is_full_fingerprint(&signer) || !is_full_fingerprint(&primary) {
+                return Err(GeneratorError::usage(format!(
+                    "{label} VALIDSIG status has an invalid fingerprint"
+                )));
+            }
+            Ok((signer, primary))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if signers.len() != 1 || signers[0].1 != expected {
         return Err(GeneratorError::usage(format!(
             "{label} signature signer does not match the pinned publisher key"
         )));
@@ -8843,25 +8857,46 @@ mod tests {
     }
 
     #[test]
-    fn gpgv_status_requires_exactly_the_pinned_signer() {
-        let valid = format!(
-            "[GNUPG:] NEWSIG\n[GNUPG:] VALIDSIG {FIXTURE_FPR} 20260920 0 0 1 10 {FIXTURE_FPR}\n"
+    fn gpgv_status_requires_one_pinned_primary() {
+        // This is the exact VALIDSIG field shape emitted by gpgv for a real
+        // signing subkey: the subkey fingerprint is first and its primary
+        // fingerprint is the final field.
+        const SUBKEY: &str = "11223344556677889900AABBCCDDEEFF00112233";
+        const STATUS_FIELDS: &str = "20260920 1789883126 0 4 0 22 10 00";
+        let valid_subkey =
+            format!("[GNUPG:] NEWSIG\n[GNUPG:] VALIDSIG {SUBKEY} {STATUS_FIELDS} {FIXTURE_FPR}\n");
+        must(
+            gpgv_signer(valid_subkey.as_bytes(), FIXTURE_FPR, "record"),
+            "accept signing subkey bound to pinned primary",
+        );
+        let valid_primary = format!(
+            "[GNUPG:] NEWSIG\n[GNUPG:] VALIDSIG {FIXTURE_FPR} {STATUS_FIELDS} {FIXTURE_FPR}\n"
         );
         must(
-            gpgv_signer(valid.as_bytes(), FIXTURE_FPR, "record"),
-            "accept pinned signer",
+            gpgv_signer(valid_primary.as_bytes(), FIXTURE_FPR, "record"),
+            "accept direct primary signature",
         );
 
-        for output in [
-            "[GNUPG:] NEWSIG\n",
-            "[GNUPG:] VALIDSIG FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 20260920 0 0 1 10 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\n",
-            &format!(
-                "[GNUPG:] VALIDSIG {FIXTURE_FPR} 20260920 0 0 1 10 {FIXTURE_FPR}\n[GNUPG:] VALIDSIG {FIXTURE_FPR} 20260920 0 0 1 10 {FIXTURE_FPR}\n"
-            ),
-        ] {
-            let error = must_fail(gpgv_signer(output.as_bytes(), FIXTURE_FPR, "record"), "reject signer status");
-            assert!(error.contains("does not match"), "{error}");
-        }
+        let foreign_primary = format!(
+            "[GNUPG:] VALIDSIG {SUBKEY} {STATUS_FIELDS} FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\n"
+        );
+        let error = must_fail(
+            gpgv_signer(foreign_primary.as_bytes(), FIXTURE_FPR, "record"),
+            "reject foreign primary",
+        );
+        assert!(error.contains("does not match"), "{error}");
+        let duplicate = format!("{valid_subkey}{valid_primary}");
+        let error = must_fail(
+            gpgv_signer(duplicate.as_bytes(), FIXTURE_FPR, "record"),
+            "reject duplicate signer status",
+        );
+        assert!(error.contains("does not match"), "{error}");
+        let malformed = format!("[GNUPG:] VALIDSIG {FIXTURE_FPR}\n");
+        let error = must_fail(
+            gpgv_signer(malformed.as_bytes(), FIXTURE_FPR, "record"),
+            "reject malformed signer status",
+        );
+        assert!(error.contains("field count"), "{error}");
         let error = must_fail(
             gpgv_signer(b"\xff", FIXTURE_FPR, "record"),
             "reject non-UTF-8 signer status",
