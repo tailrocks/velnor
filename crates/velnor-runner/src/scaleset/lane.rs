@@ -1051,21 +1051,10 @@ impl DaemonWorkerLane {
             if !failures.is_empty() {
                 return self.record_cleanup_failure(&row, key, failures);
             }
-            let state_cleanup = {
-                let live = self
-                    .workers
-                    .get(key)
-                    .with_context(|| format!("live worker {key:?} vanished"))?;
-                live.supervision.release_owned_state()
-            };
-            if let Err(error) = state_cleanup {
-                return self.record_cleanup_failure(
-                    &row,
-                    key,
-                    vec![format!("delete worker state: {error:#}")],
-                );
-            }
-            self.registry.clear_state_dir_cleanup_pending(key)?;
+            // The state dir is deliberately NOT deleted here: the exported
+            // diagnostics survive the worker for post-mortem ("diagnostics
+            // exported before deletion" — deletion ends owned Docker
+            // objects, never the exported logs).
         }
         if let Some(request_id) = row.request_id {
             let holder = permit_holder(self.config.scale_set_id, request_id);
@@ -1073,6 +1062,19 @@ impl DaemonWorkerLane {
         }
         self.transition_worker(key, ScaleSetWorkerState::PermitReleased)?;
         Ok(TerminalOutcome::Released)
+    }
+
+    /// Whether the terminal path already claimed `key`. Only
+    /// `drive_terminal_inner` writes terminal-side states, so a
+    /// terminal-side row after a failed tick proves the worker failed
+    /// explicitly (cleanup unconfirmed, permit retained uncertain) as
+    /// opposed to a tick that never got that far. Unreadable rows answer
+    /// conservatively: keep the worker tracked.
+    fn terminal_cleanup_started(&self, key: &str) -> bool {
+        self.registry
+            .get(key)
+            .map(|row| row.is_some_and(|row| terminal_side(row.worker_state)))
+            .unwrap_or(false)
     }
 
     fn record_cleanup_failure(
@@ -1165,15 +1167,28 @@ impl DaemonWorkerLane {
                     report.failed += 1;
                 }
                 Err(error) => {
-                    // Docker unreachable (daemon restart race): keep the
-                    // worker tracked; the message path retries the tick.
-                    // The permit stays held either way — never freed blind.
-                    tracing::warn!(
-                        worker = key.as_str(),
-                        error = error.to_string(),
-                        "scale-set adoption tick failed; worker stays tracked"
-                    );
-                    report.adopted += 1;
+                    // A tick that reached the terminal path failed the
+                    // worker explicitly (terminal-side row, permit
+                    // retained uncertain): that is a failure, never an
+                    // adoption. Anything earlier (Docker unreachable,
+                    // restart impossible) keeps the worker tracked; the
+                    // message path retries the tick. The permit stays
+                    // held either way — never freed blind.
+                    if self.terminal_cleanup_started(&key) {
+                        tracing::warn!(
+                            worker = key.as_str(),
+                            error = error.to_string(),
+                            "scale-set adoption terminal cleanup failed; the message path will retry"
+                        );
+                        report.failed += 1;
+                    } else {
+                        tracing::warn!(
+                            worker = key.as_str(),
+                            error = error.to_string(),
+                            "scale-set adoption tick failed; worker stays tracked"
+                        );
+                        report.adopted += 1;
+                    }
                 }
             }
         }
@@ -1197,12 +1212,24 @@ impl DaemonWorkerLane {
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(
-                        worker = key.as_str(),
-                        error = error.to_string(),
-                        "scale-set shutdown tick failed; worker left for restart adoption"
-                    );
-                    report.adopted_across_restart += 1;
+                    // Same taxonomy as adoption: a tick that reached the
+                    // terminal path failed the worker explicitly, even
+                    // though cleanup stays unconfirmed for the restart.
+                    if self.terminal_cleanup_started(&key) {
+                        tracing::warn!(
+                            worker = key.as_str(),
+                            error = error.to_string(),
+                            "scale-set shutdown terminal cleanup failed; restart adoption resumes it"
+                        );
+                        report.failed += 1;
+                    } else {
+                        tracing::warn!(
+                            worker = key.as_str(),
+                            error = error.to_string(),
+                            "scale-set shutdown tick failed; worker left for restart adoption"
+                        );
+                        report.adopted_across_restart += 1;
+                    }
                 }
             }
         }
@@ -1938,7 +1965,7 @@ mod tests {
     }
 
     #[test]
-    fn owned_cleanup_replay_removes_state_before_permit_release() {
+    fn owned_cleanup_replay_preserves_diagnostics_across_permit_release() {
         let dir = unique_test_dir("cleanup-replay");
         let db = dir.join("state.db");
         let ledger = dir.join("permit-ledger.db");
@@ -2036,13 +2063,18 @@ mod tests {
         drop(first_lane);
 
         // New process resumes from OwnedCleanup. Missing Docker objects are
-        // accepted; the state dir is removed before the released checkpoint.
+        // accepted; the exported diagnostics survive the released
+        // checkpoint for post-mortem while the permit frees.
         let replay_seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let replay_runner =
             CleanupRunner::missing(identity.runner_container(), replay_seen.clone());
         let mut replay_lane = test_lane(&db, &ledger, &state_root, Box::new(replay_runner));
         replay_lane.drive_terminal(&key).unwrap();
-        assert!(!state_dir.exists());
+        assert!(state_dir.join("raw-job.log").is_file());
+        assert!(
+            state_dir.join("diagnostics/capture.complete").is_file(),
+            "exported diagnostics survive the permit release"
+        );
         let row = replay_lane.registry.get(&key).unwrap().unwrap();
         assert_eq!(row.worker_state, ScaleSetWorkerState::PermitReleased);
         assert!(!row.state_dir_cleanup_pending);
@@ -2104,7 +2136,109 @@ mod tests {
         assert!(calls
             .iter()
             .any(|args| args.first().is_some_and(|arg| arg == "rm")));
-        assert!(!state_dir.exists());
+        // The export persists for forensics; teardown removed the objects.
+        assert!(state_dir.join("diagnostics/runner.log").is_file());
+        assert!(state_dir.join("diagnostics/capture.complete").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adoption_counts_terminal_cleanup_failure_as_failed() {
+        let dir = unique_test_dir("adopt-terminal-failure");
+        let db = dir.join("state.db");
+        let ledger = dir.join("permit-ledger.db");
+        let state_root = dir.join("workers");
+        let ownership = OwnershipId::bind(7, "velnor-7-4246");
+        let identity = WorkerIdentity::new(ownership.clone());
+        let key = ownership.as_str();
+        let state_dir = state_root.join(ownership.slug());
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let holder = permit_holder(7, 4246);
+        {
+            let mut global = velnor_control::permit_ledger::PermitLedger::open(&ledger).unwrap();
+            global.set_max_jobs(1).unwrap();
+            let generation = global.begin_epoch().unwrap();
+            let now = velnor_model::Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp()
+                .max(0) as u64;
+            global
+                .observe_demand(
+                    &holder,
+                    velnor_control::permit_ledger::PermitLane::ScaleSet,
+                    "scaleset/7",
+                    now,
+                    now,
+                )
+                .unwrap();
+            assert_eq!(
+                global
+                    .acquire(
+                        &holder,
+                        velnor_control::permit_ledger::PermitLane::ScaleSet,
+                        velnor_control::permit_ledger::PermitState::Provisioning,
+                        generation,
+                        None,
+                    )
+                    .unwrap(),
+                velnor_control::permit_ledger::AcquireOutcome::Acquired
+            );
+        }
+
+        let mut registry = WorkerRegistry::open(&db).unwrap();
+        registry
+            .upsert(
+                &key,
+                "op-3",
+                4246,
+                "velnor-7-4246",
+                &identity.network(),
+                state_dir.join("workspace").to_string_lossy().as_ref(),
+                state_dir.join("dind-data").to_string_lossy().as_ref(),
+                "sha256:runner",
+                "sha256:dind",
+            )
+            .unwrap();
+        registry
+            .set_state(&key, ScaleSetWorkerState::Running)
+            .unwrap();
+        drop(registry);
+
+        let mut intents = ProvisionIntentStore::open(&db).unwrap();
+        intents
+            .record_intent(
+                "op-3",
+                &crate::scaleset::intents::provision_ownership_id(7, "velnor-7-4246"),
+                7,
+                4246,
+                "velnor-7-4246",
+                "sha256:runner",
+                "sha256:dind",
+                1,
+            )
+            .unwrap();
+        drop(intents);
+
+        // Dead pair (nothing answers) + a stuck runner removal: the tick
+        // fails the worker, the terminal path retains the permit
+        // uncertain, and adoption must count the failure — not an adoption.
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = CleanupRunner::fail_runner_remove(identity.runner_container(), seen.clone());
+        let mut lane = test_lane(&db, &ledger, &state_root, Box::new(runner));
+        let report = lane.adopt_live_workers().unwrap();
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.adopted, 0);
+        assert_eq!(report.resumed_cleanup, 0);
+        assert_eq!(report.awaiting_provision, 0);
+        assert_eq!(report.skipped_released, 0);
+        let row = lane.registry.get(&key).unwrap().unwrap();
+        assert_eq!(row.worker_state, ScaleSetWorkerState::OwnedCleanup);
+        assert_eq!(
+            lane.ledger.holder_state(&holder).unwrap(),
+            Some(LedgerPermitState::Uncertain)
+        );
+        assert_eq!(lane.ledger.occupied().unwrap(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
