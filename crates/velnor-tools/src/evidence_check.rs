@@ -11219,176 +11219,331 @@ mod tests {
     }
 
     #[test]
-    fn captured_app_and_actions_objects_bind_raw_provider_fields() {
-        // Values below are the captured provider subset from
-        // G0/fleet/check-contexts-full.json (SHA-256
-        // 1a51f8a276c912c6f03f3bcb749d1f5845b52c0551cdff6254c8e90c0c78901e).
-        let repository = "tailrocks/velnor";
-        let dco_source_sha = "b93157f7f0971c73d1964447b5570c39aca6bf5e".to_owned();
+    fn authenticated_supplement_binds_real_apps_and_suites() {
+        // Exact body bytes from
+        // G0/real-api-fixture-supplement-20260920T085311Z, manifest
+        // 1146764830a0e6e31518dd05abd6c00e6627f554d6dbbc97a55d721facabe70a.
+        let supplement = |name: &str| -> Vec<u8> {
+            let encoded = match name {
+                "app-dco" => include_str!(
+                    "testdata/g0/real-api-fixture-supplement-20260920-085311/apps/dco-2.body.base64"
+                ),
+                "app-actions" => include_str!(
+                    "testdata/g0/real-api-fixture-supplement-20260920-085311/apps/github-actions.body.base64"
+                ),
+                "app-sonar" => include_str!(
+                    "testdata/g0/real-api-fixture-supplement-20260920-085311/apps/sonarqubecloud.body.base64"
+                ),
+                "suite-dco" => include_str!(
+                    "testdata/g0/real-api-fixture-supplement-20260920-085311/suites/velnor-96108219979.body.base64"
+                ),
+                "suite-actions" => include_str!(
+                    "testdata/g0/real-api-fixture-supplement-20260920-085311/suites/velnor-96108227551.body.base64"
+                ),
+                "suite-sonar" => include_str!(
+                    "testdata/g0/real-api-fixture-supplement-20260920-085311/suites/homebrew-96059348318.body.base64"
+                ),
+                _ => panic!("unknown supplement body {name}"),
+            };
+            BASE64
+                .decode(encoded.trim())
+                .expect("supplement body base64")
+        };
         let mut requests = Vec::new();
         let mut raw_objects = Vec::new();
-        let mut dco = G0CheckProducer {
+        #[allow(
+            clippy::too_many_arguments,
+            reason = "fixture helper mirrors one captured request/raw provenance tuple"
+        )]
+        fn add_capture(
+            requests: &mut Vec<G0RequestRecord>,
+            raw_objects: &mut Vec<G0RawObjectRef>,
+            raw_id: &str,
+            request_id: &str,
+            object_kind: &str,
+            endpoint: String,
+            query: &str,
+            items: u32,
+            bytes: &[u8],
+        ) {
+            let mut request = captured_page_request(&endpoint, query, items);
+            request.request_id = request_id.to_owned();
+            request.response_raw_ref = raw_id.to_owned();
+            requests.push(request);
+            raw_objects.push(captured_raw_reference(
+                raw_id,
+                request_id,
+                object_kind,
+                bytes,
+            ));
+        }
+
+        let check_bytes = real_api_fixture_entry(
+            "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs/page-0001.body",
+        );
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-velnor-checks",
+            "real-velnor-checks-request",
+            "check_run",
+            "/repos/tailrocks/velnor/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs"
+                .to_owned(),
+            "per_page=100&filter=all&page=1",
+            70,
+            &check_bytes,
+        );
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-suite-dco",
+            "real-suite-dco-request",
+            "check_suite",
+            "/repos/tailrocks/velnor/check-suites/96108219979".to_owned(),
+            "",
+            1,
+            &supplement("suite-dco"),
+        );
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-app-dco",
+            "real-app-dco-request",
+            "app",
+            "/apps/dco-2".to_owned(),
+            "",
+            1,
+            &supplement("app-dco"),
+        );
+
+        let dco = G0CheckProducer {
             context: "DCO".to_owned(),
             app_id: "974774".to_owned(),
             app_slug: "dco-2".to_owned(),
             provider: G0CheckProvider::ExternalApp,
             api: G0ApiKind::Rest,
-            check_suite_id: 96035378559,
-            check_run_id: 105952041178,
-            source_sha: dco_source_sha,
+            check_suite_id: 96108219979,
+            check_run_id: 106031458188,
+            source_sha: "df9fb272c025f76cc8711560209afcdfd6cc4e00".to_owned(),
             event: "pull_request".to_owned(),
             status: "completed".to_owned(),
             conclusion: "success".to_owned(),
-            html_url: "https://github.com/tailrocks/velnor/runs/105952041178".to_owned(),
-            raw_object_refs: Vec::new(),
+            html_url: "https://github.com/tailrocks/velnor/runs/106031458188".to_owned(),
+            raw_object_refs: vec![
+                "real-velnor-checks".to_owned(),
+                "real-suite-dco".to_owned(),
+                "real-app-dco".to_owned(),
+            ],
         };
-        dco.raw_object_refs = push_provider_raw_fixture(
-            &mut requests,
-            &mut raw_objects,
-            repository,
-            "captured-dco",
-            &dco,
-        );
         assert!(g0_check_raw_evidence_valid(
-            repository,
+            "tailrocks/velnor",
             &dco,
             &requests,
             &raw_objects
         ));
 
-        let mut sonar = G0CheckProducer {
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-suite-actions",
+            "real-suite-actions-request",
+            "check_suite",
+            "/repos/tailrocks/velnor/check-suites/96108227551".to_owned(),
+            "",
+            1,
+            &supplement("suite-actions"),
+        );
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-app-actions",
+            "real-app-actions-request",
+            "app",
+            "/apps/github-actions".to_owned(),
+            "",
+            1,
+            &supplement("app-actions"),
+        );
+        let run_bytes = real_api_fixture_entry("raw/velnor/run-35493166478/run.body");
+        let jobs_bytes =
+            real_api_fixture_entry("raw/velnor/run-35493166478/attempt-1/jobs/page-0001.body");
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-velnor-run",
+            "real-velnor-run-request",
+            "workflow_run",
+            "/repos/tailrocks/velnor/actions/runs/35493166478".to_owned(),
+            "",
+            1,
+            &run_bytes,
+        );
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-velnor-jobs",
+            "real-velnor-jobs-request",
+            "job",
+            "/repos/tailrocks/velnor/actions/runs/35493166478/attempts/1/jobs".to_owned(),
+            "per_page=100&page=1",
+            68,
+            &jobs_bytes,
+        );
+        let actions = G0CheckProducer {
+            context: "Control / Planning".to_owned(),
+            app_id: "15368".to_owned(),
+            app_slug: "github-actions".to_owned(),
+            provider: G0CheckProvider::GithubActions {
+                workflow_run_id: 35493166478,
+                run_attempt: 1,
+                job_id: 106031464296,
+                job_run_id: 35493166478,
+                job_run_attempt: 1,
+                job_check_run_id: 106031464296,
+                job_source_sha: "df9fb272c025f76cc8711560209afcdfd6cc4e00".to_owned(),
+                job_html_url:
+                    "https://github.com/tailrocks/velnor/actions/runs/35493166478/job/106031464296"
+                        .to_owned(),
+                actual_checkout_sha: "df9fb272c025f76cc8711560209afcdfd6cc4e00".to_owned(),
+            },
+            api: G0ApiKind::Rest,
+            check_suite_id: 96108227551,
+            check_run_id: 106031464296,
+            source_sha: "df9fb272c025f76cc8711560209afcdfd6cc4e00".to_owned(),
+            event: "pull_request".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: "success".to_owned(),
+            html_url:
+                "https://github.com/tailrocks/velnor/actions/runs/35493166478/job/106031464296"
+                    .to_owned(),
+            raw_object_refs: vec![
+                "real-velnor-checks".to_owned(),
+                "real-suite-actions".to_owned(),
+                "real-app-actions".to_owned(),
+                "real-velnor-run".to_owned(),
+                "real-velnor-jobs".to_owned(),
+            ],
+        };
+        assert!(g0_check_raw_evidence_valid(
+            "tailrocks/velnor",
+            &actions,
+            &requests,
+            &raw_objects
+        ));
+
+        let homebrew_checks = real_api_fixture_entry(
+            "raw/homebrew-tap/commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-runs/page-0001.body",
+        );
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-homebrew-checks",
+            "real-homebrew-checks-request",
+            "check_run",
+            "/repos/jackin-project/homebrew-tap/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-runs"
+                .to_owned(),
+            "per_page=100&filter=all&page=1",
+            6,
+            &homebrew_checks,
+        );
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-suite-sonar",
+            "real-suite-sonar-request",
+            "check_suite",
+            "/repos/jackin-project/homebrew-tap/check-suites/96059348318".to_owned(),
+            "",
+            1,
+            &supplement("suite-sonar"),
+        );
+        add_capture(
+            &mut requests,
+            &mut raw_objects,
+            "real-app-sonar",
+            "real-app-sonar-request",
+            "app",
+            "/apps/sonarqubecloud".to_owned(),
+            "",
+            1,
+            &supplement("app-sonar"),
+        );
+        let sonar = G0CheckProducer {
             context: "SonarCloud Code Analysis".to_owned(),
             app_id: "12526".to_owned(),
             app_slug: "sonarqubecloud".to_owned(),
             provider: G0CheckProvider::ExternalApp,
             api: G0ApiKind::Rest,
-            check_suite_id: 95096323852,
-            check_run_id: 104858624075,
-            source_sha: "b9db5b149cc46baba9c49549432307c29e3972b0".to_owned(),
-            event: "pull_request".to_owned(),
-            status: "completed".to_owned(),
-            conclusion: "success".to_owned(),
-            html_url: "https://github.com/jackin-project/jackin-agent-smith/runs/104858624075"
-                .to_owned(),
-            raw_object_refs: Vec::new(),
-        };
-        sonar.raw_object_refs = push_provider_raw_fixture(
-            &mut requests,
-            &mut raw_objects,
-            "jackin-project/jackin-agent-smith",
-            "captured-sonar",
-            &sonar,
-        );
-        assert!(g0_check_raw_evidence_valid(
-            "jackin-project/jackin-agent-smith",
-            &sonar,
-            &requests,
-            &raw_objects
-        ));
-
-        let actions_source_sha = "e713841bdb9c33d853b7a9af88ceac924af1b3b6".to_owned();
-        let mut actions = G0CheckProducer {
-            context: "Publish runtime products".to_owned(),
-            app_id: "15368".to_owned(),
-            app_slug: "github-actions".to_owned(),
-            provider: G0CheckProvider::GithubActions {
-                workflow_run_id: 35463512640,
-                run_attempt: 1,
-                job_id: 105951823951,
-                job_run_id: 35463512640,
-                job_run_attempt: 1,
-                job_check_run_id: 105951823951,
-                job_source_sha: actions_source_sha.clone(),
-                job_html_url:
-                    "https://github.com/tailrocks/velnor/actions/runs/35463512640/job/105951823951"
-                        .to_owned(),
-                actual_checkout_sha: actions_source_sha.clone(),
-            },
-            api: G0ApiKind::Rest,
-            check_suite_id: 96034876638,
-            check_run_id: 105951823951,
-            source_sha: actions_source_sha,
+            check_suite_id: 96059348318,
+            check_run_id: 105978471119,
+            source_sha: "c501e90d014c207234ed94ea41f7a1c9b6ea0c7c".to_owned(),
             event: "push".to_owned(),
             status: "completed".to_owned(),
-            conclusion: "success".to_owned(),
-            html_url:
-                "https://github.com/tailrocks/velnor/actions/runs/35463512640/job/105951823951"
-                    .to_owned(),
-            raw_object_refs: Vec::new(),
+            conclusion: "failure".to_owned(),
+            html_url: "https://github.com/jackin-project/homebrew-tap/runs/105978471119".to_owned(),
+            raw_object_refs: vec![
+                "real-homebrew-checks".to_owned(),
+                "real-suite-sonar".to_owned(),
+                "real-app-sonar".to_owned(),
+            ],
         };
-        actions.raw_object_refs = push_provider_raw_fixture(
-            &mut requests,
-            &mut raw_objects,
-            repository,
-            "captured-actions",
-            &actions,
-        );
         assert!(g0_check_raw_evidence_valid(
-            repository,
-            &actions,
+            "jackin-project/homebrew-tap",
+            &sonar,
             &requests,
             &raw_objects
         ));
 
-        let dco_check_raw_id = dco
-            .raw_object_refs
+        let app_index = raw_objects
             .iter()
-            .find(|raw_id| raw_id.contains("check_run"))
-            .unwrap();
-        let dco_raw = raw_objects
-            .iter_mut()
-            .find(|raw| &raw.raw_id == dco_check_raw_id)
-            .unwrap();
-        let mut dco_body: Value =
-            serde_json::from_slice(&BASE64.decode(&dco_raw.bytes_base64).unwrap()).unwrap();
-        dco_body["html_url"] = json!("https://cncf.github.io/dco2");
-        let dco_bytes = canonical_json(&dco_body).into_bytes();
-        dco_raw.bytes_base64 = BASE64.encode(&dco_bytes);
-        let dco_digest = digest_bytes(&dco_bytes);
-        dco_raw.sha256 = dco_digest.clone();
-        dco_raw.byte_length = dco_bytes.len() as u64;
-        dco_raw.storage_ref = format!("sha256://{}", dco_digest.strip_prefix("sha256:").unwrap());
-        dco_raw.original_sha256 = dco_digest.clone();
-        dco_raw.original_byte_length = dco_bytes.len() as u64;
-        dco_raw.original_storage_ref =
-            format!("sha256://{}", dco_digest.strip_prefix("sha256:").unwrap());
+            .position(|raw| raw.raw_id == "real-app-dco")
+            .expect("DCO App capture");
+        let app_body = serde_json::from_slice::<Value>(
+            &BASE64
+                .decode(&raw_objects[app_index].bytes_base64)
+                .expect("DCO App bytes"),
+        )
+        .expect("DCO App JSON");
+        let mut wrong_app_body = app_body;
+        wrong_app_body["id"] = json!(12_526);
+        wrong_app_body["slug"] = json!("sonarqubecloud");
+        let wrong_app_bytes = canonical_json(&wrong_app_body).into_bytes();
+        raw_objects[app_index] = captured_raw_reference(
+            "real-app-dco",
+            "real-app-dco-request",
+            "app",
+            &wrong_app_bytes,
+        );
         assert!(!g0_check_raw_evidence_valid(
-            repository,
+            "tailrocks/velnor",
             &dco,
             &requests,
             &raw_objects
         ));
 
-        let actions_job_raw_id = actions
-            .raw_object_refs
+        let suite_index = raw_objects
             .iter()
-            .find(|raw_id| raw_id.contains("job"))
-            .unwrap();
-        let actions_raw = raw_objects
-            .iter_mut()
-            .find(|raw| &raw.raw_id == actions_job_raw_id)
-            .unwrap();
-        let mut actions_body: Value =
-            serde_json::from_slice(&BASE64.decode(&actions_raw.bytes_base64).unwrap()).unwrap();
-        actions_body["jobs"][0]["run_attempt"] = json!(2);
-        let actions_bytes = canonical_json(&actions_body).into_bytes();
-        actions_raw.bytes_base64 = BASE64.encode(&actions_bytes);
-        let actions_digest = digest_bytes(&actions_bytes);
-        actions_raw.sha256 = actions_digest.clone();
-        actions_raw.byte_length = actions_bytes.len() as u64;
-        actions_raw.storage_ref = format!(
-            "sha256://{}",
-            actions_digest.strip_prefix("sha256:").unwrap()
-        );
-        actions_raw.original_sha256 = actions_digest.clone();
-        actions_raw.original_byte_length = actions_bytes.len() as u64;
-        actions_raw.original_storage_ref = format!(
-            "sha256://{}",
-            actions_digest.strip_prefix("sha256:").unwrap()
+            .position(|raw| raw.raw_id == "real-suite-dco")
+            .expect("DCO suite capture");
+        let suite_body = serde_json::from_slice::<Value>(
+            &BASE64
+                .decode(&raw_objects[suite_index].bytes_base64)
+                .expect("DCO suite bytes"),
+        )
+        .expect("DCO suite JSON");
+        let mut wrong_suite_body = suite_body;
+        wrong_suite_body["app"]["id"] = json!(15_368u64);
+        wrong_suite_body["app"]["slug"] = json!("github-actions");
+        let wrong_suite_bytes = canonical_json(&wrong_suite_body).into_bytes();
+        raw_objects[suite_index] = captured_raw_reference(
+            "real-suite-dco",
+            "real-suite-dco-request",
+            "check_suite",
+            &wrong_suite_bytes,
         );
         assert!(!g0_check_raw_evidence_valid(
-            repository,
-            &actions,
+            "tailrocks/velnor",
+            &dco,
             &requests,
             &raw_objects
         ));
