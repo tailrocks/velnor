@@ -10,7 +10,7 @@ Their claims require revalidation against current revisions.
 ## Latest measured checkpoint
 
 Release metadata staging (`57e7cafc`) and rolling-release recovery
-(`27bfb54b`) passed exact-head PR and policy CI. Four latest full PR
+(`27bfb54b`) passed exact-head PR and policy CI. Latest full PR
 observations are retained below; they are not matched performance treatments.
 
 | Source | PR run | Trigger to required result | Aggregate job execution | Runner | Generator |
@@ -19,10 +19,11 @@ observations are retained below; they are not matched performance treatments.
 | `413458df` | 35511219049 | 541s | 1,290s | 466s | 175s |
 | `27bfb54b` | 35511815559 | 559s | 1,359s | 525s | 184s |
 | `32733948` | 35513481769 | 546s | 1,324s | 518s | 170s |
+| `2da37b63` | 35517547611 | 539s | 1,320s | 475s | 186s |
 
 Each observation includes 68 job records: 20 executed and 48 skipped.
-Generator coverage increased from 1,947 to 1,952 passing tests; runner coverage
-retains 2,516 passing tests, five existing skips and one repeated leaky-test
+Generator coverage increased from 1,947 to 1,955 passing tests; runner coverage
+increased from 2,516 to 2,522 passing tests, with five existing skips and one repeated leaky-test
 result. No introduced-flake absence or compiler-cache reuse is established.
 Raw timestamps, compressed logs, collector JSONL/CSV and summaries are in
 `observations/velnor-<run>-*`. Completion uses job timestamps, never `updated_at`.
@@ -44,11 +45,18 @@ main history, its release-leg seed/pin-fetch fix and typed runner failures.
 The runtime pin advances to upstream `38dbf85e` only with independently checked
 product identity and provenance. This is compatibility repair, not a speedup.
 
-Current ownership: parent integrates upstream and the Parallax consumer;
-Jackin agent repairs telemetry after independent malformed-phase probes;
-Velnor agent reviews Parallax while its typed Rust/Mise patch awaits separate
-review; Parallax agent verifies the new upstream runtime product. Telemetry
-and Rust/Mise candidates remain isolated until their findings are resolved.
+Integration `2da37b63` passed PR `35517547611` and policy `35517545736`.
+The PR executed reusable workflows at merge revision `74e1b66d`; raw run
+metadata identifies source head `2da37b63`. Required-gate latency was 539s;
+the final control job completed at 545s. Policy executed for 258s separately.
+The runner remains longest, with 1,879/1,807 MBX operations not looked up and
+131 bypasses in each check/test report. Successful CI does not prove reuse.
+
+Current ownership: parent integrates Parallax and preserves exact-head CI;
+Jackin agent repairs telemetry partial-order validation; Velnor agent repairs
+typed Rust component identity, then Parallax product file-type validation;
+Parallax agent resolves MBX cache authority and namespace design. Candidates
+remain isolated until independent findings and deterministic checks pass.
 
 ## Completion contract
 
