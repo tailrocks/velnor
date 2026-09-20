@@ -4002,16 +4002,25 @@ fn apt_publish(arguments: &[OsString]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the typed pointer command keeps live signature, index, and pointer gates together"
+)]
 fn apt_previous_pointer(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let options = parse_options(
         arguments,
         &[
             "selection",
             "suite",
-            "published",
             "prior",
             "candidate",
             "candidate-sha",
+            "live-publication",
+            "live-publication-signature",
+            "live-inrelease",
+            "live-packages-amd64",
+            "live-packages-arm64",
+            "keyring",
             "bootstrap",
         ],
     )?;
@@ -4035,26 +4044,78 @@ fn apt_previous_pointer(arguments: &[OsString]) -> Result<(), GeneratorError> {
                     "previous pointer candidate differs from immutable discovery",
                 ));
             }
-            let published = required_option(&options, "published")?;
-            let published_path = Path::new(published);
-            let bytes = fs::read(published_path).map_err(|error| {
-                GeneratorError::io("read published record", published_path, &error)
-            })?;
-            let document: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
-                GeneratorError::usage(format!("published record is not valid JSON: {error}"))
-            })?;
-            apt_result(crate::apt::derive_previous_pointer(
-                &document,
+            let live = apt_result(crate::apt::read_verified_live_publication(
+                crate::apt::Suite::Stable,
+                Path::new(required_option(&options, "live-publication")?),
+                Path::new(required_option(&options, "live-publication-signature")?),
+                Path::new(required_option(&options, "live-inrelease")?),
+                Path::new(required_option(&options, "live-packages-amd64")?),
+                Path::new(required_option(&options, "live-packages-arm64")?),
+                Path::new(required_option(&options, "keyring")?),
+                None,
+            ))?;
+            let pointer = apt_result(crate::apt::derive_previous_pointer(
+                &live.document,
                 required_option(&options, "prior")?,
                 &candidate,
                 required_option(&options, "candidate-sha")?,
+            ))?;
+            let live_candidate = live
+                .document
+                .get("crate_version")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| GeneratorError::usage("live stable publication has no version"))?;
+            let expected_rollback = pointer
+                .get("tag")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|tag| tag.strip_prefix('v'))
+                .ok_or_else(|| {
+                    GeneratorError::usage("stable previous pointer has no canonical rollback tag")
+                })?;
+            apt_result(crate::apt::bind_live_rollback_packages(
+                &pointer,
+                crate::apt::Suite::Stable,
+                &selection.package,
+                live_candidate,
+                Some(expected_rollback),
+                &live.amd64_packages,
+                &live.arm64_packages,
             ))?
         }
         crate::apt::Suite::Preview => {
             if bootstrap {
                 serde_json::Value::Null
             } else {
-                serde_json::Value::String(crate::apt::PREVIEW_TAG.to_owned())
+                let live = apt_result(crate::apt::read_verified_live_publication(
+                    crate::apt::Suite::Preview,
+                    Path::new(required_option(&options, "live-publication")?),
+                    Path::new(required_option(&options, "live-publication-signature")?),
+                    Path::new(required_option(&options, "live-inrelease")?),
+                    Path::new(required_option(&options, "live-packages-amd64")?),
+                    Path::new(required_option(&options, "live-packages-arm64")?),
+                    Path::new(required_option(&options, "keyring")?),
+                    None,
+                ))?;
+                let live_candidate = live
+                    .document
+                    .get("crate_version")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        GeneratorError::usage("live preview publication has no version")
+                    })?;
+                let pointer = serde_json::json!({
+                    "tag": crate::apt::PREVIEW_TAG,
+                    "rollback_packages": []
+                });
+                apt_result(crate::apt::bind_live_rollback_packages(
+                    &pointer,
+                    crate::apt::Suite::Preview,
+                    &selection.package,
+                    live_candidate,
+                    None,
+                    &live.amd64_packages,
+                    &live.arm64_packages,
+                ))?
             }
         }
     };

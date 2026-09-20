@@ -4769,13 +4769,12 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
             "publish: refusing — verify has not armed the reprepro sentinel: {error}"
         ))
     })?;
-    let (selection_path, expected_selection) = match (inputs.selection_path, inputs.selection) {
-        (Some(path), Some(selection)) => (path, selection),
-        _ => {
-            return Err(GeneratorError::usage(
-                "publish: schema-2 discovery selection and source path are required",
-            ));
-        }
+    let (Some(selection_path), Some(expected_selection)) =
+        (inputs.selection_path, inputs.selection)
+    else {
+        return Err(GeneratorError::usage(
+            "publish: schema-2 discovery selection and source path are required",
+        ));
     };
     let current = read_discovery_selection(selection_path)?;
     if &current != expected_selection {
@@ -5070,6 +5069,417 @@ pub(crate) fn packages_versions(text: &str, package: &str) -> BTreeSet<String> {
         }
     }
     versions
+}
+
+/// One package identity read from a live `Packages` index.  The index is the
+/// authority for the rollback bytes only after its enclosing signed Release
+/// metadata has been verified by the caller; this parser binds the exact
+/// package path and digest once that boundary is crossed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LivePackageEntry {
+    version: String,
+    name: String,
+    sha256: String,
+}
+
+fn parse_live_package_stanza(
+    fields: &BTreeMap<String, String>,
+    package: &str,
+    arch: &str,
+    suite: Suite,
+) -> Result<Option<LivePackageEntry>, GeneratorError> {
+    if fields.get("Package").map(String::as_str) != Some(package) {
+        return Ok(None);
+    }
+    let value = |name: &str| {
+        fields
+            .get(name)
+            .map(String::as_str)
+            .ok_or_else(|| GeneratorError::usage(format!("live Packages stanza lacks {name}")))
+    };
+    if value("Architecture")? != arch {
+        return Err(GeneratorError::usage(
+            "live Packages package architecture differs from its index",
+        ));
+    }
+    let version = value("Version")?.to_owned();
+    if !valid_pool_version(&version) {
+        return Err(GeneratorError::usage(
+            "live Packages package version is unsafe",
+        ));
+    }
+    let name = canonical_pool_name(package, &version, arch);
+    let filename = value("Filename")?;
+    let prefix = match suite {
+        Suite::Stable => "pool/main",
+        Suite::Preview => "pool/preview/main",
+    };
+    let expected_filename = format!("{prefix}/{}/{package}/{name}", pool_letter(package));
+    if filename != expected_filename {
+        return Err(GeneratorError::usage(
+            "live Packages package filename is not the canonical pool identity",
+        ));
+    }
+    let sha256 = value("SHA256")?.to_owned();
+    if !valid_digest(&sha256) {
+        return Err(GeneratorError::usage(
+            "live Packages package SHA256 is not a lowercase digest",
+        ));
+    }
+    Ok(Some(LivePackageEntry {
+        version,
+        name,
+        sha256,
+    }))
+}
+
+/// Parse the package rows for one architecture from a live `Packages` file.
+/// Only the selected package is projected; every selected stanza must carry
+/// an exact canonical pool filename and SHA256.  A path-bearing filename or
+/// a duplicate field cannot silently become a rollback identity.
+fn parse_live_packages(
+    text: &str,
+    package: &str,
+    arch: &str,
+    suite: Suite,
+) -> Result<Vec<LivePackageEntry>, GeneratorError> {
+    if !valid_package_name(package) || !REQUIRED_ARCHES.contains(&arch) {
+        return Err(GeneratorError::usage(
+            "live Packages selection has an unsafe package or architecture",
+        ));
+    }
+    let mut rows = Vec::new();
+    let mut fields = BTreeMap::new();
+    let flush = |fields: &mut BTreeMap<String, String>,
+                 rows: &mut Vec<LivePackageEntry>|
+     -> Result<(), GeneratorError> {
+        if fields.is_empty() {
+            return Ok(());
+        }
+        if let Some(row) = parse_live_package_stanza(fields, package, arch, suite)? {
+            rows.push(row);
+        }
+        fields.clear();
+        Ok(())
+    };
+    for line in text.lines() {
+        if line.is_empty() {
+            flush(&mut fields, &mut rows)?;
+            continue;
+        }
+        // Description continuations are not identity fields.  They are
+        // accepted only as continuations, never as new field names.
+        if line.starts_with([' ', '\t']) {
+            continue;
+        }
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| GeneratorError::usage("live Packages contains a malformed field"))?;
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            || fields
+                .insert(name.to_owned(), value.trim().to_owned())
+                .is_some()
+        {
+            return Err(GeneratorError::usage(
+                "live Packages contains a duplicate or unsafe field",
+            ));
+        }
+    }
+    flush(&mut fields, &mut rows)?;
+    Ok(rows)
+}
+
+fn live_rollback_entry(
+    text: &str,
+    package: &str,
+    arch: &str,
+    suite: Suite,
+    candidate: &str,
+    expected_rollback: Option<&str>,
+) -> Result<LivePackageEntry, GeneratorError> {
+    if !valid_pool_version(candidate) {
+        return Err(GeneratorError::usage(
+            "live Packages candidate version is unsafe",
+        ));
+    }
+    let rows = parse_live_packages(text, package, arch, suite)?;
+    let mut by_version = BTreeMap::new();
+    for row in rows {
+        if by_version.insert(row.version.clone(), row).is_some() {
+            return Err(GeneratorError::usage(
+                "live Packages contains duplicate package versions",
+            ));
+        }
+    }
+    if by_version.len() != IMPLEMENTED_RETENTION as usize + 1 {
+        return Err(GeneratorError::usage(
+            "live Packages must contain exactly the candidate and one rollback version",
+        ));
+    }
+    if !by_version.contains_key(candidate) {
+        return Err(GeneratorError::usage(
+            "live Packages does not contain the immutable candidate version",
+        ));
+    }
+    let row = if let Some(expected) = expected_rollback {
+        by_version.remove(expected).ok_or_else(|| {
+            GeneratorError::usage(
+                "live Packages rollback version differs from the immutable prior tag",
+            )
+        })?
+    } else {
+        let mut rollback = by_version
+            .into_iter()
+            .filter(|(version, _)| version != candidate)
+            .map(|(_, row)| row);
+        let row = rollback.next().ok_or_else(|| {
+            GeneratorError::usage("live Packages has no retained rollback version")
+        })?;
+        if rollback.next().is_some() {
+            return Err(GeneratorError::usage(
+                "live Packages contains more than one rollback version",
+            ));
+        }
+        row
+    };
+    Ok(row)
+}
+
+/// Replace the rollback identities in a typed previous pointer with the rows
+/// from both verified live indexes. Stable pointers retain their source-record
+/// digest; preview pointers must already be the object form and cannot use the
+/// removed string-only legacy representation.
+pub(crate) fn bind_live_rollback_packages(
+    pointer: &serde_json::Value,
+    suite: Suite,
+    package: &str,
+    candidate: &str,
+    expected_rollback: Option<&str>,
+    amd64_packages: &str,
+    arm64_packages: &str,
+) -> Result<serde_json::Value, GeneratorError> {
+    let amd64 = live_rollback_entry(
+        amd64_packages,
+        package,
+        "amd64",
+        suite,
+        candidate,
+        expected_rollback,
+    )?;
+    let arm64 = live_rollback_entry(
+        arm64_packages,
+        package,
+        "arm64",
+        suite,
+        candidate,
+        expected_rollback,
+    )?;
+    if amd64.version != arm64.version {
+        return Err(GeneratorError::usage(
+            "live Packages rollback versions differ by architecture",
+        ));
+    }
+    let rollback_packages = serde_json::json!([
+        {"name": amd64.name, "sha256": amd64.sha256},
+        {"name": arm64.name, "sha256": arm64.sha256},
+    ]);
+    match suite {
+        Suite::Stable => {
+            validate_rollback_pointer_shape(pointer)?;
+            let expected = expected_rollback.ok_or_else(|| {
+                GeneratorError::usage(
+                    "stable live rollback binding requires the immutable prior version",
+                )
+            })?;
+            if field(pointer, "tag")? != format!("v{expected}") {
+                return Err(GeneratorError::usage(
+                    "live Packages rollback tag differs from the immutable prior tag",
+                ));
+            }
+        }
+        Suite::Preview => {
+            exact_object_keys(
+                pointer,
+                &["tag", ROLLBACK_PACKAGES_FIELD],
+                "preview live rollback pointer",
+            )?;
+            if field(pointer, "tag")? != PREVIEW_TAG {
+                return Err(GeneratorError::usage(
+                    "preview live rollback pointer has an invalid tag",
+                ));
+            }
+            if !pointer
+                .get(ROLLBACK_PACKAGES_FIELD)
+                .is_some_and(serde_json::Value::is_array)
+            {
+                return Err(GeneratorError::usage(
+                    "preview live rollback pointer has no package array",
+                ));
+            }
+        }
+    }
+    let mut bound = pointer.clone();
+    bound[ROLLBACK_PACKAGES_FIELD] = rollback_packages;
+    Ok(bound)
+}
+
+/// The signed live publication plus the exact index bytes it authenticated.
+/// The bytes stay in this value so selection cannot re-open mutable index
+/// pathnames after the signature/digest boundary.
+pub(crate) struct VerifiedLivePublication {
+    pub(crate) document: serde_json::Value,
+    pub(crate) amd64_packages: String,
+    pub(crate) arm64_packages: String,
+}
+
+/// Verify the signed live publication record, its clearsigned `InRelease`,
+/// and both index digests before any package row can become a rollback
+/// identity. The caller still projects package rows through
+/// `bind_live_rollback_packages`; this function establishes the external
+/// signature/digest authority for those rows.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "live publication verification keeps signatures, digests, and immutable bytes together"
+)]
+pub(crate) fn read_verified_live_publication(
+    suite: Suite,
+    publication: &Path,
+    publication_signature: &Path,
+    inrelease: &Path,
+    amd64_packages: &Path,
+    arm64_packages: &Path,
+    keyring: &Path,
+    path_overlay: Option<&Path>,
+) -> Result<VerifiedLivePublication, GeneratorError> {
+    let keyring_name = keyring
+        .to_str()
+        .ok_or_else(|| GeneratorError::usage("live publication keyring is not UTF-8"))?;
+    if !valid_keyring_path(keyring_name) {
+        return Err(GeneratorError::usage(
+            "live publication keyring path is unsafe",
+        ));
+    }
+    let keyring_bytes = read_regular_file(keyring)?;
+    let publication_bytes = read_regular_file(publication)?;
+    let signature_bytes = read_regular_file(publication_signature)?;
+    let inrelease_bytes = read_regular_file(inrelease)?;
+    let amd64_bytes = read_regular_file(amd64_packages)?;
+    let arm64_bytes = read_regular_file(arm64_packages)?;
+    let mut scratch_dirs = Vec::new();
+    let result = (|| {
+        let (scratch, keyring_path) = materialize_verified_bytes(&keyring_bytes)?;
+        scratch_dirs.push(scratch);
+        let (scratch, publication_path) = materialize_verified_bytes(&publication_bytes)?;
+        scratch_dirs.push(scratch);
+        let (scratch, signature_path) = materialize_verified_bytes(&signature_bytes)?;
+        scratch_dirs.push(scratch);
+        let (scratch, inrelease_path) = materialize_verified_bytes(&inrelease_bytes)?;
+        scratch_dirs.push(scratch);
+        let keyring_name = keyring_path
+            .to_str()
+            .ok_or_else(|| GeneratorError::usage("materialized keyring path is not UTF-8"))?;
+        let publication_name = publication_path
+            .to_str()
+            .ok_or_else(|| GeneratorError::usage("materialized publication path is not UTF-8"))?;
+        let signature_name = signature_path.to_str().ok_or_else(|| {
+            GeneratorError::usage("materialized publication signature path is not UTF-8")
+        })?;
+        let inrelease_name = inrelease_path
+            .to_str()
+            .ok_or_else(|| GeneratorError::usage("materialized InRelease path is not UTF-8"))?;
+        run_fixed(
+            "gpgv",
+            &[
+                "--no-default-keyring".to_owned(),
+                "--keyring".to_owned(),
+                keyring_name.to_owned(),
+                signature_name.to_owned(),
+                publication_name.to_owned(),
+            ],
+            None,
+            path_overlay,
+        )?;
+        run_fixed(
+            "gpgv",
+            &[
+                "--no-default-keyring".to_owned(),
+                "--keyring".to_owned(),
+                keyring_name.to_owned(),
+                inrelease_name.to_owned(),
+            ],
+            None,
+            path_overlay,
+        )?;
+        let document =
+            serde_json::from_slice::<serde_json::Value>(&publication_bytes).map_err(|error| {
+                GeneratorError::usage(format!("live publication is not valid JSON: {error}"))
+            })?;
+        let record = parse_publication_record(&document)?;
+        match suite {
+            Suite::Stable => {
+                if record.suite.is_some()
+                    || parse_stable_tag(&record.tag)?.version != record.crate_version
+                {
+                    return Err(GeneratorError::usage(
+                        "live stable publication identity is inconsistent",
+                    ));
+                }
+            }
+            Suite::Preview => {
+                if record.suite.as_deref() != Some(PREVIEW_SUITE)
+                    || record.tag != PREVIEW_TAG
+                    || parse_preview_version(&record.crate_version).is_err()
+                {
+                    return Err(GeneratorError::usage(
+                        "live preview publication identity is inconsistent",
+                    ));
+                }
+            }
+        }
+        if sha256_hex(&inrelease_bytes) != record.inrelease_sha256 {
+            return Err(GeneratorError::usage(
+                "live InRelease bytes differ from the signed publication record",
+            ));
+        }
+        let mut index_text = BTreeMap::new();
+        for (arch, bytes) in [("amd64", &amd64_bytes), ("arm64", &arm64_bytes)] {
+            let expected = record
+                .packages
+                .iter()
+                .find(|entry| entry.arch == arch)
+                .map(|entry| entry.sha256.as_str())
+                .ok_or_else(|| {
+                    GeneratorError::usage(format!(
+                        "live publication record has no {arch} Packages digest"
+                    ))
+                })?;
+            if sha256_hex(bytes) != expected {
+                return Err(GeneratorError::usage(format!(
+                    "live {arch} Packages bytes differ from the signed publication record"
+                )));
+            }
+            let text = String::from_utf8(bytes.clone())
+                .map_err(|_| GeneratorError::usage(format!("live {arch} Packages is not UTF-8")))?;
+            index_text.insert(arch, text);
+        }
+        Ok(VerifiedLivePublication {
+            document,
+            amd64_packages: index_text
+                .remove("amd64")
+                .ok_or_else(|| GeneratorError::usage("live amd64 Packages text is missing"))?,
+            arm64_packages: index_text
+                .remove("arm64")
+                .ok_or_else(|| GeneratorError::usage("live arm64 Packages text is missing"))?,
+        })
+    })();
+    for scratch in scratch_dirs {
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+    result
 }
 
 /// The fixed `apt-ftparchive packages` argument vector.
@@ -6282,6 +6692,10 @@ pub(crate) struct PublicationRecord {
 }
 
 /// Parse a publication record, failing closed on any malformed shape.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the publication record is one exact typed contract gate"
+)]
 pub(crate) fn parse_publication_record(
     document: &serde_json::Value,
 ) -> Result<PublicationRecord, GeneratorError> {
@@ -6307,9 +6721,16 @@ pub(crate) fn parse_publication_record(
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| GeneratorError::usage("publication record packages are not an array"))?;
     let mut entries = Vec::new();
+    let mut seen_arches = BTreeSet::new();
     for package in packages {
+        let arch = field(package, "arch")?;
+        if !seen_arches.insert(arch) {
+            return Err(GeneratorError::usage(
+                "publication record repeats a Packages architecture",
+            ));
+        }
         entries.push(IndexEntry {
-            arch: field(package, "arch")?.to_owned(),
+            arch: arch.to_owned(),
             sha256: field(package, "sha256")?.to_owned(),
         });
     }
@@ -6436,6 +6857,10 @@ fn staged_deb_entries(
 }
 
 /// Emit and detached-sign the publication record into the staging tree.
+#[allow(
+    clippy::too_many_lines,
+    reason = "publication emission keeps the signed record assembly auditable"
+)]
 #[allow(clippy::too_many_arguments)]
 fn emit_publication_record(
     staging: &Path,
@@ -10198,6 +10623,198 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn live_packages(
+        suite: Suite,
+        package: &str,
+        arch: &str,
+        candidate: &str,
+        rollback: &str,
+    ) -> String {
+        let prefix = match suite {
+            Suite::Stable => "pool/main",
+            Suite::Preview => "pool/preview/main",
+        };
+        let stanza = |version: &str, digest: &str| {
+            let name = canonical_pool_name(package, version, arch);
+            format!(
+                "Package: {package}\nVersion: {version}\nArchitecture: {arch}\nFilename: {prefix}/e/{package}/{name}\nSize: 17\nSHA256: {digest}\nDescription: test\n continuation\n"
+            )
+        };
+        format!(
+            "{}\n{}",
+            stanza(candidate, &"aa".repeat(32)),
+            stanza(rollback, &"bb".repeat(32))
+        )
+    }
+
+    #[test]
+    fn live_packages_bind_exact_rollback_identity_for_both_arches() {
+        let pointer = serde_json::json!({
+            "tag": "v1.2.2",
+            "source_record_sha256": "cc".repeat(32),
+            ROLLBACK_PACKAGES_FIELD: [
+                {"name": "example_1.2.2_amd64.deb", "sha256": "dd".repeat(32)},
+                {"name": "example_1.2.2_arm64.deb", "sha256": "dd".repeat(32)}
+            ]
+        });
+        let bound = must(
+            bind_live_rollback_packages(
+                &pointer,
+                Suite::Stable,
+                "example",
+                "1.2.3",
+                Some("1.2.2"),
+                &live_packages(Suite::Stable, "example", "amd64", "1.2.3", "1.2.2"),
+                &live_packages(Suite::Stable, "example", "arm64", "1.2.3", "1.2.2"),
+            ),
+            "bind live rollback identity",
+        );
+        assert_eq!(
+            bound
+                .get(ROLLBACK_PACKAGES_FIELD)
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(REQUIRED_ARCHES.len())
+        );
+        assert_eq!(
+            bound[ROLLBACK_PACKAGES_FIELD][0]["name"],
+            "example_1.2.2_amd64.deb"
+        );
+        assert_eq!(
+            bound[ROLLBACK_PACKAGES_FIELD][0]["sha256"],
+            serde_json::Value::String("bb".repeat(32))
+        );
+        assert_eq!(
+            bound[ROLLBACK_PACKAGES_FIELD][1]["name"],
+            "example_1.2.2_arm64.deb"
+        );
+    }
+
+    #[test]
+    fn live_packages_reject_path_or_digest_tampering() {
+        let pointer = serde_json::json!({
+            "tag": PREVIEW_TAG,
+            ROLLBACK_PACKAGES_FIELD: []
+        });
+        let mut hostile = live_packages(
+            Suite::Preview,
+            "example",
+            "amd64",
+            PREVIEW_CANDIDATE,
+            PREVIEW_ROLLBACK,
+        );
+        hostile = hostile.replace(
+            "Filename: pool/preview/main/e/example/example_1.2.3~preview.40+abcdef0_amd64.deb",
+            "Filename: pool/preview/main/e/example/../escape.deb",
+        );
+        let error = must_fail(
+            bind_live_rollback_packages(
+                &pointer,
+                Suite::Preview,
+                "example",
+                PREVIEW_CANDIDATE,
+                None,
+                &hostile,
+                &live_packages(
+                    Suite::Preview,
+                    "example",
+                    "arm64",
+                    PREVIEW_CANDIDATE,
+                    PREVIEW_ROLLBACK,
+                ),
+            ),
+            "reject hostile live path",
+        );
+        assert!(error.contains("canonical pool identity"), "{error}");
+
+        let mut hostile = live_packages(
+            Suite::Preview,
+            "example",
+            "amd64",
+            PREVIEW_CANDIDATE,
+            PREVIEW_ROLLBACK,
+        );
+        hostile = hostile.replace(&"bb".repeat(32), &"zz".repeat(32));
+        let error = must_fail(
+            bind_live_rollback_packages(
+                &pointer,
+                Suite::Preview,
+                "example",
+                PREVIEW_CANDIDATE,
+                None,
+                &hostile,
+                &live_packages(
+                    Suite::Preview,
+                    "example",
+                    "arm64",
+                    PREVIEW_CANDIDATE,
+                    PREVIEW_ROLLBACK,
+                ),
+            ),
+            "reject hostile live digest",
+        );
+        assert!(error.contains("SHA256"), "{error}");
+    }
+
+    #[test]
+    fn live_packages_reject_legacy_preview_pointer_and_mixed_versions() {
+        let amd64 = live_packages(
+            Suite::Preview,
+            "example",
+            "amd64",
+            PREVIEW_CANDIDATE,
+            PREVIEW_ROLLBACK,
+        );
+        let arm64 = live_packages(
+            Suite::Preview,
+            "example",
+            "arm64",
+            PREVIEW_CANDIDATE,
+            PREVIEW_ROLLBACK,
+        );
+        let error = must_fail(
+            bind_live_rollback_packages(
+                &serde_json::json!(PREVIEW_TAG),
+                Suite::Preview,
+                "example",
+                PREVIEW_CANDIDATE,
+                None,
+                &amd64,
+                &arm64,
+            ),
+            "reject legacy preview pointer",
+        );
+        assert!(
+            error.contains("not an object")
+                || error.contains("object form")
+                || error.contains("unexpected field"),
+            "{error}"
+        );
+
+        let error = must_fail(
+            bind_live_rollback_packages(
+                &serde_json::json!({
+                    "tag": PREVIEW_TAG,
+                    ROLLBACK_PACKAGES_FIELD: []
+                }),
+                Suite::Preview,
+                "example",
+                PREVIEW_CANDIDATE,
+                None,
+                &amd64,
+                &live_packages(
+                    Suite::Preview,
+                    "example",
+                    "arm64",
+                    PREVIEW_CANDIDATE,
+                    "1.2.3~preview.39+abcdef0",
+                ),
+            ),
+            "reject mixed live rollback versions",
+        );
+        assert!(error.contains("differ by architecture"), "{error}");
     }
 
     /// Build a rollback prev pair of asset-named debs under `root/prev`.
