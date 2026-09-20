@@ -318,6 +318,48 @@ pub(crate) fn candidate_bounded_git_archive_script() -> String {
     )
 }
 
+/// Stream every GitHub API archive response into a bounded partial file. The
+/// API's `size_in_bytes` is checked before this call, but a chunked response
+/// can omit a usable Content-Length; the writer therefore remains the final
+/// compressed-byte gate before any ZIP/TAR parser sees the file.
+pub(crate) fn candidate_bounded_curl_download_script() -> String {
+    r#"          bounded_curl_download() {
+            local url="$1"
+            local destination="$2"
+            local partial="${destination}.partial"
+            rm -f -- "$partial" "$destination"
+            if ! curl --fail --location --silent --show-error --max-filesize __MAX_COMPRESSED__ \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$url" --output - |
+            python3 -c '
+          import sys
+          destination = sys.argv[1]
+          limit = int(sys.argv[2])
+          total = 0
+          with open(destination, "wb") as output:
+              while True:
+                  chunk = sys.stdin.buffer.read(1024 * 1024)
+                  if not chunk:
+                      break
+                  total += len(chunk)
+                  if total > limit:
+                      raise SystemExit("download exceeds bounded compressed transport size")
+                  output.write(chunk)
+          ' "$partial" "__MAX_COMPRESSED__"; then
+              rm -f -- "$partial" "$destination"
+              return 1
+            fi
+            mv -- "$partial" "$destination"
+          }
+"#
+    .replace(
+        "__MAX_COMPRESSED__",
+        &CANDIDATE_TRANSPORT_MAX_COMPRESSED_BYTES.to_string(),
+    )
+}
+
 pub(crate) const CANDIDATE_MANIFEST_SCHEMA: &str = "velnor.bootstrap-producer-manifest.v1";
 /// The producer manifest schema is embedded in the base-owned policy
 /// renderer.  The policy job writes this exact text before it accepts a
@@ -5364,18 +5406,14 @@ macro_rules! policy_candidate_step_template {
           if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
           if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
           case "$PR_NUMBER" in ''|*[!0-9]*) exit 1 ;; esac
-          verify_action_archive() {{
+{bounded_curl_download}          verify_action_archive() {{
             local repository="$1"
             local revision="$2"
             local expected="$3"
             local label="$4"
             if [[ ! "$revision" =~ ^[0-9a-f]{{40}}$ || ! "$expected" =~ ^[0-9a-f]{{64}}$ ]]; then exit 1; fi
             local archive="$RUNNER_TEMP/action-$label.tar.gz"
-            curl --fail --location --silent --show-error --max-filesize {max_compressed} \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer $GH_TOKEN" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "$GITHUB_API_URL/repos/$repository/tarball/$revision" --output "$archive"
+            bounded_curl_download "$GITHUB_API_URL/repos/$repository/tarball/$revision" "$archive"
             archive_size="$(stat -c '%s' "$archive")"
             test "$archive_size" -le {max_compressed}
             test "$(sha256sum "$archive" | awk '{{print $1}}')" = "$expected"
@@ -5517,12 +5555,7 @@ macro_rules! policy_candidate_step_template {
           jq -e --argjson run_created "$run_created_epoch" '.expired == false and (.expires_at | strings | fromdateiso8601 > now) and (.created_at | strings | fromdateiso8601) >= $run_created and (.updated_at | strings | fromdateiso8601) >= (.created_at | strings | fromdateiso8601)' <<<"$artifact" >/dev/null
 
           archive="$RUNNER_TEMP/candidate.zip"
-          curl --fail --location --silent --show-error --max-filesize {max_compressed} \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" \
-            --output "$archive"
+          bounded_curl_download "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" "$archive"
           raw_zip_sha256="$(sha256sum "$archive" | awk '{{print $1}}')"
           archive_size="$(stat -c '%s' "$archive")"
           test "$archive_size" -le {max_compressed}
@@ -5681,6 +5714,7 @@ macro_rules! policy_candidate_step_template {
         artifact_binding_method = crate::s2::CANDIDATE_ARTIFACT_BINDING_METHOD,
         object_format = crate::s2::CANDIDATE_TRANSPORT_OBJECT_FORMAT,
         bounded_git_archive = crate::s2::candidate_bounded_git_archive_script(),
+        bounded_curl_download = crate::s2::candidate_bounded_curl_download_script(),
         upload = ActionPin::UploadArtifact.reference(),
         )
     };
@@ -6132,18 +6166,14 @@ macro_rules! policy_candidate_result_verification_template {
           test "$HEAD_REPOSITORY_ID" = "$TARGET_REPOSITORY_ID"
           policy_run_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
           policy_run_created_epoch="$(jq -er '.created_at | fromdateiso8601' <<<"$policy_run_api")"
-          verify_action_archive() {{
+{bounded_curl_download}          verify_action_archive() {{
             local repository="$1"
             local revision="$2"
             local expected="$3"
             local label="$4"
             if [[ ! "$revision" =~ ^[0-9a-f]{{40}}$ || ! "$expected" =~ ^[0-9a-f]{{64}}$ ]]; then exit 1; fi
             local archive="$RUNNER_TEMP/verify-action-$label.tar.gz"
-            curl --fail --location --silent --show-error --max-filesize {max_compressed} \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer $GH_TOKEN" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "$GITHUB_API_URL/repos/$repository/tarball/$revision" --output "$archive"
+            bounded_curl_download "$GITHUB_API_URL/repos/$repository/tarball/$revision" "$archive"
             archive_size="$(stat -c '%s' "$archive")"
             test "$archive_size" -le {max_compressed}
             test "$(sha256sum "$archive" | awk '{{print $1}}')" = "$expected"
@@ -6158,12 +6188,7 @@ macro_rules! policy_candidate_result_verification_template {
             (.updated_at | strings | fromdateiso8601) >= (.created_at | strings | fromdateiso8601)
           ' <<<"$result_api" >/dev/null
           result_archive="$RUNNER_TEMP/candidate-result.zip"
-          curl --fail --location --silent --show-error --max-filesize {max_compressed} \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$RESULT_ID/zip" \
-            --output "$result_archive"
+          bounded_curl_download "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$RESULT_ID/zip" "$result_archive"
           result_raw_zip_sha256="$(sha256sum "$result_archive" | awk '{{print $1}}')"
           result_archive_size="$(stat -c '%s' "$result_archive")"
           test "$result_archive_size" -le {max_compressed}
@@ -6264,12 +6289,7 @@ macro_rules! policy_candidate_result_verification_template {
             (.updated_at | strings | fromdateiso8601) >= (.created_at | strings | fromdateiso8601)
           ' <<<"$handoff_api" >/dev/null
           handoff_archive="$RUNNER_TEMP/candidate-handoff.zip"
-          curl --fail --location --silent --show-error --max-filesize {max_compressed} \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$handoff_id/zip" \
-            --output "$handoff_archive"
+          bounded_curl_download "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$handoff_id/zip" "$handoff_archive"
           handoff_raw_zip_sha256="$(sha256sum "$handoff_archive" | awk '{{print $1}}')"
           handoff_archive_size="$(stat -c '%s' "$handoff_archive")"
           test "$handoff_archive_size" -le {max_compressed}
@@ -6349,12 +6369,7 @@ macro_rules! policy_candidate_result_verification_template {
             (.updated_at | strings | fromdateiso8601) >= (.created_at | strings | fromdateiso8601)
           ' <<<"$producer_api" >/dev/null
           producer_archive="$RUNNER_TEMP/candidate-producer-verified.zip"
-          curl --fail --location --silent --show-error --max-filesize {max_compressed} \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$producer_id/zip" \
-            --output "$producer_archive"
+          bounded_curl_download "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$producer_id/zip" "$producer_archive"
           producer_archive_size="$(stat -c '%s' "$producer_archive")"
           test "$producer_archive_size" -le {max_compressed}
           test "$(sha256sum "$producer_archive" | awk '{{print $1}}')" = "$(jq -er .artifact_raw_zip_sha256 "$handoff_json")"
@@ -6518,6 +6533,7 @@ macro_rules! policy_candidate_result_verification_template {
         max_uncompressed = crate::s2::CANDIDATE_TRANSPORT_MAX_UNCOMPRESSED_BYTES,
         result_max_uncompressed = crate::s2::CANDIDATE_RESULT_MAX_UNCOMPRESSED_BYTES,
         bounded_git_archive = crate::s2::candidate_bounded_git_archive_script(),
+        bounded_curl_download = crate::s2::candidate_bounded_curl_download_script(),
         upload_action_archive_sha256 = crate::s2::CANDIDATE_UPLOAD_ACTION_ARCHIVE_SHA256,
         upload_action_revision = crate::s2::CANDIDATE_UPLOAD_ACTION_REVISION,
         )

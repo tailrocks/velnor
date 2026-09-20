@@ -980,14 +980,15 @@ else:
 "#;
 
 const CURL_FIXTURE: &str = r#"#!/usr/bin/env python3
-import os, shutil, sys
+import os, sys
 args = sys.argv[1:]
 destination = args[args.index("--output") + 1]
 url = next((arg for arg in args if arg.startswith("http")), "")
-if "/tarball/" in url:
-    open(destination, "wb").write(b"base-owned action archive fixture\n")
+payload = b"base-owned action archive fixture\n" if "/tarball/" in url else open(os.environ["FIXTURE_ARCHIVE"], "rb").read()
+if destination == "-":
+    sys.stdout.buffer.write(payload)
 else:
-    shutil.copyfile(os.environ["FIXTURE_ARCHIVE"], destination)
+    open(destination, "wb").write(payload)
 "#;
 
 const GIT_FIXTURE: &str = r#"#!/usr/bin/env python3
