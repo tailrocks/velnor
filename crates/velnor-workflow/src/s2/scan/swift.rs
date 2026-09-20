@@ -852,7 +852,7 @@ fn xcode_project_is_ios(contents: &str) -> bool {
 }
 
 fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
-    let mut units = Vec::new();
+    let mut candidates = Vec::new();
     for scheme in files
         .iter()
         .filter(|file| file.ends_with(".xcscheme") && file.contains("/xcshareddata/xcschemes/"))
@@ -861,46 +861,92 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             continue;
         };
         let scheme_name = scheme_name.trim_end_matches(".xcscheme");
-        let container_root = parent_path(container);
-        let (flag, extension) = if container.ends_with(".xcworkspace") {
-            ("-workspace", "xcworkspace")
+        let extension = if container.ends_with(".xcworkspace") {
+            "xcworkspace"
         } else if container.ends_with(".xcodeproj") {
-            ("-project", "xcodeproj")
+            "xcodeproj"
         } else {
             continue;
         };
-        let scheme_contents = fs::read_to_string(root.join(scheme)).unwrap_or_default();
-        let referenced_project = if extension == "xcworkspace" {
-            xcode_scheme_referenced_container(&scheme_contents)
-                .and_then(|path| resolve_repo_path(&container_root, &path))
-        } else {
-            Some(container.to_owned())
-        };
-        let project_contents = referenced_project
-            .as_deref()
-            .and_then(|project| {
-                files
-                    .iter()
-                    .find(|file| file.as_str() == format!("{project}/project.pbxproj"))
-            })
-            .and_then(|project| fs::read_to_string(root.join(project)).ok())
-            .unwrap_or_default();
-        let ios_destination = xcode_project_is_ios(&project_contents);
-        let build_destination = if ios_destination {
-            " -destination 'generic/platform=iOS Simulator'"
-        } else {
-            ""
-        };
-        let test_destination = if ios_destination {
-            " -destination 'platform=iOS Simulator'"
-        } else {
-            ""
-        };
-        let command_prefix = shell_change_dir(&container_root);
-        let container_name = container.rsplit('/').next().unwrap_or(container);
-        let container_quoted = shell_quote(container_name);
-        let scheme_quoted = shell_quote(scheme_name);
-        let commands = vec![
+        candidates.push((scheme, container, scheme_name, extension));
+    }
+    // Same-named schemes in different containers share a base id; qualify
+    // every member of a colliding group with its container so the ids stay
+    // stable and meaningful instead of order-dependent `-2` suffixes.
+    let mut base_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for (_, _, scheme_name, extension) in &candidates {
+        *base_counts
+            .entry(format!(
+                "swift-{extension}-{}",
+                identifier_suffix(scheme_name)
+            ))
+            .or_default() += 1;
+    }
+    candidates
+        .into_iter()
+        .map(|(scheme, container, scheme_name, extension)| {
+            let base = format!("swift-{extension}-{}", identifier_suffix(scheme_name));
+            let qualified = base_counts.get(&base).is_some_and(|count| *count > 1);
+            xcode_scheme_unit(
+                root,
+                files,
+                scheme,
+                container,
+                scheme_name,
+                extension,
+                qualified,
+            )
+        })
+        .collect()
+}
+
+fn xcode_scheme_unit(
+    root: &Path,
+    files: &[String],
+    scheme: &str,
+    container: &str,
+    scheme_name: &str,
+    extension: &str,
+    qualified: bool,
+) -> Unit {
+    let container_root = parent_path(container);
+    let flag = if extension == "xcworkspace" {
+        "-workspace"
+    } else {
+        "-project"
+    };
+    let scheme_contents = fs::read_to_string(root.join(scheme)).unwrap_or_default();
+    let referenced_project = if extension == "xcworkspace" {
+        xcode_scheme_referenced_container(&scheme_contents)
+            .and_then(|path| resolve_repo_path(&container_root, &path))
+    } else {
+        Some(container.to_owned())
+    };
+    let project_contents = referenced_project
+        .as_deref()
+        .and_then(|project| {
+            files
+                .iter()
+                .find(|file| file.as_str() == format!("{project}/project.pbxproj"))
+        })
+        .and_then(|project| fs::read_to_string(root.join(project)).ok())
+        .unwrap_or_default();
+    let ios_destination = xcode_project_is_ios(&project_contents);
+    let build_destination = if ios_destination {
+        " -destination 'generic/platform=iOS Simulator'"
+    } else {
+        ""
+    };
+    let test_destination = if ios_destination {
+        " -destination 'platform=iOS Simulator'"
+    } else {
+        ""
+    };
+    let command_prefix = shell_change_dir(&container_root);
+    let container_name = container.rsplit('/').next().unwrap_or(container);
+    let container_quoted = shell_quote(container_name);
+    let scheme_quoted = shell_quote(scheme_name);
+    let commands = vec![
             format!(
                 "{command_prefix}xcodebuild {flag} {container_quoted} -scheme {scheme_quoted}{build_destination} CODE_SIGNING_ALLOWED=NO build"
             ),
@@ -908,66 +954,79 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
                 "{command_prefix}xcodebuild {flag} {container_quoted} -scheme {scheme_quoted}{test_destination} CODE_SIGNING_ALLOWED=NO test"
             ),
         ];
-        let mut cache_key_files = vec![scheme.to_owned()];
-        if extension == "xcodeproj" {
-            cache_key_files.push(format!("{container}/project.pbxproj"));
-        } else {
-            cache_key_files.push(format!("{container}/contents.xcworkspacedata"));
-            if let Some(project) = referenced_project {
-                cache_key_files.push(format!("{project}/project.pbxproj"));
-            }
+    let mut cache_key_files = vec![scheme.to_owned()];
+    if extension == "xcodeproj" {
+        cache_key_files.push(format!("{container}/project.pbxproj"));
+    } else {
+        cache_key_files.push(format!("{container}/contents.xcworkspacedata"));
+        if let Some(project) = referenced_project {
+            cache_key_files.push(format!("{project}/project.pbxproj"));
         }
-        cache_key_files.sort();
-        cache_key_files.dedup();
-        let root_watch = if container_root == "." {
-            "**".to_owned()
-        } else {
-            format!("{container_root}/**")
-        };
-        let mut unit = Unit {
-            id: format!("swift-{extension}-{}", identifier_suffix(scheme_name)),
-            label: format!("Apple scheme ({scheme_name})"),
-            kind: UnitKind::Swift,
-            root: container_root.clone(),
-            watch: vec![
-                format!("{container}/**"),
-                root_watch,
-                "*.xcconfig".to_owned(),
-            ],
-            pr_commands: commands.clone(),
-            full_commands: commands,
-            depends_on: Vec::new(),
-            pinned_lockfile: false,
-            cache: Some(CacheSpec {
-                key_files: cache_key_files,
-                paths: vec!["~/Library/Developer/Xcode/DerivedData".to_owned()],
-                purpose: CachePurpose::Generic,
-                mbx_output_cache_justification: None,
-                mutable_mount_seed: false,
-            }),
-            tool_version: None,
-            mise_tools: Vec::new(),
-            toolchain: None,
-            services: Vec::new(),
-            trust: crate::s2::provider::TrustReq::UntrustedOk,
-            platform: crate::s2::provider::Platform::MacosArm64,
-            capabilities: crate::s2::provider::Capabilities {
-                native_macos_arm64: true,
-                ..crate::s2::provider::Capabilities::default()
-            },
-            workspace_check: false,
-            products: Vec::new(),
-            prerequisites: Vec::new(),
-            docker_contexts: Vec::new(),
-            env: std::collections::BTreeMap::new(),
-            mbx: None,
-            prepared_tools: Vec::new(),
-        };
-        unit.watch.sort();
-        unit.watch.dedup();
-        units.push(unit);
     }
-    units
+    cache_key_files.sort();
+    cache_key_files.dedup();
+    let root_watch = if container_root == "." {
+        "**".to_owned()
+    } else {
+        format!("{container_root}/**")
+    };
+    let (id, label) = if qualified {
+        (
+            format!(
+                "swift-{extension}-{}-{}",
+                identifier_suffix(container),
+                identifier_suffix(scheme_name)
+            ),
+            format!("Apple scheme ({scheme_name} in {container})"),
+        )
+    } else {
+        (
+            format!("swift-{extension}-{}", identifier_suffix(scheme_name)),
+            format!("Apple scheme ({scheme_name})"),
+        )
+    };
+    let mut unit = Unit {
+        id,
+        label,
+        kind: UnitKind::Swift,
+        root: container_root.clone(),
+        watch: vec![
+            format!("{container}/**"),
+            root_watch,
+            "*.xcconfig".to_owned(),
+        ],
+        pr_commands: commands.clone(),
+        full_commands: commands,
+        depends_on: Vec::new(),
+        pinned_lockfile: false,
+        cache: Some(CacheSpec {
+            key_files: cache_key_files,
+            paths: vec!["~/Library/Developer/Xcode/DerivedData".to_owned()],
+            purpose: CachePurpose::Generic,
+            mbx_output_cache_justification: None,
+            mutable_mount_seed: false,
+        }),
+        tool_version: None,
+        mise_tools: Vec::new(),
+        toolchain: None,
+        services: Vec::new(),
+        trust: crate::s2::provider::TrustReq::UntrustedOk,
+        platform: crate::s2::provider::Platform::MacosArm64,
+        capabilities: crate::s2::provider::Capabilities {
+            native_macos_arm64: true,
+            ..crate::s2::provider::Capabilities::default()
+        },
+        workspace_check: false,
+        products: Vec::new(),
+        prerequisites: Vec::new(),
+        docker_contexts: Vec::new(),
+        env: std::collections::BTreeMap::new(),
+        mbx: None,
+        prepared_tools: Vec::new(),
+    };
+    unit.watch.sort();
+    unit.watch.dedup();
+    unit
 }
 
 pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
@@ -1671,6 +1730,74 @@ mod tests {
             "{:?}",
             shape.limitations
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn same_named_schemes_in_different_containers_get_qualified_ids() {
+        let root = native_fixture(&[
+            (
+                "apps/one/One.xcodeproj/xcshareddata/xcschemes/App.xcscheme",
+                "<Scheme/>\n",
+            ),
+            (
+                "apps/two/Two.xcodeproj/xcshareddata/xcschemes/App.xcscheme",
+                "<Scheme/>\n",
+            ),
+        ]);
+        let shape = scan_native(&root);
+        let mut ids: Vec<&str> = shape
+            .units
+            .iter()
+            .filter(|unit| unit.kind == crate::s2::UnitKind::Swift)
+            .map(|unit| unit.id.as_str())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec![
+                "swift-xcodeproj-apps-one-one-xcodeproj-app",
+                "swift-xcodeproj-apps-two-two-xcodeproj-app",
+            ]
+        );
+        let mut labels: Vec<&str> = shape
+            .units
+            .iter()
+            .filter(|unit| unit.kind == crate::s2::UnitKind::Swift)
+            .map(|unit| unit.label.as_str())
+            .collect();
+        labels.sort_unstable();
+        assert_eq!(
+            labels,
+            vec![
+                "Apple scheme (App in apps/one/One.xcodeproj)",
+                "Apple scheme (App in apps/two/Two.xcodeproj)",
+            ]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn same_named_scheme_across_project_and_workspace_stays_unqualified() {
+        let root = native_fixture(&[
+            (
+                "app/App.xcodeproj/xcshareddata/xcschemes/App.xcscheme",
+                "<Scheme/>\n",
+            ),
+            (
+                "app/App.xcworkspace/xcshareddata/xcschemes/App.xcscheme",
+                "<Scheme/>\n",
+            ),
+        ]);
+        let shape = scan_native(&root);
+        let mut ids: Vec<&str> = shape
+            .units
+            .iter()
+            .filter(|unit| unit.kind == crate::s2::UnitKind::Swift)
+            .map(|unit| unit.id.as_str())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["swift-xcodeproj-app", "swift-xcworkspace-app"]);
         let _ = std::fs::remove_dir_all(root);
     }
 
