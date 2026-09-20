@@ -143,10 +143,12 @@ pub async fn run(args: G0LiveCollectArgs) -> Result<()> {
     {
         return fail_with_checkpoint(&mut progress, error, "write live collection");
     }
-    progress.mark_complete()?;
     if let Err(error) = write_json_new(&args.evidence_dir.join("capture-metadata.json"), &metadata)
     {
-        return Err(error).context("write capture metadata after collection completion");
+        return fail_with_checkpoint(&mut progress, error, "write capture metadata");
+    }
+    if let Err(error) = progress.mark_complete() {
+        return fail_with_checkpoint(&mut progress, error, "write complete progress checkpoint");
     }
     println!(
         "captured {} repositories, {} requests, {} API raw objects and {} local binding raw objects into {}",

@@ -367,24 +367,30 @@ impl<'a> Ledger<'a> {
 
     fn ingest(&mut self, result: CollectionResult) -> Result<Vec<Value>> {
         self.record_progress(&result.requests)?;
+        let mut request_ids = BTreeSet::new();
+        for request in &result.requests {
+            if !request_ids.insert(request.request_id.clone())
+                || self.request_ids.contains(&request.request_id)
+            {
+                bail!("duplicate acquisition request id {}", request.request_id);
+            }
+        }
+        let mut raw_ids = BTreeSet::new();
+        for raw in &result.raw_objects {
+            if !raw_ids.insert(raw.raw_id.clone()) || self.raw_ids.contains(&raw.raw_id) {
+                bail!("duplicate acquisition raw id {}", raw.raw_id);
+            }
+        }
+        self.request_ids.extend(request_ids);
+        self.raw_ids.extend(raw_ids);
+        self.requests.extend(result.requests);
+        self.raw_objects.extend(result.raw_objects);
         if !result.complete {
             bail!(
                 "GitHub collection page set is incomplete: {:?}",
                 result.state
             );
         }
-        for request in &result.requests {
-            if !self.request_ids.insert(request.request_id.clone()) {
-                bail!("duplicate acquisition request id {}", request.request_id);
-            }
-        }
-        for raw in &result.raw_objects {
-            if !self.raw_ids.insert(raw.raw_id.clone()) {
-                bail!("duplicate acquisition raw id {}", raw.raw_id);
-            }
-        }
-        self.requests.extend(result.requests);
-        self.raw_objects.extend(result.raw_objects);
         Ok(result.items)
     }
 
@@ -790,24 +796,26 @@ where
     )
     .await
     .map_err(|error| anyhow!(acquisition_error_message(error)))?;
-    if !result.complete {
-        bail!("raw source acquisition incomplete: {:?}", result.state);
-    }
+    // Snapshot the response metadata before ingest consumes the collection.
+    // Ingest before inspecting success.  A failed raw-source request is still
+    // evidence: its typed request state, error response, and any prior pages
+    // must remain in the ledger for the caller's failure report.
     let raw = result
         .raw_objects
         .iter()
         .find(|raw| raw.object_kind == object_kind)
-        .ok_or_else(|| anyhow!("raw source response lacks object kind {object_kind}"))?;
-    let bytes = BASE64
-        .decode(&raw.bytes_base64)
-        .context("decode raw workflow source bytes")?;
-    let source = String::from_utf8(bytes).context("raw workflow source is not UTF-8")?;
+        .cloned();
     let raw_ids = result
         .raw_objects
         .iter()
         .map(|raw| raw.raw_id.clone())
         .collect::<Vec<_>>();
     ledger.ingest(result)?;
+    let raw = raw.ok_or_else(|| anyhow!("raw source response lacks object kind {object_kind}"))?;
+    let bytes = BASE64
+        .decode(&raw.bytes_base64)
+        .context("decode raw workflow source bytes")?;
+    let source = String::from_utf8(bytes).context("raw workflow source is not UTF-8")?;
     Ok((source, raw_ids))
 }
 
@@ -3210,8 +3218,9 @@ fn utc_now() -> String {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::super::{
-        sha256_digest, AcquisitionFuture, AcquisitionRequest, AcquisitionTransport, RawObject,
-        RawStorageError, TransportFailure, TransportResponse,
+        sha256_digest, AcquisitionFuture, AcquisitionRequest, AcquisitionState,
+        AcquisitionTransport, ApiKind, HttpMethod, PageState, RawObject, RawStorageError,
+        TransportFailure, TransportResponse,
     };
     use super::*;
     use base64::engine::general_purpose::STANDARD as BASE64;
@@ -3325,6 +3334,67 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn failed_collection_is_retained_in_ledger_before_error() {
+        let request = RequestRecord {
+            request_id: "capture-0001".to_owned(),
+            api: ApiKind::Rest,
+            method: HttpMethod::Get,
+            endpoint_or_operation: "https://api.github.com/items".to_owned(),
+            query_base64: String::new(),
+            variables_base64: String::new(),
+            query_sha256: None,
+            variables_sha256: None,
+            redacted_variables: None,
+            auth_identity_ref: "collector.auth".to_owned(),
+            started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+            completed_at_utc: "2026-09-20T00:00:01Z".to_owned(),
+            http_status: None,
+            api_request_id: None,
+            rate_limit: None,
+            safe_scopes: None,
+            page: PageState {
+                number: 1,
+                per_page: Some(100),
+                link_next: None,
+                cursor_in: None,
+                cursor_out: None,
+                has_next_page: None,
+                items_returned: 0,
+            },
+            response_raw_ref: None,
+            error_raw_ref: None,
+            state: AcquisitionState::TransportError,
+            complete: false,
+            truncation_reason: Some("transport failure".to_owned()),
+        };
+        let raw = RawObjectRef {
+            raw_id: "capture-0001-error".to_owned(),
+            request_id: request.request_id.clone(),
+            object_kind: "items.error".to_owned(),
+            canonicalization: "raw-bytes-v1".to_owned(),
+            sha256: "sha256:error".to_owned(),
+            byte_length: 0,
+            original_sha256: "sha256:error".to_owned(),
+            original_byte_length: 0,
+            bytes_base64: String::new(),
+            media_type: "application/json".to_owned(),
+            storage_ref: "sha256://error".to_owned(),
+            original_storage_ref: "sha256://error".to_owned(),
+        };
+        let result = CollectionResult {
+            items: Vec::new(),
+            requests: vec![request],
+            raw_objects: vec![raw],
+            state: AcquisitionState::TransportError,
+            complete: false,
+        };
+        let mut ledger = Ledger::default();
+        assert!(ledger.ingest(result).is_err());
+        assert_eq!(ledger.requests.len(), 1);
+        assert_eq!(ledger.raw_objects.len(), 1);
     }
 
     #[tokio::test]

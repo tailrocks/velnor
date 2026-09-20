@@ -9,7 +9,7 @@
 use super::live_collector::LiveProgressSink;
 use super::{AcquisitionState, RequestRecord};
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,14 +17,14 @@ use url::Url;
 
 pub const REQUEST_PROGRESS_FILE: &str = "request-progress.ndjson";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum ProgressTerminal {
     Complete,
     Failed,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 enum ProgressEvent {
     Started {
@@ -92,6 +92,44 @@ impl LiveProgressFile {
         self.mark_terminal(ProgressTerminal::Failed)
     }
 
+    /// Validate a persisted progress stream before treating its terminal
+    /// state as authoritative.  A final partial JSON line, a request after a
+    /// terminal event, or a second terminal event is never accepted.
+    pub fn validate(path: &Path) -> Result<bool> {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("read request progress {}", path.display()))?;
+        if bytes.is_empty() || !bytes.ends_with(b"\n") {
+            bail!("request progress has a truncated final line");
+        }
+        let mut started = false;
+        let mut terminal = None;
+        let lines = bytes.split(|byte| *byte == b'\n').collect::<Vec<_>>();
+        if !lines.last().is_some_and(|line| line.is_empty()) {
+            bail!("request progress has no final line terminator");
+        }
+        for line in &lines[..lines.len() - 1] {
+            if line.is_empty() {
+                bail!("request progress contains an empty event line");
+            }
+            let event: ProgressEvent =
+                serde_json::from_slice(line).context("parse request progress event")?;
+            match event {
+                ProgressEvent::Started { .. } if !started && terminal.is_none() => {
+                    started = true;
+                }
+                ProgressEvent::Request { .. } if started && terminal.is_none() => {}
+                ProgressEvent::Terminal { status, .. } if started && terminal.is_none() => {
+                    terminal = Some(status);
+                }
+                _ => bail!("request progress event order is invalid"),
+            }
+        }
+        if !started {
+            bail!("request progress has no started event");
+        }
+        Ok(terminal == Some(ProgressTerminal::Complete))
+    }
+
     fn mark_terminal(&mut self, status: ProgressTerminal) -> Result<()> {
         if self.terminal.is_some() {
             bail!("progress file already has a terminal event");
@@ -106,10 +144,10 @@ impl LiveProgressFile {
     }
 
     fn append(&mut self, event: ProgressEvent) -> Result<()> {
-        let bytes = serde_json::to_vec(&event).context("serialize request progress event")?;
+        let mut bytes = serde_json::to_vec(&event).context("serialize request progress event")?;
+        bytes.push(b'\n');
         self.file
             .write_all(&bytes)
-            .and_then(|_| self.file.write_all(b"\n"))
             .and_then(|_| self.file.sync_data())
             .with_context(|| format!("append request progress {}", self.path.display()))
     }
@@ -258,6 +296,21 @@ mod tests {
         let text = fs::read_to_string(progress.path())?;
         assert_eq!(text.matches("\"event\":\"terminal\"").count(), 1);
         assert!(text.contains("\"status\":\"complete\""));
+        assert!(LiveProgressFile::validate(progress.path())?);
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn truncated_final_progress_line_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = temp_dir()?;
+        let mut progress = LiveProgressFile::create(&directory)?;
+        progress.record_request(&request())?;
+        progress.mark_complete()?;
+        let mut bytes = fs::read(progress.path())?;
+        bytes.pop();
+        fs::write(progress.path(), bytes)?;
+        assert!(LiveProgressFile::validate(progress.path()).is_err());
         fs::remove_dir_all(directory)?;
         Ok(())
     }

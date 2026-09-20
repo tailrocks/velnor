@@ -839,16 +839,45 @@ where
         complete: false,
     };
     let mut endpoint = request.api_origin.bind(&request.endpoint)?;
+    let paginated = request.item_field.as_deref() != Some("$object");
+    if paginated && request.query.contains_key("page") {
+        return Err(AcquisitionError::InvalidRequest);
+    }
     let mut query = request.query.clone();
+    if !paginated
+        && query
+            .get("per_page")
+            .is_some_and(|value| value != &request.per_page.to_string())
+    {
+        return Err(AcquisitionError::InvalidRequest);
+    }
+    if paginated {
+        let mut endpoint_url =
+            Url::parse(&endpoint).map_err(|_| AcquisitionError::EndpointViolation)?;
+        for (key, value) in url_query_map(&endpoint_url)? {
+            if query.insert(key, value).is_some() {
+                return Err(AcquisitionError::EndpointViolation);
+            }
+        }
+        endpoint_url.set_query(None);
+        endpoint = endpoint_url.to_string();
+        let expected_per_page = request.per_page.to_string();
+        if query
+            .insert("per_page".to_owned(), expected_per_page.clone())
+            .is_some_and(|value| value != expected_per_page)
+        {
+            return Err(AcquisitionError::InvalidRequest);
+        }
+    }
     let mut seen_pages = BTreeSet::new();
 
     for page_number in 1..=request.max_pages {
         let page_number_u32 = page_number as u32;
         let mut page_query = query.clone();
-        if page_number == 1 {
-            page_query
-                .entry("per_page".to_owned())
-                .or_insert_with(|| request.per_page.to_string());
+        if paginated {
+            page_query.insert("page".to_owned(), page_number.to_string());
+        } else if page_number == 1 {
+            page_query.insert("per_page".to_owned(), request.per_page.to_string());
         }
         let page_key = canonical_page_key(&endpoint, &page_query)?;
         if !seen_pages.insert(page_key) {
@@ -903,9 +932,10 @@ where
                 break;
             }
         };
-        request.api_origin.validate_candidate(
-            &Url::parse(&response.effective_endpoint)
-                .map_err(|_| AcquisitionError::EndpointViolation)?,
+        validate_effective_response(
+            &request.api_origin,
+            &acquisition_request,
+            &response.effective_endpoint,
         )?;
 
         let rate_limit = rate_limit_from_headers(&response.headers);
@@ -1100,11 +1130,20 @@ where
         result.items.extend(page_items);
 
         if let Some(next_link) = next_link {
-            let next_endpoint = request.api_origin.bind(&next_link)?;
+            if !paginated {
+                return Err(AcquisitionError::InvalidRequest);
+            }
+            let (next_endpoint, next_query, normalized_link) = next_page_request(
+                &request.api_origin,
+                &next_link,
+                &endpoint,
+                &query,
+                page_number_u32.saturating_add(1),
+            )?;
             let page = PageState {
                 number: page_number_u32,
                 per_page: Some(request.per_page as u32),
-                link_next: Some(next_link.clone()),
+                link_next: Some(normalized_link),
                 cursor_in: None,
                 cursor_out: None,
                 has_next_page: Some(true),
@@ -1132,7 +1171,7 @@ where
                 result.complete = false;
                 break;
             }
-            let next_page_key = canonical_page_key(&next_endpoint, &BTreeMap::new())?;
+            let next_page_key = canonical_page_key(&next_endpoint, &next_query)?;
             if seen_pages.contains(&next_page_key) {
                 result.requests.push(make_record(
                     &request_id,
@@ -1173,7 +1212,7 @@ where
                 rate_limit,
             ));
             endpoint = next_endpoint;
-            query = BTreeMap::new();
+            query = next_query;
             continue;
         }
 
@@ -1312,9 +1351,10 @@ where
             });
         }
     };
-    request.api_origin.validate_candidate(
-        &Url::parse(&response.effective_endpoint)
-            .map_err(|_| AcquisitionError::EndpointViolation)?,
+    validate_effective_response(
+        &request.api_origin,
+        &acquisition_request,
+        &response.effective_endpoint,
     )?;
     let rate_limit = rate_limit_from_headers(&response.headers);
     let media_type = header_value(&response.headers, "content-type")
@@ -1458,9 +1498,10 @@ where
                 break;
             }
         };
-        request.api_origin.validate_candidate(
-            &Url::parse(&response.effective_endpoint)
-                .map_err(|_| AcquisitionError::EndpointViolation)?,
+        validate_effective_response(
+            &request.api_origin,
+            &acquisition_request,
+            &response.effective_endpoint,
         )?;
         let rate_limit = rate_limit_from_headers(&response.headers);
         let media_type = header_value(&response.headers, "content-type")
@@ -2321,7 +2362,7 @@ fn make_record(
                     variable_bytes
                         .as_ref()
                         .map_or_else(|_| String::new(), |bytes| BASE64.encode(bytes)),
-                    Some(request_digest(&request.endpoint_or_operation, query)),
+                    Some(query_digest(query)),
                     Some(variable_bytes.map_or_else(
                         |_| "sha256:serialization-error".to_owned(),
                         |bytes| sha256_digest(&bytes),
@@ -2334,10 +2375,7 @@ fn make_record(
                 (
                     BASE64.encode(canonical_query.as_bytes()),
                     String::new(),
-                    Some(request_digest(
-                        &request.endpoint_or_operation,
-                        &canonical_query,
-                    )),
+                    Some(query_digest(&canonical_query)),
                     Some(sha256_digest(b"")),
                     None,
                 )
@@ -2398,16 +2436,12 @@ fn canonical_page_key(
     query: &BTreeMap<String, String>,
 ) -> Result<String, AcquisitionError> {
     let parsed = Url::parse(endpoint).map_err(|_| AcquisitionError::EndpointViolation)?;
-    let mut pairs = parsed
-        .query_pairs()
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect::<Vec<_>>();
-    pairs.extend(
-        query
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone())),
-    );
-    pairs.sort();
+    let mut pairs = url_query_map(&parsed)?;
+    for (key, value) in query {
+        if pairs.insert(key.clone(), value.clone()).is_some() {
+            return Err(AcquisitionError::EndpointViolation);
+        }
+    }
     let host = parsed
         .host_str()
         .ok_or(AcquisitionError::EndpointViolation)?;
@@ -2426,13 +2460,80 @@ fn canonical_page_key(
     Ok(canonical)
 }
 
-fn request_digest(endpoint_or_operation: &str, query_or_document: &str) -> String {
-    let mut canonical =
-        String::with_capacity(endpoint_or_operation.len() + query_or_document.len() + 1);
-    canonical.push_str(endpoint_or_operation);
-    canonical.push('\0');
-    canonical.push_str(query_or_document);
-    sha256_digest(canonical.as_bytes())
+fn query_digest(query_or_document: &str) -> String {
+    sha256_digest(query_or_document.as_bytes())
+}
+
+fn url_query_map(url: &Url) -> Result<BTreeMap<String, String>, AcquisitionError> {
+    let Some(raw_query) = url.query() else {
+        return Ok(BTreeMap::new());
+    };
+    if raw_query.is_empty() || raw_query.contains('%') {
+        return Err(AcquisitionError::EndpointViolation);
+    }
+    let mut pairs = BTreeMap::new();
+    for part in raw_query.split('&') {
+        let (key, value) = part
+            .split_once('=')
+            .ok_or(AcquisitionError::EndpointViolation)?;
+        if key.is_empty()
+            || key_is_sensitive(key)
+            || looks_like_secret(value)
+            || pairs.insert(key.to_owned(), value.to_owned()).is_some()
+        {
+            return Err(AcquisitionError::EndpointViolation);
+        }
+    }
+    Ok(pairs)
+}
+
+fn next_page_request(
+    api_origin: &GithubApiOrigin,
+    link: &str,
+    current_endpoint: &str,
+    current_query: &BTreeMap<String, String>,
+    next_page: u32,
+) -> Result<(String, BTreeMap<String, String>, String), AcquisitionError> {
+    let mut next = Url::parse(link).map_err(|_| AcquisitionError::EndpointViolation)?;
+    api_origin.validate_candidate(&next)?;
+    let current = Url::parse(current_endpoint).map_err(|_| AcquisitionError::EndpointViolation)?;
+    if next.path() != current.path() || next.query().is_none() || next.fragment().is_some() {
+        return Err(AcquisitionError::EndpointViolation);
+    }
+    let mut expected = current_query.clone();
+    expected.remove("page");
+    expected.insert("page".to_owned(), next_page.to_string());
+    let link_query = url_query_map(&next)?;
+    if link_query != expected {
+        return Err(AcquisitionError::EndpointViolation);
+    }
+    let normalized_link = next.to_string();
+    next.set_query(None);
+    Ok((next.to_string(), link_query, normalized_link))
+}
+
+fn validate_effective_response(
+    api_origin: &GithubApiOrigin,
+    request: &AcquisitionRequest,
+    effective_endpoint: &str,
+) -> Result<(), AcquisitionError> {
+    let expected = api_origin.bind(&request.endpoint_or_operation)?;
+    let expected = Url::parse(&expected).map_err(|_| AcquisitionError::EndpointViolation)?;
+    let actual = Url::parse(effective_endpoint).map_err(|_| AcquisitionError::EndpointViolation)?;
+    api_origin.validate_candidate(&actual)?;
+    if actual.path() != expected.path() {
+        return Err(AcquisitionError::EndpointViolation);
+    }
+    let mut expected_query = url_query_map(&expected)?;
+    for (key, value) in &request.query {
+        if expected_query.insert(key.clone(), value.clone()).is_some() {
+            return Err(AcquisitionError::EndpointViolation);
+        }
+    }
+    if url_query_map(&actual)? != expected_query {
+        return Err(AcquisitionError::EndpointViolation);
+    }
+    Ok(())
 }
 
 /// Build the one canonical URI used by both the producer store and checker
@@ -2729,12 +2830,26 @@ mod tests {
             request: AcquisitionRequest,
         ) -> AcquisitionFuture<'a, Result<TransportResponse, TransportFailure>> {
             self.requests.lock().unwrap().push(request);
-            let response = self
+            let request = self.requests.lock().unwrap().last().cloned().unwrap();
+            let mut response = self
                 .responses
                 .lock()
                 .unwrap()
                 .pop_front()
                 .unwrap_or(Err(TransportFailure::Other));
+            if let Ok(response) = &mut response
+                && response.effective_endpoint == "https://api.github.com"
+            {
+                let endpoint = request
+                    .api_origin
+                    .bind(&request.endpoint_or_operation)
+                    .expect("fixture request endpoint");
+                let mut url = Url::parse(&endpoint).expect("fixture request URL");
+                for (key, value) in &request.query {
+                    url.query_pairs_mut().append_pair(key, value);
+                }
+                response.effective_endpoint = url.to_string();
+            }
             Box::pin(async move { response })
         }
     }
@@ -2931,7 +3046,7 @@ mod tests {
                     ("x-github-request-id", "r1"),
                     (
                         "link",
-                        "<https://api.github.com/items?page=2>; rel=\"next\"",
+                        "<https://api.github.com/items?page=2&per_page=100>; rel=\"next\"",
                     ),
                 ],
                 rest_items(100, 0),
@@ -2956,7 +3071,16 @@ mod tests {
         assert_eq!(result.requests[0].page.items_returned, 100);
         assert_eq!(
             result.requests[0].page.link_next.as_deref(),
-            Some("https://api.github.com/items?page=2")
+            Some("https://api.github.com/items?page=2&per_page=100")
+        );
+        let first_request = &transport.requests()[0];
+        assert_eq!(
+            first_request.query.get("page").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            result.requests[0].query_sha256,
+            Some(sha256_digest(b"page\01\0per_page\0100\0"))
         );
         assert_eq!(transport.requests().len(), 2);
     }
@@ -2966,7 +3090,10 @@ mod tests {
         let transport = FixtureTransport::new(vec![
             Ok(response(
                 200,
-                &[("link", "</items?page=2>; rel=\"next\"")],
+                &[(
+                    "link",
+                    "<https://api.github.com/items?page=2&per_page=100>; rel=\"next\"",
+                )],
                 rest_items(100, 0),
             )),
             Ok(response(
@@ -3047,13 +3174,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relative_rest_next_link_is_rejected_before_following() {
+        let transport = FixtureTransport::new(vec![Ok(response(
+            200,
+            &[("link", "</items?page=2&per_page=100>; rel=\"next\"")],
+            rest_items(1, 0),
+        ))]);
+        let mut store = MemoryStore::default();
+        let request = RestCollectionRequest::new("items", "/items", Some("items"), "items");
+        let error = collect_rest(&transport, &mut store, &auth(), request)
+            .await
+            .unwrap_err();
+        assert_eq!(error, AcquisitionError::EndpointViolation);
+        assert_eq!(transport.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn effective_response_path_and_query_must_match_request() {
+        for effective_endpoint in [
+            "https://api.github.com/other?page=1&per_page=100",
+            "https://api.github.com/items?page=2&per_page=100",
+        ] {
+            let transport = FixtureTransport::new(vec![Ok(raw_response(
+                200,
+                &[],
+                serde_json::to_vec(&rest_items(1, 0)).unwrap(),
+                effective_endpoint,
+            ))]);
+            let mut store = MemoryStore::default();
+            let request = RestCollectionRequest::new("items", "/items", Some("items"), "items");
+            let error = collect_rest(&transport, &mut store, &auth(), request)
+                .await
+                .unwrap_err();
+            assert_eq!(error, AcquisitionError::EndpointViolation);
+            assert!(store.refs.is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn duplicate_rest_link_with_query_reordering_is_rejected() {
         let transport = FixtureTransport::new(vec![
             Ok(response(
                 200,
                 &[(
                     "link",
-                    "<https://api.github.com/items?page=2&a=1&b=2>; rel=\"next\"",
+                    "<https://api.github.com/items?page=2&per_page=100&a=1&b=2>; rel=\"next\"",
                 )],
                 rest_items(1, 0),
             )),
@@ -3061,18 +3226,19 @@ mod tests {
                 200,
                 &[(
                     "link",
-                    "<https://api.github.com/items?b=2&a=1&page=2>; rel=\"next\"",
+                    "<https://api.github.com/items?b=2&a=1&page=2&per_page=100>; rel=\"next\"",
                 )],
                 rest_items(1, 1),
             )),
         ]);
         let mut store = MemoryStore::default();
-        let request = RestCollectionRequest::new("items", "/items", Some("items"), "items");
-        let result = collect_rest(&transport, &mut store, &auth(), request)
+        let request = RestCollectionRequest::new("items", "/items", Some("items"), "items")
+            .with_query("a", "1")
+            .with_query("b", "2");
+        let error = collect_rest(&transport, &mut store, &auth(), request)
             .await
-            .unwrap();
-        assert_eq!(result.state, AcquisitionState::DuplicateCursor);
-        assert!(!result.complete);
+            .unwrap_err();
+        assert_eq!(error, AcquisitionError::EndpointViolation);
         assert_eq!(transport.requests().len(), 2);
     }
 
@@ -3393,7 +3559,7 @@ mod tests {
             200,
             &[],
             body.clone(),
-            "https://api.github.com/items",
+            "https://api.github.com/items?page=1&per_page=100",
         ))]);
         let mut store = MemoryStore::default();
         let request = RestCollectionRequest::new("items", "/items", None::<String>, "items");
