@@ -2714,11 +2714,16 @@ const RUN_CMD_DRAIN_GRACE: Duration = Duration::from_secs(10);
 /// promptly before reporting a successful direct-child status.
 #[cfg(unix)]
 const RUN_CMD_CLEANUP_GRACE: Duration = Duration::from_secs(1);
+/// Bound process reaping after a kill. An unresolved owned process is an
+/// explicit command error; never wait forever or report success.
+#[cfg(unix)]
+const RUN_CMD_REAP_GRACE: Duration = Duration::from_secs(1);
 
 #[cfg(unix)]
 /// Serialize poll-plus-write ownership among concurrent `run_unit` layers.
-/// This avoids changing shared descriptor flags while preventing one runtime
-/// writer from invalidating another writer's readiness result.
+/// Runtime writers use `std::io::Write`, so this also covers the process-local
+/// stdout/stderr locks used by run-unit markers. Writers in other processes
+/// are outside this guard; no cross-process write atomicity is promised.
 static RUN_CMD_OUTPUT_GATE: Mutex<()> = Mutex::new(());
 
 fn run_cmd_stall_limit() -> Duration {
@@ -2807,9 +2812,10 @@ fn run_command_with_stall_guard(
     }
 }
 
-/// A command plus an unreaped process-group leader. The keeper remains alive
-/// until cleanup, so group signaling never reuses the direct child's PID after
-/// its status is reaped.
+/// A command plus an unreaped process-group leader. The keeper is a single
+/// `sleep` process and remains alive until cleanup, so group signaling never
+/// reuses the direct child's PID after its status is reaped or leaves a keeper
+/// descendant behind.
 struct SpawnedRunCommand {
     child: Child,
     #[cfg(unix)]
@@ -2822,8 +2828,8 @@ fn spawn_run_command(
     command: &str,
 ) -> Result<SpawnedRunCommand, GeneratorError> {
     #[cfg(unix)]
-    let mut group_keeper = Command::new("bash")
-        .args(["-euo", "pipefail", "-c", "while sleep 3600; do :; done"])
+    let mut group_keeper = Command::new("sleep")
+        .arg("3600")
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -2845,9 +2851,7 @@ fn spawn_run_command(
     #[cfg(unix)]
     {
         let Ok(group_id) = i32::try_from(group_keeper.id()) else {
-            let _ = kill_process_group(Pid::from_child(&group_keeper), Signal::KILL);
-            let _ = group_keeper.kill();
-            let _ = group_keeper.wait();
+            let _ = finish_group_keeper(&mut group_keeper);
             return Err(GeneratorError::usage(format!(
                 "run CI command {unit_id}: process-group keeper pid is out of range"
             )));
@@ -2859,9 +2863,7 @@ fn spawn_run_command(
         Err(error) => {
             #[cfg(unix)]
             {
-                let _ = kill_process_group(Pid::from_child(&group_keeper), Signal::KILL);
-                let _ = group_keeper.kill();
-                let _ = group_keeper.wait();
+                let _ = finish_group_keeper(&mut group_keeper);
             }
             return Err(GeneratorError::usage(format!(
                 "run CI command {unit_id}: {error}"
@@ -2885,8 +2887,8 @@ fn run_command_with_stall_guard_to<WOut, WErr>(
     stderr_writer: &mut WErr,
 ) -> Result<(), GeneratorError>
 where
-    WOut: std::os::fd::AsFd,
-    WErr: std::os::fd::AsFd,
+    WOut: std::os::fd::AsFd + Write,
+    WErr: std::os::fd::AsFd + Write,
 {
     let spawned = spawn_run_command(root, unit_id, command)?;
     run_command_with_polling(
@@ -3087,25 +3089,26 @@ where
 #[cfg(unix)]
 fn flush_pending_output<W>(
     ready: bool,
-    writer: &W,
+    writer: &mut W,
     pending: &mut PendingOutput,
-) -> rustix::io::Result<bool>
+) -> std::io::Result<bool>
 where
-    W: std::os::fd::AsFd,
+    W: std::os::fd::AsFd + Write,
 {
     if !ready || pending.is_empty() {
         return Ok(false);
     }
     let remaining = pending.remaining();
     let chunk_len = output_write_chunk_limit(writer).min(remaining.len());
-    match rustix::io::write(writer, &remaining[..chunk_len]) {
+    match writer.write(&remaining[..chunk_len]) {
         Ok(0) => Ok(false),
         Ok(written) => {
             pending.consume(written);
+            writer.flush()?;
             Ok(true)
         }
-        Err(error) if error == rustix::io::Errno::INTR => Ok(false),
-        Err(error) if error == rustix::io::Errno::WOULDBLOCK => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
         Err(error) => Err(error),
     }
 }
@@ -3135,22 +3138,44 @@ fn kill_child_group(group_keeper: &Child) -> Result<(), String> {
 }
 
 #[cfg(unix)]
+fn reap_child_bounded(child: &mut Child, label: &str, kill_succeeded: bool) -> Result<(), String> {
+    let deadline = Instant::now() + RUN_CMD_REAP_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) if Instant::now() >= deadline => {
+                return Err(format!(
+                    "{label} remained alive after bounded reap (kill_succeeded={kill_succeeded})"
+                ));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => return Err(format!("{label} reap probe failed: {error}")),
+        }
+    }
+}
+
+#[cfg(unix)]
 fn finish_group_keeper(group_keeper: &mut Child) -> Result<(), String> {
     match kill_child_group(group_keeper) {
-        Ok(()) => group_keeper
-            .wait()
-            .map(|_| ())
-            .map_err(|error| format!("process-group keeper reap failed: {error}")),
+        Ok(()) => reap_child_bounded(group_keeper, "process-group keeper", true),
         Err(group_error) => {
-            let direct_error = group_keeper.kill().err().map(|error| error.to_string());
-            if direct_error.is_none() {
-                let _ = group_keeper.wait();
-            }
-            Err(match direct_error {
-                Some(direct_error) => {
+            let direct_result = group_keeper.kill();
+            let reap = reap_child_bounded(
+                group_keeper,
+                "process-group keeper after group-kill failure",
+                direct_result.is_ok(),
+            );
+            Err(match (direct_result.err(), reap.err()) {
+                (Some(direct_error), Some(reap_error)) => format!(
+                    "process-group kill failed: {group_error}; keeper kill failed: {direct_error}; {reap_error}"
+                ),
+                (Some(direct_error), None) => {
                     format!("process-group kill failed: {group_error}; keeper kill failed: {direct_error}")
                 }
-                None => format!("process-group kill failed: {group_error}"),
+                (None, Some(reap_error)) => {
+                    format!("process-group kill failed: {group_error}; {reap_error}")
+                }
+                (None, None) => format!("process-group kill failed: {group_error}"),
             })
         }
     }
@@ -3161,24 +3186,25 @@ fn abort_child(child: &mut Child, group_keeper: &mut Child) -> String {
     let group = kill_child_group(group_keeper).err();
     let direct_result = child.kill();
     let direct = direct_result.as_ref().err().map(ToString::to_string);
-    let reaped = if group.is_none() || direct_result.is_ok() {
-        child.wait().err().map(|error| error.to_string())
-    } else {
-        child
-            .try_wait()
-            .err()
-            .map(|error| format!("reap probe failed: {error}"))
-    };
+    let reaped = reap_child_bounded(
+        child,
+        "command child",
+        group.is_none() || direct_result.is_ok(),
+    )
+    .err();
     let keeper = if group.is_none() {
-        group_keeper.wait().err().map(|error| error.to_string())
+        reap_child_bounded(group_keeper, "process-group keeper", true).err()
     } else {
-        match group_keeper.kill() {
-            Ok(()) => group_keeper.wait().err().map(|error| error.to_string()),
-            Err(error) => group_keeper
-                .try_wait()
-                .err()
-                .map(|probe| format!("{error}; reap probe failed: {probe}")),
-        }
+        let keeper_kill = group_keeper.kill();
+        let keeper_reap = reap_child_bounded(
+            group_keeper,
+            "process-group keeper after group-kill failure",
+            keeper_kill.is_ok(),
+        );
+        keeper_kill
+            .err()
+            .map(|error| error.to_string())
+            .or_else(|| keeper_reap.err())
     };
     [
         group.map(|error| format!("process-group kill failed: {error}")),
@@ -3269,8 +3295,8 @@ fn run_command_with_polling<WOut, WErr>(
     stderr_writer: &mut WErr,
 ) -> Result<(), GeneratorError>
 where
-    WOut: std::os::fd::AsFd,
-    WErr: std::os::fd::AsFd,
+    WOut: std::os::fd::AsFd + Write,
+    WErr: std::os::fd::AsFd + Write,
 {
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
@@ -3345,7 +3371,7 @@ where
         };
 
         if let Err(error) =
-            flush_pending_output(ready.stdout_write, &*stdout_writer, &mut stdout_pending)
+            flush_pending_output(ready.stdout_write, &mut *stdout_writer, &mut stdout_pending)
         {
             let cleanup = abort_child(&mut child, &mut group_keeper);
             drop(stdout);
@@ -3355,7 +3381,7 @@ where
             )));
         }
         if let Err(error) =
-            flush_pending_output(ready.stderr_write, &*stderr_writer, &mut stderr_pending)
+            flush_pending_output(ready.stderr_write, &mut *stderr_writer, &mut stderr_pending)
         {
             let cleanup = abort_child(&mut child, &mut group_keeper);
             drop(stdout);
@@ -3446,7 +3472,7 @@ where
             }
         };
         if let Err(error) =
-            flush_pending_output(ready.stdout_write, &*stdout_writer, &mut stdout_pending)
+            flush_pending_output(ready.stdout_write, &mut *stdout_writer, &mut stdout_pending)
         {
             let cleanup = finish_group_keeper(&mut group_keeper)
                 .err()
@@ -3458,7 +3484,7 @@ where
             )));
         }
         if let Err(error) =
-            flush_pending_output(ready.stderr_write, &*stderr_writer, &mut stderr_pending)
+            flush_pending_output(ready.stderr_write, &mut *stderr_writer, &mut stderr_pending)
         {
             let cleanup = finish_group_keeper(&mut group_keeper)
                 .err()
@@ -3672,6 +3698,8 @@ mod run_cmd_stall_tests {
     use std::io::Read;
     #[cfg(unix)]
     use std::os::unix::net::UnixStream;
+    #[cfg(unix)]
+    use std::path::Path;
     use std::time::{Duration, Instant};
 
     #[expect(
@@ -3683,6 +3711,61 @@ mod run_cmd_stall_tests {
             Ok(value) => value,
             Err(error) => panic!("{context}: {error}"),
         }
+    }
+
+    #[cfg(unix)]
+    fn fixture_process_pids(root: &Path) -> Vec<u32> {
+        let root = must(fs::canonicalize(root), "canonicalize keeper census root");
+        #[cfg(target_os = "linux")]
+        {
+            let output = must(
+                Command::new("ps").args(["-axo", "pid=,command="]).output(),
+                "run fixture process census",
+            );
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let mut fields = line.split_whitespace();
+                    let pid = fields.next()?.parse::<u32>().ok()?;
+                    fs::read_link(format!("/proc/{pid}/cwd"))
+                        .ok()
+                        .is_some_and(|cwd| cwd == root)
+                        .then_some(pid)
+                })
+                .collect()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let output = must(
+                Command::new("lsof")
+                    .args(["-a", "-d", "cwd", "-Fn", "-Fp"])
+                    .output(),
+                "run fixture process census",
+            );
+            let mut pid = None;
+            let mut matches = Vec::new();
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                if let Some(value) = line.strip_prefix('p') {
+                    pid = value.parse::<u32>().ok();
+                } else if let Some(value) = line.strip_prefix('n')
+                    && fs::canonicalize(value).ok().as_deref() == Some(root.as_path())
+                {
+                    if let Some(pid) = pid {
+                        matches.push(pid);
+                    }
+                }
+            }
+            matches
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_no_fixture_processes(root: &Path, context: &str) {
+        let pids = fixture_process_pids(root);
+        assert!(
+            pids.is_empty(),
+            "{context} left owned process residue: {pids:?}"
+        );
     }
 
     #[test]
@@ -3887,6 +3970,88 @@ mod run_cmd_stall_tests {
             fs::remove_dir_all(&root),
             "remove output backpressure fixture",
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_stall_error_path_leaves_no_fixture_process() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-keeper-census-{}",
+            crate::s2::unique_suffix()
+        ));
+        must(fs::create_dir_all(&root), "create keeper census fixture");
+
+        let result = run_command_with_stall_guard(
+            &root,
+            "census-stall",
+            "exec sleep 30",
+            Duration::from_millis(200),
+        );
+        assert!(result.is_err(), "silent command must fail for census");
+        assert_no_fixture_processes(&root, "silent stall");
+
+        let result = run_command_with_stall_guard(
+            &root,
+            "census-blocked-pipe",
+            "exec 3< <(sleep 2 2>&-); read <&3",
+            Duration::from_millis(200),
+        );
+        assert!(result.is_err(), "blocked pipe must fail for census");
+        assert_no_fixture_processes(&root, "blocked pipe");
+
+        let (mut stdout, _stdout_reader) = must(UnixStream::pair(), "create census sink");
+        let mut stderr = must(
+            File::create(root.join("backpressure-stderr")),
+            "create census stderr",
+        );
+        let result = run_command_with_stall_guard_to(
+            &root,
+            "census-backpressure",
+            "yes x",
+            Duration::from_millis(200),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert!(result.is_err(), "backpressure must fail for census");
+        drop(stdout);
+        drop(stderr);
+        assert_no_fixture_processes(&root, "backpressure");
+
+        let (mut stdout, stdout_reader) = must(UnixStream::pair(), "create closed census sink");
+        drop(stdout_reader);
+        let mut stderr = must(
+            File::create(root.join("closed-stderr")),
+            "create closed census stderr",
+        );
+        let result = run_command_with_stall_guard_to(
+            &root,
+            "census-closed-output",
+            "printf 'lost\\n'",
+            Duration::from_secs(3),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert!(result.is_err(), "closed sink must fail for census");
+        drop(stdout);
+        drop(stderr);
+        assert_no_fixture_processes(&root, "closed output");
+
+        let result =
+            run_command_with_stall_guard(&root, "census-status", "exit 3", Duration::from_secs(3));
+        assert!(result.is_err(), "failed status must fail for census");
+        assert_no_fixture_processes(&root, "failed status");
+
+        must(
+            run_command_with_stall_guard(
+                &root,
+                "census-success",
+                "printf ok",
+                Duration::from_secs(3),
+            ),
+            "successful command for census",
+        );
+        assert_no_fixture_processes(&root, "successful command");
+        must(fs::remove_dir_all(&root), "remove keeper census fixture");
     }
 
     #[cfg(unix)]
