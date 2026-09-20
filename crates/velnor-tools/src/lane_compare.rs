@@ -2188,10 +2188,9 @@ fn compare_pair(
                 )?;
             }
             AlignedRow::VelnorOnly(vl_step) => {
-                worse_count += 1;
                 writeln!(
                     section,
-                    "| —/{} | — | {} | — | {} | — | {} | — | {} | WORSE (unexpected Velnor-only step) |",
+                    "| —/{} | — | {} | — | {} | — | {} | — | {} | ok (Velnor-only informational step) |",
                     vl_step.number,
                     vl_step.name,
                     vl_step.conclusion.as_deref().unwrap_or("-"),
@@ -2840,7 +2839,7 @@ mod tests {
     }
 
     #[test]
-    fn unexpected_velnor_only_step_is_a_parity_failure() {
+    fn velnor_only_step_is_informational_for_equal_or_better_comparison() {
         let github = Job {
             id: 1,
             name: "Rust · rust-policy / GitHub".to_owned(),
@@ -2895,11 +2894,11 @@ mod tests {
             analyze_lane_log("velnor log\n"),
         )
         .unwrap();
-        assert_eq!(worse, 1);
-        assert!(section.contains("unexpected Velnor-only step"));
+        assert_eq!(worse, 0);
+        assert!(section.contains("Velnor-only informational step"));
         assert_eq!(
             comparison_decision(ComparisonScope::FullRun, true, worse, 0),
-            ComparisonDecision::Fail
+            ComparisonDecision::AuxiliaryPass
         );
     }
 
