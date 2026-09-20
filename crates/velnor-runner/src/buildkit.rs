@@ -528,6 +528,33 @@ fn read_registered_claims(path: &Path, builder: &str) -> Result<Option<BuilderCl
     }
 }
 
+/// A failed ownership read during a maintenance pass, carrying the exact file
+/// the operator must repair. Runtime-claim and stat failures report the claim
+/// file; durable owner-record failures report the owner record. Pointing the
+/// operator at the claim path for an owner-record failure would delete a
+/// healthy file while the corrupt record pins its builder every pass.
+#[derive(Debug)]
+struct OwnershipReadError {
+    source: anyhow::Error,
+    path: PathBuf,
+}
+
+impl OwnershipReadError {
+    fn claims(path: &Path, source: anyhow::Error) -> Self {
+        Self {
+            source,
+            path: path.to_path_buf(),
+        }
+    }
+
+    fn owner_record(registry_root: &Path, builder: &str, source: anyhow::Error) -> Self {
+        Self {
+            source,
+            path: owner_registry_file(registry_root, builder),
+        }
+    }
+}
+
 /// Read ownership for a maintenance pass. Old capped names predate the
 /// current generation and their claim files lived under `/run`, so a reboot
 /// can remove the owner record while leaving Docker's builder container.
@@ -538,21 +565,30 @@ fn read_claims_for_reaping(
     builder: &str,
     registry_root: Option<&Path>,
     allow_legacy_missing: bool,
-) -> Result<Option<BuilderClaims>> {
-    if let Some(claims) = read_registered_claims(path, builder)? {
+) -> Result<Option<BuilderClaims>, OwnershipReadError> {
+    if let Some(claims) = read_registered_claims(path, builder)
+        .map_err(|source| OwnershipReadError::claims(path, source))?
+    {
         if builder.starts_with(CURRENT_PERSISTENT_BUILDER_PREFIX)
             && let Some(registry_root) = registry_root
         {
             // An existing malformed or mismatched durable record is a hard
             // stop. A valid runtime claim may recreate a missing marker below.
-            let _ = read_owner_record(registry_root, builder)?;
+            let _ = read_owner_record(registry_root, builder).map_err(|source| {
+                OwnershipReadError::owner_record(registry_root, builder, source)
+            })?;
         }
         return Ok(Some(claims));
     }
     match std::fs::symlink_metadata(path) {
         Ok(_) => return Ok(None),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).with_context(|| format!("stat {}", path.display())),
+        Err(error) => {
+            return Err(OwnershipReadError::claims(
+                path,
+                anyhow::Error::new(error).context(format!("stat {}", path.display())),
+            ));
+        }
     }
     if is_legacy_capped_builder_name(builder) && allow_legacy_missing {
         // Explicit migration exception: this exact old formatter namespace
@@ -564,7 +600,9 @@ fn read_claims_for_reaping(
     }
     if builder.starts_with(CURRENT_PERSISTENT_BUILDER_PREFIX)
         && let Some(registry_root) = registry_root
-        && read_owner_record(registry_root, builder)?.is_some()
+        && read_owner_record(registry_root, builder)
+            .map_err(|source| OwnershipReadError::owner_record(registry_root, builder, source))?
+            .is_some()
     {
         return Ok(Some(BuilderClaims {
             builder: builder.to_string(),
@@ -635,11 +673,11 @@ fn log_torn_claims(builder: &str, path: &Path, error: &anyhow::Error) {
     );
 }
 
-fn log_unreadable_ownership(builder: &str, claims_path: &Path, error: &anyhow::Error) {
+fn log_unreadable_ownership(builder: &str, ownership_path: &Path, error: &anyhow::Error) {
     tracing::error!(
         target: "velnor.buildkit",
         builder,
-        claims_path = %claims_path.display(),
+        ownership_path = %ownership_path.display(),
         error = format!("{error:#}"),
         "unreadable BuildKit ownership state treated as claimed; quiesce jobs, repair the runtime claim or durable owner record, then retry"
     );
@@ -1184,7 +1222,8 @@ pub(crate) fn pressure_prune_builders(run_root: &Path, target_bytes: u64) -> Pre
                 "skip BuildKit builder {builder}: Velnor ownership record is absent or mismatched"
             )),
             Err(error) => report.failures.push(format!(
-                "skip BuildKit builder {builder}: ownership record is unreadable ({error:#})"
+                "skip BuildKit builder {builder}: ownership record is unreadable ({:#})",
+                error.source
             )),
         }
     }
@@ -1246,10 +1285,10 @@ pub(crate) fn pressure_prune_builders(run_root: &Path, target_bytes: u64) -> Pre
                     continue;
                 }
                 Err(error) => {
-                    log_unreadable_ownership(&builder, &path, &error);
+                    log_unreadable_ownership(&builder, &error.path, &error.source);
                     report
                         .failures
-                        .push(format!("read claims for {builder}: {error:#}"));
+                        .push(format!("read claims for {builder}: {:#}", error.source));
                     continue;
                 }
             };
@@ -1607,11 +1646,13 @@ fn reap_idle_builders_with_registry(
                 continue;
             }
             Err(error) => {
-                log_unreadable_ownership(&builder, &path, &error);
+                log_unreadable_ownership(&builder, &error.path, &error.source);
                 report
                     .failures
-                    .push(format!("read ownership for {builder}: {error:#}"));
-                report.unreadable_claims.push(path.display().to_string());
+                    .push(format!("read ownership for {builder}: {:#}", error.source));
+                report
+                    .unreadable_claims
+                    .push(error.path.display().to_string());
                 continue;
             }
         }
@@ -1642,11 +1683,13 @@ fn reap_idle_builders_with_registry(
                     continue;
                 }
                 Err(error) => {
-                    log_unreadable_ownership(&builder, &path, &error);
+                    log_unreadable_ownership(&builder, &error.path, &error.source);
                     report
                         .failures
-                        .push(format!("read claims for {builder}: {error:#}"));
-                    report.unreadable_claims.push(path.display().to_string());
+                        .push(format!("read claims for {builder}: {:#}", error.source));
+                    report
+                        .unreadable_claims
+                        .push(error.path.display().to_string());
                     continue;
                 }
             };
@@ -3079,6 +3122,72 @@ mod tests {
         // Fresh stamp: skipped without running the pass.
         let report = maybe_reap_idle_builders_with(&run_root, now, |_, _| panic!("must not reap"));
         assert!(report.is_none());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn unreadable_owner_record_reports_owner_path_not_runtime_claim() {
+        let root = temp_root("owner-record-unreadable-path");
+        let run_root = root.join("run");
+        let registry_root = owner_registry_root(&root.join("lib"));
+        let owner_corrupt =
+            persistent_builder_name("owner-corrupt", "trusted", TRUST_TIER_BRANCH, Some("o/r"));
+        let claim_corrupt =
+            persistent_builder_name("claim-corrupt", "trusted", TRUST_TIER_BRANCH, Some("o/r"));
+
+        // Valid runtime claim plus a torn durable owner record: the failure
+        // is the owner record, so the report must name it — never the
+        // healthy runtime claim the operator would otherwise delete.
+        claim_builder_with_registry(
+            &run_root,
+            Some(&registry_root),
+            &owner_corrupt,
+            "slot-1",
+            "velnor-job-a",
+        )
+        .unwrap();
+        std::fs::write(
+            owner_registry_file(&registry_root, &owner_corrupt),
+            b"{torn",
+        )
+        .unwrap();
+
+        // Torn runtime claim plus a valid owner record: the companion case
+        // still names the runtime claim file.
+        claim_builder_with_registry(
+            &run_root,
+            Some(&registry_root),
+            &claim_corrupt,
+            "slot-2",
+            "velnor-job-b",
+        )
+        .unwrap();
+        let torn_claim_path = claims_file(&run_root, &claim_corrupt);
+        std::fs::write(&torn_claim_path, b"{torn").unwrap();
+
+        let report = reap_idle_builders_with_registry(
+            &run_root,
+            Some(&registry_root),
+            SystemTime::now(),
+            || Ok(vec![owner_corrupt.clone(), claim_corrupt.clone()]),
+            || Ok(BTreeSet::new()),
+            |_| panic!("unreadable ownership blocks inspection"),
+            |_| panic!("unreadable ownership blocks stop"),
+            |_| panic!("unreadable ownership blocks restart"),
+            |_| panic!("unreadable ownership blocks removal"),
+        );
+
+        assert!(report.deleted.is_empty());
+        assert_eq!(
+            report.unreadable_claims,
+            vec![
+                owner_registry_file(&registry_root, &owner_corrupt)
+                    .display()
+                    .to_string(),
+                torn_claim_path.display().to_string(),
+            ]
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }
