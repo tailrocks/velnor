@@ -619,26 +619,6 @@ fn validate_skills(context: &ScanContext<'_>, names: &[String]) -> Result<(), Ge
                 "{path} frontmatter name does not match catalog entry `{expected_name}`"
             )));
         }
-        require_frontmatter_value(&frontmatter, "description", path)?;
-        require_frontmatter_value(&frontmatter, "argument-hint", path)?;
-        if frontmatter.values.get("license").map(String::as_str) != Some("Apache-2.0") {
-            return Err(GeneratorError::usage(format!(
-                "{path} frontmatter license must be Apache-2.0"
-            )));
-        }
-        if frontmatter.values.get("user-invocable").map(String::as_str) != Some("true") {
-            return Err(GeneratorError::usage(format!(
-                "{path} frontmatter user-invocable must be true"
-            )));
-        }
-        if let Some(value) = frontmatter.values.get("disable-model-invocation")
-            && value != "true"
-            && value != "false"
-        {
-            return Err(GeneratorError::usage(format!(
-                "{path} frontmatter disable-model-invocation must be true or false"
-            )));
-        }
     }
     let extra = context
         .files
@@ -1115,8 +1095,13 @@ fn validate_frontmatter_mapping(
                 "{path} frontmatter {key} must be a YAML string"
             )));
         }
+        if matches!(key, "user-invocable" | "disable-model-invocation") && !value.is_bool() {
+            return Err(GeneratorError::usage(format!(
+                "{path} frontmatter {key} must be a YAML boolean"
+            )));
+        }
     }
-    for key in ["name", "description", "argument-hint", "license"] {
+    for key in ["name", "description"] {
         if !mapping.contains_key(key) {
             return Err(GeneratorError::usage(format!(
                 "{path} frontmatter requires {key}"
@@ -1131,43 +1116,6 @@ fn validate_frontmatter_mapping(
                 "{path} frontmatter {key} must not be empty"
             )));
         }
-    }
-    if mapping.get("license").and_then(serde_yaml::Value::as_str) != Some("Apache-2.0") {
-        return Err(GeneratorError::usage(format!(
-            "{path} frontmatter license must be Apache-2.0"
-        )));
-    }
-    if mapping
-        .get("user-invocable")
-        .is_none_or(|value| value.as_bool() != Some(true))
-    {
-        return Err(GeneratorError::usage(format!(
-            "{path} frontmatter user-invocable must be the YAML boolean true"
-        )));
-    }
-    if let Some(value) = mapping.get("disable-model-invocation")
-        && !value.is_bool()
-    {
-        return Err(GeneratorError::usage(format!(
-            "{path} frontmatter disable-model-invocation must be a YAML boolean"
-        )));
-    }
-    Ok(())
-}
-
-fn require_frontmatter_value(
-    frontmatter: &Frontmatter,
-    key: &str,
-    path: &str,
-) -> Result<(), GeneratorError> {
-    if frontmatter
-        .values
-        .get(key)
-        .is_none_or(|value| value.trim().is_empty())
-    {
-        return Err(GeneratorError::usage(format!(
-            "{path} frontmatter {key} must not be empty"
-        )));
     }
     Ok(())
 }
@@ -1629,7 +1577,7 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
         );
         reject_skill_frontmatter_variant(
             |skill| skill.replacen("user-invocable: true", "user-invocable: \"true\"", 1),
-            "user-invocable must be the YAML boolean true",
+            "user-invocable must be a YAML boolean",
         );
     }
 
@@ -1658,15 +1606,50 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
     }
 
     #[test]
+    fn optional_frontmatter_policy_values_are_target_owned() {
+        let rewrites: [fn(String) -> String; 2] = [
+            |skill: String| skill.replacen("license: Apache-2.0", "license: MIT", 1),
+            |skill: String| skill.replacen("user-invocable: true", "user-invocable: false", 1),
+        ];
+        for rewrite in rewrites {
+            let fixture = Fixture::new();
+            let skill = must(
+                fs::read_to_string(fixture.root.join("skills/example/SKILL.md")),
+                "read skill fixture",
+            );
+            fixture.write("skills/example/SKILL.md", &rewrite(skill));
+            let (_, shape) = fixture
+                .run_detect()
+                .unwrap_or_else(|error| panic!("optional policy field must be accepted: {error}"));
+            assert_eq!(shape.units.len(), 1);
+        }
+    }
+
+    #[test]
+    fn minimal_provider_valid_frontmatter_is_accepted() {
+        let fixture = Fixture::new();
+        let skill = must(
+            fs::read_to_string(fixture.root.join("skills/example/SKILL.md")),
+            "read skill fixture",
+        );
+        let skill = skill
+            .lines()
+            .filter(|line| {
+                !line.starts_with("argument-hint:")
+                    && !line.starts_with("license:")
+                    && !line.starts_with("user-invocable:")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fixture.write("skills/example/SKILL.md", &skill);
+        let (_, shape) = fixture
+            .run_detect()
+            .unwrap_or_else(|error| panic!("minimal frontmatter must be accepted: {error}"));
+        assert_eq!(shape.units.len(), 1);
+    }
+
+    #[test]
     fn typed_frontmatter_rejects_semantic_invalid_values() {
-        reject_skill_frontmatter_variant(
-            |skill| skill.replacen("license: Apache-2.0", "license: MIT", 1),
-            "license must be Apache-2.0",
-        );
-        reject_skill_frontmatter_variant(
-            |skill| skill.replacen("user-invocable: true", "user-invocable: false", 1),
-            "user-invocable must be the YAML boolean true",
-        );
         reject_skill_frontmatter_variant(
             |skill| {
                 skill.replacen(
