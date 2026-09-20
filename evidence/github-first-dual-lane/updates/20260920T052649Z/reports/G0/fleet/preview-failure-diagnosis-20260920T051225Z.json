@@ -1,0 +1,182 @@
+{
+  "captured_at_utc": "2026-09-20T05:12:25Z",
+  "scope": "read-only diagnosis of failed Preview push run and live PR966 reconciliation",
+  "no_mutation": true,
+  "failed_preview": {
+    "run_id": 35484968732,
+    "workflow": "Preview · push · main",
+    "event": "push",
+    "head_sha": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+    "status": "completed",
+    "conclusion": "failure",
+    "created_at": "2026-09-20T02:49:06Z",
+    "updated_at": "2026-09-20T02:49:18Z",
+    "failed_job": {
+      "id": 106009550596,
+      "name": "Resolve preview identity",
+      "status": "completed",
+      "conclusion": "failure",
+      "started_at": "2026-09-20T02:49:09Z",
+      "completed_at": "2026-09-20T02:49:17Z",
+      "runner": "GitHub Actions 1000085287",
+      "runner_group": "GitHub Actions",
+      "labels": ["ubuntu-24.04"]
+    },
+    "skipped_jobs": [
+      {"id": 106009570898, "name": "Guest payload ${{ matrix.arch }}", "conclusion": "skipped"},
+      {"id": 106009570905, "name": "Compile preview metadata once", "conclusion": "skipped"},
+      {"id": 106009571114, "name": "Build ${{ matrix.arch }} preview deb", "conclusion": "skipped"},
+      {"id": 106009571302, "name": "Sign ${{ matrix.arch }} preview deb", "conclusion": "skipped"},
+      {"id": 106009571679, "name": "Replace the rolling preview release", "conclusion": "skipped"}
+    ],
+    "log_endpoint": "https://api.github.com/repos/tailrocks/velnor/actions/jobs/106009550596/logs",
+    "run_log_command": "gh run view 35484968732 --log-failed",
+    "normalized_relevant_excerpt_sha256": "9cd31a847770dfb0a95adccc6b700d582e952fb16199890fc5c4d50d069c8e1f",
+    "normalized_relevant_excerpt": [
+      "error: workflow policy failed: generated-tree",
+      "PASS pin-declared .github-gen/velnor-workflow.toml revision = 0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+      "PASS pin-reachable 0dc79895ff1c5e88be7c3822c437e1c5b5282e12 is an ancestor of head 89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+      "FAIL generated-tree the tree differs from the render of velnor-workflow at 0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+      "- .github/actionlint.yaml: differs from the pinned render",
+      "- .github/ci/.github-actions-generator-state: differs from the pinned render",
+      "- .github/workflows/ci-main.yml: differs from the pinned render",
+      "- .github/workflows/ci-pr.yml: differs from the pinned render",
+      "- .github/workflows/ci-runtime-products.yml: differs from the pinned render",
+      "- .github/workflows/ci-unit-bun.yml: differs from the pinned render",
+      "- .github/workflows/ci-unit-docker.yml: differs from the pinned render",
+      "- .github/workflows/ci-unit-docs.yml: differs from the pinned render",
+      "- .github/workflows/ci-unit-opentofu.yml: differs from the pinned render",
+      "- .github/workflows/ci-unit-rust.yml: differs from the pinned render",
+      "policy: 11 rules, 1 failed",
+      "Process completed with exit code 1"
+    ]
+  },
+  "root_cause": {
+    "classification": "generated-tree drift against the pinned renderer; failure occurs before preview identity/build/publish work",
+    "pin": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+    "policy_source": {
+      "commit": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+      "file": ".github/workflows/ci-policy.yml",
+      "pin_lines": [62, 70, 172]
+    },
+    "introducing_commit_evidence": {
+      "commit": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+      "subject": "fix(workflow): gate cache tools per Rust member",
+      "parent": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+      "generated_files_modified": [
+        ".github/ci/.github-actions-generator-state",
+        ".github/workflows/ci-main.yml",
+        ".github/workflows/ci-pr.yml",
+        ".github/workflows/ci-unit-bun.yml",
+        ".github/workflows/ci-unit-docker.yml",
+        ".github/workflows/ci-unit-docs.yml",
+        ".github/workflows/ci-unit-opentofu.yml",
+        ".github/workflows/ci-unit-rust.yml"
+      ],
+      "source_change": "added mbx_enabled generated inputs/caller values without a matching published renderer pin"
+    },
+    "unresolved_defect": "The checked-in generated workflow tree and generator-state manifest are not byte-identical to the renderer at the declared 0dc pin. Preview cannot reach identity resolution or publishing until the generated tree/pin contract is reconciled."
+  },
+  "pr966": {
+    "number": 966,
+    "title": "fix(package-release): refuse legacy rolling mutation",
+    "state": "open",
+    "merged": false,
+    "mergeable": true,
+    "mergeable_state": "blocked",
+    "head_branch": "codex/rolling-preview-legacy-migration-20260920",
+    "head_sha": "8c545e5f4e60b5f4b867eb7d7c622e3d8bbd6a9c",
+    "base_branch": "main",
+    "base_sha": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+    "synthetic_merge_sha_observed_before_head_advance": "6bfc465d622c0c4c04cd34239f76c50435dffe0c",
+    "head_owner": "donbeave",
+    "author_association": "MEMBER",
+    "current_diff_files": [
+      ".github-gen/velnor-workflow.toml",
+      "crates/velnor-workflow/README.md",
+      "crates/velnor-workflow/src/closure.rs",
+      "crates/velnor-workflow/src/policy.rs",
+      "crates/velnor-workflow/src/primitives/prepared_tools.rs",
+      "crates/velnor-workflow/src/runtime.rs",
+      "crates/velnor-workflow/src/s2/closure.rs",
+      "crates/velnor-workflow/src/s2/config/mod.rs",
+      "crates/velnor-workflow/src/s2/dispatch.rs",
+      "crates/velnor-workflow/src/s2/mod.rs",
+      "crates/velnor-workflow/src/s2/policy.rs",
+      "crates/velnor-workflow/src/s2/policy/tests.rs",
+      "crates/velnor-workflow/src/s2/primitives/package_release.rs",
+      "crates/velnor-workflow/src/s2/primitives/prepared_tools.rs",
+      "crates/velnor-workflow/src/s2/primitives/release.rs",
+      "crates/velnor-workflow/src/s2/primitives/renovate.rs",
+      "crates/velnor-workflow/src/s2/primitives/runtime_products.rs",
+      "crates/velnor-workflow/src/s2/runtime.rs",
+      "crates/velnor-workflow/src/s2/scan/gradle.rs",
+      "crates/velnor-workflow/src/s2/tui/mod.rs",
+      "crates/velnor-workflow/src/scan/gradle.rs",
+      "crates/velnor-workflow/src/tui/mod.rs",
+      "crates/velnor-workflow/tests/package_release.rs"
+    ],
+    "generated_tree_files_in_current_diff": [],
+    "declared_pin_current_head": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+    "fix_assessment": "does_not_fix_failed_preview_generated_tree",
+    "fix_reason": "The current PR diff has no .github/workflows/** or .github/ci/.github-actions-generator-state changes and leaves the 0dc pin unchanged. Its package-release/source changes are not exercised by the failed Stage-0 generated-tree gate."
+  },
+  "pr966_checks_and_reviews": {
+    "captured_at_utc": "2026-09-20T05:09:49Z",
+    "current_ci_run": {
+      "id": 35490581231,
+      "head_sha": "8c545e5f4e60b5f4b867eb7d7c622e3d8bbd6a9c",
+      "status": "in_progress",
+      "conclusion": null,
+      "control_planning": "success",
+      "completed_github_hosted_jobs": [
+        "Rust · velnor-render · github-hosted — rust-velnor-render / GitHub · hosted",
+        "Rust · velnor-model · github-hosted — rust-velnor-model / GitHub · hosted",
+        "Rust · velnor-control · github-hosted — rust-velnor-control / GitHub · hosted",
+        "Rust · velnor-client · github-hosted — rust-velnor-client / GitHub · hosted",
+        "Rust · Rust production topology · github-hosted — rust-production-topology / GitHub · hosted",
+        "Docker · Docker · github-hosted — docker / GitHub · hosted",
+        "Documentation · Documentation · github-hosted — docs / GitHub · hosted"
+      ],
+      "pending_or_in_progress_required_work": true
+    },
+    "policy_run": {
+      "id": 35490579796,
+      "head_sha": "8c545e5f4e60b5f4b867eb7d7c622e3d8bbd6a9c",
+      "status": "in_progress",
+      "conclusion": null
+    },
+    "previous_head_run": {
+      "id": 35487814865,
+      "head_sha": "311885ea9ff65eadb291760e8ae18129e79b7526",
+      "status": "completed",
+      "conclusion": "success",
+      "updated_at": "2026-09-20T04:04:21Z"
+    },
+    "dco": "success",
+    "required_ci_context": "no terminal ci-required result observed at capture; Control / Planning was success and mergeable_state remained blocked",
+    "reviews": [
+      {"id": 5259508085, "user": "donbeave", "state": "PENDING", "commit_id": "575225b536f530c0af1d8dcbc7f083a10c4ef421"},
+      {"id": 5258397228, "user": "chatgpt-codex-connector[bot]", "state": "COMMENTED", "submitted_at": "2026-09-19T23:52:15Z", "commit_id": "e54d1ad61b233c8e4bb62a68cfc4c9cbdd348c80"},
+      {"id": 5258975990, "user": "donbeave", "state": "COMMENTED", "submitted_at": "2026-09-20T02:05:10Z", "commit_id": "2b749cb4b85121c83e8fe2f0e5ae2a7eda54ac6e"}
+    ],
+    "approved_review_observed": false
+  },
+  "ownership_evidence": {
+    "github_repository": "tailrocks/velnor",
+    "head_repository": "tailrocks/velnor",
+    "same_repository_member": true,
+    "github_actor": "donbeave",
+    "local_worktree_observation": "/private/tmp/velnor-pr966-repair had the same branch and was clean at stale local HEAD caac13221d573977d802f734057ebbff5402cbb7",
+    "codex_attribution": "remote PR history and local continuation include Co-authored-by: Codex <codex@openai.com>",
+    "agent_identity_limit": "No stronger named-agent mapping was established; do not classify as an external fork."
+  },
+  "api_sources": [
+    "https://api.github.com/repos/tailrocks/velnor/actions/runs/35484968732",
+    "https://api.github.com/repos/tailrocks/velnor/actions/jobs/106009550596",
+    "https://api.github.com/repos/tailrocks/velnor/pulls/966",
+    "https://api.github.com/repos/tailrocks/velnor/pulls/966/files",
+    "https://api.github.com/repos/tailrocks/velnor/actions/runs/35490581231",
+    "https://api.github.com/repos/tailrocks/velnor/actions/runs/35490579796"
+  ]
+}

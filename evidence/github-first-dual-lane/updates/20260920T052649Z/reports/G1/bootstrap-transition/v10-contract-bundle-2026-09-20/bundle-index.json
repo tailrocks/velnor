@@ -1,0 +1,11 @@
+{
+  "canonical_dag_sha256": "38a00228cd28207f3b257a53ba9683cdaf697c5899c897b0c2f53fdf80d364db",
+  "canonical_model_sha256": "09d586416a86fae321e35fc24fbecac870a1faec93cd6d17392169ff803e36f1",
+  "generated_at": "2026-09-20T03:58:55Z",
+  "plan_json_sha256": "8e5ff3e61a1d25590c88a161f9e38db260b9fa1afeccfe1c956b1194b5b66050",
+  "plan_md_sha256": "ab8513aebb6cf6657f0c88f5fd7af283c8b785d054cd64d0156be4a4bad5c12b",
+  "root_digest": "44f144bee0d2437fedf3d72c951d5df248033f7b78100004d81e30980e046136",
+  "root_manifest_sha256": "9f9306f71a82f656affa23eb8957d844ebbbe3be5d3fce293cf9f5bbe0dfac3e",
+  "schema": "velnor.authority-transition.bundle-index.v10",
+  "v9_preserved": true
+}

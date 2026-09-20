@@ -1,0 +1,111 @@
+{
+  "$id": "https://velnor.dev/schemas/v10-verify-b.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "called_head_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "called_job_workflow_ref": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "called_job_workflow_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "called_run_attempt": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "called_run_id": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "called_workflow_file_blob_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "called_workflow_ref": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "called_workflow_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "policy_check_app_id": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "policy_check_conclusion": {
+      "const": "success",
+      "type": "string"
+    },
+    "policy_check_context": {
+      "const": "Policy-bootstrap-B",
+      "type": "string"
+    },
+    "policy_check_head_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "policy_check_integration_id": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "policy_check_run_id": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "provider_result_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "provider_result_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "resulting_main_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "terminal_census_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "terminal_census_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "terminal_census_rows_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "called_head_sha",
+    "called_job_workflow_ref",
+    "called_job_workflow_sha",
+    "called_run_attempt",
+    "called_run_id",
+    "called_workflow_file_blob_sha",
+    "called_workflow_ref",
+    "called_workflow_sha",
+    "policy_check_app_id",
+    "policy_check_conclusion",
+    "policy_check_context",
+    "policy_check_head_sha",
+    "policy_check_integration_id",
+    "policy_check_run_id",
+    "provider_result_digest",
+    "provider_result_id",
+    "resulting_main_sha",
+    "terminal_census_digest",
+    "terminal_census_id",
+    "terminal_census_rows_digest"
+  ],
+  "title": "Velnor verify-B composite result",
+  "type": "object"
+}

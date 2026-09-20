@@ -1,0 +1,509 @@
+{
+  "schema": "velnor.authority-change-plan.v9.audit.v1",
+  "plan_sha256": "e74a583e492b41fa043b4a78621e6183875a333e3d533a4244e3956121b66615",
+  "markdown_sha256": "bfcafb4f706ac5c1a1ecccc7d8ba1d0d777f16e52bf4fa335a15085908e832ed",
+  "checks": [
+    {
+      "id": "schema",
+      "pass": true,
+      "detail": "successor_draft_external_blocked"
+    },
+    {
+      "id": "not-authorized",
+      "pass": true,
+      "detail": false
+    },
+    {
+      "id": "markdown-hash",
+      "pass": true,
+      "detail": {
+        "path": "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v9.md",
+        "sha256": "bfcafb4f706ac5c1a1ecccc7d8ba1d0d777f16e52bf4fa335a15085908e832ed"
+      }
+    },
+    {
+      "id": "current-main-one-tuple",
+      "pass": true,
+      "detail": {
+        "repository": "tailrocks/velnor",
+        "sha": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+        "parent_sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+        "tree_sha": "22ccc1daf9d55bd12d9a58e6652fe92cf3cb9416",
+        "observed_utc": "2026-09-20T03:58:55Z",
+        "checkpoint_path": "G1/bootstrap-transition/current-main-checkpoint-89f82dd8-2026-09-20.json",
+        "checkpoint_sha256": "77e1ecc848e0a3ad73cdfd853b788054e8cda02e0aae38d076b7c59b0da130bd",
+        "closure_input_path": "G1/bootstrap-transition/current-main-closure-inputs-89f82dd8-2026-09-20.json",
+        "closure_input_sha256": "1b890ef899c8a02146e7d6ab1d664fcb92213924e8c7a722f8f57a2bfb55c072"
+      }
+    },
+    {
+      "id": "historical-separated",
+      "pass": true,
+      "detail": {
+        "sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+        "parent_sha": "e94b48406c4ed206fce2bbf39b788264e72cf39c",
+        "observed_utc": "2026-09-20T01:28:35Z",
+        "checkpoint_sha256": "d4987b227e79212df2abdf503c33a80daff225ed270ea445f5c657f938fd101a",
+        "role": "historical parent snapshot; not current"
+      }
+    },
+    {
+      "id": "job-graph",
+      "pass": true,
+      "detail": [
+        "capture-caller-context",
+        "build-linux-x64",
+        "artifact-verify",
+        "reserve-release",
+        "attest-binding",
+        "publish",
+        "attest-release",
+        "pre-record-upload",
+        "verify-B"
+      ]
+    },
+    {
+      "id": "needs",
+      "pass": true,
+      "detail": [
+        [
+          "build-linux-x64",
+          "capture-caller-context"
+        ],
+        [
+          "artifact-verify",
+          "build-linux-x64"
+        ],
+        [
+          "reserve-release",
+          "artifact-verify"
+        ],
+        [
+          "attest-binding",
+          "reserve-release"
+        ],
+        [
+          "publish",
+          "attest-binding"
+        ],
+        [
+          "attest-release",
+          "publish"
+        ],
+        [
+          "pre-record-upload",
+          "attest-release"
+        ],
+        [
+          "verify-B",
+          "pre-record-upload"
+        ]
+      ]
+    },
+    {
+      "id": "caller-upper-bound",
+      "pass": true,
+      "detail": [
+        "actions:write",
+        "contents:write",
+        "attestations:write",
+        "id-token:write",
+        "checks:read"
+      ]
+    },
+    {
+      "id": "caller-no-reexport",
+      "pass": true,
+      "detail": {
+        "id": "policy-validator-B",
+        "uses": "./.github/workflows/ci-policy-validator-products.yml",
+        "needs": [],
+        "outputs_declared": false,
+        "shell_steps": false,
+        "permissions": [
+          "actions:write",
+          "contents:write",
+          "attestations:write",
+          "id-token:write",
+          "checks:read"
+        ],
+        "with_inputs": [
+          "caller_repository",
+          "caller_source_ref",
+          "caller_source_sha",
+          "caller_workflow_ref",
+          "caller_workflow_sha",
+          "caller_run_id",
+          "caller_run_attempt"
+        ]
+      }
+    },
+    {
+      "id": "stage-order",
+      "pass": true,
+      "detail": [
+        "S0",
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S5",
+        "S6",
+        "S7a",
+        "S7b"
+      ]
+    },
+    {
+      "id": "s7-external-inputs",
+      "pass": true,
+      "detail": {
+        "stage": "S7b",
+        "producer_job": "external-provider-result / verify-B",
+        "produces": [
+          "called_workflow_file_blob_sha:sha256",
+          "called_workflow_path:string",
+          "called_workflow_ref:string",
+          "called_workflow_sha:sha256",
+          "policy_bootstrap_b_check_id:u64",
+          "policy_bootstrap_b_integration_id:u64",
+          "policy_bootstrap_b_provider_app_id:u64",
+          "policy_bootstrap_b_verifier_revision:string",
+          "provider_result_digest:sha256",
+          "provider_result_id:string",
+          "terminal_census_digest:sha256",
+          "terminal_census_id:string"
+        ],
+        "consumes": [
+          "caller_run_attempt:u64",
+          "caller_run_id:u64",
+          "caller_workflow_file_blob_sha:sha256",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "closure_digest:sha256",
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "artifact_digest:sha256",
+          "artifact_id:u64",
+          "artifact_name:string",
+          "binary_architecture:string",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "upload_step_id:string",
+          "producer_check_run_id:u64",
+          "producer_job_id:u64",
+          "producer_run_attempt:u64",
+          "producer_run_id:u64",
+          "producer_workflow_file_blob_sha:sha256",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256",
+          "binding_attestation_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_core_digest:sha256",
+          "binding_predicate_path:string",
+          "binding_predicate_type:string",
+          "binding_record_artifact_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_subject_digest:sha256",
+          "binding_subject_name:string",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_digest:sha256",
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target_sha:sha256",
+          "release_asset_digest:sha256",
+          "release_asset_id:u64",
+          "certificate_identity:string",
+          "certificate_verified:string",
+          "oidc_issuer:string",
+          "oidc_policy_revision_sha256:sha256",
+          "release_attestation_digest:sha256",
+          "release_attestation_id:u64",
+          "release_manifest_subject_sha256:sha256",
+          "release_predicate_path:string",
+          "release_predicate_type:string",
+          "signer_repository:string",
+          "signer_source_ref:string",
+          "signer_workflow:string",
+          "pre_record_artifact_digest:sha256",
+          "pre_record_artifact_id:u64",
+          "pre_record_artifact_name:string",
+          "pre_record_upload_check_run_id:u64",
+          "pre_record_upload_job_id:u64",
+          "pre_record_upload_run_attempt:u64",
+          "pre_record_upload_run_id:u64",
+          "record_artifact_digest:sha256",
+          "record_artifact_id:u64",
+          "record_artifact_name:string",
+          "record_upload_check_run_id:u64",
+          "record_upload_job_id:u64",
+          "record_upload_run_attempt:u64",
+          "record_upload_run_id:u64",
+          "record_upload_step_id:string"
+        ],
+        "external_inputs": [
+          "policy_bootstrap_b_check_id:u64",
+          "policy_bootstrap_b_integration_id:u64",
+          "policy_bootstrap_b_provider_app_id:u64",
+          "policy_bootstrap_b_verifier_revision:string",
+          "provider_result_digest:sha256",
+          "provider_result_id:string"
+        ]
+      }
+    },
+    {
+      "id": "unique-provenance",
+      "pass": true,
+      "detail": "every field has exactly one producer"
+    },
+    {
+      "id": "canonical-146",
+      "pass": true,
+      "detail": 146
+    },
+    {
+      "id": "canonical-typed",
+      "pass": true,
+      "detail": "146 mapped leaves"
+    },
+    {
+      "id": "lineage-oriented-typed",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "id": "verify-no-self-produced-input",
+      "pass": true,
+      "detail": {
+        "intersection": [
+          "policy_bootstrap_b_check_id",
+          "policy_bootstrap_b_integration_id",
+          "policy_bootstrap_b_provider_app_id",
+          "policy_bootstrap_b_verifier_revision",
+          "provider_result_digest",
+          "provider_result_id"
+        ],
+        "external": [
+          "policy_bootstrap_b_check_id",
+          "policy_bootstrap_b_integration_id",
+          "policy_bootstrap_b_provider_app_id",
+          "policy_bootstrap_b_verifier_revision",
+          "provider_result_digest",
+          "provider_result_id"
+        ]
+      }
+    },
+    {
+      "id": "unique-s7-producers",
+      "pass": true,
+      "detail": "no producer alternatives"
+    },
+    {
+      "id": "root-current",
+      "pass": true,
+      "detail": {
+        "repository": "tailrocks/velnor",
+        "sha": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+        "parent_sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+        "tree_sha": "22ccc1daf9d55bd12d9a58e6652fe92cf3cb9416",
+        "observed_utc": "2026-09-20T03:58:55Z"
+      }
+    },
+    {
+      "id": "schema-pre_record",
+      "pass": true,
+      "detail": {
+        "expected": "f5d04aad1cb6ee764bdd70e13961ca7ec28924994e149c3a49933fdb9441e26c",
+        "actual": "f5d04aad1cb6ee764bdd70e13961ca7ec28924994e149c3a49933fdb9441e26c"
+      }
+    },
+    {
+      "id": "schema-provider_result",
+      "pass": true,
+      "detail": {
+        "expected": "4bb8a2a31867a720453219eae9624745c647f4483dd71f45b7cd759bd978bd2b",
+        "actual": "4bb8a2a31867a720453219eae9624745c647f4483dd71f45b7cd759bd978bd2b"
+      }
+    },
+    {
+      "id": "schema-release_manifest",
+      "pass": true,
+      "detail": {
+        "expected": "81c7599b3d29abe9c6fad2b3032a6207352ac72a7bbe2399cd913a0003ec6b74",
+        "actual": "81c7599b3d29abe9c6fad2b3032a6207352ac72a7bbe2399cd913a0003ec6b74"
+      }
+    },
+    {
+      "id": "schema-tree_b_adoption",
+      "pass": true,
+      "detail": {
+        "expected": "078b038e862a7650c714d219d96099c112c97c34fad3a75b54ecce208e024f8b",
+        "actual": "078b038e862a7650c714d219d96099c112c97c34fad3a75b54ecce208e024f8b"
+      }
+    },
+    {
+      "id": "historical-excluded",
+      "pass": true,
+      "detail": {
+        "path": "G1/bootstrap-transition/validator-binding-audit-2026-09-20/binding-predicate.schema.json",
+        "sha256": "4bcd53cdd4e1900d4edf240f46da4c14ab570fc7be09f37484a9f56402da3b06",
+        "role": "historical audit only; forbidden current input"
+      }
+    },
+    {
+      "id": "product",
+      "pass": true,
+      "detail": {
+        "product_id": "velnor-workflow-policy-validator",
+        "schema": "velnor.workflow-policy-validator.v1",
+        "purpose": "policy-validator",
+        "platform": "Linux-X64",
+        "runner": "ubuntu-24.04",
+        "architecture": "x86_64",
+        "asset": "velnor-workflow-policy-validator-Linux-X64",
+        "tag_pattern": "^velnor-workflow-policy-validator-v1-[0-9a-f]{16}$",
+        "features": "",
+        "mutable_latest": false,
+        "overwrite": false,
+        "application_namespace_reuse": false
+      }
+    },
+    {
+      "id": "positive-pre-record",
+      "pass": true,
+      "detail": "strict pre-record"
+    },
+    {
+      "id": "positive-provider-result",
+      "pass": true,
+      "detail": "strict provider result"
+    },
+    {
+      "id": "positive-root-binding",
+      "pass": true,
+      "detail": {
+        "pre": "7f888b746ca8c7a6f6e8342c7d0a450edd70a5bf766421f9a2d8ddd2cd9e517b",
+        "root": "7f888b746ca8c7a6f6e8342c7d0a450edd70a5bf766421f9a2d8ddd2cd9e517b"
+      }
+    },
+    {
+      "id": "positive-normalized-hashes",
+      "pass": true,
+      "detail": "root-bound normalized fixture hashes"
+    },
+    {
+      "id": "hostile-fixture-set",
+      "pass": true,
+      "detail": 15
+    },
+    {
+      "id": "actionlint",
+      "pass": true,
+      "detail": "exit 0"
+    },
+    {
+      "id": "immutable-release-contract",
+      "pass": true,
+      "detail": {
+        "get_endpoint": "/repos/{owner}/{repo}/immutable-releases",
+        "expected_status": 200,
+        "expected_enabled": true,
+        "expected_enforced_by_owner": "record returned boolean",
+        "release_attestation_required": true,
+        "documentation": "https://docs.github.com/en/rest/repos/repos"
+      }
+    },
+    {
+      "id": "provider-freeze-blocked",
+      "pass": true,
+      "detail": [
+        {
+          "id": "target_generator",
+          "condition": "target generator revision null; current 54/old 0dc not target",
+          "required_before": "Tree-A admission"
+        },
+        {
+          "id": "publisher_source_output",
+          "condition": "B source/output absent at current main 89f82; fixed-point generation unproven",
+          "required_before": "Tree-A admission"
+        },
+        {
+          "id": "field_availability",
+          "condition": "v9 uses canonical machine baseline but no real verifier execution",
+          "required_before": "authority operation"
+        },
+        {
+          "id": "external_provider",
+          "condition": "B App IDs/credentials/verifier revision/called identity unresolved",
+          "required_before": "Main-B"
+        },
+        {
+          "id": "provider_freeze",
+          "condition": "actor 5 always bypass and no provider-enforced freeze/recovery proven",
+          "required_before": "any transition"
+        },
+        {
+          "id": "native_matrix",
+          "condition": "macos-26 observed; xcode-27 proof absent",
+          "required_before": "Main-B"
+        },
+        {
+          "id": "real_verifier",
+          "condition": "live raw artifact/crypto/provider verifier unimplemented",
+          "required_before": "acceptance"
+        },
+        {
+          "id": "independent_reviews",
+          "condition": "v9 authority and canonical DAG reviews absent",
+          "required_before": "implementation/release/merge"
+        }
+      ]
+    },
+    {
+      "id": "native-negative",
+      "pass": true,
+      "detail": {
+        "path": "G1/bootstrap-transition/current-main-checkpoint-89f82dd8-2026-09-20.json",
+        "sha256": "77e1ecc848e0a3ad73cdfd853b788054e8cda02e0aae38d076b7c59b0da130bd",
+        "observed_utc": "2026-09-20T03:58:55Z",
+        "runtime_products_run": 35484968618,
+        "runtime_macos_job": 106009574341,
+        "runtime_runner": "macos-26",
+        "runtime_accepted": false,
+        "preview_run": 35484968732,
+        "preview_first_job": 106009550596,
+        "preview_conclusion": "failure",
+        "preview_failure": "generated tree drift",
+        "ci_main_run": 35484968706,
+        "ci_main_capture": "Policy failure; required children skipped"
+      }
+    }
+  ],
+  "check_count": 33,
+  "passed": 33,
+  "findings": [],
+  "structural_pass": true,
+  "external_blockers": [
+    "target generator/B source output absent",
+    "provider App identities/credential/verifier unresolved",
+    "provider freeze/recovery excluding actor 5 unproven",
+    "real verifier/native xcode-27 proof absent"
+  ],
+  "status": "structural_audit_pass_external_blocked",
+  "execution_authorized": false
+}

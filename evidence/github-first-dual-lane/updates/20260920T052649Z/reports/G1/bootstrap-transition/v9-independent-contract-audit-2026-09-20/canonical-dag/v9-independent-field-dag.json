@@ -1,0 +1,3583 @@
+{
+  "authority_claim": false,
+  "cross_schema_identity": {
+    "permanent": {
+      "product.asset": "velnor-workflow-policy-validator-Linux-X64",
+      "product.platform": "Linux-X64",
+      "product.product_id": "velnor-workflow-policy-validator",
+      "product.runner": "ubuntu-24.04",
+      "product.schema": "velnor.workflow-policy-validator.v1"
+    },
+    "pre_record": {
+      "product.architecture": "x86_64",
+      "product.name": "velnor-workflow-policy-validator",
+      "product.namespace": "velnor.workflow-policy-validator",
+      "product.platform": "Linux-X64"
+    },
+    "release_manifest": {
+      "architecture": "x86_64",
+      "platform": "ubuntu-24.04",
+      "product_name": "velnor-policy-validator",
+      "product_namespace": "velnor.policy-validator",
+      "schema": "velnor.policy-validator.release-manifest.v1"
+    },
+    "root_manifest": {
+      "architecture": "x86_64",
+      "asset": "velnor-workflow-policy-validator-Linux-X64",
+      "platform": "Linux-X64",
+      "product_id": "velnor-workflow-policy-validator",
+      "runner": "ubuntu-24.04",
+      "schema": "velnor.workflow-policy-validator.v1"
+    }
+  },
+  "field_lineage_edges": [
+    {
+      "consumer": "build-linux-x64",
+      "fields": [
+        "caller_run_attempt:u64",
+        "caller_run_id:u64",
+        "caller_workflow_file_blob_sha:sha256",
+        "caller_workflow_path:string",
+        "caller_workflow_ref:string",
+        "caller_workflow_sha:sha256",
+        "closure_digest:sha256",
+        "repository_id:string",
+        "source_ref:string",
+        "source_sha:sha256",
+        "source_tree_sha:sha256"
+      ],
+      "orientation": "producer_outputs_to_consumer_inputs",
+      "producer": "capture-caller-context"
+    },
+    {
+      "consumer": "artifact-verify",
+      "fields": [
+        "artifact_digest:sha256",
+        "artifact_id:u64",
+        "artifact_name:string",
+        "binary_architecture:string",
+        "binary_digest:sha256",
+        "binary_size:u64",
+        "inner_payload_digest:sha256",
+        "inner_payload_size:u64",
+        "service_zip_digest:sha256",
+        "service_zip_size:u64",
+        "upload_step_id:string"
+      ],
+      "orientation": "producer_outputs_to_consumer_inputs",
+      "producer": "build-linux-x64"
+    },
+    {
+      "consumer": "reserve-release",
+      "fields": [
+        "producer_check_run_id:u64",
+        "producer_job_id:u64",
+        "producer_run_attempt:u64",
+        "producer_run_id:u64",
+        "producer_workflow_file_blob_sha:sha256",
+        "producer_workflow_path:string",
+        "producer_workflow_ref:string",
+        "producer_workflow_sha:sha256",
+        "verified_artifact_digest:sha256",
+        "verified_raw_binary_digest:sha256",
+        "verified_raw_inner_payload_digest:sha256",
+        "verified_raw_service_zip_digest:sha256"
+      ],
+      "orientation": "producer_outputs_to_consumer_inputs",
+      "producer": "artifact-verify"
+    },
+    {
+      "consumer": "attest-binding",
+      "fields": [
+        "release_id:u64",
+        "release_tag:string",
+        "release_target_sha:sha256"
+      ],
+      "orientation": "producer_outputs_to_consumer_inputs",
+      "producer": "reserve-release"
+    },
+    {
+      "consumer": "publish",
+      "fields": [
+        "binding_attestation_digest:sha256",
+        "binding_attestation_id:u64",
+        "binding_core_digest:sha256",
+        "binding_predicate_path:string",
+        "binding_predicate_type:string",
+        "binding_record_artifact_digest:sha256",
+        "binding_record_artifact_id:u64",
+        "binding_subject_digest:sha256",
+        "binding_subject_name:string",
+        "final_manifest_artifact_digest:sha256",
+        "final_manifest_artifact_id:u64",
+        "final_manifest_digest:sha256"
+      ],
+      "orientation": "producer_outputs_to_consumer_inputs",
+      "producer": "attest-binding"
+    },
+    {
+      "consumer": "attest-release",
+      "fields": [
+        "published_release_id:u64",
+        "published_release_tag:string",
+        "published_release_target_sha:sha256",
+        "release_asset_digest:sha256",
+        "release_asset_id:u64"
+      ],
+      "orientation": "producer_outputs_to_consumer_inputs",
+      "producer": "publish"
+    },
+    {
+      "consumer": "pre-record-upload",
+      "fields": [
+        "certificate_identity:string",
+        "certificate_verified:string",
+        "oidc_issuer:string",
+        "oidc_policy_revision_sha256:sha256",
+        "release_attestation_digest:sha256",
+        "release_attestation_id:u64",
+        "release_manifest_subject_sha256:sha256",
+        "release_predicate_path:string",
+        "release_predicate_type:string",
+        "signer_repository:string",
+        "signer_source_ref:string",
+        "signer_workflow:string"
+      ],
+      "orientation": "producer_outputs_to_consumer_inputs",
+      "producer": "attest-release"
+    },
+    {
+      "consumer": "verify-B",
+      "fields": [
+        "pre_record_artifact_digest:sha256",
+        "pre_record_artifact_id:u64",
+        "pre_record_artifact_name:string",
+        "pre_record_upload_check_run_id:u64",
+        "pre_record_upload_job_id:u64",
+        "pre_record_upload_run_attempt:u64",
+        "pre_record_upload_run_id:u64",
+        "record_artifact_digest:sha256",
+        "record_artifact_id:u64",
+        "record_artifact_name:string",
+        "record_upload_check_run_id:u64",
+        "record_upload_job_id:u64",
+        "record_upload_run_attempt:u64",
+        "record_upload_run_id:u64",
+        "record_upload_step_id:string"
+      ],
+      "orientation": "producer_outputs_to_consumer_inputs",
+      "producer": "pre-record-upload"
+    },
+    {
+      "consumer": "verify-B",
+      "fields": [
+        "policy_bootstrap_b_check_id:u64",
+        "policy_bootstrap_b_integration_id:u64",
+        "policy_bootstrap_b_provider_app_id:u64",
+        "policy_bootstrap_b_verifier_revision:string",
+        "provider_result_digest:sha256",
+        "provider_result_id:string"
+      ],
+      "orientation": "producer_outputs_to_consumer_inputs",
+      "producer": "external-provider-result"
+    }
+  ],
+  "fields": {
+    "artifact_digest": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "build-linux-x64",
+      "stage": "S1"
+    },
+    "artifact_id": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "build-linux-x64",
+      "stage": "S1"
+    },
+    "artifact_name": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "build-linux-x64",
+      "stage": "S1"
+    },
+    "binary_architecture": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "build-linux-x64",
+      "stage": "S1"
+    },
+    "binary_digest": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "build-linux-x64",
+      "stage": "S1"
+    },
+    "binary_size": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "build-linux-x64",
+      "stage": "S1"
+    },
+    "binding_attestation_digest": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload",
+        "publish"
+      ],
+      "producer": "attest-binding",
+      "stage": "S4"
+    },
+    "binding_attestation_id": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload",
+        "publish"
+      ],
+      "producer": "attest-binding",
+      "stage": "S4"
+    },
+    "binding_core_digest": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload",
+        "publish"
+      ],
+      "producer": "attest-binding",
+      "stage": "S4"
+    },
+    "binding_predicate_path": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload",
+        "publish"
+      ],
+      "producer": "attest-binding",
+      "stage": "S4"
+    },
+    "binding_predicate_type": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload",
+        "publish"
+      ],
+      "producer": "attest-binding",
+      "stage": "S4"
+    },
+    "binding_record_artifact_digest": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload",
+        "publish"
+      ],
+      "producer": "attest-binding",
+      "stage": "S4"
+    },
+    "binding_record_artifact_id": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload",
+        "publish"
+      ],
+      "producer": "attest-binding",
+      "stage": "S4"
+    },
+    "binding_subject_digest": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload",
+        "publish"
+      ],
+      "producer": "attest-binding",
+      "stage": "S4"
+    },
+    "binding_subject_name": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload",
+        "publish"
+      ],
+      "producer": "attest-binding",
+      "stage": "S4"
+    },
+    "called_workflow_file_blob_sha": {
+      "consumers": [],
+      "producer": "external-provider-result / verify-B",
+      "stage": "S7b"
+    },
+    "called_workflow_path": {
+      "consumers": [],
+      "producer": "external-provider-result / verify-B",
+      "stage": "S7b"
+    },
+    "called_workflow_ref": {
+      "consumers": [],
+      "producer": "external-provider-result / verify-B",
+      "stage": "S7b"
+    },
+    "called_workflow_sha": {
+      "consumers": [],
+      "producer": "external-provider-result / verify-B",
+      "stage": "S7b"
+    },
+    "caller_run_attempt": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "build-linux-x64",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "capture-caller-context.capture",
+      "stage": "S0"
+    },
+    "caller_run_id": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "build-linux-x64",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "capture-caller-context.capture",
+      "stage": "S0"
+    },
+    "caller_workflow_file_blob_sha": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "build-linux-x64",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "capture-caller-context.capture",
+      "stage": "S0"
+    },
+    "caller_workflow_path": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "build-linux-x64",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "capture-caller-context.capture",
+      "stage": "S0"
+    },
+    "caller_workflow_ref": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "build-linux-x64",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "capture-caller-context.capture",
+      "stage": "S0"
+    },
+    "caller_workflow_sha": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "build-linux-x64",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "capture-caller-context.capture",
+      "stage": "S0"
+    },
+    "certificate_identity": {
+      "consumers": [
+        "pre-record-upload"
+      ],
+      "producer": "attest-release",
+      "stage": "S6"
+    },
+    "certificate_verified": {
+      "consumers": [
+        "pre-record-upload"
+      ],
+      "producer": "attest-release",
+      "stage": "S6"
+    },
+    "closure_digest": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "build-linux-x64",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "capture-caller-context.capture",
+      "stage": "S0"
+    },
+    "final_manifest_artifact_digest": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload",
+        "publish"
+      ],
+      "producer": "attest-binding",
+      "stage": "S4"
+    },
+    "final_manifest_artifact_id": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload",
+        "publish"
+      ],
+      "producer": "attest-binding",
+      "stage": "S4"
+    },
+    "final_manifest_digest": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload",
+        "publish"
+      ],
+      "producer": "attest-binding",
+      "stage": "S4"
+    },
+    "inner_payload_digest": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "build-linux-x64",
+      "stage": "S1"
+    },
+    "inner_payload_size": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "build-linux-x64",
+      "stage": "S1"
+    },
+    "oidc_issuer": {
+      "consumers": [
+        "pre-record-upload"
+      ],
+      "producer": "attest-release",
+      "stage": "S6"
+    },
+    "oidc_policy_revision_sha256": {
+      "consumers": [
+        "pre-record-upload"
+      ],
+      "producer": "attest-release",
+      "stage": "S6"
+    },
+    "policy_bootstrap_b_check_id": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "external-provider-result / verify-B",
+      "stage": "S7b"
+    },
+    "policy_bootstrap_b_integration_id": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "external-provider-result / verify-B",
+      "stage": "S7b"
+    },
+    "policy_bootstrap_b_provider_app_id": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "external-provider-result / verify-B",
+      "stage": "S7b"
+    },
+    "policy_bootstrap_b_verifier_revision": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "external-provider-result / verify-B",
+      "stage": "S7b"
+    },
+    "pre_record_artifact_digest": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "pre-record-upload",
+      "stage": "S7a"
+    },
+    "pre_record_artifact_id": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "pre-record-upload",
+      "stage": "S7a"
+    },
+    "pre_record_artifact_name": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "pre-record-upload",
+      "stage": "S7a"
+    },
+    "pre_record_upload_check_run_id": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "pre-record-upload",
+      "stage": "S7a"
+    },
+    "pre_record_upload_job_id": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "pre-record-upload",
+      "stage": "S7a"
+    },
+    "pre_record_upload_run_attempt": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "pre-record-upload",
+      "stage": "S7a"
+    },
+    "pre_record_upload_run_id": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "pre-record-upload",
+      "stage": "S7a"
+    },
+    "producer_check_run_id": {
+      "consumers": [
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "artifact-verify",
+      "stage": "S2"
+    },
+    "producer_job_id": {
+      "consumers": [
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "artifact-verify",
+      "stage": "S2"
+    },
+    "producer_run_attempt": {
+      "consumers": [
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "artifact-verify",
+      "stage": "S2"
+    },
+    "producer_run_id": {
+      "consumers": [
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "artifact-verify",
+      "stage": "S2"
+    },
+    "producer_workflow_file_blob_sha": {
+      "consumers": [
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "artifact-verify",
+      "stage": "S2"
+    },
+    "producer_workflow_path": {
+      "consumers": [
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "artifact-verify",
+      "stage": "S2"
+    },
+    "producer_workflow_ref": {
+      "consumers": [
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "artifact-verify",
+      "stage": "S2"
+    },
+    "producer_workflow_sha": {
+      "consumers": [
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "artifact-verify",
+      "stage": "S2"
+    },
+    "provider_result_digest": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "external-provider-result / verify-B",
+      "stage": "S7b"
+    },
+    "provider_result_id": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "external-provider-result / verify-B",
+      "stage": "S7b"
+    },
+    "published_release_id": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload"
+      ],
+      "producer": "publish",
+      "stage": "S5"
+    },
+    "published_release_tag": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload"
+      ],
+      "producer": "publish",
+      "stage": "S5"
+    },
+    "published_release_target_sha": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload"
+      ],
+      "producer": "publish",
+      "stage": "S5"
+    },
+    "record_artifact_digest": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "pre-record-upload",
+      "stage": "S7a"
+    },
+    "record_artifact_id": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "pre-record-upload",
+      "stage": "S7a"
+    },
+    "record_artifact_name": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "pre-record-upload",
+      "stage": "S7a"
+    },
+    "record_upload_check_run_id": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "pre-record-upload",
+      "stage": "S7a"
+    },
+    "record_upload_job_id": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "pre-record-upload",
+      "stage": "S7a"
+    },
+    "record_upload_run_attempt": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "pre-record-upload",
+      "stage": "S7a"
+    },
+    "record_upload_run_id": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "pre-record-upload",
+      "stage": "S7a"
+    },
+    "record_upload_step_id": {
+      "consumers": [
+        "verify-B"
+      ],
+      "producer": "pre-record-upload",
+      "stage": "S7a"
+    },
+    "release_asset_digest": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload"
+      ],
+      "producer": "publish",
+      "stage": "S5"
+    },
+    "release_asset_id": {
+      "consumers": [
+        "attest-release",
+        "pre-record-upload"
+      ],
+      "producer": "publish",
+      "stage": "S5"
+    },
+    "release_attestation_digest": {
+      "consumers": [
+        "pre-record-upload"
+      ],
+      "producer": "attest-release",
+      "stage": "S6"
+    },
+    "release_attestation_id": {
+      "consumers": [
+        "pre-record-upload"
+      ],
+      "producer": "attest-release",
+      "stage": "S6"
+    },
+    "release_id": {
+      "consumers": [
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish"
+      ],
+      "producer": "reserve-release",
+      "stage": "S3"
+    },
+    "release_manifest_subject_sha256": {
+      "consumers": [
+        "pre-record-upload"
+      ],
+      "producer": "attest-release",
+      "stage": "S6"
+    },
+    "release_predicate_path": {
+      "consumers": [
+        "pre-record-upload"
+      ],
+      "producer": "attest-release",
+      "stage": "S6"
+    },
+    "release_predicate_type": {
+      "consumers": [
+        "pre-record-upload"
+      ],
+      "producer": "attest-release",
+      "stage": "S6"
+    },
+    "release_tag": {
+      "consumers": [
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish"
+      ],
+      "producer": "reserve-release",
+      "stage": "S3"
+    },
+    "release_target_sha": {
+      "consumers": [
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish"
+      ],
+      "producer": "reserve-release",
+      "stage": "S3"
+    },
+    "repository_id": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "build-linux-x64",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "capture-caller-context.capture",
+      "stage": "S0"
+    },
+    "service_zip_digest": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "build-linux-x64",
+      "stage": "S1"
+    },
+    "service_zip_size": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "build-linux-x64",
+      "stage": "S1"
+    },
+    "signer_repository": {
+      "consumers": [
+        "pre-record-upload"
+      ],
+      "producer": "attest-release",
+      "stage": "S6"
+    },
+    "signer_source_ref": {
+      "consumers": [
+        "pre-record-upload"
+      ],
+      "producer": "attest-release",
+      "stage": "S6"
+    },
+    "signer_workflow": {
+      "consumers": [
+        "pre-record-upload"
+      ],
+      "producer": "attest-release",
+      "stage": "S6"
+    },
+    "source_ref": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "build-linux-x64",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "capture-caller-context.capture",
+      "stage": "S0"
+    },
+    "source_sha": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "build-linux-x64",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "capture-caller-context.capture",
+      "stage": "S0"
+    },
+    "source_tree_sha": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "build-linux-x64",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "capture-caller-context.capture",
+      "stage": "S0"
+    },
+    "terminal_census_digest": {
+      "consumers": [],
+      "producer": "external-provider-result / verify-B",
+      "stage": "S7b"
+    },
+    "terminal_census_id": {
+      "consumers": [],
+      "producer": "external-provider-result / verify-B",
+      "stage": "S7b"
+    },
+    "upload_step_id": {
+      "consumers": [
+        "artifact-verify",
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "build-linux-x64",
+      "stage": "S1"
+    },
+    "verified_artifact_digest": {
+      "consumers": [
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "artifact-verify",
+      "stage": "S2"
+    },
+    "verified_raw_binary_digest": {
+      "consumers": [
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "artifact-verify",
+      "stage": "S2"
+    },
+    "verified_raw_inner_payload_digest": {
+      "consumers": [
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "artifact-verify",
+      "stage": "S2"
+    },
+    "verified_raw_service_zip_digest": {
+      "consumers": [
+        "attest-binding",
+        "attest-release",
+        "pre-record-upload",
+        "publish",
+        "reserve-release"
+      ],
+      "producer": "artifact-verify",
+      "stage": "S2"
+    }
+  },
+  "live_main": {
+    "sha": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+    "status": "unimplemented",
+    "tree_sha": "22ccc1daf9d55bd12d9a58e6652fe92cf3cb9416",
+    "typed_verifier_paths": [
+      {
+        "path": ".github/workflows/ci-policy-validator-products.yml",
+        "present": false,
+        "stderr": "fatal: path '.github/workflows/ci-policy-validator-products.yml' does not exist in '89f82dd8b287f46a3cf4c0920f341f6ca6c736db'"
+      },
+      {
+        "path": ".github-gen/sources/workflows/ci-policy-validator-products.yml",
+        "present": false,
+        "stderr": "fatal: path '.github-gen/sources/workflows/ci-policy-validator-products.yml' does not exist in '89f82dd8b287f46a3cf4c0920f341f6ca6c736db'"
+      },
+      {
+        "path": "crates/velnor-workflow/src/s2/primitives/policy_validator_products.rs",
+        "present": false,
+        "stderr": "fatal: path 'crates/velnor-workflow/src/s2/primitives/policy_validator_products.rs' does not exist in '89f82dd8b287f46a3cf4c0920f341f6ca6c736db'"
+      }
+    ]
+  },
+  "needs_edges_consumer_producer": [
+    [
+      "build-linux-x64",
+      "capture-caller-context"
+    ],
+    [
+      "artifact-verify",
+      "build-linux-x64"
+    ],
+    [
+      "reserve-release",
+      "artifact-verify"
+    ],
+    [
+      "attest-binding",
+      "reserve-release"
+    ],
+    [
+      "publish",
+      "attest-binding"
+    ],
+    [
+      "attest-release",
+      "publish"
+    ],
+    [
+      "pre-record-upload",
+      "attest-release"
+    ],
+    [
+      "verify-B",
+      "pre-record-upload"
+    ]
+  ],
+  "negative_fixture_path": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G1/bootstrap-transition/v9-independent-contract-audit-2026-09-20/canonical-dag/v9-independent-negative-fixtures.json",
+  "permanent_leaf_lineage_reviewed": {
+    "actions.artifact_metadata_write": {
+      "producer": "canonical action contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "bool"
+    },
+    "actions.attest_sha": {
+      "producer": "canonical action contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "actions.create_storage_record": {
+      "producer": "canonical action contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "bool"
+    },
+    "actions.push_to_registry": {
+      "producer": "canonical action contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "bool"
+    },
+    "actions.upload_artifact_sha": {
+      "producer": "canonical action contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "artifact.expired": {
+      "producer": "artifact-verify",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "bool"
+    },
+    "artifact.id": {
+      "producer": "build-linux-x64",
+      "required": true,
+      "source": "build-linux-x64 typed output plus upload-artifact response",
+      "stage": "S1",
+      "type": "u64"
+    },
+    "artifact.inner_payload_sha256": {
+      "producer": "build-linux-x64",
+      "required": true,
+      "source": "build-linux-x64 typed output plus upload-artifact response",
+      "stage": "S1",
+      "type": "string"
+    },
+    "artifact.inner_payload_size": {
+      "producer": "build-linux-x64",
+      "required": true,
+      "source": "build-linux-x64 typed output plus upload-artifact response",
+      "stage": "S1",
+      "type": "u64"
+    },
+    "artifact.name": {
+      "producer": "build-linux-x64",
+      "required": true,
+      "source": "build-linux-x64 typed output plus upload-artifact response",
+      "stage": "S1",
+      "type": "string"
+    },
+    "artifact.rest_service_zip_sha256": {
+      "producer": "artifact-verify",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "artifact.rest_service_zip_size": {
+      "producer": "artifact-verify",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "u64"
+    },
+    "artifact.service_zip_sha256": {
+      "producer": "build-linux-x64",
+      "required": true,
+      "source": "build-linux-x64 typed output plus upload-artifact response",
+      "stage": "S1",
+      "type": "string"
+    },
+    "artifact.service_zip_size": {
+      "producer": "build-linux-x64",
+      "required": true,
+      "source": "build-linux-x64 typed output plus upload-artifact response",
+      "stage": "S1",
+      "type": "u64"
+    },
+    "artifact.workflow_run_id": {
+      "producer": "artifact-verify",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "u64"
+    },
+    "attestation.binding_digest": {
+      "producer": "attest-binding",
+      "required": true,
+      "source": "attest-binding attestation and manifest upload API responses",
+      "stage": "S4",
+      "type": "string"
+    },
+    "attestation.binding_predicate_path": {
+      "producer": "attest-binding",
+      "required": true,
+      "source": "attest-binding attestation and manifest upload API responses",
+      "stage": "S4",
+      "type": "string"
+    },
+    "attestation.binding_predicate_type": {
+      "producer": "attest-binding",
+      "required": true,
+      "source": "attest-binding attestation and manifest upload API responses",
+      "stage": "S4",
+      "type": "string"
+    },
+    "attestation.binding_subject_name": {
+      "producer": "attest-binding",
+      "required": true,
+      "source": "attest-binding attestation and manifest upload API responses",
+      "stage": "S4",
+      "type": "string"
+    },
+    "attestation.binding_subject_sha256": {
+      "producer": "attest-binding",
+      "required": true,
+      "source": "attest-binding attestation and manifest upload API responses",
+      "stage": "S4",
+      "type": "string"
+    },
+    "attestation.certificate_verified": {
+      "producer": "attest-release",
+      "required": true,
+      "source": "attest-release attestation API and verified certificate/predicate bytes",
+      "stage": "S6",
+      "type": "bool"
+    },
+    "attestation.release_manifest_subject_sha256": {
+      "producer": "attest-release",
+      "required": true,
+      "source": "attest-release attestation API and verified certificate/predicate bytes",
+      "stage": "S6",
+      "type": "string"
+    },
+    "attestation.release_predicate_path": {
+      "producer": "attest-release",
+      "required": true,
+      "source": "attest-release attestation API and verified certificate/predicate bytes",
+      "stage": "S6",
+      "type": "string"
+    },
+    "attestation.release_predicate_type": {
+      "producer": "attest-release",
+      "required": true,
+      "source": "attest-release attestation API and verified certificate/predicate bytes",
+      "stage": "S6",
+      "type": "string"
+    },
+    "attestation.signer_repository": {
+      "producer": "attest-release",
+      "required": true,
+      "source": "attest-release attestation API and verified certificate/predicate bytes",
+      "stage": "S6",
+      "type": "string"
+    },
+    "attestation.signer_source_ref": {
+      "producer": "attest-release",
+      "required": true,
+      "source": "attest-release attestation API and verified certificate/predicate bytes",
+      "stage": "S6",
+      "type": "string"
+    },
+    "attestation.signer_workflow": {
+      "producer": "attest-release",
+      "required": true,
+      "source": "attest-release attestation API and verified certificate/predicate bytes",
+      "stage": "S6",
+      "type": "string"
+    },
+    "binary.architecture": {
+      "producer": "build-linux-x64",
+      "required": true,
+      "source": "build-linux-x64 typed output plus upload-artifact response",
+      "stage": "S1",
+      "type": "string"
+    },
+    "binary.closure": {
+      "producer": "build-linux-x64",
+      "required": true,
+      "source": "build-linux-x64 typed output plus upload-artifact response",
+      "stage": "S1",
+      "type": "string"
+    },
+    "binary.mode": {
+      "producer": "build-linux-x64",
+      "required": true,
+      "source": "build-linux-x64 typed output plus upload-artifact response",
+      "stage": "S1",
+      "type": "u64"
+    },
+    "binary.revision": {
+      "producer": "build-linux-x64",
+      "required": true,
+      "source": "build-linux-x64 typed output plus upload-artifact response",
+      "stage": "S1",
+      "type": "string"
+    },
+    "binary.sha256": {
+      "producer": "build-linux-x64",
+      "required": true,
+      "source": "build-linux-x64 typed output plus upload-artifact response",
+      "stage": "S1",
+      "type": "string"
+    },
+    "binary.size": {
+      "producer": "build-linux-x64",
+      "required": true,
+      "source": "build-linux-x64 typed output plus upload-artifact response",
+      "stage": "S1",
+      "type": "u64"
+    },
+    "job.check_run_id": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "u64"
+    },
+    "job.conclusion": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "job.head_sha": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "job.id": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "u64"
+    },
+    "job.key": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "job.run_attempt": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "u64"
+    },
+    "job.run_id": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "u64"
+    },
+    "job.status": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "kind": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "manifest.sha256": {
+      "producer": "attest-binding",
+      "required": true,
+      "source": "attest-binding attestation and manifest upload API responses",
+      "stage": "S4",
+      "type": "string"
+    },
+    "manifest.size": {
+      "producer": "attest-binding",
+      "required": true,
+      "source": "attest-binding attestation and manifest upload API responses",
+      "stage": "S4",
+      "type": "u64"
+    },
+    "product.application_namespace_reuse": {
+      "producer": "canonical product contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "bool"
+    },
+    "product.asset": {
+      "producer": "canonical product contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "product.features": {
+      "producer": "canonical product contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "product.mutable_latest": {
+      "producer": "canonical product contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "bool"
+    },
+    "product.overwrite": {
+      "producer": "canonical product contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "bool"
+    },
+    "product.platform": {
+      "producer": "canonical product contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "product.product_id": {
+      "producer": "canonical product contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "product.profile": {
+      "producer": "canonical product contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "product.purpose": {
+      "producer": "canonical product contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "product.runner": {
+      "producer": "canonical product contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "product.schema": {
+      "producer": "canonical product contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "product.tag": {
+      "producer": "canonical product contract",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "publisher.attest_permissions": {
+      "producer": "ci-main source closure",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "publisher.build_permissions": {
+      "producer": "ci-main source closure",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "publisher.event": {
+      "producer": "ci-main source closure",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "publisher.head_branch": {
+      "producer": "ci-main source closure",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "publisher.head_sha": {
+      "producer": "ci-main source closure",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "publisher.path": {
+      "producer": "ci-main source closure",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "publisher.ref": {
+      "producer": "ci-main source closure",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "publisher.repository": {
+      "producer": "ci-main source closure",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "publisher.repository_id": {
+      "producer": "ci-main source closure",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "u64"
+    },
+    "publisher.reserve_publish_permissions": {
+      "producer": "ci-main source closure",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "publisher.sha": {
+      "producer": "ci-main source closure",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "release.attestation_signed_after_draft_id": {
+      "producer": "attest-binding",
+      "required": true,
+      "source": "attest-binding attestation and manifest upload API responses",
+      "stage": "S4",
+      "type": "bool"
+    },
+    "release.draft_first": {
+      "producer": "reserve-release",
+      "required": true,
+      "source": "reserve-release draft Releases API response",
+      "stage": "S3",
+      "type": "bool"
+    },
+    "release.draft_reserved": {
+      "producer": "reserve-release",
+      "required": true,
+      "source": "reserve-release draft Releases API response",
+      "stage": "S3",
+      "type": "bool"
+    },
+    "release.id": {
+      "producer": "reserve-release",
+      "required": true,
+      "source": "reserve-release draft Releases API response",
+      "stage": "S3",
+      "type": "u64"
+    },
+    "release.manifest_signed_after_draft_id": {
+      "producer": "attest-binding",
+      "required": true,
+      "source": "attest-binding attestation and manifest upload API responses",
+      "stage": "S4",
+      "type": "bool"
+    },
+    "release.published": {
+      "producer": "publish",
+      "required": true,
+      "source": "publish immutable Releases API response and raw asset download",
+      "stage": "S5",
+      "type": "bool"
+    },
+    "release.tag": {
+      "producer": "reserve-release",
+      "required": true,
+      "source": "reserve-release draft Releases API response",
+      "stage": "S3",
+      "type": "string"
+    },
+    "release.tag_immutable": {
+      "producer": "publish",
+      "required": true,
+      "source": "publish immutable Releases API response and raw asset download",
+      "stage": "S5",
+      "type": "bool"
+    },
+    "release.target_sha": {
+      "producer": "reserve-release",
+      "required": true,
+      "source": "reserve-release draft Releases API response",
+      "stage": "S3",
+      "type": "string"
+    },
+    "run.attempt": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "u64"
+    },
+    "run.conclusion": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "run.database_id": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "u64"
+    },
+    "run.event": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "run.head_branch": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "run.head_sha": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "run.id": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "u64"
+    },
+    "run.repository_id": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "u64"
+    },
+    "run.status": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "run.workflow_sha": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "source.closure": {
+      "producer": "capture-caller-context.capture",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "source.ref": {
+      "producer": "capture-caller-context.capture",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "source.repository": {
+      "producer": "capture-caller-context.capture",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "source.repository_id": {
+      "producer": "capture-caller-context.capture",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "u64"
+    },
+    "source.sha": {
+      "producer": "capture-caller-context.capture",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "source.tree_sha": {
+      "producer": "capture-caller-context.capture",
+      "required": true,
+      "source": "workflow_call inputs plus capture-caller-context.capture gh api Contents response",
+      "stage": "S0",
+      "type": "string"
+    },
+    "steps.attest_binding.conclusion": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.attest_binding.id": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.attest_binding.name": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.attest_binding.status": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.attest_release.conclusion": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.attest_release.id": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.attest_release.name": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.attest_release.status": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.build.conclusion": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.build.id": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.build.name": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.build.status": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.publish.conclusion": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.publish.id": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.publish.name": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.publish.status": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.reserve_release.conclusion": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.reserve_release.id": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.reserve_release.name": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.reserve_release.status": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.upload.conclusion": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.upload.id": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.upload.name": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "steps.upload.status": {
+      "producer": "named job API verifier",
+      "required": true,
+      "source": "artifact-verify paginated Actions API and raw artifact download",
+      "stage": "S2",
+      "type": "string"
+    },
+    "trust.oidc_issuer": {
+      "producer": "attest-release",
+      "required": true,
+      "source": "attest-release attestation API and verified certificate/predicate bytes",
+      "stage": "S6",
+      "type": "string"
+    },
+    "trust.oidc_policy_revision_sha256": {
+      "producer": "attest-release",
+      "required": true,
+      "source": "attest-release attestation API and verified certificate/predicate bytes",
+      "stage": "S6",
+      "type": "string"
+    },
+    "trust.repository_id": {
+      "producer": "attest-release",
+      "required": true,
+      "source": "attest-release attestation API and verified certificate/predicate bytes",
+      "stage": "S6",
+      "type": "u64"
+    },
+    "trust.signer_repository": {
+      "producer": "attest-release",
+      "required": true,
+      "source": "attest-release attestation API and verified certificate/predicate bytes",
+      "stage": "S6",
+      "type": "string"
+    },
+    "trust.signer_workflow": {
+      "producer": "attest-release",
+      "required": true,
+      "source": "attest-release attestation API and verified certificate/predicate bytes",
+      "stage": "S6",
+      "type": "string"
+    },
+    "trust.source_ref": {
+      "producer": "attest-release",
+      "required": true,
+      "source": "attest-release attestation API and verified certificate/predicate bytes",
+      "stage": "S6",
+      "type": "string"
+    },
+    "trust.source_sha": {
+      "producer": "attest-release",
+      "required": true,
+      "source": "attest-release attestation API and verified certificate/predicate bytes",
+      "stage": "S6",
+      "type": "string"
+    },
+    "trust.temporary_key_used": {
+      "producer": "attest-release",
+      "required": true,
+      "source": "attest-release attestation API and verified certificate/predicate bytes",
+      "stage": "S6",
+      "type": "bool"
+    },
+    "upload.artifact_digest_output": {
+      "producer": "build-linux-x64",
+      "required": true,
+      "source": "build-linux-x64 typed output plus upload-artifact response",
+      "stage": "S1",
+      "type": "string"
+    },
+    "upload.artifact_id_output": {
+      "producer": "build-linux-x64",
+      "required": true,
+      "source": "build-linux-x64 typed output plus upload-artifact response",
+      "stage": "S1",
+      "type": "u64"
+    },
+    "upload.step_id": {
+      "producer": "build-linux-x64",
+      "required": true,
+      "source": "build-linux-x64 typed output plus upload-artifact response",
+      "stage": "S1",
+      "type": "string"
+    },
+    "verification.binding_digest_verified": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "bool"
+    },
+    "verification.cryptographic_attestation_verified": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "bool"
+    },
+    "verification.custom_predicate_verified": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "bool"
+    },
+    "verification.draft_first_verified": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "bool"
+    },
+    "verification.evidence_state": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "verification.inner_payload_verified": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "bool"
+    },
+    "verification.main_ref_verified": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "bool"
+    },
+    "verification.manifest_verified": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "bool"
+    },
+    "verification.permanent_trust_policy_sha256": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "verification.producer_api_verified": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "bool"
+    },
+    "verification.raw_zip_verified": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "bool"
+    },
+    "verification.release_api_verified": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "bool"
+    },
+    "verification.temporary_authority_used": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "bool"
+    },
+    "verifier.check_name": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "verifier.integration_id": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "u64"
+    },
+    "verifier.permissions": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "verifier.provider_app_id": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "u64"
+    },
+    "verifier.verifier_revision": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "verifier.write_authority": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider result API; verify-B called-identity and terminal-census API responses",
+      "stage": "S7b",
+      "type": "bool"
+    }
+  },
+  "preimage_contract": {
+    "S4_binding": {
+      "digest_source": "sha256(canonical JSON object containing exactly ordered_fields)",
+      "excluded_fields": [
+        "binding_attestation_digest",
+        "binding_attestation_id",
+        "binding_core_digest",
+        "binding_predicate_path",
+        "binding_predicate_type",
+        "binding_record_artifact_digest",
+        "binding_record_artifact_id",
+        "binding_subject_digest",
+        "binding_subject_name",
+        "called_workflow_file_blob_sha",
+        "called_workflow_path",
+        "called_workflow_ref",
+        "called_workflow_sha",
+        "certificate_identity",
+        "certificate_verified",
+        "final_manifest_artifact_digest",
+        "final_manifest_artifact_id",
+        "final_manifest_digest",
+        "oidc_issuer",
+        "oidc_policy_revision_sha256",
+        "policy_bootstrap_b_check_id",
+        "policy_bootstrap_b_integration_id",
+        "policy_bootstrap_b_provider_app_id",
+        "policy_bootstrap_b_verifier_revision",
+        "pre_record_artifact_digest",
+        "pre_record_artifact_id",
+        "pre_record_artifact_name",
+        "pre_record_upload_check_run_id",
+        "pre_record_upload_job_id",
+        "pre_record_upload_run_attempt",
+        "pre_record_upload_run_id",
+        "provider_result_digest",
+        "provider_result_id",
+        "published_release_id",
+        "published_release_tag",
+        "published_release_target_sha",
+        "record_artifact_digest",
+        "record_artifact_id",
+        "record_artifact_name",
+        "record_upload_check_run_id",
+        "record_upload_job_id",
+        "record_upload_run_attempt",
+        "record_upload_run_id",
+        "record_upload_step_id",
+        "release_asset_digest",
+        "release_asset_id",
+        "release_attestation_digest",
+        "release_attestation_id",
+        "release_manifest_subject_sha256",
+        "release_predicate_path",
+        "release_predicate_type",
+        "signer_repository",
+        "signer_source_ref",
+        "signer_workflow",
+        "terminal_census_digest",
+        "terminal_census_id"
+      ],
+      "ordered_fields": [
+        "caller_run_attempt",
+        "caller_run_id",
+        "caller_workflow_file_blob_sha",
+        "caller_workflow_path",
+        "caller_workflow_ref",
+        "caller_workflow_sha",
+        "closure_digest",
+        "repository_id",
+        "source_ref",
+        "source_sha",
+        "source_tree_sha",
+        "artifact_digest",
+        "artifact_id",
+        "artifact_name",
+        "binary_architecture",
+        "binary_digest",
+        "binary_size",
+        "inner_payload_digest",
+        "inner_payload_size",
+        "service_zip_digest",
+        "service_zip_size",
+        "upload_step_id",
+        "producer_check_run_id",
+        "producer_job_id",
+        "producer_run_attempt",
+        "producer_run_id",
+        "producer_workflow_file_blob_sha",
+        "producer_workflow_path",
+        "producer_workflow_ref",
+        "producer_workflow_sha",
+        "verified_artifact_digest",
+        "verified_raw_binary_digest",
+        "verified_raw_inner_payload_digest",
+        "verified_raw_service_zip_digest",
+        "release_id",
+        "release_tag",
+        "release_target_sha"
+      ],
+      "subject": "raw service ZIP"
+    },
+    "S6_release": {
+      "digest_source": "sha256(canonical JSON object containing exactly ordered_fields)",
+      "excluded_fields": [
+        "called_workflow_file_blob_sha",
+        "called_workflow_path",
+        "called_workflow_ref",
+        "called_workflow_sha",
+        "certificate_identity",
+        "certificate_verified",
+        "oidc_issuer",
+        "oidc_policy_revision_sha256",
+        "policy_bootstrap_b_check_id",
+        "policy_bootstrap_b_integration_id",
+        "policy_bootstrap_b_provider_app_id",
+        "policy_bootstrap_b_verifier_revision",
+        "pre_record_artifact_digest",
+        "pre_record_artifact_id",
+        "pre_record_artifact_name",
+        "pre_record_upload_check_run_id",
+        "pre_record_upload_job_id",
+        "pre_record_upload_run_attempt",
+        "pre_record_upload_run_id",
+        "provider_result_digest",
+        "provider_result_id",
+        "record_artifact_digest",
+        "record_artifact_id",
+        "record_artifact_name",
+        "record_upload_check_run_id",
+        "record_upload_job_id",
+        "record_upload_run_attempt",
+        "record_upload_run_id",
+        "record_upload_step_id",
+        "release_attestation_digest",
+        "release_attestation_id",
+        "release_manifest_subject_sha256",
+        "release_predicate_path",
+        "release_predicate_type",
+        "signer_repository",
+        "signer_source_ref",
+        "signer_workflow",
+        "terminal_census_digest",
+        "terminal_census_id"
+      ],
+      "ordered_fields": [
+        "caller_run_attempt",
+        "caller_run_id",
+        "caller_workflow_file_blob_sha",
+        "caller_workflow_path",
+        "caller_workflow_ref",
+        "caller_workflow_sha",
+        "closure_digest",
+        "repository_id",
+        "source_ref",
+        "source_sha",
+        "source_tree_sha",
+        "artifact_digest",
+        "artifact_id",
+        "artifact_name",
+        "binary_architecture",
+        "binary_digest",
+        "binary_size",
+        "inner_payload_digest",
+        "inner_payload_size",
+        "service_zip_digest",
+        "service_zip_size",
+        "upload_step_id",
+        "producer_check_run_id",
+        "producer_job_id",
+        "producer_run_attempt",
+        "producer_run_id",
+        "producer_workflow_file_blob_sha",
+        "producer_workflow_path",
+        "producer_workflow_ref",
+        "producer_workflow_sha",
+        "verified_artifact_digest",
+        "verified_raw_binary_digest",
+        "verified_raw_inner_payload_digest",
+        "verified_raw_service_zip_digest",
+        "release_id",
+        "release_tag",
+        "release_target_sha",
+        "binding_attestation_digest",
+        "binding_attestation_id",
+        "binding_core_digest",
+        "binding_predicate_path",
+        "binding_predicate_type",
+        "binding_record_artifact_digest",
+        "binding_record_artifact_id",
+        "binding_subject_digest",
+        "binding_subject_name",
+        "final_manifest_artifact_digest",
+        "final_manifest_artifact_id",
+        "final_manifest_digest",
+        "published_release_id",
+        "published_release_tag",
+        "published_release_target_sha",
+        "release_asset_digest",
+        "release_asset_id"
+      ],
+      "subject": "final manifest artifact bytes"
+    },
+    "S7_provider_result": {
+      "digest_source": "sha256(canonical JSON object containing exactly ordered_fields)",
+      "excluded_fields": [
+        "provider_result_id",
+        "provider_result_digest",
+        "terminal_census_id",
+        "terminal_census_digest"
+      ],
+      "ordered_fields": [
+        "pre_record_artifact_digest",
+        "pre_record_artifact_id",
+        "pre_record_artifact_name",
+        "pre_record_upload_check_run_id",
+        "pre_record_upload_job_id",
+        "pre_record_upload_run_attempt",
+        "pre_record_upload_run_id",
+        "record_artifact_digest",
+        "record_artifact_id",
+        "record_artifact_name",
+        "record_upload_check_run_id",
+        "record_upload_job_id",
+        "record_upload_run_attempt",
+        "record_upload_run_id",
+        "record_upload_step_id",
+        "policy_bootstrap_b_check_id",
+        "policy_bootstrap_b_integration_id",
+        "policy_bootstrap_b_provider_app_id",
+        "policy_bootstrap_b_verifier_revision",
+        "provider_result_digest",
+        "provider_result_id"
+      ],
+      "subject": "external provider result over pre-record/API binding"
+    },
+    "S7_terminal_census": {
+      "digest_source": "sha256(canonical JSON object containing exactly successful upstream run/job/check identities)",
+      "excluded_fields": [
+        "terminal_census_digest"
+      ],
+      "ordered_fields": [
+        "terminal_census_id",
+        "terminal_census_digest"
+      ],
+      "subject": "post-provider upstream terminal census"
+    },
+    "canonical_serialization": {
+      "arrays": "declared order",
+      "digests": "lowercase hex; sha256 fields are 64 hex unless schema says sha40",
+      "encoding": "UTF-8",
+      "integers": "base-10 no leading zero",
+      "line_endings": "LF",
+      "object_keys": "lexicographically sorted"
+    },
+    "no_self_or_future_preimage": true,
+    "record_transport_excluded": [
+      "record_artifact_name",
+      "record_upload_run_attempt",
+      "record_upload_step_id",
+      "record_artifact_id",
+      "record_artifact_digest",
+      "record_upload_run_id",
+      "record_upload_job_id",
+      "record_upload_check_run_id"
+    ]
+  },
+  "record_leaf_lineage_reviewed": {
+    "pre_record.artifact.actions_artifact_id": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "u64"
+    },
+    "pre_record.artifact.binary_architecture": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.artifact.binary_digest": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.artifact.binary_size": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "u64"
+    },
+    "pre_record.artifact.digest": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.artifact.inner_payload_digest": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.artifact.inner_payload_size": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "u64"
+    },
+    "pre_record.artifact.name": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.artifact.service_zip_digest": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.artifact.service_zip_size": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "u64"
+    },
+    "pre_record.artifact.upload_step_id": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.binding.attestation_digest": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.binding.attestation_id": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "u64"
+    },
+    "pre_record.binding.core_digest": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.binding.final_manifest_artifact_digest": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.binding.final_manifest_artifact_id": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "u64"
+    },
+    "pre_record.binding.final_manifest_digest": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.binding.predicate_path": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.binding.predicate_type": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.binding.record_artifact_digest": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.binding.record_artifact_id": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "u64"
+    },
+    "pre_record.binding.subject_digest": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.binding.subject_name": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.caller_workflow.capture_step_id": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.caller_workflow.file_blob_sha": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.caller_workflow.path": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.caller_workflow.ref": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.caller_workflow.run_attempt": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "u64"
+    },
+    "pre_record.caller_workflow.run_id": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "u64"
+    },
+    "pre_record.caller_workflow.workflow_sha": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.canonical_release_schema_sha256": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.canonical_root_manifest_sha256": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.producer.check_run_id": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "u64"
+    },
+    "pre_record.producer.job_id": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "u64"
+    },
+    "pre_record.producer.job_workflow_sha": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.producer.run_attempt": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "u64"
+    },
+    "pre_record.producer.run_id": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "u64"
+    },
+    "pre_record.producer.workflow_file_blob_sha": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.producer.workflow_path": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.producer.workflow_ref": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.product.architecture": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.product.name": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.product.namespace": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.product.platform": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.record_kind": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.release.asset_digest": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.release.asset_id": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "u64"
+    },
+    "pre_record.release.manifest_digest": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.release.release_id": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "u64"
+    },
+    "pre_record.release.tag": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.release.target_sha": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.release_attestation.attestation_digest": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.release_attestation.attestation_id": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "u64"
+    },
+    "pre_record.release_attestation.certificate_identity": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.release_attestation.certificate_verified": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "bool"
+    },
+    "pre_record.release_attestation.manifest_subject_sha256": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.release_attestation.oidc_issuer": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.release_attestation.oidc_policy_revision_sha256": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.release_attestation.predicate_path": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.release_attestation.predicate_type": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.release_attestation.signer_repository": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.release_attestation.signer_source_ref": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.release_attestation.signer_workflow": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.schema_version": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.source.closure_digest": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.source.ref": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.source.repository": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.source.sha": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.source.tree_sha": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.verification.binding_preimage_sha256": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.verification.raw_downloads_equal_digests": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "bool"
+    },
+    "pre_record.verification.release_preimage_sha256": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "string"
+    },
+    "pre_record.verification.required_step_conclusions": {
+      "producer": "pre-record-upload",
+      "required": true,
+      "source": "strict pre-record JSON bytes and Actions artifact REST response",
+      "stage": "S7a",
+      "type": "object"
+    },
+    "provider_result.called_workflow.caller_run_attempt": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "u64"
+    },
+    "provider_result.called_workflow.caller_run_id": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "u64"
+    },
+    "provider_result.called_workflow.job_workflow_sha": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.called_workflow.path": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.called_workflow.ref": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.called_workflow.workflow_file_blob_sha": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.canonical_binding_schema_sha256": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.canonical_release_schema_sha256": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.canonical_root_manifest_sha256": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.composed_binding.binding_schema_sha256": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.composed_binding.canonical_record_digest": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.composed_binding.pre_record_sha256": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.composed_binding.provider_result_sha256": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.composed_binding.release_schema_sha256": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.composed_binding.resulting_main_sha": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.immutable_release_setting.enabled": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "bool"
+    },
+    "provider_result.immutable_release_setting.endpoint": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.immutable_release_setting.enforced_by_owner": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "bool"
+    },
+    "provider_result.immutable_release_setting.readback_digest": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.immutable_release_setting.release_attestation_required": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "bool"
+    },
+    "provider_result.immutable_release_setting.status_code": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "u64"
+    },
+    "provider_result.pre_record.artifact_digest": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.pre_record.artifact_id": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "u64"
+    },
+    "provider_result.pre_record.artifact_name": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.pre_record.raw_zip_sha256": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.pre_record.upload_check_run_id": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "u64"
+    },
+    "provider_result.pre_record.upload_job_id": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "u64"
+    },
+    "provider_result.pre_record.upload_run_attempt": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "u64"
+    },
+    "provider_result.pre_record.upload_run_id": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "u64"
+    },
+    "provider_result.pre_record_schema_sha256": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.provider_check.check_run_id": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "u64"
+    },
+    "provider_result.provider_check.conclusion": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.provider_check.context": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.provider_check.credential_key_id": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.provider_check.installation_id": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "u64"
+    },
+    "provider_result.provider_check.integration_id": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "u64"
+    },
+    "provider_result.provider_check.pre_record_artifact_digest": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.provider_check.pre_record_artifact_id": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "u64"
+    },
+    "provider_result.provider_check.provider_app_id": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "u64"
+    },
+    "provider_result.provider_check.provider_result_digest": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.provider_check.provider_result_id": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.provider_check.resulting_main_sha": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.provider_check.verifier_revision": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.record_kind": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.schema_version": {
+      "producer": "verify-B",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.terminal_census.census_id": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.terminal_census.digest": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.terminal_census.excluded_self_nodes": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.terminal_census.head_sha": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.terminal_census.observed_at": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "string"
+    },
+    "provider_result.terminal_census.successful_runs": {
+      "producer": "external-provider-result",
+      "required": true,
+      "source": "external provider signed result API or verify-B exact API response",
+      "stage": "S7b",
+      "type": "array"
+    }
+  },
+  "schema": "velnor.v9-independent-field-dag.v1",
+  "schema_leaf_paths": {
+    "permanent_binding": [
+      "actions.artifact_metadata_write",
+      "actions.attest_sha",
+      "actions.create_storage_record",
+      "actions.push_to_registry",
+      "actions.upload_artifact_sha",
+      "artifact.expired",
+      "artifact.id",
+      "artifact.inner_payload_sha256",
+      "artifact.inner_payload_size",
+      "artifact.name",
+      "artifact.rest_service_zip_sha256",
+      "artifact.rest_service_zip_size",
+      "artifact.service_zip_sha256",
+      "artifact.service_zip_size",
+      "artifact.workflow_run_id",
+      "attestation.binding_digest",
+      "attestation.binding_predicate_path",
+      "attestation.binding_predicate_type",
+      "attestation.binding_subject_name",
+      "attestation.binding_subject_sha256",
+      "attestation.certificate_verified",
+      "attestation.release_manifest_subject_sha256",
+      "attestation.release_predicate_path",
+      "attestation.release_predicate_type",
+      "attestation.signer_repository",
+      "attestation.signer_source_ref",
+      "attestation.signer_workflow",
+      "binary.architecture",
+      "binary.closure",
+      "binary.mode",
+      "binary.revision",
+      "binary.sha256",
+      "binary.size",
+      "job.check_run_id",
+      "job.conclusion",
+      "job.head_sha",
+      "job.id",
+      "job.key",
+      "job.run_attempt",
+      "job.run_id",
+      "job.status",
+      "kind",
+      "manifest.sha256",
+      "manifest.size",
+      "product.application_namespace_reuse",
+      "product.asset",
+      "product.features",
+      "product.mutable_latest",
+      "product.overwrite",
+      "product.platform",
+      "product.product_id",
+      "product.profile",
+      "product.purpose",
+      "product.runner",
+      "product.schema",
+      "product.tag",
+      "publisher.attest_permissions",
+      "publisher.build_permissions",
+      "publisher.event",
+      "publisher.head_branch",
+      "publisher.head_sha",
+      "publisher.path",
+      "publisher.ref",
+      "publisher.repository",
+      "publisher.repository_id",
+      "publisher.reserve_publish_permissions",
+      "publisher.sha",
+      "release.attestation_signed_after_draft_id",
+      "release.draft_first",
+      "release.draft_reserved",
+      "release.id",
+      "release.manifest_signed_after_draft_id",
+      "release.published",
+      "release.tag",
+      "release.tag_immutable",
+      "release.target_sha",
+      "run.attempt",
+      "run.conclusion",
+      "run.database_id",
+      "run.event",
+      "run.head_branch",
+      "run.head_sha",
+      "run.id",
+      "run.repository_id",
+      "run.status",
+      "run.workflow_sha",
+      "source.closure",
+      "source.ref",
+      "source.repository",
+      "source.repository_id",
+      "source.sha",
+      "source.tree_sha",
+      "steps.attest_binding.conclusion",
+      "steps.attest_binding.id",
+      "steps.attest_binding.name",
+      "steps.attest_binding.status",
+      "steps.attest_release.conclusion",
+      "steps.attest_release.id",
+      "steps.attest_release.name",
+      "steps.attest_release.status",
+      "steps.build.conclusion",
+      "steps.build.id",
+      "steps.build.name",
+      "steps.build.status",
+      "steps.publish.conclusion",
+      "steps.publish.id",
+      "steps.publish.name",
+      "steps.publish.status",
+      "steps.reserve_release.conclusion",
+      "steps.reserve_release.id",
+      "steps.reserve_release.name",
+      "steps.reserve_release.status",
+      "steps.upload.conclusion",
+      "steps.upload.id",
+      "steps.upload.name",
+      "steps.upload.status",
+      "trust.oidc_issuer",
+      "trust.oidc_policy_revision_sha256",
+      "trust.repository_id",
+      "trust.signer_repository",
+      "trust.signer_workflow",
+      "trust.source_ref",
+      "trust.source_sha",
+      "trust.temporary_key_used",
+      "upload.artifact_digest_output",
+      "upload.artifact_id_output",
+      "upload.step_id",
+      "verification.binding_digest_verified",
+      "verification.cryptographic_attestation_verified",
+      "verification.custom_predicate_verified",
+      "verification.draft_first_verified",
+      "verification.evidence_state",
+      "verification.inner_payload_verified",
+      "verification.main_ref_verified",
+      "verification.manifest_verified",
+      "verification.permanent_trust_policy_sha256",
+      "verification.producer_api_verified",
+      "verification.raw_zip_verified",
+      "verification.release_api_verified",
+      "verification.temporary_authority_used",
+      "verifier.check_name",
+      "verifier.integration_id",
+      "verifier.permissions",
+      "verifier.provider_app_id",
+      "verifier.verifier_revision",
+      "verifier.write_authority"
+    ],
+    "pre_record": [
+      "artifact.actions_artifact_id",
+      "artifact.binary_architecture",
+      "artifact.binary_digest",
+      "artifact.binary_size",
+      "artifact.digest",
+      "artifact.inner_payload_digest",
+      "artifact.inner_payload_size",
+      "artifact.name",
+      "artifact.service_zip_digest",
+      "artifact.service_zip_size",
+      "artifact.upload_step_id",
+      "binding.attestation_digest",
+      "binding.attestation_id",
+      "binding.core_digest",
+      "binding.final_manifest_artifact_digest",
+      "binding.final_manifest_artifact_id",
+      "binding.final_manifest_digest",
+      "binding.predicate_path",
+      "binding.predicate_type",
+      "binding.record_artifact_digest",
+      "binding.record_artifact_id",
+      "binding.subject_digest",
+      "binding.subject_name",
+      "caller_workflow.capture_step_id",
+      "caller_workflow.file_blob_sha",
+      "caller_workflow.path",
+      "caller_workflow.ref",
+      "caller_workflow.run_attempt",
+      "caller_workflow.run_id",
+      "caller_workflow.workflow_sha",
+      "canonical_release_schema_sha256",
+      "canonical_root_manifest_sha256",
+      "producer.check_run_id",
+      "producer.job_id",
+      "producer.job_workflow_sha",
+      "producer.run_attempt",
+      "producer.run_id",
+      "producer.workflow_file_blob_sha",
+      "producer.workflow_path",
+      "producer.workflow_ref",
+      "product.architecture",
+      "product.name",
+      "product.namespace",
+      "product.platform",
+      "record_kind",
+      "release.asset_digest",
+      "release.asset_id",
+      "release.manifest_digest",
+      "release.release_id",
+      "release.tag",
+      "release.target_sha",
+      "release_attestation.attestation_digest",
+      "release_attestation.attestation_id",
+      "release_attestation.certificate_identity",
+      "release_attestation.certificate_verified",
+      "release_attestation.manifest_subject_sha256",
+      "release_attestation.oidc_issuer",
+      "release_attestation.oidc_policy_revision_sha256",
+      "release_attestation.predicate_path",
+      "release_attestation.predicate_type",
+      "release_attestation.signer_repository",
+      "release_attestation.signer_source_ref",
+      "release_attestation.signer_workflow",
+      "schema_version",
+      "source.closure_digest",
+      "source.ref",
+      "source.repository",
+      "source.sha",
+      "source.tree_sha",
+      "verification.binding_preimage_sha256",
+      "verification.raw_downloads_equal_digests",
+      "verification.release_preimage_sha256",
+      "verification.required_step_conclusions"
+    ],
+    "provider_result": [
+      "called_workflow.caller_run_attempt",
+      "called_workflow.caller_run_id",
+      "called_workflow.job_workflow_sha",
+      "called_workflow.path",
+      "called_workflow.ref",
+      "called_workflow.workflow_file_blob_sha",
+      "canonical_binding_schema_sha256",
+      "canonical_release_schema_sha256",
+      "canonical_root_manifest_sha256",
+      "composed_binding.binding_schema_sha256",
+      "composed_binding.canonical_record_digest",
+      "composed_binding.pre_record_sha256",
+      "composed_binding.provider_result_sha256",
+      "composed_binding.release_schema_sha256",
+      "composed_binding.resulting_main_sha",
+      "immutable_release_setting.enabled",
+      "immutable_release_setting.endpoint",
+      "immutable_release_setting.enforced_by_owner",
+      "immutable_release_setting.readback_digest",
+      "immutable_release_setting.release_attestation_required",
+      "immutable_release_setting.status_code",
+      "pre_record.artifact_digest",
+      "pre_record.artifact_id",
+      "pre_record.artifact_name",
+      "pre_record.raw_zip_sha256",
+      "pre_record.upload_check_run_id",
+      "pre_record.upload_job_id",
+      "pre_record.upload_run_attempt",
+      "pre_record.upload_run_id",
+      "pre_record_schema_sha256",
+      "provider_check.check_run_id",
+      "provider_check.conclusion",
+      "provider_check.context",
+      "provider_check.credential_key_id",
+      "provider_check.installation_id",
+      "provider_check.integration_id",
+      "provider_check.pre_record_artifact_digest",
+      "provider_check.pre_record_artifact_id",
+      "provider_check.provider_app_id",
+      "provider_check.provider_result_digest",
+      "provider_check.provider_result_id",
+      "provider_check.resulting_main_sha",
+      "provider_check.verifier_revision",
+      "record_kind",
+      "schema_version",
+      "terminal_census.census_id",
+      "terminal_census.digest",
+      "terminal_census.excluded_self_nodes",
+      "terminal_census.head_sha",
+      "terminal_census.observed_at",
+      "terminal_census.successful_runs"
+    ],
+    "release_manifest": [
+      "architecture",
+      "asset_digest",
+      "asset_id",
+      "closure_digest",
+      "manifest_digest",
+      "platform",
+      "product_name",
+      "product_namespace",
+      "release_id",
+      "release_tag",
+      "schema",
+      "source_sha",
+      "source_tree_sha",
+      "target_sha"
+    ]
+  },
+  "source_plan_sha256": "e74a583e492b41fa043b4a78621e6183875a333e3d533a4244e3956121b66615",
+  "status": "design_only_external_audit",
+  "timing": {
+    "S7a": [
+      "pre_record_artifact_digest",
+      "pre_record_artifact_id",
+      "pre_record_artifact_name",
+      "pre_record_upload_check_run_id",
+      "pre_record_upload_job_id",
+      "pre_record_upload_run_attempt",
+      "pre_record_upload_run_id",
+      "record_artifact_digest",
+      "record_artifact_id",
+      "record_artifact_name",
+      "record_upload_check_run_id",
+      "record_upload_job_id",
+      "record_upload_run_attempt",
+      "record_upload_run_id",
+      "record_upload_step_id"
+    ],
+    "S7b_external": [
+      "policy_bootstrap_b_check_id",
+      "policy_bootstrap_b_integration_id",
+      "policy_bootstrap_b_provider_app_id",
+      "policy_bootstrap_b_verifier_revision",
+      "provider_result_digest",
+      "provider_result_id"
+    ],
+    "S7b_verify_B_local": [
+      "called_workflow_file_blob_sha",
+      "called_workflow_path",
+      "called_workflow_ref",
+      "called_workflow_sha",
+      "terminal_census_digest",
+      "terminal_census_id"
+    ]
+  }
+}

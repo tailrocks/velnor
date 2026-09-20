@@ -1,0 +1,31 @@
+{
+  "fixture_metadata": {
+    "kind": "deterministic_contract_fixture",
+    "live_binding": false,
+    "live_proof_status": "not_executed"
+  },
+  "provider_attestation_digest": "fd685f7ee0a27d0a1e45f52afae4bc8565754a49cbd335a231e00d249867d817",
+  "provider_check_app_id": 1003,
+  "provider_check_conclusion": "success",
+  "provider_check_context": "Policy-bootstrap-B",
+  "provider_check_head_sha": "19d2f0f96e263e72d25ea0b2eca5eaedef8c88d0",
+  "provider_check_integration_id": 1007,
+  "provider_check_run_id": 1008,
+  "provider_endpoint": "https://provider.invalid/fixture/8",
+  "provider_result_digest": "f80ad7cc27a22917f702ecb1286ec6b109279d73cf07fa1b0710beb22b741627",
+  "provider_result_id": "fixture-0010",
+  "provider_verifier_revision": "061f30a390cee6cc3f858f3f17a3ed66b0f9f674",
+  "provider_workflow_ref": "fixture-0012",
+  "provider_workflow_sha": "af93bcb49c6386fd2d429ccdce904b1bc1e5f40f",
+  "resulting_main_sha": "b68836222d051060afc6eded0fcc924fdba706d1",
+  "resulting_main_tree_sha": "13e2d66787d661b07b0e3c5d4137b79a431fb271",
+  "signature_base64": "fixture-0016",
+  "signer_algorithm": "fixture-0017",
+  "signer_certificate_sha256": "2037f148e724ea37c0a43f0f28943d47a98c0c2a5a651f8d31a7f8660a6d256b",
+  "signer_certificate_subject": "fixture-0019",
+  "signer_key_id": "fixture-0020",
+  "signer_public_key_sha256": "feb82b2ee437ecaa89119685940ab3235a3e3db9af02a16f6dd153f5e549fe69",
+  "source_record_artifact_digest": "6fdd2fc5143160d0bd3fece0e8bc02695bb2937978e66ced85a7704470cf616c",
+  "source_record_artifact_id": 1024,
+  "source_record_raw_zip_sha256": "ad04d74ff7cc898188e6b5640f5c8cd16a94c34fd4c8be5347bd497ea158ed1b"
+}

@@ -1,0 +1,46 @@
+{
+  "all_expected": "reject",
+  "cases": [
+    {
+      "case": "own_digest_field_in_preimage",
+      "expected": "reject"
+    },
+    {
+      "case": "future_stage_field_in_preimage",
+      "expected": "reject"
+    },
+    {
+      "case": "provider_result_contains_terminal_census",
+      "expected": "reject"
+    },
+    {
+      "case": "release_leaf_omitted",
+      "expected": "reject"
+    },
+    {
+      "case": "release_identity_mismatch",
+      "expected": "reject"
+    },
+    {
+      "case": "synthetic_fixture_claims_live",
+      "expected": "reject"
+    },
+    {
+      "case": "provider_check_head_not_resulting_main",
+      "expected": "reject"
+    },
+    {
+      "case": "caller_pr_head_used_as_resulting_main",
+      "expected": "reject"
+    },
+    {
+      "case": "ambiguous_provider_producer",
+      "expected": "reject"
+    },
+    {
+      "case": "unresolved_provider_claimed_success",
+      "expected": "reject"
+    }
+  ],
+  "schema": "velnor.authority-transition.negative-fixtures.v10"
+}

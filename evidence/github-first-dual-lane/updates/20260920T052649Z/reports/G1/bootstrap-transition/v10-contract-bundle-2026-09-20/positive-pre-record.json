@@ -1,0 +1,92 @@
+{
+  "artifact": {
+    "binary_architecture": "x86_64",
+    "binary_digest": "1fbc3424732b6048f7ca2f86bed6cf63ed48a141e587675d4ec6bdad610de16c",
+    "binary_size": 1004,
+    "inner_payload_digest": "cbceed9cc9853ff9a0d06aa9f9df5d72efc451a69289150f3e30407526be296a",
+    "inner_payload_size": 1006,
+    "service_zip_digest": "1a0a83146e3ed96e863b6db2ad93e3aee238ec6e4ccb4f81e1b464558ae96ae7",
+    "service_zip_size": 1008
+  },
+  "binding": {
+    "attestation_digest": "1b41be57ba3e052928cbc395c42a7dc2c253641529c12e4e6d04c504f1b93255",
+    "attestation_id": 1010,
+    "core_digest": "970067c4b4efc67953b6b3a5b31db5f95896c2fc03ea2802f1d5152d74a5b7a2",
+    "final_manifest_artifact_digest": "ec007aa263707239615c224a3aa276979a751367e87ac1f49974d8ff09d98858",
+    "final_manifest_artifact_id": 1013,
+    "final_manifest_digest": "37008356a5ec0c40e7114e58f2a46fd1103fa032088bc491caa83ae87bf2dff8",
+    "predicate_path": "attestations/velnor-policy-validator-binding.v1.json",
+    "predicate_type": "https://velnor.dev/attestations/policy-validator-binding/v1",
+    "subject_digest": "ac36c1a1e616f67c071a1dce69ec0bbbf865d37c6521baf7a8aa89e84b857279",
+    "subject_name": "fixture-0017"
+  },
+  "caller_workflow": {
+    "capture_step_id": "fixture-0018",
+    "file_blob_sha": "9a5b769f36379f453377ccb91823ef2d620c16bc",
+    "path": "fixture-0020",
+    "ref": "fixture-0021",
+    "run_attempt": 1023,
+    "run_id": 1024,
+    "workflow_sha": "0c6ab70c6e3835bfcc9c8a6549674d51b5726e0d"
+  },
+  "canonical_release_schema_sha256": "e7dd09bbfa53915af725787684d2c64affbb755246eef14afd6f6a156fea2b50",
+  "canonical_root_manifest_sha256": "d50b0eecd2c51aa6e57a32dbcb41623f8929d023db7bbca6a16419a960aa01f7",
+  "fixture_metadata": {
+    "kind": "deterministic_contract_fixture",
+    "live_binding": false,
+    "live_proof_status": "not_executed"
+  },
+  "producer": {
+    "check_run_id": 1028,
+    "job_id": 1029,
+    "job_workflow_sha": "f9c651f980dad60469165f166fe2df2db44fb7e9",
+    "run_attempt": 1031,
+    "run_id": 1032,
+    "workflow_file_blob_sha": "db5053c82ce6744d521fe1ef6c4e873303812712",
+    "workflow_path": "fixture-0033",
+    "workflow_ref": "fixture-0034"
+  },
+  "product": {
+    "architecture": "x86_64",
+    "name": "velnor-workflow-policy-validator",
+    "namespace": "velnor.workflow-policy-validator",
+    "platform": "Linux-X64"
+  },
+  "record_kind": "policy-validator-b-pre-provider",
+  "release": {
+    "asset_digest": "97f2ad79ba51876146583e9b931b541063a3a68533af9c782df6de5ed384f741",
+    "asset_id": 1042,
+    "manifest_digest": "c5372263745c15996eece4fb6987ee06fd08147dbb1bed0fd9358740ef2dbf4f",
+    "release_id": 1044,
+    "tag": "fixture-0044",
+    "target_sha": "7d77513715e087af2df2173fb7a7417288e41f5a"
+  },
+  "release_attestation": {
+    "attestation_digest": "76aa2c1b1bd0bd1d0010b4947a8a521d7b09951b16a7db63a2a96cef1a040d85",
+    "attestation_id": 1048,
+    "certificate_identity": "fixture-0048",
+    "certificate_verified": true,
+    "manifest_subject_sha256": "7d01aeaef82fad10233c789dfe8a0adf7c1162f035caf38b672c3072c6680ef2",
+    "oidc_issuer": "https://token.actions.githubusercontent.com",
+    "oidc_policy_revision_sha256": "f00b73f4d1990a9d8fae3a6bfd16ab3df67ab2deab049e66fe373a826bc16586",
+    "predicate_path": "attestations/velnor-policy-validator-release.v1.json",
+    "predicate_type": "https://velnor.dev/attestations/velnor-policy-validator-release/v1",
+    "signer_repository": "fixture-0055",
+    "signer_source_ref": "refs/heads/main",
+    "signer_workflow": "fixture-0057"
+  },
+  "schema_version": "2",
+  "source": {
+    "closure_digest": "75ac6f4f73a23b71ac58f778c2a754606eb0ca4ce14288efb1aa041397c15b5f",
+    "ref": "fixture-0060",
+    "repository": "fixture-0061",
+    "sha": "dd5185cf225e1ddfd9b034b3ce8c82fd8cf713cc",
+    "tree_sha": "517122cdc00149c061390bd970480578f7031c20"
+  },
+  "verification": {
+    "binding_preimage_sha256": "af1086b4c241773facf7981916478b5a12c3e43fb16ed2554c09ae559406ba92",
+    "raw_downloads_equal_digests": true,
+    "release_preimage_sha256": "e03ef22f89c98633dd44209eadc12e2b463abe76b9ce045d43894a05aecde152",
+    "required_step_conclusions": "fixture-0067"
+  }
+}

@@ -1,0 +1,181 @@
+{
+  "canonical_contract": {
+    "field_count": 299,
+    "identity": {
+      "application_namespace_reuse": false,
+      "architecture": "x86_64",
+      "asset": "velnor-workflow-policy-validator-Linux-X64",
+      "features": "",
+      "mutable_latest": false,
+      "overwrite": false,
+      "platform": "Linux-X64",
+      "product_id": "velnor-workflow-policy-validator",
+      "release_schema": "velnor.workflow-policy-validator.release-manifest.v1",
+      "release_tag_prefix": "velnor-workflow-policy-validator-v1-",
+      "runner": "ubuntu-24.04",
+      "schema": "velnor.workflow-policy-validator.v1"
+    },
+    "no_parallel_contract_lists": true,
+    "permanent_leaf_count": 146,
+    "provider_result_excludes_terminal_census": true,
+    "release_leaf_count": 14,
+    "release_positive_fixture": "v10-contract-bundle-2026-09-20/positive-release-manifest.json",
+    "terminal_census_digest_excludes_own_id_and_digest": true
+  },
+  "canonical_outputs": {
+    "dag_path": "v10-contract-bundle-2026-09-20/v10-canonical-field-dag.json",
+    "dag_sha256": "38a00228cd28207f3b257a53ba9683cdaf697c5899c897b0c2f53fdf80d364db",
+    "fixture_hashes": {
+      "positive-full-typed-output-fixture.json": "671ae49f7bf2ac454f54185f32fafad1c5a8bf4f26631f15b95382343c1f5a35",
+      "positive-pre-record-transport.json": "f53b3f12993a3e4c29cadb30ce9a316aa648b3dedc42e37418ce19f3ee27aaf9",
+      "positive-pre-record.json": "e5c2a6d78189fa62b42fc6c128ad34d781d6b9ed6256e1c8643f26cba1cb5899",
+      "positive-provider-result.json": "9d64c4d86918e891d3cb5de9a15d2222f4d844d7b9358b27ff02a8f09be6ea74",
+      "positive-release-manifest.json": "762ca9136c2a4ed1b66637b9f85d4e8203da720ebe91c310da8f850f7a79f0a9",
+      "positive-verify-b.json": "46f6f5b564dcb2029e7e1da86bde2d87c7824fadcf43069396315dc3a0722efd"
+    },
+    "root_digest": "44f144bee0d2437fedf3d72c951d5df248033f7b78100004d81e30980e046136",
+    "root_manifest_path": "v10-contract-bundle-2026-09-20/canonical-root-manifest.v3.json",
+    "root_manifest_raw_sha256": "9f9306f71a82f656affa23eb8957d844ebbbe3be5d3fce293cf9f5bbe0dfac3e",
+    "schema_hashes": {
+      "adoption": "6576af30fe4943be379a5906d715a5b47be267872c830bbf572071d3c0dac9c9",
+      "permanent_binding": "f14c47679d77aad8230ae392130ae0ea14c7c0320ff2fff74af49b263ade66c8",
+      "pre_record": "1c69e5b1e42fc40e485fac80ea7bebcb52b1ff96bd3016049a45d2ec15c1c402",
+      "pre_record_transport": "30ef713ffa3b533038e8c5a07e03e6ba1cd7ba81245da7f3d7c0d49e194400b4",
+      "provider_result": "6a87234d6e710ef854ebb9074f20f4d47fcb7cba1e41813160c1a2e1282b81e4",
+      "release_manifest": "c0cfdf2cfd67f9fe20de5ab3fb8e0056ee5c55842d5b7124c86be120c1604718",
+      "verify_b": "cf3029101ffb82c35767decceddf60a0a95e16e608545548aba23c3ed31f1402"
+    }
+  },
+  "canonical_source": {
+    "path": "v10-canonical-model-source.json",
+    "sha256": "09d586416a86fae321e35fc24fbecac870a1faec93cd6d17392169ff803e36f1",
+    "single_source": true
+  },
+  "execution_authorized": false,
+  "external_blockers": [
+    "target generator revision is null",
+    "typed publisher source/output and fixed-point generated closure are absent at observed main",
+    "provider App/installation/integration/verifier/signing trust identities are unresolved",
+    "live typed verifier and real artifact/attestation lineage are absent",
+    "xcode-27/Linux-X64/Linux-ARM64 full closure is unproven; observed macos-26 is forbidden",
+    "provider-enforced freeze/CAS/recovery and user threat-model choice are unresolved",
+    "independent approval is absent"
+  ],
+  "freeze": {
+    "no_claim": "signed lease, proxy, watchdog, or ordinary operator consent is not provider-enforced freeze",
+    "provider_enforced_capability": null,
+    "required": [
+      "exact base/head/tree lease",
+      "ruleset conditional update or independently controlled exclusive writer",
+      "actor-5 bypass exclusion",
+      "forward recovery after coordinator death",
+      "conditional rollback that cannot clobber newer refs"
+    ],
+    "status": "external_blocker",
+    "user_choice_required": true
+  },
+  "independent_review": {
+    "required": [
+      "authority_transition_review",
+      "canonical_dag_independent_audit"
+    ],
+    "status": "not_requested_until_v10_automated_negative_reproduction_passes"
+  },
+  "mutation_performed": false,
+  "observed_utc": "2026-09-20T03:58:55Z",
+  "provider_and_readback": {
+    "caller_readback": {
+      "contents_api": "GET /repos/{owner}/{repo}/contents/.github/workflows/ci-main.yml?ref={caller_workflow_sha}; require blob SHA and tree binding",
+      "equalities": [
+        "caller_run.head_sha == resulting_main_sha",
+        "caller_run.event == push",
+        "caller_run.ref == refs/heads/main",
+        "caller_workflow.workflow_sha == caller_run.workflow_sha",
+        "contents.blob_sha == caller_workflow_file_blob_sha",
+        "called OIDC job_workflow_sha == called workflow immutable blob/ref identity"
+      ],
+      "run_api": "GET /repos/{owner}/{repo}/actions/runs/{caller_run_id}; require run_attempt, event, ref, head_sha, head_branch, workflow_id, workflow_sha, conclusion",
+      "selectors_are_not_evidence": true,
+      "status": "contract specified; live readback absent",
+      "workflow_api": "GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}; require path=.github/workflows/ci-main.yml"
+    },
+    "contract": {
+      "check_context": "Policy-bootstrap-B",
+      "credential": {
+        "secret_name": null,
+        "status": "unresolved_external_blocker",
+        "transport": "provider-owned credential only; never GITHUB_TOKEN and never injected into build/attest jobs"
+      },
+      "external_identity": {
+        "installation_id": null,
+        "integration_id": null,
+        "provider_app_id": null,
+        "result_endpoint": null,
+        "status": "unresolved_external_blocker",
+        "verifier_revision": null
+      },
+      "result_schema": "velnor.workflow-policy-validator.provider-result.v2",
+      "signature": {
+        "algorithm": null,
+        "key_id": null,
+        "signed_bytes": "canonical provider-result payload excluding provider_result_id and provider_result_digest",
+        "status": "unresolved_external_blocker",
+        "trust_root": null
+      },
+      "transport": {
+        "check_readback": "GET /repos/{owner}/{repo}/check-runs/{check_run_id}; require head_sha=resulting_main_sha, app.id/integration_id exact, conclusion=success",
+        "check_write": "provider App Checks API create/update with name=Policy-bootstrap-B, head_sha=resulting_main_sha, external_id=provider_result_id",
+        "pre_record_download": "GET /repos/{owner}/{repo}/actions/artifacts/{pre_record_artifact_id}/zip; verify raw SHA-256 and size",
+        "result_readback": "GET {provider_result_endpoint}/v2/results/{provider_result_id}; verify exact signed bytes and digest",
+        "status": "protocol concrete; provider identities and live implementation unresolved"
+      }
+    },
+    "status": "identities and live verifier unresolved; no success claim"
+  },
+  "revision_bound_facts": {
+    "candidate_pr": {
+      "base_sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+      "head_sha": "2445c647dafa43acbc5285c873d3b04174ff75c6",
+      "merged": true,
+      "number": 969,
+      "role": "candidate PR head only; never resulting main",
+      "state": "closed"
+    },
+    "main": {
+      "observed_utc": "2026-09-20T03:58:55Z",
+      "parent_sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+      "sha": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+      "tree_sha": "22ccc1daf9d55bd12d9a58e6652fe92cf3cb9416"
+    },
+    "repository": "tailrocks/velnor",
+    "resulting_main": {
+      "parent_sha": null,
+      "role": "must be read from the protected merge response and refs/heads/main after merge; never copied from candidate_pr.head_sha",
+      "sha": null,
+      "tree_sha": null
+    }
+  },
+  "schema": "velnor.authority-change-plan.v10",
+  "status": "successor_draft_external_blocked",
+  "supersedes": {
+    "path": "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v9.json",
+    "preserved": true,
+    "sha256": "e74a583e492b41fa043b4a78621e6183875a333e3d533a4244e3956121b66615"
+  },
+  "transition": {
+    "candidate_vs_result": "candidate_pr.head_sha is input evidence only; resulting_main.sha is null until protected merge and readback",
+    "main_b": "protected resulting-main push invokes workflow_call-only publisher and exact provider verifier",
+    "order": [
+      "read-only census",
+      "approved Tree-A authority",
+      "normal protected merge",
+      "read refs/heads/main and run APIs",
+      "publish and verify Main-B",
+      "post-provider census",
+      "reviewed Tree-B adoption",
+      "remove temporary authorities"
+    ],
+    "tree_a": "external Policy-bootstrap-A only; no permanent pin",
+    "tree_b": "separate reviewed adoption PR after live Main-B proof"
+  }
+}

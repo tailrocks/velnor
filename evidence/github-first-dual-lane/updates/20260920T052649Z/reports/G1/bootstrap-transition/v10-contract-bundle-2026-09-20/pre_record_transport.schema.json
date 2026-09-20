@@ -1,0 +1,61 @@
+{
+  "$id": "https://velnor.dev/schemas/v10-pre-record-transport.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifact_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "artifact_id": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "artifact_name": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "raw_zip_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "raw_zip_size": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "upload_check_run_id": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "upload_job_id": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "upload_run_attempt": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "upload_run_id": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "upload_step_id": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "artifact_digest",
+    "artifact_id",
+    "artifact_name",
+    "raw_zip_sha256",
+    "raw_zip_size",
+    "upload_check_run_id",
+    "upload_job_id",
+    "upload_run_attempt",
+    "upload_run_id",
+    "upload_step_id"
+  ],
+  "title": "Velnor pre-record transport",
+  "type": "object"
+}

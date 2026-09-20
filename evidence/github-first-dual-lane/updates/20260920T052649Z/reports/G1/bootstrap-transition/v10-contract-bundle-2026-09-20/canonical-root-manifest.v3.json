@@ -1,0 +1,129 @@
+{
+  "bound_files": [
+    {
+      "path": "build_v10_bundle.py",
+      "role": "reproducible projection generator",
+      "sha256": "d82653e3b4835110326d5dd338d6532bd633f6f4ba2ce3737947c3027f599f94"
+    },
+    {
+      "path": "v10-canonical-model-source.json",
+      "role": "sole contract model source",
+      "sha256": "09d586416a86fae321e35fc24fbecac870a1faec93cd6d17392169ff803e36f1"
+    },
+    {
+      "path": "v10-contract-bundle-2026-09-20/adoption.schema.json",
+      "role": "generated from canonical v10 model",
+      "sha256": "6576af30fe4943be379a5906d715a5b47be267872c830bbf572071d3c0dac9c9"
+    },
+    {
+      "path": "v10-contract-bundle-2026-09-20/negative-fixtures.json",
+      "role": "generated from canonical v10 model",
+      "sha256": "d99e5bfd1db3c1211b9d3ca0629533c39cc0943966005368a103a70ac7cf9430"
+    },
+    {
+      "path": "v10-contract-bundle-2026-09-20/permanent_binding.schema.json",
+      "role": "generated from canonical v10 model",
+      "sha256": "f14c47679d77aad8230ae392130ae0ea14c7c0320ff2fff74af49b263ade66c8"
+    },
+    {
+      "path": "v10-contract-bundle-2026-09-20/positive-full-typed-output-fixture.json",
+      "role": "generated from canonical v10 model",
+      "sha256": "671ae49f7bf2ac454f54185f32fafad1c5a8bf4f26631f15b95382343c1f5a35"
+    },
+    {
+      "path": "v10-contract-bundle-2026-09-20/positive-pre-record-transport.json",
+      "role": "generated from canonical v10 model",
+      "sha256": "f53b3f12993a3e4c29cadb30ce9a316aa648b3dedc42e37418ce19f3ee27aaf9"
+    },
+    {
+      "path": "v10-contract-bundle-2026-09-20/positive-pre-record.json",
+      "role": "generated from canonical v10 model",
+      "sha256": "e5c2a6d78189fa62b42fc6c128ad34d781d6b9ed6256e1c8643f26cba1cb5899"
+    },
+    {
+      "path": "v10-contract-bundle-2026-09-20/positive-provider-result.json",
+      "role": "generated from canonical v10 model",
+      "sha256": "9d64c4d86918e891d3cb5de9a15d2222f4d844d7b9358b27ff02a8f09be6ea74"
+    },
+    {
+      "path": "v10-contract-bundle-2026-09-20/positive-release-manifest.json",
+      "role": "generated from canonical v10 model",
+      "sha256": "762ca9136c2a4ed1b66637b9f85d4e8203da720ebe91c310da8f850f7a79f0a9"
+    },
+    {
+      "path": "v10-contract-bundle-2026-09-20/positive-verify-b.json",
+      "role": "generated from canonical v10 model",
+      "sha256": "46f6f5b564dcb2029e7e1da86bde2d87c7824fadcf43069396315dc3a0722efd"
+    },
+    {
+      "path": "v10-contract-bundle-2026-09-20/pre_record.schema.json",
+      "role": "generated from canonical v10 model",
+      "sha256": "1c69e5b1e42fc40e485fac80ea7bebcb52b1ff96bd3016049a45d2ec15c1c402"
+    },
+    {
+      "path": "v10-contract-bundle-2026-09-20/pre_record_transport.schema.json",
+      "role": "generated from canonical v10 model",
+      "sha256": "30ef713ffa3b533038e8c5a07e03e6ba1cd7ba81245da7f3d7c0d49e194400b4"
+    },
+    {
+      "path": "v10-contract-bundle-2026-09-20/provider_result.schema.json",
+      "role": "generated from canonical v10 model",
+      "sha256": "6a87234d6e710ef854ebb9074f20f4d47fcb7cba1e41813160c1a2e1282b81e4"
+    },
+    {
+      "path": "v10-contract-bundle-2026-09-20/release_manifest.schema.json",
+      "role": "generated from canonical v10 model",
+      "sha256": "c0cfdf2cfd67f9fe20de5ab3fb8e0056ee5c55842d5b7124c86be120c1604718"
+    },
+    {
+      "path": "v10-contract-bundle-2026-09-20/v10-canonical-field-dag.json",
+      "role": "generated from canonical v10 model",
+      "sha256": "38a00228cd28207f3b257a53ba9683cdaf697c5899c897b0c2f53fdf80d364db"
+    },
+    {
+      "path": "v10-contract-bundle-2026-09-20/verify_b.schema.json",
+      "role": "generated from canonical v10 model",
+      "sha256": "cf3029101ffb82c35767decceddf60a0a95e16e608545548aba23c3ed31f1402"
+    },
+    {
+      "path": "v9-independent-contract-audit-2026-09-20/canonical-dag/v9-independent-field-dag.json",
+      "role": "historical vocabulary input only",
+      "sha256": "902854e6591687095856fdf507115e933cb4d57ade8437b8875ca19d104303b9"
+    }
+  ],
+  "candidate_pr_head_is_not_resulting_main": true,
+  "canonical_root": ".",
+  "current_main": {
+    "observed_utc": "2026-09-20T03:58:55Z",
+    "parent_sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+    "sha": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+    "tree_sha": "22ccc1daf9d55bd12d9a58e6652fe92cf3cb9416"
+  },
+  "historical_exclusions": [
+    {
+      "path": "G1/bootstrap-transition/v9-independent-contract-audit-2026-09-20/canonical-dag/v9-independent-field-dag.json",
+      "role": "v9 authority input; only vocabulary is imported by v10"
+    }
+  ],
+  "live_status": "no live typed verifier or provider execution; synthetic fixtures are explicitly non-live",
+  "model_source": {
+    "path": "v10-canonical-model-source.json",
+    "sha256": "09d586416a86fae321e35fc24fbecac870a1faec93cd6d17392169ff803e36f1"
+  },
+  "product_identity": {
+    "application_namespace_reuse": false,
+    "architecture": "x86_64",
+    "asset": "velnor-workflow-policy-validator-Linux-X64",
+    "features": "",
+    "mutable_latest": false,
+    "overwrite": false,
+    "platform": "Linux-X64",
+    "product_id": "velnor-workflow-policy-validator",
+    "release_schema": "velnor.workflow-policy-validator.release-manifest.v1",
+    "release_tag_prefix": "velnor-workflow-policy-validator-v1-",
+    "runner": "ubuntu-24.04",
+    "schema": "velnor.workflow-policy-validator.v1"
+  },
+  "root_digest_rule": "SHA-256 of canonical UTF-8 LF JSON bytes with lexicographically sorted keys and compact separators; this object has no self-digest field",
+  "schema": "velnor.canonical-evidence-root-manifest.v3"
+}

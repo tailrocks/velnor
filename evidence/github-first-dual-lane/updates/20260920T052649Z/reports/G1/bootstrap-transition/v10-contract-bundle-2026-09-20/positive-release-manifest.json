@@ -1,0 +1,22 @@
+{
+  "architecture": "x86_64",
+  "asset_digest": "1fbc3424732b6048f7ca2f86bed6cf63ed48a141e587675d4ec6bdad610de16c",
+  "asset_id": 1004,
+  "closure_digest": "cbceed9cc9853ff9a0d06aa9f9df5d72efc451a69289150f3e30407526be296a",
+  "fixture_metadata": {
+    "kind": "deterministic_contract_fixture",
+    "live_binding": false,
+    "live_proof_status": "not_executed",
+    "synthetic_values_are_not_evidence": true
+  },
+  "manifest_digest": "940c9d78d8282976dfdd1ec8b8fe3ea5a4ce90fcd4d754edf4fa288fc1efb8b5",
+  "platform": "Linux-X64",
+  "product_name": "velnor-workflow-policy-validator",
+  "product_namespace": "velnor.workflow-policy-validator",
+  "release_id": 1010,
+  "release_tag": "85be7fc9ba3dea13be82559abe53e5b7c7e5ccbe",
+  "schema": "velnor.workflow-policy-validator.release-manifest.v1",
+  "source_sha": "c3dbb9cd89046cf272d45e8e2d6ecc03c79ae290",
+  "source_tree_sha": "af93bcb49c6386fd2d429ccdce904b1bc1e5f40f",
+  "target_sha": "b68836222d051060afc6eded0fcc924fdba706d1"
+}

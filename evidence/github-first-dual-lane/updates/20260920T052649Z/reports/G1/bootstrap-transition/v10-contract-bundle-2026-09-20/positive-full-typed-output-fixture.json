@@ -1,0 +1,2119 @@
+{
+  "canonical_dag_sha256": "38a00228cd28207f3b257a53ba9683cdaf697c5899c897b0c2f53fdf80d364db",
+  "canonical_model_sha256": "09d586416a86fae321e35fc24fbecac870a1faec93cd6d17392169ff803e36f1",
+  "field_count": 299,
+  "fixture_metadata": {
+    "kind": "deterministic_contract_fixture",
+    "live_binding": false,
+    "live_proof_status": "not_executed",
+    "must_cover": [
+      "permanent_binding",
+      "pre_record",
+      "pre_record_transport",
+      "provider_result",
+      "verify_b",
+      "release_manifest"
+    ],
+    "no_live_claim_rule": "a fixture is rejected if it sets live_binding=true or evidence_state=success",
+    "synthetic_values_are_not_evidence": true
+  },
+  "typed_outputs": {
+    "adoption.base_policy_blob_sha": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": "312238f88b255c67410683f31a42f9e1e9ae1a08"
+    },
+    "adoption.base_policy_workflow_sha": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": "1281a35b327a8a0310c5236a84f01530333fc4a0"
+    },
+    "adoption.canonical_root_sha256": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": "861c29c9aa768b691d6b01e7a29ac56df11a10c214ffb8fcb860a3e1f16fc0f1"
+    },
+    "adoption.mode": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": "fixture-0004"
+    },
+    "adoption.permanent_trust_root": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": "fixture-0005"
+    },
+    "adoption.pr_base_sha": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": "73fc0e9f05cade04834e6fdff893ff5ed4e6907b"
+    },
+    "adoption.pr_head_sha": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": "a7a9308f22d35950223d31a8fd03b740013dd43a"
+    },
+    "adoption.pr_number": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": 1009
+    },
+    "adoption.provider_result_digest": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": "f80ad7cc27a22917f702ecb1286ec6b109279d73cf07fa1b0710beb22b741627"
+    },
+    "adoption.release_manifest_digest": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": "970067c4b4efc67953b6b3a5b31db5f95896c2fc03ea2802f1d5152d74a5b7a2"
+    },
+    "adoption.resulting_main_sha": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": "061f30a390cee6cc3f858f3f17a3ed66b0f9f674"
+    },
+    "adoption.resulting_main_tree_sha": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": "c3dbb9cd89046cf272d45e8e2d6ecc03c79ae290"
+    },
+    "adoption.schema_sha256": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": "37008356a5ec0c40e7114e58f2a46fd1103fa032088bc491caa83ae87bf2dff8"
+    },
+    "adoption.source_template_map_digest": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": "9527a5884330d4588f35119244788c7cb471371fc6fa70a0c22ba471ec58be86"
+    },
+    "adoption.temporary_authority_removed": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": true
+    },
+    "adoption.terminal_census_digest": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": "ac36c1a1e616f67c071a1dce69ec0bbbf865d37c6521baf7a8aa89e84b857279"
+    },
+    "adoption.validated_utc": {
+      "live": false,
+      "producer": "tree-b-adoption-verifier",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "TreeB",
+      "value": "fixture-0017"
+    },
+    "permanent.actions.artifact_metadata_write": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": true
+    },
+    "permanent.actions.attest_sha": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0019"
+    },
+    "permanent.actions.create_storage_record": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": true
+    },
+    "permanent.actions.push_to_registry": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": true
+    },
+    "permanent.actions.upload_artifact_sha": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0022"
+    },
+    "permanent.artifact.expired": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": true
+    },
+    "permanent.artifact.id": {
+      "live": false,
+      "producer": "build-linux-x64",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S1_build",
+      "value": 1025
+    },
+    "permanent.artifact.inner_payload_sha256": {
+      "live": false,
+      "producer": "build-linux-x64",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S1_build",
+      "value": "fixture-0025"
+    },
+    "permanent.artifact.inner_payload_size": {
+      "live": false,
+      "producer": "build-linux-x64",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S1_build",
+      "value": 1027
+    },
+    "permanent.artifact.name": {
+      "live": false,
+      "producer": "build-linux-x64",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S1_build",
+      "value": "fixture-0027"
+    },
+    "permanent.artifact.rest_service_zip_sha256": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0028"
+    },
+    "permanent.artifact.rest_service_zip_size": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": 1030
+    },
+    "permanent.artifact.service_zip_sha256": {
+      "live": false,
+      "producer": "build-linux-x64",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S1_build",
+      "value": "fixture-0030"
+    },
+    "permanent.artifact.service_zip_size": {
+      "live": false,
+      "producer": "build-linux-x64",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S1_build",
+      "value": 1032
+    },
+    "permanent.artifact.workflow_run_id": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": 1033
+    },
+    "permanent.attestation.binding_digest": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": "fixture-0033"
+    },
+    "permanent.attestation.binding_predicate_path": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": "fixture-0034"
+    },
+    "permanent.attestation.binding_predicate_type": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": "fixture-0035"
+    },
+    "permanent.attestation.binding_subject_name": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": "fixture-0036"
+    },
+    "permanent.attestation.binding_subject_sha256": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": "fixture-0037"
+    },
+    "permanent.attestation.certificate_verified": {
+      "live": false,
+      "producer": "attest-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S6_release_attest",
+      "value": true
+    },
+    "permanent.attestation.release_manifest_subject_sha256": {
+      "live": false,
+      "producer": "attest-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S6_release_attest",
+      "value": "fixture-0039"
+    },
+    "permanent.attestation.release_predicate_path": {
+      "live": false,
+      "producer": "attest-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S6_release_attest",
+      "value": "fixture-0040"
+    },
+    "permanent.attestation.release_predicate_type": {
+      "live": false,
+      "producer": "attest-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S6_release_attest",
+      "value": "fixture-0041"
+    },
+    "permanent.attestation.signer_repository": {
+      "live": false,
+      "producer": "attest-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S6_release_attest",
+      "value": "fixture-0042"
+    },
+    "permanent.attestation.signer_source_ref": {
+      "live": false,
+      "producer": "attest-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S6_release_attest",
+      "value": "fixture-0043"
+    },
+    "permanent.attestation.signer_workflow": {
+      "live": false,
+      "producer": "attest-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S6_release_attest",
+      "value": "fixture-0044"
+    },
+    "permanent.binary.architecture": {
+      "live": false,
+      "producer": "build-linux-x64",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S1_build",
+      "value": "fixture-0045"
+    },
+    "permanent.binary.closure": {
+      "live": false,
+      "producer": "build-linux-x64",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S1_build",
+      "value": "fixture-0046"
+    },
+    "permanent.binary.mode": {
+      "live": false,
+      "producer": "build-linux-x64",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S1_build",
+      "value": 1048
+    },
+    "permanent.binary.revision": {
+      "live": false,
+      "producer": "build-linux-x64",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S1_build",
+      "value": "fixture-0048"
+    },
+    "permanent.binary.sha256": {
+      "live": false,
+      "producer": "build-linux-x64",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S1_build",
+      "value": "fixture-0049"
+    },
+    "permanent.binary.size": {
+      "live": false,
+      "producer": "build-linux-x64",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S1_build",
+      "value": 1051
+    },
+    "permanent.job.check_run_id": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": 1052
+    },
+    "permanent.job.conclusion": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0052"
+    },
+    "permanent.job.head_sha": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0053"
+    },
+    "permanent.job.id": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": 1055
+    },
+    "permanent.job.key": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0055"
+    },
+    "permanent.job.run_attempt": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": 1057
+    },
+    "permanent.job.run_id": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": 1058
+    },
+    "permanent.job.status": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0058"
+    },
+    "permanent.kind": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0059"
+    },
+    "permanent.manifest.sha256": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": "fixture-0060"
+    },
+    "permanent.manifest.size": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": 1062
+    },
+    "permanent.product.application_namespace_reuse": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": true
+    },
+    "permanent.product.asset": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0063"
+    },
+    "permanent.product.features": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0064"
+    },
+    "permanent.product.mutable_latest": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": true
+    },
+    "permanent.product.overwrite": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": true
+    },
+    "permanent.product.platform": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0067"
+    },
+    "permanent.product.product_id": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0068"
+    },
+    "permanent.product.profile": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0069"
+    },
+    "permanent.product.purpose": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0070"
+    },
+    "permanent.product.runner": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0071"
+    },
+    "permanent.product.schema": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0072"
+    },
+    "permanent.product.tag": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0073"
+    },
+    "permanent.publisher.attest_permissions": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0074"
+    },
+    "permanent.publisher.build_permissions": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0075"
+    },
+    "permanent.publisher.event": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0076"
+    },
+    "permanent.publisher.head_branch": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0077"
+    },
+    "permanent.publisher.head_sha": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0078"
+    },
+    "permanent.publisher.path": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0079"
+    },
+    "permanent.publisher.ref": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0080"
+    },
+    "permanent.publisher.repository": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0081"
+    },
+    "permanent.publisher.repository_id": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": 1083
+    },
+    "permanent.publisher.reserve_publish_permissions": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0083"
+    },
+    "permanent.publisher.sha": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0084"
+    },
+    "permanent.release.attestation_signed_after_draft_id": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": true
+    },
+    "permanent.release.draft_first": {
+      "live": false,
+      "producer": "reserve-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S3_release_reserve",
+      "value": true
+    },
+    "permanent.release.draft_reserved": {
+      "live": false,
+      "producer": "reserve-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S3_release_reserve",
+      "value": true
+    },
+    "permanent.release.id": {
+      "live": false,
+      "producer": "reserve-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S3_release_reserve",
+      "value": 1089
+    },
+    "permanent.release.manifest_signed_after_draft_id": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": true
+    },
+    "permanent.release.published": {
+      "live": false,
+      "producer": "publish",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S5_publish",
+      "value": true
+    },
+    "permanent.release.tag": {
+      "live": false,
+      "producer": "reserve-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S3_release_reserve",
+      "value": "fixture-0091"
+    },
+    "permanent.release.tag_immutable": {
+      "live": false,
+      "producer": "publish",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S5_publish",
+      "value": true
+    },
+    "permanent.release.target_sha": {
+      "live": false,
+      "producer": "reserve-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S3_release_reserve",
+      "value": "fixture-0093"
+    },
+    "permanent.run.attempt": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": 1095
+    },
+    "permanent.run.conclusion": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0095"
+    },
+    "permanent.run.database_id": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": 1097
+    },
+    "permanent.run.event": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0097"
+    },
+    "permanent.run.head_branch": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0098"
+    },
+    "permanent.run.head_sha": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0099"
+    },
+    "permanent.run.id": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": 1101
+    },
+    "permanent.run.repository_id": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": 1102
+    },
+    "permanent.run.status": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0102"
+    },
+    "permanent.run.workflow_sha": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0103"
+    },
+    "permanent.source.closure": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0104"
+    },
+    "permanent.source.ref": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0105"
+    },
+    "permanent.source.repository": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0106"
+    },
+    "permanent.source.repository_id": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": 1108
+    },
+    "permanent.source.sha": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0108"
+    },
+    "permanent.source.tree_sha": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0109"
+    },
+    "permanent.steps.attest_binding.conclusion": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0110"
+    },
+    "permanent.steps.attest_binding.id": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0111"
+    },
+    "permanent.steps.attest_binding.name": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0112"
+    },
+    "permanent.steps.attest_binding.status": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0113"
+    },
+    "permanent.steps.attest_release.conclusion": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0114"
+    },
+    "permanent.steps.attest_release.id": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0115"
+    },
+    "permanent.steps.attest_release.name": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0116"
+    },
+    "permanent.steps.attest_release.status": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0117"
+    },
+    "permanent.steps.build.conclusion": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0118"
+    },
+    "permanent.steps.build.id": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0119"
+    },
+    "permanent.steps.build.name": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0120"
+    },
+    "permanent.steps.build.status": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0121"
+    },
+    "permanent.steps.publish.conclusion": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0122"
+    },
+    "permanent.steps.publish.id": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0123"
+    },
+    "permanent.steps.publish.name": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0124"
+    },
+    "permanent.steps.publish.status": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0125"
+    },
+    "permanent.steps.reserve_release.conclusion": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0126"
+    },
+    "permanent.steps.reserve_release.id": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0127"
+    },
+    "permanent.steps.reserve_release.name": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0128"
+    },
+    "permanent.steps.reserve_release.status": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0129"
+    },
+    "permanent.steps.upload.conclusion": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0130"
+    },
+    "permanent.steps.upload.id": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0131"
+    },
+    "permanent.steps.upload.name": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0132"
+    },
+    "permanent.steps.upload.status": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0133"
+    },
+    "permanent.trust.oidc_issuer": {
+      "live": false,
+      "producer": "attest-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S6_release_attest",
+      "value": "fixture-0134"
+    },
+    "permanent.trust.oidc_policy_revision_sha256": {
+      "live": false,
+      "producer": "attest-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S6_release_attest",
+      "value": "fixture-0135"
+    },
+    "permanent.trust.repository_id": {
+      "live": false,
+      "producer": "attest-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S6_release_attest",
+      "value": 1137
+    },
+    "permanent.trust.signer_repository": {
+      "live": false,
+      "producer": "attest-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S6_release_attest",
+      "value": "fixture-0137"
+    },
+    "permanent.trust.signer_workflow": {
+      "live": false,
+      "producer": "attest-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S6_release_attest",
+      "value": "fixture-0138"
+    },
+    "permanent.trust.source_ref": {
+      "live": false,
+      "producer": "attest-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S6_release_attest",
+      "value": "fixture-0139"
+    },
+    "permanent.trust.source_sha": {
+      "live": false,
+      "producer": "attest-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S6_release_attest",
+      "value": "fixture-0140"
+    },
+    "permanent.trust.temporary_key_used": {
+      "live": false,
+      "producer": "attest-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S6_release_attest",
+      "value": true
+    },
+    "permanent.upload.artifact_digest_output": {
+      "live": false,
+      "producer": "build-linux-x64",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S1_build",
+      "value": "fixture-0142"
+    },
+    "permanent.upload.artifact_id_output": {
+      "live": false,
+      "producer": "build-linux-x64",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S1_build",
+      "value": 1144
+    },
+    "permanent.upload.step_id": {
+      "live": false,
+      "producer": "build-linux-x64",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S1_build",
+      "value": "fixture-0144"
+    },
+    "permanent.verification.binding_digest_verified": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": true
+    },
+    "permanent.verification.cryptographic_attestation_verified": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": true
+    },
+    "permanent.verification.custom_predicate_verified": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": true
+    },
+    "permanent.verification.draft_first_verified": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": true
+    },
+    "permanent.verification.evidence_state": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0149"
+    },
+    "permanent.verification.inner_payload_verified": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": true
+    },
+    "permanent.verification.main_ref_verified": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": true
+    },
+    "permanent.verification.manifest_verified": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": true
+    },
+    "permanent.verification.permanent_trust_policy_sha256": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0153"
+    },
+    "permanent.verification.producer_api_verified": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": true
+    },
+    "permanent.verification.raw_zip_verified": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": true
+    },
+    "permanent.verification.release_api_verified": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": true
+    },
+    "permanent.verification.temporary_authority_used": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": true
+    },
+    "permanent.verifier.check_name": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0158"
+    },
+    "permanent.verifier.integration_id": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": 1160
+    },
+    "permanent.verifier.permissions": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0160"
+    },
+    "permanent.verifier.provider_app_id": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": 1162
+    },
+    "permanent.verifier.verifier_revision": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0162"
+    },
+    "permanent.verifier.write_authority": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": true
+    },
+    "pre_record.artifact.binary_architecture": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "fixture-0164"
+    },
+    "pre_record.artifact.binary_digest": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "9589c556d34edacb8fac395fa1ef98655286b12b25c21542c7239f47b6b93f61"
+    },
+    "pre_record.artifact.binary_size": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": 1167
+    },
+    "pre_record.artifact.inner_payload_digest": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "497565389d984f5ba121a7599f8f80d9ada2983543bc52111305af4fa057e7f0"
+    },
+    "pre_record.artifact.inner_payload_size": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": 1169
+    },
+    "pre_record.artifact.service_zip_digest": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": "cc3f3b0c85b5876d03395835c5c4b3b0ab7a6f7dad8bfbcd02d51c6b9ef213d2"
+    },
+    "pre_record.artifact.service_zip_size": {
+      "live": false,
+      "producer": "artifact-verify",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S2_artifact_verify",
+      "value": 1171
+    },
+    "pre_record.binding.attestation_digest": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "4d67962cb465c68443f104f7b928f01eaa301eeeb28d35db2eefe59cab03b7bc"
+    },
+    "pre_record.binding.attestation_id": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": 1173
+    },
+    "pre_record.binding.core_digest": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "4e391b3ff09b052aaaf50d17733ce121f0320e3fd560635dc3e2db59e3b30464"
+    },
+    "pre_record.binding.final_manifest_artifact_digest": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fbdb95d35dbe4d9d04a6766e804710dee78dee3c8b59b3d30d04bac4986fbaf8"
+    },
+    "pre_record.binding.final_manifest_artifact_id": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": 1176
+    },
+    "pre_record.binding.final_manifest_digest": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "778488f19395b9fa4a65593ce603d40ce861a717c6e8e25b9fc2d7d5dede85fd"
+    },
+    "pre_record.binding.predicate_path": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0177"
+    },
+    "pre_record.binding.predicate_type": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0178"
+    },
+    "pre_record.binding.subject_digest": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "06fa8385e0b45d93876f607321693aa8af531eade8edce8019b8a8b09192f26a"
+    },
+    "pre_record.binding.subject_name": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0180"
+    },
+    "pre_record.caller_workflow.capture_step_id": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0181"
+    },
+    "pre_record.caller_workflow.file_blob_sha": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "49451f15cc2301da2f39d6fe140f5428d16aa180"
+    },
+    "pre_record.caller_workflow.path": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0183"
+    },
+    "pre_record.caller_workflow.ref": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0184"
+    },
+    "pre_record.caller_workflow.run_attempt": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": 1186
+    },
+    "pre_record.caller_workflow.run_id": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": 1187
+    },
+    "pre_record.caller_workflow.workflow_sha": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "8b2d0579bf8860ee03fc7bea0dd37f868a9200b3"
+    },
+    "pre_record.canonical_release_schema_sha256": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "93148ea0e62191c32da64ecdae1997095f4474fed1661419960765a7abc7409a"
+    },
+    "pre_record.canonical_root_manifest_sha256": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "20608379b1fd2f72b0652bbd9ae34d6eced0e4ec05220e6ad349e775297d0526"
+    },
+    "pre_record.producer.check_run_id": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": 1191
+    },
+    "pre_record.producer.job_id": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": 1192
+    },
+    "pre_record.producer.job_workflow_sha": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "a6c60cdea712fb1f377fb8d3068cae2ed5994e0e"
+    },
+    "pre_record.producer.run_attempt": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": 1194
+    },
+    "pre_record.producer.run_id": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": 1195
+    },
+    "pre_record.producer.workflow_file_blob_sha": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "f7471f80ec3d7b8ef399467956e6ffa94e214d5b"
+    },
+    "pre_record.producer.workflow_path": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0196"
+    },
+    "pre_record.producer.workflow_ref": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0197"
+    },
+    "pre_record.product.architecture": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0198"
+    },
+    "pre_record.product.name": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0199"
+    },
+    "pre_record.product.namespace": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0200"
+    },
+    "pre_record.product.platform": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0201"
+    },
+    "pre_record.record_kind": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0202"
+    },
+    "pre_record.release.asset_digest": {
+      "live": false,
+      "producer": "reserve-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S3_release_reserve",
+      "value": "2da80f42419af51d1fc5ebf08f3342378d5469adb058ea2dca784481524f99e0"
+    },
+    "pre_record.release.asset_id": {
+      "live": false,
+      "producer": "reserve-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S3_release_reserve",
+      "value": 1205
+    },
+    "pre_record.release.manifest_digest": {
+      "live": false,
+      "producer": "reserve-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S3_release_reserve",
+      "value": "7a0194da99a87e383011548adadbaae3250aba7b082eb0d000cf31a9e433384f"
+    },
+    "pre_record.release.release_id": {
+      "live": false,
+      "producer": "reserve-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S3_release_reserve",
+      "value": 1207
+    },
+    "pre_record.release.tag": {
+      "live": false,
+      "producer": "reserve-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S3_release_reserve",
+      "value": "fixture-0207"
+    },
+    "pre_record.release.target_sha": {
+      "live": false,
+      "producer": "reserve-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S3_release_reserve",
+      "value": "4f68a4146e8933a70e8ba226f97ad7737f158f84"
+    },
+    "pre_record.release_attestation.attestation_digest": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "f2755c2dc4ae9740a2a4d1918f7cf3e4413e63dac76ca495ff8020d906b0573c"
+    },
+    "pre_record.release_attestation.attestation_id": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": 1211
+    },
+    "pre_record.release_attestation.certificate_identity": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0211"
+    },
+    "pre_record.release_attestation.certificate_verified": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": true
+    },
+    "pre_record.release_attestation.manifest_subject_sha256": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "7b5b1eefb73ae105291ac750913240e5adeff8ca88f68eecdef4b3dd1657d380"
+    },
+    "pre_record.release_attestation.oidc_issuer": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0214"
+    },
+    "pre_record.release_attestation.oidc_policy_revision_sha256": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "df00440e62c5bac15bc287ffd06bfd1369ed0fd63d6f53666dba124e6b1d2070"
+    },
+    "pre_record.release_attestation.predicate_path": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0216"
+    },
+    "pre_record.release_attestation.predicate_type": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0217"
+    },
+    "pre_record.release_attestation.signer_repository": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0218"
+    },
+    "pre_record.release_attestation.signer_source_ref": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0219"
+    },
+    "pre_record.release_attestation.signer_workflow": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0220"
+    },
+    "pre_record.schema_version": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0221"
+    },
+    "pre_record.source.closure_digest": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "38df89a90354f2d918c32217bc53b4bd7eec9930df1deed50e53b5ea111cb223"
+    },
+    "pre_record.source.ref": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0223"
+    },
+    "pre_record.source.repository": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "fixture-0224"
+    },
+    "pre_record.source.sha": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "cb8359e2bc385bd6e421a77f89b802cd24ba22b2"
+    },
+    "pre_record.source.tree_sha": {
+      "live": false,
+      "producer": "capture-caller-context.capture",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S0_caller_readback",
+      "value": "19d4a4a20840623681b3f4208aaf06c6e6c9fbfd"
+    },
+    "pre_record.verification.binding_preimage_sha256": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "c3e63aa0233d4b0f9f6aedd119c2e81bc80c0e4d4d064fc70d28701ffe8c45d8"
+    },
+    "pre_record.verification.raw_downloads_equal_digests": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": true
+    },
+    "pre_record.verification.release_preimage_sha256": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "12828a397528022fc1612b61ba5179cd03baeca57e6a382b75a72b6915acaad5"
+    },
+    "pre_record.verification.required_step_conclusions": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0230"
+    },
+    "pre_record_transport.artifact_digest": {
+      "live": false,
+      "producer": "pre-record-upload",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7a_pre_record_transport",
+      "value": "cb095e531f24a39a02ab0bedb47fc2337c00819d2aea2d4c0e37063545faaf8a"
+    },
+    "pre_record_transport.artifact_id": {
+      "live": false,
+      "producer": "pre-record-upload",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7a_pre_record_transport",
+      "value": 1233
+    },
+    "pre_record_transport.artifact_name": {
+      "live": false,
+      "producer": "pre-record-upload",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7a_pre_record_transport",
+      "value": "fixture-0233"
+    },
+    "pre_record_transport.raw_zip_sha256": {
+      "live": false,
+      "producer": "pre-record-upload",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7a_pre_record_transport",
+      "value": "bb089eeb9ad5695e20b1496f514b42130b4c944735793a1eb3b538f71876f2c9"
+    },
+    "pre_record_transport.raw_zip_size": {
+      "live": false,
+      "producer": "pre-record-upload",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7a_pre_record_transport",
+      "value": 1236
+    },
+    "pre_record_transport.upload_check_run_id": {
+      "live": false,
+      "producer": "pre-record-upload",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7a_pre_record_transport",
+      "value": 1237
+    },
+    "pre_record_transport.upload_job_id": {
+      "live": false,
+      "producer": "pre-record-upload",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7a_pre_record_transport",
+      "value": 1238
+    },
+    "pre_record_transport.upload_run_attempt": {
+      "live": false,
+      "producer": "pre-record-upload",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7a_pre_record_transport",
+      "value": 1239
+    },
+    "pre_record_transport.upload_run_id": {
+      "live": false,
+      "producer": "pre-record-upload",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7a_pre_record_transport",
+      "value": 1240
+    },
+    "pre_record_transport.upload_step_id": {
+      "live": false,
+      "producer": "pre-record-upload",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7a_pre_record_transport",
+      "value": "fixture-0240"
+    },
+    "provider_result.provider_attestation_digest": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "19daf978523f4a55d1277210228f044baf7314d710b430011b4fe04570f4d5b2"
+    },
+    "provider_result.provider_check_app_id": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": 1243
+    },
+    "provider_result.provider_check_conclusion": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "fixture-0243"
+    },
+    "provider_result.provider_check_context": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "fixture-0244"
+    },
+    "provider_result.provider_check_head_sha": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "4911ad4b45f0408c98c06e0100c3c4330fb8e58b"
+    },
+    "provider_result.provider_check_integration_id": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": 1247
+    },
+    "provider_result.provider_check_run_id": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": 1248
+    },
+    "provider_result.provider_endpoint": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "fixture-0248"
+    },
+    "provider_result.provider_result_digest": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "75688d3516bff6c930011b2a968f326ac12f1dbefbd203805114f9b599f6bebf"
+    },
+    "provider_result.provider_result_id": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "fixture-0250"
+    },
+    "provider_result.provider_verifier_revision": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "9df43d1ba755ad31b648793760364487878c5c93"
+    },
+    "provider_result.provider_workflow_ref": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "fixture-0252"
+    },
+    "provider_result.provider_workflow_sha": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "704efc84fdaf80befc70e5b22c2c26ab7f091dda"
+    },
+    "provider_result.resulting_main_sha": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "c44b874b05e0ea1c554c6a91d83a6e603a6ed2be"
+    },
+    "provider_result.resulting_main_tree_sha": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "43f237059c3acf7063271c2d3cb9b200ffd5a78b"
+    },
+    "provider_result.signature_base64": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "fixture-0256"
+    },
+    "provider_result.signer_algorithm": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "fixture-0257"
+    },
+    "provider_result.signer_certificate_sha256": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "adef82aec1660d97d1988806c9888db6034ab17047a7dfab9db68cb09fdd0116"
+    },
+    "provider_result.signer_certificate_subject": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "fixture-0259"
+    },
+    "provider_result.signer_key_id": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "fixture-0260"
+    },
+    "provider_result.signer_public_key_sha256": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "c32a6b7f1c8cfa3b1fb2eb13b63ed04bba17b7e7ba20851acac3ea4b8d300746"
+    },
+    "provider_result.source_record_artifact_digest": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "075de594ca8404ab550f44096db6cbe94d7e321c011bd3cc09052a55aa7b190d"
+    },
+    "provider_result.source_record_artifact_id": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": 1264
+    },
+    "provider_result.source_record_raw_zip_sha256": {
+      "live": false,
+      "producer": "external-provider-result",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7b_provider_result",
+      "value": "a7f7991da92a8ab931ecbb78ca297eab0b3c13c59befc651b6343690883c015c"
+    },
+    "release_manifest.architecture": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": "fixture-0265"
+    },
+    "release_manifest.asset_digest": {
+      "live": false,
+      "producer": "publish",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S5_publish",
+      "value": "9b411d2f62000e42900e79965272f2745fbf037415103f0cfab100383a086bdb"
+    },
+    "release_manifest.asset_id": {
+      "live": false,
+      "producer": "publish",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S5_publish",
+      "value": 1268
+    },
+    "release_manifest.closure_digest": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": "a6c6e72e6b88df5b7b8145bc1ea64d6e59848dd9c4041d9ea097b11a910f92fe"
+    },
+    "release_manifest.manifest_digest": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": "70013d17e6de67eba1f7f0f4336899398cd86f4fe7ddceeb9d8ba0dffc8b5a77"
+    },
+    "release_manifest.platform": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": "fixture-0270"
+    },
+    "release_manifest.product_name": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": "fixture-0271"
+    },
+    "release_manifest.product_namespace": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": "fixture-0272"
+    },
+    "release_manifest.release_id": {
+      "live": false,
+      "producer": "reserve-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S3_release_reserve",
+      "value": 1274
+    },
+    "release_manifest.release_tag": {
+      "live": false,
+      "producer": "reserve-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S3_release_reserve",
+      "value": "ae75c8beddd2e3bf3592df5fbba2a22d445fcee8"
+    },
+    "release_manifest.schema": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": "fixture-0275"
+    },
+    "release_manifest.source_sha": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": "cf893cf65ac7a784b50fcf6909436a5a8f38abad"
+    },
+    "release_manifest.source_tree_sha": {
+      "live": false,
+      "producer": "attest-binding",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S4_binding_attest",
+      "value": "4d783dca1d079d89d157577825b16837718a4a10"
+    },
+    "release_manifest.target_sha": {
+      "live": false,
+      "producer": "reserve-release",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S3_release_reserve",
+      "value": "e5089bbf5c3a56fd8684aff90d91dd2ba2edc4b8"
+    },
+    "terminal_census.rows": {
+      "live": false,
+      "producer": "verify-B.terminal-census-api",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": [
+        {
+          "fixture_row": 280
+        }
+      ]
+    },
+    "verify_b.called_head_sha": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "97ad6cc146db039ddf474271f5583ff178eec06f"
+    },
+    "verify_b.called_job_workflow_ref": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0281"
+    },
+    "verify_b.called_job_workflow_sha": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "a299177b65b67beac2c91558d20d11b958162e23"
+    },
+    "verify_b.called_run_attempt": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": 1284
+    },
+    "verify_b.called_run_id": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": 1285
+    },
+    "verify_b.called_workflow_file_blob_sha": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "780b7f37d3f60fad1190190169d6db4b207829ba"
+    },
+    "verify_b.called_workflow_ref": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0286"
+    },
+    "verify_b.called_workflow_sha": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "8663912d985ba5ac3c2708eb8cdf773b384add1d"
+    },
+    "verify_b.policy_check_app_id": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": 1289
+    },
+    "verify_b.policy_check_conclusion": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0289"
+    },
+    "verify_b.policy_check_context": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0290"
+    },
+    "verify_b.policy_check_head_sha": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "7679a711bb2e1bc1bbc442df57bfd06353cb1f36"
+    },
+    "verify_b.policy_check_integration_id": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": 1293
+    },
+    "verify_b.policy_check_run_id": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": 1294
+    },
+    "verify_b.provider_result_digest": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "824e299cc1c9157ea3a1cf0e51943293e0b4ce5cc9574180fea03bad9519482d"
+    },
+    "verify_b.provider_result_id": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0295"
+    },
+    "verify_b.resulting_main_sha": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "9e0b0adf8f2f380fe14fe804f2778eb36c08676b"
+    },
+    "verify_b.terminal_census_digest": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "66ef4075b60868e85cce2107dcef328ba53b0a68d1172a2e57a2d2ee458c3ad5"
+    },
+    "verify_b.terminal_census_id": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "fixture-0298"
+    },
+    "verify_b.terminal_census_rows_digest": {
+      "live": false,
+      "producer": "verify-B",
+      "provenance": "deterministic_contract_fixture_only",
+      "stage": "S7c_verify_b",
+      "value": "b08ecd831a55d897ec08fd1cf7bacc2de12f41b3ef90eed19636a7db2edbe0cc"
+    }
+  }
+}

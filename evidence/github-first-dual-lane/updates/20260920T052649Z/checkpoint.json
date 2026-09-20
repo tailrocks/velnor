@@ -1,0 +1,424 @@
+{
+  "$schema": "velnor.external-evidence-update.v1",
+  "attestation": "none",
+  "captured_at_utc": "2026-09-20T05:32:10Z",
+  "excluded": [
+    "active/current/live/monitor/push/session ledgers and mutable writer snapshots",
+    "raw logs, generated target/build trees, binaries, caches, credentials, clones, harness worktrees, and live fixture trees",
+    "all v11 material and later/future review files; no future review is represented as current evidence",
+    "v9 executable fixture and authority-separation payload directory; only the independent v9 reports/results and canonical negative corpus are selected",
+    "v10 adversarial-audit side tree is excluded from this batch; the frozen v10 bundle audit/report/results inside the hash-closed bundle are retained",
+    "symlinks: none selected; no symlink dereferenced"
+  ],
+  "gate_statement": "This append-only evidence snapshot records stable external reports, frozen v9/v10 contract evidence, and inventory/diagnostic reports. It establishes no G0, G1, G2, G3, G4, G5, G6, or G7 success.",
+  "gate_status": "not-evaluated",
+  "included_entry_count_before_manifests": 51,
+  "included_file_count_before_manifests": 51,
+  "included_groups": {
+    "G0": 11,
+    "G1": 40
+  },
+  "included_paths": [
+    "G0/evidence-checkpoint-review/d25819f5-packaging-review.md",
+    "G0/fleet/g0-current-workflow-check-run-gap-map-20260920T050054Z.json",
+    "G0/fleet/g0-current-workflow-check-run-gap-map-20260920T050054Z.md",
+    "G0/fleet/preview-failure-diagnosis-20260920T051225Z.json",
+    "G0/homebrew-contract/native-384-exact-crosscheck.md",
+    "G0/homebrew-contract/native-fba-exact-crosscheck.md",
+    "G0/native-review/native-384e2e4e-independent-review.md",
+    "G0/native-review/native-fba55325-exact-review.md",
+    "G0/native-review/native-fba55325-mode-adjudication.md",
+    "G0/runtime/checkout-proof-d3840e5-review.md",
+    "G0/transaction-recovery-review/31f715978ffd1d4dc2a236d21678d689ceb6d8fc-review.md",
+    "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v9.json",
+    "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v9.md",
+    "G1/bootstrap-transition/audit_v10_bundle.py",
+    "G1/bootstrap-transition/build_v10_bundle.py",
+    "G1/bootstrap-transition/v10-canonical-model-source.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/AUTHORITY-CHANGE-PLAN-2026-09-20-v10.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/AUTHORITY-CHANGE-PLAN-2026-09-20-v10.md",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/adoption.schema.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/bundle-index.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/canonical-root-manifest.v3.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/negative-fixtures.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/permanent_binding.schema.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/positive-full-typed-output-fixture.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/positive-pre-record-transport.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/positive-pre-record.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/positive-provider-result.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/positive-release-manifest.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/positive-verify-b.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/pre_record.schema.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/pre_record_transport.schema.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/provider_result.schema.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/release_manifest.schema.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/v10-canonical-field-dag.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/v10-independent-audit-report.md",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/v10-independent-audit-results.json",
+    "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/verify_b.schema.json",
+    "G1/bootstrap-transition/v9-contract-audit-report.md",
+    "G1/bootstrap-transition/v9-contract-audit-results.json",
+    "G1/bootstrap-transition/v9-independent-authority-transition-review-2026-09-20.md",
+    "G1/bootstrap-transition/v9-independent-contract-audit-2026-09-20/canonical-dag/v9-independent-audit-report.md",
+    "G1/bootstrap-transition/v9-independent-contract-audit-2026-09-20/canonical-dag/v9-independent-audit-results.json",
+    "G1/bootstrap-transition/v9-independent-contract-audit-2026-09-20/canonical-dag/v9-independent-field-dag.json",
+    "G1/bootstrap-transition/v9-independent-contract-audit-2026-09-20/canonical-dag/v9-independent-negative-fixtures.json",
+    "G1/bootstrap-transition/v9-independent-contract-audit-2026-09-20/canonical-dag/v9_independent_audit.py",
+    "G1/bootstrap-transition/v9_contract_audit.py",
+    "G1/bootstrap/source-review-643b304a9fd011e016d32efa963fc3edfa8b2a7e.md",
+    "G1/reviews/apt-02c04180-independent.md",
+    "G1/reviews/apt-f1c2970-independent.md",
+    "G1/reviews/pr963-056-independent.md",
+    "G1/reviews/runtime-stall-f90515f3.md"
+  ],
+  "included_source_bytes": 1018389,
+  "integrity": {
+    "inventory": "INVENTORY.tsv",
+    "manifest_scope": "All regular files in this update except SHA256SUMS itself.",
+    "sha256_manifest": "SHA256SUMS",
+    "source_hash_scope": "All copied source files with bytes, source mtime epoch, and SHA-256 in INVENTORY.tsv.",
+    "source_destination_reconciliation": "All 51 selected files matched byte-for-byte and SHA-256 after copy.",
+    "source_stability_reconciliation": "Prior selected sources were rechecked; pre-copy and bounded post-observation hashes and sizes for the three added fba files and all prior files matched.",
+    "json_parse_count": 27,
+    "secret_scan_matches": 0,
+    "symlink_policy": "No symlinks selected; no symlink dereferenced.",
+    "v10_full_hash_closure": {
+      "bundle": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20",
+      "root_digest": "44f144bee0d2437fedf3d72c951d5df248033f7b78100004d81e30980e046136",
+      "root_manifest_sha256": "9f9306f71a82f656affa23eb8957d844ebbbe3be5d3fce293cf9f5bbe0dfac3e",
+      "bound_file_count": 18,
+      "bound_file_mismatches": 0,
+      "bundle_index_anchors_verified": true
+    },
+    "v9_hash_claims_verified": true,
+    "d258_packaging_review_sha256_verified": "3831370b0c008fcf62588547ee10559e13066b68b09e2b32dd7a72c7c6cfce3e",
+    "fba_mode_adjudication_sha256_verified": "ee30a3c0531a797ff46e7c387ddda71758cffaded633aa7acc44d2760643d756"
+  },
+  "new_cutoff_utc": "2026-09-20T05:32:10Z",
+  "original_evidence_root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence",
+  "parent_checkpoint_commit": "d25819f5b4a9f1e7724456693e9d8061182cdd1a",
+  "prior_cutoff_utc": "2026-09-20T04:18:47Z",
+  "publication_owner": "/root",
+  "records_owner": "/root/g0_records",
+  "ref": "refs/heads/evidence/github-first-dual-lane-20260919T181508Z",
+  "remote_before_copy": "d25819f5b4a9f1e7724456693e9d8061182cdd1a",
+  "repository": "tailrocks/velnor",
+  "selection_notes": [
+    "Append starts after d25819f5 packaging checkpoint cutoff 2026-09-20T04:18:47Z; the d258 packaging review itself is retained as the independent packaging result and its supplied SHA-256 is verified.",
+    "The 31f item resolves to the canonical G0/transaction-recovery-review/31f715978ffd1d4dc2a236d21678d689ceb6d8fc-review.md path; no invented scan-integrity alias is used.",
+    "The native 384 review and exact Homebrew mode-failure cross-check are retained together; their reject/block dispositions are not promoted to approval.",
+    "v9 owner plan/audit plus independent canonical-DAG report/results/negative corpus are frozen byte-for-byte; v10 is copied with its complete generated bundle and external model/generator closure, and every root-manifest/bundle-index hash is verified.",
+    "Runtime, APT 02c/f1, checkout d384, bootstrap 643, PR963 056, preview diagnosis 051225, and fleet gap-map reports are inventory/source evidence only. Reports preserve their own pass/block/reject/conditional dispositions.",
+    "No source, GitHub authority, ruleset, check, release, dispatch, merge, install, host, or credential state changed. No gate or attestation is claimed.",
+    "Added the exact fba55325 original review, native-fba Homebrew cross-check, and 2026-09-20T05:31:00Z mode adjudication addendum after the final cutoff crossed its review timestamp. The addendum supersedes only the historical mode residual: mode handling is PASS, while overall publication remains blocked."
+  ],
+  "source_base_revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+  "source_inventory": [
+    {
+      "path": "G0/evidence-checkpoint-review/d25819f5-packaging-review.md",
+      "bytes": 5946,
+      "source_mtime_epoch": 1789878870,
+      "sha256": "3831370b0c008fcf62588547ee10559e13066b68b09e2b32dd7a72c7c6cfce3e"
+    },
+    {
+      "path": "G0/fleet/g0-current-workflow-check-run-gap-map-20260920T050054Z.json",
+      "bytes": 55031,
+      "source_mtime_epoch": 1789880606,
+      "sha256": "57d0bbbbe8159f8e5c843681260a88f250498700589034923634e78eacf2fb8c"
+    },
+    {
+      "path": "G0/fleet/g0-current-workflow-check-run-gap-map-20260920T050054Z.md",
+      "bytes": 4870,
+      "source_mtime_epoch": 1789880662,
+      "sha256": "7093cfc1d94d96947b45210d048aab7a65deaef59bbd2b56861991386f08d21b"
+    },
+    {
+      "path": "G0/fleet/preview-failure-diagnosis-20260920T051225Z.json",
+      "bytes": 9858,
+      "source_mtime_epoch": 1789881235,
+      "sha256": "b2b09fc853821989cbd902116e73fe6ce0b1ecf87a4a8fab9038735a6dad84cf"
+    },
+    {
+      "path": "G0/homebrew-contract/native-384-exact-crosscheck.md",
+      "bytes": 3125,
+      "source_mtime_epoch": 1789879906,
+      "sha256": "ff6f37e380efc7eeb5721b654436d533ab5e854f179a824c01456a4a93f146a0"
+    },
+    {
+      "path": "G0/homebrew-contract/native-fba-exact-crosscheck.md",
+      "bytes": 5034,
+      "source_mtime_epoch": 1789881556,
+      "sha256": "d8a1732b46487fbf034c1140696acac8d935fc723e92c02a4470541599b87aaf"
+    },
+    {
+      "path": "G0/native-review/native-384e2e4e-independent-review.md",
+      "bytes": 9126,
+      "source_mtime_epoch": 1789880143,
+      "sha256": "c4c9732899be0c8d799277a72ea70f890103eca9cd94971fc0b5afa426af05a1"
+    },
+    {
+      "path": "G0/native-review/native-fba55325-exact-review.md",
+      "bytes": 7826,
+      "source_mtime_epoch": 1789881533,
+      "sha256": "0a584108f92e3781ef88bbcbca66ac451c1bb9264100e5572efad2134a3ec217"
+    },
+    {
+      "path": "G0/native-review/native-fba55325-mode-adjudication.md",
+      "bytes": 7148,
+      "source_mtime_epoch": 1789881993,
+      "sha256": "ee30a3c0531a797ff46e7c387ddda71758cffaded633aa7acc44d2760643d756"
+    },
+    {
+      "path": "G0/runtime/checkout-proof-d3840e5-review.md",
+      "bytes": 7731,
+      "source_mtime_epoch": 1789880219,
+      "sha256": "0b2b74bd87431934be9763f8613b090af8ea53c0438801f27a784e3c3f766af4"
+    },
+    {
+      "path": "G0/transaction-recovery-review/31f715978ffd1d4dc2a236d21678d689ceb6d8fc-review.md",
+      "bytes": 7309,
+      "source_mtime_epoch": 1789880907,
+      "sha256": "b53903feb1e2a46d08bed72dcb4c67106dabac149eace7b507d0be88a36bc2d4"
+    },
+    {
+      "path": "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v9.json",
+      "bytes": 190225,
+      "source_mtime_epoch": 1789878097,
+      "sha256": "e74a583e492b41fa043b4a78621e6183875a333e3d533a4244e3956121b66615"
+    },
+    {
+      "path": "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v9.md",
+      "bytes": 14943,
+      "source_mtime_epoch": 1789877672,
+      "sha256": "bfcafb4f706ac5c1a1ecccc7d8ba1d0d777f16e52bf4fa335a15085908e832ed"
+    },
+    {
+      "path": "G1/bootstrap-transition/audit_v10_bundle.py",
+      "bytes": 13417,
+      "source_mtime_epoch": 1789880476,
+      "sha256": "aad673e217e0b8913ccf799e8fae4310c93adafb57fdb9be40075fcf2c06bd76"
+    },
+    {
+      "path": "G1/bootstrap-transition/build_v10_bundle.py",
+      "bytes": 30434,
+      "source_mtime_epoch": 1789880430,
+      "sha256": "d82653e3b4835110326d5dd338d6532bd633f6f4ba2ce3737947c3027f599f94"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-canonical-model-source.json",
+      "bytes": 20406,
+      "source_mtime_epoch": 1789879992,
+      "sha256": "09d586416a86fae321e35fc24fbecac870a1faec93cd6d17392169ff803e36f1"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/AUTHORITY-CHANGE-PLAN-2026-09-20-v10.json",
+      "bytes": 8866,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "8e5ff3e61a1d25590c88a161f9e38db260b9fa1afeccfe1c956b1194b5b66050"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/AUTHORITY-CHANGE-PLAN-2026-09-20-v10.md",
+      "bytes": 4630,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "ab8513aebb6cf6657f0c88f5fd7af283c8b785d054cd64d0156be4a4bad5c12b"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/adoption.schema.json",
+      "bytes": 2259,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "6576af30fe4943be379a5906d715a5b47be267872c830bbf572071d3c0dac9c9"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/bundle-index.json",
+      "bytes": 676,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "d6debfc22d43cee63165ae29708bfd3e4908ada4c708a1f72e7e462ac5a006bc"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/canonical-root-manifest.v3.json",
+      "bytes": 5596,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "9f9306f71a82f656affa23eb8957d844ebbbe3be5d3fce293cf9f5bbe0dfac3e"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/negative-fixtures.json",
+      "bytes": 1002,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "d99e5bfd1db3c1211b9d3ca0629533c39cc0943966005368a103a70ac7cf9430"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/permanent_binding.schema.json",
+      "bytes": 18124,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "f14c47679d77aad8230ae392130ae0ea14c7c0320ff2fff74af49b263ade66c8"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/positive-full-typed-output-fixture.json",
+      "bytes": 72290,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "671ae49f7bf2ac454f54185f32fafad1c5a8bf4f26631f15b95382343c1f5a35"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/positive-pre-record-transport.json",
+      "bytes": 551,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "f53b3f12993a3e4c29cadb30ce9a316aa648b3dedc42e37418ce19f3ee27aaf9"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/positive-pre-record.json",
+      "bytes": 4136,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "e5c2a6d78189fa62b42fc6c128ad34d781d6b9ed6256e1c8643f26cba1cb5899"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/positive-provider-result.json",
+      "bytes": 1644,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "9d64c4d86918e891d3cb5de9a15d2222f4d844d7b9358b27ff02a8f09be6ea74"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/positive-release-manifest.json",
+      "bytes": 979,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "762ca9136c2a4ed1b66637b9f85d4e8203da720ebe91c310da8f850f7a79f0a9"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/positive-verify-b.json",
+      "bytes": 1591,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "46f6f5b564dcb2029e7e1da86bde2d87c7824fadcf43069396315dc3a0722efd"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/pre_record.schema.json",
+      "bytes": 10360,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "1c69e5b1e42fc40e485fac80ea7bebcb52b1ff96bd3016049a45d2ec15c1c402"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/pre_record_transport.schema.json",
+      "bytes": 1284,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "30ef713ffa3b533038e8c5a07e03e6ba1cd7ba81245da7f3d7c0d49e194400b4"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/provider_result.schema.json",
+      "bytes": 3190,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "6a87234d6e710ef854ebb9074f20f4d47fcb7cba1e41813160c1a2e1282b81e4"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/release_manifest.schema.json",
+      "bytes": 1830,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "c0cfdf2cfd67f9fe20de5ab3fb8e0056ee5c55842d5b7124c86be120c1604718"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/v10-canonical-field-dag.json",
+      "bytes": 190267,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "38a00228cd28207f3b257a53ba9683cdaf697c5899c897b0c2f53fdf80d364db"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/v10-independent-audit-report.md",
+      "bytes": 4011,
+      "source_mtime_epoch": 1789880651,
+      "sha256": "4ea7de9f1eadc56f15aa24a4e6094371798b4d9b897e5127c41120c0df8ecd48"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/v10-independent-audit-results.json",
+      "bytes": 5964,
+      "source_mtime_epoch": 1789880651,
+      "sha256": "e37fcf00ad0827ba29e005d68534b71751dc46191e7b6664e6cba6d98c6cb01d"
+    },
+    {
+      "path": "G1/bootstrap-transition/v10-contract-bundle-2026-09-20/verify_b.schema.json",
+      "bytes": 2630,
+      "source_mtime_epoch": 1789880434,
+      "sha256": "cf3029101ffb82c35767decceddf60a0a95e16e608545548aba23c3ed31f1402"
+    },
+    {
+      "path": "G1/bootstrap-transition/v9-contract-audit-report.md",
+      "bytes": 3072,
+      "source_mtime_epoch": 1789878134,
+      "sha256": "1e920b0186c050d78757919ca39dc71ffb686f4de97e7b2e3cf77cbb83d02f0f"
+    },
+    {
+      "path": "G1/bootstrap-transition/v9-contract-audit-results.json",
+      "bytes": 16025,
+      "source_mtime_epoch": 1789878114,
+      "sha256": "4ddeb3272b5456f8e790e925c4dba4a71ba4436eee38af0910bbc660fc196ca1"
+    },
+    {
+      "path": "G1/bootstrap-transition/v9-independent-authority-transition-review-2026-09-20.md",
+      "bytes": 14807,
+      "source_mtime_epoch": 1789879293,
+      "sha256": "67e6d1a41d5a988effeba6b17aafd670b10b5e9cb565c4ef921d3810409e052c"
+    },
+    {
+      "path": "G1/bootstrap-transition/v9-independent-contract-audit-2026-09-20/canonical-dag/v9-independent-audit-report.md",
+      "bytes": 5987,
+      "source_mtime_epoch": 1789879287,
+      "sha256": "853b28bee7e3475a898921f50a035b713eedd83c8403fd99c5900964944f227c"
+    },
+    {
+      "path": "G1/bootstrap-transition/v9-independent-contract-audit-2026-09-20/canonical-dag/v9-independent-audit-results.json",
+      "bytes": 42819,
+      "source_mtime_epoch": 1789879287,
+      "sha256": "d010e465c84d8552453af3612e950bc41715ee19a5fadd63070b0774944ae88a"
+    },
+    {
+      "path": "G1/bootstrap-transition/v9-independent-contract-audit-2026-09-20/canonical-dag/v9-independent-field-dag.json",
+      "bytes": 112251,
+      "source_mtime_epoch": 1789879287,
+      "sha256": "902854e6591687095856fdf507115e933cb4d57ade8437b8875ca19d104303b9"
+    },
+    {
+      "path": "G1/bootstrap-transition/v9-independent-contract-audit-2026-09-20/canonical-dag/v9-independent-negative-fixtures.json",
+      "bytes": 2079,
+      "source_mtime_epoch": 1789879283,
+      "sha256": "8af355978a6c3ec33bc7d39f9c19caf11e245eccc4af729c64c6125b8eb3f0b5"
+    },
+    {
+      "path": "G1/bootstrap-transition/v9-independent-contract-audit-2026-09-20/canonical-dag/v9_independent_audit.py",
+      "bytes": 38214,
+      "source_mtime_epoch": 1789879266,
+      "sha256": "4797485a4441442712941a3c24649aa915db4da3ec0e9deee96c194259ad773b"
+    },
+    {
+      "path": "G1/bootstrap-transition/v9_contract_audit.py",
+      "bytes": 9691,
+      "source_mtime_epoch": 1789878104,
+      "sha256": "eae169967eefc34ae7026b856b9d8dd56095b220d58759da313f8d08a6948c80"
+    },
+    {
+      "path": "G1/bootstrap/source-review-643b304a9fd011e016d32efa963fc3edfa8b2a7e.md",
+      "bytes": 8200,
+      "source_mtime_epoch": 1789880709,
+      "sha256": "29ace24aad9bb95576311c5d3d61a1328943c7f9be026d73efd330335cf1dba7"
+    },
+    {
+      "path": "G1/reviews/apt-02c04180-independent.md",
+      "bytes": 11153,
+      "source_mtime_epoch": 1789880191,
+      "sha256": "625f167a66fcef458796b8d57cc1199c229b89e09ed78cfe3b3cc579b657d9a8"
+    },
+    {
+      "path": "G1/reviews/apt-f1c2970-independent.md",
+      "bytes": 7956,
+      "source_mtime_epoch": 1789880768,
+      "sha256": "476800ef890573121229ba48418113107cf731b9e366d6f73fd8da0de8d60b4a"
+    },
+    {
+      "path": "G1/reviews/pr963-056-independent.md",
+      "bytes": 6505,
+      "source_mtime_epoch": 1789878924,
+      "sha256": "d4d2e953a4b8dae0bf3a8e1d1e99c521ff1da7deeeb674b4b7b6883754d56ae3"
+    },
+    {
+      "path": "G1/reviews/runtime-stall-f90515f3.md",
+      "bytes": 5321,
+      "source_mtime_epoch": 1789880545,
+      "sha256": "85e68edfe9c62a9eea03f5861ff9f388e4a090ed21fe4c94d3416b976c4427ca"
+    }
+  ]
+}

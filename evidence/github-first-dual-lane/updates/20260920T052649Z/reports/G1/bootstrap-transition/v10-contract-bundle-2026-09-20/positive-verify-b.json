@@ -1,0 +1,40 @@
+{
+  "called_head_sha": "312238f88b255c67410683f31a42f9e1e9ae1a08",
+  "called_job_workflow_ref": "fixture-0002",
+  "called_job_workflow_sha": "dab9e550a17f2b7461de82af840dba2bc116c83d",
+  "called_run_attempt": 1005,
+  "called_run_id": 1006,
+  "called_workflow_file_blob_sha": "73fc0e9f05cade04834e6fdff893ff5ed4e6907b",
+  "called_workflow_ref": "fixture-0007",
+  "called_workflow_sha": "b788475c4a6713ee8360bf0815e0fd796fda4643",
+  "fixture_metadata": {
+    "kind": "deterministic_contract_fixture",
+    "live_binding": false,
+    "live_proof_status": "not_executed"
+  },
+  "policy_check_app_id": 1010,
+  "policy_check_conclusion": "success",
+  "policy_check_context": "Policy-bootstrap-B",
+  "policy_check_head_sha": "c3dbb9cd89046cf272d45e8e2d6ecc03c79ae290",
+  "policy_check_integration_id": 1014,
+  "policy_check_run_id": 1015,
+  "provider_result_digest": "d5a014fe29c112e2d96a734f11992a831dddb246d63af536907fb90249a93f7a",
+  "provider_result_id": "fixture-0016",
+  "resulting_main_sha": "c4bb6831ee57f8bdf2be0b7398d697d83d235d09",
+  "terminal_census": {
+    "rows": [
+      {
+        "attempt": 1,
+        "check_run_id": 3001,
+        "conclusion": "success",
+        "head_sha": "0000000000000000000000000000000000000000",
+        "job_id": 2001,
+        "run_id": 1001,
+        "workflow_path": ".github/workflows/ci-main.yml"
+      }
+    ]
+  },
+  "terminal_census_digest": "2037f148e724ea37c0a43f0f28943d47a98c0c2a5a651f8d31a7f8660a6d256b",
+  "terminal_census_id": "fixture-0019",
+  "terminal_census_rows_digest": "b01e35181e72ca950fe831437bdd8cb622c51b2bf46d7d51870b1d9ea739642f"
+}

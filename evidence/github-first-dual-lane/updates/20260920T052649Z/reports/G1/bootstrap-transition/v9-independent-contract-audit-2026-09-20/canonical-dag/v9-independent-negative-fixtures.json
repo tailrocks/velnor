@@ -1,0 +1,56 @@
+{
+  "execution": "unexecuted-no-real-verifier",
+  "expected": "reject",
+  "fixtures": [
+    {
+      "expected": "reject",
+      "id": "terminal-census-own-id",
+      "mutation": "include terminal_census_id in S7_terminal_census ordered_fields",
+      "reason": "own identity cannot be hashed before allocation"
+    },
+    {
+      "expected": "reject",
+      "id": "terminal-census-overlap",
+      "mutation": "keep terminal_census_digest in both ordered_fields and excluded_fields",
+      "reason": "exact ordered preimage and exclusion contradict"
+    },
+    {
+      "expected": "reject",
+      "id": "provider-result-overlap",
+      "mutation": "keep provider_result_id/digest in both ordered_fields and excluded_fields",
+      "reason": "exact ordered preimage and exclusion contradict"
+    },
+    {
+      "expected": "reject",
+      "id": "release-schema-unmapped",
+      "mutation": "omit release_manifest from canonical_leaf_paths",
+      "reason": "all current schema leaves need typed lineage"
+    },
+    {
+      "expected": "reject",
+      "id": "release-identity-mismatch",
+      "mutation": "compose old permanent product with new release-manifest product",
+      "reason": "cross-schema identity must be equal"
+    },
+    {
+      "expected": "reject",
+      "id": "schema-root-hash-pattern-only",
+      "mutation": "replace canonical_root_manifest_sha256 with zeros",
+      "reason": "verifier must compare measured root digest"
+    },
+    {
+      "expected": "reject",
+      "id": "s7b-ambiguous-producer",
+      "mutation": "use one slash-joined producer for external-provider-result and verify-B fields",
+      "reason": "each field requires one concrete producer"
+    },
+    {
+      "expected": "reject",
+      "id": "fixture-output-subset",
+      "mutation": "execute actionlint fixture as typed implementation",
+      "reason": "declared 146-leaf transport has missing job/workflow outputs"
+    }
+  ],
+  "schema": "velnor.v9-independent-hostile-fixtures.v1",
+  "source": "independent v9 audit derived from frozen plan/DAG/schema; not owner result assertions"
+}

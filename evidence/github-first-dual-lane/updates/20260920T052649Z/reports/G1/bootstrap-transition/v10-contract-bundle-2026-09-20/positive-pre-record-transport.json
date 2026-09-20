@@ -1,0 +1,17 @@
+{
+  "artifact_digest": "fd685f7ee0a27d0a1e45f52afae4bc8565754a49cbd335a231e00d249867d817",
+  "artifact_id": 1003,
+  "artifact_name": "fixture-0003",
+  "fixture_metadata": {
+    "kind": "deterministic_contract_fixture",
+    "live_binding": false,
+    "live_proof_status": "not_executed"
+  },
+  "raw_zip_sha256": "cbceed9cc9853ff9a0d06aa9f9df5d72efc451a69289150f3e30407526be296a",
+  "raw_zip_size": 1006,
+  "upload_check_run_id": 1007,
+  "upload_job_id": 1008,
+  "upload_run_attempt": 1009,
+  "upload_run_id": 1010,
+  "upload_step_id": "fixture-0010"
+}
