@@ -1,0 +1,23 @@
+{
+  "source_sha": "43d1841550318f684fe1df757255e78b26e38c53",
+  "base_sha": "e28a88eceb03351da6951447a71be18780dc8bef",
+  "tree": "72f3275e43ba34d89790d4675b44a3073045665f",
+  "pull_request": "https://github.com/tailrocks/parallax/pull/118",
+  "runtime": "048a7bdaed8240cf652127c94434e60528633dec",
+  "policy_run": 35521049485,
+  "policy_conclusion": "success",
+  "pr_run": 35521049612,
+  "cli_job": 106105112507,
+  "cli_conclusion": "failure",
+  "failure": "MBX 1.11.1 cache import: Quota exceeded (os error 122), before checks",
+  "independent_review": "PASS local candidate; exact-head full CI not successful",
+  "performance_claim": null,
+  "iteration_credit": 0,
+  "failure_log_sha256": "090ce0cc8eb4f311d46adcf259fe16fb0f58009113baea9c28cdaf1d36cc29f6",
+  "restored_mbx_archive_bytes": 1347231023,
+  "import_started_at": "2026-09-20T15:55:50.7572108Z",
+  "import_failed_at": "2026-09-20T15:55:56.5101934Z",
+  "pr_conclusion": "failure",
+  "server_conclusion": "success",
+  "required_gate_conclusion": "failure"
+}

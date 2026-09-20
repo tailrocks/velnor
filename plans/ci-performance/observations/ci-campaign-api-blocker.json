@@ -1,0 +1,18 @@
+{
+  "observed_utc": "2026-09-20T17:26:50Z",
+  "operation": "gh run view 35525629941 --repo tailrocks/parallax --json status,conclusion,jobs",
+  "failure": "HTTP403 API rate limit exceeded for user ID139017",
+  "request_id": "23D4:3C6A5D:2ACE858:2CEB949:6AB01759",
+  "scope": "GitHub API polling, run dispatch, PR API operations using exhausted user quota; already-triggered CI still executes",
+  "alternatives": [
+    "continue local implementation/testing and cached evidence review",
+    "read public primary documentation without API polling",
+    "resume API verification after recorded reset"
+  ],
+  "completion_claim": false,
+  "bounded_retry": "gh api -i repos/tailrocks/parallax/actions/runs/35525629941",
+  "retry_observed_utc": "2026-09-20T17:27:40Z",
+  "retry_result": "HTTP403; core limit5000,remaining0,used5000",
+  "authoritative_response_reset_utc": "2026-09-20T17:39:16+00:00",
+  "conflicting_rate_limit_endpoint": "Reported5000remaining/0used with laterreset; per-resource actual403response retained as authoritative for retry scheduling"
+}
