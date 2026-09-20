@@ -98,9 +98,28 @@ fn generate(root: &Path) -> Generated {
         root.file_name().and_then(|name| name.to_str()).unwrap()
     ));
     let _ = fs::remove_dir_all(&output);
+    // The bridge sees --providers before legacy parsing. Keep that routing
+    // hint equal to the fixture's declared universe while opting this
+    // temporary repository into explicit local-baseline mode.
+    let provider_override = fs::read_to_string(root.join(".github-gen/velnor-workflow.toml"))
+        .unwrap()
+        .lines()
+        .find(|line| line.trim_start().starts_with("providers = ["))
+        .map(|line| {
+            line.split('"')
+                .enumerate()
+                .filter(|(index, _)| index % 2 == 1)
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .expect("provider fixture declares a provider universe");
     let outcome = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
         .args([
             "--plain",
+            "--local-no-baseline",
+            "--providers",
+            provider_override.as_str(),
             "--default-branch",
             "main",
             "--output",
