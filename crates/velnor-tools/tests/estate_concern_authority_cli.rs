@@ -25,14 +25,15 @@ fn temporary_fixture_dir() -> PathBuf {
 }
 
 fn run_audit(root: &Path, fixture: &Value) -> Output {
+    let text = serde_json::to_string_pretty(fixture).expect("serialize caller fixture");
+    run_audit_text(root, &text)
+}
+
+fn run_audit_text(root: &Path, text: &str) -> Output {
     let directory = temporary_fixture_dir();
     fs::create_dir_all(&directory).expect("create fixture directory");
     let path = directory.join("caller-estate.json");
-    fs::write(
-        &path,
-        serde_json::to_vec_pretty(fixture).expect("serialize caller fixture"),
-    )
-    .expect("write caller fixture");
+    fs::write(&path, text).expect("write caller fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_velnor-tools"))
         .args([
             "audit-ci",
@@ -140,6 +141,62 @@ fn caller_duplicate_and_unknown_metadata_are_rejected_by_real_command() {
         "unknown caller metadata unexpectedly passed"
     );
     assert!(error.contains("unknown field"), "{error}");
+}
+
+#[test]
+fn caller_top_level_and_nested_duplicate_keys_are_rejected_by_real_command() {
+    let root = repository_root();
+    let canonical =
+        fs::read_to_string(root.join("config/estate-repositories.json")).expect("read manifest");
+
+    let top_level = canonical.replacen(
+        "  \"version\": 2,",
+        "  \"version\": 2,\n  \"version\": 2,",
+        1,
+    );
+    assert_ne!(
+        top_level, canonical,
+        "top-level fixture replacement missing"
+    );
+    let output = run_audit_text(&root, &top_level);
+    let error = stderr(&output);
+    assert!(
+        !output.status.success(),
+        "top-level duplicate unexpectedly passed"
+    );
+    assert!(
+        error.contains("duplicate JSON object key \"version\""),
+        "{error}"
+    );
+
+    let nested = canonical.replacen(
+        "    \"role\":\"auxiliary-concern-projection\",",
+        "    \"role\":\"auxiliary-concern-projection\",\n    \"role\":\"auxiliary-concern-projection\",",
+        1,
+    );
+    assert_ne!(nested, canonical, "nested fixture replacement missing");
+    let output = run_audit_text(&root, &nested);
+    let error = stderr(&output);
+    assert!(
+        !output.status.success(),
+        "nested duplicate unexpectedly passed"
+    );
+    assert!(
+        error.contains("duplicate JSON object key \"role\""),
+        "{error}"
+    );
+
+    let output = run_audit_text(&root, &canonical);
+    let error = stderr(&output);
+    assert!(
+        !output.status.success(),
+        "offline canonical audit unexpectedly passed"
+    );
+    assert!(
+        error.contains("cannot skip delivered-default freshness checks"),
+        "valid distinct-key manifest was not accepted by strict parser: {error}"
+    );
+    assert!(!error.contains("duplicate JSON object key"), "{error}");
 }
 
 #[test]
