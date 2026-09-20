@@ -47,6 +47,14 @@ pub mod live_collector;
 #[path = "g0_live_mapping.rs"]
 pub mod g0_mapping;
 
+/// Producer for the non-GitHub binding inputs required by the strict G0
+/// adapter.  It reads the model configuration through one observed local
+/// file descriptor and derives the workload artifact from the exact live
+/// workflow/source/scanner ledger; it never accepts a caller-created typed
+/// claim as authoritative evidence.
+#[path = "g0_binding_producer.rs"]
+pub mod binding_producer;
+
 /// Explicit CLI boundary for a read-only live capture.  It writes only to a
 /// caller-selected local evidence directory and never dispatches or mutates
 /// GitHub.
