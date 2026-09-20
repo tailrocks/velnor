@@ -138,6 +138,9 @@ pub(crate) const CANDIDATE_RESULT_ARTIFACT_NAME: &str = "velnor-workflow-candida
 /// before a byte is downloaded or extracted.  These are transport limits, not
 /// claims about the hosted runner's free disk.
 pub(crate) const CANDIDATE_TRANSPORT_MAX_COMPRESSED_BYTES: u64 = 268_435_456;
+pub(crate) const CANDIDATE_TRANSPORT_MAX_API_BYTES: u64 = 67_108_864;
+pub(crate) const CANDIDATE_TRANSPORT_MAX_API_PAGES: u64 = 64;
+pub(crate) const CANDIDATE_TRANSPORT_MAX_GIT_OBJECT_BYTES: u64 = 1_073_741_824;
 pub(crate) const CANDIDATE_TRANSPORT_MAX_MEMBERS: u64 = 4_096;
 pub(crate) const CANDIDATE_TRANSPORT_MAX_UNCOMPRESSED_BYTES: u64 = 536_870_912;
 pub(crate) const CANDIDATE_RESULT_MAX_UNCOMPRESSED_BYTES: u64 = 67_108_864;
@@ -292,11 +295,13 @@ pub(crate) fn candidate_bounded_git_archive_script() -> String {
             rm -f -- "$partial" "$destination"
             if ! GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$revision" -- |
             python3 -c '
+          import os
           import sys
           destination = sys.argv[1]
           limit = int(sys.argv[2])
           total = 0
-          with open(destination, "wb") as output:
+          fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(fd, "wb") as output:
               while True:
                   chunk = sys.stdin.buffer.read(1024 * 1024)
                   if not chunk:
@@ -334,11 +339,13 @@ pub(crate) fn candidate_bounded_curl_download_script() -> String {
               --header "X-GitHub-Api-Version: 2022-11-28" \
               "$url" --output - |
             python3 -c '
+          import os
           import sys
           destination = sys.argv[1]
           limit = int(sys.argv[2])
           total = 0
-          with open(destination, "wb") as output:
+          fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(fd, "wb") as output:
               while True:
                   chunk = sys.stdin.buffer.read(1024 * 1024)
                   if not chunk:
@@ -357,6 +364,58 @@ pub(crate) fn candidate_bounded_curl_download_script() -> String {
     .replace(
         "__MAX_COMPRESSED__",
         &CANDIDATE_TRANSPORT_MAX_COMPRESSED_BYTES.to_string(),
+    )
+}
+
+/// Bound JSON metadata responses before they are parsed or retained. GitHub's
+/// API can paginate an otherwise successful response, so this helper is used
+/// for both one-page objects and `--paginate --slurp` collections. `O_EXCL`
+/// prevents a pre-created symlink from turning the bounded writer into an
+/// arbitrary path write.
+pub(crate) fn candidate_bounded_gh_api_script() -> String {
+    r#"          bounded_gh_api() {
+            local destination="$1"
+            shift
+            local partial="${destination}.partial"
+            rm -f -- "$partial" "$destination"
+            if ! gh api "$@" |
+            python3 -c '
+          import os
+          import sys
+          destination = sys.argv[1]
+          limit = int(sys.argv[2])
+          total = 0
+          fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(fd, "wb") as output:
+              while True:
+                  chunk = sys.stdin.buffer.read(1024 * 1024)
+                  if not chunk:
+                      break
+                  total += len(chunk)
+                  if total > limit:
+                      raise SystemExit("GitHub API response exceeds bounded transport size")
+                  output.write(chunk)
+          ' "$partial" "__MAX_API_BYTES__"; then
+              rm -f -- "$partial" "$destination"
+              return 1
+            fi
+            mv -- "$partial" "$destination"
+          }
+          bounded_gh_api_value() {
+            local destination
+            destination="$(mktemp "$RUNNER_TEMP/gh-api.XXXXXX")"
+            rm -f -- "$destination"
+            if ! bounded_gh_api "$destination" "$@"; then
+              rm -f -- "$destination" "$destination.partial"
+              return 1
+            fi
+            cat -- "$destination"
+            rm -f -- "$destination"
+          }
+"#
+    .replace(
+        "__MAX_API_BYTES__",
+        &CANDIDATE_TRANSPORT_MAX_API_BYTES.to_string(),
     )
 }
 
@@ -5093,9 +5152,9 @@ __BOUNDED_GIT_ARCHIVE__          bounded_git_archive "$BASE_SHA" "$base_workflow
               sandbox; host-side run steps must therefore execute from the
               base-owned checkout, and repository-local actions are rejected
               because their implementation would resolve from the PR
-              workspace.  This is a workspace/role contract, not a shell
-              keyword scan: a command is either bound to candidate-control or
-              it is not admitted.
+              workspace.  A working-directory field alone is not a trust
+              boundary: host commands that invoke a shell/interpreter on
+              candidate-source or traverse to it are rejected before admission.
               """
               start = next(
                   (index for index, line in enumerate(lines) if line == "  candidate_producer:"),
@@ -5157,6 +5216,19 @@ __BOUNDED_GIT_ARCHIVE__          bounded_git_archive "$BASE_SHA" "$base_workflow
                       raise SystemExit(
                           f"{archive_name}: candidate_producer run step is not bound to candidate-control"
                       )
+                  for line in block:
+                      command = line.strip()
+                      if "../candidate-source" in command:
+                          raise SystemExit(
+                              f"{archive_name}: producer host command traverses into candidate-source"
+                          )
+                      if re.search(
+                          r"\b(?:bash|sh|dash|zsh|python(?:3)?|perl|ruby|source|\.)\s+[^#]*candidate-source",
+                          command,
+                      ):
+                          raise SystemExit(
+                              f"{archive_name}: producer host command executes candidate-source"
+                          )
 
           def normalized_contract_material(nodes, files):
               material = []
@@ -5406,7 +5478,7 @@ macro_rules! policy_candidate_step_template {
           if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
           if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
           case "$PR_NUMBER" in ''|*[!0-9]*) exit 1 ;; esac
-{bounded_curl_download}          verify_action_archive() {{
+{bounded_curl_download}{bounded_gh_api}          verify_action_archive() {{
             local repository="$1"
             local revision="$2"
             local expected="$3"
@@ -5421,18 +5493,18 @@ macro_rules! policy_candidate_step_template {
           verify_action_archive actions/checkout "{checkout_action_revision}" "{checkout_action_archive_sha256}" checkout
           verify_action_archive actions/upload-artifact "{upload_action_revision}" "{upload_action_archive_sha256}" upload
           verify_action_archive actions/download-artifact "{download_action_revision}" "{download_action_archive_sha256}" download
-          repository_api="$(gh api "repos/$GITHUB_REPOSITORY")"
+          repository_api="$(bounded_gh_api_value "repos/$GITHUB_REPOSITORY")"
           jq -e --arg repo "$GITHUB_REPOSITORY" --argjson id "$TARGET_REPOSITORY_ID" '.id == $id and .full_name == $repo' <<<"$repository_api" >/dev/null
-          head_commit_api="$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA")"
+          head_commit_api="$(bounded_gh_api_value "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA")"
           jq -e --arg head "$HEAD_SHA" '.sha == $head and (.commit.tree.sha | strings | test("^[0-9a-f]{{40}}$"))' <<<"$head_commit_api" >/dev/null
           head_tree_sha="$(jq -er '.commit.tree.sha' <<<"$head_commit_api")"
-          base_commit_api="$(gh api "repos/$GITHUB_REPOSITORY/commits/$BASE_SHA")"
+          base_commit_api="$(bounded_gh_api_value "repos/$GITHUB_REPOSITORY/commits/$BASE_SHA")"
           jq -e --arg base "$BASE_SHA" '.sha == $base and (.commit.tree.sha | strings | test("^[0-9a-f]{{40}}$"))' <<<"$base_commit_api" >/dev/null
           base_tree_sha="$(jq -er '.commit.tree.sha' <<<"$base_commit_api")"
           tree_api_digest() {{
             local tree_sha="$1"
             local tree_path="$2"
-            gh api "repos/$GITHUB_REPOSITORY/git/trees/$tree_sha?recursive=1" > "$tree_path"
+            bounded_gh_api "$tree_path" "repos/$GITHUB_REPOSITORY/git/trees/$tree_sha?recursive=1"
             jq -e --arg tree "$tree_sha" '
               .sha == $tree and .truncated == false and (.tree | type == "array") and
               all(.tree[]; (.path | strings) and (.mode | strings) and (.type | strings) and (.sha | strings))
@@ -5449,9 +5521,13 @@ macro_rules! policy_candidate_step_template {
           mkdir -m 0700 "$source_home"
           export GIT_NO_REPLACE_OBJECTS=1
           GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -c init.templateDir=/dev/null init --bare "$source_repo" >/dev/null
-          for source_sha in "$HEAD_SHA" "$BASE_SHA"; do
-            GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git --no-replace-objects -C "$source_repo" -c core.hooksPath=/dev/null fetch --no-tags --depth=1 "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$source_sha"
-          done
+          git_object_limit_blocks=$(( {max_git_object_bytes} / 512 ))
+          test "$git_object_limit_blocks" -gt 0
+          (
+            ulimit -f "$git_object_limit_blocks"
+            GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git --no-replace-objects -C "$source_repo" -c core.hooksPath=/dev/null fetch --no-tags --depth=1 "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA" "$BASE_SHA"
+          )
+          test "$(du -sx --bytes --apparent-size "$source_repo" | awk '{{print $1}}')" -le {max_git_object_bytes}
           test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" show -s --format=%T "$HEAD_SHA")" = "$head_tree_sha"
           test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" show -s --format=%T "$BASE_SHA")" = "$base_tree_sha"
 
@@ -5506,14 +5582,15 @@ macro_rules! policy_candidate_step_template {
           [[ "$candidate_workflow_contract_sha256" =~ ^[0-9a-f]{{64}}$ && "$candidate_workflow_binding_sha256" =~ ^[0-9a-f]{{64}}$ ]]
           contract_sha256="$(sha256sum "$contract" | awk '{{print $1}}')"
 
-          workflow="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml")"
+          workflow="$(bounded_gh_api_value "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml")"
           workflow_id="$(jq -er 'select(.path == ".github/workflows/ci-pr.yml") | .id | numbers' <<<"$workflow")"
           test "$workflow_id" -gt 0
-          runs="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=100" \
-            | jq -c --arg path ".github/workflows/ci-pr.yml" --argjson workflow_id "$workflow_id" \
+          runs_api="$RUNNER_TEMP/candidate-runs-api.json"
+          bounded_gh_api "$runs_api" --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=100"
+          runs="$(jq -c --arg path ".github/workflows/ci-pr.yml" --argjson workflow_id "$workflow_id" \
                 --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --argjson pr "$PR_NUMBER" --arg repo "$GITHUB_REPOSITORY" \
                 --argjson target_id "$TARGET_REPOSITORY_ID" --argjson head_id "$HEAD_REPOSITORY_ID" \
-                '[.[][] | select(.path == $path and (.workflow_id | tonumber) == $workflow_id and .event == "pull_request" and .head_sha == $head and (.pull_requests | any((.number | tonumber) == $pr and .base.sha == $base)) and .status == "completed" and .conclusion == "success" and (.repository.id | tonumber) == $target_id and (.head_repository.id | tonumber) == $head_id and .repository.full_name == $repo and .head_repository.full_name == $repo and (.run_attempt | tonumber) >= 1)]')"
+                'if length > {max_api_pages} then error("workflow runs exceeded bounded page count") else [.[][] | select(.path == $path and (.workflow_id | tonumber) == $workflow_id and .event == "pull_request" and .head_sha == $head and (.pull_requests | any((.number | tonumber) == $pr and .base.sha == $base)) and .status == "completed" and .conclusion == "success" and (.repository.id | tonumber) == $target_id and (.head_repository.id | tonumber) == $head_id and .repository.full_name == $repo and .head_repository.full_name == $repo and (.run_attempt | tonumber) >= 1)] end' "$runs_api")"
           test "$(jq -r 'length' <<<"$runs")" = 1
           run="$(jq -c '.[0]' <<<"$runs")"
           run_id="$(jq -er '.id | numbers' <<<"$run")"
@@ -5524,9 +5601,10 @@ macro_rules! policy_candidate_step_template {
           run_created_epoch="$(jq -er '.created_at | fromdateiso8601' <<<"$run")"
           jq -e --argjson run_created "$run_created_epoch" '.created_at | fromdateiso8601 == $run_created' <<<"$run" >/dev/null
 
-          jobs="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
-            | jq -c --argjson run_id "$run_id" --argjson run_attempt "$run_attempt" --arg head "$HEAD_SHA" \
-                '[.[][] | select(.name == "candidate_producer" and (.run_id | tonumber) == $run_id and (.run_attempt | tonumber) == $run_attempt and .head_sha == $head and .status == "completed" and .conclusion == "success")]')"
+          jobs_api="$RUNNER_TEMP/candidate-jobs-api.json"
+          bounded_gh_api "$jobs_api" --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100"
+          jobs="$(jq -c --argjson run_id "$run_id" --argjson run_attempt "$run_attempt" --arg head "$HEAD_SHA" \
+                'if length > {max_api_pages} then error("workflow jobs exceeded bounded page count") else [.[][] | select(.name == "candidate_producer" and (.run_id | tonumber) == $run_id and (.run_attempt | tonumber) == $run_attempt and .head_sha == $head and .status == "completed" and .conclusion == "success")] end' "$jobs_api")"
           test "$(jq -r 'length' <<<"$jobs")" = 1
           job="$(jq -c '.[0]' <<<"$jobs")"
           job_id="$(jq -er '.id | numbers' <<<"$job")"
@@ -5539,10 +5617,11 @@ macro_rules! policy_candidate_step_template {
           upload_steps="$(jq -c '[.steps[]? | select(.name == "Upload candidate generator product" and .status == "completed" and .conclusion == "success")]' <<<"$job")"
           test "$(jq -r 'length' <<<"$upload_steps")" = 1
 
-          artifacts="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
-            | jq -c --arg name "{artifact}" --argjson run_id "$run_id" --argjson run_created "$run_created_epoch" \
+          artifacts_api="$RUNNER_TEMP/candidate-artifacts-api.json"
+          bounded_gh_api "$artifacts_api" --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100"
+          artifacts="$(jq -c --arg name "{artifact}" --argjson run_id "$run_id" --argjson run_created "$run_created_epoch" \
                 --argjson job_started "$job_started_epoch" --argjson job_completed "$job_completed_epoch" \
-                '[.[][] | select(.name == $name and .expired == false and (.workflow_run.id | tonumber) == $run_id and (.size_in_bytes | numbers) <= {max_compressed} and (.created_at | strings | fromdateiso8601) >= $run_created and (.created_at | strings | fromdateiso8601) >= $job_started and (.updated_at | strings | fromdateiso8601) <= $job_completed and (.updated_at | strings | fromdateiso8601) >= (.created_at | strings | fromdateiso8601))]')"
+                'if length > {max_api_pages} then error("workflow artifacts exceeded bounded page count") else [.[][] | select(.name == $name and .expired == false and (.workflow_run.id | tonumber) == $run_id and (.size_in_bytes | numbers) <= {max_compressed} and (.created_at | strings | fromdateiso8601) >= $run_created and (.created_at | strings | fromdateiso8601) >= $job_started and (.updated_at | strings | fromdateiso8601) <= $job_completed and (.updated_at | strings | fromdateiso8601) >= (.created_at | strings | fromdateiso8601))] end' "$artifacts_api")"
           test "$(jq -r 'length' <<<"$artifacts")" = 1
           artifact="$(jq -c '.[0]' <<<"$artifacts")"
           artifact_id="$(jq -er '.id | numbers' <<<"$artifact")"
@@ -5694,6 +5773,8 @@ macro_rules! policy_candidate_step_template {
           retention-days: 1
 "#,
         artifact = crate::s2::CANDIDATE_ARTIFACT_NAME,
+        max_git_object_bytes = crate::s2::CANDIDATE_TRANSPORT_MAX_GIT_OBJECT_BYTES,
+        max_api_pages = crate::s2::CANDIDATE_TRANSPORT_MAX_API_PAGES,
         max_compressed = crate::s2::CANDIDATE_TRANSPORT_MAX_COMPRESSED_BYTES,
         max_members = crate::s2::CANDIDATE_TRANSPORT_MAX_MEMBERS,
         max_uncompressed = crate::s2::CANDIDATE_TRANSPORT_MAX_UNCOMPRESSED_BYTES,
@@ -5715,6 +5796,7 @@ macro_rules! policy_candidate_step_template {
         object_format = crate::s2::CANDIDATE_TRANSPORT_OBJECT_FORMAT,
         bounded_git_archive = crate::s2::candidate_bounded_git_archive_script(),
         bounded_curl_download = crate::s2::candidate_bounded_curl_download_script(),
+        bounded_gh_api = crate::s2::candidate_bounded_gh_api_script(),
         upload = ActionPin::UploadArtifact.reference(),
         )
     };
@@ -6164,9 +6246,9 @@ macro_rules! policy_candidate_result_verification_template {
           case "$PR_NUMBER" in ''|*[!0-9]*) exit 1 ;; esac
           test "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY"
           test "$HEAD_REPOSITORY_ID" = "$TARGET_REPOSITORY_ID"
-          policy_run_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
+          policy_run_api="$(bounded_gh_api_value "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
           policy_run_created_epoch="$(jq -er '.created_at | fromdateiso8601' <<<"$policy_run_api")"
-{bounded_curl_download}          verify_action_archive() {{
+{bounded_curl_download}{bounded_gh_api}          verify_action_archive() {{
             local repository="$1"
             local revision="$2"
             local expected="$3"
@@ -6181,7 +6263,7 @@ macro_rules! policy_candidate_result_verification_template {
           verify_action_archive actions/checkout "{checkout_action_revision}" "{checkout_action_archive_sha256}" checkout
           verify_action_archive actions/upload-artifact "{upload_action_revision}" "{upload_action_archive_sha256}" upload
           verify_action_archive actions/download-artifact "{download_action_revision}" "{download_action_archive_sha256}" download
-          result_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RESULT_ID")"
+          result_api="$(bounded_gh_api_value "repos/$GITHUB_REPOSITORY/actions/artifacts/$RESULT_ID")"
           jq -e --argjson id "$RESULT_ID" --arg digest "$RESULT_DIGEST" --arg name "{result}" --argjson run_id "$GITHUB_RUN_ID" --argjson run_created "$policy_run_created_epoch" '
             .id == $id and .name == $name and .expired == false and (.size_in_bytes | numbers | . <= {max_compressed}) and (.expires_at | strings | fromdateiso8601 > now) and .digest == $digest and
             ((.workflow_run.id | tonumber) == $run_id) and (.created_at | strings | fromdateiso8601) >= $run_created and
@@ -6282,7 +6364,7 @@ macro_rules! policy_candidate_result_verification_template {
           ' "$result_json" >/dev/null
           handoff_id="$(jq -er '.handoff_id | tonumber' "$result_json")"
           handoff_digest="$(jq -er '.handoff_digest | strings | select(test("^sha256:[0-9a-f]{{64}}$"))' "$result_json")"
-          handoff_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$handoff_id")"
+          handoff_api="$(bounded_gh_api_value "repos/$GITHUB_REPOSITORY/actions/artifacts/$handoff_id")"
           jq -e --argjson id "$handoff_id" --arg digest "$handoff_digest" --arg name "{handoff}" --argjson run_id "$GITHUB_RUN_ID" --argjson run_created "$policy_run_created_epoch" '
             .id == $id and .name == $name and .expired == false and (.size_in_bytes | numbers | . <= {max_compressed}) and (.expires_at | strings | fromdateiso8601 > now) and .digest == $digest and
             ((.workflow_run.id | tonumber) == $run_id) and (.created_at | strings | fromdateiso8601) >= $run_created and
@@ -6361,7 +6443,7 @@ macro_rules! policy_candidate_result_verification_template {
           test "$(sha256sum "$handoff_dir/source.tar" | awk '{{print $1}}')" = "$(jq -er .source_archive_sha256 "$handoff_json")"
           producer_id="$(jq -er '.artifact_id | tonumber' "$handoff_json")"
           producer_digest="$(jq -er '.artifact_service_digest | strings | select(test("^sha256:[0-9a-f]{{64}}$"))' "$handoff_json")"
-          producer_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$producer_id")"
+          producer_api="$(bounded_gh_api_value "repos/$GITHUB_REPOSITORY/actions/artifacts/$producer_id")"
           jq -e --argjson id "$producer_id" --arg digest "$producer_digest" --arg name "{artifact}" --argjson run_id "$(jq -er .run_id "$handoff_json")" \
             --arg created_at "$(jq -er .artifact_created_at "$handoff_json")" --arg updated_at "$(jq -er .artifact_updated_at "$handoff_json")" '
             .id == $id and .name == $name and .expired == false and (.expires_at | strings | fromdateiso8601 > now) and .digest == $digest and
@@ -6415,18 +6497,18 @@ macro_rules! policy_candidate_result_verification_template {
           ' "$producer_manifest" >/dev/null
           test "$(sha256sum "$producer_binary" | awk '{{print $1}}')" = "$(jq -er .binary_sha256 "$producer_manifest")"
           test "$(sha256sum "$producer_manifest" | awk '{{print $1}}')" = "$(jq -er .manifest_sha256 "$handoff_json")"
-          repository_api="$(gh api "repos/$GITHUB_REPOSITORY")"
+          repository_api="$(bounded_gh_api_value "repos/$GITHUB_REPOSITORY")"
           jq -e --arg repo "$GITHUB_REPOSITORY" --argjson id "$TARGET_REPOSITORY_ID" '.id == $id and .full_name == $repo' <<<"$repository_api" >/dev/null
-          head_commit_api="$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA")"
+          head_commit_api="$(bounded_gh_api_value "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA")"
           jq -e --arg head "$HEAD_SHA" '.sha == $head and (.commit.tree.sha | strings | test("^[0-9a-f]{{40}}$"))' <<<"$head_commit_api" >/dev/null
           head_tree_sha="$(jq -er '.commit.tree.sha' <<<"$head_commit_api")"
-          base_commit_api="$(gh api "repos/$GITHUB_REPOSITORY/commits/$BASE_SHA")"
+          base_commit_api="$(bounded_gh_api_value "repos/$GITHUB_REPOSITORY/commits/$BASE_SHA")"
           jq -e --arg base "$BASE_SHA" '.sha == $base and (.commit.tree.sha | strings | test("^[0-9a-f]{{40}}$"))' <<<"$base_commit_api" >/dev/null
           base_tree_sha="$(jq -er '.commit.tree.sha' <<<"$base_commit_api")"
           tree_api_digest() {{
             local tree_sha="$1"
             local tree_path="$2"
-            gh api "repos/$GITHUB_REPOSITORY/git/trees/$tree_sha?recursive=1" > "$tree_path"
+            bounded_gh_api "$tree_path" "repos/$GITHUB_REPOSITORY/git/trees/$tree_sha?recursive=1"
             jq -e --arg tree "$tree_sha" '
               .sha == $tree and .truncated == false and (.tree | type == "array") and
               all(.tree[]; (.path | strings) and (.mode | strings) and (.type | strings) and (.sha | strings))
@@ -6444,9 +6526,13 @@ macro_rules! policy_candidate_result_verification_template {
           mkdir -m 0700 "$verifier_source_home"
           export GIT_NO_REPLACE_OBJECTS=1
           GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -c init.templateDir=/dev/null init --bare "$verifier_source_repo" >/dev/null
-          for source_sha in "$HEAD_SHA" "$BASE_SHA"; do
-            GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git --no-replace-objects -C "$verifier_source_repo" -c core.hooksPath=/dev/null fetch --no-tags --depth=1 "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$source_sha"
-          done
+          git_object_limit_blocks=$(( {max_git_object_bytes} / 512 ))
+          test "$git_object_limit_blocks" -gt 0
+          (
+            ulimit -f "$git_object_limit_blocks"
+            GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git --no-replace-objects -C "$verifier_source_repo" -c core.hooksPath=/dev/null fetch --no-tags --depth=1 "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA" "$BASE_SHA"
+          )
+          test "$(du -sx --bytes --apparent-size "$verifier_source_repo" | awk '{{print $1}}')" -le {max_git_object_bytes}
           test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" show -s --format=%T "$HEAD_SHA")" = "$head_tree_sha"
           test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" show -s --format=%T "$BASE_SHA")" = "$base_tree_sha"
           source_repo="$verifier_source_repo"
@@ -6468,12 +6554,12 @@ macro_rules! policy_candidate_result_verification_template {
           test "$verifier_source_archive_size" -le {max_uncompressed}
           test "$(sha256sum "$verifier_source_archive" | awk '{{print $1}}')" = "$(jq -er .source_archive_sha256 "$handoff_json")"
           cmp -s "$verifier_source_archive" "$handoff_dir/source.tar"
-          workflow_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml")"
+          workflow_api="$(bounded_gh_api_value "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml")"
           jq -e --argjson id "$(jq -er .workflow_id "$handoff_json")" '.path == ".github/workflows/ci-pr.yml" and .id == $id' <<<"$workflow_api" >/dev/null
           run_id="$(jq -er .run_id "$handoff_json")"
           workflow_id="$(jq -er .workflow_id "$handoff_json")"
           run_attempt="$(jq -er .run_attempt "$handoff_json")"
-          run_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+          run_api="$(bounded_gh_api_value "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
           producer_run_created_epoch="$(jq -er '.created_at | fromdateiso8601' <<<"$run_api")"
           test "$(jq -er .created_at <<<"$run_api")" = "$(jq -er .producer_run_created_at "$handoff_json")"
           artifact_created_epoch="$(jq -er '.created_at | fromdateiso8601' <<<"$producer_api")"
@@ -6489,7 +6575,7 @@ macro_rules! policy_candidate_result_verification_template {
             .run_attempt == $run_attempt
           ' <<<"$run_api" >/dev/null
           job_id="$(jq -er .job_id "$handoff_json")"
-          job_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id")"
+          job_api="$(bounded_gh_api_value "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id")"
           jq -e --argjson id "$job_id" --argjson run_id "$run_id" --argjson run_attempt "$run_attempt" --arg head "$HEAD_SHA" \
             --arg started_at "$(jq -er .job_started_at "$handoff_json")" --arg completed_at "$(jq -er .job_completed_at "$handoff_json")" '
             .id == $id and .run_id == $run_id and (.run_attempt | tonumber) == $run_attempt and .name == "candidate_producer" and .head_sha == $head and
@@ -6528,12 +6614,14 @@ macro_rules! policy_candidate_result_verification_template {
         upload_step_id = crate::s2::CANDIDATE_UPLOAD_STEP_ID,
         artifact_binding_method = crate::s2::CANDIDATE_ARTIFACT_BINDING_METHOD,
         object_format = crate::s2::CANDIDATE_TRANSPORT_OBJECT_FORMAT,
+        max_git_object_bytes = crate::s2::CANDIDATE_TRANSPORT_MAX_GIT_OBJECT_BYTES,
         max_compressed = crate::s2::CANDIDATE_TRANSPORT_MAX_COMPRESSED_BYTES,
         max_members = crate::s2::CANDIDATE_TRANSPORT_MAX_MEMBERS,
         max_uncompressed = crate::s2::CANDIDATE_TRANSPORT_MAX_UNCOMPRESSED_BYTES,
         result_max_uncompressed = crate::s2::CANDIDATE_RESULT_MAX_UNCOMPRESSED_BYTES,
         bounded_git_archive = crate::s2::candidate_bounded_git_archive_script(),
         bounded_curl_download = crate::s2::candidate_bounded_curl_download_script(),
+        bounded_gh_api = crate::s2::candidate_bounded_gh_api_script(),
         upload_action_archive_sha256 = crate::s2::CANDIDATE_UPLOAD_ACTION_ARCHIVE_SHA256,
         upload_action_revision = crate::s2::CANDIDATE_UPLOAD_ACTION_REVISION,
         )
