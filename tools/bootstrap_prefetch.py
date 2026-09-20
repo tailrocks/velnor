@@ -107,7 +107,7 @@ class _GitSnapshot:
         path = self.root / relative
         # Validate worktree shape, but never consume its bytes.  The source
         # content below comes only from the content-addressed Git blob.
-        _lstat_regular(
+        worktree = _lstat_regular(
             path,
             field,
             limit,
@@ -117,9 +117,11 @@ class _GitSnapshot:
         expected = _git_bytes(self.root, ["cat-file", "blob", f"{self.commit}:{relative}"])
         if len(expected) > limit:
             _fail(f"{field} exceeds {limit} bytes")
-        # Read only the content-addressed blob.  A status check followed by a
-        # worktree path read leaves a same-user replacement race; the Git blob
-        # is the reviewed source and its object ID is checked by Git.
+        if worktree != expected:
+            _fail(f"{field} worktree bytes differ from Git {self.commit}:{relative}")
+        # A status check followed by a worktree path read can race, so the
+        # comparison is only a clean-shape check.  Emitted bytes are always
+        # the reviewed content-addressed Git blob above.
         return expected
 
 
