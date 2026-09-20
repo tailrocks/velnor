@@ -71,6 +71,8 @@ pub struct ApplicationComponent {
     pub name: String,
     #[serde(rename = "crate")]
     pub crate_name: String,
+    pub feature: Option<String>,
+    pub identity: String,
     pub version: String,
     pub binary: String,
     pub targets: Vec<String>,
@@ -363,6 +365,11 @@ impl ApplicationManifest {
         for component in &self.components {
             if !safe_slug(&component.name)
                 || !safe_slug(&component.crate_name)
+                || component
+                    .feature
+                    .as_deref()
+                    .is_some_and(|feature| feature != "release-build")
+                || !matches!(component.identity.as_str(), "version" | "revision")
                 || !safe_version(&component.version)
                 || matches!(component.version.as_str(), "development" | "unknown")
                 || !safe_basename(&component.binary)
@@ -527,9 +534,9 @@ impl ApplicationManifest {
     }
 
     /// Verify the complete source-owned component declaration, including
-    /// crate, binary, component version, and target coverage.  Feature and
-    /// identity mode remain source-contract concerns and are not duplicated
-    /// in the consumer-facing canonical manifest.
+    /// crate, feature, identity mode, binary, component version, and target
+    /// coverage.  These fields stay in the canonical rows so every consumer
+    /// binds to the same source-owned component contract.
     pub fn verify_typed_profile(
         &self,
         contract: &NativeProductContract,
@@ -560,6 +567,8 @@ impl ApplicationManifest {
                 return Err(ApplicationManifestError::Contract);
             };
             if actual.crate_name != expected.crate_name
+                || actual.feature != expected.feature
+                || actual.identity != expected.identity
                 || actual.binary != expected.binary
                 || actual.version != expected.version
                 || actual
@@ -703,6 +712,8 @@ struct ArchiveComponent {
     #[serde(rename = "crate")]
     crate_name: String,
     crate_version: String,
+    feature: Option<String>,
+    identity: String,
     release_version: String,
     source_commit: String,
     binary_sha256: String,
@@ -871,6 +882,8 @@ fn verify_archive_members(
                     component.name.clone(),
                     (
                         component.crate_name.clone(),
+                        component.feature.clone(),
+                        component.identity.clone(),
                         component.version.clone(),
                         binary_sha256,
                     ),
@@ -894,6 +907,8 @@ fn verify_archive_members(
                     component.name,
                     (
                         component.crate_name,
+                        component.feature,
+                        component.identity,
                         component.crate_version,
                         Some(component.binary_sha256),
                         component.release_version,
@@ -904,18 +919,22 @@ fn verify_archive_members(
             .collect::<BTreeMap<_, _>>();
         let expected_components = expected_components
             .into_iter()
-            .map(|(name, (crate_name, version, binary_sha256))| {
-                (
-                    name,
+            .map(
+                |(name, (crate_name, feature, identity, version, binary_sha256))| {
                     (
-                        crate_name,
-                        version,
-                        binary_sha256,
-                        manifest.version.clone(),
-                        manifest.source_commit.clone(),
-                    ),
-                )
-            })
+                        name,
+                        (
+                            crate_name,
+                            feature,
+                            identity,
+                            version,
+                            binary_sha256,
+                            manifest.version.clone(),
+                            manifest.source_commit.clone(),
+                        ),
+                    )
+                },
+            )
             .collect::<BTreeMap<_, _>>();
         if actual_components != expected_components {
             return Err(ApplicationManifestError::ArchiveUnsafe);
@@ -1170,6 +1189,8 @@ mod tests {
             components: vec![ApplicationComponent {
                 name: "runner".to_owned(),
                 crate_name: "runner".to_owned(),
+                feature: None,
+                identity: "version".to_owned(),
                 version: "0.1.0".to_owned(),
                 binary: "runner".to_owned(),
                 targets: vec!["x86_64-unknown-linux-gnu".to_owned()],
@@ -1218,6 +1239,12 @@ mod tests {
             value.verify_typed_profile(&mismatch),
             Err(ApplicationManifestError::Contract)
         );
+        mismatch = contract.clone();
+        mismatch.components[0].identity = "revision".to_owned();
+        assert_eq!(
+            value.verify_typed_profile(&mismatch),
+            Err(ApplicationManifestError::Contract)
+        );
     }
 
     #[test]
@@ -1231,7 +1258,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_component_rows_have_only_consumer_fields() {
+    fn canonical_component_rows_preserve_typed_fields() {
         let value = serde_json::to_value(&manifest().components[0]).unwrap();
         let fields = value
             .as_object()
@@ -1241,7 +1268,9 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(
             fields,
-            BTreeSet::from(["binary", "crate", "name", "targets", "version"])
+            BTreeSet::from([
+                "binary", "crate", "feature", "identity", "name", "targets", "version"
+            ])
         );
     }
 

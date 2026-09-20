@@ -2032,7 +2032,7 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
         output.replace_range(
             start..end,
             r#"            artifact_json="$(jq -s '.' "$artifact_file")"
-            archive_components="$(jq -S --arg target "$target" --arg release_version "$product_version" --arg source_commit "$source_commit" --argjson artifacts "$artifact_json" '[.components[] | select((.targets | index($target)) != null) | . as $component | ($artifacts[] | select(.target == $target and .kind == "binary" and .name == ($component.binary + "-" + $target))) as $artifact | {name:$component.name,crate:$component.crate,crate_version:$component.version,release_version:$release_version,source_commit:$source_commit,binary_sha256:$artifact.sha256}] | sort_by(.name)' product-component-contract.json)""#,
+            archive_components="$(jq -S --arg target "$target" --arg release_version "$product_version" --arg source_commit "$source_commit" --argjson artifacts "$artifact_json" '[.components[] | select((.targets | index($target)) != null) | . as $component | ($artifacts[] | select(.target == $target and .kind == "binary" and .name == ($component.binary + "-" + $target))) as $artifact | {name:$component.name,crate:$component.crate,crate_version:$component.version,feature:$component.feature,identity:$component.identity,release_version:$release_version,source_commit:$source_commit,binary_sha256:$artifact.sha256}] | sort_by(.name)' product-component-contract.json)""#,
         );
     }
     output = output.replace(
@@ -2065,6 +2065,7 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
             --manifest product-assets/product-manifest.json\n\
             --checksum product-assets/product-manifest.json.sha256\n\
             --artifacts product-payload\n\
+            --component-contract product-component-contract.json\n\
             --schema \"$product_schema\"\n\
             --product-id \"$product_id\"\n\
             --channel \"$product_channel\"\n\
@@ -2075,17 +2076,15 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
             --release-tag \"$release_tag\"\n\
             --release-id \"$PRODUCT_RELEASE_ID\"\n\
           )\n\
-          while IFS= read -r target; do verify_args+=(--target \"$target\"); done < <(jq -r '.targets[]' \"$contract\")\n\
-          while IFS= read -r component; do verify_args+=(--component \"$component\"); done < <(jq -r '.components[].name' \"$contract\")\n\
+          while IFS= read -r target; do verify_args+=(--target \"$target\"); done < <(jq -r '.targets[]' product-component-contract.json)\n\
+          while IFS= read -r component; do verify_args+=(--component \"$component\"); done < <(jq -r '.components[].name' product-component-contract.json)\n\
           {release_tool} release verify-product \"${{verify_args[@]}}\"\n",
         );
         let mut indented = String::new();
         for line in block.lines() {
             let _ = writeln!(indented, "          {}", line.trim_start());
         }
-        indented
-            .replace("\"$contract\")", "product-component-contract.json)")
-            .replace("\n          +", "\n          ")
+        indented.replace("\n          +", "\n          ")
     };
     output = output.replace(
         "          sha256sum product-assets/product-manifest.json > product-assets/product-manifest.json.sha256\n",
@@ -2126,14 +2125,6 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
             ($source[0].components | map({name,crate,binary,feature,identity,targets}) | sort_by(.name))
           ' "$contract" >/dev/null || { echo '::error::downloaded native product contract differs from source contract' >&2; exit 1; }
 "#,
-    );
-    output = output.replace(
-        "            --artifacts product-payload\n",
-        "            --artifacts product-payload\n            --component-contract product-component-contract.json\n",
-    );
-    output = output.replace(
-        "              --artifacts \"$product_payload\"\n",
-        "              --artifacts \"$product_payload\"\n              --component-contract product-component-contract.json\n",
     );
     if let Some(position) =
         output.find("          product_version=\"$(jq -er '.version' \"$contract\")\"")
@@ -2255,7 +2246,7 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
             .map_or(output.len(), |offset| start + offset);
         output.replace_range(
             start..end,
-            "          actual_components=\"$(jq -s 'sort_by(.name,.target) | group_by(.name) | map(if (map({crate,version,binary}) | unique | length) != 1 then error(\\\"component identity differs across targets\\\") else {name:.[0].name,crate:.[0].crate,version:.[0].version,binary:.[0].binary,targets:(map(.target) | sort)} end) | sort_by(.name)' product-component-rows.jsonl)\"\n          jq -e --argjson actual \"$actual_components\" '($actual | map({name,crate,binary,version,targets}) | sort_by(.name)) == (.components | map({name,crate,binary,version,targets}) | sort_by(.name))' product-component-contract.json >/dev/null || { echo '::error::grouped component identity differs from source contract' >&2; exit 1; }",
+            "          actual_components=\"$(jq -s 'sort_by(.name,.target) | group_by(.name) | map(if (map({crate,version,binary,feature,identity}) | unique | length) != 1 then error(\\\"component identity differs across targets\\\") else {name:.[0].name,crate:.[0].crate,feature:.[0].feature,identity:.[0].identity,version:.[0].version,binary:.[0].binary,targets:(map(.target) | sort)} end) | sort_by(.name)' product-component-rows.jsonl)\"\n          jq -e --argjson actual \"$actual_components\" '($actual | map({name,crate,binary,feature,identity,version,targets}) | sort_by(.name)) == (.components | map({name,crate,binary,feature,identity,version,targets}) | sort_by(.name))' product-component-contract.json >/dev/null || { echo '::error::grouped component identity differs from source contract' >&2; exit 1; }",
         );
     }
     output = output.replace(
@@ -6622,6 +6613,29 @@ mod tests {
         );
         assert!(publish.contains("provider release id"), "{publish}");
         assert!(publish.contains("release verify-product"), "{publish}");
+        let verify_start = publish
+            .find("verify_args=(")
+            .expect("native product verifier must construct typed args");
+        let verify_tail = &publish[verify_start..];
+        let verify_end = verify_tail
+            .find("release verify-product")
+            .expect("native product verifier command must consume typed args");
+        let verify_args = &verify_tail[..verify_end];
+        assert_eq!(
+            verify_args
+                .matches("--component-contract product-component-contract.json")
+                .count(),
+            1,
+            "the rendered verifier args must carry one source contract: {verify_args}"
+        );
+        assert!(
+            verify_args.contains(".targets[]' product-component-contract.json"),
+            "targets must come from the typed source contract: {verify_args}"
+        );
+        assert!(
+            verify_args.contains(".components[].name' product-component-contract.json"),
+            "components must come from the typed source contract: {verify_args}"
+        );
         assert!(
             publish.contains("Verify native product attestations before publication"),
             "{publish}"
