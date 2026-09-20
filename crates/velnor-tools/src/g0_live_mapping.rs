@@ -331,6 +331,9 @@ fn merge_raw_object_sets(
             bail!("local binding ledger repeats raw object {}", raw.raw_id);
         }
     }
+    if let Some(raw_id) = provider_ids.intersection(&local_ids).next() {
+        bail!("provider/local ledgers repeat raw object {raw_id}");
+    }
     for raw in provider_objects.iter().chain(local_objects) {
         // Validate the bytes and both canonical storage references before the
         // object enters the map.  The producer store has already verified the
@@ -394,6 +397,7 @@ pub fn map_g0_inventory_with_supplement(
         .map(|raw| (raw.raw_id.clone(), raw))
         .collect::<BTreeMap<_, _>>();
     let request_by_id = index_unique_requests(&live.requests)?;
+    validate_request_raw_bindings(&live.requests, &merged_raw_objects, &request_by_id)?;
     let requests = live
         .requests
         .iter()
@@ -619,6 +623,79 @@ fn map_request_state(state: AcquisitionState) -> Result<G0RequestState> {
         }
         AcquisitionState::Unknown => G0RequestState::Unknown,
     })
+}
+
+/// Validate the request/raw ledger as one relation before any typed inventory
+/// projection runs. Per-object consumers still apply their endpoint/kind
+/// contracts; this pass closes the common gap where a request response was
+/// missing, cross-bound, duplicated, or omitted from the merged raw ledger.
+fn validate_request_raw_bindings(
+    requests: &[RequestRecord],
+    raw_objects: &[RawObjectRef],
+    request_by_id: &BTreeMap<String, &RequestRecord>,
+) -> Result<()> {
+    let raw_by_id = raw_objects
+        .iter()
+        .map(|raw| (raw.raw_id.as_str(), raw))
+        .collect::<BTreeMap<_, _>>();
+    let mut referenced = BTreeMap::<&str, &str>::new();
+    for request in requests {
+        let mut refs = Vec::with_capacity(2);
+        if let Some(raw_id) = request.response_raw_ref.as_deref() {
+            refs.push(("response", raw_id));
+        } else {
+            bail!(
+                "request {} lacks response raw reference",
+                request.request_id
+            );
+        }
+        if let Some(raw_id) = request.error_raw_ref.as_deref() {
+            refs.push(("error", raw_id));
+        }
+        for (role, raw_id) in refs {
+            let raw = raw_by_id.get(raw_id).copied().ok_or_else(|| {
+                anyhow!(
+                    "request {} {role} references missing raw object {raw_id}",
+                    request.request_id
+                )
+            })?;
+            if raw.request_id != request.request_id {
+                bail!(
+                    "request {} {role} raw object {} belongs to request {}",
+                    request.request_id,
+                    raw.raw_id,
+                    raw.request_id
+                );
+            }
+            if let Some(previous_request_id) = referenced.insert(raw_id, &request.request_id)
+                && previous_request_id != request.request_id
+            {
+                bail!(
+                    "raw object {raw_id} is referenced by requests {} and {}",
+                    previous_request_id,
+                    request.request_id
+                );
+            }
+        }
+    }
+    for raw in raw_objects {
+        let Some(request) = request_by_id.get(&raw.request_id).copied() else {
+            // Local model/workload objects have measured file-descriptor
+            // request IDs, not provider request-ledger IDs. Their typed
+            // bindings are checked separately by merge_raw_objects.
+            continue;
+        };
+        let response_matches = request.response_raw_ref.as_deref() == Some(raw.raw_id.as_str());
+        let error_matches = request.error_raw_ref.as_deref() == Some(raw.raw_id.as_str());
+        if !response_matches && !error_matches {
+            bail!(
+                "provider raw object {} for request {} is not linked from that request",
+                raw.raw_id,
+                request.request_id
+            );
+        }
+    }
+    Ok(())
 }
 
 fn map_raw_object(raw: &RawObjectRef) -> Result<G0RawObjectRef> {
@@ -2892,6 +2969,47 @@ mod tests {
         let mut tampered = model;
         tampered.bytes_base64 = BASE64.encode(b"{}");
         assert!(CapturedModelSession::from_raw_object(&tampered).is_err());
+    }
+
+    #[test]
+    fn request_raw_ledger_rejects_cross_bound_and_unlinked_objects() {
+        let response = raw_object("repository", "response", serde_json::json!({"id": 1}));
+        let request = rest_request(&response, "/repos/acme/repo");
+        let request_by_id =
+            index_unique_requests(std::slice::from_ref(&request)).expect("unique request fixture");
+
+        let mut cross_bound = response.clone();
+        cross_bound.request_id = "other-request".to_owned();
+        let error = validate_request_raw_bindings(
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&cross_bound),
+            &request_by_id,
+        )
+        .expect_err("cross-bound response must fail closed");
+        assert!(error.to_string().contains("belongs to request"));
+
+        let mut orphan = raw_object("repository", "orphan", serde_json::json!({"id": 2}));
+        orphan.request_id = response.request_id.clone();
+        let error = validate_request_raw_bindings(
+            std::slice::from_ref(&request),
+            &[response, orphan],
+            &request_by_id,
+        )
+        .expect_err("unlinked provider response must fail closed");
+        assert!(error.to_string().contains("not linked"));
+    }
+
+    #[test]
+    fn merge_raw_objects_rejects_provider_local_duplicate_identity() {
+        let raw = raw_object("model.session", "same", serde_json::json!({"id": 1}));
+        let error = merge_raw_object_sets(
+            std::slice::from_ref(&raw),
+            std::slice::from_ref(&raw),
+            "same",
+            "same",
+        )
+        .expect_err("provider/local duplicate must fail closed");
+        assert!(error.to_string().contains("provider/local"));
     }
 
     #[test]
