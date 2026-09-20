@@ -2201,6 +2201,103 @@ mod tests {
         assert!(error.to_string().contains("differs"));
     }
 
+    fn scope_manifest(names: &[String]) -> ManifestDocument {
+        ManifestDocument {
+            schema_version: 2,
+            manifest_id: "github-first-dual-lane-2026-09-19".to_owned(),
+            source: crate::evidence_check::SourceIdentity {
+                repository: "tailrocks/velnor".to_owned(),
+                revision: "a".repeat(40),
+                digest: "sha256:".to_owned() + &"b".repeat(64),
+                reviewed_by: "reviewer".to_owned(),
+            },
+            repositories: names
+                .iter()
+                .map(|repository| ManifestRepository {
+                    repository: repository.clone(),
+                    ..ManifestRepository::default()
+                })
+                .collect(),
+        }
+    }
+
+    fn scope_live(names: &[String]) -> LiveCollection {
+        LiveCollection {
+            schema_version: 1,
+            manifest_id: "github-first-dual-lane-2026-09-19".to_owned(),
+            snapshot_id: "scope-fixture".to_owned(),
+            observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+            completed_at_utc: "2026-09-20T00:00:01Z".to_owned(),
+            auth: crate::github_acquisition::AuthIdentity::new(
+                "fixture-auth",
+                "github",
+                Some("1".to_owned()),
+                Some("fixture".to_owned()),
+                BTreeSet::from(["metadata:read".to_owned()]),
+            ),
+            requests: Vec::new(),
+            raw_objects: Vec::new(),
+            repositories: names
+                .iter()
+                .enumerate()
+                .map(|(index, repository)| LiveRepository {
+                    repository: repository.clone(),
+                    repository_id: index as u64 + 1,
+                    default_branch: "main".to_owned(),
+                    default_branch_sha: "a".repeat(40),
+                    rulesets: Vec::new(),
+                    workflows: Vec::new(),
+                    open_prs: Vec::new(),
+                    artifacts: Vec::new(),
+                    main_executions: Vec::new(),
+                    main_checks: Vec::new(),
+                    closing_repository_id: index as u64 + 1,
+                    closing_default_branch: "main".to_owned(),
+                    closing_default_branch_sha: "a".repeat(40),
+                    source_invalidated: false,
+                    access_state: "unknown".to_owned(),
+                    access_gaps: vec!["fixture".to_owned()],
+                    raw_object_refs: Vec::new(),
+                })
+                .collect(),
+            opening_prs: Vec::new(),
+            closing_prs: Vec::new(),
+            reconciliation: crate::github_acquisition::IdentityReconciliation {
+                opening: Vec::new(),
+                closing: Vec::new(),
+                changes: Vec::new(),
+                duplicate_keys: Vec::new(),
+                stable: true,
+            },
+        }
+    }
+
+    #[test]
+    fn mapping_scope_preflight_accepts_canonical_production_census() {
+        let names = CANONICAL_REPOSITORIES
+            .iter()
+            .map(|repository| (*repository).to_owned())
+            .collect::<Vec<_>>();
+        let manifest = scope_manifest(&names);
+        let live = scope_live(&names);
+        assert!(validate_fixed_repository_set(&manifest, &live).is_ok());
+    }
+
+    #[test]
+    fn mapping_scope_preflight_rejects_substitution_before_capture() {
+        let canonical = CANONICAL_REPOSITORIES
+            .iter()
+            .map(|repository| (*repository).to_owned())
+            .collect::<Vec<_>>();
+        let mut substituted = canonical.clone();
+        substituted[0] = "tailrocks/not-in-scope".to_owned();
+        let manifest = scope_manifest(&substituted);
+        let live = scope_live(&substituted);
+        let error = validate_fixed_repository_set(&manifest, &live)
+            .expect_err("substituted scope must fail before nested mapping");
+        assert!(error.to_string().contains("differs"));
+    }
+
     #[test]
     fn local_binding_raw_objects_merge_only_with_exact_provenance() {
         let provider = raw_object("repository", "provider-1", serde_json::json!({"id": 1}));
