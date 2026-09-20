@@ -5466,6 +5466,8 @@ macro_rules! policy_candidate_step_template {
           BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}
           HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
           PR_NUMBER: ${{{{ github.event.pull_request.number }}}}
+          PR_MERGE_SHA: ${{{{ github.event.pull_request.merge_commit_sha || github.sha }}}}
+          EVENT_SHA: ${{{{ github.sha }}}}
           HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name }}}}
           HEAD_REPOSITORY_ID: ${{{{ github.event.pull_request.head.repo.id }}}}
           TARGET_REPOSITORY_ID: ${{{{ github.repository_id }}}}
@@ -5483,6 +5485,8 @@ macro_rules! policy_candidate_step_template {
           test "$HEAD_REPOSITORY_ID" = "$TARGET_REPOSITORY_ID" || {{ echo "::error::head repository id is not the target repository id" >&2; exit 1; }}
           if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
           if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
+          if [[ ! "$PR_MERGE_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
+          if [[ ! "$EVENT_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
           case "$PR_NUMBER" in ''|*[!0-9]*) exit 1 ;; esac
 {bounded_curl_download}{bounded_gh_api}          verify_action_archive() {{
             local repository="$1"
@@ -5603,6 +5607,7 @@ macro_rules! policy_candidate_step_template {
           run_attempt="$(jq -er '.run_attempt | numbers' <<<"$run")"
           run_status="$(jq -er '.status | strings' <<<"$run")"
           run_conclusion="$(jq -er '.conclusion | strings' <<<"$run")"
+          run_api_head_sha="$(jq -er '.head_sha | strings | select(test("^[0-9a-f]{{40}}$"))' <<<"$run")"
           run_created_at="$(jq -er '.created_at | strings' <<<"$run")"
           run_created_epoch="$(jq -er '.created_at | fromdateiso8601' <<<"$run")"
           jq -e --argjson run_created "$run_created_epoch" '.created_at | fromdateiso8601 == $run_created' <<<"$run" >/dev/null
@@ -5715,6 +5720,13 @@ macro_rules! policy_candidate_step_template {
           candidate_closure="$(sha256sum "$closure_input" | awk '{{print $1}}')"
           test "$candidate_closure" != ''
           test "$candidate_closure" = "$manifest_closure"
+          workflow_sha="$BASE_SHA"
+          workflow_ref="$GITHUB_REPOSITORY/.github/workflows/ci-pr.yml@$workflow_sha"
+          workflow_repository="$GITHUB_REPOSITORY"
+          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" cat-file -e "$workflow_sha:.github/workflows/ci-pr.yml"
+          for identity in "$workflow_sha" "$workflow_ref" "$workflow_repository" "$PR_MERGE_SHA" "$EVENT_SHA" "$run_api_head_sha"; do
+            case "$identity" in *$'\n'*|*$'\r'*|*' '*|*'"'*) exit 1 ;; esac
+          done
           jq -n \
             --arg role handoff \
             --arg workflow_path ".github/workflows/ci-pr.yml" \
@@ -5769,6 +5781,9 @@ macro_rules! policy_candidate_step_template {
             --arg candidate_workflow_binding_sha256 "$candidate_workflow_binding_sha256" \
             --arg contract_sha256 "$contract_sha256" \
             '{{role: $role, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, run_status: $run_status, run_conclusion: $run_conclusion, status: $status, conclusion: $conclusion, producer_run_created_at: $producer_run_created_at, job_id: $job_id, job_name: $job_name, job_started_at: $job_started_at, job_completed_at: $job_completed_at, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, checkout_action_archive_sha256: $checkout_action_archive_sha256, download_action_archive_sha256: $download_action_archive_sha256, upload_action_archive_sha256: $upload_action_archive_sha256, upload_step_id: $upload_step_id, artifact_binding_method: $artifact_binding_method, object_format: $object_format, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_created_at: $artifact_created_at, artifact_updated_at: $artifact_updated_at, artifact_expires_at: $artifact_expires_at, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, candidate_workflow_contract_sha256: $candidate_workflow_contract_sha256, candidate_workflow_binding_sha256: $candidate_workflow_binding_sha256, contract_sha256: $contract_sha256}}' > "$handoff/handoff.json"
+          identity_json="$(jq -c --arg pr_head_sha "$HEAD_SHA" --arg pr_base_sha "$BASE_SHA" --arg pr_merge_sha "$PR_MERGE_SHA" --arg event_sha "$EVENT_SHA" --arg run_api_head_sha "$run_api_head_sha" --arg workflow_ref "$workflow_ref" --arg workflow_sha "$workflow_sha" --arg workflow_repository "$workflow_repository" '{{pr_head_sha: $pr_head_sha, pr_base_sha: $pr_base_sha, pr_merge_sha: $pr_merge_sha, event_sha: $event_sha, run_api_head_sha: $run_api_head_sha, workflow_ref: $workflow_ref, workflow_sha: $workflow_sha, workflow_repository: $workflow_repository}}')"
+          jq --argjson identity "$identity_json" '. + $identity' "$handoff/handoff.json" > "$handoff/handoff.json.tmp"
+          mv "$handoff/handoff.json.tmp" "$handoff/handoff.json"
       - name: Upload candidate handoff
         id: handoff_upload
         uses: {upload}
@@ -5915,6 +5930,12 @@ macro_rules! policy_candidate_role_jobs_template {
             (.head_sha | strings | test("^[0-9a-f]{{40}}$")) and
             (.base_sha | strings | test("^[0-9a-f]{{40}}$")) and
             (.base_revision | strings | test("^[0-9a-f]{{40}}$")) and
+            (.pr_head_sha == .head_sha) and (.pr_base_sha == .base_sha) and
+            (.pr_merge_sha | strings | test("^[0-9a-f]{{40}}$")) and
+            (.event_sha | strings | test("^[0-9a-f]{{40}}$")) and
+            (.run_api_head_sha | strings | test("^[0-9a-f]{{40}}$")) and
+            (.workflow_ref | strings | test("^[^[:space:]]+/.github/workflows/ci-pr.yml@[0-9a-f]{{40}}$")) and
+            (.workflow_sha == .base_sha) and (.workflow_repository == .target_repository) and
             (.head_tree_sha | strings | test("^[0-9a-f]{{40}}$")) and
             (.base_tree_sha | strings | test("^[0-9a-f]{{40}}$")) and
             (.head_tree_api_digest | strings | test("^[0-9a-f]{{64}}$")) and
@@ -6149,6 +6170,9 @@ macro_rules! policy_candidate_role_jobs_template {
             --arg sandbox_platform_digest "$platform_digest" \
             --arg sandbox_config_digest "$config_digest" \
             '{{role: $role, render_sha256: $render_sha256, handoff_id: $handoff_id, handoff_digest: $handoff_digest, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, run_status: $run_status, run_conclusion: $run_conclusion, status: $status, conclusion: $conclusion, producer_run_created_at: $producer_run_created_at, job_id: $job_id, job_name: $job_name, job_started_at: $job_started_at, job_completed_at: $job_completed_at, event: $event, pr_number: $pr_number, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, head_tree_api_digest: $head_tree_api_digest, base_tree_api_digest: $base_tree_api_digest, profile: $profile, platform: $platform, features: $features, checkout_action_archive_sha256: $checkout_action_archive_sha256, download_action_archive_sha256: $download_action_archive_sha256, upload_action_archive_sha256: $upload_action_archive_sha256, upload_step_id: $upload_step_id, artifact_binding_method: $artifact_binding_method, object_format: $object_format, manifest_member: $manifest_member, manifest_sha256: $manifest_sha256, manifest_schema_sha256: $manifest_schema_sha256, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, candidate_workflow_contract_sha256: $candidate_workflow_contract_sha256, candidate_workflow_binding_sha256: $candidate_workflow_binding_sha256, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_created_at: $artifact_created_at, artifact_updated_at: $artifact_updated_at, artifact_expires_at: $artifact_expires_at, execution_run_id: $execution_run_id, execution_run_attempt: $execution_run_attempt, execution_job: $execution_job, sandbox_index_digest: $sandbox_index_digest, sandbox_platform_digest: $sandbox_platform_digest, sandbox_config_digest: $sandbox_config_digest}}' > "$result/result.json"
+          identity_json="$(jq -c '{{pr_head_sha, pr_base_sha, pr_merge_sha, event_sha, run_api_head_sha, workflow_ref, workflow_sha, workflow_repository}}' "$handoff_json")"
+          jq --argjson identity "$identity_json" '. + $identity' "$result/result.json" > "$result/result.json.tmp"
+          mv "$result/result.json.tmp" "$result/result.json"
       - name: Upload candidate verification result
         id: result_upload
         uses: {upload}
@@ -6240,6 +6264,8 @@ macro_rules! policy_candidate_result_verification_template {
           RESULT_DIGEST: ${{{{ needs.candidate_execute.outputs.result_digest }}}}
           HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
           BASE_SHA: ${{{{ github.event.pull_request.base.sha }}}}
+          PR_MERGE_SHA: ${{{{ github.event.pull_request.merge_commit_sha || github.sha }}}}
+          EVENT_SHA: ${{{{ github.sha }}}}
           PR_NUMBER: ${{{{ github.event.pull_request.number }}}}
           HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name }}}}
           HEAD_REPOSITORY_ID: ${{{{ github.event.pull_request.head.repo.id }}}}
@@ -6323,7 +6349,7 @@ macro_rules! policy_candidate_result_verification_template {
           test -z "$(find -P "$result_dir" -type l -print -quit)"
           test -z "$(find -P "$result_dir" ! -type f ! -type d ! -type l -print -quit)"
           jq -e --argjson result_id "$RESULT_ID" --arg result_digest "$RESULT_DIGEST" \
-            --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg repo "$GITHUB_REPOSITORY" \
+            --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg merge "$PR_MERGE_SHA" --arg event "$EVENT_SHA" --arg repo "$GITHUB_REPOSITORY" \
             --arg head_repo "$HEAD_REPOSITORY" --argjson head_repo_id "$HEAD_REPOSITORY_ID" \
             --argjson target_repo_id "$TARGET_REPOSITORY_ID" --argjson pr "$PR_NUMBER" --arg execution_run "$GITHUB_RUN_ID" \
             --arg execution_attempt "$GITHUB_RUN_ATTEMPT" '
@@ -6341,6 +6367,10 @@ macro_rules! policy_candidate_result_verification_template {
             (.target_repository == $repo) and (.target_repository_id == $target_repo_id) and
             (.head_repository == $head_repo) and (.head_repository_id == $head_repo_id) and
             (.head_sha == $head) and (.base_sha == $base) and
+            (.pr_head_sha == .head_sha) and (.pr_base_sha == .base_sha) and (.pr_merge_sha == $merge) and (.event_sha == $event) and
+            (.run_api_head_sha | strings | test("^[0-9a-f]{{40}}$")) and
+            (.workflow_ref | strings | test("^[^[:space:]]+/.github/workflows/ci-pr.yml@[0-9a-f]{{40}}$")) and
+            (.workflow_sha == .base_sha) and (.workflow_repository == .target_repository) and
             (.base_revision | strings | test("^[0-9a-f]{{40}}$")) and
             (.head_tree_sha | strings | test("^[0-9a-f]{{40}}$")) and (.base_tree_sha | strings | test("^[0-9a-f]{{40}}$")) and
             (.head_tree_api_digest | strings | test("^[0-9a-f]{{64}}$")) and (.base_tree_api_digest | strings | test("^[0-9a-f]{{64}}$")) and
@@ -6428,6 +6458,10 @@ macro_rules! policy_candidate_result_verification_template {
             $h.target_repository == $repo and $h.target_repository_id == $target_repo_id and
             $h.head_repository == $head_repo and $h.head_repository_id == $head_repo_id and
             $h.head_sha == $head and $h.base_sha == $base and $h.base_revision == $r.base_revision and
+            $h.pr_head_sha == $r.pr_head_sha and $h.pr_base_sha == $r.pr_base_sha and
+            $h.pr_merge_sha == $r.pr_merge_sha and $h.event_sha == $r.event_sha and
+            $h.run_api_head_sha == $r.run_api_head_sha and $h.workflow_ref == $r.workflow_ref and
+            $h.workflow_sha == $r.workflow_sha and $h.workflow_repository == $r.workflow_repository and
             $h.head_tree_sha == $r.head_tree_sha and $h.base_tree_sha == $r.base_tree_sha and
             $h.head_tree_api_digest == $r.head_tree_api_digest and $h.base_tree_api_digest == $r.base_tree_api_digest and
             $h.profile == $r.profile and $h.platform == $r.platform and $h.features == $r.features and
@@ -6560,6 +6594,13 @@ macro_rules! policy_candidate_result_verification_template {
           test "$verifier_source_archive_size" -le {max_uncompressed}
           test "$(sha256sum "$verifier_source_archive" | awk '{{print $1}}')" = "$(jq -er .source_archive_sha256 "$handoff_json")"
           cmp -s "$verifier_source_archive" "$handoff_dir/source.tar"
+          workflow_sha="$(jq -er .workflow_sha "$handoff_json")"
+          workflow_ref="$(jq -er .workflow_ref "$handoff_json")"
+          workflow_repository="$(jq -er .workflow_repository "$handoff_json")"
+          test "$workflow_sha" = "$BASE_SHA"
+          test "$workflow_repository" = "$GITHUB_REPOSITORY"
+          test "$workflow_ref" = "$GITHUB_REPOSITORY/.github/workflows/ci-pr.yml@$workflow_sha"
+          test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" show "$workflow_sha:.github/workflows/ci-pr.yml" | sha256sum | awk '{{print $1}}')" = "$(jq -er .contract_sha256 "$handoff_json")"
           workflow_api="$(bounded_gh_api_value "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml")"
           jq -e --argjson id "$(jq -er .workflow_id "$handoff_json")" '.path == ".github/workflows/ci-pr.yml" and .id == $id' <<<"$workflow_api" >/dev/null
           run_id="$(jq -er .run_id "$handoff_json")"
@@ -6572,9 +6613,10 @@ macro_rules! policy_candidate_result_verification_template {
           artifact_updated_epoch="$(jq -er '.updated_at | fromdateiso8601' <<<"$producer_api")"
           test "$artifact_created_epoch" -ge "$producer_run_created_epoch"
           test "$artifact_updated_epoch" -ge "$artifact_created_epoch"
-          jq -e --argjson id "$run_id" --argjson workflow_id "$workflow_id" --argjson target_repo_id "$TARGET_REPOSITORY_ID" --argjson head_repo_id "$HEAD_REPOSITORY_ID" --arg head_repo "$HEAD_REPOSITORY" --argjson pr "$PR_NUMBER" --argjson run_attempt "$run_attempt" --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg repo "$GITHUB_REPOSITORY" '
+          jq -e --argjson id "$run_id" --argjson workflow_id "$workflow_id" --argjson target_repo_id "$TARGET_REPOSITORY_ID" --argjson head_repo_id "$HEAD_REPOSITORY_ID" --arg head_repo "$HEAD_REPOSITORY" --argjson pr "$PR_NUMBER" --argjson run_attempt "$run_attempt" --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg run_api_head_sha "$(jq -er .run_api_head_sha "$handoff_json")" --arg repo "$GITHUB_REPOSITORY" '
             .id == $id and .workflow_id == $workflow_id and .path == ".github/workflows/ci-pr.yml" and .event == "pull_request" and
             .status == "completed" and .conclusion == "success" and .head_sha == $head and
+            .head_sha == $run_api_head_sha and
             ((.repository.id | tonumber) == $target_repo_id) and .repository.full_name == $repo and
             ((.head_repository.id | tonumber) == $head_repo_id) and .head_repository.full_name == $head_repo and
             (.pull_requests | any((.number | tonumber) == $pr and .base.sha == $base)) and
