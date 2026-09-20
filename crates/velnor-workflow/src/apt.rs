@@ -4661,7 +4661,14 @@ impl PublicationSnapshot {
         incoming: IncomingSnapshot,
     ) -> Result<Self, GeneratorError> {
         let previous_pointer = read_json(inputs.previous_pointer)?;
-        let retained_debs = capture_retained_debs(inputs.prev_dir, &inputs.contract.package)?;
+        let rollback_digests = rollback_package_digests(
+            &previous_pointer,
+            inputs.suite,
+            inputs.bootstrap,
+            &inputs.contract.package,
+        )?;
+        let retained_debs =
+            capture_retained_debs(inputs.prev_dir, &inputs.contract.package, &rollback_digests)?;
         Ok(Self {
             files: incoming.files,
             selection: incoming.selection,
@@ -4684,8 +4691,14 @@ impl PublicationSnapshot {
 fn capture_retained_debs(
     dir: Option<&Path>,
     package: &str,
+    expected: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, Vec<u8>>, GeneratorError> {
     let Some(dir) = dir else {
+        if !expected.is_empty() {
+            return Err(GeneratorError::usage(
+                "publish: rollback directory is required for the retained package identities",
+            ));
+        }
         return Ok(BTreeMap::new());
     };
     #[cfg(unix)]
@@ -4700,15 +4713,31 @@ fn capture_retained_debs(
         if !name.starts_with(package) || !is_deb_file(&name) {
             continue;
         }
+        let Some(expected_sha256) = expected.get(&name) else {
+            return Err(GeneratorError::usage(format!(
+                "rollback directory contains an unexpected package entry: {name}"
+            )));
+        };
         #[cfg(unix)]
         let bytes = read_regular_file_at(&directory, &name, &dir.join(&name))?;
         #[cfg(not(unix))]
         let bytes = read_regular_file(&dir.join(&name))?;
+        if sha256_hex(&bytes).as_str() != expected_sha256 {
+            return Err(GeneratorError::usage(format!(
+                "rollback package bytes differ from the signed/live identity: {name}"
+            )));
+        }
         if retained.insert(name.clone(), bytes).is_some() {
             return Err(GeneratorError::usage(format!(
                 "rollback directory contains duplicate package entry: {name}"
             )));
         }
+    }
+    if retained.len() != expected.len() || expected.keys().any(|name| !retained.contains_key(name))
+    {
+        return Err(GeneratorError::usage(
+            "rollback directory is missing a package named by the signed/live identity",
+        ));
     }
     Ok(retained)
 }
@@ -4729,6 +4758,11 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
                 "publish: --bootstrap is mutually exclusive with --prev-dir",
             ));
         }
+    }
+    if inputs.suite == Suite::Preview && !inputs.bootstrap && inputs.prev_dir.is_none() {
+        return Err(GeneratorError::usage(
+            "publish: --prev-dir is required for the preview suite (the retained preview rollback pair; use --bootstrap to initialize the suite)",
+        ));
     }
     let incoming = IncomingSnapshot::capture(inputs.incoming).map_err(|error| {
         GeneratorError::usage(format!(
@@ -5477,7 +5511,7 @@ fn publish_stable(
     // Malformed pointers are rejected before any mutation or signing: only
     // the tag-agreement half waits for the retained rollback, which the
     // strict index build below computes.
-    check_stable_pointer_shape(&snapshot.previous_pointer)?;
+    check_stable_pointer_shape(&snapshot.previous_pointer, &contract.package)?;
     if inputs.staging.exists() {
         std::fs::remove_dir_all(inputs.staging)
             .map_err(|error| GeneratorError::io("wipe", inputs.staging, &error))?;
@@ -5531,7 +5565,11 @@ fn publish_stable(
         contract.retention,
         inputs.path_overlay,
     )?;
-    check_stable_pointer(&snapshot.previous_pointer, &format!("v{rollback}"))?;
+    check_stable_pointer(
+        &snapshot.previous_pointer,
+        &format!("v{rollback}"),
+        &contract.package,
+    )?;
     prime_signer_agent(&contract.signer, homedir, passphrase, inputs.path_overlay)?;
     sign_suite_release(
         inputs.staging,
@@ -5583,7 +5621,11 @@ fn publish_preview(
     }
     // The preview pointer needs no computed values, so it is rejected before
     // any mutation or signing.
-    check_preview_pointer(&snapshot.previous_pointer, inputs.bootstrap)?;
+    check_preview_pointer(
+        &snapshot.previous_pointer,
+        inputs.bootstrap,
+        &contract.package,
+    )?;
     let pool = pool_root(inputs.staging, Suite::Preview, contract);
     std::fs::create_dir_all(inputs.staging.join("conf"))
         .map_err(|error| GeneratorError::io("create", inputs.staging, &error))?;
@@ -5859,22 +5901,116 @@ fn sign_suite_release(
 /// Check the stable previous pointer shape: the final schema only — an object
 /// with exactly `tag` and a 64-hex `source_record_sha256`. The caller passes
 /// the immutable pointer snapshot, so validation cannot race a replacement.
-fn check_stable_pointer_shape(pointer: &serde_json::Value) -> Result<(), GeneratorError> {
+const ROLLBACK_PACKAGES_FIELD: &str = "rollback_packages";
+
+/// Parse the exact retained package identity carried by the signed/live
+/// previous-state handoff. A pathname snapshot alone is not authoritative:
+/// every retained byte must match one of these external SHA-256 values.
+fn rollback_package_digests(
+    pointer: &serde_json::Value,
+    suite: Suite,
+    bootstrap: bool,
+    package: &str,
+) -> Result<BTreeMap<String, String>, GeneratorError> {
+    if suite == Suite::Preview && bootstrap {
+        if !pointer.is_null() {
+            return Err(GeneratorError::usage(
+                "publish: bootstrap previous pointer must be JSON null",
+            ));
+        }
+        return Ok(BTreeMap::new());
+    }
     let object = pointer.as_object().ok_or_else(|| {
-        GeneratorError::usage("publish: stable previous pointer must be an object")
+        if suite == Suite::Preview {
+            GeneratorError::usage(
+                "publish: preview previous pointer must be an object carrying rollback identities",
+            )
+        } else {
+            GeneratorError::usage("publish: coherent previous pointer is malformed")
+        }
     })?;
     let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    if keys != ["source_record_sha256", "tag"] {
+    let expected_keys = if suite == Suite::Stable {
+        vec![ROLLBACK_PACKAGES_FIELD, "source_record_sha256", "tag"]
+    } else {
+        vec![ROLLBACK_PACKAGES_FIELD, "tag"]
+    };
+    if keys != expected_keys {
+        return Err(GeneratorError::usage(if suite == Suite::Preview {
+            "publish: preview previous pointer must carry rollback identities"
+        } else {
+            "publish: coherent previous pointer is malformed"
+        }));
+    }
+    if suite == Suite::Stable && !valid_digest(field(pointer, "source_record_sha256")?) {
         return Err(GeneratorError::usage(
             "publish: coherent previous pointer is malformed",
         ));
     }
-    if !valid_digest(field(pointer, "source_record_sha256")?) {
+    if suite == Suite::Preview && field(pointer, "tag")? != PREVIEW_TAG {
         return Err(GeneratorError::usage(
-            "publish: coherent previous pointer is malformed",
+            "publish: preview previous pointer tag is malformed",
         ));
     }
+    let rows = object
+        .get(ROLLBACK_PACKAGES_FIELD)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            GeneratorError::usage("publish: previous pointer rollback packages are not an array")
+        })?;
+    if rows.len() != REQUIRED_ARCHES.len() {
+        return Err(GeneratorError::usage(
+            "publish: previous pointer must identify exactly both rollback packages",
+        ));
+    }
+    let mut digests = BTreeMap::new();
+    let mut arches = BTreeSet::new();
+    for row in rows {
+        exact_object_keys(row, &["name", "sha256"], "rollback package")?;
+        let name = field(row, "name")?;
+        if !valid_discovery_asset_name(name)
+            || !is_deb_file(name)
+            || !(name.starts_with(&format!("{package}-"))
+                || name.starts_with(&format!("{package}_")))
+        {
+            return Err(GeneratorError::usage(
+                "publish: previous pointer rollback package name is unsafe",
+            ));
+        }
+        let arch = REQUIRED_ARCHES.iter().find(|arch| {
+            name.ends_with(&format!("-{arch}.deb")) || name.ends_with(&format!("_{arch}.deb"))
+        });
+        let Some(arch) = arch else {
+            return Err(GeneratorError::usage(
+                "publish: previous pointer rollback package architecture is unsupported",
+            ));
+        };
+        if !arches.insert(*arch) {
+            return Err(GeneratorError::usage(
+                "publish: previous pointer identifies a duplicate rollback architecture",
+            ));
+        }
+        let digest = field(row, "sha256")?;
+        if !valid_digest(digest) || digests.insert(name.to_owned(), digest.to_owned()).is_some() {
+            return Err(GeneratorError::usage(
+                "publish: previous pointer rollback package digest is invalid",
+            ));
+        }
+    }
+    if arches.len() != REQUIRED_ARCHES.len() {
+        return Err(GeneratorError::usage(
+            "publish: previous pointer must identify both rollback architectures",
+        ));
+    }
+    Ok(digests)
+}
+
+fn check_stable_pointer_shape(
+    pointer: &serde_json::Value,
+    package: &str,
+) -> Result<(), GeneratorError> {
+    let _ = rollback_package_digests(pointer, Suite::Stable, false, package)?;
     Ok(())
 }
 
@@ -5884,8 +6020,9 @@ fn check_stable_pointer_shape(pointer: &serde_json::Value) -> Result<(), Generat
 fn check_stable_pointer(
     pointer: &serde_json::Value,
     rollback_tag: &str,
+    package: &str,
 ) -> Result<(), GeneratorError> {
-    check_stable_pointer_shape(pointer)?;
+    check_stable_pointer_shape(pointer, package)?;
     if field(pointer, "tag")? != rollback_tag {
         return Err(GeneratorError::usage(
             "publish: previous pointer disagrees with retained rollback version",
@@ -5899,16 +6036,107 @@ fn check_stable_pointer(
 fn check_preview_pointer(
     pointer: &serde_json::Value,
     bootstrap: bool,
+    package: &str,
 ) -> Result<(), GeneratorError> {
-    if bootstrap {
-        if !pointer.is_null() {
+    let _ = rollback_package_digests(pointer, Suite::Preview, bootstrap, package)?;
+    Ok(())
+}
+
+fn rollback_pointer_from_publication(
+    published: &serde_json::Value,
+    prior_tag: &str,
+) -> Result<serde_json::Value, GeneratorError> {
+    let source_record_sha256 = field(published, "source_record_sha256")?;
+    if !valid_digest(source_record_sha256) {
+        return Err(GeneratorError::usage(
+            "published rollback source-record checksum is invalid",
+        ));
+    }
+    let version = parse_stable_tag(prior_tag)?.version;
+    let entries = parse_deb_entries(
+        published.get("deb_packages").ok_or_else(|| {
+            GeneratorError::usage("published record has no deb package identities")
+        })?,
+        "published deb packages",
+    )?;
+    if entries.len() != REQUIRED_ARCHES.len() * 2 {
+        return Err(GeneratorError::usage(
+            "published record must identify candidate and rollback package pairs",
+        ));
+    }
+    let rollback_packages = entries
+        .into_iter()
+        .filter(|entry| {
+            entry.name.contains(&format!("_{version}_"))
+                || entry.name.contains(&format!("-{version}-"))
+        })
+        .map(|entry| serde_json::json!({"name": entry.name, "sha256": entry.sha256}))
+        .collect::<Vec<_>>();
+    if rollback_packages.len() != REQUIRED_ARCHES.len() {
+        return Err(GeneratorError::usage(
+            "published record has no complete retained package pair for the prior tag",
+        ));
+    }
+    Ok(serde_json::json!({
+        "tag": prior_tag,
+        "source_record_sha256": source_record_sha256,
+        ROLLBACK_PACKAGES_FIELD: rollback_packages
+    }))
+}
+
+fn validate_rollback_pointer_shape(pointer: &serde_json::Value) -> Result<(), GeneratorError> {
+    let object = pointer
+        .as_object()
+        .ok_or_else(|| GeneratorError::usage("published rollback pointer is not an object"))?;
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    if keys != [ROLLBACK_PACKAGES_FIELD, "source_record_sha256", "tag"] {
+        return Err(GeneratorError::usage(
+            "published rollback pointer has an unsupported shape",
+        ));
+    }
+    if !valid_digest(field(pointer, "source_record_sha256")?) {
+        return Err(GeneratorError::usage(
+            "published rollback checksum is invalid",
+        ));
+    }
+    let rows = object
+        .get(ROLLBACK_PACKAGES_FIELD)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| GeneratorError::usage("published rollback packages are not an array"))?;
+    if rows.len() != REQUIRED_ARCHES.len() {
+        return Err(GeneratorError::usage(
+            "published rollback pointer must contain both package rows",
+        ));
+    }
+    let mut arches = BTreeSet::new();
+    for row in rows {
+        exact_object_keys(row, &["name", "sha256"], "published rollback package")?;
+        let name = field(row, "name")?;
+        if !valid_discovery_asset_name(name) || !is_deb_file(name) {
             return Err(GeneratorError::usage(
-                "publish: bootstrap previous pointer must be JSON null",
+                "published rollback package name is invalid",
             ));
         }
-    } else if pointer.as_str() != Some(PREVIEW_TAG) {
+        let arch = REQUIRED_ARCHES.iter().find(|arch| {
+            name.ends_with(&format!("-{arch}.deb")) || name.ends_with(&format!("_{arch}.deb"))
+        });
+        if let Some(arch) = arch {
+            arches.insert(*arch);
+        } else {
+            return Err(GeneratorError::usage(
+                "published rollback package architecture is invalid",
+            ));
+        }
+        if !valid_digest(field(row, "sha256")?) {
+            return Err(GeneratorError::usage(
+                "published rollback package digest is invalid",
+            ));
+        }
+    }
+    if arches.len() != REQUIRED_ARCHES.len() {
         return Err(GeneratorError::usage(
-            "publish: preview previous pointer must be the JSON string \"preview\"",
+            "published rollback pointer must cover both architectures",
         ));
     }
     Ok(())
@@ -5938,16 +6166,7 @@ pub(crate) fn derive_previous_pointer(
     }
     let tag = field(published, "tag")?;
     if tag == prior_tag {
-        let sha = field(published, "source_record_sha256")?;
-        if !valid_digest(sha) {
-            return Err(GeneratorError::usage(
-                "prior publication record checksum is invalid",
-            ));
-        }
-        return Ok(serde_json::json!({
-            "tag": tag,
-            "source_record_sha256": sha,
-        }));
+        return rollback_pointer_from_publication(published, prior_tag);
     }
     if tag == candidate_tag {
         if field(published, "source_record_sha256")? != candidate_sha {
@@ -5958,6 +6177,7 @@ pub(crate) fn derive_previous_pointer(
         let previous = published
             .get("previous")
             .ok_or_else(|| GeneratorError::usage("published rollback checksum is invalid"))?;
+        validate_rollback_pointer_shape(previous)?;
         if field(previous, "tag")? != prior_tag {
             return Err(GeneratorError::usage(
                 "published rollback tag differs from signed package pair",
@@ -5969,10 +6189,7 @@ pub(crate) fn derive_previous_pointer(
                 "published rollback checksum is invalid",
             ));
         }
-        return Ok(serde_json::json!({
-            "tag": prior_tag,
-            "source_record_sha256": sha,
-        }));
+        return Ok(previous.clone());
     }
     Err(GeneratorError::usage(
         "publication record identifies neither candidate nor rollback",
@@ -5986,6 +6203,48 @@ pub(crate) struct IndexEntry {
     pub(crate) arch: String,
     /// The hex SHA-256 of the `Packages` file.
     pub(crate) sha256: String,
+}
+
+/// One exact staged package identity carried by a publication record. Index
+/// digests authenticate the index bytes; these rows authenticate the retained
+/// package bytes used for the next rollback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DebEntry {
+    /// The canonical pool filename.
+    pub(crate) name: String,
+    /// The package SHA-256.
+    pub(crate) sha256: String,
+}
+
+fn parse_deb_entries(
+    value: &serde_json::Value,
+    context: &str,
+) -> Result<Vec<DebEntry>, GeneratorError> {
+    let rows = value
+        .as_array()
+        .ok_or_else(|| GeneratorError::usage(format!("{context} is not an array")))?;
+    let mut entries = Vec::new();
+    let mut names = BTreeSet::new();
+    for package in rows {
+        exact_object_keys(package, &["name", "sha256"], context)?;
+        let name = field(package, "name")?;
+        if !valid_discovery_asset_name(name) || !is_deb_file(name) || !names.insert(name) {
+            return Err(GeneratorError::usage(format!(
+                "{context} contains an invalid or duplicated package name"
+            )));
+        }
+        let sha256 = field(package, "sha256")?;
+        if !valid_digest(sha256) {
+            return Err(GeneratorError::usage(format!(
+                "{context} contains an invalid package digest"
+            )));
+        }
+        entries.push(DebEntry {
+            name: name.to_owned(),
+            sha256: sha256.to_owned(),
+        });
+    }
+    Ok(entries)
 }
 
 /// A typed publication record: the stable shape plus the preview variant
@@ -6008,6 +6267,8 @@ pub(crate) struct PublicationRecord {
     pub(crate) inrelease_sha256: String,
     /// The per-arch published indexes.
     pub(crate) packages: Vec<IndexEntry>,
+    /// The exact candidate and rollback package identities.
+    pub(crate) deb_packages: Vec<DebEntry>,
     /// The signing-key fingerprint.
     pub(crate) signer_fingerprint: String,
     /// The previous pointer document.
@@ -6061,6 +6322,12 @@ pub(crate) fn parse_publication_record(
             "publication record must index exactly both architectures",
         ));
     }
+    let deb_entries = parse_deb_entries(
+        document
+            .get("deb_packages")
+            .ok_or_else(|| GeneratorError::usage("publication record deb packages are missing"))?,
+        "publication deb packages",
+    )?;
     if !is_full_fingerprint(&normalize_fingerprint(field(
         document,
         "signer_fingerprint",
@@ -6073,6 +6340,21 @@ pub(crate) fn parse_publication_record(
         .get("previous")
         .cloned()
         .ok_or_else(|| GeneratorError::usage("publication record has no previous pointer"))?;
+    let bootstrap = document.get("suite").and_then(serde_json::Value::as_str)
+        == Some(PREVIEW_SUITE)
+        && previous.is_null();
+    let expected_deb_count = if bootstrap {
+        REQUIRED_ARCHES.len()
+    } else {
+        REQUIRED_ARCHES.len() * 2
+    };
+    if deb_entries.len() != expected_deb_count {
+        return Err(GeneratorError::usage(if bootstrap {
+            "bootstrap publication record must identify the candidate package pair"
+        } else {
+            "publication record must identify candidate and rollback package pairs"
+        }));
+    }
     let canonical_manifest_sha256 = match document.get("canonical_manifest_sha256") {
         None => None,
         Some(value) => {
@@ -6118,12 +6400,39 @@ pub(crate) fn parse_publication_record(
             .map(str::to_owned),
         inrelease_sha256: inrelease_sha256.to_owned(),
         packages: entries,
+        deb_packages: deb_entries,
         signer_fingerprint: field(document, "signer_fingerprint")?.to_owned(),
         previous,
         canonical_manifest_sha256,
         release_id,
         provider_release_id,
     })
+}
+
+fn staged_deb_entries(
+    staging: &Path,
+    suite: Suite,
+    contract: &AptContract,
+    expected_count: usize,
+) -> Result<Vec<DebEntry>, GeneratorError> {
+    let pool = pool_root(staging, suite, contract);
+    let mut entries = Vec::new();
+    for name in dir_names(&pool)? {
+        if !is_deb_file(&name) {
+            continue;
+        }
+        entries.push(DebEntry {
+            sha256: sha256_file(&pool.join(&name))?,
+            name,
+        });
+    }
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    if entries.len() != expected_count {
+        return Err(GeneratorError::usage(
+            "publication record must identify the complete candidate and rollback package pairs",
+        ));
+    }
+    Ok(entries)
 }
 
 /// Emit and detached-sign the publication record into the staging tree.
@@ -6164,6 +6473,29 @@ fn emit_publication_record(
         serde_json::Value::String(inrelease),
     );
     record.insert("packages".to_owned(), serde_json::Value::Array(packages));
+    record.insert(
+        "deb_packages".to_owned(),
+        serde_json::Value::Array(
+            staged_deb_entries(
+                staging,
+                suite,
+                contract,
+                if suite == Suite::Preview && previous_pointer.is_null() {
+                    REQUIRED_ARCHES.len()
+                } else {
+                    contract.retention.pool_debs()
+                },
+            )?
+            .into_iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "name": entry.name,
+                    "sha256": entry.sha256
+                })
+            })
+            .collect(),
+        ),
+    );
     record.insert("previous".to_owned(), previous_pointer.clone());
     record.insert(
         "schema".to_owned(),
@@ -9892,11 +10224,60 @@ mod tests {
 
     /// Write a coherent stable previous pointer naming `tag`.
     fn stable_pointer_file(root: &Path, tag: &str) {
+        let rollback_packages = REQUIRED_ARCHES
+            .iter()
+            .map(|arch| {
+                let name = format!("{FIXTURE_PACKAGE}-1.2.2-{arch}.deb");
+                serde_json::json!({
+                    "name": name,
+                    "sha256": must(
+                        sha256_file(&root.join("prev").join(&name)),
+                        "hash rollback package"
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let pointer = serde_json::json!({
+            "tag": tag,
+            "source_record_sha256": "dd".repeat(32),
+            ROLLBACK_PACKAGES_FIELD: rollback_packages
+        });
         write_bytes(
             &root.join("previous-pointer.json"),
             format!(
-                "{{\"tag\": \"{tag}\", \"source_record_sha256\": \"{}\"}}\n",
-                "dd".repeat(32)
+                "{}\n",
+                must(
+                    serde_json::to_string(&pointer),
+                    "serialize previous pointer"
+                )
+            )
+            .as_bytes(),
+        );
+    }
+
+    fn preview_pointer_file(root: &Path) {
+        let rollback_packages = REQUIRED_ARCHES
+            .iter()
+            .map(|arch| {
+                let name = format!("example_{PREVIEW_ROLLBACK}_{arch}.deb");
+                serde_json::json!({
+                    "name": name,
+                    "sha256": must(
+                        sha256_file(&root.join("prev").join(&name)),
+                        "hash preview rollback package"
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let pointer = serde_json::json!({
+            "tag": PREVIEW_TAG,
+            ROLLBACK_PACKAGES_FIELD: rollback_packages
+        });
+        write_bytes(
+            &root.join("previous-pointer.json"),
+            format!(
+                "{}\n",
+                must(serde_json::to_string(&pointer), "serialize preview pointer")
             )
             .as_bytes(),
         );
@@ -10158,6 +10539,48 @@ mod tests {
                 rollback_before
             );
         });
+        let _ = std::fs::remove_dir_all(&incoming.dir);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn publication_rejects_rollback_bytes_without_external_digest_match() {
+        let incoming = stable_incoming("rollback-digest-incoming");
+        must(
+            verify_suite(&stable_verify_inputs(&incoming)),
+            "verify rollback digest incoming",
+        );
+        let root = fixture_dir("rollback-digest-root");
+        let prev = rollback_prev_dir(&root, "1.2.2", FIXTURE_COMMIT);
+        stable_pointer_file(&root, "v1.2.2");
+        let rollback = prev.join("example-1.2.2-arm64.deb");
+        let mut tampered = must(std::fs::read(&rollback), "read rollback package");
+        tampered[0] ^= 0xff;
+        write_bytes(&rollback, &tampered);
+        let stubs = tool_stubs("rollback-digest-tools");
+        let contract = apt_contract();
+        let inputs = publish_inputs(
+            Suite::Stable,
+            contract,
+            "v1.2.3",
+            &incoming.dir,
+            Some(&prev),
+            Path::new("previous-pointer.json"),
+            Path::new("public"),
+            false,
+            Some(&stubs.bin),
+        );
+        let error = in_fixture_root(&root, || {
+            must_fail(
+                publish_suite(&inputs),
+                "reject rollback bytes without external digest match",
+            )
+        });
+        assert!(error.contains("signed/live identity"), "{error}");
+        assert!(
+            !root.join("public").exists(),
+            "digest mismatch must fail before staging"
+        );
         let _ = std::fs::remove_dir_all(&incoming.dir);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -10489,7 +10912,7 @@ mod tests {
             );
             must_fail(publish_suite(&inputs), "pool count")
         });
-        assert!(error.contains("exactly four package files"), "{error}");
+        assert!(error.contains("coherent previous pointer"), "{error}");
         let _ = std::fs::remove_dir_all(&incoming.dir);
         let _ = std::fs::remove_dir_all(&root);
 
@@ -10932,23 +11355,23 @@ mod tests {
         must(
             std::fs::copy(
                 incoming.dir.join("example-1.2.3-arm64.deb"),
+                prev.join("example-1.2.2-arm64.deb"),
+            ),
+            "rollback arm64",
+        );
+        must(
+            std::fs::copy(
+                incoming.dir.join("example-1.2.3-arm64.deb"),
                 prev.join("example-1.2.3-arm64.deb"),
             ),
-            "colliding arm64 name",
+            "candidate collision name",
         );
-        // Corrupt the colliding copy so its bytes differ.
+        // Corrupt the unexpected candidate-named copy.
         must(
             std::fs::write(prev.join("example-1.2.3-arm64.deb"), b"different-bytes"),
             "corrupt the collision",
         );
-        write_bytes(
-            &root.join("previous-pointer.json"),
-            format!(
-                "{{\"tag\": \"v1.2.2\", \"source_record_sha256\": \"{}\"}}\n",
-                "dd".repeat(32)
-            )
-            .as_bytes(),
-        );
+        stable_pointer_file(&root, "v1.2.2");
         let contract = apt_contract();
         let staging = PathBuf::from("public");
         let error = in_fixture_root(&root, || {
@@ -10965,7 +11388,7 @@ mod tests {
             );
             must_fail(publish_suite(&inputs), "collision")
         });
-        assert!(error.contains("different candidate bytes"), "{error}");
+        assert!(error.contains("unexpected package entry"), "{error}");
         let _ = std::fs::remove_dir_all(&incoming.dir);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -11004,7 +11427,7 @@ mod tests {
         let stubs = tool_stubs("pub-preview-tools");
         let root = fixture_dir("pub-preview-root");
         let prev = preview_prev_dir(&root);
-        write_bytes(&root.join("previous-pointer.json"), b"\"preview\"\n");
+        preview_pointer_file(&root);
         for arch in REQUIRED_ARCHES {
             write_bytes(
                 &stubs.log.join(format!("packages-{arch}")),
@@ -11064,8 +11487,19 @@ mod tests {
         assert_eq!(parsed.crate_version, PREVIEW_CANDIDATE);
         assert_eq!(parsed.suite.as_deref(), Some("preview"));
         assert_eq!(
-            parsed.previous,
-            serde_json::Value::String("preview".to_owned())
+            parsed
+                .previous
+                .get("tag")
+                .and_then(serde_json::Value::as_str),
+            Some(PREVIEW_TAG)
+        );
+        assert_eq!(
+            parsed
+                .previous
+                .get(ROLLBACK_PACKAGES_FIELD)
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(REQUIRED_ARCHES.len())
         );
         assert_eq!(
             must(
@@ -11102,7 +11536,7 @@ mod tests {
         let stubs = tool_stubs("pub-preview-backward-tools");
         let root = fixture_dir("pub-preview-backward-root");
         let prev = preview_prev_dir(&root);
-        write_bytes(&root.join("previous-pointer.json"), b"\"preview\"\n");
+        preview_pointer_file(&root);
         // The retained rollback is NEWER than the candidate.
         for arch in REQUIRED_ARCHES {
             write_bytes(
@@ -11305,11 +11739,22 @@ mod tests {
     fn previous_pointer_derivation_implements_the_jq_rules() {
         let prior_sha = "dd".repeat(32);
         let candidate_sha = "ee".repeat(32);
+        let rollback_packages = serde_json::json!([
+            {"name": "example_1.2.2_amd64.deb", "sha256": "33".repeat(32)},
+            {"name": "example_1.2.2_arm64.deb", "sha256": "44".repeat(32)},
+        ]);
+        let deb_packages = serde_json::json!([
+            {"name": "example_1.2.2_amd64.deb", "sha256": "33".repeat(32)},
+            {"name": "example_1.2.2_arm64.deb", "sha256": "44".repeat(32)},
+            {"name": "example_1.2.1_amd64.deb", "sha256": "55".repeat(32)},
+            {"name": "example_1.2.1_arm64.deb", "sha256": "66".repeat(32)},
+        ]);
         // The published record already identifies the prior tag.
         let published = serde_json::json!({
             "schema": PUBLICATION_RECORD_SCHEMA,
             "tag": "v1.2.2",
             "source_record_sha256": prior_sha,
+            "deb_packages": deb_packages,
         });
         let pointer = must(
             derive_previous_pointer(&published, "v1.2.2", "v1.2.3", &candidate_sha),
@@ -11317,7 +11762,11 @@ mod tests {
         );
         assert_eq!(
             pointer,
-            serde_json::json!({"tag": "v1.2.2", "source_record_sha256": prior_sha})
+            serde_json::json!({
+                "tag": "v1.2.2",
+                "source_record_sha256": prior_sha,
+                ROLLBACK_PACKAGES_FIELD: rollback_packages
+            })
         );
         // The published record identifies the candidate: the pointer is its
         // recorded rollback once the bytes agree.
@@ -11325,7 +11774,11 @@ mod tests {
             "schema": PUBLICATION_RECORD_SCHEMA,
             "tag": "v1.2.3",
             "source_record_sha256": candidate_sha,
-            "previous": {"tag": "v1.2.2", "source_record_sha256": prior_sha},
+            "previous": {
+                "tag": "v1.2.2",
+                "source_record_sha256": prior_sha,
+                ROLLBACK_PACKAGES_FIELD: rollback_packages
+            },
         });
         let pointer = must(
             derive_previous_pointer(&published, "v1.2.2", "v1.2.3", &candidate_sha),
@@ -11333,7 +11786,11 @@ mod tests {
         );
         assert_eq!(
             pointer,
-            serde_json::json!({"tag": "v1.2.2", "source_record_sha256": prior_sha})
+            serde_json::json!({
+                "tag": "v1.2.2",
+                "source_record_sha256": prior_sha,
+                ROLLBACK_PACKAGES_FIELD: rollback_packages
+            })
         );
         // Neither tag.
         let published = serde_json::json!({
@@ -11351,7 +11808,11 @@ mod tests {
             "schema": PUBLICATION_RECORD_SCHEMA,
             "tag": "v1.2.3",
             "source_record_sha256": "ff".repeat(32),
-            "previous": {"tag": "v1.2.2", "source_record_sha256": prior_sha},
+            "previous": {
+                "tag": "v1.2.2",
+                "source_record_sha256": prior_sha,
+                ROLLBACK_PACKAGES_FIELD: rollback_packages
+            },
         });
         let error = must_fail(
             derive_previous_pointer(&published, "v1.2.2", "v1.2.3", &candidate_sha),
@@ -11363,7 +11824,11 @@ mod tests {
             "schema": PUBLICATION_RECORD_SCHEMA,
             "tag": "v1.2.3",
             "source_record_sha256": candidate_sha,
-            "previous": {"tag": "v1.2.0", "source_record_sha256": prior_sha},
+            "previous": {
+                "tag": "v1.2.0",
+                "source_record_sha256": prior_sha,
+                ROLLBACK_PACKAGES_FIELD: rollback_packages
+            },
         });
         let error = must_fail(
             derive_previous_pointer(&published, "v1.2.2", "v1.2.3", &candidate_sha),
@@ -11378,7 +11843,11 @@ mod tests {
             "schema": PUBLICATION_RECORD_SCHEMA,
             "tag": "v1.2.3",
             "source_record_sha256": candidate_sha,
-            "previous": {"tag": "v1.2.2", "source_record_sha256": "short"},
+            "previous": {
+                "tag": "v1.2.2",
+                "source_record_sha256": "short",
+                ROLLBACK_PACKAGES_FIELD: rollback_packages
+            },
         });
         let error = must_fail(
             derive_previous_pointer(&published, "v1.2.2", "v1.2.3", &candidate_sha),
@@ -11415,8 +11884,21 @@ mod tests {
                 {"arch": "amd64", "sha256": "bb".repeat(32)},
                 {"arch": "arm64", "sha256": "cc".repeat(32)},
             ],
+            "deb_packages": [
+                {"name": "example_1.2.3_amd64.deb", "sha256": "11".repeat(32)},
+                {"name": "example_1.2.3_arm64.deb", "sha256": "22".repeat(32)},
+                {"name": "example_1.2.2_amd64.deb", "sha256": "33".repeat(32)},
+                {"name": "example_1.2.2_arm64.deb", "sha256": "44".repeat(32)},
+            ],
             "signer_fingerprint": FIXTURE_FPR,
-            "previous": {"tag": "v1.2.2", "source_record_sha256": "dd".repeat(32)},
+            "previous": {
+                "tag": "v1.2.2",
+                "source_record_sha256": "dd".repeat(32),
+                "rollback_packages": [
+                    {"name": "example_1.2.2_amd64.deb", "sha256": "33".repeat(32)},
+                    {"name": "example_1.2.2_arm64.deb", "sha256": "44".repeat(32)},
+                ],
+            },
         });
         let parsed = must(parse_publication_record(&stable), "stable record");
         assert_eq!(parsed.suite, None);
@@ -11432,8 +11914,20 @@ mod tests {
                 {"arch": "amd64", "sha256": "bb".repeat(32)},
                 {"arch": "arm64", "sha256": "cc".repeat(32)},
             ],
+            "deb_packages": [
+                {"name": "example_1.2.3_amd64.deb", "sha256": "11".repeat(32)},
+                {"name": "example_1.2.3_arm64.deb", "sha256": "22".repeat(32)},
+                {"name": "example_1.2.2_amd64.deb", "sha256": "33".repeat(32)},
+                {"name": "example_1.2.2_arm64.deb", "sha256": "44".repeat(32)},
+            ],
             "signer_fingerprint": FIXTURE_FPR,
-            "previous": "preview",
+            "previous": {
+                "tag": "preview",
+                "rollback_packages": [
+                    {"name": "example_1.2.2_amd64.deb", "sha256": "33".repeat(32)},
+                    {"name": "example_1.2.2_arm64.deb", "sha256": "44".repeat(32)},
+                ],
+            },
         });
         let parsed = must(parse_publication_record(&preview), "preview record");
         assert_eq!(parsed.suite.as_deref(), Some("preview"));
