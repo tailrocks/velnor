@@ -150,7 +150,7 @@ impl LiveCheckoutProof {
 }
 
 impl LiveCheckoutObservation {
-    fn api_head_only(api_head_sha: String, api_raw_object_refs: Vec<String>) -> Self {
+    pub(crate) fn api_head_only(api_head_sha: String, api_raw_object_refs: Vec<String>) -> Self {
         Self {
             api_head_sha,
             api_raw_object_refs,
@@ -257,6 +257,7 @@ pub struct LiveExecution {
 pub struct LiveCheck {
     pub context: String,
     pub app_id: Option<String>,
+    pub app_slug: Option<String>,
     pub check_suite_id: Option<u64>,
     pub check_run_id: u64,
     pub workflow_run_id: Option<u64>,
@@ -2482,7 +2483,7 @@ fn parse_check_run_api_url(value: &str, repository: &str) -> Result<u64> {
     Ok(check_run_id)
 }
 
-fn validate_check_suite(
+pub(crate) fn validate_check_suite(
     value: &Value,
     repository: &str,
     source_sha: &str,
@@ -2516,7 +2517,7 @@ fn validate_check_suite(
     Ok(())
 }
 
-fn parse_check(
+pub(crate) fn parse_check(
     value: &Value,
     repository: &str,
     source_sha: &str,
@@ -2545,6 +2546,7 @@ fn parse_check(
         bail!("associated workflow run head SHA differs from check run");
     }
     let app_id = optional_u64(value, &["app", "id"]).map(|id| id.to_string());
+    let app_slug = optional_string(value, &["app", "slug"]);
     let check_run_id = required_u64(value, &["id"])?;
     validate_api_url(
         &required_string(value, &["url"])?,
@@ -2556,6 +2558,7 @@ fn parse_check(
     Ok(LiveCheck {
         context: required_string(value, &["name"])?,
         app_id,
+        app_slug,
         check_suite_id: Some(check_suite_id),
         check_run_id,
         workflow_run_id,

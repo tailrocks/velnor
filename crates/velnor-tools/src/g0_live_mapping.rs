@@ -434,18 +434,28 @@ fn validate_mapper_identity_uniqueness(live: &LiveCollection) -> Result<()> {
             }
         }
 
-        let mut workflow_paths = BTreeSet::new();
+        // Entity identities and provider references are different namespaces.
+        // A job row intentionally repeats its check-run ID in the check-run
+        // row; only duplicate rows within the same role are invalid.
+        let mut workflow_entities = BTreeSet::new();
         let mut artifact_ids = BTreeSet::new();
         let mut artifact_names = BTreeSet::new();
         let mut execution_keys = BTreeSet::new();
         let mut job_keys = BTreeSet::new();
-        let mut check_ids = BTreeSet::new();
+        let mut provider_check_ids = BTreeSet::new();
+        let mut main_check_ids = BTreeSet::new();
         for workflow in &repository.workflows {
-            if !workflow_paths.insert(workflow.path.clone()) {
+            if !workflow_entities.insert((
+                workflow.path.clone(),
+                workflow.revision.clone(),
+                workflow.source_sha.clone(),
+            )) {
                 bail!(
-                    "{} workflow identity {} is duplicated",
+                    "{} workflow identity {}@{} ({}) is duplicated",
                     repository.repository,
-                    workflow.path
+                    workflow.path,
+                    workflow.revision,
+                    workflow.source_sha
                 );
             }
             validate_dependency_identity_uniqueness(
@@ -485,7 +495,7 @@ fn validate_mapper_identity_uniqueness(live: &LiveCollection) -> Result<()> {
                 pull_request,
                 &mut execution_keys,
                 &mut job_keys,
-                &mut check_ids,
+                &mut provider_check_ids,
             )?;
         }
         for execution in &repository.main_executions {
@@ -494,11 +504,11 @@ fn validate_mapper_identity_uniqueness(live: &LiveCollection) -> Result<()> {
                 execution,
                 &mut execution_keys,
                 &mut job_keys,
-                &mut check_ids,
+                &mut provider_check_ids,
             )?;
         }
         for check in &repository.main_checks {
-            if !check_ids.insert(check.check_run_id) {
+            if !main_check_ids.insert(check.check_run_id) {
                 bail!(
                     "{} check-run identity {} is duplicated",
                     repository.repository,
@@ -543,7 +553,7 @@ fn validate_pull_request_identity_uniqueness(
     pull_request: &LivePullRequest,
     execution_keys: &mut BTreeSet<(u64, u32)>,
     job_keys: &mut BTreeSet<(u64, u32, u64)>,
-    check_ids: &mut BTreeSet<u64>,
+    provider_check_ids: &mut BTreeSet<u64>,
 ) -> Result<()> {
     let number = pull_request.identity.number;
     let mut binding_keys = BTreeSet::new();
@@ -557,7 +567,14 @@ fn validate_pull_request_identity_uniqueness(
         }
     }
     let mut check_keys = BTreeSet::new();
+    let mut check_ids = BTreeSet::new();
     for check in &pull_request.checks {
+        if !check_ids.insert(check.check_run_id) {
+            bail!(
+                "{repository} PR {number} check-run identity {} is duplicated",
+                check.check_run_id
+            );
+        }
         if !check_keys.insert((check.context.clone(), check.app_id.clone())) {
             bail!("{repository} PR {number} check identity is duplicated");
         }
@@ -568,7 +585,7 @@ fn validate_pull_request_identity_uniqueness(
             execution,
             execution_keys,
             job_keys,
-            check_ids,
+            provider_check_ids,
         )?;
     }
     Ok(())
@@ -579,7 +596,7 @@ fn validate_execution_identity_uniqueness(
     execution: &LiveExecution,
     execution_keys: &mut BTreeSet<(u64, u32)>,
     job_keys: &mut BTreeSet<(u64, u32, u64)>,
-    check_ids: &mut BTreeSet<u64>,
+    provider_check_ids: &mut BTreeSet<u64>,
 ) -> Result<()> {
     if !execution_keys.insert((execution.run_id, execution.run_attempt)) {
         bail!(
@@ -597,9 +614,9 @@ fn validate_execution_identity_uniqueness(
                 job.job_id
             );
         }
-        if !check_ids.insert(job.check_run_id) {
+        if !provider_check_ids.insert(job.check_run_id) {
             bail!(
-                "{repository} check-run identity {} is duplicated",
+                "{repository} provider job check-run identity {} is duplicated",
                 job.check_run_id
             );
         }
@@ -1119,7 +1136,13 @@ fn map_supplement(
     let mut source_api_urls = BTreeMap::new();
     for repository in &live.repositories {
         for workflow in &repository.workflows {
-            let workflow_key = format!("workflow:{}:{}", repository.repository, workflow.path);
+            // A workflow path is not an entity identity: the same path may
+            // be observed at multiple immutable source revisions during one
+            // opening/closing or PR-source traversal.
+            let workflow_key = format!(
+                "workflow:{}:{}@{}#{}",
+                repository.repository, workflow.path, workflow.revision, workflow.source_sha
+            );
             graph_source.insert(
                 workflow_key.clone(),
                 (workflow.source_sha.clone(), workflow.path.clone()),
@@ -1309,6 +1332,7 @@ fn map_repository(
                 },
             ],
         )?;
+        validate_artifact_api_bindings(artifact, &repository.repository, raw_by_id, request_by_id)?;
         let archive_raw = artifact
             .raw_object_refs
             .iter()
@@ -1324,9 +1348,12 @@ fn map_repository(
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .find(|raw| {
-                request_by_id
-                    .get(&raw.request_id)
-                    .is_some_and(|request| request.endpoint_or_operation == archive_endpoint)
+                request_by_id.get(&raw.request_id).is_some_and(|request| {
+                    endpoint_path(&request.endpoint_or_operation)
+                        .ok()
+                        .as_deref()
+                        == Some(archive_endpoint.as_str())
+                })
             })
             .ok_or_else(|| {
                 anyhow!(
@@ -1830,7 +1857,10 @@ fn validate_nested_raw_references(
             .iter()
             .filter(|binding| {
                 binding.object_kind == raw.object_kind
-                    && binding.endpoint == request.endpoint_or_operation
+                    && endpoint_path(&request.endpoint_or_operation)
+                        .ok()
+                        .as_deref()
+                        == endpoint_path(&binding.endpoint).ok().as_deref()
             })
             .count();
         if matching != 1 {
@@ -1860,6 +1890,232 @@ fn validate_nested_raw_references(
                 binding.endpoint
             );
         }
+    }
+    Ok(())
+}
+
+/// Return the canonical path of a GitHub REST endpoint while enforcing the
+/// one allowed API origin.  Collector records may retain either the path used
+/// by the request builder or the absolute URL sent to transport; both are
+/// reduced to one path before endpoint identity is compared.  Query pairs are
+/// validated separately by the endpoint-specific contract below.
+fn endpoint_path(value: &str) -> Result<String> {
+    if value.starts_with('/') {
+        let (path, query) = value.split_once('?').unwrap_or((value, ""));
+        if path.is_empty() || value.contains('#') || query.contains('#') {
+            bail!("REST endpoint path is malformed");
+        }
+        return Ok(path.to_owned());
+    }
+    let parsed = Url::parse(value).with_context(|| format!("parse REST endpoint {value}"))?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("api.github.com")
+        || parsed.port().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        bail!("REST endpoint is outside https://api.github.com");
+    }
+    Ok(parsed.path().to_owned())
+}
+
+fn endpoint_query_pairs(value: &str) -> Result<Vec<(String, String)>> {
+    let parsed_endpoint;
+    let query = if value.starts_with('/') {
+        value.split_once('?').map_or("", |(_, query)| query)
+    } else {
+        parsed_endpoint =
+            Url::parse(value).with_context(|| format!("parse REST endpoint {value}"))?;
+        parsed_endpoint.query().unwrap_or_default()
+    };
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut pairs = Vec::new();
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        if key.is_empty() || pairs.iter().any(|(seen, _)| seen == key.as_ref()) {
+            bail!("REST endpoint query has duplicate or empty parameter");
+        }
+        pairs.push((key.into_owned(), value.into_owned()));
+    }
+    Ok(pairs)
+}
+
+fn request_query_pairs(request: &RequestRecord) -> Result<Vec<(String, String)>> {
+    let bytes = BASE64
+        .decode(&request.query_base64)
+        .with_context(|| format!("decode query for {}", request.request_id))?;
+    let mut pairs = Vec::new();
+    if !bytes.is_empty() {
+        let fields = bytes.split(|byte| *byte == 0).collect::<Vec<_>>();
+        if !fields.last().is_some_and(|field| field.is_empty()) || fields.len() % 2 != 1 {
+            bail!(
+                "request {} has malformed canonical REST query",
+                request.request_id
+            );
+        }
+        for chunk in fields[..fields.len() - 1].chunks(2) {
+            let key = std::str::from_utf8(chunk[0]).context("REST query key is not UTF-8")?;
+            let value = std::str::from_utf8(chunk[1]).context("REST query value is not UTF-8")?;
+            if key.is_empty() || pairs.iter().any(|(seen, _)| seen == key) {
+                bail!(
+                    "request {} has duplicate or empty query parameter",
+                    request.request_id
+                );
+            }
+            pairs.push((key.to_owned(), value.to_owned()));
+        }
+    }
+    let endpoint_pairs = endpoint_query_pairs(&request.endpoint_or_operation)?;
+    for (key, value) in endpoint_pairs {
+        if pairs.iter().any(|(seen, _)| seen == &key) {
+            bail!(
+                "request {} repeats query parameter {} across endpoint and query ledger",
+                request.request_id,
+                key
+            );
+        }
+        pairs.push((key, value));
+    }
+    Ok(pairs)
+}
+
+fn require_artifact_query_contract(
+    request: &RequestRecord,
+    expected_per_page: u32,
+    expected_page: u32,
+    archive: bool,
+) -> Result<()> {
+    let pairs = request_query_pairs(request)?;
+    let mut expected = BTreeMap::new();
+    if archive {
+        if expected_page != 1 || expected_per_page != 1 {
+            bail!("artifact archive request has invalid page contract");
+        }
+    } else {
+        expected.insert("per_page".to_owned(), expected_per_page.to_string());
+        if expected_page > 1 {
+            expected.insert("page".to_owned(), expected_page.to_string());
+        }
+    }
+    let observed = pairs.into_iter().collect::<BTreeMap<_, _>>();
+    if observed != expected {
+        bail!(
+            "artifact request {} query/page contract differs: observed={observed:?}, expected={expected:?}",
+            request.request_id
+        );
+    }
+    Ok(())
+}
+
+fn decode_raw_safe_json(raw: &RawObjectRef, label: &str) -> Result<serde_json::Value> {
+    let bytes = BASE64
+        .decode(&raw.bytes_base64)
+        .with_context(|| format!("decode {label} raw bytes"))?;
+    if bytes.len() as u64 != raw.byte_length || sha256_digest(&bytes) != raw.sha256 {
+        bail!("{label} raw bytes do not match safe digest/length");
+    }
+    serde_json::from_slice(&bytes).with_context(|| format!("parse {label} raw JSON"))
+}
+
+fn validate_artifact_api_bindings(
+    artifact: &LiveArtifact,
+    repository: &str,
+    raw_by_id: &BTreeMap<String, &RawObjectRef>,
+    request_by_id: &BTreeMap<String, &RequestRecord>,
+) -> Result<()> {
+    let list_endpoint = format!(
+        "/repos/{repository}/actions/runs/{}/artifacts",
+        artifact.run_id
+    );
+    let archive_endpoint = format!(
+        "/repos/{repository}/actions/artifacts/{}/zip",
+        artifact.artifact_id
+    );
+    let mut list_records = Vec::new();
+    let mut archive_records = Vec::new();
+    for raw_id in &artifact.raw_object_refs {
+        let raw = raw_by_id.get(raw_id).copied().ok_or_else(|| {
+            anyhow!(
+                "artifact {} references missing raw {raw_id}",
+                artifact.artifact_id
+            )
+        })?;
+        let request = request_by_id.get(&raw.request_id).copied().ok_or_else(|| {
+            anyhow!(
+                "artifact {} raw {raw_id} has missing request",
+                artifact.artifact_id
+            )
+        })?;
+        let path = endpoint_path(&request.endpoint_or_operation)?;
+        if path == list_endpoint {
+            list_records.push((raw, request));
+        } else if path == archive_endpoint {
+            archive_records.push((raw, request));
+        }
+    }
+    if list_records.len() != 1 || archive_records.len() != 1 {
+        bail!(
+            "artifact {} requires one list and one archive response (list={}, archive={})",
+            artifact.artifact_id,
+            list_records.len(),
+            archive_records.len()
+        );
+    }
+    let (list_raw, list_request) = list_records[0];
+    require_artifact_query_contract(list_request, 100, list_request.page.number, false)?;
+    let (archive_raw, archive_request) = archive_records[0];
+    require_artifact_query_contract(archive_request, 1, archive_request.page.number, true)?;
+
+    let list_body = decode_raw_safe_json(list_raw, "artifact list")?;
+    let entries = list_body
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("artifact list response lacks artifacts array"))?;
+    let matches = entries
+        .iter()
+        .filter(|entry| {
+            entry.get("id").and_then(serde_json::Value::as_u64) == Some(artifact.artifact_id)
+        })
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        bail!(
+            "artifact {} list response contains {} matching metadata rows",
+            artifact.artifact_id,
+            matches.len()
+        );
+    }
+    let entry = matches[0];
+    if entry.get("name").and_then(serde_json::Value::as_str) != Some(artifact.name.as_str())
+        || entry
+            .get("workflow_run")
+            .and_then(|run| run.get("id"))
+            .and_then(serde_json::Value::as_u64)
+            != Some(artifact.run_id)
+        || entry
+            .get("workflow_run")
+            .and_then(|run| run.get("head_sha"))
+            .and_then(serde_json::Value::as_str)
+            != Some(artifact.run_head_sha.as_str())
+        || entry.get("digest").and_then(serde_json::Value::as_str) != Some(artifact.digest.as_str())
+        || entry
+            .get("archive_download_url")
+            .and_then(serde_json::Value::as_str)
+            != Some(artifact.source_url.as_str())
+    {
+        bail!(
+            "artifact {} metadata is not bound to list response",
+            artifact.artifact_id
+        );
+    }
+    if archive_raw.sha256 != artifact.digest {
+        bail!(
+            "artifact {} archive digest {} differs from metadata {}",
+            artifact.artifact_id,
+            archive_raw.sha256,
+            artifact.digest
+        );
     }
     Ok(())
 }
@@ -2110,15 +2366,10 @@ fn map_check(
         .app_id
         .clone()
         .ok_or_else(|| anyhow!("check {} lacks provider App identity", check.context))?;
-    let workflow_run_id = check.workflow_run_id.ok_or_else(|| {
-        anyhow!(
-            "external check {} lacks workflow association",
-            check.context
-        )
-    })?;
-    let check_run_attempt = check
-        .run_attempt
-        .ok_or_else(|| anyhow!("check {} lacks run attempt", check.context))?;
+    let app_slug = check
+        .app_slug
+        .clone()
+        .ok_or_else(|| anyhow!("check {} lacks provider App slug", check.context))?;
     validate_github_html_url(
         &check.source_url,
         &format!("{repository}/runs/{}", check.check_run_id),
@@ -2152,111 +2403,126 @@ fn map_check(
         request_by_id,
         &format!("check {}", check.context),
     )?;
-    let matching_executions = executions
-        .into_iter()
-        .flatten()
-        .filter(|run| run.run_id == workflow_run_id && run.run_attempt == check_run_attempt)
-        .collect::<Vec<_>>();
-    if matching_executions.len() != 1 {
-        bail!(
-            "check {} must bind exactly one workflow execution for run {workflow_run_id} attempt {check_run_attempt}, found {}",
-            check.context,
-            matching_executions.len()
-        );
-    }
-    let execution = executions
-        .and_then(|runs| {
-            runs.iter()
-                .find(|run| run.run_id == workflow_run_id && run.run_attempt == check_run_attempt)
-        })
-        .ok_or_else(|| anyhow!("check {} lacks concrete workflow execution", check.context))?;
-    if execution.source_sha != check.source_sha {
-        bail!(
-            "check {} source SHA differs from workflow execution",
+    let provider = match (check.workflow_run_id, check.run_attempt, check.job_id) {
+        (Some(workflow_run_id), Some(check_run_attempt), Some(check_job_id)) => {
+            let runs = executions.ok_or_else(|| {
+                anyhow!("check {} lacks workflow execution inventory", check.context)
+            })?;
+            let matching_executions = runs
+                .iter()
+                .filter(|run| run.run_id == workflow_run_id && run.run_attempt == check_run_attempt)
+                .collect::<Vec<_>>();
+            if matching_executions.len() != 1 {
+                bail!(
+                    "check {} must bind exactly one workflow execution for run {workflow_run_id} attempt {check_run_attempt}, found {}",
+                    check.context,
+                    matching_executions.len()
+                );
+            }
+            let execution = matching_executions[0];
+            if execution.source_sha != check.source_sha {
+                bail!(
+                    "check {} source SHA differs from workflow execution",
+                    check.context
+                );
+            }
+            let workflow = workflows
+                .iter()
+                .find(|workflow| {
+                    workflow.path == execution.workflow_path
+                        && workflow.revision == execution.workflow_revision
+                        && workflow.source_sha == execution.source_sha
+                })
+                .ok_or_else(|| {
+                    anyhow!(
+                        "check {} workflow source/revision is not bound to inventory",
+                        check.context
+                    )
+                })?;
+            if !workflow.events.contains(&execution.event) {
+                bail!(
+                    "check {} event {} is not declared by workflow {}",
+                    check.context,
+                    execution.event,
+                    workflow.path
+                );
+            }
+            let matching_jobs = execution
+                .jobs
+                .iter()
+                .filter(|job| job.check_run_id == check.check_run_id)
+                .collect::<Vec<_>>();
+            if matching_jobs.len() != 1 {
+                bail!(
+                    "check {} must bind exactly one job for check {}, found {}",
+                    check.context,
+                    check.check_run_id,
+                    matching_jobs.len()
+                );
+            }
+            let job = matching_jobs[0];
+            if job.job_id != check_job_id
+                || job.run_id != execution.run_id
+                || job.run_attempt != execution.run_attempt
+                || job.source_sha.as_deref() != Some(check.source_sha.as_str())
+            {
+                bail!(
+                    "check {} job identity is not bound to workflow execution",
+                    check.context
+                );
+            }
+            let actual_checkout_sha = check
+                .checkout
+                .actual_checkout_sha()
+                .or_else(|| execution.checkout.actual_checkout_sha())
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("check {} lacks checkout identity", check.context))?;
+            if let Some(check_event) = &check.event
+                && check_event != &execution.event
+            {
+                bail!(
+                    "check {} event differs from workflow execution",
+                    check.context
+                );
+            }
+            G0CheckProvider::GithubActions {
+                workflow_run_id,
+                run_attempt: check_run_attempt,
+                job_id: check_job_id,
+                job_run_id: job.run_id,
+                job_run_attempt: job.run_attempt,
+                job_check_run_id: job.check_run_id,
+                job_source_sha: job
+                    .source_sha
+                    .clone()
+                    .ok_or_else(|| anyhow!("check {} job lacks source SHA", check.context))?,
+                job_html_url: job.source_url.clone(),
+                actual_checkout_sha,
+            }
+        }
+        (None, None, None) => G0CheckProvider::ExternalApp,
+        _ => bail!(
+            "check {} has partial Actions workflow/job association",
             check.context
-        );
-    }
-    let workflow = workflows
-        .iter()
-        .find(|workflow| {
-            workflow.path == execution.workflow_path
-                && workflow.revision == execution.workflow_revision
-                && workflow.source_sha == execution.source_sha
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "check {} workflow source/revision is not bound to inventory",
-                check.context
-            )
-        })?;
-    if !workflow.events.contains(&execution.event) {
-        bail!(
-            "check {} event {} is not declared by workflow {}",
-            check.context,
-            execution.event,
-            workflow.path
-        );
-    }
-    let matching_jobs = execution
-        .jobs
-        .iter()
-        .filter(|job| job.check_run_id == check.check_run_id)
-        .collect::<Vec<_>>();
-    if matching_jobs.len() != 1 {
-        bail!(
-            "check {} must bind exactly one job for check {}, found {}",
-            check.context,
-            check.check_run_id,
-            matching_jobs.len()
-        );
-    }
-    let job = matching_jobs[0];
-    if job.run_id != execution.run_id
-        || job.run_attempt != execution.run_attempt
-        || job.source_sha.as_deref() != Some(check.source_sha.as_str())
-    {
-        bail!(
-            "check {} job identity is not bound to workflow execution",
-            check.context
-        );
-    }
-    let job_id = job.job_id;
-    let actual_checkout_sha = check
-        .checkout
-        .actual_checkout_sha()
-        .or_else(|| execution.checkout.actual_checkout_sha())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("check {} lacks checkout identity", check.context))?;
-    let run_attempt = check_run_attempt;
-    if run_attempt != execution.run_attempt {
-        bail!(
-            "check {} attempt differs from workflow execution",
-            check.context
-        );
-    }
-    let event = execution.event.clone();
-    if let Some(check_event) = &check.event
-        && check_event != &event
-    {
-        bail!(
-            "check {} event differs from workflow execution",
-            check.context
-        );
-    }
+        ),
+    };
+    let event = check
+        .event
+        .clone()
+        .ok_or_else(|| anyhow!("check {} lacks event identity", check.context))?;
     Ok(G0CheckProducer {
         context: check.context.clone(),
         app_id,
+        app_slug,
+        provider,
+        api: G0ApiKind::Rest,
         check_suite_id,
         check_run_id: check.check_run_id,
-        workflow_run_id,
-        run_attempt,
-        job_id,
         source_sha: check.source_sha.clone(),
-        actual_checkout_sha,
         event,
         status: check.status.clone(),
         conclusion: check.conclusion.clone().unwrap_or_else(|| "".to_owned()),
-        source_url: check.source_url.clone(),
+        html_url: check.source_url.clone(),
         raw_object_refs: check.raw_object_refs.clone(),
     })
 }
@@ -3188,12 +3454,44 @@ fn utc_now() -> String {
 mod tests {
     use super::*;
     use crate::github_acquisition::live_collector::{
-        parse_artifact, LiveRuleset, LiveRulesetCheck, LiveSourceJob,
+        parse_artifact, LiveJob, LiveRuleset, LiveRulesetCheck, LiveSourceJob,
     };
-    use crate::github_acquisition::sha256_digest;
+    use crate::github_acquisition::raw_store::RawObjectFileStore;
+    use crate::github_acquisition::{sha256_digest, RawObject, RawObjectStore};
     use base64::engine::general_purpose::STANDARD as BASE64;
     use serde_json::Value;
-    use std::{env, fs, path::PathBuf};
+    use std::{
+        env, fs,
+        os::unix::ffi::OsStrExt,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static NEXT_LIVE_CAS_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    fn live_cas_fixture_root() -> PathBuf {
+        let id = NEXT_LIVE_CAS_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        env::current_dir()
+            .expect("find test working directory")
+            .join(".github-raw-store-fixtures")
+            .join(format!("velnor-g0-live-map-{}-{id}", std::process::id()))
+    }
+
+    fn remove_live_cas_fixture(root: &Path) {
+        let _ = fs::remove_dir_all(root);
+        let Some(name) = root.file_name() else {
+            return;
+        };
+        let mut marker = b".velnor-raw-anchor-".to_vec();
+        for byte in name.as_bytes() {
+            marker.extend(format!("{byte:02x}").bytes());
+        }
+        let marker = root
+            .parent()
+            .expect("fixture parent")
+            .join(String::from_utf8(marker).expect("marker name"));
+        let _ = fs::remove_file(marker);
+    }
 
     fn raw_object(kind: &str, raw_id: &str, value: serde_json::Value) -> RawObjectRef {
         let bytes = serde_json::to_vec(&value).expect("fixture JSON");
@@ -3438,6 +3736,80 @@ mod tests {
         let error = validate_mapper_identity_uniqueness(&live)
             .expect_err("duplicate workflow identity must fail closed");
         assert!(error.to_string().contains("workflow identity"));
+    }
+
+    #[test]
+    fn mapper_identity_allows_job_check_reference_overlap_and_workflow_revisions() {
+        let names = vec!["tailrocks/example".to_owned()];
+        let mut live = scope_live(&names);
+        let workflow = LiveWorkflow {
+            path: ".github/workflows/ci.yml".to_owned(),
+            revision: "c".repeat(40),
+            source_sha: "c".repeat(40),
+            source_url: "https://github.com/tailrocks/example/blob/c/ci.yml".to_owned(),
+            source_bytes_base64: BASE64.encode(b"on: [push]"),
+            source_raw_object_refs: Vec::new(),
+            events: vec!["push".to_owned()],
+            source_jobs: Vec::new(),
+            reusable_workflows: Vec::new(),
+            actions: Vec::new(),
+            scanners: Vec::new(),
+            raw_object_refs: Vec::new(),
+        };
+        let mut second_revision = workflow.clone();
+        second_revision.revision = "d".repeat(40);
+        second_revision.source_sha = "d".repeat(40);
+        live.repositories[0].workflows = vec![workflow, second_revision];
+
+        let checkout = LiveCheckoutObservation::api_head_only("c".repeat(40), Vec::new());
+        let job = LiveJob {
+            job_id: 11,
+            check_run_id: 77,
+            run_id: 88,
+            run_attempt: 1,
+            name: "ci".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            event: "push".to_owned(),
+            source_sha: Some("c".repeat(40)),
+            checkout: checkout.clone(),
+            source_url: "https://github.com/tailrocks/example/actions/runs/88/job/11".to_owned(),
+            raw_object_refs: Vec::new(),
+        };
+        live.repositories[0].main_executions = vec![LiveExecution {
+            run_id: 88,
+            run_attempt: 1,
+            workflow_path: ".github/workflows/ci.yml".to_owned(),
+            workflow_revision: "c".repeat(40),
+            event: "push".to_owned(),
+            source_sha: "c".repeat(40),
+            checkout,
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            source_url: "https://github.com/tailrocks/example/actions/runs/88".to_owned(),
+            jobs: vec![job],
+            raw_object_refs: Vec::new(),
+        }];
+        live.repositories[0].main_checks = vec![LiveCheck {
+            context: "ci".to_owned(),
+            app_id: Some("123".to_owned()),
+            app_slug: Some("github-actions".to_owned()),
+            check_suite_id: Some(99),
+            check_run_id: 77,
+            workflow_run_id: Some(88),
+            job_id: Some(11),
+            run_attempt: Some(1),
+            source_sha: "c".repeat(40),
+            checkout: LiveCheckoutObservation::api_head_only("c".repeat(40), Vec::new()),
+            event: Some("push".to_owned()),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            source_url: "https://github.com/tailrocks/example/runs/77".to_owned(),
+            raw_object_refs: Vec::new(),
+        }];
+
+        validate_mapper_identity_uniqueness(&live)
+            .expect("job-to-check reference overlap is not a duplicate entity");
     }
 
     #[test]
@@ -4336,6 +4708,253 @@ mod tests {
             &expected,
         )
         .is_err());
+    }
+
+    #[test]
+    fn artifact_identity_requires_query_page_and_list_body_binding() {
+        let digest = sha256_digest(b"zip-bytes");
+        let source_url = "https://api.github.com/repos/tailrocks/example/actions/artifacts/7/zip";
+        let list_body = serde_json::json!({
+            "total_count": 1,
+            "artifacts": [{
+                "id": 7,
+                "name": "dist",
+                "digest": digest,
+                "archive_download_url": source_url,
+                "workflow_run": {
+                    "id": 8,
+                    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+            }]
+        });
+        let list = raw_object("workflow_artifacts", "artifact-list-bound", list_body);
+        let archive = raw_bytes("workflow_artifacts", "artifact-archive-bound", b"zip-bytes");
+        let raw_values = [list.clone(), archive.clone()];
+        let raw_by_id = raw_values
+            .iter()
+            .map(|raw| (raw.raw_id.clone(), raw))
+            .collect::<BTreeMap<_, _>>();
+        let run_endpoint = "/repos/tailrocks/example/actions/runs/8/artifacts";
+        let archive_endpoint = "/repos/tailrocks/example/actions/artifacts/7/zip";
+        let mut list_request = rest_request(&list, run_endpoint);
+        list_request.query_base64 = BASE64.encode(b"per_page\x00100\x00");
+        list_request.query_sha256 = Some(sha256_digest(b"per_page\x00100\x00"));
+        let mut archive_request = rest_request(&archive, archive_endpoint);
+        archive_request.query_base64 = BASE64.encode(b"");
+        archive_request.query_sha256 = Some(sha256_digest(b""));
+        archive_request.page.per_page = Some(1);
+        let requests = [list_request.clone(), archive_request.clone()];
+        let request_by_id = requests
+            .iter()
+            .map(|request| (request.request_id.clone(), request))
+            .collect::<BTreeMap<_, _>>();
+        let artifact = LiveArtifact {
+            artifact_id: 7,
+            run_id: 8,
+            run_attempt: None,
+            run_head_sha: "a".repeat(40),
+            name: "dist".to_owned(),
+            digest,
+            expired: Some(false),
+            source_url: source_url.to_owned(),
+            raw_object_refs: vec![list.raw_id.clone(), archive.raw_id.clone()],
+        };
+        validate_artifact_api_bindings(&artifact, "tailrocks/example", &raw_by_id, &request_by_id)
+            .expect("artifact list/archive provenance");
+
+        let mut wrong_query = list_request;
+        wrong_query.query_base64 = BASE64.encode(b"per_page\x0050\x00");
+        wrong_query.query_sha256 = Some(sha256_digest(b"per_page\x0050\x00"));
+        let wrong_requests = [wrong_query, archive_request];
+        let wrong_by_id = wrong_requests
+            .iter()
+            .map(|request| (request.request_id.clone(), request))
+            .collect::<BTreeMap<_, _>>();
+        assert!(validate_artifact_api_bindings(
+            &artifact,
+            "tailrocks/example",
+            &raw_by_id,
+            &wrong_by_id,
+        )
+        .is_err());
+    }
+
+    fn checker_raw_reference(reference: &RawObjectRef) -> G0RawObjectRef {
+        G0RawObjectRef {
+            raw_id: reference.raw_id.clone(),
+            request_id: reference.request_id.clone(),
+            object_kind: reference.object_kind.clone(),
+            canonicalization: reference.canonicalization.clone(),
+            sha256: reference.sha256.clone(),
+            byte_length: reference.byte_length,
+            bytes_base64: reference.bytes_base64.clone(),
+            media_type: reference.media_type.clone(),
+            storage_ref: reference.storage_ref.clone(),
+            original_sha256: reference.original_sha256.clone(),
+            original_byte_length: reference.original_byte_length,
+            original_storage_ref: reference.original_storage_ref.clone(),
+        }
+    }
+
+    #[test]
+    #[ignore = "requires frozen real API corpus and corrected check-suite supplement"]
+    fn corrected_real_corpus_traverses_cas_parser_mapper_and_preserves_negatives() {
+        let corpus =
+            PathBuf::from(env::var("VELNOR_REAL_API_CORPUS").expect("set VELNOR_REAL_API_CORPUS"));
+        let corrected = PathBuf::from(
+            env::var("VELNOR_CORRECTED_FIXTURE").expect("set VELNOR_CORRECTED_FIXTURE"),
+        );
+        let corrected_manifest =
+            fs::read(corrected.join("manifest.json")).expect("read corrected fixture manifest");
+        assert_eq!(
+            sha256_digest(&corrected_manifest),
+            "sha256:fea65b61ff1668ff58762066b207ac1c9534452d328080f1f0680e7cb571447e",
+            "corrected fixture identity changed"
+        );
+        let relationship: Value = serde_json::from_slice(
+            &fs::read(corrected.join("relationship-report.json"))
+                .expect("read relationship report"),
+        )
+        .expect("parse relationship report");
+        let raw_source_root = PathBuf::from(
+            relationship["raw_source_root"]
+                .as_str()
+                .expect("corrected fixture raw source root"),
+        );
+
+        let artifact_body_path = corpus.join("raw/velnor/run-35493166478/artifacts/page-0001.body");
+        let artifact_body = fs::read(&artifact_body_path).expect("read real artifact list");
+        let root = live_cas_fixture_root();
+        fs::create_dir_all(root.parent().expect("fixture parent")).expect("create fixture parent");
+        fs::create_dir_all(&root).expect("create fixture root");
+        let mut store = RawObjectFileStore::new(&root).expect("open fixture CAS");
+        let stored = store
+            .store(RawObject {
+                raw_id: "real-corpus-artifacts".to_owned(),
+                request_id: "real-corpus-artifacts-request".to_owned(),
+                object_kind: "workflow_artifacts".to_owned(),
+                canonicalization: "raw-bytes-v1".to_owned(),
+                media_type: "application/json".to_owned(),
+                original_bytes: artifact_body.clone(),
+                bytes: artifact_body.clone(),
+            })
+            .expect("store exact artifact response bytes");
+        drop(store);
+
+        let checker_raw = checker_raw_reference(&stored);
+        let adapter =
+            crate::github_acquisition::g0_raw_store_adapter::VerifiedRawStoreAdapter::open(&root)
+                .expect("open verified producer adapter");
+        let handle =
+            crate::live_authority::VerifiedRawStoreHandle::from_producer(Box::new(adapter));
+        let reopened = handle
+            .read_g0_raw(&checker_raw)
+            .expect("checker seam reopens exact CAS bytes");
+        assert_eq!(reopened, artifact_body);
+        let artifacts_json: Value = serde_json::from_slice(&reopened).expect("parse artifact list");
+        let artifact_value = artifacts_json["artifacts"]
+            .as_array()
+            .expect("artifact array")
+            .first()
+            .expect("one real artifact")
+            .clone();
+        let repository: Value = serde_json::from_slice(
+            &fs::read(corpus.join("raw/metadata/tailrocks-velnor/repository.body"))
+                .expect("read repository body"),
+        )
+        .expect("parse repository body");
+        let run: Value = serde_json::from_slice(
+            &fs::read(corpus.join("raw/velnor/run-35493166478/run.body"))
+                .expect("read workflow run body"),
+        )
+        .expect("parse workflow run body");
+        let artifact = parse_artifact(
+            &artifact_value,
+            "tailrocks/velnor",
+            repository["id"].as_u64().expect("repository ID"),
+            run["id"].as_u64().expect("run ID"),
+            run["head_sha"].as_str().expect("run head SHA"),
+            vec![stored.raw_id.clone()],
+        )
+        .expect("strict provider artifact parser");
+        let error = map_artifact_observation(&artifact, "tailrocks/velnor")
+            .expect_err("run-scoped artifact without attempt remains unknown");
+        assert!(error.to_string().contains("unknown run attempt"));
+
+        let checks_body: Value = serde_json::from_slice(
+            &fs::read(corpus.join(
+                "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs/page-0001.body",
+            ))
+            .expect("read real check-run page"),
+        )
+        .expect("parse real check-run page");
+        let failed_check = checks_body["check_runs"]
+            .as_array()
+            .expect("check-run array")
+            .iter()
+            .find(|check| check["conclusion"] == "failure")
+            .expect("real failed check");
+        let failed_source_sha = failed_check["head_sha"].as_str().expect("failed check SHA");
+        let failed_suite_id = failed_check["check_suite"]["id"]
+            .as_u64()
+            .expect("failed check suite ID");
+        let check_error = crate::github_acquisition::live_collector::parse_check(
+            failed_check,
+            "tailrocks/velnor",
+            failed_source_sha,
+            vec!["real-corpus-check".to_owned()],
+            failed_suite_id,
+        )
+        .expect_err("incomplete failed check identity remains unknown");
+        assert!(check_error.to_string().contains("repository identity"));
+
+        for (repository_name, suite_id, expected_status, expected_conclusion) in [
+            (
+                "jackin-project/homebrew-tap",
+                96059348120_u64,
+                "queued",
+                None,
+            ),
+            (
+                "jackin-project/homebrew-tap",
+                96059348227_u64,
+                "queued",
+                None,
+            ),
+            (
+                "tailrocks/velnor",
+                96108224766_u64,
+                "completed",
+                Some("failure"),
+            ),
+        ] {
+            let suite_path = if repository_name == "tailrocks/velnor" {
+                raw_source_root.join(format!("raw/check-suites/velnor/suite-{suite_id}.body"))
+            } else {
+                raw_source_root.join(format!(
+                    "raw/check-suites/homebrew-tap/suite-{suite_id}.body"
+                ))
+            };
+            let suite: Value =
+                serde_json::from_slice(&fs::read(&suite_path).expect("read corrected suite body"))
+                    .expect("parse corrected suite body");
+            let source_sha = suite["head_sha"].as_str().expect("suite head SHA");
+            crate::github_acquisition::live_collector::validate_check_suite(
+                &suite,
+                repository_name,
+                source_sha,
+                suite_id,
+            )
+            .expect("strict provider suite parser");
+            assert_eq!(suite["repository"]["full_name"], repository_name);
+            assert_eq!(
+                suite["url"],
+                format!("https://api.github.com/repos/{repository_name}/check-suites/{suite_id}")
+            );
+            assert_eq!(suite["status"], expected_status);
+            assert_eq!(suite["conclusion"].as_str(), expected_conclusion);
+        }
+        remove_live_cas_fixture(&root);
     }
 
     #[test]
