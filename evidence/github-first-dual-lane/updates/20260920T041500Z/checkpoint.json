@@ -1,0 +1,678 @@
+{
+  "$schema": "velnor.external-evidence-update.v1",
+  "attestation": "none",
+  "captured_at_utc": "2026-09-20T04:18:47Z",
+  "excluded": [
+    "active/current/live/monitor/push/session ledgers and mutable writer snapshots",
+    "raw logs, generated target/build trees, binaries, caches, credentials, clones, harness worktrees, and live fixture trees",
+    "intermediate 032616Z/033317Z/034032Z inventories, pr-reread.json, synthetic normalizer fixture/output/result, and duplicate manifest.ndjson",
+    "v8 hostile fixtures, v9 executable fixture, authority-separation payloads, and Python caches; selected audit/DAG scripts are retained only as frozen provenance",
+    "G0/skills-adapter/integration-map.md because it is moving and current integration-map bytes drifted after the prior capture",
+    "no independent docs924 review artifact was present in the source evidence root at cutoff; no substitute was invented",
+    "symlinks: none selected; no symlink dereferenced"
+  ],
+  "gate_statement": "This append-only evidence snapshot records stable external reports, frozen audit artifacts, and inventory-only API evidence. It establishes no G0, G1, G2, G3, G4, G5, G6, or G7 success.",
+  "gate_status": "not-evaluated",
+  "included_entry_count_before_manifests": 89,
+  "included_file_count_before_manifests": 89,
+  "included_groups": {
+    "G0": 74,
+    "G1": 15
+  },
+  "included_paths": [
+    "G0/action-review/review-71e97129.md",
+    "G0/action-review/review-9edac5e9.md",
+    "G0/checker-v2-review/4f453f91-g3-raw-store-rereview.md",
+    "G0/distribution/schema2-handoff-0712.md",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-pr-reread-final.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-pr-reread-final.md",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/001-jackin-project__homebrew-tap-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/002-jackin-project__jackin-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/003-jackin-project__jackin-agent-smith-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/004-jackin-project__jackin-role-action-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/005-jackin-project__jackin-sentinel-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/006-jackin-project__jackin-the-architect-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/007-tailrocks__holla-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/008-tailrocks__holla-apt-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/009-tailrocks__homebrew-holla-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/010-tailrocks__homebrew-parallax-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/011-tailrocks__homebrew-ruxel-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/012-tailrocks__homebrew-tablerock-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/013-tailrocks__homebrew-velnor-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/014-tailrocks__parallax-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/015-tailrocks__parallax-telemetry-playground-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/016-tailrocks__pg-bigdecimal-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/017-tailrocks__ruxel-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/018-tailrocks__schemalane-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/019-tailrocks__tablerock-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/020-tailrocks__tailrocks-code-quality-skills-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/021-tailrocks__tailrocks-macos-skills-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/022-tailrocks__tailrocks-open-source-skills-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/023-tailrocks__tailrocks-pull-request-skills-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/024-tailrocks__tailrocks-roadmap-skills-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/025-tailrocks__tailrocks-rust-skills-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/026-tailrocks__tailrocks-skill-authoring-skills-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/027-tailrocks__tailrocks-typescript-skills-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/028-tailrocks__termpane-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/029-tailrocks__termrock-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/030-tailrocks__tracing-request-level-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/031-tailrocks__velnor-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/032-tailrocks__velnor-apt-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/001-jackin-project__homebrew-tap-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/002-jackin-project__jackin-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/003-jackin-project__jackin-agent-smith-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/004-jackin-project__jackin-role-action-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/005-jackin-project__jackin-sentinel-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/006-jackin-project__jackin-the-architect-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/007-tailrocks__holla-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/008-tailrocks__holla-apt-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/009-tailrocks__homebrew-holla-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/010-tailrocks__homebrew-parallax-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/011-tailrocks__homebrew-ruxel-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/012-tailrocks__homebrew-tablerock-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/013-tailrocks__homebrew-velnor-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/014-tailrocks__parallax-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/015-tailrocks__parallax-telemetry-playground-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/016-tailrocks__pg-bigdecimal-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/017-tailrocks__ruxel-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/018-tailrocks__schemalane-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/019-tailrocks__tablerock-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/020-tailrocks__tailrocks-code-quality-skills-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/021-tailrocks__tailrocks-macos-skills-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/022-tailrocks__tailrocks-open-source-skills-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/023-tailrocks__tailrocks-pull-request-skills-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/024-tailrocks__tailrocks-roadmap-skills-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/025-tailrocks__tailrocks-rust-skills-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/026-tailrocks__tailrocks-skill-authoring-skills-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/027-tailrocks__tailrocks-typescript-skills-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/028-tailrocks__termpane-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/029-tailrocks__termrock-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/030-tailrocks__tracing-request-level-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/031-tailrocks__velnor-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/032-tailrocks__velnor-apt-page-1.json",
+    "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/manifest.json",
+    "G0/homebrew-review/bdf6fdb2-exact-negative-review.md",
+    "G0/native-review/d33cf621-g3-native-product-review.md",
+    "G0/runtime/live-collector-ccd2144-review.md",
+    "G1/bootstrap/source-review-e62a6ee24802e85530c0930c08281dca68ddb577.md",
+    "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v8.json",
+    "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v8.md",
+    "G1/bootstrap-transition/v8-contract-audit-report.md",
+    "G1/bootstrap-transition/v8-contract-audit-results.json",
+    "G1/bootstrap-transition/v8-independent-authority-transition-review-2026-09-20.md",
+    "G1/bootstrap-transition/v8-independent-contract-audit-2026-09-20/canonical-dag/REPORT.md",
+    "G1/bootstrap-transition/v8-independent-contract-audit-2026-09-20/canonical-dag/canonical-field-dag.json",
+    "G1/bootstrap-transition/v8-independent-contract-audit-2026-09-20/canonical-dag/canonical-preimage-negatives.json",
+    "G1/bootstrap-transition/v8-independent-contract-audit-2026-09-20/canonical-dag/derive_v8_canonical_dag.py",
+    "G1/bootstrap-transition/v8_contract_audit.py",
+    "G1/reviews/pr963-b156-independent.md",
+    "G1/reviews/pr963-f46-independent.md",
+    "G1/scan-integrity/source-review-9d13bbc9.md",
+    "G1/scan-integrity/source-review-cec04dd1.md"
+  ],
+  "included_source_bytes": 5000169,
+  "integrity": {
+    "inventory": "INVENTORY.tsv",
+    "manifest_scope": "All regular files in this update except SHA256SUMS itself.",
+    "sha256_manifest": "SHA256SUMS",
+    "source_hash_scope": "All copied source files with bytes, source mtime epoch, and SHA-256 in INVENTORY.tsv.",
+    "source_destination_reconciliation": "All 89 selected files matched byte-for-byte and SHA-256 after copy.",
+    "source_stability_reconciliation": "Pre-copy and bounded post-observation source hashes and sizes matched.",
+    "json_parse_count": 70,
+    "secret_scan_matches": 0,
+    "symlink_policy": "No symlinks selected; no symlink dereferenced."
+  },
+  "new_cutoff_utc": "2026-09-20T04:18:47Z",
+  "original_evidence_root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence",
+  "parent_checkpoint_commit": "ec9fc3c9a000d99086089fb1a3f4f038460789f8",
+  "prior_cutoff_utc": "2026-09-20T03:09:05Z",
+  "publication_owner": "/root",
+  "records_owner": "/root/g0_records",
+  "ref": "refs/heads/evidence/github-first-dual-lane-20260919T181508Z",
+  "remote_before_copy": "ec9fc3c9a000d99086089fb1a3f4f038460789f8",
+  "repository": "tailrocks/velnor",
+  "selection_notes": [
+    "Successor 035717Z inventory is retained as inventory-only evidence: exact32 repositories, final inventory JSON/report, 64 initial/final API page responses, and the raw manifest.json; independent reread reports 64/64 raw rehash and normalized equality plus stable open/head/base/merge identities.",
+    "Frozen v8 authority plan, v8 contract-audit report/results, independent transition review, and canonical-DAG report/JSON/negative corpus/scripts were copied byte-for-byte.",
+    "Latest stable exact read-only reviews captured: action 9edac5e9/71e97129, raw-store 4f453f91, APT schema2 0712, checkout-proof serde ccd2144, native d33cf621, Homebrew bdf6fdb2, bootstrap e62a6ee2, scan-integrity cec04dd1/9d13bbc9, and PR963 f46/b156.",
+    "The records branch has a 92477f80 docs commit, but no independent docs924 review artifact was available under the source evidence root at capture; that absence is recorded rather than inferred as approval.",
+    "Reports preserve their own reject/block/conditional/pass dispositions; no disposition transfers across revisions and no report is treated as gate authority."
+  ],
+  "source_base_revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+  "source_inventory": [
+    {
+      "bytes": 3863,
+      "path": "G0/action-review/review-71e97129.md",
+      "sha256": "4864ee9d8141e82b876b287752e16eea3fec507cdceb163f020a66bb9f71a969",
+      "source_mtime_epoch": 1789876320
+    },
+    {
+      "bytes": 4658,
+      "path": "G0/action-review/review-9edac5e9.md",
+      "sha256": "9d7200838d21ab74c9d9aee73e605de6169450297aa63f78219119a33c04a92e",
+      "source_mtime_epoch": 1789874638
+    },
+    {
+      "bytes": 9003,
+      "path": "G0/checker-v2-review/4f453f91-g3-raw-store-rereview.md",
+      "sha256": "67b022288a5aecc8e356a7b6aaad3b467e891f6258426d585e07abced7ea217a",
+      "source_mtime_epoch": 1789874657
+    },
+    {
+      "bytes": 17270,
+      "path": "G0/distribution/schema2-handoff-0712.md",
+      "sha256": "825ca1983319e57d343d042e3cfd0f6de4877351b29dd30ad0a24f8ab1181271",
+      "source_mtime_epoch": 1789876005
+    },
+    {
+      "bytes": 508757,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-pr-reread-final.json",
+      "sha256": "1c844f5c09a6d9d6a5c24f1b36c410a7190eb63a2bc6d2893268e469d9839dee",
+      "source_mtime_epoch": 1789876973
+    },
+    {
+      "bytes": 4229,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-pr-reread-final.md",
+      "sha256": "4134cb7050a1a2a1699cc6784a6797133182c14929e13e5d1527094a6745c780",
+      "source_mtime_epoch": 1789877019
+    },
+    {
+      "bytes": 16730,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/001-jackin-project__homebrew-tap-page-1.json",
+      "sha256": "fde320ff4085465b48e6b40b6dc4106af2962fa246b90beb94c07989c08acb50",
+      "source_mtime_epoch": 1789876643
+    },
+    {
+      "bytes": 90707,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/002-jackin-project__jackin-page-1.json",
+      "sha256": "a52763f903e707acd0ae8e41303b8a245e27d436aac56dcde12156079e28c3a8",
+      "source_mtime_epoch": 1789876649
+    },
+    {
+      "bytes": 260496,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/003-jackin-project__jackin-agent-smith-page-1.json",
+      "sha256": "b9d8cfdbf7cd67a3f1f2891a561b6612f6ae4883db12e77884f09e7c673c0171",
+      "source_mtime_epoch": 1789876655
+    },
+    {
+      "bytes": 207717,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/004-jackin-project__jackin-role-action-page-1.json",
+      "sha256": "a7f1603613a0b139d51b88d3f3c8356154c622f1f0ab874593f3d5ca49a8fe24",
+      "source_mtime_epoch": 1789876661
+    },
+    {
+      "bytes": 203937,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/005-jackin-project__jackin-sentinel-page-1.json",
+      "sha256": "2a1fcd05540646b57a966ed7ad434713e2367216074b15ad6ca6fb76ff6e2256",
+      "source_mtime_epoch": 1789876666
+    },
+    {
+      "bytes": 579279,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/006-jackin-project__jackin-the-architect-page-1.json",
+      "sha256": "561a819d4793e7ada848a5b4d6a538cc3ce98ef0e48a1608411bce98ca59f91a",
+      "source_mtime_epoch": 1789876674
+    },
+    {
+      "bytes": 167659,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/007-tailrocks__holla-page-1.json",
+      "sha256": "1cf2d77fdaad3284df4d46d5892905fce4c8954eac99a86983bd2ced6fc77c48",
+      "source_mtime_epoch": 1789876680
+    },
+    {
+      "bytes": 96160,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/008-tailrocks__holla-apt-page-1.json",
+      "sha256": "27e561249d0650920fd72a72e077338941e479e0fe2334470e12039a3c7f22cd",
+      "source_mtime_epoch": 1789876686
+    },
+    {
+      "bytes": 58658,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/009-tailrocks__homebrew-holla-page-1.json",
+      "sha256": "3934f721b7e1abcd71cbb838babbfa8e96a0e833bef5e10454c22a683cda9481",
+      "source_mtime_epoch": 1789876692
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/010-tailrocks__homebrew-parallax-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876697
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/011-tailrocks__homebrew-ruxel-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876703
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/012-tailrocks__homebrew-tablerock-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876708
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/013-tailrocks__homebrew-velnor-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876713
+    },
+    {
+      "bytes": 66537,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/014-tailrocks__parallax-page-1.json",
+      "sha256": "edcd1f9826a0e11fe8bae05ad5870dbc5be91f6bef33baf7629a4f592bda78eb",
+      "source_mtime_epoch": 1789876720
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/015-tailrocks__parallax-telemetry-playground-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876726
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/016-tailrocks__pg-bigdecimal-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876732
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/017-tailrocks__ruxel-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876739
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/018-tailrocks__schemalane-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876745
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/019-tailrocks__tablerock-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876751
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/020-tailrocks__tailrocks-code-quality-skills-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876757
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/021-tailrocks__tailrocks-macos-skills-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876762
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/022-tailrocks__tailrocks-open-source-skills-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876769
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/023-tailrocks__tailrocks-pull-request-skills-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876775
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/024-tailrocks__tailrocks-roadmap-skills-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876782
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/025-tailrocks__tailrocks-rust-skills-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876789
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/026-tailrocks__tailrocks-skill-authoring-skills-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876797
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/027-tailrocks__tailrocks-typescript-skills-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876805
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/028-tailrocks__termpane-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876812
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/029-tailrocks__termrock-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876819
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/030-tailrocks__tracing-request-level-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876825
+    },
+    {
+      "bytes": 172548,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/031-tailrocks__velnor-page-1.json",
+      "sha256": "58020f49c725b86ee97b405a056eafb0016c260a32a4102142a82d1e0f158c72",
+      "source_mtime_epoch": 1789876832
+    },
+    {
+      "bytes": 67846,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/final/032-tailrocks__velnor-apt-page-1.json",
+      "sha256": "533ef58fbf1519fe14d9f136f296241486c681b2be8e804d6eeee6b87dbc227f",
+      "source_mtime_epoch": 1789876838
+    },
+    {
+      "bytes": 16730,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/001-jackin-project__homebrew-tap-page-1.json",
+      "sha256": "fde320ff4085465b48e6b40b6dc4106af2962fa246b90beb94c07989c08acb50",
+      "source_mtime_epoch": 1789876641
+    },
+    {
+      "bytes": 90707,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/002-jackin-project__jackin-page-1.json",
+      "sha256": "a52763f903e707acd0ae8e41303b8a245e27d436aac56dcde12156079e28c3a8",
+      "source_mtime_epoch": 1789876646
+    },
+    {
+      "bytes": 260496,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/003-jackin-project__jackin-agent-smith-page-1.json",
+      "sha256": "b9d8cfdbf7cd67a3f1f2891a561b6612f6ae4883db12e77884f09e7c673c0171",
+      "source_mtime_epoch": 1789876652
+    },
+    {
+      "bytes": 207717,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/004-jackin-project__jackin-role-action-page-1.json",
+      "sha256": "a7f1603613a0b139d51b88d3f3c8356154c622f1f0ab874593f3d5ca49a8fe24",
+      "source_mtime_epoch": 1789876658
+    },
+    {
+      "bytes": 203937,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/005-jackin-project__jackin-sentinel-page-1.json",
+      "sha256": "2a1fcd05540646b57a966ed7ad434713e2367216074b15ad6ca6fb76ff6e2256",
+      "source_mtime_epoch": 1789876664
+    },
+    {
+      "bytes": 579279,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/006-jackin-project__jackin-the-architect-page-1.json",
+      "sha256": "561a819d4793e7ada848a5b4d6a538cc3ce98ef0e48a1608411bce98ca59f91a",
+      "source_mtime_epoch": 1789876670
+    },
+    {
+      "bytes": 167659,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/007-tailrocks__holla-page-1.json",
+      "sha256": "1cf2d77fdaad3284df4d46d5892905fce4c8954eac99a86983bd2ced6fc77c48",
+      "source_mtime_epoch": 1789876677
+    },
+    {
+      "bytes": 96160,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/008-tailrocks__holla-apt-page-1.json",
+      "sha256": "27e561249d0650920fd72a72e077338941e479e0fe2334470e12039a3c7f22cd",
+      "source_mtime_epoch": 1789876683
+    },
+    {
+      "bytes": 58658,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/009-tailrocks__homebrew-holla-page-1.json",
+      "sha256": "3934f721b7e1abcd71cbb838babbfa8e96a0e833bef5e10454c22a683cda9481",
+      "source_mtime_epoch": 1789876689
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/010-tailrocks__homebrew-parallax-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876694
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/011-tailrocks__homebrew-ruxel-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876700
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/012-tailrocks__homebrew-tablerock-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876706
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/013-tailrocks__homebrew-velnor-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876711
+    },
+    {
+      "bytes": 66537,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/014-tailrocks__parallax-page-1.json",
+      "sha256": "edcd1f9826a0e11fe8bae05ad5870dbc5be91f6bef33baf7629a4f592bda78eb",
+      "source_mtime_epoch": 1789876717
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/015-tailrocks__parallax-telemetry-playground-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876722
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/016-tailrocks__pg-bigdecimal-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876729
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/017-tailrocks__ruxel-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876735
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/018-tailrocks__schemalane-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876742
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/019-tailrocks__tablerock-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876748
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/020-tailrocks__tailrocks-code-quality-skills-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876754
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/021-tailrocks__tailrocks-macos-skills-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876760
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/022-tailrocks__tailrocks-open-source-skills-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876766
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/023-tailrocks__tailrocks-pull-request-skills-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876772
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/024-tailrocks__tailrocks-roadmap-skills-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876779
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/025-tailrocks__tailrocks-rust-skills-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876786
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/026-tailrocks__tailrocks-skill-authoring-skills-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876794
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/027-tailrocks__tailrocks-typescript-skills-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876801
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/028-tailrocks__termpane-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876809
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/029-tailrocks__termrock-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876816
+    },
+    {
+      "bytes": 2,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/030-tailrocks__tracing-request-level-page-1.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_mtime_epoch": 1789876822
+    },
+    {
+      "bytes": 172548,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/031-tailrocks__velnor-page-1.json",
+      "sha256": "58020f49c725b86ee97b405a056eafb0016c260a32a4102142a82d1e0f158c72",
+      "source_mtime_epoch": 1789876828
+    },
+    {
+      "bytes": 67846,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/initial/032-tailrocks__velnor-apt-page-1.json",
+      "sha256": "533ef58fbf1519fe14d9f136f296241486c681b2be8e804d6eeee6b87dbc227f",
+      "source_mtime_epoch": 1789876835
+    },
+    {
+      "bytes": 37403,
+      "path": "G0/fleet/live-default-branches-open-prs-20260920T035717Z-raw-pages/manifest.json",
+      "sha256": "88d150e78af354645eac07d31cede2163cb80e75a2ff86e9ef78efa46d3ed30a",
+      "source_mtime_epoch": 1789876839
+    },
+    {
+      "bytes": 4223,
+      "path": "G0/homebrew-review/bdf6fdb2-exact-negative-review.md",
+      "sha256": "98da741eb94085c3fe9da99873ab68b91ff2bb62c6094d37f247fd3c9259396b",
+      "source_mtime_epoch": 1789876387
+    },
+    {
+      "bytes": 5823,
+      "path": "G0/native-review/d33cf621-g3-native-product-review.md",
+      "sha256": "060b18db5ba9c8c33cbc815ea6b4bdd70ecb8952f4c53de85b40bdc16f8a5d3a",
+      "source_mtime_epoch": 1789875535
+    },
+    {
+      "bytes": 3833,
+      "path": "G0/runtime/live-collector-ccd2144-review.md",
+      "sha256": "62db87a4ae7953759eb1aa4a76b5cc8e77507083918d409bd5f8a0f1a1bb1c80",
+      "source_mtime_epoch": 1789875326
+    },
+    {
+      "bytes": 5622,
+      "path": "G1/bootstrap/source-review-e62a6ee24802e85530c0930c08281dca68ddb577.md",
+      "sha256": "752c30ff900a09bd5dd6328030c76cb6ef147fe20466cc07f7f48bbbed599017",
+      "source_mtime_epoch": 1789875497
+    },
+    {
+      "bytes": 180590,
+      "path": "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v8.json",
+      "sha256": "87a5896eb8cf75e53b49f8eacb61226315a9f79c574af3078fdc34390252c321",
+      "source_mtime_epoch": 1789875463
+    },
+    {
+      "bytes": 22002,
+      "path": "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v8.md",
+      "sha256": "503a564afcbe157e607215c0549480b2cade36525b6f3aeb41198418c6add639",
+      "source_mtime_epoch": 1789875454
+    },
+    {
+      "bytes": 2512,
+      "path": "G1/bootstrap-transition/v8-contract-audit-report.md",
+      "sha256": "9100a2323635f6f299238773dfc49aeaddd48be46309d7a01064f0532b215f5f",
+      "source_mtime_epoch": 1789875604
+    },
+    {
+      "bytes": 17880,
+      "path": "G1/bootstrap-transition/v8-contract-audit-results.json",
+      "sha256": "2e2764bdd84d6e5fbbf95046ed9e4391046f2ce26f45424325461dc9aaacb96c",
+      "source_mtime_epoch": 1789875582
+    },
+    {
+      "bytes": 10818,
+      "path": "G1/bootstrap-transition/v8-independent-authority-transition-review-2026-09-20.md",
+      "sha256": "926859b2080ab76614e46fce1c07dd2ef8debb62cdb9732bf62ac981b9d85076",
+      "source_mtime_epoch": 1789876347
+    },
+    {
+      "bytes": 5075,
+      "path": "G1/bootstrap-transition/v8-independent-contract-audit-2026-09-20/canonical-dag/REPORT.md",
+      "sha256": "b5de0e97c61d5dad18cbe59985cef8685d05c94154fce32bea90d7381aada8a0",
+      "source_mtime_epoch": 1789876740
+    },
+    {
+      "bytes": 112259,
+      "path": "G1/bootstrap-transition/v8-independent-contract-audit-2026-09-20/canonical-dag/canonical-field-dag.json",
+      "sha256": "aa2f86a91cb0b8458ec8e101c3ad99859514c146bcaead655db9b041bddbbf5d",
+      "source_mtime_epoch": 1789876740
+    },
+    {
+      "bytes": 3969,
+      "path": "G1/bootstrap-transition/v8-independent-contract-audit-2026-09-20/canonical-dag/canonical-preimage-negatives.json",
+      "sha256": "cf180c341af91980662ef560500c18798b60f284eb22b10f1438e46dbd828ebf",
+      "source_mtime_epoch": 1789876740
+    },
+    {
+      "bytes": 26569,
+      "path": "G1/bootstrap-transition/v8-independent-contract-audit-2026-09-20/canonical-dag/derive_v8_canonical_dag.py",
+      "sha256": "f0a43efee143c9f0788a81c055a77a689f2210fdbda66f60efc3de775548d8a0",
+      "source_mtime_epoch": 1789876725
+    },
+    {
+      "bytes": 11099,
+      "path": "G1/bootstrap-transition/v8_contract_audit.py",
+      "sha256": "d26fc8ce0d1a8d971c3ce88a90e55531466ec93c9698adb36162574618d4d742",
+      "source_mtime_epoch": 1789875569
+    },
+    {
+      "bytes": 6168,
+      "path": "G1/reviews/pr963-b156-independent.md",
+      "sha256": "c73db471d6ab411f26a52b83a34fba94de130b8d414165c14ec58ca2bd6116e3",
+      "source_mtime_epoch": 1789876715
+    },
+    {
+      "bytes": 6140,
+      "path": "G1/reviews/pr963-f46-independent.md",
+      "sha256": "e5f3eef20bad7fe435d32118f8f52d3402ce4e3ce0fe2f5e9c963d91fcc1c3ba",
+      "source_mtime_epoch": 1789874383
+    },
+    {
+      "bytes": 6983,
+      "path": "G1/scan-integrity/source-review-9d13bbc9.md",
+      "sha256": "607e46847a2ba0aaf978666dac52f9ac90c0626efa4f3239ff2e8bf1319de88c",
+      "source_mtime_epoch": 1789877352
+    },
+    {
+      "bytes": 6793,
+      "path": "G1/scan-integrity/source-review-cec04dd1.md",
+      "sha256": "d7120650a06821438abf3257bcdeeea128d934d7dd8d16c47d86de23baa2e812",
+      "source_mtime_epoch": 1789874980
+    }
+  ]
+}

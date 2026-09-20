@@ -1,0 +1,111 @@
+{
+  "execution_status": "contract-only-unexecuted",
+  "fixtures": [
+    {
+      "derived_result": "reject",
+      "execution_status": "contract-only-unexecuted",
+      "expected": "reject",
+      "id": "NEG-S5-release-asset-in-S4",
+      "mutation": "add release_asset_id to S4 binding preimage",
+      "rule": "S5 value is unavailable at S4"
+    },
+    {
+      "derived_result": "reject",
+      "execution_status": "contract-only-unexecuted",
+      "expected": "reject",
+      "id": "NEG-S4-binding-record-id",
+      "mutation": "add binding_record_artifact_id to binding core",
+      "rule": "S4 binding-record output is exact own/later transport"
+    },
+    {
+      "derived_result": "reject",
+      "execution_status": "contract-only-unexecuted",
+      "expected": "reject",
+      "id": "NEG-S7-provider-fields-record-upload",
+      "mutation": "claim record-upload produced provider/called identities",
+      "rule": "record-upload has no provider/API source"
+    },
+    {
+      "derived_result": "reject",
+      "execution_status": "contract-only-unexecuted",
+      "expected": "reject",
+      "id": "NEG-S7-lineage-gap",
+      "mutation": "remove 16 S7 fields from lineage",
+      "rule": "every produced field requires explicit edge"
+    },
+    {
+      "derived_result": "reject",
+      "execution_status": "contract-only-unexecuted",
+      "expected": "reject",
+      "id": "NEG-manifest-flag-before-S4",
+      "mutation": "produce manifest_signed_after_draft_id at S3",
+      "rule": "manifest sign occurs at S4"
+    },
+    {
+      "derived_result": "reject",
+      "execution_status": "contract-only-unexecuted",
+      "expected": "reject",
+      "id": "NEG-tag-immutable-before-publish",
+      "mutation": "produce tag_immutable at S3",
+      "rule": "publish/readback occurs at S5"
+    },
+    {
+      "derived_result": "reject",
+      "execution_status": "contract-only-unexecuted",
+      "expected": "reject",
+      "id": "NEG-raw-REST-archive-at-S1",
+      "mutation": "bind raw REST archive digest to build self-report",
+      "rule": "raw archive is read at S2"
+    },
+    {
+      "derived_result": "reject",
+      "execution_status": "contract-only-unexecuted",
+      "expected": "reject",
+      "id": "NEG-lineage-label-reversal",
+      "mutation": "read field_lineage_edges from_job as producer",
+      "rule": "all seven labels reverse needs direction"
+    },
+    {
+      "derived_result": "reject",
+      "execution_status": "contract-only-unexecuted",
+      "expected": "reject",
+      "id": "NEG-caller-called-OIDC-swap",
+      "mutation": "satisfy called SHA from caller SHA",
+      "rule": "caller and called claims are distinct"
+    },
+    {
+      "derived_result": "reject",
+      "execution_status": "contract-only-unexecuted",
+      "expected": "reject",
+      "id": "NEG-terminal-states-untransported",
+      "mutation": "omit run/job terminal states",
+      "rule": "strict B requires completed/success states"
+    },
+    {
+      "derived_result": "reject",
+      "execution_status": "contract-only-unexecuted",
+      "expected": "reject",
+      "id": "NEG-record-schema-unmapped",
+      "mutation": "accept record schema without its 68 leaves",
+      "rule": "record is a separate strict consumer"
+    },
+    {
+      "derived_result": "reject",
+      "execution_status": "contract-only-unexecuted",
+      "expected": "reject",
+      "id": "NEG-binding-specific-exclusion-alias",
+      "mutation": "treat generic record_artifact_id as binding_record_artifact_id",
+      "rule": "exact fields require exact exclusions"
+    },
+    {
+      "derived_result": "reject",
+      "execution_status": "contract-only-unexecuted",
+      "expected": "reject",
+      "id": "NEG-product-namespace-substitution",
+      "mutation": "replace strict product ID with plan namespace/name",
+      "rule": "product constants disagree"
+    }
+  ],
+  "real_verifier": "unimplemented",
+  "schema": "velnor.v8-independent-canonical-preimage-negative-fixtures.v1"
+}

@@ -1,0 +1,683 @@
+{
+  "schema": "velnor.authority-change-plan.v8.audit.v1",
+  "plan_sha256": "87a5896eb8cf75e53b49f8eacb61226315a9f79c574af3078fdc34390252c321",
+  "markdown_sha256": "503a564afcbe157e607215c0549480b2cade36525b6f3aeb41198418c6add639",
+  "checks": [
+    {
+      "id": "schema-status",
+      "pass": true,
+      "detail": "successor_draft_external_blocked"
+    },
+    {
+      "id": "not-authorized",
+      "pass": true,
+      "detail": "execution_authorized and mutation_performed must both be false"
+    },
+    {
+      "id": "markdown-hash",
+      "pass": true,
+      "detail": {
+        "path": "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v8.md",
+        "sha256": "503a564afcbe157e607215c0549480b2cade36525b6f3aeb41198418c6add639"
+      }
+    },
+    {
+      "id": "current-main",
+      "pass": true,
+      "detail": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db"
+    },
+    {
+      "id": "current-tree",
+      "pass": true,
+      "detail": "22ccc1daf9d55bd12d9a58e6652fe92cf3cb9416"
+    },
+    {
+      "id": "job-graph",
+      "pass": true,
+      "detail": [
+        "build-linux-x64",
+        "artifact-verify",
+        "reserve-release",
+        "attest-binding",
+        "publish",
+        "attest-release",
+        "record-upload",
+        "verify-B"
+      ]
+    },
+    {
+      "id": "needs-edges",
+      "pass": true,
+      "detail": [
+        [
+          "artifact-verify",
+          "build-linux-x64"
+        ],
+        [
+          "reserve-release",
+          "artifact-verify"
+        ],
+        [
+          "attest-binding",
+          "reserve-release"
+        ],
+        [
+          "publish",
+          "attest-binding"
+        ],
+        [
+          "attest-release",
+          "publish"
+        ],
+        [
+          "record-upload",
+          "attest-release"
+        ],
+        [
+          "verify-B",
+          "record-upload"
+        ]
+      ]
+    },
+    {
+      "id": "no-legacy-attest-node",
+      "pass": true,
+      "detail": [
+        "build-linux-x64",
+        "artifact-verify",
+        "reserve-release",
+        "attest-binding",
+        "publish",
+        "attest-release",
+        "record-upload",
+        "verify-B"
+      ]
+    },
+    {
+      "id": "needs:build-linux-x64",
+      "pass": true,
+      "detail": {
+        "declared": [],
+        "expected": []
+      }
+    },
+    {
+      "id": "needs:artifact-verify",
+      "pass": true,
+      "detail": {
+        "declared": [
+          "build-linux-x64"
+        ],
+        "expected": [
+          "build-linux-x64"
+        ]
+      }
+    },
+    {
+      "id": "needs:reserve-release",
+      "pass": true,
+      "detail": {
+        "declared": [
+          "artifact-verify"
+        ],
+        "expected": [
+          "artifact-verify"
+        ]
+      }
+    },
+    {
+      "id": "needs:attest-binding",
+      "pass": true,
+      "detail": {
+        "declared": [
+          "reserve-release"
+        ],
+        "expected": [
+          "reserve-release"
+        ]
+      }
+    },
+    {
+      "id": "needs:publish",
+      "pass": true,
+      "detail": {
+        "declared": [
+          "attest-binding"
+        ],
+        "expected": [
+          "attest-binding"
+        ]
+      }
+    },
+    {
+      "id": "needs:attest-release",
+      "pass": true,
+      "detail": {
+        "declared": [
+          "publish"
+        ],
+        "expected": [
+          "publish"
+        ]
+      }
+    },
+    {
+      "id": "needs:record-upload",
+      "pass": true,
+      "detail": {
+        "declared": [
+          "attest-release"
+        ],
+        "expected": [
+          "attest-release"
+        ]
+      }
+    },
+    {
+      "id": "needs:verify-B",
+      "pass": true,
+      "detail": {
+        "declared": [
+          "record-upload"
+        ],
+        "expected": [
+          "record-upload"
+        ]
+      }
+    },
+    {
+      "id": "stages",
+      "pass": true,
+      "detail": [
+        "S0",
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S5",
+        "S6",
+        "S7"
+      ]
+    },
+    {
+      "id": "field-output-coverage",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "id": "field-provenance-complete",
+      "pass": true,
+      "detail": {
+        "missing": [],
+        "nonobjects": []
+      }
+    },
+    {
+      "id": "lineage-edge-count",
+      "pass": true,
+      "detail": 7
+    },
+    {
+      "id": "lineage-no-empty",
+      "pass": true,
+      "detail": "every edge must transport typed fields"
+    },
+    {
+      "id": "strict-record-schema",
+      "pass": true,
+      "detail": {
+        "path": "G1/bootstrap-transition/authority-contract-separation-2026-09-20/policy-validator-b-record-provenance.v1.schema.json",
+        "sha256": "3f2d72acda359e8ca0a31a40a6e4aa417bd49552acec050583a92601d0c851ef"
+      }
+    },
+    {
+      "id": "canonical-path-map",
+      "pass": true,
+      "detail": 128
+    },
+    {
+      "id": "record-raw-handoff",
+      "pass": true,
+      "detail": {
+        "producer": "record-upload",
+        "upload_response": "Actions artifact REST response",
+        "required_fields": [
+          "record_artifact_id",
+          "record_artifact_name",
+          "record_artifact_digest",
+          "record_upload_run_id",
+          "record_upload_run_attempt",
+          "record_upload_job_id",
+          "record_upload_check_run_id"
+        ],
+        "not_in_binding_preimage": true
+      }
+    },
+    {
+      "id": "record-no-self-preimage",
+      "pass": true,
+      "detail": {
+        "path": "policy-validator-b-record.zip",
+        "artifact_namespace": "Actions artifact",
+        "strict_schema": true,
+        "schema_path": "G1/bootstrap-transition/authority-contract-separation-2026-09-20/policy-validator-b-record-provenance.v1.schema.json",
+        "schema_sha256": "3f2d72acda359e8ca0a31a40a6e4aa417bd49552acec050583a92601d0c851ef",
+        "contains_paths": [
+          "binding.json",
+          "provenance.json"
+        ],
+        "canonical_binding_schema_path": "G1/bootstrap-transition/authority-contract-separation-2026-09-20/permanent-b-product-binding.schema.json",
+        "canonical_binding_schema_sha256": "427cbae0d9a238ae5e22a1afac2c8f840e4a8ad136983ac28a863651e533aed7",
+        "actual_producer_job": "record-upload numeric job id",
+        "actual_upload_step": "upload-record",
+        "record_artifact_transport": {
+          "producer": "record-upload",
+          "upload_response": "Actions artifact REST response",
+          "required_fields": [
+            "record_artifact_id",
+            "record_artifact_name",
+            "record_artifact_digest",
+            "record_upload_run_id",
+            "record_upload_run_attempt",
+            "record_upload_job_id",
+            "record_upload_check_run_id"
+          ],
+          "not_in_binding_preimage": true
+        },
+        "record_ids_excluded_from_preimage": true,
+        "provider_handoff": [
+          "record_artifact_id",
+          "record_artifact_digest",
+          "provider_app_id",
+          "provider_integration_id",
+          "verifier_revision"
+        ]
+      }
+    },
+    {
+      "id": "binding-preimage",
+      "pass": true,
+      "detail": {
+        "subject": "raw immutable service ZIP",
+        "predicate_type": "https://velnor.dev/attestations/policy-validator-binding/v1",
+        "predicate_path": "attestations/velnor-policy-validator-binding.v1.json",
+        "preimage_stages": [
+          "S0",
+          "S1",
+          "S2",
+          "S3"
+        ],
+        "excludes": [
+          "release_asset_id",
+          "release_asset_digest",
+          "release_attestation_id",
+          "release_attestation_digest",
+          "record_artifact_id",
+          "record_artifact_digest",
+          "provider_check",
+          "called_workflow",
+          "binding_attestation_id",
+          "binding_attestation_digest",
+          "final_manifest_digest"
+        ]
+      }
+    },
+    {
+      "id": "release-preimage",
+      "pass": true,
+      "detail": {
+        "subject": "final manifest artifact bytes",
+        "predicate_type": "https://velnor.dev/attestations/velnor-policy-validator-release/v1",
+        "predicate_path": "attestations/velnor-policy-validator-release.v1.json",
+        "preimage_stages": [
+          "S0",
+          "S1",
+          "S2",
+          "S3",
+          "S4",
+          "S5"
+        ],
+        "requires": [
+          "release_asset_id",
+          "release_asset_digest",
+          "published_release_id"
+        ],
+        "excludes": [
+          "release_attestation_id",
+          "release_attestation_digest",
+          "record_artifact_id",
+          "record_artifact_digest",
+          "provider_check",
+          "called_workflow"
+        ]
+      }
+    },
+    {
+      "id": "record-preimage",
+      "pass": true,
+      "detail": {
+        "subject": "strict record zip bytes",
+        "preimage_stages": [
+          "S0",
+          "S1",
+          "S2",
+          "S3",
+          "S4",
+          "S5",
+          "S6"
+        ],
+        "excludes": [
+          "record_artifact_id",
+          "record_artifact_digest",
+          "record_upload_run_id",
+          "record_upload_job_id",
+          "record_upload_check_run_id"
+        ]
+      }
+    },
+    {
+      "id": "digest-graph-acyclic",
+      "pass": true,
+      "detail": {
+        "nodes": [
+          "S0_inputs",
+          "S1_artifact",
+          "S2_producer",
+          "S3_release",
+          "S4_binding",
+          "S5_release_asset",
+          "S6_release_attestation",
+          "S7_record_transport",
+          "S7_provider_check"
+        ],
+        "edges": [
+          [
+            "S0_inputs",
+            "S1_artifact"
+          ],
+          [
+            "S1_artifact",
+            "S2_producer"
+          ],
+          [
+            "S2_producer",
+            "S3_release"
+          ],
+          [
+            "S3_release",
+            "S4_binding"
+          ],
+          [
+            "S4_binding",
+            "S5_release_asset"
+          ],
+          [
+            "S5_release_asset",
+            "S6_release_attestation"
+          ],
+          [
+            "S6_release_attestation",
+            "S7_record_transport"
+          ],
+          [
+            "S7_record_transport",
+            "S7_provider_check"
+          ]
+        ],
+        "no_future_or_self_preimage": true
+      }
+    },
+    {
+      "id": "oidc-role-separation",
+      "pass": true,
+      "detail": {
+        "oidc_issuer": "https://token.actions.githubusercontent.com",
+        "caller_claims": [
+          "workflow_ref",
+          "workflow_sha"
+        ],
+        "called_claims": [
+          "job_workflow_ref",
+          "job_workflow_sha"
+        ],
+        "producer_claims": [
+          "job_workflow_ref",
+          "job_workflow_sha"
+        ],
+        "contents_blob_relation": "Contents API blob SHA at exact source ref is separately compared to workflow_sha where GitHub provides commit/blob mapping",
+        "certificate_verified": true,
+        "signer_repository": "tailrocks/velnor",
+        "signer_workflow": "tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml",
+        "signer_source_ref": "refs/heads/main",
+        "oidc_policy_revision_sha256": "<64-hex>",
+        "temporary_key": false
+      }
+    },
+    {
+      "id": "event-guard",
+      "pass": true,
+      "detail": {
+        "publisher_trigger": "workflow_call only",
+        "standalone_push": false,
+        "standalone_workflow_dispatch": false,
+        "standalone_tag": false,
+        "pull_request": false,
+        "caller_workflow": ".github/workflows/ci-main.yml",
+        "caller_job_uses": "./.github/workflows/ci-policy-validator-products.yml",
+        "caller_job_condition": "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+        "called_side_effect_guard": "repeat caller push/main guard before every side effect",
+        "workflow_dispatch": "diagnostic/non-publishing; no reserve/attest/publish/record/check",
+        "no_second_publisher": true,
+        "event_semantics": "push is authenticated on the caller; called identity is separately checked from job_workflow_ref/job_workflow_sha"
+      }
+    },
+    {
+      "id": "caller-no-outputs",
+      "pass": true,
+      "detail": {
+        "id": "policy-validator-B",
+        "uses": "./.github/workflows/ci-policy-validator-products.yml",
+        "needs": [],
+        "outputs_declared": false,
+        "shell_steps": false,
+        "permissions": [
+          "actions:read",
+          "contents:read",
+          "attestations:read",
+          "checks:read",
+          "id-token:write"
+        ]
+      }
+    },
+    {
+      "id": "policy-direct-output",
+      "pass": true,
+      "detail": "verify-B outputs directly; caller uses-job declares no outputs and Policy consumes needs.policy-validator-B.outputs"
+    },
+    {
+      "id": "permissions-isolated",
+      "pass": true,
+      "detail": {
+        "build-linux-x64": [
+          "contents:read",
+          "actions:read"
+        ],
+        "artifact-verify": [
+          "contents:read",
+          "actions:read",
+          "attestations:read"
+        ],
+        "reserve-release": [
+          "contents:write"
+        ],
+        "attest-binding": [
+          "contents:read",
+          "actions:read",
+          "id-token:write",
+          "attestations:write"
+        ],
+        "publish": [
+          "contents:write"
+        ],
+        "attest-release": [
+          "contents:read",
+          "actions:read",
+          "id-token:write",
+          "attestations:write"
+        ],
+        "record-upload": [
+          "actions:write"
+        ],
+        "verify-B": [
+          "contents:read",
+          "actions:read",
+          "attestations:read",
+          "checks:read"
+        ]
+      }
+    },
+    {
+      "id": "terminal-census-excludes-self",
+      "pass": true,
+      "detail": {
+        "required": true,
+        "producer": "post-run census verifier",
+        "excludes": [
+          "verify-B own job/check",
+          "caller run wrapper",
+          "Policy job/check",
+          "external Policy-bootstrap-B check"
+        ],
+        "requires": [
+          "all applicable build/verify/reserve/attest/publish/record runs and attempts terminal success",
+          "non-neutral/non-skipped conclusions",
+          "exact head/ref/workflow path",
+          "no duplicate candidate"
+        ]
+      }
+    },
+    {
+      "id": "provider-blocked",
+      "pass": true,
+      "detail": [
+        "reviewed_target_generator",
+        "publisher_source_output",
+        "provider_admin_freeze",
+        "ruleset_snapshots",
+        "coordinator_recovery",
+        "release_retry",
+        "native_matrix",
+        "clean_runtime",
+        "real_verifier",
+        "independent_reviews",
+        "v8_field_availability",
+        "v8_canonical_transport",
+        "v8_provider_identity",
+        "v8_freeze",
+        "v8_target_generator",
+        "v8_native"
+      ]
+    },
+    {
+      "id": "native-negative",
+      "pass": true,
+      "detail": {
+        "main_sha": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+        "runtime_run": 35484968618,
+        "runtime_macos_job": 106009574341,
+        "runner": "macos-26",
+        "accepted": false,
+        "preview_run": 35484968732,
+        "preview_conclusion": "failure"
+      }
+    },
+    {
+      "id": "v7-preserved-input",
+      "pass": true,
+      "detail": {
+        "schema": "velnor.authority-change-plan.v7",
+        "path": "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v7.json",
+        "sha256": "1a1cc175b36611f6ce175f4c82b6f6ce51f36f74bfb22a5d8e1abb9cc5647826",
+        "preserved": true
+      }
+    },
+    {
+      "id": "hostile-baseline-valid",
+      "pass": true,
+      "detail": "baseline v8 contract must validate"
+    },
+    {
+      "id": "negative:binding-future-release-asset",
+      "pass": true,
+      "detail": "hostile mutation must be rejected"
+    },
+    {
+      "id": "negative:binding-record-id",
+      "pass": true,
+      "detail": "hostile mutation must be rejected"
+    },
+    {
+      "id": "negative:release-before-asset",
+      "pass": true,
+      "detail": "hostile mutation must be rejected"
+    },
+    {
+      "id": "negative:generic-provenance",
+      "pass": true,
+      "detail": "hostile mutation must be rejected"
+    },
+    {
+      "id": "negative:record-schema-omitted",
+      "pass": true,
+      "detail": "hostile mutation must be rejected"
+    },
+    {
+      "id": "negative:record-provider-omitted",
+      "pass": true,
+      "detail": "hostile mutation must be rejected"
+    },
+    {
+      "id": "negative:oidc-role-reversal",
+      "pass": true,
+      "detail": "hostile mutation must be rejected"
+    },
+    {
+      "id": "negative:terminal-self-cycle",
+      "pass": true,
+      "detail": "hostile mutation must be rejected"
+    },
+    {
+      "id": "negative:record-artifact-self-preimage",
+      "pass": true,
+      "detail": "hostile mutation must be rejected"
+    },
+    {
+      "id": "negative:product-asset-tag-omitted",
+      "pass": true,
+      "detail": "hostile mutation must be rejected"
+    },
+    {
+      "id": "negative:provider-token-impersonation",
+      "pass": true,
+      "detail": "hostile mutation must be rejected"
+    },
+    {
+      "id": "negative:canonical-path-unmapped",
+      "pass": true,
+      "detail": "hostile mutation must be rejected"
+    }
+  ],
+  "check_count": 51,
+  "passed": 51,
+  "findings": [],
+  "structural_pass": true,
+  "external_blockers": [
+    "no provider-enforced freeze/recovery excluding bypass actor 5",
+    "target generator revision is null and B source/output are not current-main artifacts",
+    "external B App/provider identities and credentials are unresolved",
+    "real verifier and live record-artifact acceptance are unimplemented",
+    "current native run is macos-26 and xcode-27 proof is absent"
+  ],
+  "status": "structural_audit_pass_external_blocked",
+  "execution_authorized": false
+}

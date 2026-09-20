@@ -1,0 +1,4962 @@
+{
+  "schema": "velnor.authority-change-plan.v8",
+  "status": "successor_draft_external_blocked",
+  "execution_authorized": false,
+  "mutation_performed": false,
+  "observed_utc": "2026-09-20T03:12:50Z",
+  "plan_markdown": {
+    "path": "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v8.md",
+    "sha256": "503a564afcbe157e607215c0549480b2cade36525b6f3aeb41198418c6add639"
+  },
+  "supersedes": {
+    "schema": "velnor.authority-change-plan.v7",
+    "path": "G1/bootstrap-transition/AUTHORITY-CHANGE-PLAN-2026-09-20-v7.json",
+    "sha256": "1a1cc175b36611f6ce175f4c82b6f6ce51f36f74bfb22a5d8e1abb9cc5647826",
+    "preserved": true
+  },
+  "transition": {
+    "tree_a": {
+      "purpose": "source_and_generator_transition",
+      "authority": "one external owner-controlled Policy-bootstrap-A check for exact PR/synthetic tree",
+      "literal_b_pin": false,
+      "policy_state": "TREE_A_AUDIT; old Policy is removed from required contexts only under reviewed external provider transaction"
+    },
+    "main_b": {
+      "purpose": "first resulting main and live typed validator publication",
+      "publisher": ".github/workflows/ci-policy-validator-products.yml",
+      "publisher_invocation": "workflow_call only from guarded ci-main push/main caller",
+      "policy_state": "MAIN_B_HANDOFF after external B check; no source pin",
+      "required_context": {
+        "context": "Policy-bootstrap-B",
+        "integration_id": "<MAIN_B_INTEGRATION_ID>"
+      }
+    },
+    "tree_b": {
+      "purpose": "reviewed pin adoption after Main-B",
+      "adoption_file": ".github/ci/validator-pin-adoption.json",
+      "digest_sidecar": ".github/ci/validator-pin-adoption.sha256",
+      "pr_number": "created only after Main-B census",
+      "policy_state": "TREE_B_FILE then PERMANENT"
+    },
+    "order": [
+      "read_only_preflight_census",
+      "provider_freeze_decision",
+      "tree_a_ruleset_put",
+      "tree_a_external_admission",
+      "protected_normal_pr_merge",
+      "main_b_real_publisher_and_live_verify",
+      "post_run_terminal_census",
+      "main_b_ruleset_put",
+      "tree_b_adoption_pr_and_merge",
+      "permanent_cleanup"
+    ],
+    "prohibitions": [
+      "pre-main provenance",
+      "candidate/local artifact",
+      "old OS fallback",
+      "admin/bypass merge",
+      "workflow_run/dispatch handoff",
+      "name-only binding",
+      "caller uses-job outputs",
+      "invented REST database_id",
+      "GITHUB_TOKEN impersonation",
+      "second publisher",
+      "binding record self-preimage",
+      "release asset in S4 binding preimage"
+    ]
+  },
+  "revision_bound_facts": {
+    "repository": "tailrocks/velnor",
+    "main_sha": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+    "main_parent_sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+    "tree_sha": "22ccc1daf9d55bd12d9a58e6652fe92cf3cb9416",
+    "source_pr": 969,
+    "source_pr_sha": "2445c647dafa43acbc5285c873d3b04174ff75c6",
+    "current_generator_revision": "54",
+    "current_policy_runtime_pin": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+    "target_generator_revision": null,
+    "target_generator_revision_requirement": "reviewed immutable 40-hex revision required; current emission revision 54 and old runtime pin 0dc are not a target",
+    "current_checkpoint": {
+      "path": "G1/bootstrap-transition/current-main-checkpoint-89f82dd8-2026-09-20.json",
+      "sha256": "77e1ecc848e0a3ad73cdfd853b788054e8cda02e0aae38d076b7c59b0da130bd",
+      "observed_utc": "2026-09-20T03:12:50Z",
+      "runtime_products_run": 35484968618,
+      "runtime_macos_job": 106009574341,
+      "runtime_runner": "macos-26",
+      "runtime_accepted": false,
+      "preview_run": 35484968732,
+      "preview_first_job": 106009550596,
+      "preview_conclusion": "failure",
+      "preview_failure": "generated tree drift",
+      "ci_main_run": 35484968706,
+      "ci_main_capture": "Policy failure; required children skipped"
+    },
+    "changed_blobs": {
+      "generator_state": "c5c83cbe212beade20a6054a591e8c52038c0145",
+      "s2_mod": "5f3001a4447527af685a93af967f670b4633da4e",
+      "package_release": "0a3387910d2e7bce5553f5452850885e55fd34e9",
+      "runtime_workflow": "c35974071e31f1cbef495776fc5167ab8748908b"
+    },
+    "closure_inventory": {
+      "observed_at_utc": "2026-09-20T03:12:50Z",
+      "inventory_main": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+      "tree": "22ccc1daf9d55bd12d9a58e6652fe92cf3cb9416",
+      "input_artifact": "G1/bootstrap-transition/current-main-closure-inputs-89f82dd8-2026-09-20.json",
+      "input_sha256": "1b890ef899c8a02146e7d6ab1d664fcb92213924e8c7a722f8f57a2bfb55c072",
+      "semantic_publisher_source_present": false,
+      "semantic_publisher_output_present": false,
+      "old_renderer_dynamic_provenance_resolved": false,
+      "current_reconciliation_required": true
+    },
+    "required_native_runner": "xcode-27",
+    "forbidden_observed_runner": "macos-26",
+    "ruleset": {
+      "name": "protect-main",
+      "id": 19573071,
+      "required_contexts_before": [
+        "DCO",
+        "ci-required",
+        "Policy"
+      ],
+      "reported_bypass_actor": 5,
+      "bypass_mode_observed": "always",
+      "bypass_used_by_plan": false,
+      "branch_protection_endpoint": "404; ruleset API authoritative",
+      "required_contexts_tree_a": [
+        "DCO",
+        "ci-required",
+        "Policy-bootstrap-A"
+      ],
+      "required_contexts_main_b": [
+        "DCO",
+        "ci-required",
+        "Policy-bootstrap-B"
+      ],
+      "required_contexts_tree_b": [
+        "DCO",
+        "ci-required",
+        "Policy"
+      ]
+    },
+    "d19_clean_runtime": {
+      "path": "G0/fleet/d19-pin-feasibility-20260920",
+      "advertised_tags": 47,
+      "clean_published_candidate": false,
+      "unpublished_computed_tag": "2246fdb3f05f3b21",
+      "strict_closure_failure": "CLAUDE.md exceeds regular-file closure"
+    }
+  },
+  "complete_generated_closure": [
+    {
+      "path": ".github-gen/velnor-workflow.toml",
+      "blob": "b2bd968a484b9786c112c931dc325071ba1dff08",
+      "disposition": "preserve strict old shape; add neutral typed inputs only; no policy.validator or literal pin"
+    },
+    {
+      "path": ".github-gen/sources/workflows/ci-policy-validator-products.yml",
+      "blob": "absent-at-d20",
+      "disposition": "new source-owned Linux-X64 B publisher; post-implementation blob required in closure and render hashes"
+    },
+    {
+      "path": ".github/ci/.github-actions-generator-state",
+      "blob": "cd94b8751826154fb424414a484ad39bc320caac",
+      "disposition": "regenerate and include in fixed-point proof"
+    },
+    {
+      "path": ".github/actionlint.yaml",
+      "blob": "3dfcb29e220adb41ce218c511bdffb40983e07c2",
+      "disposition": "regenerate and validate"
+    },
+    {
+      "path": ".github/workflows/ci-main.yml",
+      "blob": "1bfa0ce7358d9acca59cac1eb91719b1dbe56491",
+      "disposition": "Main-B publisher, verifier, then Policy"
+    },
+    {
+      "path": ".github/workflows/ci-policy.yml",
+      "blob": "c8896e9e9bb766105fe949fa668ca15e3fd73f9c",
+      "disposition": "base-owned exact adoption verifier; no old checker or candidate"
+    },
+    {
+      "path": ".github/workflows/ci-pr.yml",
+      "blob": "335bebccf33f3ab1cc27176f0f4154eb52cd9f9e",
+      "disposition": "full ordinary PR workload"
+    },
+    {
+      "path": ".github/workflows/ci-unit-rust.yml",
+      "blob": "3f17cdbf571e32b5c19c49f83affa47cb9800970",
+      "disposition": "full Rust child"
+    },
+    {
+      "path": ".github/workflows/ci-unit-bun.yml",
+      "blob": "937d68cb35aaebbeafe6581269a97072e728ef35",
+      "disposition": "ordinary Bun checks; remove stale identity"
+    },
+    {
+      "path": ".github/workflows/ci-unit-docker.yml",
+      "blob": "1a0a6d6df5ec25d0afe88ea69da6c7e3d7873149",
+      "disposition": "ordinary Docker checks; preserve native requirements"
+    },
+    {
+      "path": ".github/workflows/ci-unit-docs.yml",
+      "blob": "677a0d639cd3c799d65721259b023f079ea13984",
+      "disposition": "ordinary docs checks"
+    },
+    {
+      "path": ".github/workflows/ci-unit-opentofu.yml",
+      "blob": "7b2a4c4d26c3cb7b11bc1de77eef63eaba1406d7",
+      "disposition": "ordinary OpenTofu checks"
+    },
+    {
+      "path": ".github/workflows/maintenance.yml",
+      "blob": "715351889671e4d775492f87717a5143bc14dba4",
+      "disposition": "observable maintenance; no old product acquisition"
+    },
+    {
+      "path": ".github/workflows/preview.yml",
+      "blob": "f0a54de82479960b858bfc446ff79d53688ffeff",
+      "disposition": "exact Main-B SHA/live API handoff"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "blob": "99c0584852dbdd4beedd04102dc42bff8e0c7232",
+      "disposition": "exact Main-B SHA/live API handoff; v* applicability recorded"
+    },
+    {
+      "path": ".github/workflows/ci-runtime-products.yml",
+      "blob": "c35974071e31f1cbef495776fc5167ab8748908b",
+      "disposition": "Linux-X64, Linux-ARM64, xcode-27, publish; no macOS-26/15"
+    },
+    {
+      "path": ".github/workflows/ci-policy-validator-products.yml",
+      "blob": "absent-at-d20",
+      "disposition": "generated B publisher output; post-implementation blob, source/template mapping, graph, and two-render digest required"
+    },
+    {
+      "path": ".github/actions/setup-velnor-workflow/action.yml",
+      "blob": "4e48bc2694af7b3d1a969cb108234a9a92b515d3",
+      "disposition": "replace old runtime-product consumer path; no alias"
+    },
+    {
+      "path": ".github/actions/report-velnor-ci-outcomes/action.yml",
+      "blob": "199083f950f67e8befd2282d8d525b105af761e0",
+      "disposition": "exact child census and no stale path"
+    },
+    {
+      "path": ".github-gen/sources/actions/setup-velnor-workflow/action.yml",
+      "blob": "4e48bc2694af7b3d1a969cb108234a9a92b515d3",
+      "disposition": "replace setup source"
+    },
+    {
+      "path": ".github-gen/sources/actions/report-velnor-ci-outcomes/action.yml",
+      "blob": "199083f950f67e8befd2282d8d525b105af761e0",
+      "disposition": "replace report source and include in renderer tests"
+    },
+    {
+      "path": ".github/actions/setup-velnor-policy-validator/action.yml",
+      "blob": "absent-at-d20",
+      "disposition": "new generated typed B consumer action"
+    },
+    {
+      "path": ".github-gen/sources/actions/setup-velnor-policy-validator/action.yml",
+      "blob": "absent-at-d20",
+      "disposition": "new source-owned typed B consumer action"
+    },
+    {
+      "path": ".github/workflows/nightly.yml",
+      "blob": "<current-main-blob-required>",
+      "disposition": "recursive closure and dispatch-main census; no old identity or candidate route"
+    },
+    {
+      "path": ".github/workflows/ci-release-package-signer.yml",
+      "blob": "<current-main-blob-required>",
+      "disposition": "callable signer closure, isolated identity and exact attestation census"
+    },
+    {
+      "path": ".github-gen/sources/workflows/ci-policy-validator-products.yml",
+      "blob": "<Tree-A-source-blob-required>",
+      "disposition": "source-owned workflow_call-only B publisher; hash in generator closure and renderer tests"
+    },
+    {
+      "path": ".github/workflows/ci-policy-validator-products.yml",
+      "blob": "<Tree-A-generated-blob-required>",
+      "disposition": "generated B publisher output; exact output/source mapping and two-render digest required"
+    },
+    {
+      "path": ".github/workflows/nightly.yml",
+      "blob": "<current-main-blob-required>",
+      "disposition": "recursive closure and dispatch-main census"
+    },
+    {
+      "path": ".github/workflows/ci-release-package-signer.yml",
+      "blob": "<current-main-blob-required>",
+      "disposition": "callable signer closure and exact attestation census"
+    }
+  ],
+  "active_workflows": [
+    "ci-main.yml",
+    "ci-policy.yml",
+    "ci-pr.yml",
+    "ci-unit-rust.yml",
+    "ci-unit-bun.yml",
+    "ci-unit-docker.yml",
+    "ci-unit-docs.yml",
+    "ci-unit-opentofu.yml",
+    "maintenance.yml",
+    "preview.yml",
+    "release.yml",
+    "ci-runtime-products.yml",
+    "ci-policy-validator-products.yml",
+    "nightly.yml",
+    "ci-release-package-signer.yml"
+  ],
+  "recursive_forbidden_scan": {
+    "forbidden_behavior": [
+      "old 0dc runtime provenance",
+      "candidate-manifest and candidate_publish",
+      "--pin-build",
+      "old setup/runtime product identity",
+      "macos-15",
+      "macos-26",
+      "mutable latest",
+      "empty or skipped required matrix",
+      "unbound build_revision"
+    ],
+    "roots": [
+      ".github-gen",
+      ".github",
+      ".github/actions",
+      ".github/workflows",
+      ".github/ci",
+      "crates/velnor-workflow"
+    ],
+    "method": "semantic reachable graph plus generated fixed-point; string scan supporting only",
+    "historical_inventory_not_current": true,
+    "current_main_reconciliation": {
+      "main_sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+      "tree_sha": "e9019f00578d34c3f339c7e8d55b66f7e53f8567"
+    }
+  },
+  "old_parser_boundary": {
+    "source_revision": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+    "binary_sha256": "ade826fd3a27de43cfce55acfda870493b4921770199fe0afaa653b9a96f1750",
+    "unknown_field_behavior": "strict parser aborts unknown field validator",
+    "measured_facts": [
+      "historical b5 old check/policy passed 11/11",
+      "policy.validator insertion aborts before rendering",
+      "current d20/e94 raw policy fails fixed-point or verify_tasks boundary",
+      "xcode-27 transition fails old trusted-runner semantics",
+      "static_files transports bytes only and does not prove B"
+    ],
+    "selected_typed_mechanism": "existing generic static_files mapping for actual B workflow and setup action; not a compatibility sidecar",
+    "selected_mappings": [
+      {
+        "file": ".github/workflows/ci-policy-validator-products.yml",
+        "source": ".github-gen/sources/workflows/ci-policy-validator-products.yml"
+      },
+      {
+        "file": ".github/actions/setup-velnor-policy-validator/action.yml",
+        "source": ".github-gen/sources/actions/setup-velnor-policy-validator/action.yml"
+      }
+    ],
+    "typed_publisher_feasibility": {
+      "markdown_sha256": "8764712693e2883d05846de05a3c2137fb3d31e3ee97ab0ad129186f3ff960f4",
+      "json_sha256": "01ad40d473aa26ae7e5e814ef7c3f93e854d682d2c359fa7588f0bba2b4943e9",
+      "finding": "static_files transports source bytes only; no actual B source; old package-release path is incompatible",
+      "source_admission_proven": false
+    },
+    "admission_fixture_required": true,
+    "raw_old_failure_is_failure": true,
+    "final_acceptance": "semantic generator/runtime closure and reachable graph proof; text scan supporting only",
+    "candidate_route_must_be_unreachable": [
+      "ci-unit-rust candidate producer",
+      "ci-main candidate_publish caller",
+      "ci-pr candidate_publish caller",
+      "policy candidate consumers",
+      "unchecked build_revision boundary"
+    ]
+  },
+  "neutral_s2_surface": {
+    "estate_neutral": true,
+    "allowed": [
+      "typed schema/rendering",
+      "field availability and graph validation",
+      "fixed point"
+    ],
+    "forbidden": [
+      "estate hardcodes",
+      "product/provider/pin hardcodes",
+      "repository consumer branches",
+      "compatibility aliases"
+    ]
+  },
+  "tree_a_admission": {
+    "check_context": "Policy-bootstrap-A",
+    "app": "velnor-bootstrap-authority",
+    "permissions": [
+      "metadata:read",
+      "contents:read",
+      "actions:read",
+      "checks:read/write",
+      "pull_requests:read"
+    ],
+    "forbidden_permissions": [
+      "administration",
+      "release",
+      "ref-write",
+      "workflow",
+      "secrets",
+      "packages",
+      "deployments",
+      "merge",
+      "bypass"
+    ],
+    "record_must_bind": [
+      "repository_id",
+      "pull_request_number",
+      "pr_head_sha",
+      "locked_base_sha",
+      "synthetic_merge_sha",
+      "synthetic_tree_sha",
+      "checks_integration_id",
+      "provider_app_id",
+      "transaction_id",
+      "fencing_token",
+      "lease_id",
+      "complete_premerge_run_attempt_child_census"
+    ],
+    "null_provenance": [
+      "product_id",
+      "release_id",
+      "artifact_id",
+      "attestation_subject",
+      "actions_run",
+      "actions_job"
+    ],
+    "source_ref": "refs/pull/<N>/merge",
+    "never_source_ref": "refs/heads/main",
+    "eligibility": "all required premerge checks terminal success, non-neutral, non-skipped, complete",
+    "placeholders": {
+      "BOOTSTRAP_APP_ID": "<real>",
+      "BOOTSTRAP_INSTALLATION_ID": "<real>",
+      "BOOTSTRAP_INTEGRATION_ID": "<real>",
+      "BOOTSTRAP_VERIFIER_REVISION": "<40-hex>",
+      "BOOTSTRAP_APP_PUBLIC_KEY_SHA256": "<64-hex>",
+      "BOOTSTRAP_PR_NUMBER": "<real>",
+      "PR_HEAD_SHA": "<40-hex>",
+      "BASE_SHA": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+      "SYNTHETIC_MERGE_SHA": "<40-hex>",
+      "SYNTHETIC_TREE_SHA": "<40-hex>",
+      "TRANSACTION_ID": "<unique>",
+      "FENCING_TOKEN": "<monotonic>",
+      "LEASE_ID": "<durable record>",
+      "WATCHDOG_ID": "<independent actor>",
+      "TREE_A_RULESET_HASH": "<canonical full-PUT hash>",
+      "MAIN_B_VERIFIER_APP_ID": "<real>",
+      "MAIN_B_INTEGRATION_ID": "<real>",
+      "MAIN_B_VERIFIER_REVISION": "<40-hex>"
+    }
+  },
+  "main_b_publisher": {
+    "workflow_source": ".github-gen/sources/workflows/ci-policy-validator-products.yml",
+    "workflow_output": ".github/workflows/ci-policy-validator-products.yml",
+    "event_guard": {
+      "publisher_trigger": "workflow_call only",
+      "standalone_push": false,
+      "standalone_workflow_dispatch": false,
+      "standalone_tag": false,
+      "pull_request": false,
+      "caller_workflow": ".github/workflows/ci-main.yml",
+      "caller_job_uses": "./.github/workflows/ci-policy-validator-products.yml",
+      "caller_job_condition": "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+      "called_side_effect_guard": "repeat caller push/main guard before every side effect",
+      "workflow_dispatch": "diagnostic/non-publishing; no reserve/attest/publish/record/check",
+      "no_second_publisher": true,
+      "event_semantics": "push is authenticated on the caller; called identity is separately checked from job_workflow_ref/job_workflow_sha"
+    },
+    "job_graph": [
+      "build-linux-x64",
+      "artifact-verify",
+      "reserve-release",
+      "attest-binding",
+      "publish",
+      "attest-release",
+      "record-upload",
+      "verify-B"
+    ],
+    "needs_edges": [
+      [
+        "artifact-verify",
+        "build-linux-x64"
+      ],
+      [
+        "reserve-release",
+        "artifact-verify"
+      ],
+      [
+        "attest-binding",
+        "reserve-release"
+      ],
+      [
+        "publish",
+        "attest-binding"
+      ],
+      [
+        "attest-release",
+        "publish"
+      ],
+      [
+        "record-upload",
+        "attest-release"
+      ],
+      [
+        "verify-B",
+        "record-upload"
+      ]
+    ],
+    "caller_permissions": [
+      "actions:read",
+      "contents:read",
+      "attestations:read",
+      "checks:read",
+      "id-token:write"
+    ],
+    "workflow_call_outputs": [
+      "repository_id:string",
+      "source_ref:string",
+      "source_sha:sha256",
+      "source_tree_sha:sha256",
+      "closure_digest:sha256",
+      "caller_run_id:u64",
+      "caller_run_attempt:u64",
+      "caller_workflow_path:string",
+      "caller_workflow_ref:string",
+      "caller_workflow_sha:sha256",
+      "caller_workflow_file_blob_sha:sha256",
+      "artifact_name:string",
+      "artifact_id:u64",
+      "artifact_digest:sha256",
+      "service_zip_digest:sha256",
+      "service_zip_size:u64",
+      "inner_payload_digest:sha256",
+      "inner_payload_size:u64",
+      "binary_digest:sha256",
+      "binary_size:u64",
+      "binary_architecture:string",
+      "upload_step_id:string",
+      "producer_run_id:u64",
+      "producer_run_attempt:u64",
+      "producer_job_id:u64",
+      "producer_check_run_id:u64",
+      "producer_workflow_path:string",
+      "producer_workflow_ref:string",
+      "producer_workflow_sha:sha256",
+      "producer_workflow_file_blob_sha:sha256",
+      "verified_artifact_digest:sha256",
+      "verified_raw_service_zip_digest:sha256",
+      "verified_raw_inner_payload_digest:sha256",
+      "verified_raw_binary_digest:sha256",
+      "release_id:u64",
+      "release_tag:string",
+      "release_target_sha:sha256",
+      "binding_core_digest:sha256",
+      "binding_record_artifact_id:u64",
+      "binding_record_artifact_digest:sha256",
+      "binding_attestation_id:u64",
+      "binding_attestation_digest:sha256",
+      "final_manifest_artifact_id:u64",
+      "final_manifest_artifact_digest:sha256",
+      "final_manifest_digest:sha256",
+      "binding_predicate_type:string",
+      "binding_predicate_path:string",
+      "binding_subject_name:string",
+      "binding_subject_digest:sha256",
+      "release_asset_id:u64",
+      "release_asset_digest:sha256",
+      "published_release_id:u64",
+      "published_release_tag:string",
+      "published_release_target_sha:sha256",
+      "release_attestation_id:u64",
+      "release_attestation_digest:sha256",
+      "release_manifest_subject_sha256:sha256",
+      "release_predicate_type:string",
+      "release_predicate_path:string",
+      "signer_repository:string",
+      "signer_workflow:string",
+      "signer_source_ref:string",
+      "oidc_issuer:string",
+      "certificate_identity:string",
+      "certificate_verified:string",
+      "oidc_policy_revision_sha256:sha256",
+      "record_artifact_id:u64",
+      "record_artifact_name:string",
+      "record_artifact_digest:sha256",
+      "record_upload_step_id:string",
+      "record_upload_run_id:u64",
+      "record_upload_run_attempt:u64",
+      "record_upload_job_id:u64",
+      "record_upload_check_run_id:u64",
+      "policy_bootstrap_b_check_id:u64",
+      "policy_bootstrap_b_provider_app_id:u64",
+      "policy_bootstrap_b_integration_id:u64",
+      "policy_bootstrap_b_verifier_revision:string",
+      "called_workflow_path:string",
+      "called_workflow_ref:string",
+      "called_workflow_sha:sha256",
+      "called_workflow_file_blob_sha:sha256"
+    ],
+    "called_workflow_outputs_source": "verify-B outputs directly; caller uses-job declares no outputs and Policy consumes needs.policy-validator-B.outputs",
+    "ci_main_graph": {
+      "caller_job": {
+        "id": "policy-validator-B",
+        "uses": "./.github/workflows/ci-policy-validator-products.yml",
+        "needs": [],
+        "outputs_declared": false,
+        "shell_steps": false,
+        "permissions": [
+          "actions:read",
+          "contents:read",
+          "attestations:read",
+          "checks:read",
+          "id-token:write"
+        ]
+      },
+      "policy_job": {
+        "id": "Policy",
+        "needs": [
+          "policy-validator-B"
+        ],
+        "permissions": [
+          "contents:read",
+          "actions:read",
+          "attestations:read",
+          "checks:read"
+        ],
+        "consumes": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256",
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "binding_predicate_type:string",
+          "binding_predicate_path:string",
+          "binding_subject_name:string",
+          "binding_subject_digest:sha256",
+          "release_asset_id:u64",
+          "release_asset_digest:sha256",
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target_sha:sha256",
+          "release_attestation_id:u64",
+          "release_attestation_digest:sha256",
+          "release_manifest_subject_sha256:sha256",
+          "release_predicate_type:string",
+          "release_predicate_path:string",
+          "signer_repository:string",
+          "signer_workflow:string",
+          "signer_source_ref:string",
+          "oidc_issuer:string",
+          "certificate_identity:string",
+          "certificate_verified:string",
+          "oidc_policy_revision_sha256:sha256",
+          "record_artifact_id:u64",
+          "record_artifact_name:string",
+          "record_artifact_digest:sha256",
+          "record_upload_step_id:string",
+          "record_upload_run_id:u64",
+          "record_upload_run_attempt:u64",
+          "record_upload_job_id:u64",
+          "record_upload_check_run_id:u64",
+          "policy_bootstrap_b_check_id:u64",
+          "policy_bootstrap_b_provider_app_id:u64",
+          "policy_bootstrap_b_integration_id:u64",
+          "policy_bootstrap_b_verifier_revision:string",
+          "called_workflow_path:string",
+          "called_workflow_ref:string",
+          "called_workflow_sha:sha256",
+          "called_workflow_file_blob_sha:sha256"
+        ]
+      },
+      "run_identity": "caller run_id/run_attempt is shared by called workflow; called identity is independently read from job_workflow_ref/job_workflow_sha; numeric job/check/artifact/release IDs come from live APIs"
+    },
+    "jobs": {
+      "build-linux-x64": {
+        "needs": [],
+        "permissions": [
+          "contents:read",
+          "actions:read"
+        ],
+        "role": "unprivileged immutable Linux-X64 build and artifact upload",
+        "outputs": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string"
+        ],
+        "forbidden": [
+          "contents:write",
+          "id-token:write",
+          "attestations:write",
+          "checks:write",
+          "release",
+          "packages"
+        ]
+      },
+      "artifact-verify": {
+        "needs": [
+          "build-linux-x64"
+        ],
+        "permissions": [
+          "contents:read",
+          "actions:read",
+          "attestations:read"
+        ],
+        "role": "download raw artifact and bind producer API identity",
+        "outputs": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256"
+        ],
+        "consumes": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string"
+        ],
+        "forbidden": [
+          "contents:write",
+          "id-token:write",
+          "attestations:write",
+          "checks:write"
+        ]
+      },
+      "reserve-release": {
+        "needs": [
+          "artifact-verify"
+        ],
+        "permissions": [
+          "contents:write"
+        ],
+        "role": "create draft release and return nonzero release ID/tag/target",
+        "outputs": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256"
+        ],
+        "consumes": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256"
+        ],
+        "forbidden": [
+          "id-token:write",
+          "attestations:write",
+          "packages"
+        ]
+      },
+      "attest-binding": {
+        "needs": [
+          "reserve-release"
+        ],
+        "permissions": [
+          "contents:read",
+          "actions:read",
+          "id-token:write",
+          "attestations:write"
+        ],
+        "role": "sign binding predicate and canonical manifest; no release asset input",
+        "outputs": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256",
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "binding_predicate_type:string",
+          "binding_predicate_path:string",
+          "binding_subject_name:string",
+          "binding_subject_digest:sha256"
+        ],
+        "consumes": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256"
+        ],
+        "forbidden": [
+          "contents:write",
+          "packages"
+        ]
+      },
+      "publish": {
+        "needs": [
+          "attest-binding"
+        ],
+        "permissions": [
+          "contents:write"
+        ],
+        "role": "publish immutable release/tag/asset; raw release API readback",
+        "outputs": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256",
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "binding_predicate_type:string",
+          "binding_predicate_path:string",
+          "binding_subject_name:string",
+          "binding_subject_digest:sha256",
+          "release_asset_id:u64",
+          "release_asset_digest:sha256",
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target_sha:sha256"
+        ],
+        "consumes": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256",
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "binding_predicate_type:string",
+          "binding_predicate_path:string",
+          "binding_subject_name:string",
+          "binding_subject_digest:sha256"
+        ],
+        "forbidden": [
+          "id-token:write",
+          "attestations:write",
+          "packages"
+        ]
+      },
+      "attest-release": {
+        "needs": [
+          "publish"
+        ],
+        "permissions": [
+          "contents:read",
+          "actions:read",
+          "id-token:write",
+          "attestations:write"
+        ],
+        "role": "sign release predicate only after asset/readback exists",
+        "outputs": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256",
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "binding_predicate_type:string",
+          "binding_predicate_path:string",
+          "binding_subject_name:string",
+          "binding_subject_digest:sha256",
+          "release_asset_id:u64",
+          "release_asset_digest:sha256",
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target_sha:sha256",
+          "release_attestation_id:u64",
+          "release_attestation_digest:sha256",
+          "release_manifest_subject_sha256:sha256",
+          "release_predicate_type:string",
+          "release_predicate_path:string",
+          "signer_repository:string",
+          "signer_workflow:string",
+          "signer_source_ref:string",
+          "oidc_issuer:string",
+          "certificate_identity:string",
+          "certificate_verified:string",
+          "oidc_policy_revision_sha256:sha256"
+        ],
+        "consumes": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256",
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "binding_predicate_type:string",
+          "binding_predicate_path:string",
+          "binding_subject_name:string",
+          "binding_subject_digest:sha256",
+          "release_asset_id:u64",
+          "release_asset_digest:sha256",
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target_sha:sha256"
+        ],
+        "forbidden": [
+          "contents:write",
+          "packages"
+        ]
+      },
+      "record-upload": {
+        "needs": [
+          "attest-release"
+        ],
+        "permissions": [
+          "actions:write"
+        ],
+        "role": "upload strict record/provenance artifact; no source build or signing",
+        "outputs": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256",
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "binding_predicate_type:string",
+          "binding_predicate_path:string",
+          "binding_subject_name:string",
+          "binding_subject_digest:sha256",
+          "release_asset_id:u64",
+          "release_asset_digest:sha256",
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target_sha:sha256",
+          "release_attestation_id:u64",
+          "release_attestation_digest:sha256",
+          "release_manifest_subject_sha256:sha256",
+          "release_predicate_type:string",
+          "release_predicate_path:string",
+          "signer_repository:string",
+          "signer_workflow:string",
+          "signer_source_ref:string",
+          "oidc_issuer:string",
+          "certificate_identity:string",
+          "certificate_verified:string",
+          "oidc_policy_revision_sha256:sha256",
+          "record_artifact_id:u64",
+          "record_artifact_name:string",
+          "record_artifact_digest:sha256",
+          "record_upload_step_id:string",
+          "record_upload_run_id:u64",
+          "record_upload_run_attempt:u64",
+          "record_upload_job_id:u64",
+          "record_upload_check_run_id:u64",
+          "policy_bootstrap_b_check_id:u64",
+          "policy_bootstrap_b_provider_app_id:u64",
+          "policy_bootstrap_b_integration_id:u64",
+          "policy_bootstrap_b_verifier_revision:string",
+          "called_workflow_path:string",
+          "called_workflow_ref:string",
+          "called_workflow_sha:sha256",
+          "called_workflow_file_blob_sha:sha256"
+        ],
+        "consumes": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256",
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "binding_predicate_type:string",
+          "binding_predicate_path:string",
+          "binding_subject_name:string",
+          "binding_subject_digest:sha256",
+          "release_asset_id:u64",
+          "release_asset_digest:sha256",
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target_sha:sha256",
+          "release_attestation_id:u64",
+          "release_attestation_digest:sha256",
+          "release_manifest_subject_sha256:sha256",
+          "release_predicate_type:string",
+          "release_predicate_path:string",
+          "signer_repository:string",
+          "signer_workflow:string",
+          "signer_source_ref:string",
+          "oidc_issuer:string",
+          "certificate_identity:string",
+          "certificate_verified:string",
+          "oidc_policy_revision_sha256:sha256"
+        ],
+        "forbidden": [
+          "contents:write",
+          "id-token:write",
+          "attestations:write",
+          "checks:write",
+          "packages"
+        ]
+      },
+      "verify-B": {
+        "needs": [
+          "record-upload"
+        ],
+        "permissions": [
+          "contents:read",
+          "actions:read",
+          "attestations:read",
+          "checks:read"
+        ],
+        "role": "strict validator and external-check evidence handoff",
+        "outputs": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256",
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "binding_predicate_type:string",
+          "binding_predicate_path:string",
+          "binding_subject_name:string",
+          "binding_subject_digest:sha256",
+          "release_asset_id:u64",
+          "release_asset_digest:sha256",
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target_sha:sha256",
+          "release_attestation_id:u64",
+          "release_attestation_digest:sha256",
+          "release_manifest_subject_sha256:sha256",
+          "release_predicate_type:string",
+          "release_predicate_path:string",
+          "signer_repository:string",
+          "signer_workflow:string",
+          "signer_source_ref:string",
+          "oidc_issuer:string",
+          "certificate_identity:string",
+          "certificate_verified:string",
+          "oidc_policy_revision_sha256:sha256",
+          "record_artifact_id:u64",
+          "record_artifact_name:string",
+          "record_artifact_digest:sha256",
+          "record_upload_step_id:string",
+          "record_upload_run_id:u64",
+          "record_upload_run_attempt:u64",
+          "record_upload_job_id:u64",
+          "record_upload_check_run_id:u64",
+          "policy_bootstrap_b_check_id:u64",
+          "policy_bootstrap_b_provider_app_id:u64",
+          "policy_bootstrap_b_integration_id:u64",
+          "policy_bootstrap_b_verifier_revision:string",
+          "called_workflow_path:string",
+          "called_workflow_ref:string",
+          "called_workflow_sha:sha256",
+          "called_workflow_file_blob_sha:sha256"
+        ],
+        "consumes": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256",
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "binding_predicate_type:string",
+          "binding_predicate_path:string",
+          "binding_subject_name:string",
+          "binding_subject_digest:sha256",
+          "release_asset_id:u64",
+          "release_asset_digest:sha256",
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target_sha:sha256",
+          "release_attestation_id:u64",
+          "release_attestation_digest:sha256",
+          "release_manifest_subject_sha256:sha256",
+          "release_predicate_type:string",
+          "release_predicate_path:string",
+          "signer_repository:string",
+          "signer_workflow:string",
+          "signer_source_ref:string",
+          "oidc_issuer:string",
+          "certificate_identity:string",
+          "certificate_verified:string",
+          "oidc_policy_revision_sha256:sha256",
+          "record_artifact_id:u64",
+          "record_artifact_name:string",
+          "record_artifact_digest:sha256",
+          "record_upload_step_id:string",
+          "record_upload_run_id:u64",
+          "record_upload_run_attempt:u64",
+          "record_upload_job_id:u64",
+          "record_upload_check_run_id:u64",
+          "policy_bootstrap_b_check_id:u64",
+          "policy_bootstrap_b_provider_app_id:u64",
+          "policy_bootstrap_b_integration_id:u64",
+          "policy_bootstrap_b_verifier_revision:string",
+          "called_workflow_path:string",
+          "called_workflow_ref:string",
+          "called_workflow_sha:sha256",
+          "called_workflow_file_blob_sha:sha256"
+        ],
+        "forbidden": [
+          "contents:write",
+          "actions:write",
+          "id-token:write",
+          "attestations:write",
+          "checks:write",
+          "release",
+          "merge",
+          "bypass"
+        ]
+      }
+    },
+    "transport_fields": [
+      "repository_id:string",
+      "source_ref:string",
+      "source_sha:sha256",
+      "source_tree_sha:sha256",
+      "closure_digest:sha256",
+      "caller_run_id:u64",
+      "caller_run_attempt:u64",
+      "caller_workflow_path:string",
+      "caller_workflow_ref:string",
+      "caller_workflow_sha:sha256",
+      "caller_workflow_file_blob_sha:sha256",
+      "artifact_name:string",
+      "artifact_id:u64",
+      "artifact_digest:sha256",
+      "service_zip_digest:sha256",
+      "service_zip_size:u64",
+      "inner_payload_digest:sha256",
+      "inner_payload_size:u64",
+      "binary_digest:sha256",
+      "binary_size:u64",
+      "binary_architecture:string",
+      "upload_step_id:string",
+      "producer_run_id:u64",
+      "producer_run_attempt:u64",
+      "producer_job_id:u64",
+      "producer_check_run_id:u64",
+      "producer_workflow_path:string",
+      "producer_workflow_ref:string",
+      "producer_workflow_sha:sha256",
+      "producer_workflow_file_blob_sha:sha256",
+      "verified_artifact_digest:sha256",
+      "verified_raw_service_zip_digest:sha256",
+      "verified_raw_inner_payload_digest:sha256",
+      "verified_raw_binary_digest:sha256",
+      "release_id:u64",
+      "release_tag:string",
+      "release_target_sha:sha256",
+      "binding_core_digest:sha256",
+      "binding_record_artifact_id:u64",
+      "binding_record_artifact_digest:sha256",
+      "binding_attestation_id:u64",
+      "binding_attestation_digest:sha256",
+      "final_manifest_artifact_id:u64",
+      "final_manifest_artifact_digest:sha256",
+      "final_manifest_digest:sha256",
+      "binding_predicate_type:string",
+      "binding_predicate_path:string",
+      "binding_subject_name:string",
+      "binding_subject_digest:sha256",
+      "release_asset_id:u64",
+      "release_asset_digest:sha256",
+      "published_release_id:u64",
+      "published_release_tag:string",
+      "published_release_target_sha:sha256",
+      "release_attestation_id:u64",
+      "release_attestation_digest:sha256",
+      "release_manifest_subject_sha256:sha256",
+      "release_predicate_type:string",
+      "release_predicate_path:string",
+      "signer_repository:string",
+      "signer_workflow:string",
+      "signer_source_ref:string",
+      "oidc_issuer:string",
+      "certificate_identity:string",
+      "certificate_verified:string",
+      "oidc_policy_revision_sha256:sha256",
+      "record_artifact_id:u64",
+      "record_artifact_name:string",
+      "record_artifact_digest:sha256",
+      "record_upload_step_id:string",
+      "record_upload_run_id:u64",
+      "record_upload_run_attempt:u64",
+      "record_upload_job_id:u64",
+      "record_upload_check_run_id:u64",
+      "policy_bootstrap_b_check_id:u64",
+      "policy_bootstrap_b_provider_app_id:u64",
+      "policy_bootstrap_b_integration_id:u64",
+      "policy_bootstrap_b_verifier_revision:string",
+      "called_workflow_path:string",
+      "called_workflow_ref:string",
+      "called_workflow_sha:sha256",
+      "called_workflow_file_blob_sha:sha256"
+    ],
+    "field_availability_dag": [
+      {
+        "stage": "S0",
+        "produces": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256"
+        ],
+        "consumes": [],
+        "producer_job": "ci-main caller job"
+      },
+      {
+        "stage": "S1",
+        "produces": [
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string"
+        ],
+        "consumes": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256"
+        ],
+        "producer_job": "build-linux-x64"
+      },
+      {
+        "stage": "S2",
+        "produces": [
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256"
+        ],
+        "consumes": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string"
+        ],
+        "producer_job": "artifact-verify"
+      },
+      {
+        "stage": "S3",
+        "produces": [
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256"
+        ],
+        "consumes": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256"
+        ],
+        "producer_job": "reserve-release"
+      },
+      {
+        "stage": "S4",
+        "produces": [
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "binding_predicate_type:string",
+          "binding_predicate_path:string",
+          "binding_subject_name:string",
+          "binding_subject_digest:sha256"
+        ],
+        "consumes": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256"
+        ],
+        "producer_job": "attest-binding"
+      },
+      {
+        "stage": "S5",
+        "produces": [
+          "release_asset_id:u64",
+          "release_asset_digest:sha256",
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target_sha:sha256"
+        ],
+        "consumes": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256",
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "binding_predicate_type:string",
+          "binding_predicate_path:string",
+          "binding_subject_name:string",
+          "binding_subject_digest:sha256"
+        ],
+        "producer_job": "publish"
+      },
+      {
+        "stage": "S6",
+        "produces": [
+          "release_attestation_id:u64",
+          "release_attestation_digest:sha256",
+          "release_manifest_subject_sha256:sha256",
+          "release_predicate_type:string",
+          "release_predicate_path:string",
+          "signer_repository:string",
+          "signer_workflow:string",
+          "signer_source_ref:string",
+          "oidc_issuer:string",
+          "certificate_identity:string",
+          "certificate_verified:string",
+          "oidc_policy_revision_sha256:sha256"
+        ],
+        "consumes": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256",
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "binding_predicate_type:string",
+          "binding_predicate_path:string",
+          "binding_subject_name:string",
+          "binding_subject_digest:sha256",
+          "release_asset_id:u64",
+          "release_asset_digest:sha256",
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target_sha:sha256"
+        ],
+        "producer_job": "attest-release"
+      },
+      {
+        "stage": "S7",
+        "produces": [
+          "record_artifact_id:u64",
+          "record_artifact_name:string",
+          "record_artifact_digest:sha256",
+          "record_upload_step_id:string",
+          "record_upload_run_id:u64",
+          "record_upload_run_attempt:u64",
+          "record_upload_job_id:u64",
+          "record_upload_check_run_id:u64",
+          "policy_bootstrap_b_check_id:u64",
+          "policy_bootstrap_b_provider_app_id:u64",
+          "policy_bootstrap_b_integration_id:u64",
+          "policy_bootstrap_b_verifier_revision:string",
+          "called_workflow_path:string",
+          "called_workflow_ref:string",
+          "called_workflow_sha:sha256",
+          "called_workflow_file_blob_sha:sha256"
+        ],
+        "consumes": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256",
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string",
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256",
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256",
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "binding_predicate_type:string",
+          "binding_predicate_path:string",
+          "binding_subject_name:string",
+          "binding_subject_digest:sha256",
+          "release_asset_id:u64",
+          "release_asset_digest:sha256",
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target_sha:sha256",
+          "release_attestation_id:u64",
+          "release_attestation_digest:sha256",
+          "release_manifest_subject_sha256:sha256",
+          "release_predicate_type:string",
+          "release_predicate_path:string",
+          "signer_repository:string",
+          "signer_workflow:string",
+          "signer_source_ref:string",
+          "oidc_issuer:string",
+          "certificate_identity:string",
+          "certificate_verified:string",
+          "oidc_policy_revision_sha256:sha256"
+        ],
+        "producer_job": "record-upload/verify-B"
+      }
+    ],
+    "field_provenance": {
+      "repository_id": {
+        "stage": "S0",
+        "producer": "ci-main caller job",
+        "source": "GitHub context and Contents API at exact caller ref",
+        "required": true
+      },
+      "source_ref": {
+        "stage": "S0",
+        "producer": "ci-main caller job",
+        "source": "GitHub context and Contents API at exact caller ref",
+        "required": true
+      },
+      "source_sha": {
+        "stage": "S0",
+        "producer": "ci-main caller job",
+        "source": "GitHub context and Contents API at exact caller ref",
+        "required": true
+      },
+      "source_tree_sha": {
+        "stage": "S0",
+        "producer": "ci-main caller job",
+        "source": "GitHub context and Contents API at exact caller ref",
+        "required": true
+      },
+      "closure_digest": {
+        "stage": "S0",
+        "producer": "ci-main caller job",
+        "source": "GitHub context and Contents API at exact caller ref",
+        "required": true
+      },
+      "caller_run_id": {
+        "stage": "S0",
+        "producer": "ci-main caller job",
+        "source": "GitHub context and Contents API at exact caller ref",
+        "required": true
+      },
+      "caller_run_attempt": {
+        "stage": "S0",
+        "producer": "ci-main caller job",
+        "source": "GitHub context and Contents API at exact caller ref",
+        "required": true
+      },
+      "caller_workflow_path": {
+        "stage": "S0",
+        "producer": "ci-main caller job",
+        "source": "GitHub context and Contents API at exact caller ref",
+        "required": true
+      },
+      "caller_workflow_ref": {
+        "stage": "S0",
+        "producer": "ci-main caller job",
+        "source": "GitHub context and Contents API at exact caller ref",
+        "required": true
+      },
+      "caller_workflow_sha": {
+        "stage": "S0",
+        "producer": "ci-main caller job",
+        "source": "GitHub context and Contents API at exact caller ref",
+        "required": true
+      },
+      "caller_workflow_file_blob_sha": {
+        "stage": "S0",
+        "producer": "ci-main caller job",
+        "source": "GitHub context and Contents API at exact caller ref",
+        "required": true
+      },
+      "artifact_name": {
+        "stage": "S1",
+        "producer": "build-linux-x64",
+        "source": "typed job output plus raw Actions artifact REST bytes",
+        "required": true
+      },
+      "artifact_id": {
+        "stage": "S1",
+        "producer": "build-linux-x64",
+        "source": "typed job output plus raw Actions artifact REST bytes",
+        "required": true
+      },
+      "artifact_digest": {
+        "stage": "S1",
+        "producer": "build-linux-x64",
+        "source": "typed job output plus raw Actions artifact REST bytes",
+        "required": true
+      },
+      "service_zip_digest": {
+        "stage": "S1",
+        "producer": "build-linux-x64",
+        "source": "typed job output plus raw Actions artifact REST bytes",
+        "required": true
+      },
+      "service_zip_size": {
+        "stage": "S1",
+        "producer": "build-linux-x64",
+        "source": "typed job output plus raw Actions artifact REST bytes",
+        "required": true
+      },
+      "inner_payload_digest": {
+        "stage": "S1",
+        "producer": "build-linux-x64",
+        "source": "typed job output plus raw Actions artifact REST bytes",
+        "required": true
+      },
+      "inner_payload_size": {
+        "stage": "S1",
+        "producer": "build-linux-x64",
+        "source": "typed job output plus raw Actions artifact REST bytes",
+        "required": true
+      },
+      "binary_digest": {
+        "stage": "S1",
+        "producer": "build-linux-x64",
+        "source": "typed job output plus raw Actions artifact REST bytes",
+        "required": true
+      },
+      "binary_size": {
+        "stage": "S1",
+        "producer": "build-linux-x64",
+        "source": "typed job output plus raw Actions artifact REST bytes",
+        "required": true
+      },
+      "binary_architecture": {
+        "stage": "S1",
+        "producer": "build-linux-x64",
+        "source": "typed job output plus raw Actions artifact REST bytes",
+        "required": true
+      },
+      "upload_step_id": {
+        "stage": "S1",
+        "producer": "build-linux-x64",
+        "source": "typed job output plus raw Actions artifact REST bytes",
+        "required": true
+      },
+      "producer_run_id": {
+        "stage": "S2",
+        "producer": "artifact-verify",
+        "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+        "required": true
+      },
+      "producer_run_attempt": {
+        "stage": "S2",
+        "producer": "artifact-verify",
+        "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+        "required": true
+      },
+      "producer_job_id": {
+        "stage": "S2",
+        "producer": "artifact-verify",
+        "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+        "required": true
+      },
+      "producer_check_run_id": {
+        "stage": "S2",
+        "producer": "artifact-verify",
+        "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+        "required": true
+      },
+      "producer_workflow_path": {
+        "stage": "S2",
+        "producer": "artifact-verify",
+        "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+        "required": true
+      },
+      "producer_workflow_ref": {
+        "stage": "S2",
+        "producer": "artifact-verify",
+        "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+        "required": true
+      },
+      "producer_workflow_sha": {
+        "stage": "S2",
+        "producer": "artifact-verify",
+        "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+        "required": true
+      },
+      "producer_workflow_file_blob_sha": {
+        "stage": "S2",
+        "producer": "artifact-verify",
+        "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+        "required": true
+      },
+      "verified_artifact_digest": {
+        "stage": "S2",
+        "producer": "artifact-verify",
+        "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+        "required": true
+      },
+      "verified_raw_service_zip_digest": {
+        "stage": "S2",
+        "producer": "artifact-verify",
+        "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+        "required": true
+      },
+      "verified_raw_inner_payload_digest": {
+        "stage": "S2",
+        "producer": "artifact-verify",
+        "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+        "required": true
+      },
+      "verified_raw_binary_digest": {
+        "stage": "S2",
+        "producer": "artifact-verify",
+        "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+        "required": true
+      },
+      "release_id": {
+        "stage": "S3",
+        "producer": "reserve-release",
+        "source": "draft Releases API create response",
+        "required": true
+      },
+      "release_tag": {
+        "stage": "S3",
+        "producer": "reserve-release",
+        "source": "draft Releases API create response",
+        "required": true
+      },
+      "release_target_sha": {
+        "stage": "S3",
+        "producer": "reserve-release",
+        "source": "draft Releases API create response",
+        "required": true
+      },
+      "binding_core_digest": {
+        "stage": "S4",
+        "producer": "attest-binding",
+        "source": "attestation/Actions artifact API response after binding subject exists",
+        "required": true
+      },
+      "binding_record_artifact_id": {
+        "stage": "S4",
+        "producer": "attest-binding",
+        "source": "attestation/Actions artifact API response after binding subject exists",
+        "required": true
+      },
+      "binding_record_artifact_digest": {
+        "stage": "S4",
+        "producer": "attest-binding",
+        "source": "attestation/Actions artifact API response after binding subject exists",
+        "required": true
+      },
+      "binding_attestation_id": {
+        "stage": "S4",
+        "producer": "attest-binding",
+        "source": "attestation/Actions artifact API response after binding subject exists",
+        "required": true
+      },
+      "binding_attestation_digest": {
+        "stage": "S4",
+        "producer": "attest-binding",
+        "source": "attestation/Actions artifact API response after binding subject exists",
+        "required": true
+      },
+      "final_manifest_artifact_id": {
+        "stage": "S4",
+        "producer": "attest-binding",
+        "source": "attestation/Actions artifact API response after binding subject exists",
+        "required": true
+      },
+      "final_manifest_artifact_digest": {
+        "stage": "S4",
+        "producer": "attest-binding",
+        "source": "attestation/Actions artifact API response after binding subject exists",
+        "required": true
+      },
+      "final_manifest_digest": {
+        "stage": "S4",
+        "producer": "attest-binding",
+        "source": "attestation/Actions artifact API response after binding subject exists",
+        "required": true
+      },
+      "binding_predicate_type": {
+        "stage": "S4",
+        "producer": "attest-binding",
+        "source": "attestation/Actions artifact API response after binding subject exists",
+        "required": true
+      },
+      "binding_predicate_path": {
+        "stage": "S4",
+        "producer": "attest-binding",
+        "source": "attestation/Actions artifact API response after binding subject exists",
+        "required": true
+      },
+      "binding_subject_name": {
+        "stage": "S4",
+        "producer": "attest-binding",
+        "source": "attestation/Actions artifact API response after binding subject exists",
+        "required": true
+      },
+      "binding_subject_digest": {
+        "stage": "S4",
+        "producer": "attest-binding",
+        "source": "attestation/Actions artifact API response after binding subject exists",
+        "required": true
+      },
+      "release_asset_id": {
+        "stage": "S5",
+        "producer": "publish",
+        "source": "published Releases API response and raw release-asset download",
+        "required": true
+      },
+      "release_asset_digest": {
+        "stage": "S5",
+        "producer": "publish",
+        "source": "published Releases API response and raw release-asset download",
+        "required": true
+      },
+      "published_release_id": {
+        "stage": "S5",
+        "producer": "publish",
+        "source": "published Releases API response and raw release-asset download",
+        "required": true
+      },
+      "published_release_tag": {
+        "stage": "S5",
+        "producer": "publish",
+        "source": "published Releases API response and raw release-asset download",
+        "required": true
+      },
+      "published_release_target_sha": {
+        "stage": "S5",
+        "producer": "publish",
+        "source": "published Releases API response and raw release-asset download",
+        "required": true
+      },
+      "release_attestation_id": {
+        "stage": "S6",
+        "producer": "attest-release",
+        "source": "release attestation API response and verified certificate/predicate bytes",
+        "required": true
+      },
+      "release_attestation_digest": {
+        "stage": "S6",
+        "producer": "attest-release",
+        "source": "release attestation API response and verified certificate/predicate bytes",
+        "required": true
+      },
+      "release_manifest_subject_sha256": {
+        "stage": "S6",
+        "producer": "attest-release",
+        "source": "release attestation API response and verified certificate/predicate bytes",
+        "required": true
+      },
+      "release_predicate_type": {
+        "stage": "S6",
+        "producer": "attest-release",
+        "source": "release attestation API response and verified certificate/predicate bytes",
+        "required": true
+      },
+      "release_predicate_path": {
+        "stage": "S6",
+        "producer": "attest-release",
+        "source": "release attestation API response and verified certificate/predicate bytes",
+        "required": true
+      },
+      "signer_repository": {
+        "stage": "S6",
+        "producer": "attest-release",
+        "source": "release attestation API response and verified certificate/predicate bytes",
+        "required": true
+      },
+      "signer_workflow": {
+        "stage": "S6",
+        "producer": "attest-release",
+        "source": "release attestation API response and verified certificate/predicate bytes",
+        "required": true
+      },
+      "signer_source_ref": {
+        "stage": "S6",
+        "producer": "attest-release",
+        "source": "release attestation API response and verified certificate/predicate bytes",
+        "required": true
+      },
+      "oidc_issuer": {
+        "stage": "S6",
+        "producer": "attest-release",
+        "source": "release attestation API response and verified certificate/predicate bytes",
+        "required": true
+      },
+      "certificate_identity": {
+        "stage": "S6",
+        "producer": "attest-release",
+        "source": "release attestation API response and verified certificate/predicate bytes",
+        "required": true
+      },
+      "certificate_verified": {
+        "stage": "S6",
+        "producer": "attest-release",
+        "source": "release attestation API response and verified certificate/predicate bytes",
+        "required": true
+      },
+      "oidc_policy_revision_sha256": {
+        "stage": "S6",
+        "producer": "attest-release",
+        "source": "release attestation API response and verified certificate/predicate bytes",
+        "required": true
+      },
+      "record_artifact_id": {
+        "stage": "S7",
+        "producer": "record-upload or verify-B",
+        "source": "record upload REST response or external Checks/Actions API",
+        "required": true
+      },
+      "record_artifact_name": {
+        "stage": "S7",
+        "producer": "record-upload or verify-B",
+        "source": "record upload REST response or external Checks/Actions API",
+        "required": true
+      },
+      "record_artifact_digest": {
+        "stage": "S7",
+        "producer": "record-upload or verify-B",
+        "source": "record upload REST response or external Checks/Actions API",
+        "required": true
+      },
+      "record_upload_step_id": {
+        "stage": "S7",
+        "producer": "record-upload or verify-B",
+        "source": "record upload REST response or external Checks/Actions API",
+        "required": true
+      },
+      "record_upload_run_id": {
+        "stage": "S7",
+        "producer": "record-upload or verify-B",
+        "source": "record upload REST response or external Checks/Actions API",
+        "required": true
+      },
+      "record_upload_run_attempt": {
+        "stage": "S7",
+        "producer": "record-upload or verify-B",
+        "source": "record upload REST response or external Checks/Actions API",
+        "required": true
+      },
+      "record_upload_job_id": {
+        "stage": "S7",
+        "producer": "record-upload or verify-B",
+        "source": "record upload REST response or external Checks/Actions API",
+        "required": true
+      },
+      "record_upload_check_run_id": {
+        "stage": "S7",
+        "producer": "record-upload or verify-B",
+        "source": "record upload REST response or external Checks/Actions API",
+        "required": true
+      },
+      "policy_bootstrap_b_check_id": {
+        "stage": "S7",
+        "producer": "record-upload or verify-B",
+        "source": "record upload REST response or external Checks/Actions API",
+        "required": true
+      },
+      "policy_bootstrap_b_provider_app_id": {
+        "stage": "S7",
+        "producer": "record-upload or verify-B",
+        "source": "record upload REST response or external Checks/Actions API",
+        "required": true
+      },
+      "policy_bootstrap_b_integration_id": {
+        "stage": "S7",
+        "producer": "record-upload or verify-B",
+        "source": "record upload REST response or external Checks/Actions API",
+        "required": true
+      },
+      "policy_bootstrap_b_verifier_revision": {
+        "stage": "S7",
+        "producer": "record-upload or verify-B",
+        "source": "record upload REST response or external Checks/Actions API",
+        "required": true
+      },
+      "called_workflow_path": {
+        "stage": "S7",
+        "producer": "record-upload or verify-B",
+        "source": "record upload REST response or external Checks/Actions API",
+        "required": true
+      },
+      "called_workflow_ref": {
+        "stage": "S7",
+        "producer": "record-upload or verify-B",
+        "source": "record upload REST response or external Checks/Actions API",
+        "required": true
+      },
+      "called_workflow_sha": {
+        "stage": "S7",
+        "producer": "record-upload or verify-B",
+        "source": "record upload REST response or external Checks/Actions API",
+        "required": true
+      },
+      "called_workflow_file_blob_sha": {
+        "stage": "S7",
+        "producer": "record-upload or verify-B",
+        "source": "record upload REST response or external Checks/Actions API",
+        "required": true
+      }
+    },
+    "record_contract": {
+      "path": "policy-validator-b-record.zip",
+      "artifact_namespace": "Actions artifact",
+      "strict_schema": true,
+      "schema_path": "G1/bootstrap-transition/authority-contract-separation-2026-09-20/policy-validator-b-record-provenance.v1.schema.json",
+      "schema_sha256": "3f2d72acda359e8ca0a31a40a6e4aa417bd49552acec050583a92601d0c851ef",
+      "contains_paths": [
+        "binding.json",
+        "provenance.json"
+      ],
+      "canonical_binding_schema_path": "G1/bootstrap-transition/authority-contract-separation-2026-09-20/permanent-b-product-binding.schema.json",
+      "canonical_binding_schema_sha256": "427cbae0d9a238ae5e22a1afac2c8f840e4a8ad136983ac28a863651e533aed7",
+      "actual_producer_job": "record-upload numeric job id",
+      "actual_upload_step": "upload-record",
+      "record_artifact_transport": {
+        "producer": "record-upload",
+        "upload_response": "Actions artifact REST response",
+        "required_fields": [
+          "record_artifact_id",
+          "record_artifact_name",
+          "record_artifact_digest",
+          "record_upload_run_id",
+          "record_upload_run_attempt",
+          "record_upload_job_id",
+          "record_upload_check_run_id"
+        ],
+        "not_in_binding_preimage": true
+      },
+      "record_ids_excluded_from_preimage": true,
+      "provider_handoff": [
+        "record_artifact_id",
+        "record_artifact_digest",
+        "provider_app_id",
+        "provider_integration_id",
+        "verifier_revision"
+      ]
+    },
+    "attestation_contract": {
+      "stage_partition": {
+        "S4_binding": {
+          "subject": "raw immutable service ZIP",
+          "predicate_type": "https://velnor.dev/attestations/policy-validator-binding/v1",
+          "predicate_path": "attestations/velnor-policy-validator-binding.v1.json",
+          "preimage_stages": [
+            "S0",
+            "S1",
+            "S2",
+            "S3"
+          ],
+          "excludes": [
+            "release_asset_id",
+            "release_asset_digest",
+            "release_attestation_id",
+            "release_attestation_digest",
+            "record_artifact_id",
+            "record_artifact_digest",
+            "provider_check",
+            "called_workflow",
+            "binding_attestation_id",
+            "binding_attestation_digest",
+            "final_manifest_digest"
+          ]
+        },
+        "S6_release": {
+          "subject": "final manifest artifact bytes",
+          "predicate_type": "https://velnor.dev/attestations/velnor-policy-validator-release/v1",
+          "predicate_path": "attestations/velnor-policy-validator-release.v1.json",
+          "preimage_stages": [
+            "S0",
+            "S1",
+            "S2",
+            "S3",
+            "S4",
+            "S5"
+          ],
+          "requires": [
+            "release_asset_id",
+            "release_asset_digest",
+            "published_release_id"
+          ],
+          "excludes": [
+            "release_attestation_id",
+            "release_attestation_digest",
+            "record_artifact_id",
+            "record_artifact_digest",
+            "provider_check",
+            "called_workflow"
+          ]
+        },
+        "S7_record": {
+          "subject": "strict record zip bytes",
+          "preimage_stages": [
+            "S0",
+            "S1",
+            "S2",
+            "S3",
+            "S4",
+            "S5",
+            "S6"
+          ],
+          "excludes": [
+            "record_artifact_id",
+            "record_artifact_digest",
+            "record_upload_run_id",
+            "record_upload_job_id",
+            "record_upload_check_run_id"
+          ]
+        }
+      },
+      "required_fields": [
+        "repository_id",
+        "source_ref",
+        "source_sha",
+        "source_tree_sha",
+        "closure_digest",
+        "caller_run_id",
+        "caller_run_attempt",
+        "caller_workflow_path",
+        "caller_workflow_ref",
+        "caller_workflow_sha",
+        "caller_workflow_file_blob_sha",
+        "artifact_name",
+        "artifact_id",
+        "artifact_digest",
+        "service_zip_digest",
+        "service_zip_size",
+        "inner_payload_digest",
+        "inner_payload_size",
+        "binary_digest",
+        "binary_size",
+        "binary_architecture",
+        "upload_step_id",
+        "producer_run_id",
+        "producer_run_attempt",
+        "producer_job_id",
+        "producer_check_run_id",
+        "producer_workflow_path",
+        "producer_workflow_ref",
+        "producer_workflow_sha",
+        "producer_workflow_file_blob_sha",
+        "verified_artifact_digest",
+        "verified_raw_service_zip_digest",
+        "verified_raw_inner_payload_digest",
+        "verified_raw_binary_digest",
+        "release_id",
+        "release_tag",
+        "release_target_sha",
+        "binding_core_digest",
+        "binding_record_artifact_id",
+        "binding_record_artifact_digest",
+        "binding_attestation_id",
+        "binding_attestation_digest",
+        "final_manifest_artifact_id",
+        "final_manifest_artifact_digest",
+        "final_manifest_digest",
+        "binding_predicate_type",
+        "binding_predicate_path",
+        "binding_subject_name",
+        "binding_subject_digest",
+        "release_asset_id",
+        "release_asset_digest",
+        "published_release_id",
+        "published_release_tag",
+        "published_release_target_sha",
+        "release_attestation_id",
+        "release_attestation_digest",
+        "release_manifest_subject_sha256",
+        "release_predicate_type",
+        "release_predicate_path",
+        "signer_repository",
+        "signer_workflow",
+        "signer_source_ref",
+        "oidc_issuer",
+        "certificate_identity",
+        "certificate_verified",
+        "oidc_policy_revision_sha256",
+        "record_artifact_id",
+        "record_artifact_name",
+        "record_artifact_digest",
+        "record_upload_step_id",
+        "record_upload_run_id",
+        "record_upload_run_attempt",
+        "record_upload_job_id",
+        "record_upload_check_run_id",
+        "policy_bootstrap_b_check_id",
+        "policy_bootstrap_b_provider_app_id",
+        "policy_bootstrap_b_integration_id",
+        "policy_bootstrap_b_verifier_revision",
+        "called_workflow_path",
+        "called_workflow_ref",
+        "called_workflow_sha",
+        "called_workflow_file_blob_sha"
+      ],
+      "required_field_provenance": {
+        "repository_id": {
+          "stage": "S0",
+          "producer": "ci-main caller job",
+          "source": "GitHub context and Contents API at exact caller ref",
+          "required": true
+        },
+        "source_ref": {
+          "stage": "S0",
+          "producer": "ci-main caller job",
+          "source": "GitHub context and Contents API at exact caller ref",
+          "required": true
+        },
+        "source_sha": {
+          "stage": "S0",
+          "producer": "ci-main caller job",
+          "source": "GitHub context and Contents API at exact caller ref",
+          "required": true
+        },
+        "source_tree_sha": {
+          "stage": "S0",
+          "producer": "ci-main caller job",
+          "source": "GitHub context and Contents API at exact caller ref",
+          "required": true
+        },
+        "closure_digest": {
+          "stage": "S0",
+          "producer": "ci-main caller job",
+          "source": "GitHub context and Contents API at exact caller ref",
+          "required": true
+        },
+        "caller_run_id": {
+          "stage": "S0",
+          "producer": "ci-main caller job",
+          "source": "GitHub context and Contents API at exact caller ref",
+          "required": true
+        },
+        "caller_run_attempt": {
+          "stage": "S0",
+          "producer": "ci-main caller job",
+          "source": "GitHub context and Contents API at exact caller ref",
+          "required": true
+        },
+        "caller_workflow_path": {
+          "stage": "S0",
+          "producer": "ci-main caller job",
+          "source": "GitHub context and Contents API at exact caller ref",
+          "required": true
+        },
+        "caller_workflow_ref": {
+          "stage": "S0",
+          "producer": "ci-main caller job",
+          "source": "GitHub context and Contents API at exact caller ref",
+          "required": true
+        },
+        "caller_workflow_sha": {
+          "stage": "S0",
+          "producer": "ci-main caller job",
+          "source": "GitHub context and Contents API at exact caller ref",
+          "required": true
+        },
+        "caller_workflow_file_blob_sha": {
+          "stage": "S0",
+          "producer": "ci-main caller job",
+          "source": "GitHub context and Contents API at exact caller ref",
+          "required": true
+        },
+        "artifact_name": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "typed job output plus raw Actions artifact REST bytes",
+          "required": true
+        },
+        "artifact_id": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "typed job output plus raw Actions artifact REST bytes",
+          "required": true
+        },
+        "artifact_digest": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "typed job output plus raw Actions artifact REST bytes",
+          "required": true
+        },
+        "service_zip_digest": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "typed job output plus raw Actions artifact REST bytes",
+          "required": true
+        },
+        "service_zip_size": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "typed job output plus raw Actions artifact REST bytes",
+          "required": true
+        },
+        "inner_payload_digest": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "typed job output plus raw Actions artifact REST bytes",
+          "required": true
+        },
+        "inner_payload_size": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "typed job output plus raw Actions artifact REST bytes",
+          "required": true
+        },
+        "binary_digest": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "typed job output plus raw Actions artifact REST bytes",
+          "required": true
+        },
+        "binary_size": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "typed job output plus raw Actions artifact REST bytes",
+          "required": true
+        },
+        "binary_architecture": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "typed job output plus raw Actions artifact REST bytes",
+          "required": true
+        },
+        "upload_step_id": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "typed job output plus raw Actions artifact REST bytes",
+          "required": true
+        },
+        "producer_run_id": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+          "required": true
+        },
+        "producer_run_attempt": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+          "required": true
+        },
+        "producer_job_id": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+          "required": true
+        },
+        "producer_check_run_id": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+          "required": true
+        },
+        "producer_workflow_path": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+          "required": true
+        },
+        "producer_workflow_ref": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+          "required": true
+        },
+        "producer_workflow_sha": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+          "required": true
+        },
+        "producer_workflow_file_blob_sha": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+          "required": true
+        },
+        "verified_artifact_digest": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+          "required": true
+        },
+        "verified_raw_service_zip_digest": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+          "required": true
+        },
+        "verified_raw_inner_payload_digest": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+          "required": true
+        },
+        "verified_raw_binary_digest": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "paginated Actions runs/jobs/check-runs API plus OIDC/blob cross-check",
+          "required": true
+        },
+        "release_id": {
+          "stage": "S3",
+          "producer": "reserve-release",
+          "source": "draft Releases API create response",
+          "required": true
+        },
+        "release_tag": {
+          "stage": "S3",
+          "producer": "reserve-release",
+          "source": "draft Releases API create response",
+          "required": true
+        },
+        "release_target_sha": {
+          "stage": "S3",
+          "producer": "reserve-release",
+          "source": "draft Releases API create response",
+          "required": true
+        },
+        "binding_core_digest": {
+          "stage": "S4",
+          "producer": "attest-binding",
+          "source": "attestation/Actions artifact API response after binding subject exists",
+          "required": true
+        },
+        "binding_record_artifact_id": {
+          "stage": "S4",
+          "producer": "attest-binding",
+          "source": "attestation/Actions artifact API response after binding subject exists",
+          "required": true
+        },
+        "binding_record_artifact_digest": {
+          "stage": "S4",
+          "producer": "attest-binding",
+          "source": "attestation/Actions artifact API response after binding subject exists",
+          "required": true
+        },
+        "binding_attestation_id": {
+          "stage": "S4",
+          "producer": "attest-binding",
+          "source": "attestation/Actions artifact API response after binding subject exists",
+          "required": true
+        },
+        "binding_attestation_digest": {
+          "stage": "S4",
+          "producer": "attest-binding",
+          "source": "attestation/Actions artifact API response after binding subject exists",
+          "required": true
+        },
+        "final_manifest_artifact_id": {
+          "stage": "S4",
+          "producer": "attest-binding",
+          "source": "attestation/Actions artifact API response after binding subject exists",
+          "required": true
+        },
+        "final_manifest_artifact_digest": {
+          "stage": "S4",
+          "producer": "attest-binding",
+          "source": "attestation/Actions artifact API response after binding subject exists",
+          "required": true
+        },
+        "final_manifest_digest": {
+          "stage": "S4",
+          "producer": "attest-binding",
+          "source": "attestation/Actions artifact API response after binding subject exists",
+          "required": true
+        },
+        "binding_predicate_type": {
+          "stage": "S4",
+          "producer": "attest-binding",
+          "source": "attestation/Actions artifact API response after binding subject exists",
+          "required": true
+        },
+        "binding_predicate_path": {
+          "stage": "S4",
+          "producer": "attest-binding",
+          "source": "attestation/Actions artifact API response after binding subject exists",
+          "required": true
+        },
+        "binding_subject_name": {
+          "stage": "S4",
+          "producer": "attest-binding",
+          "source": "attestation/Actions artifact API response after binding subject exists",
+          "required": true
+        },
+        "binding_subject_digest": {
+          "stage": "S4",
+          "producer": "attest-binding",
+          "source": "attestation/Actions artifact API response after binding subject exists",
+          "required": true
+        },
+        "release_asset_id": {
+          "stage": "S5",
+          "producer": "publish",
+          "source": "published Releases API response and raw release-asset download",
+          "required": true
+        },
+        "release_asset_digest": {
+          "stage": "S5",
+          "producer": "publish",
+          "source": "published Releases API response and raw release-asset download",
+          "required": true
+        },
+        "published_release_id": {
+          "stage": "S5",
+          "producer": "publish",
+          "source": "published Releases API response and raw release-asset download",
+          "required": true
+        },
+        "published_release_tag": {
+          "stage": "S5",
+          "producer": "publish",
+          "source": "published Releases API response and raw release-asset download",
+          "required": true
+        },
+        "published_release_target_sha": {
+          "stage": "S5",
+          "producer": "publish",
+          "source": "published Releases API response and raw release-asset download",
+          "required": true
+        },
+        "release_attestation_id": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "release attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "release_attestation_digest": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "release attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "release_manifest_subject_sha256": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "release attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "release_predicate_type": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "release attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "release_predicate_path": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "release attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "signer_repository": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "release attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "signer_workflow": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "release attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "signer_source_ref": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "release attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "oidc_issuer": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "release attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "certificate_identity": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "release attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "certificate_verified": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "release attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "oidc_policy_revision_sha256": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "release attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "record_artifact_id": {
+          "stage": "S7",
+          "producer": "record-upload or verify-B",
+          "source": "record upload REST response or external Checks/Actions API",
+          "required": true
+        },
+        "record_artifact_name": {
+          "stage": "S7",
+          "producer": "record-upload or verify-B",
+          "source": "record upload REST response or external Checks/Actions API",
+          "required": true
+        },
+        "record_artifact_digest": {
+          "stage": "S7",
+          "producer": "record-upload or verify-B",
+          "source": "record upload REST response or external Checks/Actions API",
+          "required": true
+        },
+        "record_upload_step_id": {
+          "stage": "S7",
+          "producer": "record-upload or verify-B",
+          "source": "record upload REST response or external Checks/Actions API",
+          "required": true
+        },
+        "record_upload_run_id": {
+          "stage": "S7",
+          "producer": "record-upload or verify-B",
+          "source": "record upload REST response or external Checks/Actions API",
+          "required": true
+        },
+        "record_upload_run_attempt": {
+          "stage": "S7",
+          "producer": "record-upload or verify-B",
+          "source": "record upload REST response or external Checks/Actions API",
+          "required": true
+        },
+        "record_upload_job_id": {
+          "stage": "S7",
+          "producer": "record-upload or verify-B",
+          "source": "record upload REST response or external Checks/Actions API",
+          "required": true
+        },
+        "record_upload_check_run_id": {
+          "stage": "S7",
+          "producer": "record-upload or verify-B",
+          "source": "record upload REST response or external Checks/Actions API",
+          "required": true
+        },
+        "policy_bootstrap_b_check_id": {
+          "stage": "S7",
+          "producer": "record-upload or verify-B",
+          "source": "record upload REST response or external Checks/Actions API",
+          "required": true
+        },
+        "policy_bootstrap_b_provider_app_id": {
+          "stage": "S7",
+          "producer": "record-upload or verify-B",
+          "source": "record upload REST response or external Checks/Actions API",
+          "required": true
+        },
+        "policy_bootstrap_b_integration_id": {
+          "stage": "S7",
+          "producer": "record-upload or verify-B",
+          "source": "record upload REST response or external Checks/Actions API",
+          "required": true
+        },
+        "policy_bootstrap_b_verifier_revision": {
+          "stage": "S7",
+          "producer": "record-upload or verify-B",
+          "source": "record upload REST response or external Checks/Actions API",
+          "required": true
+        },
+        "called_workflow_path": {
+          "stage": "S7",
+          "producer": "record-upload or verify-B",
+          "source": "record upload REST response or external Checks/Actions API",
+          "required": true
+        },
+        "called_workflow_ref": {
+          "stage": "S7",
+          "producer": "record-upload or verify-B",
+          "source": "record upload REST response or external Checks/Actions API",
+          "required": true
+        },
+        "called_workflow_sha": {
+          "stage": "S7",
+          "producer": "record-upload or verify-B",
+          "source": "record upload REST response or external Checks/Actions API",
+          "required": true
+        },
+        "called_workflow_file_blob_sha": {
+          "stage": "S7",
+          "producer": "record-upload or verify-B",
+          "source": "record upload REST response or external Checks/Actions API",
+          "required": true
+        }
+      },
+      "digest_graph": {
+        "nodes": [
+          "S0_inputs",
+          "S1_artifact",
+          "S2_producer",
+          "S3_release",
+          "S4_binding",
+          "S5_release_asset",
+          "S6_release_attestation",
+          "S7_record_transport",
+          "S7_provider_check"
+        ],
+        "edges": [
+          [
+            "S0_inputs",
+            "S1_artifact"
+          ],
+          [
+            "S1_artifact",
+            "S2_producer"
+          ],
+          [
+            "S2_producer",
+            "S3_release"
+          ],
+          [
+            "S3_release",
+            "S4_binding"
+          ],
+          [
+            "S4_binding",
+            "S5_release_asset"
+          ],
+          [
+            "S5_release_asset",
+            "S6_release_attestation"
+          ],
+          [
+            "S6_release_attestation",
+            "S7_record_transport"
+          ],
+          [
+            "S7_record_transport",
+            "S7_provider_check"
+          ]
+        ],
+        "no_future_or_self_preimage": true
+      },
+      "own_id_digest_excluded": [
+        "binding_attestation_id",
+        "binding_attestation_digest",
+        "release_attestation_id",
+        "release_attestation_digest",
+        "record_artifact_id",
+        "record_artifact_digest",
+        "record_upload_run_id",
+        "record_upload_job_id",
+        "record_upload_check_run_id",
+        "release_asset_id",
+        "release_asset_digest"
+      ],
+      "trust": {
+        "oidc_issuer": "https://token.actions.githubusercontent.com",
+        "caller_claims": [
+          "workflow_ref",
+          "workflow_sha"
+        ],
+        "called_claims": [
+          "job_workflow_ref",
+          "job_workflow_sha"
+        ],
+        "producer_claims": [
+          "job_workflow_ref",
+          "job_workflow_sha"
+        ],
+        "contents_blob_relation": "Contents API blob SHA at exact source ref is separately compared to workflow_sha where GitHub provides commit/blob mapping",
+        "certificate_verified": true,
+        "signer_repository": "tailrocks/velnor",
+        "signer_workflow": "tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml",
+        "signer_source_ref": "refs/heads/main",
+        "oidc_policy_revision_sha256": "<64-hex>",
+        "temporary_key": false
+      },
+      "actions": {
+        "build_job_permissions": [
+          "actions:read",
+          "contents:read"
+        ],
+        "verify_job_permissions": [
+          "actions:read",
+          "attestations:read",
+          "contents:read"
+        ],
+        "attest_job_permissions": [
+          "actions:read",
+          "contents:read",
+          "id-token:write",
+          "attestations:write"
+        ],
+        "publish_job_permissions": [
+          "contents:write"
+        ],
+        "external_verifier_permissions": [
+          "metadata:read",
+          "contents:read",
+          "actions:read",
+          "attestations:read",
+          "checks:read"
+        ],
+        "github_token_impersonation": false
+      }
+    },
+    "release_protocol": {
+      "draft_first": true,
+      "create_response_must_have_nonzero_release_id": true,
+      "draft_tag_reserved_before_attestation": true,
+      "immutable_tag": "reserve once; retry only same draft identity; reject tag/release replacement",
+      "publish_readback": [
+        "release_id",
+        "tag_name",
+        "target_commitish",
+        "asset_id",
+        "asset_digest",
+        "raw_download_digest"
+      ],
+      "release_attestation_after": "published asset and manifest raw bytes",
+      "automatic_release_attestation_census": "GET attestations and verify predicate type/path/subject/certificate; terminal success required",
+      "retry": "on timeout query exact release ID/tag/target and continue or fail; never create a second candidate"
+    },
+    "external_checks_app": {
+      "provider_app_id": "<real MAIN_B_PROVIDER_APP_ID>",
+      "installation_id": "<real MAIN_B_INSTALLATION_ID>",
+      "integration_id": "<real MAIN_B_INTEGRATION_ID>",
+      "verifier_revision": "<40-hex>",
+      "credential_source": "private key in durable external secret manager; not GITHUB_TOKEN",
+      "permissions": [
+        "metadata:read",
+        "contents:read",
+        "actions:read",
+        "attestations:read",
+        "checks:read/write"
+      ],
+      "check_binding": [
+        "context",
+        "integration_id",
+        "provider_app_id",
+        "resulting_main_sha",
+        "record_artifact_id",
+        "record_artifact_digest",
+        "verifier_revision",
+        "transaction_id"
+      ],
+      "record_artifact_handoff": "GET /actions/artifacts/{record_artifact_id}/zip; verify raw ZIP digest, strict schema, canonical binding schema, and source/release digests before emitting check",
+      "provider_identity_handoff": "provider app identity and called workflow identity are read from live API/OIDC; names do not bind them",
+      "status": "unproven external capability blocker"
+    },
+    "product": {
+      "namespace": "velnor.policy-validator",
+      "name": "velnor-policy-validator",
+      "platform": "ubuntu-24.04",
+      "architecture": "x86_64",
+      "source_sha_field": "source_sha",
+      "source_tree_field": "source_tree_sha",
+      "closure_field": "closure_digest",
+      "immutable_tag_field": "release_tag",
+      "release_asset_field": "release_asset_id",
+      "raw_service_zip_digest_field": "service_zip_digest",
+      "raw_inner_payload_digest_field": "inner_payload_digest",
+      "raw_binary_digest_field": "binary_digest"
+    },
+    "validation_contract": [
+      "field availability is executable and every canonical leaf has exactly one producer/source object",
+      "all edge fields are explicit typed values or immutable artifact IDs; no workspace crossing",
+      "binding S4 excludes release assets and all record/provider/own IDs",
+      "release S6 consumes release asset and excludes own/record/provider IDs",
+      "record artifact producer/upload identity is returned by API and is not in its own preimage",
+      "caller OIDC uses workflow_ref/workflow_sha; called OIDC uses job_workflow_ref/job_workflow_sha",
+      "terminal census is post-run companion evidence and excludes verify-B, Policy, and provider check",
+      "external App has real verifier-only credential; GITHUB_TOKEN cannot impersonate it",
+      "workflow_call-only publisher has one guarded caller and no standalone push publisher"
+    ],
+    "contract_version": "v8",
+    "field_lineage_edges": [
+      {
+        "from_job": "artifact-verify",
+        "to_job": "build-linux-x64",
+        "fields": [
+          "repository_id:string",
+          "source_ref:string",
+          "source_sha:sha256",
+          "source_tree_sha:sha256",
+          "closure_digest:sha256",
+          "caller_run_id:u64",
+          "caller_run_attempt:u64",
+          "caller_workflow_path:string",
+          "caller_workflow_ref:string",
+          "caller_workflow_sha:sha256",
+          "caller_workflow_file_blob_sha:sha256"
+        ]
+      },
+      {
+        "from_job": "reserve-release",
+        "to_job": "artifact-verify",
+        "fields": [
+          "artifact_name:string",
+          "artifact_id:u64",
+          "artifact_digest:sha256",
+          "service_zip_digest:sha256",
+          "service_zip_size:u64",
+          "inner_payload_digest:sha256",
+          "inner_payload_size:u64",
+          "binary_digest:sha256",
+          "binary_size:u64",
+          "binary_architecture:string",
+          "upload_step_id:string"
+        ]
+      },
+      {
+        "from_job": "attest-binding",
+        "to_job": "reserve-release",
+        "fields": [
+          "producer_run_id:u64",
+          "producer_run_attempt:u64",
+          "producer_job_id:u64",
+          "producer_check_run_id:u64",
+          "producer_workflow_path:string",
+          "producer_workflow_ref:string",
+          "producer_workflow_sha:sha256",
+          "producer_workflow_file_blob_sha:sha256",
+          "verified_artifact_digest:sha256",
+          "verified_raw_service_zip_digest:sha256",
+          "verified_raw_inner_payload_digest:sha256",
+          "verified_raw_binary_digest:sha256"
+        ]
+      },
+      {
+        "from_job": "publish",
+        "to_job": "attest-binding",
+        "fields": [
+          "release_id:u64",
+          "release_tag:string",
+          "release_target_sha:sha256"
+        ]
+      },
+      {
+        "from_job": "attest-release",
+        "to_job": "publish",
+        "fields": [
+          "binding_core_digest:sha256",
+          "binding_record_artifact_id:u64",
+          "binding_record_artifact_digest:sha256",
+          "binding_attestation_id:u64",
+          "binding_attestation_digest:sha256",
+          "final_manifest_artifact_id:u64",
+          "final_manifest_artifact_digest:sha256",
+          "final_manifest_digest:sha256",
+          "binding_predicate_type:string",
+          "binding_predicate_path:string",
+          "binding_subject_name:string",
+          "binding_subject_digest:sha256"
+        ]
+      },
+      {
+        "from_job": "record-upload",
+        "to_job": "attest-release",
+        "fields": [
+          "release_asset_id:u64",
+          "release_asset_digest:sha256",
+          "published_release_id:u64",
+          "published_release_tag:string",
+          "published_release_target_sha:sha256"
+        ]
+      },
+      {
+        "from_job": "verify-B",
+        "to_job": "record-upload",
+        "fields": [
+          "release_attestation_id:u64",
+          "release_attestation_digest:sha256",
+          "release_manifest_subject_sha256:sha256",
+          "release_predicate_type:string",
+          "release_predicate_path:string",
+          "signer_repository:string",
+          "signer_workflow:string",
+          "signer_source_ref:string",
+          "oidc_issuer:string",
+          "certificate_identity:string",
+          "certificate_verified:string",
+          "oidc_policy_revision_sha256:sha256"
+        ]
+      }
+    ],
+    "canonical_schemas": {
+      "permanent_binding": {
+        "path": "G1/bootstrap-transition/authority-contract-separation-2026-09-20/permanent-b-product-binding.schema.json",
+        "sha256": "427cbae0d9a238ae5e22a1afac2c8f840e4a8ad136983ac28a863651e533aed7"
+      },
+      "record_provenance": {
+        "path": "G1/bootstrap-transition/authority-contract-separation-2026-09-20/policy-validator-b-record-provenance.v1.schema.json",
+        "sha256": "3f2d72acda359e8ca0a31a40a6e4aa417bd49552acec050583a92601d0c851ef"
+      },
+      "binding_predicate": {
+        "path": "G1/bootstrap-transition/validator-binding-audit-2026-09-20/binding-predicate.schema.json",
+        "sha256": "4bcd53cdd4e1900d4edf240f46da4c14ab570fc7be09f37484a9f56402da3b06"
+      },
+      "canonical_leaf_paths": {
+        "kind": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict canonical record verifier input",
+          "required": true
+        },
+        "product.product_id": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "product.schema": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "product.purpose": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "product.platform": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "product.runner": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "product.profile": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "product.features": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "product.asset": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "product.tag": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "product.mutable_latest": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "product.overwrite": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "product.application_namespace_reuse": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "source.repository": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "source.repository_id": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "source.ref": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "source.sha": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "source.tree_sha": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "source.closure": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "publisher.repository": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "publisher.path": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "publisher.ref": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "publisher.sha": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "publisher.head_sha": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "publisher.event": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "publisher.head_branch": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "publisher.repository_id": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "publisher.build_permissions": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "publisher.reserve_publish_permissions": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "publisher.attest_permissions": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "verifier.check_name": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict canonical record verifier input",
+          "required": true
+        },
+        "verifier.provider_app_id": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict canonical record verifier input",
+          "required": true
+        },
+        "verifier.integration_id": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict canonical record verifier input",
+          "required": true
+        },
+        "verifier.verifier_revision": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict canonical record verifier input",
+          "required": true
+        },
+        "verifier.permissions": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict canonical record verifier input",
+          "required": true
+        },
+        "verifier.write_authority": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict canonical record verifier input",
+          "required": true
+        },
+        "actions.upload_artifact_sha": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "actions.attest_sha": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "actions.artifact_metadata_write": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "actions.push_to_registry": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "actions.create_storage_record": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "trust.oidc_issuer": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "trust.oidc_policy_revision_sha256": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "trust.signer_repository": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "trust.signer_workflow": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "trust.source_ref": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "trust.source_sha": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "trust.repository_id": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "trust.temporary_key_used": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "run.id": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "run.database_id": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "run.attempt": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "run.status": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "run.conclusion": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "run.event": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "run.head_branch": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "run.head_sha": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "run.workflow_sha": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "run.repository_id": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "job.key": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "job.id": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "job.run_id": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "job.run_attempt": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "job.check_run_id": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "job.head_sha": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "job.status": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "job.conclusion": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "artifact.id": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "artifact.name": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "artifact.rest_service_zip_sha256": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "artifact.rest_service_zip_size": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "artifact.service_zip_sha256": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "artifact.service_zip_size": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "artifact.inner_payload_sha256": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "artifact.inner_payload_size": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "artifact.workflow_run_id": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "artifact.expired": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "upload.step_id": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "upload-artifact action output plus artifact REST response",
+          "required": true
+        },
+        "upload.artifact_id_output": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "upload-artifact action output plus artifact REST response",
+          "required": true
+        },
+        "upload.artifact_digest_output": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "upload-artifact action output plus artifact REST response",
+          "required": true
+        },
+        "binary.sha256": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "binary.size": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "binary.architecture": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "binary.mode": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "binary.revision": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "binary.closure": {
+          "stage": "S1",
+          "producer": "build-linux-x64",
+          "source": "immutable build output, upload-artifact output, and raw downloaded bytes",
+          "required": true
+        },
+        "release.id": {
+          "stage": "S3",
+          "producer": "reserve-release",
+          "source": "typed job output and Releases API draft response",
+          "required": true
+        },
+        "release.tag": {
+          "stage": "S3",
+          "producer": "reserve-release",
+          "source": "typed job output and Releases API draft response",
+          "required": true
+        },
+        "release.target_sha": {
+          "stage": "S3",
+          "producer": "reserve-release",
+          "source": "typed job output and Releases API draft response",
+          "required": true
+        },
+        "release.draft_reserved": {
+          "stage": "S3",
+          "producer": "reserve-release",
+          "source": "typed job output and Releases API draft response",
+          "required": true
+        },
+        "release.published": {
+          "stage": "S5",
+          "producer": "publish",
+          "source": "raw Releases API asset/release response and downloaded bytes",
+          "required": true
+        },
+        "release.draft_first": {
+          "stage": "S3",
+          "producer": "reserve-release",
+          "source": "typed job output and Releases API draft response",
+          "required": true
+        },
+        "release.manifest_signed_after_draft_id": {
+          "stage": "S3",
+          "producer": "reserve-release",
+          "source": "typed job output and Releases API draft response",
+          "required": true
+        },
+        "release.attestation_signed_after_draft_id": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "release.tag_immutable": {
+          "stage": "S3",
+          "producer": "reserve-release",
+          "source": "typed job output and Releases API draft response",
+          "required": true
+        },
+        "manifest.sha256": {
+          "stage": "S4",
+          "producer": "attest-binding",
+          "source": "canonical manifest artifact bytes and upload API response",
+          "required": true
+        },
+        "manifest.size": {
+          "stage": "S4",
+          "producer": "attest-binding",
+          "source": "canonical manifest artifact bytes and upload API response",
+          "required": true
+        },
+        "attestation.binding_subject_name": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "attestation.binding_subject_sha256": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "attestation.binding_predicate_type": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "attestation.binding_predicate_path": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "attestation.binding_digest": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "attestation.release_manifest_subject_sha256": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "attestation.release_predicate_type": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "attestation.release_predicate_path": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "attestation.signer_repository": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "attestation.signer_workflow": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "attestation.signer_source_ref": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "attestation.certificate_verified": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "steps.build": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "steps.upload": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "steps.reserve_release": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "steps.attest_binding": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "steps.attest_release": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "steps.publish": {
+          "stage": "S2",
+          "producer": "artifact-verify",
+          "source": "exact Actions runs/jobs/check-runs API response plus OIDC/blob cross-check",
+          "required": true
+        },
+        "verification.evidence_state": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "verification.main_ref_verified": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "verification.producer_api_verified": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "verification.raw_zip_verified": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "verification.inner_payload_verified": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "verification.cryptographic_attestation_verified": {
+          "stage": "S6",
+          "producer": "attest-release",
+          "source": "raw attestation API response and verified certificate/predicate bytes",
+          "required": true
+        },
+        "verification.release_api_verified": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "verification.custom_predicate_verified": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "verification.binding_digest_verified": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "verification.manifest_verified": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "verification.draft_first_verified": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "verification.permanent_trust_policy_sha256": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        },
+        "verification.temporary_authority_used": {
+          "stage": "S7",
+          "producer": "verify-B",
+          "source": "strict record verifier output and API evidence",
+          "required": true
+        }
+      }
+    },
+    "upstream_terminal_census": {
+      "required": true,
+      "producer": "post-run census verifier",
+      "excludes": [
+        "verify-B own job/check",
+        "caller run wrapper",
+        "Policy job/check",
+        "external Policy-bootstrap-B check"
+      ],
+      "requires": [
+        "all applicable build/verify/reserve/attest/publish/record runs and attempts terminal success",
+        "non-neutral/non-skipped conclusions",
+        "exact head/ref/workflow path",
+        "no duplicate candidate"
+      ]
+    }
+  },
+  "tree_b_adoption": {
+    "file": ".github/ci/validator-pin-adoption.json",
+    "digest_sidecar": ".github/ci/validator-pin-adoption.sha256",
+    "schema": "velnor.policy-validator-pin-adoption.v1",
+    "mode": "tree-b",
+    "pr_number": "created only after Main-B",
+    "self_digest_field": false,
+    "digest_preimage": "canonical UTF-8 LF JSON bytes; no self-digest field",
+    "base_policy_identity": {
+      "workflow_path": ".github/workflows/ci-policy.yml",
+      "workflow_file_blob_sha": "<immutable Contents API blob SHA>",
+      "verifier_key": "policy-adoption-v1",
+      "verifier_revision": "<40-hex>",
+      "checks_integration_id": "<BASE_POLICY_INTEGRATION_ID>"
+    },
+    "required_fields": [
+      "transition_id",
+      "tree_b_pr_number",
+      "base_policy.workflow_path",
+      "base_policy.workflow_file_blob_sha",
+      "base_policy.verifier_key",
+      "base_policy.verifier_revision",
+      "base_policy.checks_integration_id",
+      "target.config_path",
+      "target.config_sha256",
+      "target.generator_revision",
+      "target.template_sources",
+      "target.static_files",
+      "main_b.source_sha",
+      "main_b.release_id",
+      "main_b.actions_artifact_id",
+      "main_b.release_asset_id",
+      "main_b.record_artifact_id",
+      "main_b.binding_digest",
+      "main_b.provider_integration_id"
+    ],
+    "main_b_binding_fields": [
+      "source_sha",
+      "release_id",
+      "release_tag",
+      "release_target_sha",
+      "actions_artifact_id",
+      "actions_artifact_digest",
+      "release_asset_id",
+      "release_asset_digest",
+      "record_artifact_id",
+      "record_artifact_digest",
+      "binding_digest",
+      "binding_attestation_digest",
+      "release_attestation_digest",
+      "manifest_digest",
+      "provider_app_id",
+      "provider_integration_id"
+    ],
+    "state_machine": [
+      "TREE_A_AUDIT",
+      "MAIN_B_HANDOFF",
+      "TREE_B_FILE",
+      "PERMANENT"
+    ],
+    "verification": [
+      "sidecar hash over exact JSON bytes",
+      "exact PR identity after Main-B",
+      "base workflow blob/verifier/integration identity",
+      "target config/source/template/static mapping",
+      "live IDs/predicates and raw digest equality"
+    ],
+    "pin_timing": "materialize/retain literal pin only after Tree-B merge/resulting-main verification",
+    "temporary_cleanup": [
+      "A context/App",
+      "B transition provider/config",
+      "MAIN_B_HANDOFF state",
+      "coordinator/watchdog transition permissions"
+    ],
+    "permanent_retained": [
+      "B publisher",
+      "permanent trust",
+      "base Policy verifier"
+    ]
+  },
+  "ruleset_transition": {
+    "contexts": {
+      "before": [
+        {
+          "context": "DCO",
+          "integration_id": "<DCO_ID>"
+        },
+        {
+          "context": "ci-required",
+          "integration_id": "<CI_REQUIRED_ID>"
+        },
+        {
+          "context": "Policy",
+          "integration_id": "<BASE_POLICY_INTEGRATION_ID>"
+        }
+      ],
+      "tree_a": [
+        {
+          "context": "DCO",
+          "integration_id": "<DCO_ID>"
+        },
+        {
+          "context": "ci-required",
+          "integration_id": "<CI_REQUIRED_ID>"
+        },
+        {
+          "context": "Policy-bootstrap-A",
+          "integration_id": "<BOOTSTRAP_INTEGRATION_ID>"
+        }
+      ],
+      "main_b": [
+        {
+          "context": "DCO",
+          "integration_id": "<DCO_ID>"
+        },
+        {
+          "context": "ci-required",
+          "integration_id": "<CI_REQUIRED_ID>"
+        },
+        {
+          "context": "Policy-bootstrap-B",
+          "integration_id": "<MAIN_B_INTEGRATION_ID>"
+        }
+      ],
+      "tree_b_final": [
+        {
+          "context": "DCO",
+          "integration_id": "<DCO_ID>"
+        },
+        {
+          "context": "ci-required",
+          "integration_id": "<CI_REQUIRED_ID>"
+        },
+        {
+          "context": "Policy",
+          "integration_id": "<BASE_POLICY_INTEGRATION_ID>"
+        }
+      ]
+    },
+    "update_method": "documented full-object PUT; no ETag/CAS assumption",
+    "context_identity_rule": "context+integration_id pair",
+    "provider_admin_freeze": {
+      "required": true,
+      "observed_bypass_actor": 5,
+      "observed_mode": "always",
+      "mechanism": "owner-authorized provider full PUT removing actor 5 or changing provider-supported mode",
+      "provider_enforces": "unproven",
+      "proxy_cannot_enforce_admin_direct_api": true,
+      "blocker": true,
+      "required_snapshot": "full returned JSON body + canonical SHA",
+      "decision": "unselected; feasibility report proves no provider CAS excluding actor 5 and no ordinary proxy freeze"
+    },
+    "snapshots": {
+      "before": {
+        "body": "<external full JSON>",
+        "sha256": "<64-hex>"
+      },
+      "tree_a": {
+        "body": "<external full JSON>",
+        "sha256": "<64-hex>"
+      },
+      "main_b": {
+        "body": "<external full JSON>",
+        "sha256": "<64-hex>"
+      },
+      "final": {
+        "body": "<external full JSON>",
+        "sha256": "<64-hex>"
+      },
+      "each_reread": "full body+canonical SHA"
+    },
+    "coordinator": {
+      "type": "external owner-controlled mutation proxy with durable monotonic fence",
+      "required_guards": [
+        "expected main SHA",
+        "expected PR head/base/tree",
+        "expected full ruleset hash",
+        "allowlisted endpoint/actor",
+        "transaction ID",
+        "unexpired fence"
+      ],
+      "reject": [
+        "stale fence",
+        "wrong ref/hash",
+        "duplicate operation",
+        "unallowlisted actor/endpoint",
+        "concurrent writer"
+      ],
+      "all_mutations_through_proxy": true,
+      "status": "unproven until disposable race/death/recovery exercise",
+      "ids": {
+        "coordinator": "<real>",
+        "proxy": "<real>",
+        "watchdog": "<real>",
+        "trust_location": "<durable reviewed location>"
+      }
+    },
+    "lease": "signed evidence only; provider freeze and proxy enforcement required",
+    "recovery": {
+      "premerge": "conditional restore only when exact temporary ruleset hash and pre-merge main still match",
+      "postmerge": "no rollback; watchdog freezes and forward-completes",
+      "concurrent_change": "never unconditional restore",
+      "watchdog_independent": true,
+      "status": "unproven; signed lease/proxy prose is not enforcement and actor 5 remains an uncontrolled bypass"
+    },
+    "merge_method": "normal protected PR merge only; sha=PR_HEAD_SHA",
+    "direct_ref_update": "rejected",
+    "bypass_actor_5": "provider freeze unproven; no operation authorized",
+    "api_transcript": [
+      "GET main ref",
+      "GET PR",
+      "GET ruleset 19573071",
+      "GET checks",
+      "paginated runs/jobs",
+      "full PUT with canonical body+snapshot",
+      "normal merge sha=PR_HEAD_SHA",
+      "postoperation re-read"
+    ],
+    "exact_order": [
+      "read-only main/PR/runs/jobs/checks/ruleset census",
+      "provider freeze decision and independently verified fence/recovery capability",
+      "reread main and full ruleset hash",
+      "full PUT Tree-A contexts DCO+ci-required+Policy-bootstrap-A",
+      "Tree-A admission and all ordinary required checks",
+      "normal protected merge and exact resulting main SHA verify",
+      "Main-B caller publishes typed validator and external verifier checks live IDs/digests",
+      "post-run terminal census",
+      "full PUT Main-B contexts DCO+ci-required+Policy-bootstrap-B",
+      "create Tree-B PR with exact adoption file/sidecar and source mapping",
+      "normal merge, final Policy proof, cleanup both temporary authorities"
+    ]
+  },
+  "cross_workflow_handoff": {
+    "scope": [
+      "preview",
+      "release",
+      "nightly",
+      "signer"
+    ],
+    "mode": "bounded live GitHub API polling; no workflow_run/dispatch publisher",
+    "poll_interval_seconds": 15,
+    "deadline_minutes": 45,
+    "queries": [
+      "runs exact head_sha/branch/event/path",
+      "attempt jobs",
+      "check-runs",
+      "artifacts numeric IDs",
+      "release/assets numeric IDs",
+      "raw downloads",
+      "attestations",
+      "workflow blob/OIDC claims"
+    ],
+    "matching": [
+      "source/tree/ref",
+      "caller run_id/run_attempt",
+      "producer run_id/run_attempt/job_id/check_run_id",
+      "record/artifact/release IDs",
+      "provider integration check",
+      "digest equality"
+    ],
+    "exclude_from_upstream_census": [
+      "verify-B own job/check",
+      "caller run",
+      "Policy",
+      "external B check"
+    ],
+    "terminal_success": "success only",
+    "terminal_failure": [
+      "failure",
+      "cancelled",
+      "timed_out",
+      "neutral",
+      "skipped",
+      "missing",
+      "attempt mismatch",
+      "deadline",
+      "multiple candidates"
+    ],
+    "release_non_applicable_on_main_push": true,
+    "same_run": true,
+    "consumer": "Policy job consumes policy-validator-B reusable-workflow outputs in the caller run",
+    "exact_binding_required": [
+      "source_sha",
+      "resulting_main_sha",
+      "caller_run_id",
+      "caller_run_attempt",
+      "called job_workflow_ref",
+      "called job_workflow_sha",
+      "producer run/job/check IDs",
+      "Actions artifact ID/digest",
+      "release ID/tag/target",
+      "release asset ID/raw digest",
+      "binding/release attestation IDs/digests",
+      "record artifact ID/digest",
+      "provider app/integration/revision"
+    ],
+    "post_run_terminal_census": "separate verifier query after all producer jobs finish; verify-B, Policy, caller wrapper, and external provider check are excluded to avoid self-cycle"
+  },
+  "required_workloads": {
+    "ordinary_workflows": [
+      "ci-main.yml",
+      "ci-policy.yml",
+      "ci-pr.yml",
+      "ci-unit-rust.yml",
+      "ci-unit-bun.yml",
+      "ci-unit-docker.yml",
+      "ci-unit-docs.yml",
+      "ci-unit-opentofu.yml",
+      "maintenance.yml",
+      "preview.yml",
+      "release.yml"
+    ],
+    "supporting_workflows": [
+      "nightly.yml",
+      "ci-release-package-signer.yml"
+    ],
+    "application_publisher_workflow": "ci-runtime-products.yml",
+    "typed_validator_publisher": "ci-policy-validator-products.yml",
+    "runtime_matrix": [
+      "build[Linux-X64]",
+      "build[Linux-ARM64]",
+      "build[xcode-27]",
+      "publish"
+    ],
+    "role_matrix": {
+      "main": "B publisher + Policy",
+      "policy": "MAIN_B_HANDOFF/TREE_B_FILE",
+      "pr": "ordinary checks/no B publisher",
+      "units": "ordinary children",
+      "preview": "consumer",
+      "release": "v* consumer",
+      "nightly": "observation",
+      "signer": "isolated signer/no build token"
+    },
+    "result_rule": "every applicable run/attempt/job/check/child/artifact/manifest/provider/native cell terminal success, non-neutral, non-skipped, non-empty, exact SHA/attempt",
+    "publisher_event_guard": "workflow_call-only; local uses path prefix; push/main guard; dispatch diagnostic",
+    "semantic_final_closure": "semantic graph + two byte-identical renders",
+    "text_scan_is_sufficient": false
+  },
+  "pre_tree_a_removal": [
+    "active old 0dc checker",
+    "candidate manifest/publish",
+    "--pin-build",
+    "old setup/runtime identity",
+    "macOS-15/26",
+    "empty/disabled required cells",
+    "legacy aliases/fallbacks",
+    "temporary A/B paths"
+  ],
+  "evidence": {
+    "current_main": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+    "current_parent": "e94b48406c4ed206fce2bbf39b788264e72cf39c",
+    "current_tree": "e9019f00578d34c3f339c7e8d55b66f7e53f8567",
+    "current_checkpoint_sha256": "d4987b227e79212df2abdf503c33a80daff225ed270ea445f5c657f938fd101a",
+    "current_observed_utc": "2026-09-20T01:28:35Z",
+    "v6_owner": {
+      "markdown_sha256": "4aea2c28eb06f21e094adad1b4b0dfe8a8d6918d1cbe18c3a2befb77c849e593",
+      "json_sha256": "556eb0485a18fe9abb91c132ff2a0cddd21e6eb3f549f66ebd90dbdf9da89947",
+      "freeze_manifest_sha256": "28eaa6d28f5e45ad674f3151ff4d1a093b0681f65c9073f9a960b429813487fd"
+    },
+    "v6_independent_audit": {
+      "report_sha256": "60e15e3a45c9c7d2739be0db30e7f642e0696567881806613a263f8283a0a7f0",
+      "results_sha256": "0b889e2a567b8d0f8790cc888900abeb63693eb07a2a4aaf4b045969322c1879",
+      "verdict": "58 checks; 33 pass; 23 findings; 2 unimplemented"
+    },
+    "authority_freeze_provider_feasibility": {
+      "markdown_sha256": "9735c1b2184f32f3b6b1cd1fefe98045dbb23403f937cd65692d2bcf54b06725",
+      "json_sha256": "29fa711c78ffd8c323acaf6e19653e4adbad87d1658b4d27c9116d669bab36b9",
+      "verdict": "no provider atomic exact base/head plus ruleset CAS excluding the current repository or organization administrator was proven",
+      "measured_facts": [
+        "protect-main actor 5 remains an always-bypass administrator",
+        "caller is organization-free and no eligible organization-level trust was proven",
+        "lease, proxy, and watchdog are operator-consent mechanisms only",
+        "ordinary-writer fencing is possible only after an authorized provider rule change"
+      ],
+      "decision_boundary": [
+        "operator quiescence with an explicitly amended threat model",
+        "separately controlled provider authority with a verified enforcement mechanism"
+      ],
+      "execution_blocked": true
+    },
+    "required_future_evidence": [
+      "field availability executable result",
+      "real B source/output/actionlint",
+      "record producer/upload live proof",
+      "external App credential/provider proof",
+      "full ruleset bodies+hash snapshots and actor-5 freeze",
+      "coordinator race/death/recovery",
+      "Main-B/native/supporting census",
+      "Tree-B sidecar/adoption/permanent cleanup"
+    ],
+    "current_main_checkpoint": {
+      "path": "G1/bootstrap-transition/current-main-checkpoint-89f82dd8-2026-09-20.json",
+      "sha256": "77e1ecc848e0a3ad73cdfd853b788054e8cda02e0aae38d076b7c59b0da130bd"
+    },
+    "current_main_closure_inputs": {
+      "path": "G1/bootstrap-transition/current-main-closure-inputs-89f82dd8-2026-09-20.json",
+      "sha256": "1b890ef899c8a02146e7d6ab1d664fcb92213924e8c7a722f8f57a2bfb55c072"
+    },
+    "v7_canonical_dag": {
+      "report_sha256": "fd30b668c2b756287045f885288afd45c530a6d448875731b042fc4fdb2f7d16",
+      "json_sha256": "dacdd33b97beecb67ba49d812d65e14a00ba0aa7b6d659069f61156e8ed0ba38",
+      "status": "independent rejection retained as input; v8 does not claim fixed implementation"
+    },
+    "current_runtime": {
+      "main_sha": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+      "runtime_run": 35484968618,
+      "runtime_macos_job": 106009574341,
+      "runner": "macos-26",
+      "accepted": false,
+      "preview_run": 35484968732,
+      "preview_conclusion": "failure"
+    }
+  },
+  "hard_blockers": [
+    {
+      "id": "reviewed_target_generator",
+      "condition": "target generator revision null; current 54/old 0dc not target",
+      "required_before": "authority operation"
+    },
+    {
+      "id": "publisher_source_output",
+      "condition": "B source/output absent at origin main; actionlint live source unimplemented",
+      "required_before": "Tree-A admission"
+    },
+    {
+      "id": "provider_admin_freeze",
+      "condition": "actor 5 always-bypass provider enforcement unproven; proxy cannot freeze direct admin API",
+      "required_before": "any transition"
+    },
+    {
+      "id": "ruleset_snapshots",
+      "condition": "full ruleset bodies/hash snapshots unresolved",
+      "required_before": "ruleset mutation"
+    },
+    {
+      "id": "coordinator_recovery",
+      "condition": "proxy/fence/watchdog race/death/recovery unproven",
+      "required_before": "mutation"
+    },
+    {
+      "id": "release_retry",
+      "condition": "draft precondition/timeout protocol unimplemented/test absent",
+      "required_before": "publisher"
+    },
+    {
+      "id": "native_matrix",
+      "condition": "macos-26 observed; xcode-27 not proven",
+      "required_before": "Main-B acceptance"
+    },
+    {
+      "id": "clean_runtime",
+      "condition": "D19 no clean published candidate",
+      "required_before": "runtime publication"
+    },
+    {
+      "id": "real_verifier",
+      "condition": "live API/crypto verifier unimplemented",
+      "required_before": "acceptance"
+    },
+    {
+      "id": "independent_reviews",
+      "condition": "independent approvals absent",
+      "required_before": "implementation/release/merge"
+    },
+    {
+      "id": "v8_field_availability",
+      "condition": "canonical DAG still has unresolved producer/source fields; v7 independent DAG reports 90 fields, 21 undefined, 20 unmapped, 13 ambiguous",
+      "required_before": "independent review and any authority operation"
+    },
+    {
+      "id": "v8_canonical_transport",
+      "condition": "record/provenance schema and complete canonical leaf mapping are design-only; real producer/upload and live verifier absent",
+      "required_before": "Main-B acceptance"
+    },
+    {
+      "id": "v8_provider_identity",
+      "condition": "external B App/provider/integration/verifier credentials and called workflow identity unresolved",
+      "required_before": "Tree-A/Main-B transition"
+    },
+    {
+      "id": "v8_freeze",
+      "condition": "provider feasibility report shows actor 5 always-bypass and no proven atomic/exclusive freeze/recovery provider",
+      "required_before": "any transition"
+    },
+    {
+      "id": "v8_target_generator",
+      "condition": "target generator revision remains null; old 0dc and current 54 are not target",
+      "required_before": "Tree-A admission"
+    },
+    {
+      "id": "v8_native",
+      "condition": "current run used forbidden macos-26; xcode-27 full native census absent",
+      "required_before": "Main-B acceptance"
+    }
+  ],
+  "independent_approval": {
+    "required_reviewers": [
+      "g0_reviewer",
+      "authority_transition_review"
+    ],
+    "author_can_approve": false,
+    "review_scope": [
+      "current main 89f82dd8",
+      "v7 canonical DAG report fd30b668",
+      "typed S0-S7 field availability and hostile negatives",
+      "canonical strict schema paths/hashes",
+      "caller versus called OIDC claims",
+      "record artifact raw REST handoff",
+      "provider integration identity and freeze/recovery",
+      "ruleset snapshots and Tree-A/Main-B/Tree-B ordering",
+      "native matrix and release attestation census"
+    ],
+    "final_status": "not_approved",
+    "approval_required_before": [
+      "source/workflow edits",
+      "authority/trust/ruleset mutation",
+      "release/publication",
+      "merge",
+      "G1 completion"
+    ],
+    "blocking_evidence": {
+      "v7_canonical_dag_report": "fd30b668c2b756287045f885288afd45c530a6d448875731b042fc4fdb2f7d16",
+      "v7_canonical_dag_json": "dacdd33b97beecb67ba49d812d65e14a00ba0aa7b6d659069f61156e8ed0ba38",
+      "provider_feasibility": "9735c1b2184f32f3b6b1cd1fefe98045dbb23403f937cd65692d2bcf54b06725",
+      "current_main_checkpoint": "77e1ecc848e0a3ad73cdfd853b788054e8cda02e0aae38d076b7c59b0da130bd"
+    }
+  }
+}
+
