@@ -4735,21 +4735,21 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
             "publish: refusing — verify has not armed the reprepro sentinel: {error}"
         ))
     })?;
-    if let (Some(selection_path), Some(selection)) = (inputs.selection_path, inputs.selection) {
-        let current = read_discovery_selection(selection_path)?;
-        if &current != selection {
+    let (selection_path, expected_selection) = match (inputs.selection_path, inputs.selection) {
+        (Some(path), Some(selection)) => (path, selection),
+        _ => {
             return Err(GeneratorError::usage(
-                "publish: discovery selection changed after verification",
+                "publish: schema-2 discovery selection and source path are required",
             ));
         }
-    } else if inputs.selection_path.is_some() || inputs.selection.is_some() {
+    };
+    let current = read_discovery_selection(selection_path)?;
+    if &current != expected_selection {
         return Err(GeneratorError::usage(
-            "publish: selection and selection path must be supplied together",
+            "publish: discovery selection changed after verification",
         ));
     }
-    if let Some(expected) = inputs.selection
-        && expected != &incoming.selection
-    {
+    if expected_selection != &incoming.selection {
         return Err(GeneratorError::usage(
             "publish: captured incoming selection differs from verification",
         ));
@@ -10020,6 +10020,11 @@ mod tests {
     ) -> PublishInputs<'a> {
         let passphrase_env = contract.passphrase_secret.clone();
         let key_env = contract.signing_key_secret.clone();
+        let selection_path = Box::leak(incoming.join(DISCOVERY_SELECTION_FILE).into_boxed_path());
+        let selection = Box::leak(Box::new(must(
+            read_discovery_selection(selection_path),
+            "read fixture discovery selection",
+        )));
         PublishInputs {
             suite,
             contract,
@@ -10035,9 +10040,37 @@ mod tests {
             key_material: Some("fixture-key-material".to_owned()),
             backend: DebBackend::Auto,
             path_overlay,
-            selection: None,
-            selection_path: None,
+            selection: Some(selection),
+            selection_path: Some(selection_path),
         }
+    }
+
+    #[test]
+    fn publication_requires_bound_schema2_selection() {
+        let incoming = stable_incoming("publish-selection-binding");
+        must(
+            verify_suite(&stable_verify_inputs(&incoming)),
+            "verify selection-binding incoming",
+        );
+        let mut inputs = publish_inputs(
+            Suite::Stable,
+            apt_contract(),
+            "v1.2.3",
+            &incoming.dir,
+            None,
+            Path::new("missing-previous-pointer.json"),
+            Path::new("public"),
+            false,
+            None,
+        );
+        inputs.selection = None;
+        inputs.selection_path = None;
+        let error = must_fail(
+            publish_suite(&inputs),
+            "reject publisher without external schema-2 selection",
+        );
+        assert!(error.contains("schema-2 discovery selection"), "{error}");
+        let _ = std::fs::remove_dir_all(incoming.dir);
     }
 
     #[test]
