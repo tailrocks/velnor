@@ -180,6 +180,7 @@ fn is_excluded_directory(name: &str) -> bool {
             | ".build"
             | ".gradle"
             | ".terraform"
+            | ".velnor-workflow-transaction"
             | "dist"
             | "coverage"
     )

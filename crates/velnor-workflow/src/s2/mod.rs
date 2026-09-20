@@ -74,6 +74,10 @@ const PACKAGE_UPDATER_WORKFLOW: &str = "package-updater.yml";
 // immutable operator baselines prove overwrite ownership.
 pub(crate) const OWNERSHIP_STATE: &str = ".github/ci/.github-actions-generator-state";
 const OWNERSHIP_STATE_HEADER: &str = "# Generated ownership state; do not edit.\n";
+/// Durable transaction journal. It is generator-owned scratch state and is
+/// removed after a committed write; a leftover journal is recovered before a
+/// later generation attempt can inspect or mutate outputs.
+const TRANSACTION_DIRECTORY: &str = ".velnor-workflow-transaction";
 // Schema 2 adds the generation inputs (`config`, `scan`, `generator`) beside
 // the recorded outputs. The older layout is never parsed; see
 // `parse_ownership_state` for the fail-closed migration rule.
@@ -6315,6 +6319,50 @@ impl GeneratedWritePlan {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TransactionSnapshot {
+    Missing,
+    Regular { mode: Option<u32> },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TransactionRecord {
+    index: usize,
+    relative: PathBuf,
+    before: TransactionSnapshot,
+    after: TransactionSnapshot,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TransactionProgress {
+    Missing,
+    Regular(FileIdentity),
+}
+
+struct TransactionJournal {
+    path: PathBuf,
+    indexes: BTreeMap<PathBuf, usize>,
+    completed: BTreeMap<usize, TransactionProgress>,
+}
+
+impl TransactionJournal {
+    fn record(&mut self, root: &Path, relative: &Path) -> Result<(), GeneratorError> {
+        let current = capture_file_preimage(&root.join(relative), relative)?;
+        let progress = match current {
+            FilePreimage::Missing => TransactionProgress::Missing,
+            FilePreimage::Regular { identity, .. } => TransactionProgress::Regular(identity),
+        };
+        let index = *self.indexes.get(relative).ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "transaction journal has no entry for {}",
+                relative.display()
+            ))
+        })?;
+        self.completed.insert(index, progress);
+        write_transaction_progress(&self.path, &self.completed)
+    }
+}
+
 impl FilePreimage {
     fn bytes(&self) -> Option<&[u8]> {
         match self {
@@ -6326,6 +6374,610 @@ impl FilePreimage {
     fn has_bytes(&self, expected: &[u8]) -> bool {
         self.bytes().is_some_and(|bytes| bytes == expected)
     }
+}
+
+fn transaction_path(root: &Path) -> PathBuf {
+    root.join(TRANSACTION_DIRECTORY)
+}
+
+fn transaction_snapshot(preimage: &FilePreimage) -> TransactionSnapshot {
+    match preimage {
+        FilePreimage::Missing => TransactionSnapshot::Missing,
+        FilePreimage::Regular { identity, .. } => {
+            #[cfg(unix)]
+            let mode = Some(identity.mode);
+            #[cfg(not(unix))]
+            let mode = None;
+            TransactionSnapshot::Regular { mode }
+        }
+    }
+}
+
+fn transaction_kind(snapshot: &TransactionSnapshot) -> &'static str {
+    match snapshot {
+        TransactionSnapshot::Missing => "missing",
+        TransactionSnapshot::Regular { .. } => "regular",
+    }
+}
+
+fn transaction_mode(snapshot: &TransactionSnapshot) -> String {
+    match snapshot {
+        TransactionSnapshot::Missing | TransactionSnapshot::Regular { mode: None } => {
+            "-".to_owned()
+        }
+        TransactionSnapshot::Regular { mode: Some(mode) } => mode.to_string(),
+    }
+}
+
+fn parse_transaction_snapshot(
+    kind: &str,
+    mode: &str,
+    path: &Path,
+) -> Result<TransactionSnapshot, GeneratorError> {
+    match kind {
+        "missing" if mode == "-" => Ok(TransactionSnapshot::Missing),
+        "regular" if mode == "-" => Ok(TransactionSnapshot::Regular { mode: None }),
+        "regular" => mode
+            .parse::<u32>()
+            .map(|mode| TransactionSnapshot::Regular { mode: Some(mode) })
+            .map_err(|_| {
+                GeneratorError::usage(format!(
+                    "invalid transaction journal mode in {}",
+                    path.display()
+                ))
+            }),
+        _ => Err(GeneratorError::usage(format!(
+            "invalid transaction journal snapshot in {}",
+            path.display()
+        ))),
+    }
+}
+
+fn snapshot_matches(
+    current: &FilePreimage,
+    snapshot: &TransactionSnapshot,
+    bytes: Option<&[u8]>,
+) -> bool {
+    match (current, snapshot) {
+        (FilePreimage::Missing, TransactionSnapshot::Missing) => true,
+        (
+            FilePreimage::Regular {
+                identity,
+                bytes: current_bytes,
+            },
+            TransactionSnapshot::Regular { mode },
+        ) => {
+            #[cfg(unix)]
+            let mode_matches = *mode == Some(identity.mode);
+            #[cfg(not(unix))]
+            let mode_matches = mode.is_none();
+            current_bytes.as_ref() == bytes.unwrap_or_default() && mode_matches
+        }
+        _ => false,
+    }
+}
+
+fn progress_matches(current: &FilePreimage, progress: &TransactionProgress) -> bool {
+    match (current, progress) {
+        (FilePreimage::Missing, TransactionProgress::Missing) => true,
+        (FilePreimage::Regular { identity, .. }, TransactionProgress::Regular(expected)) => {
+            identity == expected
+        }
+        _ => false,
+    }
+}
+
+fn transaction_identity_line(progress: &TransactionProgress) -> String {
+    match progress {
+        TransactionProgress::Missing => "missing".to_owned(),
+        TransactionProgress::Regular(identity) => {
+            let mut line = format!("regular\t{}", identity.length);
+            #[cfg(unix)]
+            {
+                let _ = write!(
+                    line,
+                    "\t{}\t{}\t{}",
+                    identity.device, identity.inode, identity.mode
+                );
+            }
+            line
+        }
+    }
+}
+
+fn write_transaction_progress(
+    journal: &Path,
+    completed: &BTreeMap<usize, TransactionProgress>,
+) -> Result<(), GeneratorError> {
+    let mut content = String::from("# Velnor workflow transaction progress; do not edit.\n");
+    for (index, progress) in completed {
+        let _ = writeln!(content, "{index}\t{}", transaction_identity_line(progress));
+    }
+    let staged = journal.join("progress.stage");
+    write_transaction_bytes(&staged, content.as_bytes())?;
+    fs::rename(&staged, journal.join("progress")).map_err(|error| {
+        GeneratorError::io(
+            "commit transaction progress",
+            &journal.join("progress"),
+            &error,
+        )
+    })?;
+    sync_transaction_directory(journal)
+}
+
+fn write_transaction_bytes(path: &Path, bytes: &[u8]) -> Result<(), GeneratorError> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| GeneratorError::io("create transaction journal file", path, &error))?;
+    file.write_all(bytes)
+        .map_err(|error| GeneratorError::io("write transaction journal file", path, &error))?;
+    file.sync_all()
+        .map_err(|error| GeneratorError::io("sync transaction journal file", path, &error))
+}
+
+fn sync_transaction_directory(path: &Path) -> Result<(), GeneratorError> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| GeneratorError::io("sync transaction journal directory", path, &error))
+}
+
+fn transaction_targets(plan: &GeneratedWritePlan) -> BTreeSet<PathBuf> {
+    plan.files
+        .iter()
+        .filter(|file| file.action != PlannedAction::Same)
+        .map(|file| file.path.clone())
+        .collect()
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "durable journal assembly keeps path, snapshot, and manifest invariants together"
+)]
+fn create_transaction_journal(
+    root: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    inputs: &GenerationInputs,
+    plan: &GeneratedWritePlan,
+) -> Result<TransactionJournal, GeneratorError> {
+    let path = transaction_path(root);
+    if fs::symlink_metadata(&path).is_ok() {
+        return Err(GeneratorError::usage(format!(
+            "pending transaction journal exists: {}; recover it before generating",
+            path.display()
+        )));
+    }
+    fs::create_dir(&path)
+        .map_err(|error| GeneratorError::io("create transaction journal", &path, &error))?;
+    let result = (|| {
+        let before_dir = path.join("before");
+        let after_dir = path.join("after");
+        fs::create_dir(&before_dir).map_err(|error| {
+            GeneratorError::io("create transaction preimage store", &before_dir, &error)
+        })?;
+        fs::create_dir(&after_dir).map_err(|error| {
+            GeneratorError::io("create transaction output store", &after_dir, &error)
+        })?;
+        let mut records = Vec::<TransactionRecord>::new();
+        let mut indexes = BTreeMap::new();
+        for (index, relative) in transaction_targets(plan).into_iter().enumerate() {
+            let relative_text = relative.to_str().ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "transaction journal path is not UTF-8: {}",
+                    relative.display()
+                ))
+            })?;
+            if relative_text
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte == b'\t')
+            {
+                return Err(GeneratorError::usage(format!(
+                    "transaction journal path is ambiguous: {}",
+                    relative.display()
+                )));
+            }
+            let planned = plan
+                .files
+                .iter()
+                .find(|file| file.path == relative)
+                .ok_or_else(|| GeneratorError::usage("transaction target has no preimage"))?;
+            let before = transaction_snapshot(&planned.preimage);
+            if let FilePreimage::Regular { .. } = &planned.preimage {
+                fs::hard_link(root.join(&relative), before_dir.join(index.to_string())).map_err(
+                    |error| {
+                        GeneratorError::io(
+                            "snapshot transaction preimage",
+                            &root.join(&relative),
+                            &error,
+                        )
+                    },
+                )?;
+            }
+            let after_content = if relative == Path::new(OWNERSHIP_STATE) {
+                Some(ownership_state_content(files, inputs).into_bytes())
+            } else {
+                files
+                    .get(&relative)
+                    .map(|content| content.as_bytes().to_vec())
+            };
+            let after = if let Some(content) = after_content {
+                let after_path = after_dir.join(index.to_string());
+                write_transaction_bytes(&after_path, &content)?;
+                #[cfg(unix)]
+                if let FilePreimage::Regular { identity, .. } = &planned.preimage {
+                    // Updates preserve the reviewed mode; creations retain
+                    // the mode assigned by the journal file's umask.
+                    restore_file_mode(&after_path, identity.mode)?;
+                }
+                let after_preimage = capture_file_preimage(&after_path, &after_path)?;
+                transaction_snapshot(&after_preimage)
+            } else {
+                TransactionSnapshot::Missing
+            };
+            indexes.insert(relative.clone(), index);
+            records.push(TransactionRecord {
+                index,
+                relative,
+                before,
+                after,
+            });
+        }
+        let mut manifest = String::from(
+            "# Velnor workflow transaction journal; do not edit.\nschema = 1\n[entries]\n",
+        );
+        for record in &records {
+            let _ = writeln!(
+                manifest,
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                record.index,
+                record.relative.display(),
+                transaction_kind(&record.before),
+                transaction_mode(&record.before),
+                transaction_kind(&record.after),
+                transaction_mode(&record.after),
+            );
+        }
+        let manifest_stage = path.join("manifest.stage");
+        write_transaction_bytes(&manifest_stage, manifest.as_bytes())?;
+        fs::rename(&manifest_stage, path.join("manifest")).map_err(|error| {
+            GeneratorError::io("commit transaction journal manifest", &path, &error)
+        })?;
+        sync_transaction_directory(&path)?;
+        Ok(TransactionJournal {
+            path: path.clone(),
+            indexes,
+            completed: BTreeMap::new(),
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&path);
+    }
+    result
+}
+
+fn parse_transaction_manifest(journal: &Path) -> Result<Vec<TransactionRecord>, GeneratorError> {
+    let path = journal.join("manifest");
+    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        GeneratorError::io("inspect transaction journal manifest", &path, &error)
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(GeneratorError::usage(format!(
+            "transaction journal manifest is not a regular file: {}",
+            path.display()
+        )));
+    }
+    let content = fs::read_to_string(&path)
+        .map_err(|error| GeneratorError::io("read transaction journal manifest", &path, &error))?;
+    let mut lines = content.lines();
+    if lines.next() != Some("# Velnor workflow transaction journal; do not edit.")
+        || lines.next() != Some("schema = 1")
+        || lines.next() != Some("[entries]")
+    {
+        return Err(GeneratorError::usage(format!(
+            "invalid transaction journal manifest: {}",
+            path.display()
+        )));
+    }
+    let mut records = Vec::new();
+    let mut paths = BTreeSet::new();
+    for line in lines {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() != 6 {
+            return Err(GeneratorError::usage(format!(
+                "invalid transaction journal entry: {}",
+                path.display()
+            )));
+        }
+        let index = fields[0].parse::<usize>().map_err(|_| {
+            GeneratorError::usage(format!(
+                "invalid transaction journal entry index: {}",
+                path.display()
+            ))
+        })?;
+        if index != records.len() {
+            return Err(GeneratorError::usage(format!(
+                "transaction journal entries are not contiguous: {}",
+                path.display()
+            )));
+        }
+        let relative = managed_relative_path(fields[1])?;
+        if !paths.insert(relative.clone()) {
+            return Err(GeneratorError::usage(format!(
+                "duplicate transaction journal path: {}",
+                path.display()
+            )));
+        }
+        let before = parse_transaction_snapshot(fields[2], fields[3], &path)?;
+        let after = parse_transaction_snapshot(fields[4], fields[5], &path)?;
+        records.push(TransactionRecord {
+            index,
+            relative,
+            before,
+            after,
+        });
+    }
+    if records.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "transaction journal has no entries: {}",
+            path.display()
+        )));
+    }
+    Ok(records)
+}
+
+fn parse_transaction_progress(
+    journal: &Path,
+) -> Result<BTreeMap<usize, TransactionProgress>, GeneratorError> {
+    let path = journal.join("progress");
+    if let Ok(metadata) = fs::symlink_metadata(&path)
+        && (metadata.file_type().is_symlink() || !metadata.is_file())
+    {
+        return Err(GeneratorError::usage(format!(
+            "transaction journal progress is not a regular file: {}",
+            path.display()
+        )));
+    }
+    let Ok(content) = fs::read_to_string(&path) else {
+        return Ok(BTreeMap::new());
+    };
+    let mut lines = content.lines();
+    if lines.next() != Some("# Velnor workflow transaction progress; do not edit.") {
+        return Err(GeneratorError::usage(format!(
+            "invalid transaction journal progress: {}",
+            path.display()
+        )));
+    }
+    let mut progress = BTreeMap::new();
+    for line in lines {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() < 2 {
+            return Err(GeneratorError::usage(format!(
+                "invalid transaction journal progress entry: {}",
+                path.display()
+            )));
+        }
+        let index = fields[0].parse::<usize>().map_err(|_| {
+            GeneratorError::usage(format!(
+                "invalid transaction journal progress index: {}",
+                path.display()
+            ))
+        })?;
+        let current = match fields[1] {
+            "missing" if fields.len() == 2 => TransactionProgress::Missing,
+            #[cfg(not(unix))]
+            "regular" if fields.len() == 3 => TransactionProgress::Regular(FileIdentity {
+                length: fields[2].parse().map_err(|_| {
+                    GeneratorError::usage(format!(
+                        "invalid transaction journal regular length: {}",
+                        path.display()
+                    ))
+                })?,
+                #[cfg(unix)]
+                device: 0,
+                #[cfg(unix)]
+                inode: 0,
+                #[cfg(unix)]
+                mode: 0,
+            }),
+            #[cfg(unix)]
+            "regular" if fields.len() == 6 => TransactionProgress::Regular(FileIdentity {
+                length: fields[2].parse().map_err(|_| {
+                    GeneratorError::usage(format!(
+                        "invalid transaction journal regular length: {}",
+                        path.display()
+                    ))
+                })?,
+                device: fields[3].parse().map_err(|_| {
+                    GeneratorError::usage(format!(
+                        "invalid transaction journal regular device: {}",
+                        path.display()
+                    ))
+                })?,
+                inode: fields[4].parse().map_err(|_| {
+                    GeneratorError::usage(format!(
+                        "invalid transaction journal regular inode: {}",
+                        path.display()
+                    ))
+                })?,
+                mode: fields[5].parse().map_err(|_| {
+                    GeneratorError::usage(format!(
+                        "invalid transaction journal regular mode: {}",
+                        path.display()
+                    ))
+                })?,
+            }),
+            _ => {
+                return Err(GeneratorError::usage(format!(
+                    "invalid transaction journal progress entry: {}",
+                    path.display()
+                )));
+            }
+        };
+        if progress.insert(index, current).is_some() {
+            return Err(GeneratorError::usage(format!(
+                "duplicate transaction journal progress entry: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(progress)
+}
+
+fn transaction_snapshot_bytes(
+    journal: &Path,
+    directory: &str,
+    record: &TransactionRecord,
+    snapshot: &TransactionSnapshot,
+) -> Result<Option<Vec<u8>>, GeneratorError> {
+    if matches!(snapshot, TransactionSnapshot::Missing) {
+        return Ok(None);
+    }
+    let path = journal.join(directory).join(record.index.to_string());
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| GeneratorError::io("inspect transaction snapshot", &path, &error))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(GeneratorError::usage(format!(
+            "transaction snapshot is not a regular file: {}",
+            path.display()
+        )));
+    }
+    fs::read(&path)
+        .map(Some)
+        .map_err(|error| GeneratorError::io("read transaction snapshot", &path, &error))
+}
+
+fn recover_transaction_record(
+    root: &Path,
+    journal: &Path,
+    record: &TransactionRecord,
+    progress: &BTreeMap<usize, TransactionProgress>,
+) -> Result<(), GeneratorError> {
+    let path = root.join(&record.relative);
+    let current = capture_file_preimage(&path, &record.relative)?;
+    let before_bytes = transaction_snapshot_bytes(journal, "before", record, &record.before)?;
+    if snapshot_matches(&current, &record.before, before_bytes.as_deref()) {
+        return Ok(());
+    }
+    let after_bytes = transaction_snapshot_bytes(journal, "after", record, &record.after)?;
+    let Some(expected_identity) = progress.get(&record.index) else {
+        return Err(GeneratorError::usage(format!(
+            "transaction recovery cannot prove mutation identity for {}",
+            record.relative.display()
+        )));
+    };
+    if !progress_matches(&current, expected_identity)
+        || !snapshot_matches(&current, &record.after, after_bytes.as_deref())
+    {
+        return Err(GeneratorError::usage(format!(
+            "transaction recovery identity mismatch for {}; journal preserved",
+            record.relative.display()
+        )));
+    }
+    match (&record.before, before_bytes) {
+        (TransactionSnapshot::Missing, None) => match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                Err(GeneratorError::usage(format!(
+                    "transaction recovery found a non-regular output: {}",
+                    record.relative.display()
+                )))
+            }
+            Ok(_) => fs::remove_file(&path).map_err(|error| {
+                GeneratorError::io("remove recovered generated file", &path, &error)
+            }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(GeneratorError::io(
+                "inspect recovered generated file",
+                &path,
+                &error,
+            )),
+        },
+        (TransactionSnapshot::Regular { mode }, Some(bytes)) => {
+            let staged = stage_generated_bytes(&path, &bytes)?;
+            #[cfg(unix)]
+            if let Some(mode) = mode {
+                restore_file_mode(&staged, *mode)?;
+            }
+            fs::rename(&staged, &path).map_err(|error| {
+                let _ = fs::remove_file(&staged);
+                GeneratorError::io("restore transaction preimage", &path, &error)
+            })
+        }
+        _ => Err(GeneratorError::usage(format!(
+            "transaction recovery preimage store is inconsistent for {}",
+            record.relative.display()
+        ))),
+    }
+}
+
+fn cleanup_transaction_journal(root: &Path) -> Result<(), GeneratorError> {
+    let path = transaction_path(root);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(GeneratorError::usage(format!(
+                "transaction journal is not a directory: {}",
+                path.display()
+            )))
+        }
+        Ok(_) => fs::remove_dir_all(&path)
+            .map_err(|error| GeneratorError::io("remove transaction journal", &path, &error)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(GeneratorError::io(
+            "inspect transaction journal",
+            &path,
+            &error,
+        )),
+    }
+}
+
+fn recover_pending_transaction(root: &Path) -> Result<(), GeneratorError> {
+    let path = transaction_path(root);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(GeneratorError::io(
+                "inspect transaction journal",
+                &path,
+                &error,
+            ))
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(GeneratorError::usage(format!(
+            "transaction journal is not a directory: {}",
+            path.display()
+        )));
+    }
+    for directory in ["before", "after"] {
+        let directory_path = path.join(directory);
+        let metadata = fs::symlink_metadata(&directory_path).map_err(|error| {
+            GeneratorError::io(
+                "inspect transaction snapshot directory",
+                &directory_path,
+                &error,
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(GeneratorError::usage(format!(
+                "transaction snapshot directory is not a directory: {}",
+                directory_path.display()
+            )));
+        }
+    }
+    let records = parse_transaction_manifest(&path)?;
+    reject_managed_symlink_ancestors(root, records.iter().map(|record| &record.relative))?;
+    let progress = parse_transaction_progress(&path)?;
+    if progress.keys().any(|index| *index >= records.len()) {
+        return Err(GeneratorError::usage(format!(
+            "transaction journal progress references an unknown entry: {}",
+            path.display()
+        )));
+    }
+    for record in records.iter().rev() {
+        recover_transaction_record(root, &path, record, &progress)?;
+    }
+    cleanup_transaction_journal(root)
 }
 
 pub(crate) enum WriteOutcome {
@@ -6766,6 +7418,7 @@ fn write_generated_with_baseline(
     adopt: bool,
     baseline: Option<&TrustedBaseline>,
 ) -> Result<WriteOutcome, GeneratorError> {
+    recover_pending_transaction(root)?;
     let plan = plan_generated_write_with_baseline(root, files, inputs, adopt, baseline)?;
     apply_generated_write_plan(root, files, inputs, dry_run, check, force, &plan)
 }
@@ -7004,6 +7657,7 @@ fn apply_generated_write_plan(
     }
     let _generation_lock = GenerationLock::acquire(root, files.keys())?;
     validate_plan_preimages(root, plan)?;
+    let mut journal = create_transaction_journal(root, files, inputs, plan)?;
     // A pre-state version is safe to adopt only when every existing generated
     // file exactly matches this renderer's output. `verify_generated_ownership`
     // rejects any divergent file before this point, including under `--force`.
@@ -7011,7 +7665,28 @@ fn apply_generated_write_plan(
         && plan.stale.is_empty()
         && (!plan.ownership_present || plan.ownership_needs_refresh)
     {
-        return apply_ownership_refresh(root, files, inputs, plan);
+        return match apply_ownership_refresh(root, files, inputs, plan) {
+            Ok(outcome) => {
+                if let Err(error) = journal.record(root, Path::new(OWNERSHIP_STATE)) {
+                    let preimage = plan
+                        .files
+                        .iter()
+                        .find(|file| file.path == Path::new(OWNERSHIP_STATE))
+                        .map(|file| file.preimage.clone())
+                        .ok_or_else(|| {
+                            GeneratorError::usage("generated plan has no ownership preimage")
+                        })?;
+                    return rollback_after_error(
+                        root,
+                        &[(PathBuf::from(OWNERSHIP_STATE), preimage)],
+                        error,
+                    );
+                }
+                cleanup_transaction_journal(root)?;
+                Ok(outcome)
+            }
+            Err(error) => Err(error),
+        };
     }
     let created = plan
         .files
@@ -7052,6 +7727,9 @@ fn apply_generated_write_plan(
             return rollback_after_error(root, &mutated, error);
         }
         mutated.push((relative.clone(), planned.preimage.clone()));
+        if let Err(error) = journal.record(root, relative) {
+            return rollback_after_error(root, &mutated, error);
+        }
     }
     for relative in &plan.stale {
         let planned = plan
@@ -7071,6 +7749,9 @@ fn apply_generated_write_plan(
             return rollback_after_error(root, &mutated, error);
         }
         mutated.push((relative.clone(), planned.preimage.clone()));
+        if let Err(error) = journal.record(root, relative) {
+            return rollback_after_error(root, &mutated, error);
+        }
     }
     let ownership_file = plan
         .files
@@ -7093,6 +7774,10 @@ fn apply_generated_write_plan(
         return rollback_after_error(root, &mutated, error);
     }
     mutated.push((ownership_path, ownership_file.preimage.clone()));
+    if let Err(error) = journal.record(root, Path::new(OWNERSHIP_STATE)) {
+        return rollback_after_error(root, &mutated, error);
+    }
+    cleanup_transaction_journal(root)?;
     Ok(WriteOutcome::Written {
         changed: written,
         created,
@@ -7107,6 +7792,11 @@ fn rollback_after_error(
     if let Err(rollback) = rollback_generated_files(root, mutated) {
         return Err(GeneratorError::usage(format!(
             "{error}; rollback failed: {rollback}"
+        )));
+    }
+    if let Err(cleanup) = cleanup_transaction_journal(root) {
+        return Err(GeneratorError::usage(format!(
+            "{error}; rollback succeeded but transaction journal cleanup failed: {cleanup}"
         )));
     }
     Err(error)
@@ -19547,6 +20237,104 @@ lockfile = true
             must(fs::metadata(&path), "read rolled back mode").mode() & 0o7777,
             0o640
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn durable_transaction_recovers_an_interrupted_write() {
+        let root = temporary_repository("durable-transaction-recovery");
+        let relative = PathBuf::from(".github/workflows/ci-pr.yml");
+        let initial = BTreeMap::from([(
+            relative.clone(),
+            format!("{GENERATED_HEADER}name: initial\n"),
+        )]);
+        must(
+            write_generated(&root, &initial, false, false, false),
+            "write initial generated layout",
+        );
+        let baseline = committed_test_baseline(&root);
+        let wanted = BTreeMap::from([(
+            relative.clone(),
+            format!("{GENERATED_HEADER}name: wanted\n"),
+        )]);
+        let plan = must(
+            plan_generated_write_with_baseline(
+                &root,
+                &wanted,
+                &GenerationInputs::parts(0, 0),
+                false,
+                Some(&baseline),
+            ),
+            "plan durable transaction",
+        );
+        let mut journal = must(
+            create_transaction_journal(&root, &wanted, &GenerationInputs::parts(0, 0), &plan),
+            "create durable transaction",
+        );
+        must(
+            atomic_write(&root.join(&relative), &wanted[&relative]),
+            "simulate interrupted replacement",
+        );
+        must(
+            journal.record(&root, &relative),
+            "record replacement identity",
+        );
+        must(
+            recover_pending_transaction(&root),
+            "recover interrupted transaction",
+        );
+        assert_eq!(
+            must(
+                fs::read_to_string(root.join(&relative)),
+                "read recovered bytes"
+            ),
+            initial[&relative]
+        );
+        assert!(!transaction_path(&root).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn durable_transaction_refuses_unproven_interrupted_write() {
+        let root = temporary_repository("durable-transaction-refusal");
+        let relative = PathBuf::from(".github/workflows/ci-pr.yml");
+        let initial = BTreeMap::from([(
+            relative.clone(),
+            format!("{GENERATED_HEADER}name: initial\n"),
+        )]);
+        must(
+            write_generated(&root, &initial, false, false, false),
+            "write initial generated layout",
+        );
+        let baseline = committed_test_baseline(&root);
+        let wanted = BTreeMap::from([(
+            relative.clone(),
+            format!("{GENERATED_HEADER}name: wanted\n"),
+        )]);
+        let plan = must(
+            plan_generated_write_with_baseline(
+                &root,
+                &wanted,
+                &GenerationInputs::parts(0, 0),
+                false,
+                Some(&baseline),
+            ),
+            "plan durable transaction",
+        );
+        let _journal = must(
+            create_transaction_journal(&root, &wanted, &GenerationInputs::parts(0, 0), &plan),
+            "create durable transaction",
+        );
+        must(
+            atomic_write(&root.join(&relative), &wanted[&relative]),
+            "simulate unrecorded replacement",
+        );
+        let error = must_some(
+            recover_pending_transaction(&root).err(),
+            "refuse replacement without durable identity record",
+        );
+        assert!(error.to_string().contains("cannot prove mutation identity"));
+        assert!(transaction_path(&root).is_dir());
         let _ = fs::remove_dir_all(root);
     }
 
