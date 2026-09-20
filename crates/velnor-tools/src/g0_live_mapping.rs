@@ -758,7 +758,7 @@ fn map_checkout_observation(
         proof_raw_object_refs: observation
             .proof
             .as_ref()
-            .map(|proof| proof.raw_object_refs.clone())
+            .map(|proof| proof.raw_object_refs().to_vec())
             .unwrap_or_default(),
     }
 }
