@@ -1377,6 +1377,11 @@ fn validate_nested_raw_references(
     if raw_ids.is_empty() {
         bail!("{label} lacks raw object references");
     }
+    let allowed_kinds = expected
+        .iter()
+        .map(|binding| binding.object_kind)
+        .collect::<Vec<_>>();
+    validate_raw_references(raw_ids, raw_by_id, request_by_id, label, &allowed_kinds)?;
     let expected_by_kind = expected
         .iter()
         .map(|binding| (binding.object_kind, binding))
