@@ -1,5 +1,42 @@
 # Velnor CI reliability execution record
 
+## 2026-09-21 continuation: trusted admission regression
+
+Fresh authenticated refs and Git fetch agree on main `97bac4c4` and PR #979
+head `39b67ecd`. The isolated integration checkout is now
+`/Users/donbeave/Projects/work/velnor`; unrelated dirty migration work is preserved.
+The current cross-repository objective additionally requires every complete
+acceptance pipeline to meet 120 seconds. No previous campaign result proves that
+target or the six-nines reliability objective.
+
+The PR's generator failure is locally reproduced: 1,830 library tests pass and
+`trust_gated_velnor_docker_is_judged_by_the_trusted_class` fails. Its expected
+diagnostic text encoded the superseded rule that denied selected work may skip.
+The renderer now correctly rejects contradictory selection and admission.
+The test architecture allowed that contract disagreement because it checked
+strings rather than executing the trusted caller's verdict.
+
+The replacement executes the actual generated trusted-provider verdict for 40
+combinations of selection, admission, and job result. Selected work requires
+both admission and success; unselected work requires an explicit skipped result.
+The test retains assertions tying the actual caller to the trusted provider's
+event expression. Independent reviewer `/root/independent_verifier` found no
+actionable defect in the repair.
+
+Local verification on the repaired tree:
+
+- `cargo fmt --all --check`: passed.
+- `cargo clippy --workspace --all-targets --locked --features velnor-runner/test-support -- -D warnings`:
+  passed, 24.02 seconds reported by Cargo.
+- `cargo test --locked -p velnor-workflow`: 1,959 tests passed, zero failed or
+  ignored. This includes 1,831 library tests and 128 integration tests.
+- Candidate `velnor-workflow --plain --dry-run .`: discovered 11 Rust workspace
+  packages and 17 total execution units; zero generated files would change.
+
+These are local correctness checks, not complete CI timing or immutable-runtime
+acceptance. Fresh pushed CI, source/pin parity, hooks, explicit Rust phases,
+consumer adoption, and protected integration remain required.
+
 Status: active. Started 2026-09-20. This record covers the Velnor reliability
 task; it does not replace or inherit the separate cross-repository performance
 campaign's completion contract. The objective is structural prevention of

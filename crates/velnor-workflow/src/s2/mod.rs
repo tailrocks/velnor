@@ -9913,13 +9913,39 @@ mod tests {
             block.contains("if [[ \"$PROVIDER_ADMITTED_VELNOR_TRUSTED\" == true ]]; then"),
             "the trust-gated caller is judged by the trusted class's admission: {block}"
         );
-        assert!(
-            block.contains("skipped) ;;")
-                && block.contains(
-                    "ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED="
-                ),
-            "an unadmitted lane must be exactly `skipped`, never merely tolerated: {block}"
+        // Selection freezes an obligation. A later admission disagreement cannot
+        // turn that obligation into a successful skipped check. Execute the
+        // rendered verdict so this fixture checks behavior, not diagnostic text.
+        let script = format!(
+            "plan_expects() {{ [[ \"$TEST_SELECTED\" == true ]]; }}\n\
+             result_for_job() {{ printf '%s\\n' \"$TEST_RESULT\"; }}\n{block}"
         );
+        for selected in [false, true] {
+            for admitted in ["true", "false", "", "unknown"] {
+                for result in ["success", "skipped", "failure", "cancelled", ""] {
+                    let output = must(
+                        Command::new("bash")
+                            .args(["-euo", "pipefail", "-c", &script])
+                            .env("TEST_SELECTED", selected.to_string())
+                            .env("TEST_RESULT", result)
+                            .env("PROVIDER_ADMITTED_VELNOR_TRUSTED", admitted)
+                            .output(),
+                        "execute the generated trusted-provider verdict",
+                    );
+                    let expected = if selected {
+                        admitted == "true" && result == "success"
+                    } else {
+                        result == "skipped"
+                    };
+                    assert_eq!(
+                        output.status.success(),
+                        expected,
+                        "selected={selected}, admission={admitted:?}, result={result:?}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+            }
+        }
         let admissions = required_check_admissions(&pr);
         let trusted = must_some(
             admissions.get("PROVIDER_ADMITTED_VELNOR_TRUSTED"),
@@ -9944,7 +9970,7 @@ mod tests {
 
     /// Every aggregate caller, its callee lane job, and the required check
     /// evaluate one admission predicate per lane class, and the check expects
-    /// `skipped` from a selected caller whose class the predicate denies.
+    /// `skipped` only from callers outside the frozen selection.
     #[test]
     fn required_check_expects_each_caller_by_its_lane_admission() {
         let mut config = scanned_fixture(all_providers());
