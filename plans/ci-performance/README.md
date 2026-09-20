@@ -9,14 +9,25 @@ Their claims require revalidation against current revisions.
 
 ## Latest measured checkpoint
 
-Metadata staging is published as `57e7cafc`; exact-revision CI is running.
-The preceding two successful full PR observations took 458s and 534s from
-trigger to required result, with aggregate job execution 1,210s and 1,314s.
-Runner jobs took 413s and 508s; generator jobs 186s and 167s. Both retained
-1,943 generator tests and 2,516 passing runner tests, five existing skips and
-one repeated leaky-test result. Same image/region does not prove identical
-hardware or contention. Sample size two supports no speedup or plateau claim.
-Raw second-run evidence is under `observations/velnor-35508841303-*`.
+Release metadata staging (`57e7cafc`) and rolling-release recovery
+(`27bfb54b`) passed exact-head PR and policy CI. Three latest full PR
+observations are retained below; they are not matched performance treatments.
+
+| Source | PR run | Trigger to required result | Aggregate job execution | Runner | Generator |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `57e7cafc` | 35510807365 | 443s | 1,266s | 413s | 182s |
+| `413458df` | 35511219049 | 541s | 1,290s | 466s | 175s |
+| `27bfb54b` | 35511815559 | 559s | 1,359s | 525s | 184s |
+
+Each observation includes 68 job records: 20 executed and 48 skipped.
+Generator coverage increased from 1,947 to 1,952 passing tests; runner coverage
+retains 2,516 passing tests, five existing skips and one repeated leaky-test
+result. No introduced-flake absence or compiler-cache reuse is established.
+Raw timestamps, compressed logs, collector JSONL/CSV and summaries are in
+`observations/velnor-<run>-*`. Completion uses job timestamps, never `updated_at`.
+Runner jobs remain the longest observed component. These differing revisions,
+uncontrolled hardware/contention and small samples support no speedup or
+plateau claim. Substantive optimization iteration credit remains zero.
 
 ## Completion contract
 
@@ -54,26 +65,29 @@ hypothesis → implementation → focused checks → controlled CI → independe
 results review → commit/push → rerank. Independent research runs concurrently;
 timing experiments must account for shared runner contention.
 
-Current ownership checkpoint (2026-09-20, after `6544ad3a`):
+Current ownership checkpoint (2026-09-20, after `27bfb54b`):
 
-- Parent: integrate release input staging, preserve exact-source CI evidence,
-  and publish small verified units. Metadata has independent complete-script
-  probes; committed regression fixtures and safe real packaging remain pending.
-- Velnor agent: finish metadata regression fixtures, then split candidate work
-  and cache save from telemetry cleanup. Mise closure review remains bounded;
-  the unrelated cancellation suite is not full-suite proof for Mise.
-- Parallax agent: repair candidate identity/receipt contracts in isolation, then
-  repair clean Parallax runtime convergence before the larger bootstrap graph. The
-  first large DAG draft is rejected for concrete identity, artifact, permission
-  and graph defects; it has not been integrated.
-- Jackin agent: independently review and adapt PR #973 rolling-tag fixes without
-  replacing the accepted foreground verifier or typed process ownership.
-- Dependency chain: typed candidate contract → producer/consumer graph →
-  usable candidate runtime → consumer regeneration → controlled CI cohorts.
-  Metadata and telemetry repairs remain independent source units.
-- Existing source identity, typed stages, Mise exact tool selection, relevance,
-  scheduled child outcomes, ARM production and Swift/product reuse remain
-  queued requirements. No plateau or performance acceptance is recorded.
+- Parent: preserve and publish measured evidence, integrate independently
+  reviewed units, run deterministic checks. Shared Git operations stay serial.
+- Velnor agent: telemetry phase repair in `/tmp/velnor-telemetry-413458`.
+  Separate candidate preparation/publication and explicit cache save; distinguish
+  skipped/failed work and unobserved post-job MBX save. Parent review found
+  false durations from unconditional markers and incorrect save-action semantics.
+- Parallax agent: independent rolling-release review, then clean consumer runtime
+  convergence. Larger pending consumer migration remains isolated and unaccepted.
+- Jackin agent: full PR #962 ARM comparison, independent candidate-contract
+  review, then typed transitive Mise/Rust tool boundaries for Jackin.
+- Candidate contract draft is held: malformed generated YAML, missing local
+  candidate binding, and trusted pinned-policy permission incompatibility.
+  Diagnostic patch/logs are preserved separately; no draft was published.
+- Contract and telemetry edits now use separate real Git worktrees after an
+  overlapping scratch-checkout draft was detected and rejected. Parent integrates
+  only scoped patches; no synthetic-checkout whole-file replacement.
+- Dependency chain: trusted runtime/contract rollout → candidate graph → exact
+  consumer regeneration → controlled CI cohorts. Local source identity remains
+  a separate prerequisite; no artifact or policy check is waived.
+- Typed stages, Mise tool selection, relevance, scheduled child outcomes,
+  native ARM production and Swift/product reuse remain required work.
 
 Prior checkpoint (2026-09-20, after `56017bac`):
 

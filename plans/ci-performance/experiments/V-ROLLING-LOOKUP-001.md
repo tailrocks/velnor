@@ -1,7 +1,8 @@
 # V-ROLLING-LOOKUP-001 — rolling release lookup
 
-Status: candidate integration; deterministic checks and independent review
-pending. No measured optimization acceptance or completed iteration credit.
+Status: published as `27bfb54bdecce09a71f320885bb64f5492083744`; exact-head
+PR and policy CI pass. Final independent review and consumer/package validation
+remain pending. No measured optimization acceptance or completed iteration credit.
 
 ## Root cause and alternatives
 
@@ -62,3 +63,15 @@ fail closed. No new production release was created for these tests.
 Final parent suite: 1,952 tests passed, zero skipped. Publication awaits exact
 committed generator verification; consumer runtime convergence and package CI
 remain open obligations.
+
+## Published revision evidence
+
+Exact remote revision rebuilt with default features; generation check passed
+against pinned runtime `4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d`.
+[PR CI 35511815559](https://github.com/tailrocks/velnor/actions/runs/35511815559)
+and [policy CI 35511814394](https://github.com/tailrocks/velnor/actions/runs/35511814394)
+succeeded. Linux generator tests: 1,952 passed, zero skipped, including the
+complete draft lookup transition. Trigger to required result: 559s; aggregate
+execution: 1,359s. This is one observation of changed source and coverage, not a
+controlled speedup or packaging/release-promotion measurement. Raw observations
+are retained under `observations/velnor-35511815559-*`.
