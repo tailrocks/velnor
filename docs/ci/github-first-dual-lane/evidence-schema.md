@@ -201,6 +201,64 @@ check-suite, job, artifact/log, workflow-graph, merge-group, and child-lineage
 objects. The checker therefore emits `authoritative-collector-required` for
 execution stages; this schema is not a claim that live collection is complete.
 
+### Collector/store integration checkpoint
+
+The checker and producer are separate owners. Current checkpoints are recorded
+here so an integration cannot silently combine incompatible contracts:
+
+| Boundary | Current producer checkpoint | Checker requirement | Status |
+| --- | --- | --- | --- |
+| API acquisition and collection | `origin/codex/g3-live-collector` `fdf1e11a1ec0b86342b0348c145ecb919dd0550a` | authenticated read-only transport, complete request/page ledger, raw response references, opening and closing default/PR rereads, and source-derived workflow/run/job/check/child graph | not consumable yet: producer `LiveCollection`/mapper does not emit this checker revision's complete `G0InventoryEvidence` (including canonical snapshot bytes/storage reference, `run_attempt`-bound artifacts, and source-job obligations) |
+| Raw-byte publication | `origin/codex/g3-raw-store` `8526294628568799f0ebbe5ee444697c1405d053` | one production `RawObjectStore` using `sha256://<lowercase-64-hex>`, measured original response bytes, descriptor-relative reopen/rehash, and immutable sidecar/reference binding | not consumable yet: independent review still finds namespace transaction, crash cleanup/reconciliation, and production CLI wiring gaps |
+| Checker validation | `c0329b892e51706f5cca1c90a73744c41766cb68` | strict `g0_contract.rs` parsing and deterministic comparison against reviewed scope/source; `--live` must receive a producer-authorized capture | live path intentionally fails closed until both producer boundaries are integrated and independently reviewed |
+
+The integration target is one in-process path, not a second JSON normalizer:
+
+1. The collector owner keeps `github_acquisition.rs`, `github_transport.rs`,
+   `github_live_collector.rs`, `g0_live_mapping.rs`, and `github_live_cli.rs`.
+   The collector must return a typed capture whose source-derived plan contains
+   all non-empty expected jobs, recursive child edges, required check/app
+   identities, and every raw request/page reference. It must reread the default
+   branch and every open PR at close, then reject any changed identity.
+2. The raw-store owner keeps the producer `github_raw_store.rs` and its
+   acquisition integration. `RawObjectStore::store(RawObject)` must measure
+   bytes supplied by the authenticated transport; `verify(&RawObjectRef)` must
+   reopen the same descriptor-relative object and sidecar. A caller-supplied
+   `original_sha256`, URI, or path is metadata until verification succeeds. No
+   checker-local CAS implementation may substitute for this store.
+3. The checker owner keeps `g0_contract.rs`, `g0_workflow.rs`, and
+   `evidence_check.rs`. The eventual adapter must pass the producer's typed
+   capture directly to these types, verify measured CAS bytes, and call the
+   existing deterministic document checks. It must not reconstruct expectations
+   from result records or accept a capture merely because its timestamp, digest,
+   or `--live` flag looks fresh.
+
+The minimum handoff API is:
+
+```text
+AuthenticatedCollector::collect_closing(manifest, reviewed_source, auth)
+    -> TrustedLiveCapture {
+         g0_inventory: G0InventoryEvidence,
+         raw_store: VerifiedRawStoreHandle,
+         authority: AuthenticatedClosingReconciliation,
+       }
+```
+
+`TrustedLiveCapture` is producer-owned and must not be constructible from
+deserialized caller JSON. `AuthenticatedClosingReconciliation` must bind the
+authenticated viewer/scopes, API request identities, complete pagination,
+opening/closing revision sets, and measured raw objects. A future checker
+integration may accept only this in-process value; offline files continue to use
+`check_paths` for rejection tests and cannot authorize G0 or G7.
+
+Do not cherry-pick either checkpoint wholesale into the checker branch. Their
+collector and checker contracts diverged from the strict c032 types. The next
+producer commits must publish the adapter and store guarantees above, with
+hostile tests for stale closing heads, missing PRs/pages/jobs, wrong
+request/object bindings, raw-store replacement, and unauthenticated or
+caller-authored `--live` input. Until then, `check_paths_live` remains an
+explicit fail-closed boundary.
+
 ### Typed G0 collector handoff
 
 `evidence.g0_inventory` accepts one strict `G0InventoryEvidence` object from
