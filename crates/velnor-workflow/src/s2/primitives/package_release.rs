@@ -2115,7 +2115,7 @@ export VELNOR_VERIFIED_PACKAGE_DIR="$transaction_dir/rolling-published"
     script.push_str("do\n  gh attestation verify \"$transaction_dir/rolling-published/$payload\" ");
     script.push_str(verification.attestation_flags);
     script.push_str(
-        "\ndone\n# cleanup_publication releases the exact lock only after rollback or successful completion.\n",
+        "\ndone\n# Every rolling byte and attestation is verified. The lock is safe to release;\n# failures before this point intentionally retain it for manual recovery.\nclear_publication_lock_retain\n# cleanup_publication releases the exact lock only after rollback or successful completion.\n",
     );
     script
 }
@@ -3906,6 +3906,9 @@ gh() {{
             .find("\nremote_tag_sha() {")
             .expect("lock helper boundary");
         let lock = &rolling_script[lock_start..lock_end];
+        assert!(rolling_script.contains(
+            "clear_publication_lock_retain\n# cleanup_publication releases the exact lock"
+        ));
         let cleanup_start = rolling_script
             .find("cleanup_publication() {")
             .expect("cleanup helper");
@@ -3915,7 +3918,7 @@ gh() {{
         let cleanup = &rolling_script[cleanup_start..cleanup_end];
         let lock_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-        for mode in ["success", "held"] {
+        for mode in ["success", "retained-success", "held"] {
             let root = std::env::temp_dir().join(format!(
                 "velnor-publication-lock-{mode}-{}",
                 crate::unique_suffix()
@@ -3966,6 +3969,10 @@ if [ "$TEST_MODE" = held ]; then
 fi
 acquire_publication_lock
 assert_publication_lock
+if [ "$TEST_MODE" = retained-success ]; then
+  mark_publication_lock_retain
+  clear_publication_lock_retain
+fi
 cleanup_publication 0
 "#,
                 lock = lock,
@@ -3986,7 +3993,7 @@ cleanup_publication 0
                 String::from_utf8_lossy(&output.stderr)
             );
             let log = std::fs::read_to_string(root.join("gh.log")).expect("lock API log");
-            if mode == "success" {
+            if mode == "success" || mode == "retained-success" {
                 assert!(
                     log.contains("Acquire Velnor publication lock example/project:preview:42:3")
                 );
