@@ -9,6 +9,7 @@ Only generatedstate delta is inputs.scan. Runtime s2/runtime.rs any .github path
 Architectural hypothesis: inventory identity and execution-graph identity share one invalidation path. A policy bookkeeping update can therefore select every product although no product input changed.
 
 Alternatives requiring independent challenge:
+
 1. Fingerprint semantic discovery/configuration facts used by rendering instead of arbitrary inventory membership; retain safety checks for new/deleted/renamed manifests and source families.
 2. Keep inventory proof but distinguish control-only ownership changes from executable workflow/graph changes in runtime relevance. Validate actual state shape/content rather than blind path exclusion.
 3. Derive and compare typed per-product graph/input identities between revisions; retain full conservative fallback when comparison is incomplete. This may subsume the broader artifact/relevance contract but must not become an opaque special case.
