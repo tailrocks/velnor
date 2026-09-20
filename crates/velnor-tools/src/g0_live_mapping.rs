@@ -32,6 +32,11 @@ pub struct G0MappingBindings {
     pub phase: String,
     pub model_session: CapturedModelSession,
     pub workload_artifact: CapturedWorkloadArtifact,
+    /// Raw objects captured by the producer-owned local binding boundary.
+    /// These are merged with the provider ledger only after exact safe-byte
+    /// hash/length/storage validation; a typed value or URI alone is never
+    /// enough to enter the snapshot.
+    pub local_raw_objects: Vec<RawObjectRef>,
     /// External CAS reference written by the same collector process for the
     /// canonical typed snapshot bytes.  A URI supplied without an object
     /// write is not accepted as authoritative evidence.
@@ -217,6 +222,17 @@ impl G0MappingBindings {
         {
             bail!("model and workload inputs require independently captured raw references");
         }
+        if !self
+            .local_raw_objects
+            .iter()
+            .any(|raw| raw.raw_id == self.model_session.raw_object_ref)
+            || !self
+                .local_raw_objects
+                .iter()
+                .any(|raw| raw.raw_id == self.workload_artifact.raw_object_ref)
+        {
+            bail!("model and workload raw objects must be supplied to the mapping boundary");
+        }
         Ok(())
     }
 }
@@ -277,6 +293,62 @@ fn validate_fixed_repository_names(manifest_names: &[String], live_names: &[Stri
     Ok(())
 }
 
+fn merge_raw_objects(
+    live: &LiveCollection,
+    bindings: &G0MappingBindings,
+) -> Result<Vec<RawObjectRef>> {
+    merge_raw_object_sets(
+        &live.raw_objects,
+        &bindings.local_raw_objects,
+        &bindings.model_session.raw_object_ref,
+        &bindings.workload_artifact.raw_object_ref,
+    )
+}
+
+fn merge_raw_object_sets(
+    provider_objects: &[RawObjectRef],
+    local_objects: &[RawObjectRef],
+    model_raw_id: &str,
+    workload_raw_id: &str,
+) -> Result<Vec<RawObjectRef>> {
+    let mut merged = BTreeMap::<String, RawObjectRef>::new();
+    for raw in provider_objects.iter().chain(local_objects) {
+        // Validate the bytes and both canonical storage references before the
+        // object enters the map.  The producer store has already verified the
+        // immutable object; this second boundary prevents a caller from
+        // replacing that verified reference with a typed-only claim.
+        map_raw_object(raw)?;
+        if let Some(existing) = merged.insert(raw.raw_id.clone(), raw.clone())
+            && existing != *raw
+        {
+            bail!(
+                "raw object ID {} has conflicting provider/local bindings",
+                raw.raw_id
+            );
+        }
+    }
+    for (label, raw_id) in [
+        ("model session", model_raw_id),
+        ("workload artifact", workload_raw_id),
+    ] {
+        let raw = merged
+            .get(raw_id)
+            .ok_or_else(|| anyhow!("{label} raw object {raw_id} is absent after merge"))?;
+        let expected_kind = if label == "model session" {
+            "model.session"
+        } else {
+            "workload.artifact"
+        };
+        if raw.object_kind != expected_kind {
+            bail!(
+                "{label} raw object {raw_id} has unexpected object kind {}",
+                raw.object_kind
+            );
+        }
+    }
+    Ok(merged.into_values().collect())
+}
+
 pub fn map_g0_inventory_with_supplement(
     live: &LiveCollection,
     manifest: &ManifestDocument,
@@ -284,8 +356,8 @@ pub fn map_g0_inventory_with_supplement(
 ) -> Result<G0MappedInventory> {
     bindings.validate()?;
     validate_fixed_repository_set(manifest, live)?;
-    let raw_by_id = live
-        .raw_objects
+    let merged_raw_objects = merge_raw_objects(live, bindings)?;
+    let raw_by_id = merged_raw_objects
         .iter()
         .map(|raw| (raw.raw_id.clone(), raw))
         .collect::<BTreeMap<_, _>>();
@@ -299,8 +371,7 @@ pub fn map_g0_inventory_with_supplement(
         .iter()
         .map(map_request)
         .collect::<Result<Vec<_>>>()?;
-    let raw_objects = live
-        .raw_objects
+    let raw_objects = merged_raw_objects
         .iter()
         .map(map_raw_object)
         .collect::<Result<Vec<_>>>()?;
@@ -369,7 +440,7 @@ pub fn map_g0_inventory_with_supplement(
         collector_snapshot_sha256: snapshot_sha256,
         collector_snapshot_storage_ref: bindings.collector_snapshot_storage_ref.clone(),
     };
-    let supplement = map_supplement(live, &canonical);
+    let supplement = map_supplement(live, &merged_raw_objects, &canonical);
     Ok(G0MappedInventory {
         evidence,
         supplement,
@@ -616,7 +687,11 @@ fn canonical_json(value: &serde_json::Value) -> Result<String> {
     }
 }
 
-fn map_supplement(live: &LiveCollection, canonical: &[u8]) -> G0MappingSupplement {
+fn map_supplement(
+    live: &LiveCollection,
+    merged_raw_objects: &[RawObjectRef],
+    canonical: &[u8],
+) -> G0MappingSupplement {
     let request_payloads = live
         .requests
         .iter()
@@ -651,8 +726,7 @@ fn map_supplement(live: &LiveCollection, canonical: &[u8]) -> G0MappingSupplemen
                 })
         })
         .collect();
-    let raw_objects = live
-        .raw_objects
+    let raw_objects = merged_raw_objects
         .iter()
         .map(|raw| G0RawObjectSupplement {
             raw_id: raw.raw_id.clone(),
@@ -1851,5 +1925,43 @@ mod tests {
         let error = validate_fixed_repository_names(&expected, &mismatched)
             .expect_err("wrong 32-name set must fail closed");
         assert!(error.to_string().contains("differs"));
+    }
+
+    #[test]
+    fn local_binding_raw_objects_merge_only_with_exact_provenance() {
+        let provider = raw_object("repository", "provider-1", serde_json::json!({"id": 1}));
+        let model = raw_object("model.session", "model-1", serde_json::json!({"model": 1}));
+        let workload = raw_object(
+            "workload.artifact",
+            "workload-1",
+            serde_json::json!({"workload": 1}),
+        );
+        let merged = merge_raw_object_sets(
+            &[provider],
+            &[model.clone(), workload.clone()],
+            "model-1",
+            "workload-1",
+        )
+        .expect("provider and local objects with exact store refs merge");
+        assert_eq!(
+            merged
+                .iter()
+                .map(|raw| raw.raw_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["model-1", "provider-1", "workload-1"]
+        );
+
+        let mut tampered = model;
+        tampered.byte_length += 1;
+        assert!(
+            merge_raw_object_sets(&[], &[tampered, workload.clone()], "model-1", "workload-1",)
+                .is_err()
+        );
+
+        let mut conflicting = workload.clone();
+        conflicting.object_kind = "caller.claim".to_owned();
+        assert!(
+            merge_raw_object_sets(&[], &[workload, conflicting], "model-1", "workload-1",).is_err()
+        );
     }
 }
