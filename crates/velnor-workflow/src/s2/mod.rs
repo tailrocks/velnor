@@ -94,6 +94,12 @@ pub(crate) const VELNOR_WORKFLOW_LOCAL_SETUP_ACTION: &str =
 /// `policy-setup-action/` and runs the composite from there.
 pub(crate) const VELNOR_WORKFLOW_POLICY_SETUP_ACTION: &str =
     "./policy-setup-action/.github/actions/setup-velnor-workflow";
+/// The owner package-release publisher checks the candidate source out under
+/// `source/` before running repository-owned verification tasks. Its local
+/// setup action is therefore resolved from that exact checkout, not from the
+/// publisher workspace root.
+pub(crate) const VELNOR_WORKFLOW_SOURCE_SETUP_ACTION: &str =
+    "./source/.github/actions/setup-velnor-workflow";
 pub(crate) const VELNOR_CI_REPORT_ACTION: &str =
     "tailrocks/velnor/.github/actions/report-velnor-ci-outcomes";
 pub(crate) const VELNOR_CI_LOCAL_REPORT_ACTION: &str =
