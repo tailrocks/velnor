@@ -2118,7 +2118,6 @@ fn render_native_product_preview_publish_job(
 ) -> String {
     let download = ActionPin::DownloadArtifact.reference();
     let checkout = ActionPin::Checkout.reference();
-    let attest = ActionPin::Attest.reference();
     let mut needs = vec!["identity", "admit-product-release", "debian"];
     if sign {
         needs.push("sign-deb");
@@ -2139,7 +2138,7 @@ fn render_native_product_preview_publish_job(
     let manifest_schema = release.manifest_schema.clone();
     let package = release.package.clone();
     let binary = release.binary.clone();
-    r#"  publish:
+    let mut output = r#"  publish:
     needs: [__NEEDS__]
     name: Publish immutable native preview product
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/__BRANCH__' }}
@@ -2147,8 +2146,6 @@ fn render_native_product_preview_publish_job(
     runs-on: __RUNNER__
     permissions:
       contents: write
-      id-token: write
-      attestations: write
     concurrency:
       group: preview-product-${{ github.repository }}-${{ needs.identity.outputs.commit }}
       cancel-in-progress: false
@@ -2538,30 +2535,164 @@ fn render_native_product_preview_publish_job(
     .replace("__RUNNER__", &runner)
     .replace("__CHECKOUT__", checkout)
     .replace("__DOWNLOAD__", download)
-    .replace("__ATTEST__", attest)
     .replace("__DEB_COUNT__", &deb_count.to_string())
     .replace("__DEB_PAIRS__", &deb_pairs)
     .replace("__PACKAGE__", &package)
     .replace("__BINARY__", &binary)
     .replace("__MANIFEST_SCHEMA__", &manifest_schema)
-    .replace("__NATIVE_WORKFLOW__", "preview.yml")
+    .replace("__NATIVE_WORKFLOW__", "preview.yml");
+
+    let signer_steps = native_product_signer_record_steps(download);
+    if let Some(start) =
+        output.find("      - name: Create or inspect immutable preview provider release\n")
+        && let Some(end) =
+            output.find("      - name: Assemble canonical preview product manifest and archives\n")
+    {
+        output.replace_range(start..end, &signer_steps);
+    }
+
+    if let Some(start) = output.find("      - name: Attest canonical native product subjects\n")
+        && let Some(end) = output.find("      - name: Reconcile immutable preview release assets\n")
+    {
+        output.replace_range(start..end, "");
+    }
+
+    output = output
+        .replace(
+            "${{ steps.provider.outputs.release_id }}",
+            "${{ needs.admit-product-release.outputs.release_id }}",
+        )
+        .replace(
+            "${{ steps.provider.outputs.assets_url }}",
+            "${{ needs.admit-product-release.outputs.assets_url }}",
+        )
+        .replace(
+            "${{ steps.provider.outputs.draft }}",
+            "${{ needs.admit-product-release.outputs.phase == 'draft' }}",
+        );
+
+    if let Some(start) = output.find("      - name: Reconcile immutable preview release assets\n") {
+        let end = output[start..]
+            .find("\n      - name: Verify preview tag and assets immediately before publication\n")
+            .map_or(output.len(), |offset| start + offset);
+        let mut step = output[start..end].to_owned();
+        step = step.replace(
+            "          PROVIDER_UPLOAD_URL: ${{ steps.provider.outputs.upload_url }}\n",
+            "",
+        );
+        step = step.replace(
+            "          PROVIDER_DRAFT: ${{ needs.admit-product-release.outputs.phase == 'draft' }}\n",
+            "          PROVIDER_DRAFT: ${{ needs.admit-product-release.outputs.phase == 'draft' }}\n          PRODUCT_RELEASE_ID: ${{ needs.admit-product-release.outputs.release_id }}\n",
+        );
+        step = step.replace(
+            "          set -euo pipefail\n          expected_paths=(SHA256SUMS release-manifest.json)\n",
+            "          set -euo pipefail\n          provider_release=\"$(gh api \"repos/$GITHUB_REPOSITORY/releases/tags/$PRODUCT_RELEASE_TAG\")\"\n          provider_release_id=\"$(jq -er '.id | numbers | tostring' <<<\"$provider_release\")\"\n          [ \"$provider_release_id\" = \"$PRODUCT_RELEASE_ID\" ] || { echo '::error::admitted preview provider release changed before asset reconciliation' >&2; exit 1; }\n          PROVIDER_UPLOAD_URL=\"$(jq -er '.upload_url | strings' <<<\"$provider_release\" | sed 's/{?name,label}//')\"\n          expected_paths=(SHA256SUMS release-manifest.json)\n",
+        );
+        output.replace_range(start..end, &step);
+    }
+
+    output
+}
+
+/// The existing native release publisher consumes the callable product build
+/// and the shared signer's typed subject records. Provider identity is
+/// admitted by `admit-product-release`; this publisher never creates or
+/// resolves a competing release.
+fn native_product_signer_record_steps(download: &str) -> String {
+    r#"      - name: Download canonical native signer subjects
+        uses: __DOWNLOAD__
+        with:
+          name: native-product-assets
+          path: native-signer-assets
+          merge-multiple: true
+      - name: Download typed native signer records
+        uses: __DOWNLOAD__
+        with:
+          pattern: native-attestation-record-*
+          path: native-attestation-records
+      - name: Verify native signer records and attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REPOSITORY: ${{ needs.admit-product-release.outputs.source_repository }}
+          SOURCE_REF: ${{ needs.admit-product-release.outputs.source_ref }}
+          SOURCE_COMMIT: ${{ needs.admit-product-release.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          inventory=native-signer-assets/native-subject-inventory.json
+          inventory_sidecar=native-signer-assets/native-subject-inventory.json.sha256
+          test -f "$inventory" && test ! -L "$inventory" || { echo '::error::native subject inventory is missing or linked' >&2; exit 1; }
+          test -f "$inventory_sidecar" && test ! -L "$inventory_sidecar" || { echo '::error::native subject inventory sidecar is missing or linked' >&2; exit 1; }
+          inventory_digest="$(sha256sum "$inventory" | awk '{print $1}')"
+          [ "$(cat "$inventory_sidecar")" = "$inventory_digest  native-subject-inventory.json" ] || { echo '::error::native subject inventory sidecar mismatch' >&2; exit 1; }
+          jq -e '
+            (keys | sort) == ["artifact_name","lane","schema","source_commit","source_ref","source_repository","subjects"] and
+            .schema == "velnor.subject-inventory/v1" and .lane == "native" and
+            .artifact_name == "native-product-assets" and (.subjects | type == "array" and length > 0) and
+            (.subjects | map(.name) == (map(.name) | sort) and (map(.name) | length == (map(.name) | unique | length)))
+          ' "$inventory" >/dev/null || { echo '::error::native subject inventory schema/order is invalid' >&2; exit 1; }
+          jq -e --arg repository "$SOURCE_REPOSITORY" --arg ref "$SOURCE_REF" --arg commit "$SOURCE_COMMIT" '
+            .source_repository == $repository and .source_ref == $ref and .source_commit == $commit and
+            all(.subjects[]; (keys | sort) == ["kind","name","sha256","size","source_commit","source_ref","source_repository"] and
+              (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]*$")) and
+              (.sha256 | test("^[0-9a-f]{64}$")) and (.size | numbers and . > 0) and
+              .source_repository == $repository and .source_ref == $ref and .source_commit == $commit)
+          ' "$inventory" >/dev/null || { echo '::error::native subject inventory identity is invalid' >&2; exit 1; }
+          shopt -s nullglob
+          record_dirs=(native-attestation-records/native-attestation-record-*)
+          expected_count="$(jq '.subjects | length' "$inventory")"
+          test "${#record_dirs[@]}" -eq "$expected_count" || { echo '::error::native signer record count differs from subject inventory' >&2; exit 1; }
+          expected_names="$(jq -r '.subjects[] | "native-attestation-record-\(.name)"' "$inventory" | sort)"
+          actual_names="$(printf '%s\n' "${record_dirs[@]##*/}" | sort)"
+          [ "$actual_names" = "$expected_names" ] || { echo '::error::native signer record artifact census differs from subject inventory' >&2; exit 1; }
+          for record_dir in "${record_dirs[@]}"; do
+            test -d "$record_dir" && test ! -L "$record_dir" || { echo "::error::native signer record artifact is not a directory: $record_dir" >&2; exit 1; }
+            test "$(find "$record_dir" -type l -print -quit)" = '' || { echo "::error::native signer record artifact contains a symlink: $record_dir" >&2; exit 1; }
+            record="$record_dir/attestation-record.json"
+            sidecar="$record_dir/attestation-record.json.sha256"
+            test -f "$record" && test ! -L "$record" || { echo "::error::native signer record JSON is missing or linked: $record_dir" >&2; exit 1; }
+            test -f "$sidecar" && test ! -L "$sidecar" || { echo "::error::native signer record sidecar is missing or linked: $record_dir" >&2; exit 1; }
+            test "$(find "$record_dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit)" = '' || { echo "::error::native signer record artifact contains a non-file entry: $record_dir" >&2; exit 1; }
+            test "$(find "$record_dir" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d '[:space:]')" -eq 2 || { echo "::error::native signer record artifact has extra files: $record_dir" >&2; exit 1; }
+            canonical="$(mktemp)"
+            jq -S . "$record" > "$canonical"
+            cmp -- "$record" "$canonical" || { echo "::error::native signer record is not canonical JSON: $record_dir" >&2; exit 1; }
+            rm -f -- "$canonical"
+            record_digest="$(sha256sum "$record" | awk '{print $1}')"
+            [ "$(cat "$sidecar")" = "$record_digest  attestation-record.json" ] || { echo "::error::native signer record sidecar mismatch: $record_dir" >&2; exit 1; }
+            lane="$(jq -er '.lane' "$record")"
+            subject="$(jq -er '.subject' "$record")"
+            case "$subject" in ''|*..*|*[!A-Za-z0-9._-]*) echo "::error::native signer subject name is unsafe: $subject" >&2; exit 1 ;; esac
+            expected_record="native-attestation-record-$subject"
+            [ "$(basename "$record_dir")" = "$expected_record" ] || { echo "::error::native signer record subject/artifact mismatch: $record_dir" >&2; exit 1; }
+            [ "$lane" = native ] || { echo "::error::native signer record lane is not native: $subject" >&2; exit 1; }
+            jq -e --arg repository "$SOURCE_REPOSITORY" --arg ref "$SOURCE_REF" --arg commit "$SOURCE_COMMIT" --arg subject "$subject" --arg artifact "$expected_record" '
+              (keys | sort) == ["artifact_name","lane","oidc_issuer","predicate_type","schema","signer_workflow","source_commit","source_ref","source_repository","subject","subject_sha256","subject_size"] and
+              .schema == "velnor.attestation-record/v1" and .artifact_name == $artifact and
+              .signer_workflow == ".github/workflows/ci-release-package-signer.yml" and
+              .oidc_issuer == "https://token.actions.githubusercontent.com" and .predicate_type == "https://slsa.dev/provenance/v1" and
+              .source_repository == $repository and .source_ref == $ref and .source_commit == $commit and .subject == $subject
+            ' "$record" >/dev/null || { echo "::error::native signer record identity/schema mismatch: $subject" >&2; exit 1; }
+            jq -e --arg subject "$subject" --arg digest "$(jq -er '.subject_sha256' "$record")" --argjson size "$(jq -er '.subject_size' "$record")" '
+              ([.subjects[] | select(.name == $subject and .sha256 == $digest and .size == $size)] | length) == 1
+            ' "$inventory" >/dev/null || { echo "::error::native signer record does not match inventory: $subject" >&2; exit 1; }
+            subject_path="native-signer-assets/$subject"
+            test -f "$subject_path" && test ! -L "$subject_path" || { echo "::error::native signer subject bytes are missing: $subject" >&2; exit 1; }
+            [ "$(sha256sum "$subject_path" | awk '{print $1}')" = "$(jq -er '.subject_sha256' "$record")" ] || { echo "::error::native signer subject digest differs from record: $subject" >&2; exit 1; }
+            [ "$(wc -c <"$subject_path" | tr -d '[:space:]')" = "$(jq -er '.subject_size' "$record")" ] || { echo "::error::native signer subject size differs from record: $subject" >&2; exit 1; }
+            gh attestation verify "$subject_path" --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci-release-package-signer.yml" --source-ref "$SOURCE_REF" --source-digest "$SOURCE_COMMIT"
+          done
+"#
+    .replace("__DOWNLOAD__", download)
 }
 
 /// The existing native release publisher consumes the callable product build.
-/// It resolves the provider's numeric release id before writing product
-/// archive identity or the canonical application manifest.
 fn render_native_product_steps(release: &ReleaseSpec) -> String {
     let download = ActionPin::DownloadArtifact.reference();
-    let attest = ActionPin::Attest.reference();
     let package = release.package.clone();
     let mut output = String::from(
         "      - name: Download source-bound native product builds\n        uses: {download}\n        with:\n          pattern: native-product-*\n          path: native-product\n          merge-multiple: true\n      - name: Verify native product census and resolve provider release id\n        id: product-release\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          contracts=(native-product/product-contract-*.json)\n          test \"${{{{#contracts[@]}}}}\" -eq 4 || {{ echo '::error::native product requires four target contracts' >&2; exit 1; }}\n          contract=\"${{{{contracts[0]}}}}\"\n          for candidate in \"${{{{contracts[@]}}}}\"; do cmp -- \"$contract\" \"$candidate\" || {{ echo '::error::native product contracts disagree' >&2; exit 1; }}; done\n          product_version=\"$(jq -er '.version' \"$contract\")\"\n          source_commit=\"$(jq -er '.source_commit' \"$contract\")\"\n          release_tag=\"$(jq -er '.release_tag' \"$contract\")\"\n          source_repository=\"$(jq -er '.source_repository' \"$contract\")\"\n          [ \"$product_version\" = \"$VERSION\" ] || {{ echo '::error::product version differs from runtime release' >&2; exit 1; }}\n          [ \"$source_commit\" = \"$COMMIT\" ] || {{ echo '::error::product source commit differs from publisher commit' >&2; exit 1; }}\n          [ \"$source_repository\" = \"$GITHUB_REPOSITORY\" ] || {{ echo '::error::product source repository differs from publisher repository' >&2; exit 1; }}\n          [ \"$release_tag\" = \"$GITHUB_REF_NAME\" ] || {{ echo '::error::product release tag differs from source tag' >&2; exit 1; }}\n          expected_targets=\"$(jq -c '.targets | sort' \"$contract\")\"\n          actual_targets=\"$(find native-product -type f -name 'components-*.jsonl' -print0 | xargs -0 -r jq -s '[.[] | .target] | unique | sort' | jq -sc 'add | unique | sort')\"\n          [ \"$actual_targets\" = \"$expected_targets\" ] || {{ echo '::error::native product target census differs from contract' >&2; exit 1; }}\n          expected_components=\"$(jq -c '[.components[].name] | sort' \"$contract\")\"\n          actual_components=\"$(find native-product -type f -name 'components-*.jsonl' -print0 | xargs -0 -r jq -s '[.[] | .name] | unique | sort' | jq -sc 'add | unique | sort')\"\n          [ \"$actual_components\" = \"$expected_components\" ] || {{ echo '::error::native product component census differs from contract' >&2; exit 1; }}\n          tag=\"v$VERSION\"\n          release_json=\"$(gh api \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\" 2>/dev/null || true)\"\n          if [ -z \"$release_json\" ]; then\n            release_json=\"$(gh api repos/$GITHUB_REPOSITORY/releases -f tag_name=\"$tag\" -f target_commitish=\"$COMMIT\" -f name=\"$tag\" -F draft=true -F prerelease=false)\"\n          fi\n          jq -e --arg tag \"$tag\" --arg commit \"$COMMIT\" '.tag_name == $tag and (.target_commitish == $commit or .target_commitish == \"\")' <<<\"$release_json\" >/dev/null || {{ echo '::error::provider release does not bind this tag/commit' >&2; exit 1; }}\n          release_id=\"$(jq -er '.id | numbers | tostring' <<<\"$release_json\")\"\n          [[ \"$release_id\" =~ ^[1-9][0-9]*$ ]] || {{ echo '::error::provider release id is not a positive decimal number' >&2; exit 1; }}\n          printf 'release_id=%s\\n' \"$release_id\" >> \"$GITHUB_OUTPUT\"\n          printf 'contract=%s\\n' \"$contract\" >> \"$GITHUB_OUTPUT\"\n      - name: Assemble canonical native product inventory\n        env:\n          PRODUCT_RELEASE_ID: ${{{{ steps.product-release.outputs.release_id }}}}\n          PRODUCT_CONTRACT: ${{{{ steps.product-release.outputs.contract }}}}\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          contract=\"$PRODUCT_CONTRACT\"\n          product_version=\"$(jq -er '.version' \"$contract\")\"\n          product_id=\"$(jq -er '.product_id' \"$contract\")\"\n          manifest_schema=\"$(jq -er '.schema' \"$contract\")\"\n          source_ref=\"$(jq -er '.source_ref' \"$contract\")\"\n          source_commit=\"$(jq -er '.source_commit' \"$contract\")\"\n          release_tag=\"$(jq -er '.release_tag' \"$contract\")\"\n          archive_component=\"$(jq -er '.archive_component' \"$contract\")\"\n          archive_prefix=\"$(jq -er --arg name \"$archive_component\" '.components[] | select(.name == $name) | .binary' \"$contract\")\"\n          archive_identity_schema=\"$(jq -er '.archive_identity_schema' \"$contract\")\"\n          archive_manifest_schema=\"$(jq -er '.archive_manifest_schema' \"$contract\")\"\n          expected_targets=\"$(jq -c '.targets | sort' \"$contract\")\"\n          expected_components=\"$(jq -c '[.components[].name] | sort' \"$contract\")\"\n          rm -rf -- product-assets\n          mkdir -p product-assets\n          : > product-component-rows.jsonl\n          : > product-artifact-rows.jsonl\n          while IFS= read -r target; do\n            component_file=\"$(find native-product -type f -name \"components-$target.jsonl\" -print -quit)\"\n            artifact_file=\"$(find native-product -type f -name \"artifacts-$target.jsonl\" -print -quit)\"\n            test -s \"$component_file\" && test -s \"$artifact_file\" || {{ echo \"::error::missing rows for $target\" >&2; exit 1; }}\n            cat \"$component_file\" >> product-component-rows.jsonl\n            while IFS= read -r row; do\n              asset=\"$(jq -er '.name' <<<\"$row\")\"\n              source=\"$(find native-product -type f -name \"$asset\" -print -quit)\"\n              test -f \"$source\" || {{ echo \"::error::missing native sibling $asset\" >&2; exit 1; }}\n              cp -- \"$source\" \"product-assets/$asset\"\n              [ \"$(sha256sum \"$source\" | awk '{{print $1}}')\" = \"$(jq -er '.sha256' <<<\"$row\")\" ] || {{ echo \"::error::native sibling digest mismatch: $asset\" >&2; exit 1; }}\n              printf '%s\\n' \"$row\" >> product-artifact-rows.jsonl\n            done < <(jq -c '.[]' \"$artifact_file\")\n            archive=\"$archive_prefix-$product_version-$target.tar.gz\"\n            archive_kind=archive; case \"$target\" in *-apple-darwin) archive_kind=homebrew-archive ;; esac\n            archive_dir=\"$(mktemp -d)\"\n            while IFS= read -r row; do binary=\"$(jq -er '.binary' <<<\"$row\")\"; cp -- \"product-assets/$binary-$target\" \"$archive_dir/$binary\"; done < <(jq -c '.[]' \"$component_file\")\n            jq -S -n --arg schema \"$archive_identity_schema\" --arg product_id \"$product_id\" --arg version \"$product_version\" --arg source_ref \"$source_ref\" --arg source_commit \"$source_commit\" --arg release_tag \"$release_tag\" --arg parent_manifest_id \"$PRODUCT_RELEASE_ID\" '{schema:$schema,product_id:$product_id,channel:\"stable\",version:$version,source_repository:$ENV.GITHUB_REPOSITORY,source_ref:$source_ref,source_commit:$source_commit,release_tag:$release_tag,parent_manifest_id:$parent_manifest_id}' > \"$archive_dir/identity.json\"\n            jq -S -n --arg schema \"$archive_manifest_schema\" --arg product_id \"$product_id\" --arg version \"$product_version\" --arg source_ref \"$source_ref\" --arg source_commit \"$source_commit\" --arg release_tag \"$release_tag\" --arg parent_manifest_id \"$PRODUCT_RELEASE_ID\" '{schema:$schema,product_id:$product_id,channel:\"stable\",version:$version,source_repository:$ENV.GITHUB_REPOSITORY,source_ref:$source_ref,source_commit:$source_commit,release_tag:$release_tag,parent_manifest_id:$parent_manifest_id,components:[]}' > \"$archive_dir/manifest.json\"\n            tar -czf \"product-assets/$archive\" -C \"$archive_dir\" identity.json manifest.json *\n            digest=\"$(sha256sum \"product-assets/$archive\" | awk '{{print $1}}')\"; size=\"$(wc -c <\"product-assets/$archive\" | tr -d '[:space:]')\"\n            jq -cn --arg name \"$archive\" --arg target \"$target\" --arg kind \"$archive_kind\" --arg sha256 \"$digest\" --argjson size \"$size\" '{{name:$name,target:$target,kind:$kind,sha256:$sha256,size:$size}}' >> product-artifact-rows.jsonl\n          done < <(jq -r '.[]' <<<\"$expected_targets\")\n          for tuple in 'x86_64-unknown-linux-gnu amd64' 'aarch64-unknown-linux-gnu arm64'; do read -r target arch <<<\"$tuple\"; deb=\"artifacts/{package}-${{VERSION}}-$arch.deb\"; test -s \"$deb\" || {{ echo \"::error::missing Linux package for $target\" >&2; exit 1; }}; name=\"$(basename \"$deb\")\"; cp -- \"$deb\" \"product-assets/$name\"; digest=\"$(sha256sum \"$deb\" | awk '{{print $1}}')\"; size=\"$(wc -c <\"$deb\" | tr -d '[:space:]')\"; jq -cn --arg name \"$name\" --arg target \"$target\" --arg sha256 \"$digest\" --argjson size \"$size\" '{{name:$name,target:$target,kind:\"apt-package\",sha256:$sha256,size:$size}}' >> product-artifact-rows.jsonl; done\n          actual_components=\"$(jq -s 'sort_by(.name,.target) | group_by(.name) | map(if (map({crate,version,binary}) | unique | length) != 1 then error(\"component identity differs across targets\") else {name:.[0].name,crate:.[0].crate,version:.[0].version,binary:.[0].binary,targets:(map(.target) | sort)} end) | sort_by(.name)' product-component-rows.jsonl)\"\n          [ \"$(jq -c '[.[].name] | sort' <<<\"$actual_components\")\" = \"$expected_components\" ] || {{ echo '::error::grouped component identity differs from contract' >&2; exit 1; }}\n          jq -s 'sort_by([.target,.kind,.name])' product-artifact-rows.jsonl > product-artifacts.json\n          jq -S -n --arg schema \"$manifest_schema\" --arg product_id \"$product_id\" --arg version \"$product_version\" --arg source_ref \"$source_ref\" --arg source_commit \"$source_commit\" --arg release_tag \"$release_tag\" --arg release_id \"$PRODUCT_RELEASE_ID\" --slurpfile artifacts product-artifacts.json --argjson components \"$actual_components\" '{schema:$schema,product_id:$product_id,channel:\"stable\",version:$version,source_repository:$ENV.GITHUB_REPOSITORY,source_ref:$source_ref,source_commit:$source_commit,release_tag:$release_tag,release_id:$release_id,artifacts:$artifacts[0],components:$components}' > product-assets/product-manifest.json\n          jq -e --arg release_id \"$PRODUCT_RELEASE_ID\" --arg commit \"$source_commit\" --arg tag \"$release_tag\" --arg version \"$product_version\" '.release_id == $release_id and (.release_id | test(\"^[1-9][0-9]*$\")) and .source_commit == $commit and .release_tag == $tag and .version == $version and ([.artifacts[].name] | index(\"product-manifest.json\") | not)' product-assets/product-manifest.json >/dev/null\n          sha256sum product-assets/product-manifest.json > product-assets/product-manifest.json.sha256\n      - name: Attest canonical native product assets\n        uses: {attest}\n        with:\n          subject-path: product-assets/*\n",
     );
-    for (placeholder, value) in [
-        ("{download}", download),
-        ("{attest}", attest),
-        ("{package}", package.as_str()),
-    ] {
+    for (placeholder, value) in [("{download}", download), ("{package}", package.as_str())] {
         output = output.replace(placeholder, value);
     }
     // This block was historically a `format!` template, so shell/GitHub
@@ -2570,9 +2701,64 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
     // single in the source and therefore remain unchanged.
     output = output.replace("{{", "{").replace("}}", "}");
     output = output.replace(
-        "          PRODUCT_RELEASE_ID: ${{ steps.product-release.outputs.release_id }}\n",
-        "          GH_TOKEN: ${{ github.token }}\n          PRODUCT_RELEASE_ID: ${{ needs.admit-product-release.outputs.release_id }}\n",
+        "      - name: Attest canonical native product assets\n        uses: {attest}\n        with:\n          subject-path: product-assets/*\n",
+        "",
     );
+    let signer_steps = native_product_signer_record_steps(download);
+    let admitted_census = r#"      - name: Verify native product census against admitted release
+        env:
+          SOURCE_REF: ${{ needs.admit-product-release.outputs.source_ref }}
+          SOURCE_COMMIT: ${{ needs.admit-product-release.outputs.source_commit }}
+          PRODUCT_RELEASE_ID: ${{ needs.admit-product-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          contracts=(native-product/product-contract-*.json)
+          test "${#contracts[@]}" -eq 4 || { echo '::error::native product requires four target contracts' >&2; exit 1; }
+          contract="${contracts[0]}"
+          for candidate in "${contracts[@]}"; do
+            test -f "$candidate" && test ! -L "$candidate" || { echo "::error::native product contract is missing or linked: $candidate" >&2; exit 1; }
+            cmp -- "$contract" "$candidate" || { echo '::error::native product contracts disagree' >&2; exit 1; }
+          done
+          product_version="$(jq -er '.version' "$contract")"
+          source_commit="$(jq -er '.source_commit' "$contract")"
+          source_ref="$(jq -er '.source_ref' "$contract")"
+          release_tag="$(jq -er '.release_tag' "$contract")"
+          source_repository="$(jq -er '.source_repository' "$contract")"
+          [ "$product_version" = "$VERSION" ] || { echo '::error::product version differs from runtime release' >&2; exit 1; }
+          [ "$source_commit" = "$SOURCE_COMMIT" ] || { echo '::error::product source commit differs from admitted publisher commit' >&2; exit 1; }
+          [ "$source_ref" = "$SOURCE_REF" ] || { echo '::error::product source ref differs from admitted publisher ref' >&2; exit 1; }
+          [ "$source_repository" = "$GITHUB_REPOSITORY" ] || { echo '::error::product source repository differs from publisher repository' >&2; exit 1; }
+          [ "$release_tag" = "$GITHUB_REF_NAME" ] || { echo '::error::product release tag differs from source tag' >&2; exit 1; }
+          jq -e --arg version "$VERSION" --arg ref "$SOURCE_REF" --arg commit "$SOURCE_COMMIT" --arg repository "$GITHUB_REPOSITORY" '
+            .schema == "velnor.native-product-contract/v1" and .channel == "stable" and
+            .version == $version and .source_ref == $ref and .source_commit == $commit and
+            .source_repository == $repository and (.targets | type == "array" and length == 4) and
+            (.blocked_targets | type == "array" and length == 0) and (.components | type == "array" and length > 0)
+          ' "$contract" >/dev/null || { echo '::error::native product contract is not an admitted complete stable contract' >&2; exit 1; }
+          expected_targets="$(jq -c '.targets | sort' "$contract")"
+          actual_targets="$(find native-product -type f -name 'components-*.jsonl' -print0 | xargs -0 -r jq -s '[.[] | .target] | unique | sort' | jq -sc 'add | unique | sort')"
+          [ "$actual_targets" = "$expected_targets" ] || { echo '::error::native product target census differs from contract' >&2; exit 1; }
+          expected_components="$(jq -c '[.components[].name] | sort' "$contract")"
+          actual_components="$(find native-product -type f -name 'components-*.jsonl' -print0 | xargs -0 -r jq -s '[.[] | .name] | unique | sort' | jq -sc 'add | unique | sort')"
+          [ "$actual_components" = "$expected_components" ] || { echo '::error::native product component census differs from contract' >&2; exit 1; }
+"#;
+    if let Some(start) =
+        output.find("      - name: Verify native product census and resolve provider release id\n")
+        && let Some(end) =
+            output.find("      - name: Assemble canonical native product inventory\n")
+    {
+        output.replace_range(start..end, &format!("{signer_steps}{admitted_census}"));
+    }
+    output = output
+        .replace(
+            "${{ steps.product-release.outputs.release_id }}",
+            "${{ needs.admit-product-release.outputs.release_id }}",
+        )
+        .replace(
+            "${{ steps.product-release.outputs.contract }}",
+            "${{ needs.admit-product-release.outputs.release_id }}",
+        );
     output = output.replace(
         "          PRODUCT_CONTRACT: ${{ steps.product-release.outputs.contract }}\n",
         "",
@@ -3233,10 +3419,6 @@ fn render_native_publish_job(
         tag_check = TAG_IMMUTABILITY_STEP,
     );
     if product_enabled {
-        output = output.replace(
-            "      packages: read\n    env:",
-            "      packages: read\n      id-token: write\n      attestations: write\n    env:",
-        );
         output = output
             .replace(
                 "      SOURCE_REF: ${{ github.ref }}\n",
@@ -7682,20 +7864,23 @@ mod tests {
             "components must come from the typed source contract: {verify_args}"
         );
         assert!(
-            publish.contains("Verify native product attestations before publication"),
+            publish.contains("Verify native signer records and attestations"),
             "{publish}"
         );
         assert!(
-            publish.contains("gh api -i \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\""),
+            publish.contains("provider_release=\"$(gh api \"repos/$GITHUB_REPOSITORY/releases/tags/$release_tag\")\""),
             "{publish}"
         );
         assert!(
-            publish.contains("provider release lookup failed"),
+            !publish.contains("gh api -i \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\""),
             "{publish}"
         );
         assert!(publish.contains("verify_product_archive()"), "{publish}");
-        assert!(publish.contains("id-token: write"), "{publish}");
-        assert!(publish.contains("attestations: write"), "{publish}");
+        assert!(!publish.contains("      id-token: write\n"), "{publish}");
+        assert!(
+            !publish.contains("      attestations: write\n"),
+            "{publish}"
+        );
         assert!(
             publish.contains("test \"${#subjects[@]}\" -eq 4"),
             "{publish}"
@@ -10753,8 +10938,10 @@ JSON
         assert!(
             publish.contains("release-attestation.json")
                 && publish.contains("velnor.github-release-attestation/v1")
-                && publish.contains("Verify canonical native product attestations"),
-            "preview must emit and verify the provider-bound product attestation: {publish}"
+                && publish.contains("Verify native signer records and attestations")
+                && !publish.contains("steps.provider")
+                && !publish.contains("Attest canonical native product subjects"),
+            "preview must consume the typed signer records without a competing provider/self-attestation path: {publish}"
         );
         assert!(
             publish.contains("--component-contract product-component-contract.json"),
@@ -10775,8 +10962,8 @@ JSON
             "preview publication must re-read provider state after the flip: {publish}"
         );
         assert!(
-            publish.matches(".object.type == \"commit\"").count() >= 3,
-            "preview publication must bind initial, pre-flip, and post-flip tag reads to commits: {publish}"
+            publish.matches(".object.type == \"commit\"").count() >= 2,
+            "preview publication must bind pre-flip and post-flip tag reads to commits after admission: {publish}"
         );
         assert!(!publish.contains("gh release delete preview"), "{publish}");
         assert!(!publish.contains("gh release create preview"), "{publish}");
