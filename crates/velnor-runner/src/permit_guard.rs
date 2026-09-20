@@ -470,8 +470,6 @@ pub enum GuardError {
     /// No `max_jobs` was ever configured: the daemon never opened the
     /// ledger. Acquiring without an authority would spend uncapped.
     NotConfigured,
-    /// The generation moved twice during one acquire; retry the poll.
-    Contended,
 }
 
 impl std::fmt::Display for GuardError {
@@ -481,10 +479,6 @@ impl std::fmt::Display for GuardError {
             Self::NotConfigured => write!(
                 f,
                 "no max_jobs configured; start the daemon (or set VELNOR_MAX_JOBS) before acquiring"
-            ),
-            Self::Contended => write!(
-                f,
-                "permit ledger generation moved twice during acquire; retry the poll"
             ),
         }
     }
