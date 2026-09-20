@@ -1,0 +1,104 @@
+[
+  {
+    "repository": "tailrocks/velnor",
+    "run_id": 35523884300,
+    "attempt": 1,
+    "run_head_sha": "4f70cf741179e5a499a6e43f62dac2f913188b35",
+    "effective_checkout_sha": "8a9041da6b6c31caf39850fd0f458679576a06e6",
+    "effective_tree_sha": "8c7266115142e6fb07b50fffb695043509b5c521",
+    "parents": [
+      "97bac4c4582bbe18ee607a1dd7a41b4854345c7e",
+      "4f70cf741179e5a499a6e43f62dac2f913188b35"
+    ],
+    "source_tree_equals_head_tree": true,
+    "basis": "job checkout command and git log output plus immutable Git commit API and local head tree",
+    "evidence": [
+      {
+        "line": 238,
+        "text": "2026-09-20T16:49:35.4046231Z 8a9041da6b6c31caf39850fd0f458679576a06e6"
+      },
+      {
+        "line": 245,
+        "text": "2026-09-20T16:49:35.4164333Z [command]/usr/bin/git checkout --progress --force 8a9041da6b6c31caf39850fd0f458679576a06e6"
+      },
+      {
+        "line": 263,
+        "text": "2026-09-20T16:49:35.5657163Z HEAD is now at 8a9041d Merge 4f70cf741179e5a499a6e43f62dac2f913188b35 into 97bac4c4582bbe18ee607a1dd7a41b4854345c7e"
+      },
+      {
+        "line": 266,
+        "text": "2026-09-20T16:49:35.5770548Z 8a9041da6b6c31caf39850fd0f458679576a06e6"
+      }
+    ],
+    "log_sha256": "4a9f020469150ad201fc2131037c1965d404ec9b27d08001ee6c3aa00ed8a72a",
+    "limitation": "Git metadata-sensitive inputs retain the effective checkout SHA; tree equality is not general artifact compatibility."
+  },
+  {
+    "repository": "tailrocks/velnor",
+    "run_id": 35522199636,
+    "attempt": 1,
+    "run_head_sha": "de6e18110c146cf580179a35f2725cb72ab4ccce",
+    "effective_checkout_sha": "134a993fe4f91e24dfb7fe47daa763cdb022acc1",
+    "effective_tree_sha": "d42b8a2ecf3385974ab9d393d88d10b1f1252562",
+    "parents": [
+      "845d4740451541148cc2b00da87f41fe898976eb",
+      "de6e18110c146cf580179a35f2725cb72ab4ccce"
+    ],
+    "source_tree_equals_head_tree": true,
+    "basis": "job checkout command and git log output plus immutable Git commit API and local head tree",
+    "evidence": [
+      {
+        "line": 238,
+        "text": "2026-09-20T16:16:59.2330693Z 134a993fe4f91e24dfb7fe47daa763cdb022acc1"
+      },
+      {
+        "line": 245,
+        "text": "2026-09-20T16:16:59.2409889Z [command]/usr/bin/git checkout --progress --force 134a993fe4f91e24dfb7fe47daa763cdb022acc1"
+      },
+      {
+        "line": 263,
+        "text": "2026-09-20T16:16:59.3526978Z HEAD is now at 134a993 Merge de6e18110c146cf580179a35f2725cb72ab4ccce into 845d4740451541148cc2b00da87f41fe898976eb"
+      },
+      {
+        "line": 266,
+        "text": "2026-09-20T16:16:59.3599684Z 134a993fe4f91e24dfb7fe47daa763cdb022acc1"
+      }
+    ],
+    "log_sha256": "45f96b62a57be7404f04abf0fcfd8093b911b0563dab393198b2a6d73b1c32e4",
+    "limitation": "Git metadata-sensitive inputs retain the effective checkout SHA; tree equality is not general artifact compatibility."
+  },
+  {
+    "repository": "tailrocks/parallax",
+    "run_id": 35522592113,
+    "attempt": 1,
+    "run_head_sha": "60cf651bdc81b457ddba34fb214f6b1c1aae571b",
+    "effective_checkout_sha": "ce04e0c0933922ec83e2bb43cb210f241623681d",
+    "effective_tree_sha": "62346fd3b0d5a5eff3c990bf5feb06e69b732687",
+    "parents": [
+      "78d1df0ecfbd9e5349bcadf9ca80d15cba1b4653",
+      "60cf651bdc81b457ddba34fb214f6b1c1aae571b"
+    ],
+    "source_tree_equals_head_tree": true,
+    "basis": "job checkout command and git log output plus immutable Git commit API and local head tree",
+    "evidence": [
+      {
+        "line": 254,
+        "text": "2026-09-20T16:24:57.8941266Z ce04e0c0933922ec83e2bb43cb210f241623681d"
+      },
+      {
+        "line": 261,
+        "text": "2026-09-20T16:24:57.9024422Z [command]/usr/bin/git checkout --progress --force ce04e0c0933922ec83e2bb43cb210f241623681d"
+      },
+      {
+        "line": 279,
+        "text": "2026-09-20T16:24:58.1231105Z HEAD is now at ce04e0c Merge 60cf651bdc81b457ddba34fb214f6b1c1aae571b into 78d1df0ecfbd9e5349bcadf9ca80d15cba1b4653"
+      },
+      {
+        "line": 282,
+        "text": "2026-09-20T16:24:58.1319691Z ce04e0c0933922ec83e2bb43cb210f241623681d"
+      }
+    ],
+    "log_sha256": "e96009dc2ae1a59fde836c6db55d25d56edde420cce1dc873cdbba58ff7baf7e",
+    "limitation": "Git metadata-sensitive inputs retain the effective checkout SHA; tree equality is not general artifact compatibility."
+  }
+]

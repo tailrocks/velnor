@@ -126,6 +126,35 @@ Velnor agent implements reviewed environment partitions and diagnoses leaked
 processes. Consumers and runtime candidates depend on reviewed generator source.
 Substantive iteration and plateau credit remain zero.
 
+## Reviewed timing and source identity follow-up
+
+`4f70cf74` passed [PR CI 35523884300](https://github.com/tailrocks/velnor/actions/runs/35523884300)
+and [policy 35523882838](https://github.com/tailrocks/velnor/actions/runs/35523882838).
+Independent raw-timestamp review confirmed 451 seconds to `ci-required`,
+1,455 seconds aggregate execution, 408 seconds runner and 233 seconds generator.
+Generator checks rose to 169 seconds while runner checks fell to 376 seconds;
+source changes and compiler misses preclude causal attribution. See
+[the independent timing audit](reviews/fresh-timing-review.md).
+
+Collector rows conservatively leave source identity unknown when raw API
+metadata cannot prove it. Supplemental checkout logs and immutable commit
+responses now identify the actual source used by the sampled jobs:
+
+| Run | Effective checkout | PR head | Equal source trees |
+| --- | --- | --- | --- |
+| 35522199636 | `134a993fe4f91e24dfb7fe47daa763cdb022acc1` | `de6e1811` | yes |
+| 35522592113 | `ce04e0c0933922ec83e2bb43cb210f241623681d` | `60cf651b` | yes |
+| 35523884300 | `8a9041da6b6c31caf39850fd0f458679576a06e6` | `4f70cf74` | yes |
+
+The supplemental JSON retains exact parents, tree IDs, log lines and digests.
+Tree equality does not erase the merge SHA or prove compatibility for inputs
+derived from Git metadata. Normalized API-only rows remain unchanged.
+
+The proposed same-repository PR cache writer remains held for ShellCheck,
+local-export versus durable-save reporting, mode coupling and bounded timing
+repairs. Its [independent review](reviews/mbx-pr-writer-review.md) records all
+findings; no unreviewed writer has been integrated.
+
 ## Completion contract
 
 - Generator/runtime fixes, regenerated Velnor, Jackin and Parallax consumers.
