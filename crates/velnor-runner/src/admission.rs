@@ -644,21 +644,22 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
                 crate::protocol::GithubContentsRequestError::Transport(detail) => {
                     ActionMetadataSourceError::ApiTransport(detail)
                 }
-                crate::protocol::GithubContentsRequestError::BodyTooLarge { max_body_bytes } => {
-                    ActionMetadataSourceError::ManifestMalformed {
-                        repository: repository.to_string(),
-                        git_ref: git_ref.to_string(),
-                        detail: format!(
-                            "GitHub Contents response body exceeds {max_body_bytes} bytes"
-                        ),
-                    }
-                }
-                crate::protocol::GithubContentsRequestError::BodyInvalidUtf8 => {
-                    ActionMetadataSourceError::ManifestMalformed {
-                        repository: repository.to_string(),
-                        git_ref: git_ref.to_string(),
-                        detail: "GitHub Contents response body is not valid UTF-8".to_string(),
-                    }
+                crate::protocol::GithubContentsRequestError::BodyTooLarge {
+                    max_body_bytes,
+                    status,
+                } => metadata_body_error_from_contents(
+                    repository,
+                    git_ref,
+                    status,
+                    format!("GitHub Contents response body exceeds {max_body_bytes} bytes"),
+                ),
+                crate::protocol::GithubContentsRequestError::BodyInvalidUtf8 { status } => {
+                    metadata_body_error_from_contents(
+                        repository,
+                        git_ref,
+                        status,
+                        "GitHub Contents response body is not valid UTF-8".to_string(),
+                    )
                 }
                 crate::protocol::GithubContentsRequestError::Internal(detail) => {
                     ActionMetadataSourceError::Internal(detail)
@@ -686,12 +687,34 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
     }
 }
 
+/// Body-limit and UTF-8 failures are manifest problems only after a successful
+/// Contents status. A 403/429/5xx with a huge or non-UTF-8 body still has to
+/// surface as [`ActionMetadataSourceError::ApiStatus`] so remediation stays
+/// on the HTTP class, not workflow policy.
+fn metadata_body_error_from_contents(
+    repository: &str,
+    git_ref: &str,
+    status: Option<u16>,
+    detail: String,
+) -> ActionMetadataSourceError {
+    if let Some(status) = status
+        && !(200..300).contains(&status)
+    {
+        return ActionMetadataSourceError::ApiStatus(status);
+    }
+    ActionMetadataSourceError::ManifestMalformed {
+        repository: repository.to_string(),
+        git_ref: git_ref.to_string(),
+        detail,
+    }
+}
+
 #[cfg(test)]
 fn read_bounded_metadata_body<R: Read>(
     reader: R,
     content_length: Option<u64>,
 ) -> std::result::Result<String, crate::protocol::GithubContentsRequestError> {
-    crate::protocol::read_bounded_http_body(reader, content_length, MAX_ACTION_METADATA_BYTES)
+    crate::protocol::read_bounded_http_body(reader, content_length, MAX_ACTION_METADATA_BYTES, 200)
 }
 
 /// Recursion state shared across the closure walk.
@@ -2167,6 +2190,17 @@ mod tests {
             &oversized_error,
             ActionMetadataSourceError::ManifestMalformed { .. }
         ));
+        let oversized_error_status =
+            contents_error_for_bytes(vec![(503, vec![b'x'; MAX_ACTION_METADATA_BYTES + 1])]);
+        assert_eq!(
+            oversized_error_status,
+            ActionMetadataSourceError::ApiStatus(503)
+        );
+        let invalid_utf8_status = contents_error_for_bytes(vec![(429, vec![0xff])]);
+        assert_eq!(
+            invalid_utf8_status,
+            ActionMetadataSourceError::ApiStatus(429)
+        );
         assert_eq!(
             AdmissionError::from_metadata_source(&Ancestry::default(), oversized_error)
                 .failure_kind(),

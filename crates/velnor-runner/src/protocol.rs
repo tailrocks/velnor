@@ -1218,9 +1218,14 @@ pub(crate) enum GithubContentsRequestError {
     /// Sending a request or reading its response stream failed.
     Transport(String),
     /// The response body exceeds the caller's bounded-read limit.
-    BodyTooLarge { max_body_bytes: usize },
+    /// `status` is the HTTP status when the caller already read it; `None`
+    /// when the envelope was too large to parse a status line.
+    BodyTooLarge {
+        max_body_bytes: usize,
+        status: Option<u16>,
+    },
     /// The response body is not UTF-8, so the caller cannot parse its text format.
-    BodyInvalidUtf8,
+    BodyInvalidUtf8 { status: Option<u16> },
     /// Local configuration or response framing failed before a usable response existed.
     Internal(String),
 }
@@ -1231,11 +1236,11 @@ impl fmt::Display for GithubContentsRequestError {
             Self::Transport(detail) => {
                 write!(formatter, "GitHub Contents transport failed: {detail}")
             }
-            Self::BodyTooLarge { max_body_bytes } => write!(
+            Self::BodyTooLarge { max_body_bytes, .. } => write!(
                 formatter,
                 "GitHub Contents response body exceeds {max_body_bytes} bytes"
             ),
-            Self::BodyInvalidUtf8 => {
+            Self::BodyInvalidUtf8 { .. } => {
                 formatter.write_str("GitHub Contents response body is not valid UTF-8")
             }
             Self::Internal(detail) => {
@@ -1281,7 +1286,7 @@ pub(crate) fn github_contents_request(
             let status = response.status().as_u16();
             let headers = response.headers().clone();
             let content_length = response.content_length();
-            let body = read_bounded_http_body(response, content_length, max_body_bytes)?;
+            let body = read_bounded_http_body(response, content_length, max_body_bytes, status)?;
             Ok(GithubHttpResponse {
                 status,
                 body,
@@ -1316,12 +1321,16 @@ pub(crate) fn read_bounded_http_body<R: Read>(
     reader: R,
     content_length: Option<u64>,
     max_body_bytes: usize,
+    status: u16,
 ) -> std::result::Result<String, GithubContentsRequestError> {
     let max_body_bytes_u64 = u64::try_from(max_body_bytes).map_err(|error| {
         GithubContentsRequestError::Internal(format!("metadata body limit overflows: {error}"))
     })?;
     if content_length.is_some_and(|length| length > max_body_bytes_u64) {
-        return Err(GithubContentsRequestError::BodyTooLarge { max_body_bytes });
+        return Err(GithubContentsRequestError::BodyTooLarge {
+            max_body_bytes,
+            status: Some(status),
+        });
     }
     let mut body =
         Vec::with_capacity(content_length.unwrap_or_default().min(max_body_bytes_u64) as usize);
@@ -1334,9 +1343,14 @@ pub(crate) fn read_bounded_http_body<R: Read>(
             ))
         })?;
     if body.len() > max_body_bytes {
-        return Err(GithubContentsRequestError::BodyTooLarge { max_body_bytes });
+        return Err(GithubContentsRequestError::BodyTooLarge {
+            max_body_bytes,
+            status: Some(status),
+        });
     }
-    String::from_utf8(body).map_err(|_| GithubContentsRequestError::BodyInvalidUtf8)
+    String::from_utf8(body).map_err(|_| GithubContentsRequestError::BodyInvalidUtf8 {
+        status: Some(status),
+    })
 }
 
 fn github_error_from_response(action: &str, response: GithubHttpResponse) -> anyhow::Error {
@@ -1705,7 +1719,10 @@ fn parse_curl_response_with_body_limit(
 ) -> std::result::Result<GithubHttpResponse, GithubContentsRequestError> {
     if output.len() > GITHUB_CURL_MAX_RESPONSE_BYTES {
         return Err(match max_body_bytes {
-            Some(max_body_bytes) => GithubContentsRequestError::BodyTooLarge { max_body_bytes },
+            Some(max_body_bytes) => GithubContentsRequestError::BodyTooLarge {
+                max_body_bytes,
+                status: None,
+            },
             None => GithubContentsRequestError::Internal(format!(
                 "curl GitHub response exceeded {GITHUB_CURL_MAX_RESPONSE_BYTES} bytes"
             )),
@@ -1752,10 +1769,16 @@ fn parse_curl_response_with_body_limit(
     if let Some(max_body_bytes) = max_body_bytes
         && body.len() > max_body_bytes
     {
-        return Err(GithubContentsRequestError::BodyTooLarge { max_body_bytes });
+        return Err(GithubContentsRequestError::BodyTooLarge {
+            max_body_bytes,
+            status: Some(status),
+        });
     }
-    let body = String::from_utf8(body.to_vec())
-        .map_err(|_| GithubContentsRequestError::BodyInvalidUtf8)?;
+    let body = String::from_utf8(body.to_vec()).map_err(|_| {
+        GithubContentsRequestError::BodyInvalidUtf8 {
+            status: Some(status),
+        }
+    })?;
     Ok(GithubHttpResponse {
         status,
         body,
@@ -7647,7 +7670,10 @@ mod tests {
             large_server.join().unwrap();
             assert_eq!(
                 large_error,
-                GithubContentsRequestError::BodyTooLarge { max_body_bytes: 4 },
+                GithubContentsRequestError::BodyTooLarge {
+                    max_body_bytes: 4,
+                    status: Some(200),
+                },
                 "{transport} body limit"
             );
 
@@ -7659,7 +7685,7 @@ mod tests {
             utf8_server.join().unwrap();
             assert_eq!(
                 utf8_error,
-                GithubContentsRequestError::BodyInvalidUtf8,
+                GithubContentsRequestError::BodyInvalidUtf8 { status: Some(200) },
                 "{transport} invalid UTF-8"
             );
         }
