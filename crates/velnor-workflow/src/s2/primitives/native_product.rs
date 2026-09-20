@@ -407,6 +407,10 @@ fn render_workflow(
             "\"$compiled\" ${identity_args[@]} 2>&1",
             "\"$compiled\" \"${identity_args[@]}\" 2>&1",
         );
+    build_steps = build_steps.replace(
+        " 2>&1 || true)\"\n",
+        " 2>&1)\" || { echo '::error::component identity command failed' >&2; exit 1; }\n",
+    );
 
     let components_json = format!(
         "[{}]",
