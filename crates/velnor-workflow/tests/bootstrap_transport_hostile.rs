@@ -26,6 +26,8 @@ use sha2::{Digest, Sha256};
 
 const HEAD_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const BASE_SHA: &str = "fedcba9876543210fedcba9876543210fedcba98";
+const PR_MERGE_SHA: &str = "abcdef0123456789abcdef0123456789abcdef01";
+const EVENT_SHA: &str = HEAD_SHA;
 const HEAD_TREE_SHA: &str = "1111111111111111111111111111111111111111";
 const BASE_TREE_SHA: &str = "2222222222222222222222222222222222222222";
 const REPOSITORY: &str = "tailrocks/velnor";
@@ -329,6 +331,7 @@ struct ProvenanceFixture {
     scenario: PathBuf,
     bin: PathBuf,
     runner_temp: PathBuf,
+    gh_calls: PathBuf,
     artifact_name: String,
     digest: String,
     archive_size: u64,
@@ -365,6 +368,7 @@ impl ProvenanceFixture {
             scenario: generated.root.join("scenario.json"),
             bin,
             runner_temp: generated.root.join("runner-temp"),
+            gh_calls: generated.root.join("gh-calls.log"),
             artifact_name,
             digest,
             acquire: materialize_github_expressions(&generated.acquire),
@@ -425,10 +429,20 @@ impl ProvenanceFixture {
     }
 
     fn run_acquire(&self) -> Output {
+        self.run_script(&self.acquire)
+    }
+
+    fn run_post_gate(&self) -> Output {
+        let script = post_gate_body(&self.acquire);
+        self.run_script(&script)
+    }
+
+    fn run_script(&self, script: &str) -> Output {
         let _ = fs::remove_dir_all(&self.runner_temp);
+        let _ = fs::remove_file(&self.gh_calls);
         fs::create_dir_all(&self.runner_temp).expect("runner temp");
         Command::new("bash")
-            .args(["-euo", "pipefail", "-c", &self.acquire])
+            .args(["-euo", "pipefail", "-c", script])
             .current_dir(&self.root)
             .env("PATH", format!("{}:{}", self.bin.display(), env!("PATH")))
             .env("FIXTURE_SCENARIO", &self.scenario)
@@ -448,6 +462,8 @@ impl ProvenanceFixture {
             .env("GH_TOKEN", "fixture-token")
             .env("HEAD_SHA", HEAD_SHA)
             .env("BASE_SHA", BASE_SHA)
+            .env("PR_MERGE_SHA", PR_MERGE_SHA)
+            .env("EVENT_SHA", EVENT_SHA)
             .env("PR_NUMBER", PR_NUMBER.to_string())
             .env("HEAD_REPOSITORY", REPOSITORY)
             .env("HEAD_REPOSITORY_ID", "42")
@@ -456,20 +472,54 @@ impl ProvenanceFixture {
             .env("GITHUB_RUN_ID", RUN_ID.to_string())
             .env("GITHUB_RUN_ATTEMPT", RUN_ATTEMPT.to_string())
             .env("GITHUB_ENV", self.runner_temp.join("github.env"))
+            .env("FIXTURE_GH_CALL_LOG", &self.gh_calls)
             .output()
             .expect("generated acquire shell")
     }
 }
 
 #[test]
-fn generated_acquire_rejects_same_name_artifact_recreated_by_other_job() {
+fn generated_acquire_reports_provider_proof_pending_before_api_admission() {
     let generated = GeneratedScripts::new();
     let fixture = ProvenanceFixture::new(&generated);
     fixture.write_scenario(false);
-    let baseline = fixture.run_acquire();
+    let output = fixture.run_acquire();
+    assert_eq!(
+        output.status.code(),
+        Some(78),
+        "generated acquire must stop at the public proof guard:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("ProviderProofPending"),
+        "generated acquire must report the pending provider proof:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !fixture.gh_calls.exists(),
+        "ProviderProofPending must precede all API admission calls"
+    );
+}
+
+#[test]
+fn generated_post_gate_rejects_same_name_artifact_recreated_by_other_job() {
+    let generated = GeneratedScripts::new();
+    let fixture = ProvenanceFixture::new(&generated);
+    fixture.write_scenario(false);
+    // Execute the exact generated body after the public proof guard as a
+    // unit-level post-gate fixture. The full production path remains
+    // ProviderProofPending; no Passed/Enabled state is injected into it.
+    let baseline = fixture.run_post_gate();
     assert!(
         baseline.status.success(),
         "valid producer-bound artifact fixture failed before replacement check:\n{}\n{}",
+        String::from_utf8_lossy(&baseline.stdout),
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&baseline.stdout).contains("selected-artifact-id=1001"),
+        "post-gate baseline did not reach generated artifact selection:\n{}\n{}",
         String::from_utf8_lossy(&baseline.stdout),
         String::from_utf8_lossy(&baseline.stderr)
     );
@@ -479,13 +529,42 @@ fn generated_acquire_rejects_same_name_artifact_recreated_by_other_job() {
     // job window. The producer and ordinary job records make the missing
     // binding explicit without inventing an API property.
     fixture.write_scenario(true);
-    let output = fixture.run_acquire();
+    let output = fixture.run_post_gate();
+    let gh_calls = fs::read_to_string(&fixture.gh_calls).expect("post-gate API call log");
+    assert!(
+        gh_calls.contains("/actions/runs/900/artifacts?per_page=100"),
+        "post-gate replacement fixture did not reach artifact API selection: {gh_calls}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("ProviderProofPending"),
+        "post-gate unit must not report the public admission guard: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         !output.status.success(),
-        "generated acquire accepted an artifact recreated by ordinary job {REPLACEMENT_JOB_ID} while producer job is {PRODUCER_JOB_ID}:\n{}\n{}",
+        "generated post-gate artifact selection accepted an artifact recreated by ordinary job {REPLACEMENT_JOB_ID} while producer job is {PRODUCER_JOB_ID}:\n{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn post_gate_body(script: &str) -> String {
+    let guard = script
+        .find("readonly provider_cross_run_binding_proof=Unknown")
+        .expect("generated provider proof guard");
+    let body_start = script[guard..]
+        .find("export RUNNER_TEMP=")
+        .map(|offset| guard + offset)
+        .expect("generated post-gate body");
+    let body_end = script[body_start..]
+        .find("\narchive=\"$RUNNER_TEMP/candidate.zip\"")
+        .or_else(|| script[body_start..].find("\n          archive=\"$RUNNER_TEMP/candidate.zip\""))
+        .map(|offset| body_start + offset)
+        .expect("generated artifact selection body");
+    format!(
+        "set -euo pipefail\n{}\nprintf 'selected-artifact-id=%s\\n' \"$artifact_id\"\n",
+        &script[body_start..body_end]
+    )
 }
 
 fn scanner_args(base: &Path, head: &Path) -> Vec<String> {
@@ -833,8 +912,12 @@ if target and once and not os.path.exists(once):
 
 const GH_PROVENANCE_FIXTURE: &str = r#"#!/usr/bin/env python3
 import json, os, sys
-scenario = json.load(open(os.environ["FIXTURE_SCENARIO"]))
 args = sys.argv[1:]
+call_log = os.environ.get("FIXTURE_GH_CALL_LOG")
+if call_log:
+    with open(call_log, "a") as output:
+        output.write(json.dumps(args) + "\n")
+scenario = json.load(open(os.environ["FIXTURE_SCENARIO"]))
 url = next((arg for arg in args if "repos/" in arg), "")
 if url.endswith("/actions/workflows/ci-pr.yml"):
     print(json.dumps({"path": ".github/workflows/ci-pr.yml", "id": 700}))
