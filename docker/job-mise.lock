@@ -132,18 +132,18 @@ url = "https://github.com/rui314/mold/releases/download/v2.41.0/mold-2.41.0-x86_
 url_api = "https://api.github.com/repos/rui314/mold/releases/assets/395509419"
 
 [[tools.mr-boxington]]
-version = "1.11.1"
+version = "1.12.0"
 backend = "packslip:github.com/jdx/mr-boxington"
-specifiers = ["1.11.1"]
+specifiers = ["1.12.0"]
 
 [tools.mr-boxington."platforms.linux-arm64"]
-checksum = "sha256:a05f13ee92e1100306ff707592d33195cadf9b61209921662915bd71643d63f9"
-url = "https://github.com/jdx/mr-boxington/releases/download/v1.11.1/mbx-aarch64-unknown-linux-gnu.tar.gz"
+checksum = "sha256:34b684000c245894e37729794b3cfbddd981a3693c9e3c5ebff256db25dcc91a"
+url = "https://github.com/jdx/mr-boxington/releases/download/v1.12.0/mbx-aarch64-unknown-linux-gnu.tar.gz"
 signer = "sigstore-oidc:https://github.com/jdx/mr-boxington/.github/workflows/release.yml"
 
 [tools.mr-boxington."platforms.linux-x64"]
-checksum = "sha256:b854c43bd335b1e450138b06fab82512cf550300ee224fe5d17e2cb673986079"
-url = "https://github.com/jdx/mr-boxington/releases/download/v1.11.1/mbx-x86_64-unknown-linux-gnu.tar.gz"
+checksum = "sha256:d577a724dff2e6564329a049627f446e0a1d9a4cc0c9884c44e7487ea6253f33"
+url = "https://github.com/jdx/mr-boxington/releases/download/v1.12.0/mbx-x86_64-unknown-linux-gnu.tar.gz"
 signer = "sigstore-oidc:https://github.com/jdx/mr-boxington/.github/workflows/release.yml"
 
 [[tools.node]]

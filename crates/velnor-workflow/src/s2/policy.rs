@@ -1389,12 +1389,9 @@ fn scratch_directory(label: &str) -> Result<PathBuf, GeneratorError> {
     let base = env::var_os("RUNNER_TEMP")
         .or_else(|| env::var_os("TMPDIR"))
         .map_or_else(env::temp_dir, PathBuf::from);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_nanos());
     let path = base.join(format!(
-        "velnor-workflow-{label}-{}-{nanos}",
-        std::process::id()
+        "velnor-workflow-{label}-{}",
+        crate::unique_suffix()
     ));
     fs::create_dir_all(&path)
         .map_err(|error| GeneratorError::io("create scratch directory", &path, &error))?;

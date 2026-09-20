@@ -1283,7 +1283,7 @@ mod tests {
             aged("guest", "guest-seed-x86_64-deadbeef", 1, 30 * HOUR),
             aged(
                 "policy",
-                "velnor-policy-mbx-1.11.1-Linux-X64-deadbeef",
+                "velnor-policy-mbx-1.12.0-Linux-X64-deadbeef",
                 1,
                 30 * HOUR,
             ),
@@ -1435,6 +1435,13 @@ mod tests {
             facts("-C link-arg=-fuse-ld=mold -C panic=abort").digest(),
             base,
             "a flag change is a compatibility change"
+        );
+        let mut new_mbx = facts("-C link-arg=-fuse-ld=mold");
+        new_mbx.mbx_version = "1.12.1".to_owned();
+        assert_ne!(
+            new_mbx.digest(),
+            base,
+            "an mbx version change is a compatibility change"
         );
         let reordered = CompatibilityFacts {
             cargo_inputs: vec![".cargo/**".to_owned(), "Cargo.lock".to_owned()],

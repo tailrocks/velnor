@@ -13,6 +13,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
@@ -136,7 +137,7 @@ pub const VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV: &str = "VELNOR_WORKFLOW_CANDID
 // policy validator the *base* branch runs; `velnor-workflow policy` requires
 // the audited tree's pin to descend from it.
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
-const MR_BOXINGTON_VERSION: &str = "1.11.1";
+const MR_BOXINGTON_VERSION: &str = "1.12.0";
 /// mbx's action-store budget setting (`gc.max_size`). It is the bound the
 /// automatic sweep prunes the store to after a build, and the only budget
 /// that applies on a hosted runner: `gc.max_total_size` is unset there and
@@ -156,11 +157,13 @@ pub(crate) const MR_BOXINGTON_STORE_BUDGET_ENV: &str = "MBX_GC_MAX_SIZE";
 /// and stays inside the hosted image's free disk (about 20 GiB on
 /// `ubuntu-24.04`); it is a ceiling on the store, not a reservation.
 ///
-/// `jdx/mr-boxington-action` v1.3.1 defaults `MBX_GC_AUTO=0` on hosted
-/// runners in objects mode unless a job opts back in. The Velnor runner
-/// admits that exact ref in its compiled capability manifest; the explicit
-/// 12 GiB budget remains the safety ceiling for jobs that enable collection,
-/// keeping the store bounded rather than growing to the runner's disk.
+/// `jdx/mr-boxington-action` v1.4.0 selects directory-form object bundles
+/// with mbx >=1.12.0, so a GitHub cache restore is not unpacked a second time
+/// by `mbx cache import`. It also defaults `MBX_GC_AUTO=0` on hosted runners
+/// in objects mode unless a job opts back in. The Velnor runner admits that
+/// exact ref in its compiled capability manifest; the explicit 12 GiB budget
+/// remains the safety ceiling for jobs that enable collection, keeping the
+/// store bounded rather than growing to the runner's disk.
 pub(crate) const MR_BOXINGTON_HOSTED_STORE_BUDGET: &str = "12GiB";
 
 /// The step that exports the hosted action-store budget for the rest of the
@@ -271,14 +274,14 @@ impl ActionPin {
             Self::Sccache => {
                 "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11"
             }
-            // jdx/mr-boxington-action v1.3.1. The Velnor runner admits this
+            // jdx/mr-boxington-action v1.4.0. The Velnor runner admits this
             // action only at the ref its compiled capability manifest lists
             // (`crates/velnor-runner/src/manifest.rs`), so the pin moves in
-            // lockstep with a runner release, not here. v1.3.1 defaults
-            // `MBX_GC_AUTO=0` on hosted runners in object mode; the explicit
-            // budget remains the ceiling when collection is enabled.
+            // lockstep with a runner release, not here. v1.4.0 uses a
+            // directory bundle with mbx 1.12.0+ in hosted object mode; the
+            // explicit budget remains the ceiling when collection is enabled.
             Self::MrBoxington => {
-                "jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1"
+                "jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0"
             }
             // rui314/setup-mold v1 (current v1 tag)
             Self::Mold => "rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1",
@@ -7498,7 +7501,7 @@ fn stage_generated_file(path: &Path, content: &str) -> Result<PathBuf, Generator
         let staged = parent.join(format!(
             ".{filename}.stage-{}-{}-{attempt}",
             std::process::id(),
-            unique_suffix()
+            crate::unique_suffix()
         ));
         match fs::OpenOptions::new()
             .write(true)
@@ -7541,7 +7544,7 @@ fn reserve_backup_path(path: &Path) -> Result<(PathBuf, PathBuf), GeneratorError
         let directory = parent.join(format!(
             ".velnor-workflow-backup-{}-{}-{attempt}",
             std::process::id(),
-            unique_suffix()
+            crate::unique_suffix()
         ));
         match fs::create_dir(&directory) {
             Ok(()) => return Ok((directory.clone(), directory.join(filename))),
@@ -7584,22 +7587,6 @@ fn preimage_changed(relative: &Path) -> GeneratorError {
         "generated file changed after preflight: {}; review again",
         relative.display()
     ))
-}
-
-/// Uniqueness must never depend on clock resolution: parallel tests that
-/// start in the same instant previously collided on one temporary root and
-/// spuriously failed generation with "another generation is in progress".
-/// The atomic sequence guarantees in-process uniqueness; the process id
-/// separates concurrent test binaries; the timestamp keeps names legible.
-pub(crate) fn unique_suffix() -> u128 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    (nanos << 64)
-        | (u128::from(std::process::id()) << 32)
-        | u128::from(SEQUENCE.fetch_add(1, Ordering::Relaxed))
 }
 
 enum RepositorySource {
@@ -7912,7 +7899,7 @@ impl Checkout {
     fn clone_github(owner: &str, repository: &str) -> Result<Self, GeneratorError> {
         let mut target = env::temp_dir().join(format!(
             "velnor-workflow-{owner}-{repository}-{}",
-            unique_suffix()
+            crate::unique_suffix()
         ));
         let mut attempts = 0;
         loop {
@@ -7927,7 +7914,7 @@ impl Checkout {
                     }
                     target = env::temp_dir().join(format!(
                         "velnor-workflow-{owner}-{repository}-{}",
-                        unique_suffix()
+                        crate::unique_suffix()
                     ));
                 }
                 Err(error) => {
@@ -8178,7 +8165,10 @@ mod tests {
     }
 
     fn temporary_repository(name: &str) -> PathBuf {
-        let root = env::temp_dir().join(format!("velnor-workflow-test-{name}-{}", unique_suffix()));
+        let root = env::temp_dir().join(format!(
+            "velnor-workflow-test-{name}-{}",
+            crate::unique_suffix()
+        ));
         must(fs::create_dir_all(&root), "create test repository");
         // A Rust repository must pin its toolchain for the scan to accept it,
         // and most tests add Rust packages. The pin is inert where no Rust
@@ -8196,9 +8186,22 @@ mod tests {
     /// An empty scratch directory: for assertions that a refused write left a
     /// location untouched, which a scan-ready repository would fail.
     fn temporary_directory(name: &str) -> PathBuf {
-        let root = env::temp_dir().join(format!("velnor-workflow-test-{name}-{}", unique_suffix()));
+        let root = env::temp_dir().join(format!(
+            "velnor-workflow-test-{name}-{}",
+            crate::unique_suffix()
+        ));
         must(fs::create_dir_all(&root), "create test directory");
         root
+    }
+
+    #[test]
+    fn legacy_and_schema_two_fixture_paths_are_distinct() {
+        let legacy = crate::runtime::tests::digest_fixture("cross-module");
+        let schema_two = crate::s2::runtime::tests::digest_fixture("cross-module");
+
+        assert_ne!(legacy, schema_two);
+        let _ = fs::remove_dir_all(legacy);
+        let _ = fs::remove_dir_all(schema_two);
     }
 
     #[expect(
@@ -8418,6 +8421,53 @@ mod tests {
         assert!(kind.contains("${{ runner.os }}-${{ runner.arch }}"));
         assert!(kind.contains("manifest.json"));
         assert!(!kind.contains("cargo install --locked --git"));
+    }
+
+    #[test]
+    fn premerge_generator_changes_bootstrap_from_published_base_runtime() {
+        const PUBLISHED_BASE_REVISION: &str = "0dc79895ff1c5e88be7c3822c437e1c5b5282e12";
+        let mut config = scanned_fixture(provider_set([ProviderId::GithubHosted]));
+        config.repository = workflow_setup_action_repository().to_owned();
+        config.workflow_revision = PUBLISHED_BASE_REVISION.to_owned();
+        assert_ne!(
+            SOURCE_REVISION, PUBLISHED_BASE_REVISION,
+            "the test must model an unpublished generator revision"
+        );
+
+        let workflow = WorkflowIr::from_config(&config);
+        let pull_request = generated_ci_pr(&workflow);
+        assert!(
+            pull_request.contains(&format!("rev: {PUBLISHED_BASE_REVISION}")),
+            "PR planning must use the published base runtime: {pull_request}"
+        );
+        assert!(
+            !pull_request.contains(SOURCE_REVISION),
+            "PR planning must not bootstrap an unpublished generator revision: {pull_request}"
+        );
+
+        let policy = generated_ci_policy(&config);
+        assert!(
+            policy.contains(&format!("rev: {PUBLISHED_BASE_REVISION}")),
+            "policy must use the published base runtime: {policy}"
+        );
+        assert!(
+            policy.contains(&format!("BASE_PIN: {PUBLISHED_BASE_REVISION}")),
+            "candidate acquisition must compare against the published base runtime: {policy}"
+        );
+        assert!(
+            !policy.contains(SOURCE_REVISION),
+            "policy must not acquire an unpublished Stage-0 runtime: {policy}"
+        );
+        assert!(
+            policy.contains("name: Acquire candidate generator product"),
+            "policy must retain the candidate acquisition path: {policy}"
+        );
+        assert!(
+            policy.contains(
+                "head_candidate=\"$(velnor-workflow closure --rev=\"$HEAD_SHA\" --candidate)\""
+            ),
+            "candidate verification must remain anchored to the audited head: {policy}"
+        );
     }
 
     #[test]
@@ -12764,7 +12814,7 @@ lockfile = true
         assert!(rendered.contains("jdx/mr-boxington-action@"));
         assert!(rendered.contains("run: |\n          mbx test --locked"));
         assert!(rendered.contains("mbx +\"${MSRV}\" check --locked"));
-        assert!(rendered.contains("version: 1.11.1"));
+        assert!(rendered.contains("version: 1.12.0"));
         assert!(rendered.contains("cargo install --locked --path ."));
         assert!(!rendered.contains("cargo test"));
         assert!(!rendered.contains("cargo check"));

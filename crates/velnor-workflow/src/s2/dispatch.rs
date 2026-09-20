@@ -149,8 +149,10 @@ mod tests {
     }
 
     fn fixture_dir(name: &str, config: Option<&str>) -> PathBuf {
-        let root =
-            env::temp_dir().join(format!("velnor-r2-dispatch-{}-{name}", std::process::id()));
+        let root = env::temp_dir().join(format!(
+            "velnor-r2-dispatch-{}-{name}",
+            crate::unique_suffix()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         must(
             std::fs::create_dir_all(root.join(".github-gen")),

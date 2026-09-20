@@ -2878,7 +2878,7 @@ mod run_cmd_stall_tests {
         );
         assert_eq!(
             parse_run_cmd_stall_limit(Some(" 120 ")),
-            Duration::from_secs(120)
+            Duration::from_mins(2)
         );
         for invalid in ["", "0", "-5", "ten", "1.5"] {
             assert_eq!(
@@ -2944,7 +2944,7 @@ mod run_cmd_stall_tests {
             &std::env::temp_dir(),
             "test-unit",
             "exit 3",
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         );
         let message = match result {
             Ok(()) => String::from("<unexpected success>"),
@@ -4280,9 +4280,8 @@ pub(crate) fn valid_registry_host(value: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::error::Error;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use crate::s2::primitives::prepared_tools::{ProducerIdentity, ToolFile, ToolOutcome};
@@ -4322,10 +4321,10 @@ mod tests {
 
     /// A throwaway digest directory: the only way to feed `verify-digests`
     /// a real artifact set.
-    fn digest_fixture(name: &str) -> PathBuf {
+    pub(crate) fn digest_fixture(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-digests-{name}-{}",
-            crate::s2::unique_suffix()
+            crate::unique_suffix()
         ));
         must(std::fs::create_dir_all(&root), "create digest fixture");
         root
@@ -4678,8 +4677,7 @@ mod tests {
         name: &str,
         changed: &str,
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-selection-{name}-{}-{id}",
             std::process::id()
@@ -4742,8 +4740,7 @@ mod tests {
 
     fn stale_base_selection_git_fixture(
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-stale-base-selection-{}-{id}",
             std::process::id()
@@ -4807,8 +4804,7 @@ mod tests {
 
     fn lockfile_version_selection_git_fixture(
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-version-selection-{}-{id}",
             std::process::id()
@@ -5018,8 +5014,7 @@ workspace_check = true
         changes: &[(&str, &str, &str)],
         config_text: &str,
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-current-project-selection-{name}-{}-{id}",
             std::process::id()
@@ -5162,8 +5157,7 @@ workspace_check = true
 
     #[test]
     fn plan_output_without_swift_empties_its_matrix() -> Result<(), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let path = std::env::temp_dir().join(format!(
             "velnor-workflow-runner-matrices-{}-{id}",
             std::process::id()
@@ -5213,8 +5207,7 @@ workspace_check = true
 
     #[test]
     fn selection_artifact_round_trips_scope_and_sha() -> Result<(), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let path = std::env::temp_dir().join(format!(
             "velnor-workflow-selection-artifact-{}-{id}",
             std::process::id()
@@ -6371,8 +6364,7 @@ workspace_check = true
     }
 
     fn manifest_fixture(name: &str) -> std::path::PathBuf {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = crate::unique_suffix();
         let dir = std::env::temp_dir().join(format!(
             "velnor-workflow-manifest-{name}-{pid}-{id}",
             pid = std::process::id()
@@ -6659,12 +6651,8 @@ workspace_check = true
     }
 
     fn install_fixture(name: &str, manifest: &ToolManifest) -> InstallFixture {
-        static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "velnor-prepared-tool-install-{name}-{}-{}",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
+        let id = crate::unique_suffix();
+        let root = std::env::temp_dir().join(format!("velnor-prepared-tool-install-{name}-{id}"));
         let dir = root.join("bundle");
         must(
             fs::create_dir_all(dir.join("bin")),
@@ -6906,7 +6894,7 @@ workspace_check = true
         // A proven success passes silently.
         let root = std::env::temp_dir().join(format!(
             "velnor-prepared-tool-outcome-{}",
-            std::process::id()
+            crate::unique_suffix()
         ));
         let outputs = root.join("outputs");
         must(fs::create_dir_all(&root), "create outcome directory");

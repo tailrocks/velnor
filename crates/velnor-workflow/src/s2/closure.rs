@@ -314,7 +314,7 @@ mod tests {
         // merge-tree build iff the merge and head candidate closures agree,
         // which holds iff main's side of the merge avoids `CLOSURE_PATHS`.
         let root =
-            std::env::temp_dir().join(format!("velnor-closure-merge-{}", std::process::id()));
+            std::env::temp_dir().join(format!("velnor-closure-merge-{}", crate::unique_suffix()));
         let _ = std::fs::remove_dir_all(&root);
         write_closure_fixture(&root);
         git_in(&root, &["init", "--quiet", "-b", "main"]);
@@ -386,7 +386,7 @@ mod tests {
         use std::io::Write as _;
 
         let root =
-            std::env::temp_dir().join(format!("velnor-closure-fixture-{}", std::process::id()));
+            std::env::temp_dir().join(format!("velnor-closure-fixture-{}", crate::unique_suffix()));
         let _ = std::fs::remove_dir_all(&root);
         write_closure_fixture(&root);
         git_in(&root, &["init", "--quiet"]);
