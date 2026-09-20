@@ -12,13 +12,16 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
+
+#[cfg(unix)]
+use rustix::event::{poll, PollFd, PollFlags, Timespec};
 
 use sha2::{Digest, Sha256};
 
@@ -2695,9 +2698,8 @@ const RUN_CMD_STALL_ENV: &str = "VELNOR_RUN_CMD_STALL_SECS";
 /// silent command that already exited (or whose pipes grandchildren hold
 /// open) is noticed within this long instead of at the stall deadline.
 const RUN_CMD_EXIT_POLL_QUANTUM: Duration = Duration::from_secs(1);
-/// Bounded grace to drain a piped tail after the child exits, so detached
-/// pumps forward every byte before completion. Grandchildren holding the
-/// pipes open must not hang this drain.
+/// Bounded grace to drain a piped tail after the child exits. Grandchildren
+/// holding the pipes open must not hang this drain.
 const RUN_CMD_DRAIN_GRACE: Duration = Duration::from_secs(10);
 
 fn run_cmd_stall_limit() -> Duration {
@@ -2712,17 +2714,17 @@ fn parse_run_cmd_stall_limit(raw: Option<&str>) -> Duration {
     Duration::from_secs(seconds.unwrap_or(DEFAULT_RUN_CMD_STALL_SECS))
 }
 
+#[cfg(not(unix))]
 /// One output chunk forwarded by a child-stream pump, or that stream's EOF.
 enum PumpEvent {
     Output,
     Eof,
 }
 
-/// Forward one child pipe to the matching process stream, reporting every
-/// chunk as [`PumpEvent::Output`] so the stall guard treats output bytes as
-/// heartbeats. Runs detached: it exits on pipe EOF (or when the guard drops
-/// the receiver), so a wedged grandchild holding the pipe cannot hang the
-/// stall kill.
+#[cfg(not(unix))]
+/// Forward one child pipe to the matching process stream. Unix uses the
+/// owner-thread poll loop below because a blocking reader cannot be cancelled
+/// when a descendant keeps a child pipe open.
 fn pump_child_stream<R, W>(mut reader: R, mut writer: W, sender: &mpsc::Sender<PumpEvent>)
 where
     R: Read + Send + 'static,
@@ -2765,7 +2767,7 @@ fn run_command_with_stall_guard(
     command: &str,
     stall_limit: Duration,
 ) -> Result<(), GeneratorError> {
-    let mut child = Command::new("bash")
+    let child = Command::new("bash")
         .args(["-euo", "pipefail", "-c", command])
         .current_dir(root)
         .stdin(Stdio::null())
@@ -2773,6 +2775,218 @@ fn run_command_with_stall_guard(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| GeneratorError::usage(format!("run CI command {unit_id}: {error}")))?;
+    #[cfg(unix)]
+    {
+        run_command_with_polling(child, unit_id, command, stall_limit)
+    }
+    #[cfg(not(unix))]
+    {
+        run_command_with_threaded_pumps(child, unit_id, command, stall_limit)
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChildStreamRead {
+    Output,
+    Eof,
+    Interrupted,
+}
+
+#[cfg(unix)]
+/// Read one poll-ready child stream without allowing a pipe read to block the
+/// stall guard. Output failures retain the old behavior: they do not change
+/// command success/failure, but bytes still count as liveness output.
+fn forward_ready_child_stream<R, W>(reader: &mut R, writer: &mut W) -> ChildStreamRead
+where
+    R: Read,
+    W: Write,
+{
+    let mut buffer = [0_u8; 8192];
+    match reader.read(&mut buffer) {
+        Ok(0) => ChildStreamRead::Eof,
+        Ok(read) => {
+            let _ = writer.write_all(&buffer[..read]);
+            let _ = writer.flush();
+            ChildStreamRead::Output
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+            ChildStreamRead::Interrupted
+        }
+        Err(_) => ChildStreamRead::Eof,
+    }
+}
+
+#[cfg(unix)]
+fn poll_timeout(duration: Duration) -> Timespec {
+    Timespec {
+        tv_sec: duration.as_secs().try_into().unwrap_or(i64::MAX),
+        tv_nsec: duration.subsec_nanos().into(),
+    }
+}
+
+#[cfg(unix)]
+/// Wait for either child pipe without blocking on a `Read`. The returned
+/// booleans include EOF/error readiness so the caller can remove closed pipes.
+fn poll_child_streams(
+    stdout: Option<&std::process::ChildStdout>,
+    stderr: Option<&std::process::ChildStderr>,
+    timeout: Duration,
+) -> rustix::io::Result<(bool, bool)> {
+    let mut descriptors = Vec::with_capacity(2);
+    let stdout_index = stdout.map(|stream| {
+        let index = descriptors.len();
+        descriptors.push(PollFd::new(stream, PollFlags::IN));
+        index
+    });
+    let stderr_index = stderr.map(|stream| {
+        let index = descriptors.len();
+        descriptors.push(PollFd::new(stream, PollFlags::IN));
+        index
+    });
+    if descriptors.is_empty() {
+        return Ok((false, false));
+    }
+
+    let timeout = poll_timeout(timeout);
+    let result = poll(&mut descriptors, Some(&timeout));
+    let ready = |index: Option<usize>| {
+        index.is_some_and(|index| {
+            descriptors[index]
+                .revents()
+                .intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL)
+        })
+    };
+    result.map(|_| (ready(stdout_index), ready(stderr_index)))
+}
+
+#[cfg(unix)]
+fn consume_ready_child_stream<R, W>(
+    ready: bool,
+    reader: &mut Option<R>,
+    writer: &mut W,
+) -> Option<ChildStreamRead>
+where
+    R: Read,
+    W: Write,
+{
+    if !ready {
+        return None;
+    }
+    let outcome = forward_ready_child_stream(reader.as_mut()?, writer);
+    if outcome == ChildStreamRead::Eof {
+        *reader = None;
+    }
+    Some(outcome)
+}
+
+#[cfg(unix)]
+fn run_command_with_polling(
+    mut child: Child,
+    unit_id: &str,
+    command: &str,
+    stall_limit: Duration,
+) -> Result<(), GeneratorError> {
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let mut stdout_writer = std::io::stdout();
+    let mut stderr_writer = std::io::stderr();
+    let pid = child.id();
+    let mut deadline = Instant::now() + stall_limit;
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                drop(stdout);
+                drop(stderr);
+                return Err(GeneratorError::usage(format!(
+                    "run CI command {unit_id}: failed to poll child pid {pid}: {error}"
+                )));
+            }
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            let state = match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => String::from("running"),
+                Err(error) => format!("unknown (try_wait failed: {error})"),
+            };
+            let _ = child.kill();
+            let reaped = match child.wait() {
+                Ok(status) => format!("reaped with {status}"),
+                Err(error) => format!("reap failed: {error}"),
+            };
+            drop(stdout);
+            drop(stderr);
+            return Err(GeneratorError::usage(format!(
+                "CI command stalled for unit {unit_id}: no stdout/stderr output for {}s; killed pid {pid} (was {state}, {reaped}); command: {command}",
+                stall_limit.as_secs(),
+            )));
+        }
+
+        let timeout = remaining.min(RUN_CMD_EXIT_POLL_QUANTUM);
+        if stdout.is_none() && stderr.is_none() {
+            thread::sleep(timeout);
+            continue;
+        }
+        let (stdout_ready, stderr_ready) =
+            match poll_child_streams(stdout.as_ref(), stderr.as_ref(), timeout) {
+                Ok(ready) => ready,
+                Err(error) if error == rustix::io::Errno::INTR => continue,
+                Err(_) => {
+                    thread::sleep(timeout);
+                    continue;
+                }
+            };
+
+        if let Some(ChildStreamRead::Output) =
+            consume_ready_child_stream(stdout_ready, &mut stdout, &mut stdout_writer)
+        {
+            deadline = Instant::now() + stall_limit;
+        }
+        if let Some(ChildStreamRead::Output) =
+            consume_ready_child_stream(stderr_ready, &mut stderr, &mut stderr_writer)
+        {
+            deadline = Instant::now() + stall_limit;
+        }
+    };
+
+    let drain_deadline = Instant::now() + RUN_CMD_DRAIN_GRACE;
+    while stdout.is_some() || stderr.is_some() {
+        let remaining = drain_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let timeout = remaining.min(RUN_CMD_EXIT_POLL_QUANTUM);
+        let (stdout_ready, stderr_ready) =
+            match poll_child_streams(stdout.as_ref(), stderr.as_ref(), timeout) {
+                Ok(ready) => ready,
+                Err(error) if error == rustix::io::Errno::INTR => continue,
+                Err(_) => {
+                    thread::sleep(timeout);
+                    continue;
+                }
+            };
+        consume_ready_child_stream(stdout_ready, &mut stdout, &mut stdout_writer);
+        consume_ready_child_stream(stderr_ready, &mut stderr, &mut stderr_writer);
+    }
+    drop(stdout);
+    drop(stderr);
+    check_unit_command_status(unit_id, status)
+}
+
+#[cfg(not(unix))]
+fn run_command_with_threaded_pumps(
+    mut child: Child,
+    unit_id: &str,
+    command: &str,
+    stall_limit: Duration,
+) -> Result<(), GeneratorError> {
     let (sender, receiver) = mpsc::channel();
     let mut expected_eof = 0;
     if let Some(stdout) = child.stdout.take() {
@@ -2864,7 +3078,7 @@ mod run_cmd_stall_tests {
     use super::{
         parse_run_cmd_stall_limit, run_command_with_stall_guard, DEFAULT_RUN_CMD_STALL_SECS,
     };
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn stall_limit_parses_override_and_falls_back() {
@@ -2908,6 +3122,31 @@ mod run_cmd_stall_tests {
         assert!(
             message.contains("test-unit") && message.contains("exec sleep 30"),
             "stall error must name unit and command, got: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blocked_child_pipe_is_killed_at_stall_deadline() {
+        let started = Instant::now();
+        let result = run_command_with_stall_guard(
+            &std::env::temp_dir(),
+            "test-unit",
+            "exec 3< <(sleep 2 2>&-); printf 'before\\n'; read <&3",
+            Duration::from_millis(200),
+        );
+        let elapsed = started.elapsed();
+        let message = match result {
+            Ok(()) => String::from("<unexpected success>"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("stall"),
+            "blocked child must fail naming the stall, got: {message}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "blocked child must be cancelled near the stall deadline, took {elapsed:?}"
         );
     }
 
