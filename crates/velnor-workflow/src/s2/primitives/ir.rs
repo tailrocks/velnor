@@ -647,6 +647,16 @@ mod tests {
         selected_units: &str,
         callers: &[RequiredCaller],
     ) -> bool {
+        run_required_gate_with_admissions(script, needs, selected_units, callers, &[])
+    }
+
+    fn run_required_gate_with_admissions(
+        script: &str,
+        needs: &serde_json::Map<String, serde_json::Value>,
+        selected_units: &str,
+        callers: &[RequiredCaller],
+        admissions: &[(&str, &str)],
+    ) -> bool {
         let output = must_ok(
             Command::new("bash")
                 .args(["-euo", "pipefail", "-c", script])
@@ -668,6 +678,7 @@ mod tests {
                 .env("PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED", "true")
                 .env("PROVIDER_ADMITTED_VELNOR_TRUSTED", "true")
                 .env("PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED", "true")
+                .envs(admissions.iter().copied())
                 .output(),
             "bash and jq execute the rendered gate",
         );
@@ -782,6 +793,42 @@ mod tests {
                     "{job} with result {result:?} must fail the emitted shell gate"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn required_gate_rejects_selected_obligations_outside_admission() {
+        let ir = owner_test_ir("example/required-admission", vec![rust_unit("rust", ".")]);
+        let nodes = aggregate_fixture_nodes(&ir);
+        let callers = ir.required_callers(&nodes, None);
+        let script = required_gate_script(&ir, &nodes, false);
+        let selected = r#"[{"unit_id":"rust","providers":["github-hosted"]}]"#;
+        let mut needs = serde_json::Map::from_iter([(
+            "plan".to_owned(),
+            serde_json::json!({"result": "success"}),
+        )]);
+        for caller in &callers {
+            needs.insert(
+                caller.job_id.clone(),
+                serde_json::json!({"result": "skipped"}),
+            );
+        }
+        for admission in ["false", "", "unknown"] {
+            let admissions = [("PROVIDER_ADMITTED_GITHUB_HOSTED", admission)];
+            assert!(
+                run_required_gate_with_admissions(&script, &needs, "[]", &callers, &admissions),
+                "unselected work remains explicitly nonapplicable"
+            );
+            assert!(
+                !run_required_gate_with_admissions(
+                    &script,
+                    &needs,
+                    selected,
+                    &callers,
+                    &admissions,
+                ),
+                "admission {admission:?} cannot erase a frozen selected obligation"
+            );
         }
     }
 
@@ -3997,7 +4044,7 @@ fn render_required_caller_verdicts(output: &mut String, callers: &[RequiredCalle
         let admitted = caller.admission.env_name();
         let _ = writeln!(
             output,
-            "          if {expected_condition}; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"${admitted}\" == true ]]; then\n              case \"$result\" in\n                success) ;;\n                skipped) echo \"expected {noun} {job_id} was skipped: a skipped expected result cannot pass\" >&2; exit 1 ;;\n                cancelled) echo \"expected {noun} {job_id} was cancelled: a cancelled expected result cannot pass\" >&2; exit 1 ;;\n                *) echo \"expected {noun} {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            else\n              case \"$result\" in\n                skipped) ;;\n                *) echo \"selected {noun} {job_id} ran outside its provider admission ({admitted}=${admitted}): $result\" >&2; exit 1 ;;\n              esac\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              skipped) ;;\n              success) echo \"unexpected {noun} {job_id} succeeded outside the expected set: the plan did not declare it\" >&2; exit 1 ;;\n              *) echo \"unexpected {noun} {job_id} ran outside the expected set: $result\" >&2; exit 1 ;;\n            esac\n          fi"
+            "          if {expected_condition}; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"${admitted}\" == true ]]; then\n              case \"$result\" in\n                success) ;;\n                skipped) echo \"expected {noun} {job_id} was skipped: a skipped expected result cannot pass\" >&2; exit 1 ;;\n                cancelled) echo \"expected {noun} {job_id} was cancelled: a cancelled expected result cannot pass\" >&2; exit 1 ;;\n                *) echo \"expected {noun} {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            else\n              echo \"selected {noun} {job_id} contradicts provider admission ({admitted}=${admitted}): $result\" >&2\n              exit 1\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              skipped) ;;\n              success) echo \"unexpected {noun} {job_id} succeeded outside the expected set: the plan did not declare it\" >&2; exit 1 ;;\n              *) echo \"unexpected {noun} {job_id} ran outside the expected set: $result\" >&2; exit 1 ;;\n            esac\n          fi"
         );
     }
 }
@@ -5781,9 +5828,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// `if:`, the aggregate caller's `if:`, and the required check's
     /// `PROVIDER_ADMITTED_*` environment, so the three cannot disagree.
     ///
-    /// A trust-gated class with no online trusted runner is `&& false`: the
-    /// predicate itself says the provider is not admitted, and the required check
-    /// therefore expects `skipped` for it like any other unadmitted provider.
+    /// The planner excludes providers that are ineligible for the event.
+    /// A selected obligation must therefore agree with this admission; the
+    /// required check rejects a contradiction instead of accepting a skip.
     pub(crate) fn provider_admission_expression(&self, admission: ProviderAdmission) -> String {
         match admission {
             ProviderAdmission::AnyLocalTrusted => {
