@@ -669,6 +669,7 @@ fn owner_entrypoint_renders_the_isolated_candidate_transport() {
     assert!(job.contains("actions: read\n      contents: read"), "{job}");
     assert!(job.contains("run_attempt"), "{job}");
     assert!(job.contains("target_repository_id"), "{job}");
+    assert!(job.contains("uses: actions/checkout@"), "{job}");
     assert!(job.contains(".pr_number == $expected_pr"), "{job}");
     assert!(job.contains(".pr_number == $pr"), "{job}");
     assert!(

@@ -4632,6 +4632,7 @@ fn policy_candidate_step(revision: &str) -> String {
           grep -Fqx "  candidate_producer:" <<<"$candidate_block"
           grep -Fqx "    name: candidate_producer" <<<"$candidate_block"
           grep -Fqx "    permissions: {{}}" <<<"$candidate_block"
+          test "$(grep -Fxc "        uses: {checkout}" <<<"$candidate_block")" = 1
           grep -Fq "github.event.pull_request.head.repo.id == github.repository_id" <<<"$candidate_block"
           grep -Fq "github.event.pull_request.base.repo.id == github.repository_id" <<<"$candidate_block"
           grep -Fq 'test -z "${{GITHUB_TOKEN:-}}"' <<<"$candidate_block"
@@ -4795,6 +4796,7 @@ fn policy_candidate_step(revision: &str) -> String {
         artifact = crate::s2::CANDIDATE_ARTIFACT_NAME,
         build_image_repository = crate::s2::CANDIDATE_BUILD_IMAGE_REPOSITORY,
         build_image_digest = crate::s2::CANDIDATE_BUILD_IMAGE_DIGEST,
+        checkout = ActionPin::Checkout.reference(),
         handoff = crate::s2::CANDIDATE_HANDOFF_ARTIFACT_NAME,
         upload = ActionPin::UploadArtifact.reference(),
     )
