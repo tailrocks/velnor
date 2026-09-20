@@ -1549,6 +1549,179 @@ fn pending_recovery_rejects_replaced_valid_record() {
                 .to_string_lossy()
                 .starts_with(".velnor-raw-retained-rejected-")
         }));
+    assert!(
+        RawObjectFileStore::new(&root).is_ok(),
+        "typed rejected record must survive a subsequent reopen"
+    );
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn pending_recovery_rejects_manifest_name_alias() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("retention-staged-alias");
+    let store = must(RawObjectFileStore::new(&root), "open alias store");
+    drop(store);
+    let quarantine = root.join("sha256").join(".velnor-raw-quarantine-41-0-0");
+    must(
+        fs::create_dir(&quarantine),
+        "create alias source quarantine",
+    );
+    must(
+        fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o700)),
+        "restrict alias source quarantine",
+    );
+    must(
+        fs::write(quarantine.join("entry"), b"alias-source"),
+        "write alias source entry",
+    );
+    must(
+        fs::set_permissions(quarantine.join("entry"), fs::Permissions::from_mode(0o400)),
+        "restrict alias source entry",
+    );
+    let reopened = must(RawObjectFileStore::new(&root), "materialize alias source");
+    drop(reopened);
+
+    let retention = root.join(".velnor-raw-quarantine");
+    let final_record = must(fs::read_dir(&retention), "read alias records")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".velnor-raw-retained-"))
+                && !path.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .starts_with(".velnor-raw-retained-pending-")
+                })
+        })
+        .unwrap_or_else(|| panic!("alias final record missing"));
+    let alias = retention.join(".velnor-raw-retained-pending-999-0-0");
+    must(
+        fs::rename(&final_record, &alias),
+        "rename record to mismatched pending alias",
+    );
+
+    assert!(RawObjectFileStore::new(&root).is_err());
+    assert!(
+        alias.is_dir(),
+        "mismatched alias must remain for inspection"
+    );
+    assert!(!final_record.exists());
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_materialization_rejects_replaced_record_and_reopens() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("retention-fresh-replacement");
+    let store = must(
+        RawObjectFileStore::new(&root),
+        "open fresh replacement store",
+    );
+    drop(store);
+
+    let wrong_quarantine = root.join("sha256").join(".velnor-raw-quarantine-51-0-0");
+    must(
+        fs::create_dir(&wrong_quarantine),
+        "create wrong source quarantine",
+    );
+    must(
+        fs::set_permissions(&wrong_quarantine, fs::Permissions::from_mode(0o700)),
+        "restrict wrong source quarantine",
+    );
+    let wrong_entry = wrong_quarantine.join("entry");
+    must(
+        fs::write(&wrong_entry, b"wrong-source"),
+        "write wrong source entry",
+    );
+    must(
+        fs::set_permissions(&wrong_entry, fs::Permissions::from_mode(0o400)),
+        "restrict wrong source entry",
+    );
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "materialize wrong source record",
+    );
+    drop(reopened);
+
+    let retention = root.join(".velnor-raw-quarantine");
+    let wrong_record = must(fs::read_dir(&retention), "read wrong retention record")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".velnor-raw-retained-"))
+                && !path.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .starts_with(".velnor-raw-retained-pending-")
+                })
+        })
+        .unwrap_or_else(|| panic!("wrong retention record missing"));
+    let wrong_name = wrong_record
+        .file_name()
+        .unwrap_or_else(|| panic!("wrong retention record name"))
+        .to_owned();
+
+    let target_quarantine = root.join("sha256").join(".velnor-raw-quarantine-52-0-0");
+    must(
+        fs::create_dir(&target_quarantine),
+        "create target source quarantine",
+    );
+    must(
+        fs::set_permissions(&target_quarantine, fs::Permissions::from_mode(0o700)),
+        "restrict target source quarantine",
+    );
+    let target_entry = target_quarantine.join("entry");
+    must(
+        fs::write(&target_entry, b"target-source"),
+        "write target source entry",
+    );
+    must(
+        fs::set_permissions(&target_entry, fs::Permissions::from_mode(0o400)),
+        "restrict target source entry",
+    );
+
+    let retention_for_hook = retention.clone();
+    let wrong_record_for_hook = wrong_record.clone();
+    let wrong_name_for_hook = wrong_name.clone();
+    github_raw_store::set_test_materialize_rename_hook(Box::new(move || {
+        let fresh = fs::read_dir(&retention_for_hook)
+            .unwrap_or_else(|error| panic!("read fresh records: {error}"))
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".velnor-raw-retained-"))
+                    && path.file_name() != Some(wrong_name_for_hook.as_os_str())
+                    && !path.file_name().is_some_and(|name| {
+                        name.to_string_lossy()
+                            .starts_with(".velnor-raw-retained-pending-")
+                    })
+            })
+            .unwrap_or_else(|| panic!("fresh record missing in replacement hook"));
+        fs::remove_dir_all(&fresh)
+            .unwrap_or_else(|error| panic!("remove fresh record for replacement: {error}"));
+        fs::rename(&wrong_record_for_hook, &fresh)
+            .unwrap_or_else(|error| panic!("install wrong fresh record: {error}"));
+    }));
+
+    assert!(RawObjectFileStore::new(&root).is_err());
+    assert!(must(fs::read_dir(&retention), "read fresh rejected record")
+        .flatten()
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".velnor-raw-retained-rejected-")
+        }));
+    assert!(
+        RawObjectFileStore::new(&root).is_ok(),
+        "fresh identity rejection must be restart-safe"
+    );
     remove_fixture(&root);
 }
 

@@ -41,16 +41,25 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 pub(super) type TestPendingRenameHook = Box<dyn FnOnce() + Send + 'static>;
 
 #[cfg(test)]
+pub(super) type TestMaterializeRenameHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
 use std::cell::RefCell;
 
 #[cfg(test)]
 thread_local! {
     static TEST_PENDING_RENAME_HOOK: RefCell<Option<TestPendingRenameHook>> = RefCell::new(None);
+    static TEST_MATERIALIZE_RENAME_HOOK: RefCell<Option<TestMaterializeRenameHook>> = RefCell::new(None);
 }
 
 #[cfg(test)]
 pub(super) fn set_test_pending_rename_hook(hook: TestPendingRenameHook) {
     TEST_PENDING_RENAME_HOOK.with(|hooks| *hooks.borrow_mut() = Some(hook));
+}
+
+#[cfg(test)]
+pub(super) fn set_test_materialize_rename_hook(hook: TestMaterializeRenameHook) {
+    TEST_MATERIALIZE_RENAME_HOOK.with(|hooks| *hooks.borrow_mut() = Some(hook));
 }
 
 #[cfg(test)]
@@ -99,6 +108,14 @@ fn inject_test_manifest_fault(fault: TestManifestFault) -> Result<(), RawStorage
 #[cfg(test)]
 fn invoke_test_pending_rename_hook() {
     let hook = TEST_PENDING_RENAME_HOOK.with(|hooks| hooks.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn invoke_test_materialize_rename_hook() {
+    let hook = TEST_MATERIALIZE_RENAME_HOOK.with(|hooks| hooks.borrow_mut().take());
     if let Some(hook) = hook {
         hook();
     }
@@ -1389,19 +1406,15 @@ fn reconcile_pending_retained_records(scope: &RetentionScope<'_>) -> Result<(), 
         invoke_test_pending_rename_hook();
         rename_no_clobber(scope.retention, &name, scope.retention, &final_name)
             .map_err(|_| RawStorageError::Refused)?;
-        let final_record = match open_directory_named(scope.retention, &final_name) {
-            Ok(Some(record)) => record,
-            Ok(None) | Err(RawStorageError::Refused) => {
-                return preserve_rejected_retained_record(scope.retention, &final_name)
-            }
-            Err(error) => return Err(error),
-        };
-        let final_identity = stat_fd(&final_record).map_err(storage_io)?;
-        let (final_manifest_identity, final_manifest_bytes) =
-            read_named_with_identity(&final_record, manifest_name, MAX_RETAINED_MANIFEST_BYTES)?;
-        if !final_identity.same_directory(record_identity)
-            || final_manifest_bytes != manifest_bytes
-            || final_manifest_identity != manifest_identity
+        if verify_published_retained_record(
+            scope.retention,
+            &final_name,
+            &record,
+            record_identity,
+            &manifest_bytes,
+            manifest_identity,
+        )
+        .is_err()
         {
             return preserve_rejected_retained_record(scope.retention, &final_name);
         }
@@ -1439,6 +1452,38 @@ fn preserve_rejected_retained_record(retention: &File, name: &CStr) -> Result<()
         .map_err(|_| RawStorageError::Refused)?;
     sync_directory(retention)?;
     Err(RawStorageError::Refused)
+}
+
+#[cfg(unix)]
+fn verify_published_retained_record(
+    retention: &File,
+    final_name: &CStr,
+    record: &File,
+    record_identity: FileIdentity,
+    manifest_bytes: &[u8],
+    manifest_identity: FileIdentity,
+) -> Result<(), RawStorageError> {
+    let current_record_identity = stat_fd(record).map_err(storage_io)?;
+    if !current_record_identity.same_directory(record_identity) {
+        return Err(RawStorageError::Refused);
+    }
+    let Some(final_record) = open_directory_named(retention, final_name)? else {
+        return Err(RawStorageError::Refused);
+    };
+    let final_identity = stat_fd(&final_record).map_err(storage_io)?;
+    let manifest_name =
+        CStr::from_bytes_with_nul(RETENTION_MANIFEST_NAME).map_err(|_| RawStorageError::Refused)?;
+    let (final_manifest_identity, final_manifest_bytes) =
+        read_named_with_identity(&final_record, manifest_name, MAX_RETAINED_MANIFEST_BYTES)?;
+    let final_manifest = parse_retention_manifest(&final_manifest_bytes)?;
+    if !final_identity.same_directory(record_identity)
+        || final_manifest.record_name != final_name.to_string_lossy()
+        || final_manifest_identity != manifest_identity
+        || final_manifest_bytes != manifest_bytes
+    {
+        return Err(RawStorageError::Refused);
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1960,6 +2005,7 @@ fn materialize_retained_record(
         &manifest_bytes,
         MAX_RETAINED_MANIFEST_BYTES,
     )?;
+    let manifest_identity = stat_at(&record, manifest_name)?;
     sync_directory(&record)?;
     sync_directory(scope.retention)?;
     sync_directory(parent)?;
@@ -1973,6 +2019,20 @@ fn materialize_retained_record(
     )
     .map_err(storage_io)?;
     sync_directory(scope.retention)?;
+    #[cfg(test)]
+    invoke_test_materialize_rename_hook();
+    if verify_published_retained_record(
+        scope.retention,
+        &record_name,
+        &record,
+        record_identity,
+        &manifest_bytes,
+        manifest_identity,
+    )
+    .is_err()
+    {
+        return preserve_rejected_retained_record(scope.retention, &record_name).map(|_| true);
+    }
     Ok(true)
 }
 
@@ -2177,6 +2237,11 @@ fn valid_retained_pending_name(bytes: &[u8]) -> bool {
 }
 
 #[cfg(unix)]
+fn valid_retained_rejected_name(bytes: &[u8]) -> bool {
+    valid_generated_numeric_name(bytes, b".velnor-raw-retained-rejected-", b"")
+}
+
+#[cfg(unix)]
 fn retained_pending_name(final_name: &CStr) -> Result<CString, RawStorageError> {
     let rest = final_name
         .to_bytes()
@@ -2190,13 +2255,10 @@ fn retained_pending_name(final_name: &CStr) -> Result<CString, RawStorageError> 
 }
 
 #[cfg(unix)]
-fn read_retained_record(
+fn read_retained_record_common(
     retention: &File,
     name: &CStr,
-) -> Result<(File, Vec<u8>, RetentionManifest, u64, FileIdentity), RawStorageError> {
-    if !valid_retained_name(name.to_bytes()) {
-        return Err(RawStorageError::Refused);
-    }
+) -> Result<(File, Vec<u8>, RetentionManifest, FileIdentity), RawStorageError> {
     let Some(record) = open_directory_named(retention, name)? else {
         return Err(RawStorageError::Unavailable);
     };
@@ -2214,11 +2276,10 @@ fn read_retained_record(
     let (manifest_identity, manifest_bytes) =
         read_named_with_identity(&record, manifest_name, MAX_RETAINED_MANIFEST_BYTES)?;
     let manifest = parse_retention_manifest(&manifest_bytes)?;
-    if manifest.record_name != name.to_string_lossy()
-        || !manifest
-            .record_identity
-            .file_identity()
-            .same_directory(identity)
+    if !manifest
+        .record_identity
+        .file_identity()
+        .same_directory(identity)
     {
         return Err(RawStorageError::Refused);
     }
@@ -2226,6 +2287,22 @@ fn read_retained_record(
     names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
     let expected_names = vec![b"manifest.json".as_slice()];
     if names.iter().map(|name| name.to_bytes()).collect::<Vec<_>>() != expected_names {
+        return Err(RawStorageError::Refused);
+    }
+    Ok((record, manifest_bytes, manifest, manifest_identity))
+}
+
+#[cfg(unix)]
+fn read_retained_record(
+    retention: &File,
+    name: &CStr,
+) -> Result<(File, Vec<u8>, RetentionManifest, u64, FileIdentity), RawStorageError> {
+    if !valid_retained_name(name.to_bytes()) {
+        return Err(RawStorageError::Refused);
+    }
+    let (record, manifest_bytes, manifest, manifest_identity) =
+        read_retained_record_common(retention, name)?;
+    if manifest.record_name != name.to_string_lossy() {
         return Err(RawStorageError::Refused);
     }
     Ok((record, manifest_bytes, manifest, 0, manifest_identity))
@@ -2239,39 +2316,26 @@ fn read_pending_retained_record(
     if !valid_retained_pending_name(name.to_bytes()) {
         return Err(RawStorageError::Refused);
     }
-    let Some(record) = open_directory_named(retention, name)? else {
-        return Err(RawStorageError::Unavailable);
-    };
-    let identity = stat_fd(&record).map_err(storage_io)?;
-    if identity.mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32 || identity.mode & 0o777 != 0o700
-    {
-        return Err(RawStorageError::Refused);
-    }
-    let named = stat_at(retention, name)?;
-    if !named.same_directory(identity) {
-        return Err(RawStorageError::Refused);
-    }
-    let manifest_name =
-        CStr::from_bytes_with_nul(RETENTION_MANIFEST_NAME).map_err(|_| RawStorageError::Refused)?;
-    let (manifest_identity, manifest_bytes) =
-        read_named_with_identity(&record, manifest_name, MAX_RETAINED_MANIFEST_BYTES)?;
-    let manifest = parse_retention_manifest(&manifest_bytes)?;
-    if !valid_retained_name(manifest.record_name.as_bytes())
-        || !manifest
-            .record_identity
-            .file_identity()
-            .same_directory(identity)
-    {
-        return Err(RawStorageError::Refused);
-    }
-    let mut names = directory_names(&record)?;
-    names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-    if names.iter().map(|name| name.to_bytes()).collect::<Vec<_>>()
-        != vec![b"manifest.json".as_slice()]
-    {
+    let (record, manifest_bytes, manifest, manifest_identity) =
+        read_retained_record_common(retention, name)?;
+    let final_name =
+        CString::new(manifest.record_name.as_bytes()).map_err(|_| RawStorageError::Refused)?;
+    let expected_pending_name = retained_pending_name(&final_name)?;
+    if expected_pending_name.as_bytes() != name.to_bytes() {
         return Err(RawStorageError::Refused);
     }
     Ok((record, manifest_bytes, manifest, manifest_identity))
+}
+
+#[cfg(unix)]
+fn read_rejected_retained_record(
+    retention: &File,
+    name: &CStr,
+) -> Result<(File, Vec<u8>, RetentionManifest, FileIdentity), RawStorageError> {
+    if !valid_retained_rejected_name(name.to_bytes()) {
+        return Err(RawStorageError::Refused);
+    }
+    read_retained_record_common(retention, name)
 }
 
 #[cfg(unix)]
@@ -2283,6 +2347,27 @@ fn find_matching_retained_record(
     quarantine: FileIdentity,
 ) -> Result<Option<(CString, Vec<u8>)>, RawStorageError> {
     for name in directory_names(retention)? {
+        if valid_retained_pending_name(name.to_bytes()) {
+            continue;
+        }
+        if valid_retained_rejected_name(name.to_bytes()) {
+            let (_record, manifest_bytes, manifest, _manifest_identity) =
+                read_rejected_retained_record(retention, &name)?;
+            if manifest.source_name == source_name
+                && manifest.source_namespace == source_namespace
+                && manifest
+                    .source_parent
+                    .file_identity()
+                    .same_directory(parent)
+                && manifest
+                    .quarantine
+                    .file_identity()
+                    .same_directory(quarantine)
+            {
+                return Ok(Some((name, manifest_bytes)));
+            }
+            continue;
+        }
         if !valid_retained_name(name.to_bytes()) {
             return Err(RawStorageError::Refused);
         }
@@ -2498,6 +2583,36 @@ fn retention_usage(scope: &RetentionScope<'_>) -> Result<RetentionUsage, RawStor
         if valid_retained_pending_name(name.to_bytes()) {
             let (record, manifest_bytes, manifest, manifest_identity) =
                 read_pending_retained_record(scope.retention, &name)?;
+            validate_retained_source(scope, &manifest)?;
+            let key = retention_key(
+                &manifest.source_namespace,
+                &manifest.source_name,
+                manifest.source_parent.file_identity(),
+                manifest.quarantine.file_identity(),
+            );
+            if !retained_keys.insert(key) {
+                return Err(RawStorageError::Refused);
+            }
+            let record_identity = stat_fd(&record).map_err(storage_io)?;
+            account_actual_bytes(
+                &mut usage,
+                record_identity
+                    .allocated_bytes
+                    .max(RETENTION_RECORD_OVERHEAD_BYTES),
+            )?;
+            account_actual_bytes(
+                &mut usage,
+                allocation_or_logical(manifest_identity, manifest_bytes.len() as u64),
+            )?;
+            continue;
+        }
+        if valid_retained_rejected_name(name.to_bytes()) {
+            // Rejected records are a typed terminal state produced only after
+            // an identity mismatch. They remain immutable evidence and are
+            // replay-validated/accounted on every restart; they are never
+            // retried as a final publication.
+            let (record, manifest_bytes, manifest, manifest_identity) =
+                read_rejected_retained_record(scope.retention, &name)?;
             validate_retained_source(scope, &manifest)?;
             let key = retention_key(
                 &manifest.source_namespace,
