@@ -9573,6 +9573,236 @@ mod tests {
     }
 
     #[test]
+    fn swift_package_without_test_targets_emits_build_only_commands() {
+        let root = temporary_repository("swift-build-only");
+        must(
+            fs::create_dir_all(root.join("Sources/Tool")),
+            "create Swift sources",
+        );
+        must(
+            fs::write(
+                root.join("Package.swift"),
+                "// swift-tools-version: 6.2\nlet package = Package(targets: [.executableTarget(name: \"Tool\")])\n",
+            ),
+            "write Package.swift",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan Swift repository",
+        );
+        let swift = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift),
+            "Swift unit",
+        );
+        assert_eq!(swift.pr_commands.len(), 1, "{:?}", swift.pr_commands);
+        assert!(swift.pr_commands[0].contains("swift build"));
+        assert!(
+            config
+                .analysis
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("build-only")),
+            "{:?}",
+            config.analysis.limitations
+        );
+        assert_eq!(swift.tool_version.as_deref(), Some("6.2"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn swift_package_with_test_targets_keeps_test_command() {
+        let root = temporary_repository("swift-with-tests");
+        must(
+            fs::create_dir_all(root.join("Sources/Tool")),
+            "create Swift sources",
+        );
+        must(
+            fs::write(
+                root.join("Package.swift"),
+                "// swift-tools-version: 6.2\nlet package = Package(targets: [.executableTarget(name: \"Tool\"), .testTarget(name: \"ToolTests\", dependencies: [\"Tool\"])])\n",
+            ),
+            "write Package.swift",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan Swift repository",
+        );
+        let swift = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift),
+            "Swift unit",
+        );
+        assert_eq!(swift.pr_commands.len(), 2, "{:?}", swift.pr_commands);
+        assert!(swift
+            .pr_commands
+            .iter()
+            .any(|command| command.contains("swift test")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn swift_missing_local_binary_target_names_the_gap() {
+        let root = temporary_repository("swift-missing-binary");
+        must(
+            fs::write(
+                root.join("Package.swift"),
+                "let package = Package(targets: [.binaryTarget(name: \"BridgeFFI\", path: \"Frameworks/Bridge.xcframework\")])\n",
+            ),
+            "write Package.swift",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan Swift repository",
+        );
+        let swift = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift),
+            "Swift unit",
+        );
+        assert_eq!(swift.platform, provider::Platform::MacosArm64);
+        assert!(
+            config.analysis.limitations.iter().any(|limitation| {
+                limitation.contains("BridgeFFI") && limitation.contains("no tracked file")
+            }),
+            "{:?}",
+            config.analysis.limitations
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn swift_tracked_bundle_satisfies_local_binary_target() {
+        let root = temporary_repository("swift-tracked-binary");
+        must(
+            fs::write(
+                root.join("Package.swift"),
+                "let package = Package(targets: [.binaryTarget(name: \"BridgeFFI\", path: \"Frameworks/Bridge.xcframework\")])\n",
+            ),
+            "write Package.swift",
+        );
+        must(
+            fs::create_dir_all(root.join("Frameworks/Bridge.xcframework")),
+            "create tracked bundle",
+        );
+        must(
+            fs::write(
+                root.join("Frameworks/Bridge.xcframework/Info.plist"),
+                "<plist/>\n",
+            ),
+            "write bundle marker",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan Swift repository",
+        );
+        assert!(
+            !config
+                .analysis
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("BridgeFFI")),
+            "{:?}",
+            config.analysis.limitations
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn swift_remote_binary_target_stays_portable_with_provenance_note() {
+        let root = temporary_repository("swift-remote-binary");
+        must(
+            fs::write(
+                root.join("Package.swift"),
+                "let package = Package(targets: [.binaryTarget(name: \"Remote\", url: \"https://example.com/Remote.xcframework.zip\", checksum: \"abc\")])\n",
+            ),
+            "write Package.swift",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan Swift repository",
+        );
+        let swift = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift),
+            "Swift unit",
+        );
+        assert_eq!(swift.platform, provider::Platform::LinuxX64);
+        assert!(
+            config
+                .analysis
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("remote binary target")),
+            "{:?}",
+            config.analysis.limitations
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn swift_unresolved_binary_target_is_classified_honestly() {
+        let root = temporary_repository("swift-unresolved-binary");
+        must(
+            fs::write(
+                root.join("Package.swift"),
+                "let package = Package(targets: [.binaryTarget(name: \"Mystery\", path: artifactPath)])\n",
+            ),
+            "write Package.swift",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan Swift repository",
+        );
+        assert!(
+            config.analysis.limitations.iter().any(|limitation| {
+                limitation.contains("Mystery") && limitation.contains("cannot be classified")
+            }),
+            "{:?}",
+            config.analysis.limitations
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn xcode_project_units_detect_macos_platform() {
         let root = temporary_repository("xcode-macos");
         let project = root.join("App.xcodeproj");
