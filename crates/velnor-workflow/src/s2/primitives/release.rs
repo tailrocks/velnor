@@ -1967,6 +1967,10 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
     // single in the source and therefore remain unchanged.
     output = output.replace("{{", "{").replace("}}", "}");
     output = output.replace(
+        "          PRODUCT_RELEASE_ID: ${{ steps.product-release.outputs.release_id }}\n",
+        "          GH_TOKEN: ${{ github.token }}\n          PRODUCT_RELEASE_ID: ${{ steps.product-release.outputs.release_id }}\n",
+    );
+    output = output.replace(
         r#"          product_version="$(jq -er '.version' "$contract")"
           source_commit="#,
         r#"          blocked_targets="$(jq -c '.blocked_targets // []' "$contract")"
@@ -2009,7 +2013,7 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
     );
     output = output.replace(
         "          jq -e --arg tag \"$tag\" --arg commit \"$COMMIT\" '.tag_name == $tag and (.target_commitish == $commit or .target_commitish == \"\")' <<<\"$release_json\" >/dev/null",
-        "          jq -e --arg tag \"$tag\" --arg commit \"$COMMIT\" '.tag_name == $tag and .target_commitish == $commit and .draft == true and .prerelease == false' <<<\"$release_json\" >/dev/null",
+        "          jq -e --arg tag \"$tag\" --arg commit \"$COMMIT\" '.tag_name == $tag and .target_commitish == $commit and ((.draft == true and .prerelease == false) or (.draft == false and .prerelease == false))' <<<\"$release_json\" >/dev/null",
     );
     output = output.replace(
         r#"            tar -czf "product-assets/$archive" -C "$archive_dir" identity.json manifest.json *"#,
@@ -2039,6 +2043,15 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
         let release_tool = format!("artifacts/{package}-release-tool");
         let block = format!(
         "          sha256sum product-assets/product-manifest.json | awk '{{print $1}}' > product-assets/product-manifest.json.sha256\n\
+          provider_release=\"$(gh api \"repos/$GITHUB_REPOSITORY/releases/tags/$release_tag\")\"\n\
+          provider_release_id=\"$(jq -er '.id | numbers | tostring' <<<\"$provider_release\")\"\n\
+          [ \"$provider_release_id\" = \"$PRODUCT_RELEASE_ID\" ] || {{ echo '::error::provider release id changed while assembling product' >&2; exit 1; }}\n\
+          provider_release_url=\"$(jq -er '.html_url | strings' <<<\"$provider_release\")\"\n\
+          expected_release_url=\"https://github.com/$GITHUB_REPOSITORY/releases/tag/$release_tag\"\n\
+          [ \"$provider_release_url\" = \"$expected_release_url\" ] || {{ echo '::error::provider release URL is not canonical' >&2; exit 1; }}\n\
+          provider_target_commitish=\"$(jq -er '.target_commitish | strings' <<<\"$provider_release\")\"\n\
+          manifest_sha256=\"$(sha256sum product-assets/product-manifest.json | awk '{{print $1}}')\"\n\
+          jq -S -n \\\n+            --arg schema \"velnor.github-release-attestation/v1\" \\\n+            --arg provider github \\\n+            --arg source_repository \"$GITHUB_REPOSITORY\" \\\n+            --arg source_ref \"$source_ref\" \\\n+            --arg source_commit \"$source_commit\" \\\n+            --arg resolved_source_ref \"$source_ref\" \\\n+            --arg resolved_source_commit \"$source_commit\" \\\n+            --arg release_tag \"$release_tag\" \\\n+            --arg release_id \"$provider_release_id\" \\\n+            --arg target_commitish \"$provider_target_commitish\" \\\n+            --arg release_url \"$provider_release_url\" \\\n+            --arg manifest_sha256 \"$manifest_sha256\" \\\n+            --slurpfile assets product-assets/product-manifest.json \\\n+            '{{schema:$schema,provider:$provider,source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit,resolved_source_ref:$resolved_source_ref,resolved_source_commit:$resolved_source_commit,release_tag:$release_tag,release_id:$release_id,target_commitish:$target_commitish,release_url:$release_url,manifest_sha256:$manifest_sha256,assets:$assets[0].artifacts}}' \\\n+            > product-assets/release-attestation.json\n\
           rm -rf -- product-payload\n\
           mkdir product-payload\n\
           while IFS= read -r name; do\n\
@@ -2069,7 +2082,9 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
         for line in block.lines() {
             let _ = writeln!(indented, "          {}", line.trim_start());
         }
-        indented.replace("\"$contract\")", "product-component-contract.json)")
+        indented
+            .replace("\"$contract\")", "product-component-contract.json)")
+            .replace("\n          +", "\n          ")
     };
     output = output.replace(
         "          sha256sum product-assets/product-manifest.json > product-assets/product-manifest.json.sha256\n",
@@ -2239,7 +2254,7 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
             .map_or(output.len(), |offset| start + offset);
         output.replace_range(
             start..end,
-            "          actual_components=\"$(jq -s 'sort_by(.name,.target) | group_by(.name) | map(if (map({crate,version,binary,feature,identity}) | unique | length) != 1 then error(\\\"component identity differs across targets\\\") else {name:.[0].name,crate:.[0].crate,version:.[0].version,binary:.[0].binary,feature:.[0].feature,identity:.[0].identity,targets:(map(.target) | sort)} end) | sort_by(.name)' product-component-rows.jsonl)\"\n          jq -e --argjson actual \"$actual_components\" '($actual | sort_by(.name)) == (.components | sort_by(.name))' product-component-contract.json >/dev/null || { echo '::error::grouped component identity differs from source contract' >&2; exit 1; }",
+            "          actual_components=\"$(jq -s 'sort_by(.name,.target) | group_by(.name) | map(if (map({crate,version,binary}) | unique | length) != 1 then error(\\\"component identity differs across targets\\\") else {name:.[0].name,crate:.[0].crate,version:.[0].version,binary:.[0].binary,targets:(map(.target) | sort)} end) | sort_by(.name)' product-component-rows.jsonl)\"\n          jq -e --argjson actual \"$actual_components\" '($actual | map({name,crate,binary,version,targets}) | sort_by(.name)) == (.components | map({name,crate,binary,version,targets}) | sort_by(.name))' product-component-contract.json >/dev/null || { echo '::error::grouped component identity differs from source contract' >&2; exit 1; }",
         );
     }
     output = output.replace(
@@ -2265,7 +2280,7 @@ fn render_native_publish_job(
     let (assets, published, arch_targets) = native_publish_asset_lists(release, version);
     let published = if product_enabled {
         format!(
-            "{published} \\\n                        \"product-manifest.json\" \\\n                        \"product-manifest.json.sha256\""
+            "{published} \\\n                        \"product-manifest.json\" \\\n                        \"product-manifest.json.sha256\" \\\n                        \"release-attestation.json\""
         )
     } else {
         published
@@ -2351,6 +2366,23 @@ fn render_native_publish_job(
             mkdir -p "$product_payload"
             gh attestation verify "$tmp/product-manifest.json" --repo "$GITHUB_REPOSITORY"
             gh attestation verify "$tmp/product-manifest.json.sha256" --repo "$GITHUB_REPOSITORY"
+            gh attestation verify "$tmp/release-attestation.json" --repo "$GITHUB_REPOSITORY"
+            jq -e --arg schema "velnor.github-release-attestation/v1" \
+              --arg repository "$GITHUB_REPOSITORY" --arg source_ref "refs/tags/$tag" \
+              --arg source_commit "$COMMIT" --arg release_tag "$tag" \
+              --arg release_id "$provider_release_id" --arg release_url "https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag" \
+              --arg manifest_sha256 "$(sha256sum "$tmp/product-manifest.json" | awk '{print $1}')" \
+              --slurpfile manifest "$tmp/product-manifest.json" '
+                ((keys | sort) == ["assets","manifest_sha256","provider","release_id","release_tag","release_url","resolved_source_commit","resolved_source_ref","schema","source_commit","source_ref","source_repository","target_commitish"])
+                and .schema == $schema and .provider == "github"
+                and .source_repository == $repository and .source_ref == $source_ref
+                and .source_commit == $source_commit and .resolved_source_ref == $source_ref
+                and .resolved_source_commit == $source_commit and .release_tag == $release_tag
+                and .release_id == $release_id and .release_url == $release_url
+                and .manifest_sha256 == $manifest_sha256
+                and (.target_commitish | type == "string" and length > 0)
+                and (.assets == $manifest[0].artifacts)
+              ' "$tmp/release-attestation.json" >/dev/null
             while IFS= read -r name; do
               test -n "$name"
               case "$name" in
@@ -6577,6 +6609,9 @@ mod tests {
         );
         assert!(publish.contains("release-manifest.json"), "{publish}");
         assert!(publish.contains("product-manifest.json"), "{publish}");
+        assert!(publish.contains("release-attestation.json"), "{publish}");
+        assert!(publish.contains("velnor.github-release-attestation/v1"), "{publish}");
+        assert!(publish.contains("provider release URL is not canonical"), "{publish}");
         assert!(publish.contains("provider release id"), "{publish}");
         assert!(publish.contains("release verify-product"), "{publish}");
         assert!(
