@@ -1463,6 +1463,55 @@ fn validate_github_api_url(value: &str, expected_path: &str, label: &str) -> Res
     Ok(())
 }
 
+fn require_all_attempts_query(
+    raw_ids: &[String],
+    raw_by_id: &BTreeMap<String, &RawObjectRef>,
+    request_by_id: &BTreeMap<String, &RequestRecord>,
+    label: &str,
+) -> Result<()> {
+    for raw_id in raw_ids {
+        let raw = raw_by_id
+            .get(raw_id)
+            .copied()
+            .ok_or_else(|| anyhow!("{label} references missing raw object {raw_id}"))?;
+        if raw.object_kind != "check_suite_runs" {
+            continue;
+        }
+        let request = request_by_id
+            .get(&raw.request_id)
+            .copied()
+            .ok_or_else(|| anyhow!("{label} raw object {raw_id} has missing request"))?;
+        let query = BASE64
+            .decode(&request.query_base64)
+            .with_context(|| format!("decode {label} request query"))?;
+        let fields = std::str::from_utf8(&query)
+            .with_context(|| format!("{label} request query is not UTF-8"))?
+            .split(' ')
+            .collect::<Vec<_>>();
+        if fields.last() != Some(&"") || fields.len() % 2 == 0 {
+            bail!("{label} request query has malformed canonical fields");
+        }
+        let (pair_fields, remainder) = fields.as_chunks::<2>();
+        if remainder != [""] {
+            bail!("{label} request query has malformed canonical fields");
+        }
+        let pairs = pair_fields
+            .iter()
+            .map(|pair| (pair[0], pair[1]))
+            .collect::<Vec<_>>();
+        if !pairs
+            .iter()
+            .any(|(key, value)| *key == "filter" && *value == "all")
+            || pairs
+                .iter()
+                .any(|(key, value)| *key == "filter" && *value != "all")
+        {
+            bail!("{label} raw object {raw_id} was not acquired with filter=all");
+        }
+    }
+    Ok(())
+}
+
 fn map_pull_request(
     pull_request: &LivePullRequest,
     manifest: &ManifestRepository,
@@ -1665,6 +1714,12 @@ fn map_check(
                 endpoint: format!("/repos/{repository}/check-suites/{check_suite_id}/check-runs"),
             },
         ],
+    )?;
+    require_all_attempts_query(
+        &check.raw_object_refs,
+        raw_by_id,
+        request_by_id,
+        &format!("check {}", check.context),
     )?;
     let matching_executions = executions
         .into_iter()
@@ -2423,6 +2478,49 @@ mod tests {
             &request_by_id,
             "PR #7",
             &expected,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn check_run_raw_identity_requires_filter_all_query() {
+        let raw = raw_object("check_suite_runs", "check-runs", serde_json::json!([1]));
+        let raw_by_id = [(raw.raw_id.clone(), &raw)]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        let mut request = rest_request(&raw, "/repos/tailrocks/example/check-suites/9/check-runs");
+        let mut request_by_id = [(request.request_id.clone(), &request)]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        assert!(require_all_attempts_query(
+            std::slice::from_ref(&raw.raw_id),
+            &raw_by_id,
+            &request_by_id,
+            "check fixture",
+        )
+        .is_err());
+
+        request.query_base64 = BASE64.encode(b"filter\x00all\x00per_page\x00100\x00");
+        request_by_id = [(request.request_id.clone(), &request)]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        assert!(require_all_attempts_query(
+            std::slice::from_ref(&raw.raw_id),
+            &raw_by_id,
+            &request_by_id,
+            "check fixture",
+        )
+        .is_ok());
+
+        request.query_base64 = BASE64.encode(b"filter\x00latest\x00per_page\x00100\x00");
+        request_by_id = [(request.request_id.clone(), &request)]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        assert!(require_all_attempts_query(
+            std::slice::from_ref(&raw.raw_id),
+            &raw_by_id,
+            &request_by_id,
+            "check fixture",
         )
         .is_err());
     }
