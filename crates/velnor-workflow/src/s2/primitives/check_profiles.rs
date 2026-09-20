@@ -505,7 +505,7 @@ fn render_tool_steps(output: &mut String, config: &ProjectConfig, profile: &Chec
         if !profile.tools.is_empty() {
             let _ = writeln!(
                 output,
-                "      - name: Install declared Mise tools\n        env:\n          MISE_TOOLS: {}\n        run: |\n          set -euo pipefail\n          read -ra tools <<<\"$MISE_TOOLS\"\n          mise --yes install \"${{tools[@]}}\"",
+                "      - name: Install declared Mise tools\n        env:\n          MISE_TOOLS: {}\n        run: |\n          set -euo pipefail\n          read -ra tools <<<\"$MISE_TOOLS\"\n          mise --yes --locked install \"${{tools[@]}}\"",
                 yaml_scalar(&profile.tools.join(" "))
             );
         }
@@ -795,7 +795,10 @@ mod tests {
             "one hosted profile owns one Mise bootstrap action: {workflow}"
         );
         assert!(workflow.contains("MISE_TOOLS: ripgrep"), "{workflow}");
-        assert!(workflow.contains("mise --yes install"), "{workflow}");
+        assert!(
+            workflow.contains("mise --yes --locked install \"${tools[@]}\""),
+            "{workflow}"
+        );
         let mut bare_job = String::new();
         must(
             render_profile_job(&mut bare_job, &config, &config.check_profiles[2]),
