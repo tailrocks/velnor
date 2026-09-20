@@ -27,14 +27,15 @@ Only parent performs shared branch/index/commit operations.
 
 | Work | Owner | Inputs | Output / acceptance | State |
 | --- | --- | --- | --- | --- |
-| Velnor inventory | `/root/velnor_inventory` | current source, PR diffs, historical jobs | source/runtime distinctions, measured bottlenecks, compatible fixes | running |
+| Velnor inventory | `/root/velnor_inventory` | current source, PR diffs, historical jobs | source/runtime distinctions, measured bottlenecks, compatible fixes | bounded inventory delivered; full history pending |
 | Jackin inventory | `/root/jackin_inventory` | current source, PR diffs, desktop/Swift runs | product graph, tool boundaries, duplicate-work proof | running |
-| Parallax inventory | `/root/parallax_inventory` | current source, PR diffs, failed/scheduled runs | actual language graph, prerequisites, scheduler outcomes | running |
-| Timing collection/tooling | next available agent | raw paginated run/job/attempt data | reproducible JSONL/CSV and ranked cohorts | queued |
+| Parallax inventory | `/root/parallax_inventory` | current source, PR diffs, failed/scheduled runs | actual language graph, prerequisites, scheduler outcomes | bounded inventory delivered; full history pending |
+| Timing collection/tooling | `/root/parallax_inventory` (reused) | raw paginated run/job/attempt data | reproducible JSONL/CSV and ranked cohorts | design and independent challenge |
+| Typed validation stages | `/root/velnor_inventory` (reused) | scan and opaque runtime command contract | exact scoped commands, visible stages, regression tests | design and independent challenge |
 | Compiler/cache/tools | next available agent | inventory + cache statistics | alternatives with compatibility and trust constraints | queued |
 | Swift/Docker/artifacts | next available agent | product inventory + primary sources | explicit producer/consumer contracts and experiments | queued |
 | Relevance/scheduling | next available agent | events, gates, transitive inputs | scenario matrix and fail-closed checks | queued |
-| Independent review | agent other than author | hypotheses, diff, raw measurements | recorded findings before acceptance | queued |
+| Independent review | `/root/jackin_inventory` | hypotheses, diff, raw measurements | recorded findings before acceptance | first stage and collector designs queued |
 | Integration/final checks | parent | reviewed units | small signed commits, regular pushes, exact-SHA CI | active |
 
 Dependency order: inventories → ranked baseline → independently challenged
@@ -47,14 +48,26 @@ timing experiments must account for shared runner contention.
 - Velnor initial local main: `1048337062ea625fada1b4f7c07f2feed75f60c7`.
 - Refreshed Velnor remote main: `e94b48406c4ed206fce2bbf39b788264e72cf39c`.
   Clean local main fast-forwarded before creating `codex/ci-performance-campaign`.
-- Jackin and Parallax revisions: inventory pending.
+- Jackin remote main: `41796158b1e45535ae4e74d5ff048cb5bb4e0488`.
+  Initial local `3b1e1fc0` fast-forwarded cleanly.
+- Parallax remote/local main: `6a12bf47a816b63e848b563aaa45ef9694159c79`.
+- Each consumer uses one new `codex/ci-performance-campaign` working branch;
+  initial branches were clean main, so feature branches isolate review from main.
 - `rtk` 0.49.0 available. Missing `gh` installed using Homebrew: 2.101.0.
 - `gh auth status`: existing account token invalid; `gh api user`: HTTP 401,
   `Requires authentication`. Public repository/run/job/PR reads nevertheless work.
 - Authenticated GitHub connector repository lookup works and reports Velnor
-  push/admin permissions. SSH fetch and `ls-remote` work. Push untested.
+  push/admin permissions. SSH fetch, `ls-remote` and campaign push work.
 - Connector run/job/artifact list wrappers expose first page only; they cannot
   establish complete inventories. Use paginated REST where accessible.
+- Generic authenticated `github_fetch` supports explicit pagination; verified
+  after CLI public REST hit HTTP 403. See [baseline](baseline.md).
+- Velnor draft [PR #968](https://github.com/tailrocks/velnor/pull/968) tracks the
+  branch. Documentation-only source `c17c6ad09c4eb9617fbf8372914f50b9195a67ec`
+  triggered PR run `35480462500` and policy run `35480462376`. These form a
+  negative relevance diagnostic; conclusions pending.
+- Current generator build (`--locked --no-default-features`) and dry-run scans
+  succeeded for all three checkouts. These are local checks, not CI acceptance.
 
 ## Evidence and experiment rules
 
