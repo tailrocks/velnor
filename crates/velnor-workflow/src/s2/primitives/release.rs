@@ -3447,6 +3447,7 @@ struct ReleaseUnitJobContext<'a> {
     checkout_ref: Option<&'a str>,
     head_sha: &'a str,
     gate: Option<&'a str>,
+    admit_rehearse_dispatch: bool,
 }
 
 /// Each release lane plans its own full selection first: `run` requires the
@@ -3524,7 +3525,10 @@ fn render_release_unit_job(
     let verify_name = yaml_scalar(&unit.label);
     let mut gates = Vec::new();
     if provider.is_local() {
-        gates.push(trusted_release_runner_gate(&config.default_branch));
+        gates.push(release_verification_dispatch_gate(
+            &config.default_branch,
+            context.admit_rehearse_dispatch,
+        ));
     }
     if let Some(gate) = context.gate {
         gates.push(gate.to_owned());
@@ -3650,7 +3654,14 @@ fn release_unit_runs_on(workflow: &WorkflowIr, provider: ProviderId, unit: &Unit
 
 fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
     let root_needs = ["verify".to_owned()];
-    render_release_unit_jobs_with_context(config, &root_needs, None, "${{ github.sha }}", None)
+    render_release_unit_jobs_with_context(
+        config,
+        &root_needs,
+        None,
+        "${{ github.sha }}",
+        None,
+        false,
+    )
 }
 
 /// Render preview verification lanes against the source admission that owns
@@ -3687,7 +3698,10 @@ fn render_preview_release_unit_jobs(
             Vec::new(),
             None,
             "${{ github.sha }}",
-            Some(trusted_release_runner_gate(&config.default_branch)),
+            Some(release_verification_dispatch_gate(
+                &config.default_branch,
+                has_release_modes(release),
+            )),
         )
     };
     render_release_unit_jobs_with_context(
@@ -3696,6 +3710,7 @@ fn render_preview_release_unit_jobs(
         checkout_ref,
         head_sha,
         gate.as_deref(),
+        has_release_modes(release),
     )
 }
 
@@ -3705,6 +3720,7 @@ fn render_release_unit_jobs_with_context(
     checkout_ref: Option<&str>,
     head_sha: &str,
     gate: Option<&str>,
+    admit_rehearse_dispatch: bool,
 ) -> (String, Vec<String>) {
     let workflow = WorkflowIr::from_config(config);
     let context = ReleaseUnitJobContext {
@@ -3712,6 +3728,7 @@ fn render_release_unit_jobs_with_context(
         checkout_ref,
         head_sha,
         gate,
+        admit_rehearse_dispatch,
     };
     let mut output = String::new();
     let mut job_ids = Vec::new();
@@ -4706,6 +4723,21 @@ fn trusted_release_runner_gate(default_branch: &str) -> String {
     format!(
         "(github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/{default_branch}')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{default_branch}')"
     )
+}
+
+/// Dispatch gate for release verification units: the trusted gate, plus the
+/// rehearse-drill dispatch the preview build admits when the release declares
+/// modes. Without the drill clause the units skip on feature-branch rehearsal
+/// and skip-propagate through `needs` into the build.
+fn release_verification_dispatch_gate(default_branch: &str, admit_rehearse: bool) -> String {
+    let trusted = trusted_release_runner_gate(default_branch);
+    if admit_rehearse {
+        format!(
+            "{trusted} || (github.event_name == 'workflow_dispatch' && inputs.mode == 'rehearse')"
+        )
+    } else {
+        trusted
+    }
 }
 
 /// Delete one Actions cache entry with bounded retries. A delete the API no
@@ -9090,6 +9122,52 @@ cp "$record" "$out"
     /// The bound producer renders the `workflow_run` trigger with its
     /// source-resolution and publish-gate jobs, and the rolling publish
     /// admits only the gate's `publish` mode.
+    #[test]
+    fn preview_verification_units_admit_declared_rehearse_dispatch() {
+        let mut cfg = config(&["preview.yml"], Some(native_spec()));
+        let Some(release) = cfg.release.as_mut() else {
+            panic!("native release fixture")
+        };
+        release.modes = vec![
+            "validate".to_owned(),
+            "build".to_owned(),
+            "rehearse".to_owned(),
+        ];
+        let release = must_some(cfg.release.as_ref(), "native release fixture");
+        let preview = super::render_preview(&cfg, Some(release));
+        let drill = "github.event_name == 'workflow_dispatch' && inputs.mode == 'rehearse'";
+        let mut gated = 0;
+        for line in preview.lines() {
+            let trimmed = line.trim_end_matches(':');
+            if !line.starts_with("  release-") || !line.ends_with(':') {
+                continue;
+            }
+            let job = yaml_job(&preview, trimmed.trim_start());
+            let Some(condition) = job.lines().find(|body| body.starts_with("    if: ")) else {
+                continue;
+            };
+            gated += 1;
+            assert!(
+                condition.contains(drill),
+                "gated verification unit must admit the rehearse drill the build admits: {condition}"
+            );
+        }
+        assert!(
+            gated > 0,
+            "expected gated verification units in:\n{preview}"
+        );
+        let build = yaml_job(&preview, "build");
+        assert!(
+            build.contains(drill),
+            "preview build must admit the rehearse drill: {build}"
+        );
+        let stable = super::render_release(&cfg, release);
+        assert!(
+            !stable.contains(drill),
+            "stable release must not admit the preview-only rehearse drill"
+        );
+    }
+
     #[test]
     fn preview_producer_binding_renders_source_gate_and_wired_publish() {
         let root = scanned_root("preview-binding");
