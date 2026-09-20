@@ -4688,6 +4688,7 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
           external_reusable_workflows = {}
           local_workflow_edges = {}
           local_action_edges = {}
+          archive_members = {}
           workflow_lines = {}
           pinned_action_pattern = re.compile(r"^[^./][^ ]+@[0-9a-f]{40}$")
 
@@ -4719,14 +4720,23 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
               archive_workflows = {}
               archive_direct_uploads = []
               archive_external_reusable_workflows = []
+              archive_source_members = {}
               with tarfile.open(archive_name, "r:") as archive:
                   for member in archive.getmembers():
-                      if not member.isfile() or not member.name.startswith(".github/") or not member.name.endswith((".yml", ".yaml")):
+                      if not member.name.startswith(".github/"):
                           continue
+                      if member.isdir():
+                          continue
+                      if not member.isfile():
+                          raise SystemExit(f"{member.name}: source closure contains a non-regular member")
                       stream = archive.extractfile(member)
                       if stream is None:
                           raise SystemExit("workflow archive member is unreadable")
-                      lines = stream.read().decode("utf-8").splitlines()
+                      contents = stream.read()
+                      archive_source_members[member.name] = contents
+                      if not member.name.endswith((".yml", ".yaml")):
+                          continue
+                      lines = contents.decode("utf-8").splitlines()
                       archive_workflows[member.name] = lines
                       archive_edges[member.name] = [
                           match.group(1)
@@ -4791,6 +4801,7 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
               workflow_lines[archive_name] = archive_workflows
               direct_uploads[archive_name] = archive_direct_uploads
               external_reusable_workflows[archive_name] = archive_external_reusable_workflows
+              archive_members[archive_name] = archive_source_members
 
           def resolve_action_manifest(reference, files):
               root = reference.rstrip("/")
@@ -4803,12 +4814,20 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
               return matches[0]
 
           resolved_action_edges = {}
+          resolved_action_roots = {}
           for archive_name in sys.argv[1:3]:
               files = workflow_lines[archive_name]
               resolved = {}
+              roots = {}
               for owner, references in local_action_edges[archive_name].items():
-                  resolved[owner] = [resolve_action_manifest(reference, files) for reference in references]
+                  manifests = []
+                  for reference in references:
+                      manifest = resolve_action_manifest(reference, files)
+                      manifests.append(manifest)
+                      roots[manifest] = reference if reference.endswith((".yml", ".yaml")) else reference.rstrip("/")
+                  resolved[owner] = manifests
               resolved_action_edges[archive_name] = resolved
+              resolved_action_roots[archive_name] = roots
 
           def reachable_nodes(workflow_edges, action_edges):
               reachable = {".github/workflows/ci-pr.yml"}
@@ -4845,6 +4864,18 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                   material.extend(f"{indent}:{line}" for indent, line in normalized_capability_contract(lines))
               return "\n".join(material).encode("utf-8")
 
+          def reachable_action_files(nodes, action_roots, members):
+              roots = {
+                  root if not root.endswith((".yml", ".yaml")) else root.rsplit("/", 1)[0]
+                  for manifest, root in action_roots.items()
+                  if manifest in nodes
+              }
+              return {
+                  path: contents
+                  for path, contents in members.items()
+                  if any(path == root or path.startswith(root + "/") for root in roots)
+              }
+
           base_reachable = reachable_nodes(local_workflow_edges[base_archive], resolved_action_edges[base_archive])
           head_reachable = reachable_nodes(local_workflow_edges[head_archive], resolved_action_edges[head_archive])
           root_workflow = ".github/workflows/ci-pr.yml"
@@ -4866,8 +4897,25 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                       f"{path}: reachable workflow capability contract differs from the base-owned closed producer contract"
                   )
 
+          base_action_files = reachable_action_files(
+              base_reachable, resolved_action_roots[base_archive], archive_members[base_archive]
+          )
+          head_action_files = reachable_action_files(
+              head_reachable, resolved_action_roots[head_archive], archive_members[head_archive]
+          )
+          if set(base_action_files) != set(head_action_files):
+              raise SystemExit("reachable local action source closure differs from the base-owned contract")
+          for path in sorted(base_action_files):
+              if base_action_files[path] != head_action_files[path]:
+                  raise SystemExit(f"{path}: reachable local action implementation differs from the base-owned contract")
+
           base_contract_sha256 = hashlib.sha256(
               normalized_contract_material(base_reachable, workflow_lines[base_archive])
+              + b"\n"
+              + "\n".join(
+                  f"action-file:{path}:{hashlib.sha256(base_action_files[path]).hexdigest()}"
+                  for path in sorted(base_action_files)
+              ).encode("utf-8")
           ).hexdigest()
           base_binding_material = "\n".join(
               (

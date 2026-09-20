@@ -706,13 +706,19 @@ fn candidate_namespace_script_body() -> String {
         .join("\n")
 }
 
-fn namespace_workflow_archive(root: &Path, name: &str, workflow: &str) -> PathBuf {
+fn namespace_workflow_archive_with_action(
+    root: &Path,
+    name: &str,
+    workflow: &str,
+    action_script: &str,
+) -> PathBuf {
     let tree = root.join(format!("{name}-tree"));
     write(&tree.join(".github/workflows/ci-pr.yml"), workflow);
     write(
         &tree.join(".github/actions/setup/action.yml"),
         "name: setup\nruns:\n  using: composite\n  steps: []\n",
     );
+    write(&tree.join(".github/actions/setup/script.sh"), action_script);
     let archive = root.join(format!("{name}.tar"));
     let output = must(
         Command::new("tar")
@@ -732,8 +738,26 @@ fn namespace_workflow_archive(root: &Path, name: &str, workflow: &str) -> PathBu
 }
 
 fn run_namespace_scanner(root: &Path, base_workflow: &str, head_workflow: &str) -> Output {
-    let base = namespace_workflow_archive(root, "base", base_workflow);
-    let head = namespace_workflow_archive(root, "head", head_workflow);
+    run_namespace_scanner_with_action(
+        root,
+        base_workflow,
+        head_workflow,
+        "#!/bin/sh\necho setup\n",
+        "#!/bin/sh\necho setup\n",
+    )
+}
+
+fn run_namespace_scanner_with_action(
+    root: &Path,
+    base_workflow: &str,
+    head_workflow: &str,
+    base_action_script: &str,
+    head_action_script: &str,
+) -> Output {
+    let base =
+        namespace_workflow_archive_with_action(root, "base", base_workflow, base_action_script);
+    let head =
+        namespace_workflow_archive_with_action(root, "head", head_workflow, head_action_script);
     let mut child = must(
         Command::new("python3")
             .arg("-")
@@ -789,6 +813,17 @@ fn candidate_namespace_scan_rejects_unnamed_external_and_shell_publishers() {
     assert!(
         accepted.status.success(),
         "recursive local action contract escaped: {accepted:?}"
+    );
+    let rejected = run_namespace_scanner_with_action(
+        &root,
+        &local_action,
+        &local_action,
+        "#!/bin/sh\necho base\n",
+        "#!/bin/sh\necho head\n",
+    );
+    assert!(
+        !rejected.status.success(),
+        "local action implementation drift escaped source closure comparison: {rejected:?}"
     );
 
     let changed_top_level = fixed.replace("jobs:\n", "env:\n  CANDIDATE_FEATURE: changed\njobs:\n");
