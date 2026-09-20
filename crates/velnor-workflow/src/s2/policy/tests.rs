@@ -7,7 +7,7 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
 use super::*;
 use crate::s2::{PolicyJobSpec, ProjectConfig};
@@ -686,6 +686,116 @@ fn candidate_transport_rejects_malformed_manifest_and_open_publishers() {
         String::from_utf8_lossy(&output.stderr).contains("producer manifest keys do not match"),
         "malformed manifest rejection names the closed-schema failure: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+fn candidate_namespace_script_body() -> String {
+    let script = crate::s2::candidate_namespace_scan_script();
+    let marker =
+        "          python3 - \"$base_workflow_archive\" \"$head_workflow_archive\" <<'PY'\n";
+    let start = must_some(script.find(marker), "namespace scanner start") + marker.len();
+    let end = must_some(
+        script[start..].find("\n          PY\n"),
+        "namespace scanner end",
+    ) + start;
+    script[start..end]
+        .lines()
+        .map(|line| line.strip_prefix("          ").map_or(line, |value| value))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn namespace_workflow_archive(root: &Path, name: &str, workflow: &str) -> PathBuf {
+    let tree = root.join(format!("{name}-tree"));
+    write(&tree.join(".github/workflows/ci-pr.yml"), workflow);
+    let archive = root.join(format!("{name}.tar"));
+    let output = must(
+        Command::new("tar")
+            .args([
+                "-cf",
+                must_some(archive.to_str(), "namespace archive path"),
+                "-C",
+            ])
+            .arg(must_some(tree.to_str(), "namespace tree path"))
+            .arg(".github/workflows")
+            .env("COPYFILE_DISABLE", "1")
+            .output(),
+        "create namespace archive",
+    );
+    assert!(output.status.success(), "tar stderr: {:?}", output.stderr);
+    archive
+}
+
+fn run_namespace_scanner(root: &Path, workflow: &str) -> Output {
+    let base = namespace_workflow_archive(root, "base", workflow);
+    let head = namespace_workflow_archive(root, "head", workflow);
+    let mut child = must(
+        Command::new("python3")
+            .arg("-")
+            .arg(base)
+            .arg(head)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn(),
+        "spawn namespace scanner",
+    );
+    let mut stdin = must_some(child.stdin.take(), "namespace scanner stdin");
+    must(
+        stdin.write_all(candidate_namespace_script_body().as_bytes()),
+        "write namespace scanner",
+    );
+    drop(stdin);
+    must(child.wait_with_output(), "wait namespace scanner")
+}
+
+#[test]
+fn candidate_namespace_scan_rejects_unnamed_external_and_shell_publishers() {
+    let root = temporary_directory("namespace-scanner");
+    let fixed = r"jobs:
+  candidate_producer:
+    steps:
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: candidate_upload
+        with:
+          name: velnor-workflow-candidate-linux-x64
+          path: candidate
+";
+    let accepted = run_namespace_scanner(&root, fixed);
+    assert!(
+        accepted.status.success(),
+        "fixed publisher at {}: {accepted:?}",
+        root.display()
+    );
+
+    let unnamed = fixed.replace(
+        "          path: candidate\n",
+        "          path: candidate\n  other:\n    steps:\n      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\n        with:\n          name: velnor-workflow-candidate-linux-x64\n          path: other\n",
+    );
+    let rejected = run_namespace_scanner(&root, &unnamed);
+    assert!(
+        !rejected.status.success(),
+        "unnamed publisher escaped: {rejected:?}"
+    );
+
+    let external = fixed.replace(
+        "jobs:\n",
+        "jobs:\n  external:\n    uses: attacker/repo/.github/workflows/publish.yml@0123456789012345678901234567890123456789\n",
+    );
+    let rejected = run_namespace_scanner(&root, &external);
+    assert!(
+        !rejected.status.success(),
+        "external publisher escaped: {rejected:?}"
+    );
+
+    let shell = fixed.replace(
+        "jobs:\n",
+        "jobs:\n  shell_publish:\n    steps:\n      - run: |\n          curl -X POST \"$ACTIONS_RUNTIME_URL\"\n",
+    );
+    let rejected = run_namespace_scanner(&root, &shell);
+    assert!(
+        !rejected.status.success(),
+        "shell publisher escaped: {rejected:?}"
     );
     let _ = fs::remove_dir_all(root);
 }
