@@ -2962,13 +2962,7 @@ pub(crate) fn deb_control_field(
 
 /// A unique scratch directory under the system temp dir.
 fn scratch_dir(kind: &str) -> Result<PathBuf, GeneratorError> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "apt-feed-{kind}-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::SeqCst)
-    ));
+    let dir = std::env::temp_dir().join(format!("apt-feed-{kind}-{}", uuid::Uuid::new_v4()));
     #[cfg(unix)]
     {
         let parent = dir
