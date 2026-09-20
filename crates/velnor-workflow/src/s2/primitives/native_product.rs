@@ -471,7 +471,7 @@ fn render_workflow(
         ""
     };
     let preview_identity_env = if channel == "preview" {
-        "      PRODUCT_VERSION_INPUT: ${{{{ inputs.product-version }}}}\n      PRODUCT_SOURCE_REF_INPUT: ${{{{ inputs.product-source-ref }}}}\n      PRODUCT_RELEASE_TAG_INPUT: ${{{{ inputs.product-release-tag }}}}\n"
+        "      PRODUCT_VERSION_INPUT: ${{ inputs.product-version }}\n      PRODUCT_SOURCE_REF_INPUT: ${{ inputs.product-source-ref }}\n      PRODUCT_RELEASE_TAG_INPUT: ${{ inputs.product-release-tag }}\n"
     } else {
         ""
     };
@@ -487,15 +487,15 @@ fn render_workflow(
         "on:\n  workflow_call:\n",
         &format!("on:\n  workflow_call:\n{workflow_call_inputs}\n"),
     )
-    .replace(
-        "    steps:\n",
-        &format!("{preview_identity_env}    steps:\n"),
-    )
     .replace("${{#actual}}", "${#actual}")
     .replace(
         "never calls gh release create/upload and cannot publish a competing product.",
         "never mutates provider releases or publishes a competing product.",
     );
+    let build_env_marker = format!("      COMPONENTS_JSON: {components_json_q}\n    steps:\n");
+    let build_env_with_preview =
+        format!("      COMPONENTS_JSON: {components_json_q}\n{preview_identity_env}    steps:\n");
+    output = output.replace(&build_env_marker, &build_env_with_preview);
     output = output.replace(
         "      - name: Build and verify typed sibling inventory\n",
         "      - name: Materialize independent component contract\n        run: |\n          set -euo pipefail\n          COMPONENTS_JSON=\"$(jq -cS --slurpfile metadata cargo-metadata.json --argjson targets \"$TARGETS_JSON\" '[.[] as $component | ($metadata[0].packages | map(select(.name == $component.crate))) as $packages | if ($packages | length) != 1 then error(\"component crate is not unique\") else $component + {version:$packages[0].version,targets:$targets} end]' <<<\"$COMPONENTS_JSON\")\"\n          jq -e 'all(.[]; (keys | sort) == [\"binary\",\"crate\",\"feature\",\"identity\",\"name\",\"targets\",\"version\"] and (.version | type == \"string\") and (.targets | type == \"array\"))' <<<\"$COMPONENTS_JSON\" >/dev/null\n          printf 'COMPONENTS_JSON=%s\\n' \"$COMPONENTS_JSON\" >> \"$GITHUB_ENV\"\n          printf '%s\\n' \"$COMPONENTS_JSON\" > components.json\n      - name: Build and verify typed sibling inventory\n",
@@ -726,5 +726,22 @@ mod tests {
         assert!(source.contains("product-version:"));
         assert!(source.contains("PRODUCT_VERSION_INPUT"));
         assert!(source.contains("PRODUCT_RELEASE_TAG_INPUT"));
+        assert!(
+            source.contains("PRODUCT_VERSION_INPUT: ${{ inputs.product-version }}"),
+            "preview input expressions must be single GitHub expressions"
+        );
+        let malformed_input = ["${", "{{{{ inputs."].concat();
+        assert!(
+            !source.contains(&malformed_input),
+            "the producer must not emit quadruple-braced input expressions"
+        );
+        assert!(
+            source.contains("let build_env_marker = format!"),
+            "preview inputs must be inserted into the build environment only"
+        );
+        assert!(
+            !source.contains("\"    steps:\\n\",\\n        &format!(\"{preview_identity_env}"),
+            "preview inputs must not be inserted into every job's steps"
+        );
     }
 }
