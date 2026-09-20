@@ -36,7 +36,224 @@ permissions:
   contents: read
 
 jobs:
+  runtime:
+    name: Prepare renderer (${{ matrix.runner }})
+    permissions:
+      contents: read
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout exact integration source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve exact renderer source and published product
+        id: runtime-source
+        shell: bash
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RENDERER_REVISION: e1c589eb5012a705aa735cb553a5230ff9fec490
+          AUDITED_HEAD: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+          git cat-file -e "$RENDERER_REVISION^{commit}"
+          git merge-base --is-ancestor "$RENDERER_REVISION" HEAD || { echo "::error::renderer pin must be reachable from the checked-out integration candidate" >&2; exit 1; }
+          listing="$(git ls-tree -r "$RENDERER_REVISION" -- 'crates/velnor-workflow' 'Cargo.toml' 'Cargo.lock' 'rust-toolchain.toml' 'rust-toolchain' '.cargo')"
+          test -n "$listing"
+          closure() { printf '%s\nclosure-version:1\nfeatures:%s\nprofile:%s\n' "$(LC_ALL=C sort <<<"$1")" "$2" "$3" | sha256 | awk '{print $1}'; }
+          release="$(closure "$listing" '' release)"
+          candidate="$(closure "$listing" 'tui' debug)"
+          head_listing="$(git ls-tree -r "$AUDITED_HEAD" -- 'crates/velnor-workflow' 'Cargo.toml' 'Cargo.lock' 'rust-toolchain.toml' 'rust-toolchain' '.cargo')"
+          [[ "$(closure "$head_listing" 'tui' debug)" == "$candidate" ]] || { echo "::error::generator source differs from its declared pin; commit the source, pin it, and regenerate before merge" >&2; exit 1; }
+          if [[ 'true' == true ]]; then
+            integration_listing="$(git ls-tree -r HEAD -- 'crates/velnor-workflow' 'Cargo.toml' 'Cargo.lock' 'rust-toolchain.toml' 'rust-toolchain' '.cargo')"
+            [[ "$(closure "$integration_listing" 'tui' debug)" == "$candidate" ]] || { echo "::error::integration source closure differs from the pinned renderer" >&2; exit 1; }
+          fi
+          response="$RUNNER_TEMP/runtime-product-response"
+          if gh api --include "repos/$GITHUB_REPOSITORY/releases/tags/velnor-workflow-runtime-v1-${release:0:16}" > "$response"; then
+            published=true
+          else
+            status="$(awk '/^HTTP\// {print $2; exit}' "$response")"
+            [[ "$status" == 404 ]] || { echo "::error::runtime lookup failed with status $status; source fallback is allowed only for a missing product" >&2; exit 1; }
+            published=false
+          fi
+          { echo "published=$published"; echo "candidate=$candidate"; echo "release=$release"; echo "candidate_name=velnor-workflow-candidate-${candidate:0:16}-$RUNNER_OS-$RUNNER_ARCH"; } >> "$GITHUB_OUTPUT"
+      - name: Set up Velnor workflow runtime
+        id: runtime
+        if: steps.runtime-source.outputs.published == 'true'
+        uses: ./.github/actions/setup-velnor-workflow
+        with:
+          rev: e1c589eb5012a705aa735cb553a5230ff9fec490
+      - name: Set trusted workflow policy revision
+        run: |
+          echo "VELNOR_WORKFLOW_POLICY_REVISION=e1c589eb5012a705aa735cb553a5230ff9fec490" >> "$GITHUB_ENV"
+          echo "VELNOR_WORKFLOW_RUNTIME_CLOSURE=${{ steps.runtime.outputs.closure }}" >> "$GITHUB_ENV"
+      - name: Prepare clean pinned renderer checkout
+        if: steps.runtime-source.outputs.published != 'true'
+        shell: bash
+        working-directory: .
+        env:
+          RENDERER_REVISION: e1c589eb5012a705aa735cb553a5230ff9fec490
+          GH_TOKEN: ""
+          GITHUB_TOKEN: ""
+          RUSTC_WRAPPER: ""
+          RUSTC_WORKSPACE_WRAPPER: ""
+          RUSTFLAGS: ""
+          CARGO_ENCODED_RUSTFLAGS: ""
+        run: |
+          set -euo pipefail
+          sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+          source="$RUNNER_TEMP/renderer-source"
+          git worktree add --detach "$source" "$RENDERER_REVISION"
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all)"
+          cd "$source"
+      - name: Check renderer formatting
+        if: steps.runtime-source.outputs.published != 'true'
+        working-directory: ${{ runner.temp }}/renderer-source
+        env:
+          GH_TOKEN: ""
+          GITHUB_TOKEN: ""
+          RUSTC_WRAPPER: ""
+          RUSTC_WORKSPACE_WRAPPER: ""
+          RUSTFLAGS: ""
+          CARGO_ENCODED_RUSTFLAGS: ""
+        run: env -i PATH="$PATH" HOME="$HOME" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="$RUNNER_TEMP/renderer-cargo-home" CARGO_TARGET_DIR="$RUNNER_TEMP/renderer-target" cargo fmt --all -- --check
+      - name: Check renderer Clippy
+        if: steps.runtime-source.outputs.published != 'true'
+        working-directory: ${{ runner.temp }}/renderer-source
+        env:
+          GH_TOKEN: ""
+          GITHUB_TOKEN: ""
+          RUSTC_WRAPPER: ""
+          RUSTC_WORKSPACE_WRAPPER: ""
+          RUSTFLAGS: ""
+          CARGO_ENCODED_RUSTFLAGS: ""
+        run: env -i PATH="$PATH" HOME="$HOME" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="$RUNNER_TEMP/renderer-cargo-home" CARGO_TARGET_DIR="$RUNNER_TEMP/renderer-target" cargo clippy --locked --package velnor-workflow --all-targets --no-default-features --features tui -- -D warnings
+      - name: Build exact renderer source
+        if: steps.runtime-source.outputs.published != 'true'
+        working-directory: ${{ runner.temp }}/renderer-source
+        env:
+          GH_TOKEN: ""
+          GITHUB_TOKEN: ""
+          RUSTC_WRAPPER: ""
+          RUSTC_WORKSPACE_WRAPPER: ""
+          RUSTFLAGS: ""
+          CARGO_ENCODED_RUSTFLAGS: ""
+        run: env -i PATH="$PATH" HOME="$HOME" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="$RUNNER_TEMP/renderer-cargo-home" CARGO_TARGET_DIR="$RUNNER_TEMP/renderer-target" cargo build --locked --package velnor-workflow --bin velnor-workflow --no-default-features --features tui
+      - name: Verify source runtime identity
+        if: steps.runtime-source.outputs.published != 'true'
+        shell: bash
+        working-directory: .
+        env:
+          RENDERER_REVISION: e1c589eb5012a705aa735cb553a5230ff9fec490
+          EXPECTED_CLOSURE: ${{ steps.runtime-source.outputs.candidate }}
+          GH_TOKEN: ""
+          GITHUB_TOKEN: ""
+          RUSTC_WRAPPER: ""
+          RUSTC_WORKSPACE_WRAPPER: ""
+          RUSTFLAGS: ""
+          CARGO_ENCODED_RUSTFLAGS: ""
+        run: |
+          set -euo pipefail
+          sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+          source="$RUNNER_TEMP/renderer-source"
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all)"
+          binary="$RUNNER_TEMP/renderer-target/debug/velnor-workflow"
+          [[ "$("$binary" --revision)" == "$RENDERER_REVISION" ]]
+          [[ "$("$binary" --closure)" == "$EXPECTED_CLOSURE" ]]
+          echo "$RUNNER_TEMP/renderer-target/debug" >> "$GITHUB_PATH"
+          echo "VELNOR_WORKFLOW_PINNED_BINARY=$binary" >> "$GITHUB_ENV"
+      - name: Bind runtime closure
+        shell: bash
+        working-directory: .
+        env:
+          EXPECTED_CLOSURE: ${{ steps.runtime.outputs.closure || steps.runtime-source.outputs.candidate }}
+          GH_TOKEN: ""
+          GITHUB_TOKEN: ""
+          RUSTC_WRAPPER: ""
+          RUSTC_WORKSPACE_WRAPPER: ""
+          RUSTFLAGS: ""
+          CARGO_ENCODED_RUSTFLAGS: ""
+        run: |
+          set -euo pipefail
+          sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+          [[ "$(velnor-workflow --closure)" == "$EXPECTED_CLOSURE" ]]
+          echo "VELNOR_WORKFLOW_RUNTIME_CLOSURE=$EXPECTED_CLOSURE" >> "$GITHUB_ENV"
+          if [[ "${{ steps.runtime-source.outputs.published }}" == true ]]; then
+            echo "VELNOR_WORKFLOW_RUNTIME_PROFILE=release" >> "$GITHUB_ENV"
+            echo "VELNOR_WORKFLOW_RUNTIME_FEATURES=" >> "$GITHUB_ENV"
+          else
+            echo "VELNOR_WORKFLOW_RUNTIME_PROFILE=debug" >> "$GITHUB_ENV"
+            echo "VELNOR_WORKFLOW_RUNTIME_FEATURES=tui" >> "$GITHUB_ENV"
+          fi
+          echo "VELNOR_WORKFLOW_POLICY_REVISION=e1c589eb5012a705aa735cb553a5230ff9fec490" >> "$GITHUB_ENV"
+      - name: Prepare source candidate for trusted policy
+        if: true && steps.runtime-source.outputs.published != 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        shell: bash
+        working-directory: .
+        env:
+          CANDIDATE_CLOSURE: ${{ steps.runtime-source.outputs.candidate }}
+          CANDIDATE_HEAD: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ""
+          GITHUB_TOKEN: ""
+          RUSTC_WRAPPER: ""
+          RUSTC_WORKSPACE_WRAPPER: ""
+          RUSTFLAGS: ""
+          CARGO_ENCODED_RUSTFLAGS: ""
+        run: |
+          set -euo pipefail
+          sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+          stage="$RUNNER_TEMP/renderer-candidate"
+          mkdir -p "$stage"
+          install -m 0755 "$(command -v velnor-workflow)" "$stage/velnor-workflow"
+          digest="$(sha256 "$stage/velnor-workflow" | awk '{print $1}')"
+          jq -n --arg profile debug --arg platform "$RUNNER_OS-$RUNNER_ARCH" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" --arg revision "$CANDIDATE_HEAD" --arg closure "$CANDIDATE_CLOSURE" --arg build_revision 'e1c589eb5012a705aa735cb553a5230ff9fec490' --arg binary_sha256 "$digest" '{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, run_attempt: $run_attempt, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}' > "$stage/candidate-manifest.json"
+      - name: Publish source candidate for trusted policy
+        if: true && steps.runtime-source.outputs.published != 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.runtime-source.outputs.candidate_name }}
+          path: ${{ runner.temp }}/renderer-candidate
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+      - name: Prepare Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: e1c589eb5012a705aa735cb553a5230ff9fec490
+        run: |
+          set -euo pipefail
+          sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+          stage="$RUNNER_TEMP/velnor-workflow-runtime"
+          mkdir -p "$stage"
+          src="$(command -v velnor-workflow)"
+          install -m 0755 "$src" "$stage/velnor-workflow"
+          digest="$(sha256 "$stage/velnor-workflow" | awk '{print $1}')"
+          policy_src="${VELNOR_WORKFLOW_PINNED_BINARY:-$src}"
+          install -m 0755 "$policy_src" "$stage/velnor-workflow-policy"
+          policy_revision="$("$stage/velnor-workflow-policy" --revision)"
+          policy_closure="$("$stage/velnor-workflow-policy" --closure)"
+          [[ "$policy_closure" == "$VELNOR_WORKFLOW_RUNTIME_CLOSURE" ]] || { echo "::error::policy runtime closure mismatch" >&2; exit 1; }
+          [[ "$("$stage/velnor-workflow" --closure)" == "$VELNOR_WORKFLOW_RUNTIME_CLOSURE" ]] || { echo "::error::runtime closure mismatch" >&2; exit 1; }
+          policy_digest="$(sha256 "$stage/velnor-workflow-policy" | awk '{print $1}')"
+          jq -n --arg repository "$GITHUB_REPOSITORY" --arg revision "$EXPECTED_REVISION" --arg closure "$VELNOR_WORKFLOW_RUNTIME_CLOSURE" --arg profile "${VELNOR_WORKFLOW_RUNTIME_PROFILE:-release}" --arg features "${VELNOR_WORKFLOW_RUNTIME_FEATURES:-}" --arg platform "$RUNNER_OS-$RUNNER_ARCH" --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" --arg job_id "${{ github.job }}" --arg binary_sha256 "$digest" --arg policy_revision "$policy_revision" --arg policy_closure "$policy_closure" --arg policy_binary_sha256 "$policy_digest" '{repository: $repository, revision: $revision, closure: $closure, profile: $profile, features: $features, platform: $platform, run_id: $run_id, run_attempt: $run_attempt, job_id: $job_id, binary_sha256: $binary_sha256, policy_revision: $policy_revision, policy_closure: $policy_closure, policy_binary_sha256: $policy_binary_sha256}' > "$stage/manifest.json"
+      - name: Publish Velnor workflow runtime
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: velnor-workflow-runtime-e1c589eb5012a705aa735cb553a5230ff9fec490-${{ runner.os }}-${{ runner.arch }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/velnor-workflow-runtime
+          if-no-files-found: error
+          retention-days: 7
   plan:
+    needs: [runtime]
     name: "Control / Planning"
     runs-on: ubuntu-24.04
     outputs:
@@ -59,13 +276,61 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        id: runtime
-        uses: ./.github/actions/setup-velnor-workflow
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          rev: 38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9" >> "$GITHUB_ENV"
+          name: velnor-workflow-runtime-e1c589eb5012a705aa735cb553a5230ff9fec490-${{ runner.os }}-${{ runner.arch }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/velnor-workflow-runtime-download
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        working-directory: .
+        env:
+          EXPECTED_REVISION: e1c589eb5012a705aa735cb553a5230ff9fec490
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+          stage="$RUNNER_TEMP/velnor-workflow-runtime-download"
+          manifest="$stage/manifest.json"
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "$RUNNER_OS-$RUNNER_ARCH" --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" --arg job "runtime" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and .run_attempt == $run_attempt and .job_id == $job and (.policy_revision | test("^[0-9a-f]{40}$")) and (.profile != "debug" or .policy_revision == $revision) and ((.profile == "release" and .features == "") or (.profile == "debug" and .features == "tui")) and (.binary_sha256 | test("^[0-9a-f]{64}$")) and (.policy_binary_sha256 | test("^[0-9a-f]{64}$")) and (.closure | test("^[0-9a-f]{64}$")) and .closure == .policy_closure' "$manifest" >/dev/null
+          if [[ 'true' == true ]]; then
+            if ! git cat-file -e "$EXPECTED_REVISION^{commit}" 2>/dev/null; then
+              auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+              git -c "http.extraheader=AUTHORIZATION: basic $auth" fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$EXPECTED_REVISION"
+            fi
+          listing="$(git ls-tree -r "$EXPECTED_REVISION" -- 'crates/velnor-workflow' 'Cargo.toml' 'Cargo.lock' 'rust-toolchain.toml' 'rust-toolchain' '.cargo')"
+          test -n "$listing"
+          features="$(jq -er '.features | strings' "$manifest")"
+          profile="$(jq -er .profile "$manifest")"
+          closure="$(printf '%s\nclosure-version:1\nfeatures:%s\nprofile:%s\n' "$(LC_ALL=C sort <<<"$listing")" "$features" "$profile" | sha256 | awk '{print $1}')"
+          [[ "$(jq -er .closure "$manifest")" == "$closure" ]] || { echo "::error::runtime source closure mismatch" >&2; exit 1; }
+          fi
+          for pair in 'velnor-workflow binary_sha256' 'velnor-workflow-policy policy_binary_sha256'; do
+            read -r binary field <<< "$pair"
+            expected="$(jq -er --arg field "$field" '.[$field]' "$manifest")"
+            actual="$(sha256 "$stage/$binary" | awk '{print $1}')"
+            [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch: $binary" >&2; exit 1; }
+          done
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        env:
+          GH_TOKEN: ""
+          GITHUB_TOKEN: ""
+        run: |
+          set -euo pipefail
+          sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+          stage="$RUNNER_TEMP/velnor-workflow-runtime-download"
+          home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
+          mkdir -p "$home/bin"
+          install -m 0755 "$stage/velnor-workflow" "$home/bin/velnor-workflow"
+          install -m 0755 "$stage/velnor-workflow-policy" "$home/bin/velnor-workflow-policy"
+          expected_closure="$(jq -er '.policy_closure' "$stage/manifest.json")"
+          for binary in velnor-workflow velnor-workflow-policy; do
+            reported="$("$home/bin/$binary" --closure)"
+            [[ "$reported" == "$expected_closure" ]] || { echo "::error::runtime reports closure $reported, expected $expected_closure" >&2; exit 1; }
+          done
+          echo "$home/bin" >> "$GITHUB_PATH"
+          echo "VELNOR_WORKFLOW_PINNED_BINARY=$home/bin/velnor-workflow-policy" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -80,45 +345,21 @@ jobs:
           if [[ -z "${CI_SCOPE_OVERRIDE:-}" ]]; then unset CI_SCOPE_OVERRIDE; fi
           velnor-workflow plan --config .github/ci/project.toml
 
-      - name: Prepare Velnor workflow runtime
-        shell: bash
-        env:
-          EXPECTED_REVISION: 38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9
-        run: |
-          set -euo pipefail
-          stage="$RUNNER_TEMP/velnor-workflow-runtime"
-          rm -rf "$stage"
-          mkdir -p "$stage"
-          src="$(command -v velnor-workflow)"
-          install -m 0755 "$src" "$stage/velnor-workflow"
-          digest="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"
-          policy_src="${VELNOR_WORKFLOW_PINNED_BINARY:-$src}"
-          install -m 0755 "$policy_src" "$stage/velnor-workflow-policy"
-          policy_revision="$("$stage/velnor-workflow-policy" --revision)"
-          policy_closure="$("$stage/velnor-workflow-policy" --closure)"
-          [[ "$policy_closure" == "${{ steps.runtime.outputs.closure }}" ]] || { echo "::error::policy runtime reports closure $policy_closure, expected ${{ steps.runtime.outputs.closure }}" >&2; exit 1; }
-          policy_digest="$(sha256sum "$stage/velnor-workflow-policy" | awk '{print $1}')"
-          jq -n --arg repository "$GITHUB_REPOSITORY" --arg revision "$EXPECTED_REVISION" --arg closure "${{ steps.runtime.outputs.closure }}" --arg head_branch "${{ github.ref_name }}" --arg platform "${{ runner.os }}-${{ runner.arch }}" --arg run_id "$GITHUB_RUN_ID" --arg job_id "${{ github.job }}" --arg binary_sha256 "$digest" --arg policy_revision "$policy_revision" --arg policy_closure "$policy_closure" --arg policy_binary_sha256 "$policy_digest" '{repository: $repository, revision: $revision, closure: $closure, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256, policy_revision: $policy_revision, policy_closure: $policy_closure, policy_binary_sha256: $policy_binary_sha256}' > "$stage/manifest.json"
-      - name: Publish Velnor workflow runtime
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: velnor-workflow-runtime-38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/velnor-workflow-runtime
-          if-no-files-found: error
-          retention-days: 7
   policy:
     name: Policy
+    needs: [plan]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Trust invariant: this job runs the base branch's Stage-0 validator
     # product against the audited tree under pull_request_target. It holds
     # `contents: read` only, references no secrets, persists no credentials,
-    # and never compiles. When the audited tree differs from the declared
+    # and builds only its exact trusted base pin if its product is absent.
+    # When the audited tree differs from the declared
     # pin's render, it additionally EXECUTES the PR run's prebuilt
     # candidate generator — PR-built code, same-repository runs only, bound
     # to the audited tree by manifest closure plus binary digest before
     # execution — with no secret references, no persisted credentials, the
-    # read-only github.token confined to the Acquire/Ruleset API steps,
+    # read-only github.token confined to source/product/ruleset API steps,
     # and both candidate exec points tokenless.
     permissions:
       contents: read
@@ -140,99 +381,63 @@ jobs:
             git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"
           fi
           git checkout --quiet --detach "$HEAD_SHA"
-      - name: Check out base setup action
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
-          path: policy-setup-action
-          sparse-checkout: .github/actions/setup-velnor-workflow
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        uses: ./policy-setup-action/.github/actions/setup-velnor-workflow
-        with:
-          rev: 38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9
-          checkout-path: ${{ github.workspace }}/policy-checkout
-      - name: Acquire candidate generator product
+          name: velnor-workflow-runtime-e1c589eb5012a705aa735cb553a5230ff9fec490-${{ runner.os }}-${{ runner.arch }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/velnor-workflow-runtime-download
+      - name: Verify Velnor workflow runtime
+        shell: bash
         working-directory: policy-checkout
         env:
+          EXPECTED_REVISION: e1c589eb5012a705aa735cb553a5230ff9fec490
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          BASE_PIN: 38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9
         run: |
           set -euo pipefail
-          pin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"
-          test "$pin" != '' || pin="$(sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{40}).*/\1/p' .github/workflows/ci-policy.yml | head -n 1)"
-          test "$pin" != '' || { echo "::error::audited tree declares no generator pin" >&2; exit 1; }
-          base_closure="$(velnor-workflow closure --rev="$BASE_PIN")"
-          pin_closure="$(velnor-workflow closure --rev="$pin")"
-          if [[ "$pin_closure" == "$base_closure" ]]; then
-            # Same closure means the running base validator IS the pin's
-            # renderer, so --check decides tree==pin-render with no extra
-            # provisioning. A match exits early; a differ falls through to
-            # the candidate path (a generator change in flight) instead of
-            # stranding the validator with a cleared manifest and a red pin
-            # leg. The check output stays visible: on a fall-through it is
-            # the diagnosis, on a match it is one line.
-            if velnor-workflow --plain --check; then
-              echo "pin $pin shares the base closure and renders the tree; the Stage-0 validator renders"
-              echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"
-              exit 0
+          sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+          stage="$RUNNER_TEMP/velnor-workflow-runtime-download"
+          manifest="$stage/manifest.json"
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "$RUNNER_OS-$RUNNER_ARCH" --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" --arg job "runtime" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and .run_attempt == $run_attempt and .job_id == $job and (.policy_revision | test("^[0-9a-f]{40}$")) and (.profile != "debug" or .policy_revision == $revision) and ((.profile == "release" and .features == "") or (.profile == "debug" and .features == "tui")) and (.binary_sha256 | test("^[0-9a-f]{64}$")) and (.policy_binary_sha256 | test("^[0-9a-f]{64}$")) and (.closure | test("^[0-9a-f]{64}$")) and .closure == .policy_closure' "$manifest" >/dev/null
+          if [[ 'true' == true ]]; then
+            if ! git cat-file -e "$EXPECTED_REVISION^{commit}" 2>/dev/null; then
+              auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+              git -c "http.extraheader=AUTHORIZATION: basic $auth" fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$EXPECTED_REVISION"
             fi
-            echo "pin $pin shares the base closure but the tree differs from its render; falling through to the candidate path"
+          listing="$(git ls-tree -r "$EXPECTED_REVISION" -- 'crates/velnor-workflow' 'Cargo.toml' 'Cargo.lock' 'rust-toolchain.toml' 'rust-toolchain' '.cargo')"
+          test -n "$listing"
+          features="$(jq -er '.features | strings' "$manifest")"
+          profile="$(jq -er .profile "$manifest")"
+          closure="$(printf '%s\nclosure-version:1\nfeatures:%s\nprofile:%s\n' "$(LC_ALL=C sort <<<"$listing")" "$features" "$profile" | sha256 | awk '{print $1}')"
+          [[ "$(jq -er .closure "$manifest")" == "$closure" ]] || { echo "::error::runtime source closure mismatch" >&2; exit 1; }
           fi
-          [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || { echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }
-          if ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then
-            git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"
-          fi
-          head_candidate="$(velnor-workflow closure --rev="$HEAD_SHA" --candidate)"
-          name="velnor-workflow-candidate-${head_candidate:0:16}-${RUNNER_OS}-${RUNNER_ARCH}"
-          deadline=$((SECONDS + 900))
-          run_id=""
-          while (( SECONDS < deadline )); do
-            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)]')"
-            waiting=false
-            seen=false
-            while read -r candidate_run; do
-              test "$candidate_run" != '' || continue
-              seen=true
-              status="$(jq -r .status <<<"$candidate_run")"
-              id="$(jq -r .id <<<"$candidate_run")"
-              # $name in the filter is a jq variable, not a shell expansion.
-              # shellcheck disable=SC2016
-              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" | jq -e --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
-                run_id="$id"
-                break 2
-              fi
-              [[ "$status" == "completed" ]] || waiting=true
-            done <<<"$(jq -c '.[]' <<<"$runs")"
-            # No runs yet means the API has not indexed the sibling run, not
-            # that it will never come: keep polling until the deadline.
-            [[ "$seen" == "true" ]] || waiting=true
-            [[ "$waiting" == "true" ]] || { echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }
-            sleep 15
+          for pair in 'velnor-workflow binary_sha256' 'velnor-workflow-policy policy_binary_sha256'; do
+            read -r binary field <<< "$pair"
+            expected="$(jq -er --arg field "$field" '.[$field]' "$manifest")"
+            actual="$(sha256 "$stage/$binary" | awk '{print $1}')"
+            [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch: $binary" >&2; exit 1; }
           done
-          [[ -n "$run_id" ]] || { echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }
-          candidate="$RUNNER_TEMP/velnor-workflow-candidate"
-          rm -rf "$candidate"
-          mkdir -p "$candidate"
-          gh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"
-          jq -e --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{40}$")) and (.closure | test("^[0-9a-f]{64}$")) and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$candidate/candidate-manifest.json" >/dev/null
-          if command -v sha256sum >/dev/null 2>&1; then
-            actual="$(sha256sum "$candidate/velnor-workflow" | awk '{print $1}')"
-          else
-            actual="$(shasum -a 256 "$candidate/velnor-workflow" | awk '{print $1}')"
-          fi
-          expected="$(jq -er .binary_sha256 "$candidate/candidate-manifest.json")"
-          [[ "$actual" == "$expected" ]] || { echo "::error::candidate digest mismatch" >&2; exit 1; }
-          chmod 0755 "$candidate/velnor-workflow"
-          manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
-          [[ "$manifest_closure" == "$head_candidate" ]] || { echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }
-          reported="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --closure)"
-          [[ "$reported" == "$manifest_closure" ]] || { echo "::error::candidate reports closure $reported, manifest claims $manifest_closure" >&2; exit 1; }
-          echo "VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow" >> "$GITHUB_ENV"
-          echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        env:
+          GH_TOKEN: ""
+          GITHUB_TOKEN: ""
+        run: |
+          set -euo pipefail
+          sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+          stage="$RUNNER_TEMP/velnor-workflow-runtime-download"
+          home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
+          mkdir -p "$home/bin"
+          install -m 0755 "$stage/velnor-workflow" "$home/bin/velnor-workflow"
+          install -m 0755 "$stage/velnor-workflow-policy" "$home/bin/velnor-workflow-policy"
+          expected_closure="$(jq -er '.policy_closure' "$stage/manifest.json")"
+          for binary in velnor-workflow velnor-workflow-policy; do
+            reported="$("$home/bin/$binary" --closure)"
+            [[ "$reported" == "$expected_closure" ]] || { echo "::error::runtime reports closure $reported, expected $expected_closure" >&2; exit 1; }
+          done
+          echo "$home/bin" >> "$GITHUB_PATH"
+          echo "VELNOR_WORKFLOW_PINNED_BINARY=$home/bin/velnor-workflow-policy" >> "$GITHUB_ENV"
+      - name: Capture trusted validator
+        run: echo "VELNOR_WORKFLOW_VALIDATOR_BINARY=$(command -v velnor-workflow)" >> "$GITHUB_ENV"
       - name: Resolve required status checks
         env:
           GH_TOKEN: ${{ github.token }}
@@ -261,10 +466,10 @@ jobs:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
-          VELNOR_WORKFLOW_POLICY_REVISION: 38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9
+          VELNOR_WORKFLOW_POLICY_REVISION: e1c589eb5012a705aa735cb553a5230ff9fec490
         run: |
           set -euo pipefail
-          velnor-workflow policy \
+          "$VELNOR_WORKFLOW_VALIDATOR_BINARY" policy \
             --workflow-root "$WORKFLOW_ROOT" \
             --head-sha "$HEAD_SHA" \
             --base-sha "$BASE_SHA" \
@@ -1305,7 +1510,6 @@ jobs:
         rust-toolchain
       cargo_root: "crates/velnor-workflow"
       cargo_net_offline: true
-      candidate_publish: true
       unit_platform: linux-x64
       unit_trust: untrusted-ok
       unit_dependencies: rust-velnor-runner
@@ -1329,7 +1533,6 @@ jobs:
       mbx_enabled: true
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
-      policy_runtime: true
       unit_platform: linux-x64
       unit_trust: untrusted-ok
       unit_dependencies: rust-velnor-runner
@@ -1548,19 +1751,23 @@ jobs:
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
-      mise_runner: true
+      mise_tools: "aqua:oven-sh/bun aqua:j178/prek"
       mbx_enabled: true
-      mbx_compat: "4f81dcee4c93"
+      mbx_compat: "9d2eff4d109b"
       mbx_dependency_files: |
         Cargo.lock
         Cargo.toml
       mbx_freshness_files: |
         ./**/*.rs
+        .pre-commit-config.yaml
         crates/velnor-runner/**
         docker/**
         microvm/**
         mise.lock
         scripts/check-release-feature-boundary.sh
+        scripts/install-hooks.mjs
+        scripts/pre-commit-snapshot.mjs
+        scripts/pre-commit-snapshot.test.mjs
         scripts/test-check-release-feature-boundary.sh
       cache_paths: |
         ~/.cargo/registry
@@ -1588,6 +1795,7 @@ jobs:
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:oven-sh/bun aqua:j178/prek"
       mbx_enabled: true
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"

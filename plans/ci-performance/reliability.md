@@ -266,3 +266,34 @@ unique jobs and 3,944 logs; 1,661 target runs remain uncollected. Explicit
 The draft remains unmerged. Source pin/generation, hosted hook and package
 proof, typed CI ordering, feature correspondence, merge queue, cache workload
 identity, and full failure disposition remain active work.
+
+## Exact renderer activation after the source checkpoint
+
+The source checkpoint is pushed through `5293011a`. The active checkout now
+has the pinned prek hook installed by `mise run bootstrap`; installation
+completed successfully and uses the isolated index launcher.
+
+A detached checkout of `e1c589eb5012a705aa735cb553a5230ff9fec490` built with
+`cargo build --locked -p velnor-workflow --no-default-features --features tui`.
+Its reported revision is that exact commit, its feature set is `tui`, and its
+full debug source closure is
+`fa59414c9f36feeccf4df27e41dc23a2ce5d0608c7310d72abb3321970cedadd`.
+The current branch reports the identical closure. The repository pin now
+names this source commit, and the exact binary scanned the repository before
+regenerating the owned workflow surface. A subsequent `--plain --check`
+passed without changes.
+
+The attestation-verified published validator from the trusted base revision
+`38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9` accepted all 11 policy rules against
+the generated candidate, using the exact renderer above and the live ruleset
+contexts `ci-required,DCO,Policy`. Ruleset `19573071` still requires strict
+up-to-date validation, GitHub Actions App `15368` for `ci-required` and
+`Policy`, and DCO App `974774`. The first local policy invocation omitted
+`Policy` from its supplied context list and correctly failed; the corrected
+invocation uses the independently re-read server configuration.
+
+Actionlint passed with installed ShellCheck `0.11.0` selected explicitly.
+The ordinary local invocation encountered an unrelated unconfigured
+ShellCheck mise shim; no lint check was disabled. The regenerated full generator suite passed all 1,967 tests with no
+skips in 57.941 seconds (`cargo nextest run --locked -p velnor-workflow`).
+Hosted execution remains a separate verification obligation.
