@@ -5716,7 +5716,7 @@ fn maybe_startup_host_docker_reclaim_with(
         }
         for claims in &report.unreadable_claims {
             eprintln!(
-                "Warning: startup builder horizon reap: unreadable claim file {claims} pins \
+                "Warning: startup builder horizon reap: unreadable ownership file {claims} pins \
                  its builder as claimed; quiesce this daemon's jobs, delete the file, and \
                  let the next claim recreate it"
             );
@@ -16734,7 +16734,7 @@ fn doctor_host_docker_reclaim(
         }
         for claims in &report.unreadable_claims {
             eprintln!(
-                "doctor builder horizon: unreadable claim file {claims} pins its builder as \
+                "doctor builder horizon: unreadable ownership file {claims} pins its builder as \
                  claimed; quiesce this daemon's jobs, delete the file, and let the next \
                  claim recreate it"
             );
