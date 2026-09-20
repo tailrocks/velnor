@@ -13,6 +13,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;

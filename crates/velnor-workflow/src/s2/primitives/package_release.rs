@@ -1507,7 +1507,11 @@ rollback() {
           rollback_status=1
         fi
         if [ "$rollback_status" -eq 0 ]; then
-          while IFS=$'\t' read -r asset_id asset_name; do
+          while IFS=$'\t' read -r asset_id asset_name asset_digest; do
+            if [ -z "$asset_id" ] || [ -z "$asset_name" ] || ! [[ "$asset_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              rollback_status=1
+              break
+            fi
             asset_status=0
             asset_was_in_old_set "$asset_name"
             asset_status="$?"
@@ -3527,6 +3531,7 @@ mkdir -p "$transaction_dir"
 printf '%s\n' '7	candidate.tar.gz	sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > "$owner_assets"
 assert_rolling_ownership() { return 0; }
 replace_owned_asset_after_delete() {
+  printf '%s\t%s\n' "$1" "$2" > "$TEST_TMPDIR/observed-asset"
   test "$1" = 7
   test "$2" = candidate.tar.gz
   : > "$owner_assets"
@@ -3553,6 +3558,8 @@ set -e
 test "$rollback_status" -eq 1
 test -s "$TEST_TMPDIR/deleted"
 test "$(wc -l < "$TEST_TMPDIR/deleted")" -eq 1
+printf '%s\t%s\n' 7 candidate.tar.gz > "$TEST_TMPDIR/expected-asset"
+cmp -s "$TEST_TMPDIR/expected-asset" "$TEST_TMPDIR/observed-asset"
 test ! -s "$owner_assets"
 "#,
         );

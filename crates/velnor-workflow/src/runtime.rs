@@ -2787,7 +2787,7 @@ mod run_cmd_stall_tests {
         );
         assert_eq!(
             parse_run_cmd_stall_limit(Some(" 120 ")),
-            Duration::from_secs(120)
+            Duration::from_mins(2)
         );
         for invalid in ["", "0", "-5", "ten", "1.5"] {
             assert_eq!(
@@ -2853,7 +2853,7 @@ mod run_cmd_stall_tests {
             &std::env::temp_dir(),
             "test-unit",
             "exit 3",
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         );
         let message = match result {
             Ok(()) => String::from("<unexpected success>"),
