@@ -331,18 +331,36 @@ pub(crate) struct G0WorkflowBinding {
 pub(crate) struct G0CheckProducer {
     pub context: String,
     pub app_id: String,
+    /// Provider shape derived from the captured check App and API object.
+    /// This is not inferred from a URL string.
+    pub provider: G0CheckProvider,
+    pub app_slug: String,
     pub check_suite_id: u64,
     pub check_run_id: u64,
     pub workflow_run_id: u64,
     pub run_attempt: u32,
     pub job_id: u64,
+    pub job_run_id: u64,
+    pub job_run_attempt: u32,
+    pub job_check_run_id: u64,
+    pub job_source_sha: String,
+    pub job_html_url: String,
     pub source_sha: String,
     pub actual_checkout_sha: String,
     pub event: String,
     pub status: String,
     pub conclusion: String,
-    pub source_url: String,
+    /// The exact provider `html_url` returned by the captured check-run API
+    /// object. `details_url` is a different field and is never accepted here.
+    pub html_url: String,
     pub raw_object_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum G0CheckProvider {
+    GithubActions,
+    ExternalApp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
