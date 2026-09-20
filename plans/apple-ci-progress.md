@@ -50,12 +50,25 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
   existing ids; 2 new tests, lib 1894 green). Increment 3 complete:
   static Package.swift/Xcode/XcodeGen/BoltFFI discovery with
   product edges, no project-code execution, no Jackin literals.
-- Increments 4-8 per goal: cache/artifact, hosted macOS, Jackin
-  migration (#1013 incl. Landlock P1), native provider, proof/cleanup.
+- Increment 4: cache/artifact execution. Grounding done: `Unit.cache`
+  is one `CacheSpec` (`s2/mod.rs:774`: key_files/paths/purpose);
+  `NamedProduct` is name/task/env/outputs (`s2/platform.rs:30`);
+  handoff tests live in `tests/selection_artifact_handoff.rs` and
+  `tests/prepared_tool_handoff.rs`. Slices: 4a Swift/Xcode cache
+  layers (new `CachePurpose` variants, toolchain key boundary,
+  scanner assignment); 4b exact native-product identity
+  (transitive input digest + per-file output manifest +
+  validation); 4c staging + binding-drift check before install;
+  4d verified cross-job artifact transport; 4e per-layer
+  cache-state reporting (`snapshot.rs`).
+- Increments 5-8 per goal: hosted macOS, Jackin migration (#1013
+  incl. Landlock P1), native provider, proof/cleanup.
 - Benchmarks: none yet; set latency goals after first controlled baseline.
 
 ## Continue
 
 1. `git checkout integrate/apple-ci-s2`; `cargo test -p velnor-workflow`.
-2. Next edit surface: `crates/velnor-workflow/src/s2/scan/swift.rs`.
+2. Next edit surface: 4a Swift cache layers —
+   `s2/mod.rs` (`CachePurpose`), `s2/scan/swift.rs` (assignment),
+   `s2/primitives/ir.rs` (rendering).
 3. Keep one branch per repo; merge main in, never rebase; `git commit -s`.
