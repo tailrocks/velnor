@@ -9949,7 +9949,7 @@ mod tests {
 
     #[test]
     fn complete_g0_fixture_round_trips_through_public_check_paths() {
-        let (manifest, snapshot, mut inventory) = complete_g0_fixture();
+        let (mut manifest, mut snapshot, mut inventory) = complete_g0_fixture();
         // Add one independently captured provider chain to the serialized
         // collector.  The 32-repository fixture remains synthetic, but this
         // path proves the public JSON entrypoint consumes real raw selection
@@ -10012,6 +10012,62 @@ mod tests {
                 &real_app_bytes,
             ),
         ]);
+        let real_dco_check = G0CheckProducer {
+            context: "DCO".to_owned(),
+            app_id: "974774".to_owned(),
+            app_slug: "dco-2".to_owned(),
+            provider: G0CheckProvider::ExternalApp,
+            api: G0ApiKind::Rest,
+            check_suite_id: 96_108_219_979,
+            check_run_id: 106_031_458_188,
+            source_sha: real_source_sha.to_owned(),
+            event: "pull_request".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: "success".to_owned(),
+            html_url: "https://github.com/tailrocks/velnor/runs/106031458188".to_owned(),
+            raw_object_refs: vec![
+                "real-public-checks-raw".to_owned(),
+                "real-public-suite-raw".to_owned(),
+                "real-public-app-raw".to_owned(),
+            ],
+        };
+        // Bind the captured chain into the typed PR producer consumed by the
+        // public checker.  A free-standing raw-object tuple is insufficient:
+        // semantic validation must reach the producer's suite/App identities.
+        manifest.repositories[0].required_check_contexts_and_apps = vec![RequiredContext {
+            context: "DCO".to_owned(),
+            app_id: "974774".to_owned(),
+        }];
+        snapshot.repositories[0].ruleset.required_checks = manifest.repositories[0]
+            .required_check_contexts_and_apps
+            .clone();
+        snapshot.repositories[0].open_prs[0].head_sha = real_source_sha.to_owned();
+        snapshot.repositories[0].open_prs[0].executions[0].trigger_source_sha =
+            real_source_sha.to_owned();
+        snapshot.repositories[0].open_prs[0].executions[0].required_checks =
+            vec![CheckObservation {
+                context: "DCO".to_owned(),
+                app_id: "974774".to_owned(),
+                status: "completed".to_owned(),
+                conclusion: "success".to_owned(),
+                run_id: 50_000 + 1,
+                job_id: String::new(),
+                source_url: real_dco_check.html_url.clone(),
+                event: "pull_request".to_owned(),
+            }];
+        inventory.collector_snapshot.repositories[0].rulesets[0].required_checks =
+            vec![G0RequiredCheckPolicy {
+                context: "DCO".to_owned(),
+                app_id: "974774".to_owned(),
+                ruleset_id: inventory.collector_snapshot.repositories[0].rulesets[0].ruleset_id,
+                raw_object_refs: vec!["raw-repository-1".to_owned()],
+            }];
+        inventory.collector_snapshot.repositories[0].open_prs[0].head_sha =
+            real_source_sha.to_owned();
+        inventory.collector_snapshot.repositories[0].open_prs[0].workflow_bindings[0].source_sha =
+            real_source_sha.to_owned();
+        inventory.collector_snapshot.repositories[0].open_prs[0].required_check_producers =
+            vec![real_dco_check.clone()];
         let serialized_collector =
             serde_json::to_vec(&inventory.collector_snapshot).expect("serialize actual chain");
         let round_tripped_collector: G0CollectorSnapshot =
@@ -10135,8 +10191,59 @@ mod tests {
                 "g0-endpoint-contract" | "g0-request-query" | "g0-raw-object"
             )
         }));
+        assert!(!report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "g0-check-raw-evidence"));
         assert_eq!(report.status, "fail");
         assert_eq!(report.mode, "offline");
+
+        // Rehashing a captured suite body must not make a wrong App/member
+        // identity valid.  This mutation traverses the same serialized
+        // public path and should fail semantic producer binding, not merely
+        // byte-integrity validation.
+        let mut tampered_inventory = baseline_inventory.clone();
+        let suite_index = tampered_inventory
+            .collector_snapshot
+            .raw_objects
+            .iter()
+            .position(|raw| raw.raw_id == "real-public-suite-raw")
+            .expect("serialized DCO suite raw object");
+        let suite_bytes = BASE64
+            .decode(&tampered_inventory.collector_snapshot.raw_objects[suite_index].bytes_base64)
+            .expect("serialized DCO suite bytes");
+        let mut tampered_suite: Value =
+            serde_json::from_slice(&suite_bytes).expect("serialized DCO suite JSON");
+        tampered_suite["app"]["id"] = json!(12_526);
+        tampered_suite["app"]["slug"] = json!("sonarqubecloud");
+        let tampered_suite_bytes = canonical_json(&tampered_suite).into_bytes();
+        tampered_inventory.collector_snapshot.raw_objects[suite_index] = captured_raw_reference(
+            "real-public-suite-raw",
+            "real-public-suite-request",
+            "check_suite",
+            &tampered_suite_bytes,
+        );
+        refresh_typed_inventory_bytes(&mut tampered_inventory);
+        let mut tampered_evidence = evidence.clone();
+        tampered_evidence.g0_inventory = Some(tampered_inventory);
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_vec(&tampered_evidence).expect("serialize semantic mutation"),
+        )
+        .expect("write semantic mutation");
+        let tampered_report = check_paths(&EvidenceCheckInput {
+            stage: "G0".to_owned(),
+            manifest: manifest_path.clone(),
+            snapshot: snapshot_path.clone(),
+            evidence: evidence_path.clone(),
+            release_manifest: None,
+            live: false,
+        })
+        .expect("public checker parses semantic mutation");
+        assert!(tampered_report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "g0-check-raw-evidence"));
 
         let mut graph_inventory = baseline_inventory.clone();
         graph_inventory.collector_snapshot.dependency_graph.edges[0].target_source_ref =
@@ -11385,6 +11492,31 @@ mod tests {
         assert!(findings
             .iter()
             .any(|finding| finding.code == "g0-pagination"));
+    }
+
+    #[test]
+    fn paginated_request_missing_raw_response_fails_closed() {
+        let mut collector = minimal_g0_collector();
+        let endpoint = format!("/repos/tailrocks/velnor/commits/{}/check-runs", sha('a'));
+        let mut request = captured_page_request(&endpoint, "per_page=100&filter=all&page=1", 1);
+        request.request_id = "missing-raw-request".to_owned();
+        request.response_raw_ref = "missing-raw-response".to_owned();
+        collector.requests.push(request);
+
+        let mut findings = Vec::new();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.code == "g0-request-incomplete"),
+            "missing raw response must invalidate request: {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.code == "g0-raw-reference"),
+            "missing raw response must be reported by reference validation: {findings:?}"
+        );
     }
 
     #[test]
