@@ -60,6 +60,7 @@ pub(crate) const PRODUCT_MANIFEST_ASSET: &str = "product-manifest.json";
 /// complete artifact inventory.
 pub(crate) const RELEASE_ATTESTATION_FILE: &str = "release-attestation.json";
 const RELEASE_ATTESTATION_SCHEMA: &str = "velnor.github-release-attestation/v1";
+const GITHUB_API_VERSION: &str = "2022-11-28";
 const PROVENANCE_SIGNER_WORKFLOW: &str = "ci-release-package-signer.yml";
 const PROVENANCE_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
 const PROVENANCE_PREDICATE: &str = "https://slsa.dev/provenance/v1";
@@ -1655,7 +1656,7 @@ fn run_fixed(
     Ok(output.stdout)
 }
 
-const REJECTED_GPGV_STATUSES: [&str; 8] = [
+const REJECTED_GPGV_STATUSES: [&str; 11] = [
     "BADSIG",
     "ERRSIG",
     "EXPSIG",
@@ -1664,6 +1665,9 @@ const REJECTED_GPGV_STATUSES: [&str; 8] = [
     "NO_PUBKEY",
     "NODATA",
     "FAILURE",
+    "KEYEXPIRED",
+    "KEYREVOKED",
+    "ERROR",
 ];
 
 fn reject_gpgv_statuses(output: &[u8], label: &str) -> Result<(), GeneratorError> {
@@ -2739,7 +2743,7 @@ fn valid_provider_timestamp(value: &str) -> bool {
         return false;
     }
     match bytes[19] {
-        b'Z' => true,
+        b'Z' => bytes.len() == 20,
         b'.' => {
             let fraction_len = bytes.len().saturating_sub(21);
             bytes.last() == Some(&b'Z')
@@ -2762,6 +2766,7 @@ struct ProviderReleaseFacts {
     published_at: String,
     html_url: String,
     assets: Vec<DiscoveryAsset>,
+    asset_digests: BTreeMap<u64, String>,
 }
 
 /// Read one JSON response from the fixed GitHub API command. The endpoint is
@@ -2780,6 +2785,8 @@ fn provider_api_json(
     args.extend([
         "--header".to_owned(),
         "Accept: application/vnd.github+json".to_owned(),
+        "--header".to_owned(),
+        format!("X-GitHub-Api-Version: {GITHUB_API_VERSION}"),
         endpoint.to_owned(),
     ]);
     let bytes = run_fixed("gh", &args, None, path_overlay)?;
@@ -2796,17 +2803,17 @@ fn provider_asset_rows(
     source_repository: &str,
     tag: &str,
     paginated: bool,
-) -> Result<Vec<DiscoveryAsset>, GeneratorError> {
+) -> Result<(Vec<DiscoveryAsset>, BTreeMap<u64, String>), GeneratorError> {
     let rows = document
         .as_array()
         .ok_or_else(|| GeneratorError::usage(format!("{label} is not an array")))?;
     let mut flattened = Vec::new();
-    if paginated && !rows.iter().all(serde_json::Value::is_array) {
-        return Err(GeneratorError::usage(format!(
-            "{label} is not a strict paginated response"
-        )));
-    }
-    if rows.iter().all(serde_json::Value::is_array) {
+    if paginated {
+        if !rows.iter().all(serde_json::Value::is_array) {
+            return Err(GeneratorError::usage(format!(
+                "{label} is not a strict paginated response"
+            )));
+        }
         for page in rows {
             flattened.extend(
                 page.as_array()
@@ -2815,11 +2822,11 @@ fn provider_asset_rows(
                     .cloned(),
             );
         }
-    } else if !paginated && rows.iter().all(serde_json::Value::is_object) {
+    } else if rows.iter().all(serde_json::Value::is_object) {
         flattened.extend(rows.iter().cloned());
     } else {
         return Err(GeneratorError::usage(format!(
-            "{label} has a mixed pagination shape"
+            "{label} has a nested or mixed response shape"
         )));
     }
     if flattened.is_empty() {
@@ -2828,6 +2835,7 @@ fn provider_asset_rows(
     let mut names = BTreeSet::new();
     let mut ids = BTreeSet::new();
     let mut assets = Vec::with_capacity(flattened.len());
+    let mut digests = BTreeMap::new();
     for asset in flattened {
         let id = positive_field(&asset, "id")?;
         let name = field(&asset, "name")?.to_owned();
@@ -2858,6 +2866,16 @@ fn provider_asset_rows(
                 "{label} asset API URL is not canonical"
             )));
         }
+        let digest = field(&asset, "digest")?;
+        let digest = digest
+            .strip_prefix("sha256:")
+            .ok_or_else(|| GeneratorError::usage(format!("{label} asset digest is not SHA-256")))?;
+        if !valid_digest(digest) {
+            return Err(GeneratorError::usage(format!(
+                "{label} asset digest is not canonical"
+            )));
+        }
+        digests.insert(id, digest.to_owned());
         assets.push(DiscoveryAsset {
             id,
             name,
@@ -2867,7 +2885,20 @@ fn provider_asset_rows(
         });
     }
     assets.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(assets)
+    Ok((assets, digests))
+}
+
+fn compare_provider_asset_digests(
+    expected: &BTreeMap<u64, String>,
+    actual: &BTreeMap<u64, String>,
+    label: &str,
+) -> Result<(), GeneratorError> {
+    if expected != actual {
+        return Err(GeneratorError::usage(format!(
+            "{label} asset digests differ from the immutable provider census"
+        )));
+    }
+    Ok(())
 }
 
 fn compare_provider_asset_census(
@@ -2908,6 +2939,16 @@ fn validate_provider_facts(
     {
         return Err(GeneratorError::usage(
             "verified GitHub provider facts differ from immutable selection",
+        ));
+    }
+    if facts.assets.iter().any(|asset| {
+        facts
+            .asset_digests
+            .get(&asset.id)
+            .is_none_or(|digest| !valid_digest(digest))
+    }) {
+        return Err(GeneratorError::usage(
+            "verified GitHub provider asset digest census is incomplete",
         ));
     }
     compare_provider_asset_census(
@@ -3055,18 +3096,32 @@ fn acquire_provider_release(
     let owner_id = positive_field(owner, "id")?;
     let repository_owner_login = field(owner, "login")?;
     let owner_type = field(owner, "type")?.to_owned();
+    let owner_api_prefix = match owner_type.as_str() {
+        "User" => "users",
+        "Organization" => "orgs",
+        _ => {
+            return Err(GeneratorError::usage(
+                "GitHub provider repository owner type is not canonical",
+            ));
+        }
+    };
+    let expected_owner_api_url = format!("https://api.github.com/{owner_api_prefix}/{owner_login}");
+    let expected_owner_html_url = format!("https://github.com/{owner_login}");
     if repository_owner_login != owner_login
-        || !matches!(owner_type.as_str(), "User" | "Organization")
+        || field(owner, "url")? != expected_owner_api_url
+        || field(owner, "html_url")? != expected_owner_html_url
     {
         return Err(GeneratorError::usage(
             "GitHub provider repository owner identity is not canonical",
         ));
     }
-    let owner_endpoint = format!("users/{owner_login}");
+    let owner_endpoint = format!("{owner_api_prefix}/{owner_login}");
     let owner_document = provider_api_json(&owner_endpoint, false, path_overlay)?;
     if positive_field(&owner_document, "id")? != owner_id
         || field(&owner_document, "login")? != owner_login
         || field(&owner_document, "type")? != owner_type
+        || field(&owner_document, "url")? != expected_owner_api_url
+        || field(&owner_document, "html_url")? != expected_owner_html_url
     {
         return Err(GeneratorError::usage(
             "GitHub provider owner endpoint differs from repository identity",
@@ -3106,7 +3161,7 @@ fn acquire_provider_release(
             "GitHub provider release identity or publication status differs from immutable selection",
         ));
     }
-    let release_assets = provider_asset_rows(
+    let (release_assets, release_digests) = provider_asset_rows(
         release
             .get("assets")
             .ok_or_else(|| GeneratorError::usage("GitHub provider release assets are missing"))?,
@@ -3120,7 +3175,7 @@ fn acquire_provider_release(
         selection.source_repository, selection.provider_release_id
     );
     let paginated_assets = provider_api_json(&assets_endpoint, true, path_overlay)?;
-    let api_assets = provider_asset_rows(
+    let (api_assets, api_digests) = provider_asset_rows(
         &paginated_assets,
         "GitHub provider paginated release assets",
         &selection.source_repository,
@@ -3128,6 +3183,7 @@ fn acquire_provider_release(
         true,
     )?;
     compare_provider_asset_census(&release_assets, &api_assets, "GitHub provider asset APIs")?;
+    compare_provider_asset_digests(&release_digests, &api_digests, "GitHub provider asset APIs")?;
     compare_provider_asset_census(
         &selection.release_assets,
         &api_assets,
@@ -3145,6 +3201,7 @@ fn acquire_provider_release(
         published_at: selection.published_at.clone(),
         html_url: expected_url.clone(),
         assets: api_assets,
+        asset_digests: api_digests,
     })
 }
 
@@ -3256,6 +3313,11 @@ fn verify_provider_attestation(
             "GitHub provider attestation returned no verified records",
         ));
     }
+    if records.len() != 1 {
+        return Err(GeneratorError::usage(
+            "GitHub provider attestation returned extra verified records",
+        ));
+    }
     let expected_repository_uri = format!("https://github.com/{}", selection.source_repository);
     let expected_signer_prefix = format!("https://github.com/{signer_workflow}@");
     let matched = records.iter().any(|record| {
@@ -3333,6 +3395,19 @@ fn verify_provider_asset_payloads(
     path_overlay: Option<&Path>,
 ) -> Result<(), GeneratorError> {
     validate_provider_facts(provider, selection)?;
+    for asset in &selection.release_assets {
+        let expected_digest = provider
+            .asset_digests
+            .get(&asset.id)
+            .ok_or_else(|| GeneratorError::usage("provider asset digest is missing"))?;
+        let bytes = read_regular_file(&incoming.join(&asset.name))?;
+        if sha256_hex(&bytes) != *expected_digest {
+            return Err(GeneratorError::usage(format!(
+                "provider asset {} bytes differ from provider digest",
+                asset.name
+            )));
+        }
+    }
     let manifest_path = incoming.join(PRODUCT_MANIFEST_ASSET);
     let manifest_bytes = read_regular_file(&manifest_path)?;
     if sha256_hex(&manifest_bytes) != selection.manifest_sha256 {
@@ -8810,6 +8885,11 @@ mod tests {
         must(std::fs::create_dir_all(&bin), "create gh stub bin");
         must(std::fs::create_dir_all(&asset_root), "create gh asset root");
         let log = fixture.root.join("gh.log");
+        let fixture_digests = fixture
+            .assets
+            .iter()
+            .map(|(id, _, bytes)| (*id, sha256_hex(bytes)))
+            .collect::<BTreeMap<_, _>>();
         let release_assets = fixture.document["release_assets"]
             .as_array()
             .expect("fixture release assets")
@@ -8819,6 +8899,10 @@ mod tests {
                 let id = asset["id"].as_u64().expect("fixture asset id");
                 asset["url"] = serde_json::json!(format!(
                     "https://api.github.com/repos/{FIXTURE_SOURCE}/releases/assets/{id}"
+                ));
+                asset["digest"] = serde_json::json!(format!(
+                    "sha256:{}",
+                    fixture_digests.get(&id).expect("fixture asset digest")
                 ));
                 asset
             })
@@ -8841,12 +8925,20 @@ mod tests {
             "id": 456,
             "full_name": FIXTURE_SOURCE,
             "html_url": format!("https://github.com/{FIXTURE_SOURCE}"),
-            "owner": {"id": 789, "login": "example", "type": "Organization"}
+            "owner": {
+                "id": 789,
+                "login": "example",
+                "type": "Organization",
+                "url": "https://api.github.com/orgs/example",
+                "html_url": "https://github.com/example"
+            }
         });
         let owner = serde_json::json!({
             "id": 789,
             "login": "example",
-            "type": "Organization"
+            "type": "Organization",
+            "url": "https://api.github.com/orgs/example",
+            "html_url": "https://github.com/example"
         });
         let tag_ref = serde_json::json!({
             "ref": "refs/tags/v1.2.3",
@@ -8884,7 +8976,7 @@ mod tests {
         .expect("append provider repository case");
         writeln!(
             &mut script,
-            "  users/example) cat \"{}/owner.json\" ;;",
+            "  users/example|orgs/example) cat \"{}/owner.json\" ;;",
             fixture.root.display()
         )
         .expect("append provider owner case");
@@ -9012,6 +9104,16 @@ mod tests {
                 }),
             ),
             (
+                "wrong-asset-digest",
+                "asset digests differ",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("asset-pages.json"), |pages| {
+                        pages[0][0]["digest"] =
+                            serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+                    });
+                }),
+            ),
+            (
                 "duplicate-asset",
                 "duplicate",
                 Box::new(|root| {
@@ -9064,6 +9166,16 @@ mod tests {
                 }),
             ),
             (
+                "nested-release-assets",
+                "nested or mixed response",
+                Box::new(|root| {
+                    rewrite_fixture_json(&root.join("release.json"), |release| {
+                        let assets = release["assets"].clone();
+                        release["assets"] = serde_json::json!([assets]);
+                    });
+                }),
+            ),
+            (
                 "wrong-attestation-source",
                 "attestation identity",
                 Box::new(|root| write_bytes(&root.join("attestation-wrong-source"), b"1")),
@@ -9080,7 +9192,7 @@ mod tests {
             ),
             (
                 "wrong-payload-digest",
-                "provider product manifest bytes",
+                "provider asset product-manifest.json bytes",
                 Box::new(|root| {
                     let path = root.join("asset-by-id/asset-100");
                     let mut bytes = must(std::fs::read(&path), "read fixture payload");
@@ -9109,6 +9221,51 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(&fixture.root);
         }
+    }
+
+    #[test]
+    fn provider_owner_user_shape_is_supported() {
+        let fixture = discovery_fixture("provider-owner-user");
+        let bin = discovery_gh_stub(&fixture);
+        rewrite_fixture_json(&fixture.root.join("repository.json"), |repository| {
+            repository["owner"]["type"] = serde_json::json!("User");
+            repository["owner"]["url"] = serde_json::json!("https://api.github.com/users/example");
+        });
+        rewrite_fixture_json(&fixture.root.join("owner.json"), |owner| {
+            owner["type"] = serde_json::json!("User");
+            owner["url"] = serde_json::json!("https://api.github.com/users/example");
+        });
+        let fetched = fixture.root.join("fetched");
+        must(
+            run_fetch_selection(&fixture.selection_path, &fetched, Some(&bin)),
+            "accept User-shaped provider owner",
+        );
+        let _ = std::fs::remove_dir_all(&fixture.root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_attestation_rejects_extra_records() {
+        let fixture = discovery_fixture("provider-attestation-extra");
+        let bin = fixture.root.join("bin");
+        must(std::fs::create_dir_all(&bin), "create attestation stub bin");
+        write_bytes(&bin.join("gh"), b"#!/bin/sh\nprintf '%s\\n' '[{},{}]'\n");
+        make_executable(&bin.join("gh"));
+        let selection = must(
+            read_discovery_selection(&fixture.selection_path),
+            "read attestation fixture selection",
+        );
+        let error = must_fail(
+            verify_provider_attestation(
+                &fixture.incoming.join(PRODUCT_MANIFEST_ASSET),
+                &selection.manifest_sha256,
+                &selection,
+                Some(&bin),
+            ),
+            "reject extra provider attestation records",
+        );
+        assert!(error.contains("extra verified records"), "{error}");
+        let _ = std::fs::remove_dir_all(&fixture.root);
     }
 
     #[test]
@@ -10050,6 +10207,8 @@ mod tests {
         }
         for invalid in [
             "",
+            "2026-09-20T00:00:00Zx",
+            "2026-09-20T00:00:00Z\0",
             "2026-09-20T00:00:00+00:00",
             "2026-09-20T00:00:00",
             "2026-09-20 00:00:00Z",
@@ -10167,23 +10326,21 @@ mod tests {
             "gpgv InRelease utf8",
         );
         must(
-            run_fixed(
-                "gpgv",
+            run_gpgv(
                 &gpgv_argv(
                     homedir_name,
                     keyring_name,
                     &[signature_name, publication_name],
                 ),
-                None,
+                "record",
                 Some(&bin),
             ),
             "run detached publication gpgv proof",
         );
         must(
-            run_fixed(
-                "gpgv",
+            run_gpgv(
                 &gpgv_argv(homedir_name, keyring_name, &[inrelease_name]),
-                None,
+                "InRelease",
                 Some(&bin),
             ),
             "run InRelease gpgv proof",
@@ -10200,6 +10357,64 @@ mod tests {
         assert!(log.contains(signature_name), "{log}");
         assert!(log.contains(publication_name), "{log}");
         assert!(log.contains(inrelease_name), "{log}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gpgv_wrapper_rejects_status_and_exit_combinations() {
+        const STATUS_FIELDS: &str = "20260920 1789883126 0 4 0 22 10 00";
+        let root = fixture_dir("gpgv-status-wrapper");
+        let bin = root.join("bin");
+        must(std::fs::create_dir_all(&bin), "create gpgv wrapper bin");
+        let marker = root.join("nonzero");
+        let args = gpgv_argv("gpgv-home", "keyring.gpg", &["Release.gpg", "Release"]);
+        for status in ["KEYEXPIRED", "KEYREVOKED", "ERROR"] {
+            for nonzero in [false, true] {
+                if nonzero {
+                    write_bytes(&marker, b"1");
+                } else if marker.exists() {
+                    must(std::fs::remove_file(&marker), "clear gpgv exit marker");
+                }
+                let script = format!(
+                    "#!/bin/sh\nprintf '%s\\n' '[GNUPG:] VALIDSIG {FIXTURE_FPR} {STATUS_FIELDS} {FIXTURE_FPR}'\nprintf '%s\\n' '[GNUPG:] {status} {FIXTURE_FPR}'\nif [ -f \"{}\" ]; then exit 2; fi\n",
+                    marker.display()
+                );
+                write_bytes(&bin.join("gpgv"), script.as_bytes());
+                make_executable(&bin.join("gpgv"));
+                let error = must_fail(
+                    run_gpgv(&args, "wrapper", Some(&bin)),
+                    "reject status and exit combination",
+                );
+                assert!(
+                    error.contains("rejected status"),
+                    "{status} nonzero={nonzero}: {error}"
+                );
+            }
+        }
+        if marker.exists() {
+            must(
+                std::fs::remove_file(&marker),
+                "clear valid gpgv exit marker",
+            );
+        }
+        let valid_script = format!(
+            "#!/bin/sh\nprintf '%s\\n' '[GNUPG:] VALIDSIG {FIXTURE_FPR} {STATUS_FIELDS} {FIXTURE_FPR}'\nif [ -f \"{}\" ]; then exit 2; fi\n",
+            marker.display()
+        );
+        write_bytes(&bin.join("gpgv"), valid_script.as_bytes());
+        make_executable(&bin.join("gpgv"));
+        let output = must(run_gpgv(&args, "wrapper", Some(&bin)), "accept valid gpgv");
+        must(
+            gpgv_signer(&output, FIXTURE_FPR, "wrapper"),
+            "accept valid signer output",
+        );
+        write_bytes(&marker, b"1");
+        let error = must_fail(
+            run_gpgv(&args, "wrapper", Some(&bin)),
+            "reject nonzero gpgv exit",
+        );
+        assert!(error.contains("failed with status"), "{error}");
         let _ = std::fs::remove_dir_all(root);
     }
 
