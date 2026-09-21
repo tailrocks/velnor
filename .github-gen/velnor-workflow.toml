@@ -288,6 +288,10 @@ source = ".github-gen/sources/actions/report-velnor-ci-outcomes/action.yml"
 file = ".github/workflows/AGENTS.md"
 source = ".github-gen/sources/workflows-AGENTS.md"
 
+[[static_files]]
+file = ".github/workflows/activate-renderer.yml"
+source = ".github-gen/sources/workflows/activate-renderer.yml"
+
 [[declare]]
 primitive = "release"
 file = "release.yml"
