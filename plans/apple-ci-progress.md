@@ -116,6 +116,24 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
   separate review) — HEAD runner is green; the E0282 came
   from those edits, not from main or the merge.
   Next: Increment 5 hosted macOS integration.
+- Merge `5cba78ac` (main #992 staged full-tree replacement):
+  one conflict (generator-state scan hash), resolved by
+  regeneration (hash-only change, no workflow edits); lib
+  2015 + full_tree_replacement 35 green, clippy/fmt clean.
+- Increment 5 scoping (verified, not assumed): macOS-ARM64
+  runtime already publishes natively on macos-26
+  (`ci-runtime-products.yml` matrix) and the setup action
+  consumes `.products[macOS-ARM64]`; main routes hosted
+  Apple jobs to macOS 26 (`d20d4d1d`); schema-1 Swift unit
+  renders `swift build` + `swift test` with no Xcode
+  selection/probe; no `[apple.toolchain]` policy, no Xcode
+  build identity in cache keys, no s2 native e2e fixture.
+  Breakdown: 5a Xcode toolchain contract (typed policy,
+  DEVELOPER_DIR selection, version probe, cache/telemetry
+  identity); 5b s2 native e2e fixture + generation test
+  (SwiftPM + XcodeGen + BoltFFI producer ordering, ABI,
+  artifact needs); 5c real hosted clean/warm runs with
+  evidence and gate correctness.
   Follow-ups: `.build`
   intermediates need multi-layer cache support; scoped
   `derivedDataPath` per unit; runtime actual-Xcode probe (needs
@@ -127,10 +145,11 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
 ## Continue
 
 1. `git checkout integrate/apple-ci-s2`; `cargo test -p velnor-workflow`.
-2. Next edit surface: Increment 5 hosted macOS integration —
-   published runtime, compatible Xcode toolchain, generated
-   native graph; needs real GitHub-hosted clean/warm runs
-   with actual app coverage. Verified layout facts
+2. Next edit surface: Increment 5a Xcode toolchain contract —
+   `s2/config` typed `[apple.toolchain]`, `ir.rs` selection
+   render, probe step, cache/telemetry identity; then 5b s2
+   native e2e fixture, then 5c real hosted runs.
+   Verified layout facts
    (BoltFFI 0.30.1 @ `2e6320a`): slice dirs
    `macos/ios-{archs_joined}[-simulator]`, structural files
    `Info.plist` + per-slice `lib{crate}.a` (underscored) +
