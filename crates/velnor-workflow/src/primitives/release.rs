@@ -6101,7 +6101,7 @@ cp "$record" "$out"
             ),
             (
                 "ci-release-package-signer.yml",
-                "63e76d5e5615192d52e34bba0b8bd51ddcec3b610e934633dd282c585d9721f1",
+                "6b8532b90264f60a464f05462ea426c271e24507c1b732176b3b3bca0912daff",
             ),
         ];
         let root = scanned_root("default");
@@ -6216,7 +6216,7 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "aebcda490fb06b16894f4c2cc495ac87e82cc63a059eac21b3abc6f925622ec7",
+                "5bb7a1a0357af6b295d2c1a571b8d9e0d915d7e20168c90afa93735db7f41df1",
             ),
             (
                 "preview.yml",

@@ -6644,7 +6644,7 @@ cp "$record" "$out"
             ),
             (
                 "ci-release-package-signer.yml",
-                "63e76d5e5615192d52e34bba0b8bd51ddcec3b610e934633dd282c585d9721f1",
+                "6b8532b90264f60a464f05462ea426c271e24507c1b732176b3b3bca0912daff",
             ),
         ];
         let root = scanned_root("default");
@@ -6760,9 +6760,10 @@ cp "$record" "$out"
             // Per-arch debian artifacts: the twin legs upload
             // `debian-packages-<arch>`, each signer leg addresses its own,
             // and the publishers merge the per-arch artifacts by pattern.
+            // Carried across the b56 action-pin refresh (#1047).
             (
                 "release.yml",
-                "68432317b760b2d8b5ec39d12c5ec343e0ce51f9631188185abf864b8e21107f",
+                "8514a9408c8cb038cace01a99b87a4c0362cdd0bbf25d028a37ba5c39d3c5add",
             ),
             (
                 "preview.yml",
@@ -11930,7 +11931,7 @@ cp "$record" "$out"
         let release = rendered(&surface, "release.yml");
         assert_eq!(
             digest_of(&release),
-            "de8b89dc8e7f38d2a8cad3cd603bd5fba0cfdb2fa79b63dc4a3388acd1f019cb",
+            "7053537dce0c51553a7e3ba0d6e5a657f8563d6ac75c6fbcd2a4cad39aaaf64e",
             "the scalar docker render must stay byte-identical"
         );
         assert!(release.contains("  image-admission:\n"));

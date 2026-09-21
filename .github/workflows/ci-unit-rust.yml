@@ -343,7 +343,7 @@ jobs:
           echo "missing=$missing" >> "$GITHUB_OUTPUT"
       - name: Set up cargo bin tools
         if: ${{ inputs.cargo_bin_tools != '' && (steps.cargo-bin-toolchain.outputs.cache-hit != 'true' || steps.cargo-bin-verify.outputs.missing == 'true') }}
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
         with:
           tool: ${{ inputs.cargo_bin_tools }}
           fallback: none
