@@ -177,12 +177,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-6737cdb3b90d5c2c039b2694b5862e3b163420d2-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-eed474c4a1d9b071fd1b5de00c769c8997398e5a-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
+          EXPECTED_REVISION: eed474c4a1d9b071fd1b5de00c769c8997398e5a
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -196,7 +196,7 @@ jobs:
       - name: Add Velnor workflow runtime to PATH
         shell: bash
         env:
-          EXPECTED_REVISION: 6737cdb3b90d5c2c039b2694b5862e3b163420d2
+          EXPECTED_REVISION: eed474c4a1d9b071fd1b5de00c769c8997398e5a
         run: |
           set -euo pipefail
           home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
@@ -265,6 +265,7 @@ jobs:
             fi
           fi
       - name: Restore unit cache
+        if: ${{ inputs.cache_key_files != '' }}
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -332,7 +333,7 @@ jobs:
           fi
           exit $rc
       - name: Save unit cache
-        if: always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true'
+        if: ${{ inputs.cache_key_files != '' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
