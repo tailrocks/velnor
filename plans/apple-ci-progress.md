@@ -161,6 +161,27 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
   swift_native_e2e 3 green, workflow fmt clean; workspace
   clippy red only on branch scaleset dirt in
   `runner/scaleset/client.rs` (peer scope, untouched).
+- Increment 5c in progress: drift-surface inputs seeded
+  (committed bindings + Package.swift are producer inputs,
+  so a bindings-only edit selects the producer;
+  `6146879a`); fixture carries real boltffi 0.30.1 pack
+  outputs + resolved lock (`.gitignore` negation for the
+  fixture `dist/`, `fe596d81`, fresh-worktree e2e 3/3);
+  fixture is now executable (SwiftPM sources + test,
+  XcodeGen app sources + Info.plist + test host with
+  event loop). Local full-graph run green on arm64 Mac
+  (Xcode 27.0): pack 7.5s, drift diffs clean, one
+  arm64 slice, `swift build` ok, XCTest 1/1 (serial
+  verified; `--parallel` gate honest via negative
+  control exit 1), xcodegen + xcodebuild build + test
+  exit 0. Notes: CLI summary `runners=` line shows
+  the base provider, not the macOS-specialized
+  placement (generated files are correct); fixture app
+  does not yet link the XCFramework (Xcode product
+  edge is a follow-up). Hosted: run `35563785464`
+  (Policy) failed only on candidate-publish starvation
+  after push-cancels, not on code; awaiting a clean
+  uninterrupted run on the final SHA.
 - Increments 5-8 per goal: hosted macOS, Jackin migration (#1013
   incl. Landlock P1), native provider, proof/cleanup.
 - Benchmarks: none yet; set latency goals after first controlled baseline.

@@ -5,9 +5,17 @@ targets:
   BridgeApp:
     type: application
     platform: macOS
+    sources:
+      - BridgeApp
+    info:
+      path: BridgeApp/Info.plist
   BridgeAppTests:
     type: bundle.unit-test
     platform: macOS
+    sources:
+      - BridgeAppTests
+    dependencies:
+      - target: BridgeApp
 schemes:
   BridgeApp:
     build:
