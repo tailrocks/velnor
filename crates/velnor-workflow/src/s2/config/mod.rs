@@ -15,9 +15,11 @@
 pub(crate) mod canonical;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::fs;
 use std::path::{Component, Path};
 
+use serde::de::{Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::s2::provider::{parse_provider_set, parse_selectors, ProviderId, ProviderSelector};
@@ -402,6 +404,85 @@ pub(crate) struct ReleaseJobSection {
     env: BTreeMap<String, String>,
 }
 
+/// One `[[release.image]]` row: one published image of a multi-image
+/// docker contract. `name` keys the row's jobs, artifacts, and `needs`
+/// edges; `image` is the OCI reference it publishes; the build inputs
+/// default to the scalar contract's conventions.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReleaseImageSection {
+    name: Option<String>,
+    image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dockerfile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    platforms: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    needs: Option<Vec<String>>,
+}
+
+/// The `image` key of a `[release]` contract: either the scalar reference
+/// of the single-image publisher (`image = "…"`) or one `[[release.image]]`
+/// row per published image. The two spellings share this key, so TOML
+/// rejects both in one table as a duplicate key: scalar-vs-rows mixing
+/// cannot parse.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub(crate) enum ReleaseImageBinding {
+    Scalar(String),
+    Rows(Vec<ReleaseImageSection>),
+}
+
+/// Parse the `image` key as either the scalar reference or the
+/// `[[release.image]]` rows. A bespoke visitor rather than an untagged
+/// enum, so a mistyped row surfaces the row's own error instead of an
+/// untagged-mismatch shrug.
+fn deserialize_image_binding<'de, D>(
+    deserializer: D,
+) -> Result<Option<ReleaseImageBinding>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct BindingVisitor;
+
+    impl<'de> Visitor<'de> for BindingVisitor {
+        type Value = Option<ReleaseImageBinding>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an image reference string or `[[release.image]]` rows")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            self.visit_string(value.to_owned())
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(ReleaseImageBinding::Scalar(value)))
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut rows = Vec::new();
+            while let Some(row) = seq.next_element::<ReleaseImageSection>()? {
+                rows.push(row);
+            }
+            Ok(Some(ReleaseImageBinding::Rows(rows)))
+        }
+    }
+
+    deserializer.deserialize_any(BindingVisitor)
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReleaseSection {
@@ -420,7 +501,14 @@ pub(crate) struct ReleaseSection {
     binary: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     targets: Vec<String>,
-    image: Option<String>,
+    /// The scalar `image = "…"` reference or the `[[release.image]]`
+    /// rows; absent (or empty rows) keeps the scalar path.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_image_binding",
+        skip_serializing_if = "Option::is_none"
+    )]
+    image: Option<ReleaseImageBinding>,
     /// The workspace package the image lane compiles into the container
     /// (`release-binaries/<arch>/<package>`, which the Dockerfile copies).
     /// Empty selects `package`: repositories whose image embeds a different
@@ -868,7 +956,18 @@ impl ReleaseSection {
     }
 
     pub(crate) fn image(&self) -> Option<&str> {
-        self.image.as_deref()
+        match self.image.as_ref() {
+            Some(ReleaseImageBinding::Scalar(image)) => Some(image),
+            _ => None,
+        }
+    }
+
+    /// The `[[release.image]]` rows, or empty for the scalar contract.
+    pub(crate) fn images(&self) -> &[ReleaseImageSection] {
+        match self.image.as_ref() {
+            Some(ReleaseImageBinding::Rows(rows)) => rows,
+            _ => &[],
+        }
     }
 
     pub(crate) fn image_package(&self) -> Option<&str> {
@@ -1007,6 +1106,32 @@ impl ReleaseJobSection {
 
     pub(crate) fn env(&self) -> &BTreeMap<String, String> {
         &self.env
+    }
+}
+
+impl ReleaseImageSection {
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    pub(crate) fn image(&self) -> Option<&str> {
+        self.image.as_deref()
+    }
+
+    pub(crate) fn dockerfile(&self) -> Option<&str> {
+        self.dockerfile.as_deref()
+    }
+
+    pub(crate) fn context(&self) -> Option<&str> {
+        self.context.as_deref()
+    }
+
+    pub(crate) fn platforms(&self) -> &[String] {
+        &self.platforms
+    }
+
+    pub(crate) fn needs(&self) -> Option<&[String]> {
+        self.needs.as_deref()
     }
 }
 
@@ -2874,11 +2999,45 @@ fn release_job_events(row: &ReleaseJobSection) -> (bool, bool) {
     }
 }
 
-/// Reject cycles before a release job graph reaches GitHub Actions. GitHub
+fn validate_release_job_cycles(rows: &[ReleaseJobSection]) -> Result<(), GeneratorError> {
+    validate_release_graph_cycles(
+        "[[release.job]]",
+        &rows
+            .iter()
+            .map(|row| {
+                (
+                    row.id.as_deref().unwrap_or_default().to_owned(),
+                    row.needs.clone().unwrap_or_default(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>(),
+    )
+}
+
+fn validate_release_image_cycles(rows: &[ReleaseImageSection]) -> Result<(), GeneratorError> {
+    validate_release_graph_cycles(
+        "[[release.image]]",
+        &rows
+            .iter()
+            .map(|row| {
+                (
+                    row.name.as_deref().unwrap_or_default().to_owned(),
+                    row.needs.clone().unwrap_or_default(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>(),
+    )
+}
+
+/// Reject cycles before a release graph reaches GitHub Actions. GitHub
 /// does not report a useful configuration error for a cycle; it leaves every
 /// member waiting forever, so generation must fail with the actual cycle.
-fn validate_release_job_cycles(rows: &[ReleaseJobSection]) -> Result<(), GeneratorError> {
+fn validate_release_graph_cycles(
+    owner: &str,
+    graph: &BTreeMap<String, Vec<String>>,
+) -> Result<(), GeneratorError> {
     fn visit(
+        owner: &str,
         node: &str,
         graph: &BTreeMap<String, Vec<String>>,
         visiting: &mut BTreeSet<String>,
@@ -2893,7 +3052,7 @@ fn validate_release_job_cycles(rows: &[ReleaseJobSection]) -> Result<(), Generat
             let mut cycle = stack[start..].to_vec();
             cycle.push(node.to_owned());
             return Err(GeneratorError::usage(format!(
-                "[[release.job]] dependency cycle: {}",
+                "{owner} dependency cycle: {}",
                 cycle.join(" -> ")
             )));
         }
@@ -2902,11 +3061,11 @@ fn validate_release_job_cycles(rows: &[ReleaseJobSection]) -> Result<(), Generat
         stack.push(node.to_owned());
         if let Some(needs) = graph.get(node) {
             for dependency in needs {
-                // Unknown dependencies are reported by validate_release_jobs
+                // Unknown dependencies are reported by the row validator
                 // before this graph check. Keeping this guard makes the
                 // helper total when unit-tested directly.
                 if graph.contains_key(dependency) {
-                    visit(dependency, graph, visiting, visited, stack)?;
+                    visit(owner, dependency, graph, visiting, visited, stack)?;
                 }
             }
         }
@@ -2916,21 +3075,11 @@ fn validate_release_job_cycles(rows: &[ReleaseJobSection]) -> Result<(), Generat
         Ok(())
     }
 
-    let graph = rows
-        .iter()
-        .map(|row| {
-            (
-                row.id.as_deref().unwrap_or_default().to_owned(),
-                row.needs.clone().unwrap_or_default(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-
     let mut visiting = BTreeSet::new();
     let mut visited = BTreeSet::new();
     let mut stack = Vec::new();
     for node in graph.keys() {
-        visit(node, &graph, &mut visiting, &mut visited, &mut stack)?;
+        visit(owner, node, graph, &mut visiting, &mut visited, &mut stack)?;
     }
     Ok(())
 }
@@ -3132,10 +3281,7 @@ impl RepoGenerationConfig {
                         .is_some_and(|value| !value.is_empty())
             }
             "docker" => {
-                release
-                    .image
-                    .as_deref()
-                    .is_some_and(|value| !value.is_empty())
+                let scalar = release.image().is_some_and(|value| !value.is_empty())
                     && valid_docker_platforms(&release.platforms)
                     && release
                         .dockerfile
@@ -3144,7 +3290,11 @@ impl RepoGenerationConfig {
                     && release
                         .context
                         .as_deref()
-                        .is_none_or(is_contained_repository_path)
+                        .is_none_or(is_contained_repository_path);
+                // Scalar-vs-rows mixing is a usage error in
+                // validate_release_images before this arm runs, so exactly
+                // one side can hold here.
+                scalar ^ !release.images().is_empty()
             }
             "tasks" => !release.job.is_empty(),
             _ => false,
@@ -3486,7 +3636,7 @@ fn validate_release_naming(release: &ReleaseSection) -> Result<(), GeneratorErro
             )));
         }
     }
-    if let Some(image) = release.image.as_deref()
+    if let Some(image) = release.image()
         && !valid_docker_image(image)
     {
         return Err(GeneratorError::usage(format!(
@@ -3610,9 +3760,112 @@ fn validate_release_binding_kind(release: &ReleaseSection) -> Result<(), Generat
     Ok(())
 }
 
+/// Validate the `[[release.image]]` rows of a multi-image docker
+/// contract. Rows render only for `kind = "docker"` and never mix with
+/// the scalar docker inputs; every other rule mirrors `[[release.job]]`
+/// (the identity alphabet, unknown-`needs`, cycles) or the scalar docker
+/// contract (the image alphabet, contained paths, the platform
+/// allowlist).
+fn validate_release_images(release: &ReleaseSection) -> Result<(), GeneratorError> {
+    let rows = release.images();
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let kind = release.kind.as_deref().unwrap_or_default();
+    if kind.is_empty() {
+        return Err(GeneratorError::usage(
+            "[[release.image]] rows need `kind = \"docker\"`: no publisher is declared to render them",
+        ));
+    }
+    if kind != "docker" {
+        return Err(GeneratorError::usage(format!(
+            "[[release.image]] rows render only for kind `docker`, not `{kind}`"
+        )));
+    }
+    if release.image().is_some()
+        || release.dockerfile().is_some()
+        || release.context().is_some()
+        || !release.platforms().is_empty()
+    {
+        return Err(GeneratorError::usage(
+            "[[release.image]] rows do not mix with the scalar `image`, `dockerfile`, `context`, or `platforms` inputs: declare one contract or the other",
+        ));
+    }
+    let mut names = BTreeSet::new();
+    for row in rows {
+        let name = row.name.as_deref().unwrap_or_default();
+        if name.is_empty() {
+            return Err(GeneratorError::usage(
+                "[[release.image]] is missing name; name the image the row publishes",
+            ));
+        }
+        if !valid_check_profile_id(name) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.image]] {name} is not a job id; use letters, digits, - and _ starting with a letter or _"
+            )));
+        }
+        if !names.insert(name.to_owned()) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.image]] {name} is declared twice; image names must be unique"
+            )));
+        }
+    }
+    for row in rows {
+        let name = row.name.as_deref().unwrap_or_default();
+        let Some(image) = row.image.as_deref() else {
+            return Err(GeneratorError::usage(format!(
+                "[[release.image]] {name} is missing image; name the OCI reference the row publishes"
+            )));
+        };
+        if !valid_docker_image(image) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.image]] {name} image must be a lowercase OCI reference `[host[:port]/]path[:tag]`, found `{image}`"
+            )));
+        }
+        if let Some(dockerfile) = row.dockerfile.as_deref()
+            && !is_contained_repository_path(dockerfile)
+        {
+            return Err(GeneratorError::usage(format!(
+                "[[release.image]] {name} dockerfile must stay inside the repository, found `{dockerfile}`"
+            )));
+        }
+        if let Some(context) = row.context.as_deref()
+            && !is_contained_repository_path(context)
+        {
+            return Err(GeneratorError::usage(format!(
+                "[[release.image]] {name} context must stay inside the repository, found `{context}`"
+            )));
+        }
+        if !valid_docker_platforms(&row.platforms) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.image]] {name} platforms must be a subset of {}, found `{}`",
+                DOCKER_PLATFORMS.join(", "),
+                row.platforms.join(", "),
+            )));
+        }
+        if let Some(needs) = row.needs.as_deref() {
+            for dependency in needs {
+                if dependency == name {
+                    return Err(GeneratorError::usage(format!(
+                        "[[release.image]] {name} needs itself; an image cannot wait on its own publication"
+                    )));
+                }
+                if !names.contains(dependency) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[release.image]] {name} needs {dependency}, which no image declares"
+                    )));
+                }
+            }
+        }
+    }
+    validate_release_image_cycles(rows)?;
+    Ok(())
+}
+
 fn validate_release_bindings(release: &ReleaseSection) -> Result<(), GeneratorError> {
     validate_release_naming(release)?;
     validate_release_binding_kind(release)?;
+    validate_release_images(release)?;
     validate_producer_workflow_identity(release)?;
     if let Some(conclusion) = release.producer_conclusion.as_deref()
         && conclusion != "success"
@@ -4578,6 +4831,249 @@ mod tests {
                 "unexpected error for {name}: {error}"
             );
         }
+    }
+
+    fn docker_images_config(head: &str, rows: &str) -> RepoGenerationConfig {
+        config_for(&format!(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\n{head}\n{rows}\n"
+        ))
+    }
+
+    fn docker_images_validation_error(head: &str, rows: &str) -> String {
+        must_fail(
+            docker_images_config(head, rows).validate(&[], &[], &BTreeSet::new()),
+            "multi-image docker config must fail",
+        )
+        .to_string()
+    }
+
+    #[test]
+    fn docker_images_bind_with_all_fields_and_defaults() {
+        let config = docker_images_config(
+            "kind = \"docker\"\n",
+            "[[release.image]]\nname = \"base\"\nimage = \"example/base\"\n\n\
+             [[release.image]]\nname = \"node\"\nimage = \"example/node:1.2\"\n\
+             dockerfile = \"images/node/Dockerfile\"\ncontext = \"images/node\"\n\
+             platforms = [\"linux/amd64\"]\nneeds = [\"base\"]\n",
+        );
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "validate multi-image docker release",
+        );
+        let rows = config.release().images();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name(), Some("base"));
+        assert_eq!(rows[0].image(), Some("example/base"));
+        assert_eq!(rows[0].dockerfile(), None);
+        assert_eq!(rows[0].context(), None);
+        assert!(rows[0].platforms().is_empty());
+        assert_eq!(rows[0].needs(), None);
+        assert_eq!(rows[1].name(), Some("node"));
+        assert_eq!(rows[1].dockerfile(), Some("images/node/Dockerfile"));
+        assert_eq!(rows[1].context(), Some("images/node"));
+        assert_eq!(rows[1].platforms(), &["linux/amd64".to_owned()]);
+        assert_eq!(rows[1].needs(), Some(&["base".to_owned()][..]));
+        assert_eq!(config.release().image(), None);
+    }
+
+    #[test]
+    fn docker_images_reject_bad_names() {
+        for (name, rows, expected) in [
+            (
+                "missing",
+                "[[release.image]]\nimage = \"example/app\"\n",
+                "is missing name",
+            ),
+            (
+                "empty",
+                "[[release.image]]\nname = \"\"\nimage = \"example/app\"\n",
+                "is missing name",
+            ),
+            (
+                "illegal",
+                "[[release.image]]\nname = \"0 bad\"\nimage = \"example/app\"\n",
+                "is not a job id",
+            ),
+            (
+                "duplicate",
+                "[[release.image]]\nname = \"app\"\nimage = \"example/app\"\n\n\
+                 [[release.image]]\nname = \"app\"\nimage = \"example/other\"\n",
+                "is declared twice",
+            ),
+        ] {
+            let error = docker_images_validation_error("kind = \"docker\"\n", rows);
+            assert!(
+                error.contains("[[release.image]]") && error.contains(expected),
+                "unexpected error for {name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn docker_images_reject_bad_images() {
+        for (name, rows, expected) in [
+            (
+                "missing",
+                "[[release.image]]\nname = \"app\"\n",
+                "is missing image",
+            ),
+            (
+                "invalid",
+                "[[release.image]]\nname = \"app\"\nimage = \"GHCR.IO/app with space\"\n",
+                "must be a lowercase OCI reference",
+            ),
+        ] {
+            let error = docker_images_validation_error("kind = \"docker\"\n", rows);
+            assert!(
+                error.contains("[[release.image]] app") && error.contains(expected),
+                "unexpected error for {name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn docker_images_reject_escaping_paths_and_unknown_platforms() {
+        for (name, rows, expected) in [
+            (
+                "dockerfile",
+                "[[release.image]]\nname = \"app\"\nimage = \"example/app\"\ndockerfile = \"../Dockerfile\"\n",
+                "dockerfile must stay inside the repository",
+            ),
+            (
+                "context",
+                "[[release.image]]\nname = \"app\"\nimage = \"example/app\"\ncontext = \"/tmp\"\n",
+                "context must stay inside the repository",
+            ),
+            (
+                "platforms",
+                "[[release.image]]\nname = \"app\"\nimage = \"example/app\"\nplatforms = [\"linux/riscv64\"]\n",
+                "platforms must be a subset of",
+            ),
+        ] {
+            let error = docker_images_validation_error("kind = \"docker\"\n", rows);
+            assert!(
+                error.contains("[[release.image]] app") && error.contains(expected),
+                "unexpected error for {name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn docker_images_require_docker_kind() {
+        let rows = "[[release.image]]\nname = \"app\"\nimage = \"example/app\"\n";
+        let error = docker_images_validation_error("kind = \"tasks\"\n", rows);
+        assert!(
+            error.contains("render only for kind `docker`, not `tasks`"),
+            "{error}"
+        );
+        let error = docker_images_validation_error("", rows);
+        assert!(error.contains("need `kind = \"docker\"`"), "{error}");
+    }
+
+    #[test]
+    fn docker_images_reject_unknown_self_and_cyclic_needs() {
+        for (name, rows, expected) in [
+            (
+                "unknown",
+                "[[release.image]]\nname = \"node\"\nimage = \"example/node\"\nneeds = [\"base\"]\n",
+                "needs base, which no image declares",
+            ),
+            (
+                "self",
+                "[[release.image]]\nname = \"node\"\nimage = \"example/node\"\nneeds = [\"node\"]\n",
+                "needs itself",
+            ),
+            (
+                "cycle",
+                "[[release.image]]\nname = \"base\"\nimage = \"example/base\"\nneeds = [\"node\"]\n\n\
+                 [[release.image]]\nname = \"node\"\nimage = \"example/node\"\nneeds = [\"base\"]\n",
+                "dependency cycle: base -> node -> base",
+            ),
+        ] {
+            let error = docker_images_validation_error("kind = \"docker\"\n", rows);
+            assert!(
+                error.contains("[[release.image]]") && error.contains(expected),
+                "unexpected error for {name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn docker_images_reject_scalar_mixing() {
+        let rows = "[[release.image]]\nname = \"app\"\nimage = \"example/app\"\n";
+        for (name, head) in [
+            (
+                "dockerfile",
+                "kind = \"docker\"\ndockerfile = \"Dockerfile\"\n",
+            ),
+            ("context", "kind = \"docker\"\ncontext = \".\"\n"),
+            (
+                "platforms",
+                "kind = \"docker\"\nplatforms = [\"linux/amd64\"]\n",
+            ),
+        ] {
+            let error = docker_images_validation_error(head, rows);
+            assert!(
+                error.contains("do not mix with the scalar"),
+                "unexpected error for {name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn docker_images_scalar_reference_and_rows_share_one_key() {
+        let error = must_fail(
+            toml::from_str::<RepoGenerationConfig>(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [release]\nenabled = true\nkind = \"docker\"\nimage = \"ghcr.io/example/app\"\n\n\
+                 [[release.image]]\nname = \"app\"\nimage = \"example/app\"\n",
+            ),
+            "scalar image and rows must not parse together",
+        );
+        assert!(
+            error.to_string().contains("duplicate"),
+            "scalar `image` and rows must collide on one key: {error}"
+        );
+    }
+
+    #[test]
+    fn docker_images_complete_the_contract_without_scalar() {
+        let config = docker_images_config(
+            "kind = \"docker\"\n",
+            "[[release.image]]\nname = \"app\"\nimage = \"example/app\"\n",
+        );
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "rows alone complete the docker contract",
+        );
+        let error = must_fail(
+            docker_images_config("kind = \"docker\"\n", "").validate(&[], &[], &BTreeSet::new()),
+            "a docker contract with neither scalar nor rows must fail",
+        );
+        assert!(
+            error.to_string().contains("[release] enabled repositories"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn docker_images_keep_registry_triple_validation() {
+        let error = docker_images_validation_error(
+            "kind = \"docker\"\nregistry = \"Docker.io\"\nregistry_username_secret = \"REGISTRY_USERNAME\"\nregistry_password_secret = \"REGISTRY_PASSWORD\"\n",
+            "[[release.image]]\nname = \"app\"\nimage = \"example/app\"\n",
+        );
+        assert!(
+            error.contains("registry must be a lowercase host"),
+            "an unknown registry host must fail closed with rows declared: {error}"
+        );
+        let error = docker_images_validation_error(
+            "kind = \"docker\"\nregistry = \"docker.io\"\n",
+            "[[release.image]]\nname = \"app\"\nimage = \"example/app\"\n",
+        );
+        assert!(
+            error.contains("is missing"),
+            "a partial triple must fail closed with rows declared: {error}"
+        );
     }
 
     #[test]

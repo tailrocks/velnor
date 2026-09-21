@@ -4134,6 +4134,8 @@ fn render_docker_manifest_job(
 /// verified digest set by the single manifest job. One concurrency group
 /// per ref serializes publishers so a resume and a fresh publication can
 /// never interleave on the same tag.
+// Schema-1 is frozen: multi-image release is a schema-2 `[[release.image]]`
+// contract, so this publisher keeps its single scalar image.
 fn render_docker_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let (unit_jobs, unit_job_ids) = render_release_unit_jobs(config);
     let mut manifest_needs = vec![
