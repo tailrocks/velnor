@@ -626,6 +626,18 @@ impl RunnerSpec {
     ///   it travels via `--env-file` only.
     #[must_use]
     pub fn create_args_with_env_file(&self, env_file: &Path) -> Vec<String> {
+        let cargo_registry = self
+            .state_dir
+            .parent()
+            .unwrap_or(&self.state_dir)
+            .join("cargo/registry");
+        let cargo_git = self
+            .state_dir
+            .parent()
+            .unwrap_or(&self.state_dir)
+            .join("cargo/git");
+        let _ = std::fs::create_dir_all(&cargo_registry);
+        let _ = std::fs::create_dir_all(&cargo_git);
         let mut args = vec![
             "create".to_string(),
             "--name".to_string(),
@@ -669,13 +681,17 @@ impl RunnerSpec {
                     .join("apt/archives")
                     .display()
             ),
+            "--volume".to_string(),
+            format!("{}:/home/runner/.cargo/registry", cargo_registry.display()),
+            "--volume".to_string(),
+            format!("{}:/home/runner/.cargo/git", cargo_git.display()),
         ];
         args.extend(self.identity.label_args(ROLE_RUNNER));
         args.push("--".to_string());
         args.push(self.image.reference().to_string());
         args.push("sh".to_string());
         args.push("-c".to_string());
-        args.push("sudo mkdir -p /home/runner/_work /opt/hostedtoolcache && sudo chown -R runner:runner /home/runner/_work /opt/hostedtoolcache && sudo chmod 0777 /home/runner/_work /opt/hostedtoolcache && (command -v gh >/dev/null 2>&1 || (arch=$(uname -m); [ \"$arch\" = \"aarch64\" ] && gh_arch=\"arm64\" || gh_arch=\"amd64\"; curl -fsSL \"https://github.com/cli/cli/releases/download/v2.101.0/gh_2.101.0_linux_${gh_arch}.tar.gz\" | sudo tar -xz -C /usr/local/bin --strip-components=2 \"gh_2.101.0_linux_${gh_arch}/bin/gh\" 2>/dev/null || true)) && (command -v cargo >/dev/null 2>&1 || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable 2>/dev/null && sudo ln -sf /home/runner/.cargo/bin/* /usr/local/bin/ || true)) && (command -v mise >/dev/null 2>&1 || (curl -fsSL https://mise.run | sh 2>/dev/null && sudo ln -sf /home/runner/.local/bin/mise /usr/local/bin/mise || true)) && (ldconfig -p | grep -q libatomic || (sudo dpkg -i /var/cache/apt/archives/libatomic1*.deb 2>/dev/null || true)) && (command -v velnor-workflow >/dev/null 2>&1 || (arch=$(uname -m); [ \"$arch\" = \"aarch64\" ] && vw_arch=\"ARM64\" || vw_arch=\"X64\"; (sudo cp \"/var/cache/apt/archives/velnor-workflow-Linux-${vw_arch}\" /usr/local/bin/velnor-workflow && sudo cp \"/var/cache/apt/archives/velnor-workflow-Linux-${vw_arch}\" /usr/local/bin/velnor-workflow-policy && sudo chmod 0755 /usr/local/bin/velnor-workflow /usr/local/bin/velnor-workflow-policy) 2>/dev/null || true)) && exec /home/runner/run.sh".to_string());
+        args.push("sudo mkdir -p /home/runner/_work /opt/hostedtoolcache /home/runner/.cargo && sudo chown -R runner:runner /home/runner/_work /opt/hostedtoolcache && sudo chown runner:runner /home/runner/.cargo && sudo chmod 0777 /home/runner/_work /opt/hostedtoolcache /home/runner/.cargo && (command -v gh >/dev/null 2>&1 || (arch=$(uname -m); [ \"$arch\" = \"aarch64\" ] && gh_arch=\"arm64\" || gh_arch=\"amd64\"; curl -fsSL \"https://github.com/cli/cli/releases/download/v2.101.0/gh_2.101.0_linux_${gh_arch}.tar.gz\" | sudo tar -xz -C /usr/local/bin --strip-components=2 \"gh_2.101.0_linux_${gh_arch}/bin/gh\" 2>/dev/null || true)) && (command -v cargo >/dev/null 2>&1 || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable 2>/dev/null && sudo ln -sf /home/runner/.cargo/bin/* /usr/local/bin/ || true)) && (command -v mise >/dev/null 2>&1 || (curl -fsSL https://mise.run | sh 2>/dev/null && sudo ln -sf /home/runner/.local/bin/mise /usr/local/bin/mise || true)) && (ldconfig -p | grep -q libatomic || (sudo dpkg -i /var/cache/apt/archives/libatomic1*.deb 2>/dev/null || true)) && (command -v velnor-workflow >/dev/null 2>&1 || (arch=$(uname -m); [ \"$arch\" = \"aarch64\" ] && vw_arch=\"ARM64\" || vw_arch=\"X64\"; (sudo cp \"/var/cache/apt/archives/velnor-workflow-Linux-${vw_arch}\" /usr/local/bin/velnor-workflow && sudo cp \"/var/cache/apt/archives/velnor-workflow-Linux-${vw_arch}\" /usr/local/bin/velnor-workflow-policy && sudo chmod 0755 /usr/local/bin/velnor-workflow /usr/local/bin/velnor-workflow-policy) 2>/dev/null || true)) && exec /home/runner/run.sh".to_string());
         args
     }
 }
@@ -1176,6 +1192,8 @@ mod tests {
             RUNNER_WORK_DIR,
             TOOL_CACHE_DIR,
             BUILDKIT_CACHE_DIR,
+            "/home/runner/.cargo/registry",
+            "/home/runner/.cargo/git",
         ] {
             assert!(args.contains(guest), "missing guest path {guest}:\n{args}");
         }
