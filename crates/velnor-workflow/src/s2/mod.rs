@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 
 mod capability_tests;
@@ -601,6 +601,72 @@ impl UnitKind {
     }
 }
 
+/// One typed validation phase of a unit's commands. The scan tags each
+/// command it structures (Rust fmt/clippy/test/doctest); generated jobs run
+/// one step per runnable phase behind `--phase`, and the prerequisite tier
+/// selects the check phase. Phase membership is positional data, never
+/// substring detection on command text.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ValidationPhase {
+    Fmt,
+    Clippy,
+    Test,
+    Doctest,
+    Check,
+}
+
+impl ValidationPhase {
+    /// The runnable phases in step order: formatting first, then lints, then
+    /// tests, then doctests. `Check` is prerequisite-only and never renders
+    /// a validation step.
+    pub(crate) const RUNNABLE: [Self; 4] = [Self::Fmt, Self::Clippy, Self::Test, Self::Doctest];
+
+    /// The phase a `--phase` selector or `phases` TOML entry names.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "fmt" => Self::Fmt,
+            "clippy" => Self::Clippy,
+            "test" => Self::Test,
+            "doctest" => Self::Doctest,
+            "check" => Self::Check,
+            _ => return None,
+        })
+    }
+
+    /// The selector id: the TOML form, the `--phase` value, and the
+    /// `validation_phases` workflow-input record.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Fmt => "fmt",
+            Self::Clippy => "clippy",
+            Self::Test => "test",
+            Self::Doctest => "doctest",
+            Self::Check => "check",
+        }
+    }
+
+    /// The GitHub Actions step name of one runnable phase.
+    pub(crate) fn step_name(self) -> &'static str {
+        match self {
+            Self::Fmt => "Formatting check",
+            Self::Clippy => "Clippy check",
+            Self::Test => "Tests",
+            Self::Doctest => "Doctests",
+            Self::Check => "Prerequisite check",
+        }
+    }
+
+    /// The selector ids of one phase list, in order: the `phases` TOML
+    /// array and the `validation_phases` workflow-input records.
+    pub(crate) fn id_list(phases: &[Self]) -> Vec<String> {
+        phases
+            .iter()
+            .map(|phase| phase.as_str().to_owned())
+            .collect()
+    }
+}
+
 /// A scanner-derived verification unit serialized to TOML.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Unit {
@@ -618,6 +684,18 @@ pub struct Unit {
     /// command arrays; the fanout clones the job spec per provider.
     pub(crate) pr_commands: Vec<String>,
     pub(crate) full_commands: Vec<String>,
+    /// Positional phase tags over `pr_commands` and `full_commands`: entry
+    /// `i` names the phase command `i` belongs to. Empty means unphased
+    /// (custom, policy, and Docker units keep the single legacy step).
+    /// Any mutation that cannot preserve the alignment clears the phases
+    /// instead.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) phases: Vec<ValidationPhase>,
+    /// The prerequisite-tier check commands, built by the scan from the
+    /// clippy phase's parts (never rewritten from command text). Empty
+    /// exactly when `phases` is empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) check_commands: Vec<String>,
     pub(crate) depends_on: Vec<String>,
     pub(crate) cache: Option<CacheSpec>,
     pub(crate) tool_version: Option<String>,
@@ -694,6 +772,30 @@ impl Unit {
     /// toggle when the repository names one, the kind default otherwise.
     pub(crate) fn uses_mbx(&self) -> bool {
         self.mbx.unwrap_or(self.kind == UnitKind::Rust)
+    }
+
+    /// Whether the unit carries validation phases: its commands render one
+    /// step per runnable phase instead of the single legacy step.
+    pub(crate) fn has_phases(&self) -> bool {
+        !self.phases.is_empty()
+    }
+
+    /// The unit's runnable phases in step order: `Check` is prerequisite-
+    /// only and never renders a validation step.
+    pub(crate) fn runnable_phases(&self) -> Vec<ValidationPhase> {
+        ValidationPhase::RUNNABLE
+            .iter()
+            .filter(|phase| self.phases.contains(phase))
+            .copied()
+            .collect()
+    }
+
+    /// Drop the phase model after a command mutation that cannot preserve
+    /// the positional alignment: the unit keeps every command in order and
+    /// verifies through the single legacy step.
+    pub(crate) fn clear_phases(&mut self) {
+        self.phases.clear();
+        self.check_commands.clear();
     }
 }
 
@@ -1242,6 +1344,14 @@ impl ProjectConfig {
             write_toml_array(&mut output, "watch", &unit.watch);
             write_toml_array(&mut output, "pr_commands", &unit.pr_commands);
             write_toml_array(&mut output, "full_commands", &unit.full_commands);
+            if unit.has_phases() {
+                write_toml_array(
+                    &mut output,
+                    "phases",
+                    &ValidationPhase::id_list(&unit.phases),
+                );
+                write_toml_array(&mut output, "check_commands", &unit.check_commands);
+            }
             if !unit.depends_on.is_empty() {
                 write_toml_array(&mut output, "depends_on", &unit.depends_on);
             }
@@ -1428,6 +1538,7 @@ fn scan_target(
     // whether the rest of the contract is scanned or declared.
     validate_provider_selectors(&config)?;
     validate_unit_capabilities(&config)?;
+    validate_unit_phases(&config)?;
     let inputs = GenerationInputs::current(generation.as_ref(), &shape)?;
     Ok(ScannedTarget {
         shape,
@@ -1447,6 +1558,11 @@ pub(crate) fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
                 .collect();
             unit.full_commands = unit
                 .full_commands
+                .iter()
+                .map(|command| mbxify_cargo_command(command))
+                .collect();
+            unit.check_commands = unit
+                .check_commands
                 .iter()
                 .map(|command| mbxify_cargo_command(command))
                 .collect();
@@ -2516,6 +2632,10 @@ fn apply_unit_row(
                 }
                 commands
             },
+            // Declared units carry no scan tags; they verify through the
+            // single legacy step.
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: row.depends_on().unwrap_or_default().to_vec(),
             cache: row.cache().map(|cache| CacheSpec {
                 key_files: cache.key_files().unwrap_or_default().to_vec(),
@@ -2563,12 +2683,16 @@ fn apply_unit_row(
         unit.workspace_check = true;
         unit.pr_commands = vec!["cargo check --workspace --all-targets --locked".to_owned()];
         unit.full_commands.clone_from(&unit.pr_commands);
+        unit.clear_phases();
     }
     for task in row.ci_tasks() {
         let command = format!("mise run {task}");
         if !unit.pr_commands.contains(&command) {
             unit.pr_commands.push(command.clone());
             unit.full_commands.push(command);
+            // Custom tasks carry no phase tag; the unit keeps every command
+            // in order and verifies through the single legacy step.
+            unit.clear_phases();
         }
     }
     if let Some(dependencies) = row.depends_on() {
@@ -2875,7 +2999,10 @@ fn materialize_capability_commands(
                 .is_some_and(|cache| cache.mutable_mount_seed)
         {
             // Every provider runs the same commands: the seed lifecycle is one
-            // contract materialized into the unit's only command lists.
+            // contract materialized into the unit's only command lists. The
+            // rewrite carries no phase tags; Docker units carry none, and
+            // this keeps that invariant if one ever does.
+            unit.clear_phases();
             for command in &mut unit.pr_commands {
                 *command = docker_seed_pull_request_command(command, &unit.id);
             }
@@ -3042,6 +3169,44 @@ fn validate_unit_capabilities(config: &ProjectConfig) -> Result<(), GeneratorErr
             if provider::eligibility(unit.platform, unit.trust, *provider, true).is_ok() {
                 provider::check_capabilities(&unit.id, unit.capabilities, *provider)?;
             }
+        }
+    }
+    Ok(())
+}
+
+/// A phased unit's tags are positional over its command vectors: every
+/// vector the runtime may select must carry exactly one tag per command.
+/// Anything else is a generator bug or a hand-built config the scan would
+/// never produce; refuse it instead of shipping misaligned `--phase` steps.
+/// Runs at the end of the scan and again after unit-contract primitives
+/// (which mutate commands post-scan) so no `--phase` step can misalign.
+pub(crate) fn validate_unit_phases(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    for unit in &config.units {
+        if !unit.has_phases() {
+            if !unit.check_commands.is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` carries prerequisite check commands without validation phases",
+                    unit.id
+                )));
+            }
+            continue;
+        }
+        if unit.pr_commands.len() != unit.phases.len()
+            || unit.full_commands.len() != unit.phases.len()
+        {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` carries {} validation phases for {} PR and {} full commands; phases must tag every command",
+                unit.id,
+                unit.phases.len(),
+                unit.pr_commands.len(),
+                unit.full_commands.len()
+            )));
+        }
+        if unit.check_commands.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` carries validation phases without prerequisite check commands",
+                unit.id
+            )));
         }
     }
     Ok(())
@@ -9330,6 +9495,8 @@ mod tests {
             watch: vec!["**".to_owned()],
             pr_commands: vec!["swift test".to_owned()],
             full_commands: vec!["swift test".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             pinned_lockfile: true,
             cache: None,
@@ -11823,6 +11990,8 @@ const INCLUDED: &str = include_str!("fixture.txt");
             watch: vec!["Cargo.toml".to_owned()],
             pr_commands: Vec::new(),
             full_commands: Vec::new(),
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
@@ -11849,6 +12018,8 @@ const INCLUDED: &str = include_str!("fixture.txt");
             watch: vec!["Cargo.toml".to_owned()],
             pr_commands: vec!["mise run check-boundaries".to_owned()],
             full_commands: vec!["mise run check-boundaries".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
@@ -11875,6 +12046,8 @@ const INCLUDED: &str = include_str!("fixture.txt");
             watch: vec!["Cargo.toml".to_owned()],
             pr_commands: vec!["cargo test --package 'fixture'".to_owned()],
             full_commands: vec!["cargo test --package 'fixture'".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
@@ -11927,6 +12100,25 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(kind.contains("install: false"));
         assert!(kind.contains("inputs.mise_runner"));
         assert!(!kind.contains("name: Set up Mise tools"));
+    }
+
+    // Every provider job switches off every mise auto-install path, so
+    // verification cannot silently materialise tools the provision steps
+    // did not declare. Phased units verify through one step per phase,
+    // so every checks step carries the switch, not just one per job.
+    fn assert_checks_steps_disable_mise_auto_install(workflow: &str) {
+        let auto_install_off = workflow.matches("MISE_AUTO_INSTALL: \"false\"").count();
+        let checks_steps = workflow
+            .matches("velnor-workflow run --config .github/ci/project.toml --scope")
+            .count();
+        assert!(
+            checks_steps >= 3,
+            "the fixture must render checks steps on all three provider jobs: {workflow}"
+        );
+        assert_eq!(
+            auto_install_off, checks_steps,
+            "every checks step must disable mise auto-install: {workflow}"
+        );
     }
 
     #[test]
@@ -12030,14 +12222,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             );
         }
 
-        // Every provider job switches off every mise auto-install path, so
-        // verification cannot silently materialise tools the provision steps
-        // did not declare.
-        let auto_install_off = workflow.matches("MISE_AUTO_INSTALL: \"false\"").count();
-        assert_eq!(
-            auto_install_off, 3,
-            "all three provider jobs must disable mise auto-install: {workflow}"
-        );
+        assert_checks_steps_disable_mise_auto_install(workflow);
         assert!(workflow.contains("MISE_EXEC_AUTO_INSTALL: \"false\""));
         assert!(workflow.contains("MISE_NOT_FOUND_AUTO_INSTALL: \"false\""));
 
@@ -12205,6 +12390,103 @@ channel = "stable"
             rust.pr_commands[clippy_index].contains("--profile test"),
             "clippy must use the test profile to match nextest: {}",
             rust.pr_commands[clippy_index]
+        );
+        // The scan leaves units unphased until the phase activation
+        // lands; the order contract holds on the commands alone.
+        assert!(
+            rust.phases.is_empty() && rust.check_commands.is_empty(),
+            "scan units carry no phase tags yet: {:?}",
+            rust.phases
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn validate_unit_phases_rejects_misaligned_and_check_shapes() {
+        let phased_unit = || Unit {
+            id: "rust-app".to_owned(),
+            label: "rust-app".to_owned(),
+            kind: UnitKind::Rust,
+            root: ".".to_owned(),
+            watch: vec!["crates/app/**".to_owned()],
+            pr_commands: vec!["fmt".to_owned(), "clippy".to_owned(), "test".to_owned()],
+            full_commands: vec!["fmt".to_owned(), "clippy".to_owned(), "test".to_owned()],
+            phases: vec![
+                ValidationPhase::Fmt,
+                ValidationPhase::Clippy,
+                ValidationPhase::Test,
+            ],
+            check_commands: vec!["check".to_owned()],
+            depends_on: Vec::new(),
+            pinned_lockfile: true,
+            cache: None,
+            tool_version: None,
+            mise_tools: Vec::new(),
+            toolchain: None,
+            services: Vec::new(),
+            trust: provider::TrustReq::UntrustedOk,
+            capabilities: provider::Capabilities::default(),
+            workspace_check: false,
+            platform: provider::Platform::LinuxX64,
+            products: Vec::new(),
+            prerequisites: Vec::new(),
+            docker_contexts: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            mbx: None,
+            prepared_tools: Vec::new(),
+        };
+        let validate = |unit: Unit| {
+            validate_unit_phases(&ProjectConfig {
+                units: vec![unit],
+                ..header_fixture_config()
+            })
+        };
+        must(validate(phased_unit()), "aligned phases validate");
+        let mut skewed = phased_unit();
+        skewed.full_commands.push("extra".to_owned());
+        let error = must_fail(validate(skewed), "misaligned tags");
+        assert!(
+            error.to_string().contains("must tag every command"),
+            "tag/command misalignment fails closed: {error}"
+        );
+        let mut checkless = phased_unit();
+        checkless.check_commands.clear();
+        let error = must_fail(validate(checkless), "phases without a check");
+        assert!(
+            error
+                .to_string()
+                .contains("without prerequisite check commands"),
+            "phases without a stored check fail closed: {error}"
+        );
+        let mut tagless = phased_unit();
+        tagless.phases.clear();
+        let error = must_fail(validate(tagless), "a check without phases");
+        assert!(
+            error.to_string().contains("without validation phases"),
+            "a stored check without phases fails closed: {error}"
+        );
+    }
+
+    #[test]
+    fn runtime_rejects_unknown_phases_without_a_scan_fixture() {
+        // Hand-written TOML, no scan: the scan emits no phases until the
+        // activation lands, but the runtime already parses them strictly.
+        let root = temporary_repository("unknown-phase");
+        let project = root.join("project.toml");
+        must(
+            fs::write(
+                &project,
+                "schema = 3\nrepository = \"example/phases\"\nprofile = \"generic\"\nverified = true\ndefault_branch = \"main\"\nproviders = [\"github-hosted\", \"github-self-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\", \"github-self-hosted\", \"velnor\"]\ndefault_dispatch_providers = [\"github-hosted\", \"github-self-hosted\", \"velnor\"]\n\n[workflow]\nversion_bump_units = []\n\n[[unit]]\nid = \"rust-app\"\nplatform = \"linux-x64\"\ntrust = \"untrusted-ok\"\nkind = \"rust\"\nroot = \".\"\nwatch = [\"crates/app/**\"]\npr_commands = [\"cargo fmt --check\"]\nfull_commands = [\"cargo fmt --check\"]\nphases = [\"fmt\", \"fuzz\"]\ncheck_commands = [\"cargo check --locked\"]\n",
+            ),
+            "write bad project.toml",
+        );
+        let error = must_fail(
+            runtime::read_config_for_test(&project),
+            "an unknown phase must fail the pinned runtime",
+        );
+        assert!(
+            error.to_string().contains("fuzz"),
+            "the failure names the unknown phase: {error}"
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -16193,6 +16475,8 @@ lockfile = true
                 watch: Vec::new(),
                 pr_commands: vec!["true".to_owned()],
                 full_commands: vec!["true".to_owned()],
+                phases: Vec::new(),
+                check_commands: Vec::new(),
                 depends_on: Vec::new(),
                 cache: None,
                 tool_version: None,
@@ -16279,6 +16563,8 @@ lockfile = true
             watch: vec!["**".to_owned()],
             pr_commands: vec![command.clone()],
             full_commands: vec![command],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on,
             pinned_lockfile: true,
             cache: None,
@@ -16383,6 +16669,7 @@ lockfile = true
                 &root,
                 &root.join(".github/ci/project.toml"),
                 runtime::Scope::Full,
+                None,
                 None,
                 &selection,
             ),
@@ -18153,6 +18440,8 @@ lockfile = true
             watch: vec!["Cargo.toml".to_owned()],
             pr_commands: Vec::new(),
             full_commands: Vec::new(),
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
@@ -18480,6 +18769,8 @@ lockfile = true
             watch: vec!["Cargo.toml".to_owned()],
             pr_commands: vec!["cargo +nightly deny check".to_owned()],
             full_commands: vec!["RUSTFLAGS='-D warnings' mbx deny check".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
@@ -18600,6 +18891,8 @@ lockfile = true
             watch: vec!["Cargo.toml".to_owned()],
             pr_commands: vec!["cargo +nightly deny check".to_owned()],
             full_commands: vec!["RUSTFLAGS='-D warnings' mbx deny check".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
@@ -18684,6 +18977,10 @@ lockfile = true
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the workspace-member fixture literal spells the whole unit"
+    )]
     fn cargo_fetch_roots_deduplicate_workspace_members_and_keep_independent_lockfiles() {
         let workspace_member = |id: &str, root: &str| Unit {
             id: id.to_owned(),
@@ -18694,6 +18991,8 @@ lockfile = true
             watch: vec!["Cargo.lock".to_owned()],
             pr_commands: vec!["cargo test --locked".to_owned()],
             full_commands: vec!["cargo test --locked".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: Some(CacheSpec {
                 key_files: vec!["Cargo.lock".to_owned(), format!("{root}/Cargo.toml")],
@@ -18797,6 +19096,8 @@ lockfile = true
             watch: vec!["Cargo.lock".to_owned()],
             pr_commands: vec!["cargo test --locked".to_owned()],
             full_commands: vec!["cargo test --locked".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: depends_on.into_iter().map(str::to_owned).collect(),
             cache: Some(CacheSpec {
                 key_files: vec!["Cargo.lock".to_owned()],
@@ -18899,6 +19200,8 @@ lockfile = true
                 .iter()
                 .map(|command| (*command).to_owned())
                 .collect(),
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: depends_on.into_iter().map(str::to_owned).collect(),
             cache: Some(CacheSpec {
                 key_files: vec![if independent_lockfile {
@@ -19067,6 +19370,8 @@ lockfile = true
                     watch: Vec::new(),
                     pr_commands: Vec::new(),
                     full_commands: Vec::new(),
+                    phases: Vec::new(),
+                    check_commands: Vec::new(),
                     depends_on: Vec::new(),
                     cache: None,
                     tool_version: None,
@@ -19093,6 +19398,8 @@ lockfile = true
                     watch: Vec::new(),
                     pr_commands: Vec::new(),
                     full_commands: Vec::new(),
+                    phases: Vec::new(),
+                    check_commands: Vec::new(),
                     depends_on: Vec::new(),
                     cache: None,
                     tool_version: None,
@@ -21658,6 +21965,8 @@ lockfile = true
             watch: Vec::new(),
             pr_commands: vec!["cargo test --locked".to_owned()],
             full_commands: vec!["cargo test --locked".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             pinned_lockfile: false,
             cache: None,

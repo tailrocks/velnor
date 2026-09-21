@@ -781,6 +781,8 @@ fn xcodegen_generate_unit(
         watch,
         pr_commands: commands.clone(),
         full_commands: commands,
+        phases: Vec::new(),
+        check_commands: Vec::new(),
         depends_on: Vec::new(),
         pinned_lockfile: false,
         cache: Some(CacheSpec {
@@ -1023,6 +1025,8 @@ fn xcode_scheme_unit(
         ],
         pr_commands: commands.clone(),
         full_commands: commands,
+        phases: Vec::new(),
+        check_commands: Vec::new(),
         depends_on: Vec::new(),
         pinned_lockfile: false,
         cache: Some(CacheSpec {

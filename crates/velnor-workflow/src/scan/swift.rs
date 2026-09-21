@@ -154,6 +154,8 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             github_full_commands: None,
             velnor_pr_commands: None,
             velnor_full_commands: None,
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             pinned_lockfile: false,
             cache: Some(CacheSpec {

@@ -42,8 +42,9 @@ use std::env;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde_yaml::{Mapping, Value};
 
@@ -1480,6 +1481,19 @@ fn render_with_candidate(
     let Ok(wanted) = closure_identity::candidate_closure_of_tree(checkout, &head) else {
         return Ok(None);
     };
+    // Candidate code is untrusted PR output. Give it a clean git-object
+    // snapshot to scan and render, while `tree` remains the authoritative
+    // checkout used for comparison. A candidate can mutate its snapshot
+    // without changing the bytes the trusted comparison reads.
+    let candidate_source = scratch.with_file_name(format!(
+        "{}-candidate-source",
+        scratch
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("policy-render")
+    ));
+    let _ = fs::remove_dir_all(&candidate_source);
+    immutable_git_snapshot(checkout, &candidate_source)?;
     let current_exe = env::current_exe().ok();
     // The manifest gate fails closed loudly: a manifest path that cannot be
     // loaded, or names another tree, is a configuration error, not a skip.
@@ -1532,13 +1546,62 @@ fn render_with_candidate(
         if reported != wanted {
             continue;
         }
-        let differences =
-            render_and_compare(&binary, checkout, tree, scratch, default_branch, excludes)?;
+        let differences = render_and_compare(
+            &binary,
+            &candidate_source,
+            tree,
+            scratch,
+            default_branch,
+            excludes,
+        );
+        let differences = differences?;
         if differences.is_empty() {
+            let _ = fs::remove_dir_all(&candidate_source);
             return Ok(Some(reported));
         }
     }
+    let _ = fs::remove_dir_all(&candidate_source);
     Ok(None)
+}
+
+/// Materialize the audited `HEAD` from git objects into a disposable tree.
+/// The candidate process receives this tree only; the authoritative checkout
+/// stays outside its writable working directory and is never passed to it.
+fn immutable_git_snapshot(checkout: &Path, destination: &Path) -> Result<(), GeneratorError> {
+    fs::create_dir_all(destination).map_err(|error| {
+        GeneratorError::io("create candidate source snapshot", destination, &error)
+    })?;
+    let archive = Command::new("git")
+        .args(["archive", "--format=tar", "HEAD"])
+        .current_dir(checkout)
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("archive candidate source: {error}")))?;
+    if !archive.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "archive candidate source failed: {}",
+            String::from_utf8_lossy(&archive.stderr).trim()
+        )));
+    }
+    let mut extract = Command::new("tar")
+        .args(["-xf", "-", "-C"])
+        .arg(destination)
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|error| GeneratorError::usage(format!("extract candidate source: {error}")))?;
+    if let Some(stdin) = extract.stdin.as_mut() {
+        stdin.write_all(&archive.stdout).map_err(|error| {
+            GeneratorError::usage(format!("write candidate source archive: {error}"))
+        })?;
+    }
+    let status = extract
+        .wait()
+        .map_err(|error| GeneratorError::usage(format!("extract candidate source: {error}")))?;
+    if !status.success() {
+        return Err(GeneratorError::usage(
+            "extract candidate source archive failed",
+        ));
+    }
+    Ok(())
 }
 
 fn render_and_compare(
@@ -1575,11 +1638,24 @@ fn render_and_compare(
             detail.trim()
         )));
     }
+    compare_rendered_tree(scratch, root, excludes)
+}
+
+/// Compare an untrusted render directory with the untouched authoritative
+/// tree. The directory is never treated as source or provenance: only its
+/// regular-file bytes can match generated files in the clean tree. Symlinks
+/// in the render are resolved only when confined to the render root; a
+/// symlink that escapes the root, dangles, or names a non-file is an error.
+fn compare_rendered_tree(
+    rendered_root: &Path,
+    tree: &Path,
+    excludes: &BTreeSet<String>,
+) -> Result<Vec<String>, GeneratorError> {
     let mut rendered = BTreeMap::new();
-    collect_files(scratch, scratch, &mut rendered)?;
+    collect_files(rendered_root, rendered_root, &mut rendered)?;
     let mut differences = Vec::new();
     for (relative, content) in &rendered {
-        let actual = root.join(relative);
+        let actual = tree.join(relative);
         match fs::read(&actual) {
             Ok(bytes) if &bytes == content => {}
             Ok(_) => differences.push(format!(
@@ -1592,7 +1668,7 @@ fn render_and_compare(
             Err(error) => return Err(GeneratorError::io("read tree file", &actual, &error)),
         }
     }
-    let workflows = root.join(".github/workflows");
+    let workflows = tree.join(".github/workflows");
     if let Ok(entries) = fs::read_dir(&workflows) {
         for entry in entries {
             let path = entry
@@ -1631,19 +1707,81 @@ fn collect_files(
     directory: &Path,
     files: &mut BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<(), GeneratorError> {
+    let canonical_base = fs::canonicalize(base)
+        .map_err(|error| GeneratorError::io("canonicalize rendered root", base, &error))?;
+    collect_files_inner(base, &canonical_base, directory, files)
+}
+
+fn collect_files_inner(
+    base: &Path,
+    canonical_base: &Path,
+    directory: &Path,
+    files: &mut BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<(), GeneratorError> {
     for entry in fs::read_dir(directory)
         .map_err(|error| GeneratorError::io("read rendered directory", directory, &error))?
     {
         let path = entry
             .map_err(|error| GeneratorError::usage(format!("read rendered entry: {error}")))?
             .path();
-        if path.is_dir() {
-            collect_files(base, &path, files)?;
-        } else if path.is_file() {
-            let relative = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| GeneratorError::io("read rendered metadata", &path, &error))?;
+        if metadata.file_type().is_symlink() {
+            let target = fs::read_link(&path)
+                .map_err(|error| GeneratorError::io("read rendered symlink", &path, &error))?;
+            let joined = if target.is_absolute() {
+                target
+            } else {
+                path.parent()
+                    .map_or_else(|| PathBuf::from(&target), |parent| parent.join(&target))
+            };
+            let canonical = fs::canonicalize(&joined).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "rendered symlink {} dangles or is unreadable",
+                    path.display()
+                ))
+            })?;
+            if !canonical.starts_with(canonical_base) {
+                return Err(GeneratorError::usage(format!(
+                    "rendered symlink escapes its root: {}",
+                    path.display()
+                )));
+            }
+            let target_metadata = fs::metadata(&canonical).map_err(|error| {
+                GeneratorError::io("read rendered link target", &canonical, &error)
+            })?;
+            if !target_metadata.is_file() {
+                return Err(GeneratorError::usage(format!(
+                    "rendered symlink {} does not name a file",
+                    path.display()
+                )));
+            }
+            let relative = path.strip_prefix(base).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "rendered output escaped its root: {}",
+                    path.display()
+                ))
+            })?;
+            let content = fs::read(&canonical)
+                .map_err(|error| GeneratorError::io("read rendered file", &canonical, &error))?;
+            files.insert(relative.to_path_buf(), content);
+        } else if metadata.is_dir() {
+            collect_files_inner(base, canonical_base, &path, files)?;
+        } else if metadata.is_file() {
+            let relative = path.strip_prefix(base).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "rendered output escaped its root: {}",
+                    path.display()
+                ))
+            })?;
             let content = fs::read(&path)
                 .map_err(|error| GeneratorError::io("read rendered file", &path, &error))?;
-            files.insert(relative, content);
+            files.insert(relative.to_path_buf(), content);
+        } else {
+            return Err(GeneratorError::usage(format!(
+                "rendered output contains non-file {}",
+                path.display()
+            )));
         }
     }
     Ok(())

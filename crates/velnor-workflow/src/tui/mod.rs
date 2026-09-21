@@ -974,6 +974,8 @@ mod tests {
             github_full_commands: None,
             velnor_pr_commands: None,
             velnor_full_commands: None,
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: dependencies
                 .iter()
                 .map(|dependency| (*dependency).to_owned())

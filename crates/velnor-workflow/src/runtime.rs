@@ -30,7 +30,7 @@ use super::primitives::prepared_tools::{
 use super::primitives::snapshot::{
     budget_report, plan_evictions, CacheEntry as SnapshotCacheEntry, RetentionPolicy,
 };
-use super::{lanes_support_unit_kind, GeneratorError, RunnerMode, UnitKind};
+use super::{lanes_support_unit_kind, GeneratorError, RunnerMode, UnitKind, ValidationPhase};
 
 const DEFAULT_CONFIG: &str = ".github/ci/project.toml";
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -129,6 +129,15 @@ struct CiUnit {
     github_full_commands: Vec<String>,
     velnor_pr_commands: Vec<String>,
     velnor_full_commands: Vec<String>,
+    /// Positional phase tags over the command vectors, as the generator
+    /// emitted them. Empty on units the scan left unphased and on TOML the
+    /// phase model predates; those units run without `--phase`.
+    #[serde(default)]
+    phases: Vec<ValidationPhase>,
+    /// The prerequisite-tier check commands the scan built. Empty exactly
+    /// when `phases` is empty.
+    #[serde(default)]
+    check_commands: Vec<String>,
     #[serde(default)]
     depends_on: Vec<String>,
     #[serde(default)]
@@ -175,6 +184,78 @@ impl CiUnit {
             (RunnerLane::Github, Scope::Full) => &self.github_full_commands,
             (RunnerLane::Velnor, Scope::Affected) => &self.velnor_pr_commands,
             (RunnerLane::Velnor, Scope::Full) => &self.velnor_full_commands,
+        }
+    }
+
+    /// The unit's commands for one `--phase` selection: the check phase
+    /// selects the stored prerequisite commands, a runnable phase selects
+    /// the tagged commands positionally. Unphased units and tag/command
+    /// misalignments fail closed; a phased unit that genuinely carries no
+    /// command for the phase is a generator bug, not an empty selection.
+    fn commands_for_phase(
+        &self,
+        lane: RunnerLane,
+        scope: Scope,
+        phase: ValidationPhase,
+    ) -> Result<Vec<String>, GeneratorError> {
+        if phase == ValidationPhase::Check {
+            if self.phases.is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "CI unit `{}` has no validation phases; run it without --phase",
+                    self.id
+                )));
+            }
+            if self.check_commands.is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "CI unit `{}` carries validation phases without prerequisite check commands",
+                    self.id
+                )));
+            }
+            return Ok(self.check_commands_for_lane(lane));
+        }
+        if self.phases.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "CI unit `{}` has no validation phases; run it without --phase",
+                self.id
+            )));
+        }
+        let commands = self.commands(lane, scope);
+        if commands.len() != self.phases.len() {
+            return Err(GeneratorError::usage(format!(
+                "CI unit `{}` carries {} validation phases for {} commands; refusing a misaligned --phase selection",
+                self.id,
+                self.phases.len(),
+                commands.len()
+            )));
+        }
+        let selected = commands
+            .iter()
+            .zip(self.phases.iter())
+            .filter(|(_, candidate)| **candidate == phase)
+            .map(|(command, _)| command.clone())
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "CI unit `{}` has no {} phase commands",
+                self.id,
+                phase.as_str()
+            )));
+        }
+        Ok(selected)
+    }
+
+    /// The stored prerequisite check commands for a lane. The Velnor lane
+    /// drops Cargo's `--no-deps`: `mbx check` does not expose it. The flag
+    /// adaptation is the preserved lane rule; phase selection itself never
+    /// inspects command text.
+    fn check_commands_for_lane(&self, lane: RunnerLane) -> Vec<String> {
+        if lane == RunnerLane::Velnor {
+            self.check_commands
+                .iter()
+                .map(|command| command.replace(" --no-deps", ""))
+                .collect()
+        } else {
+            self.check_commands.clone()
         }
     }
 
@@ -411,18 +492,29 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             Ok(true)
         }
         "run" => {
-            let options = parse_options(&arguments[1..], &["config", "scope", "unit"])?;
+            let options = parse_options(&arguments[1..], &["config", "scope", "unit", "phase"])?;
             let root = env::current_dir()
                 .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
             let config = resolve_config_path(options.get("config"));
             let scope = options
                 .get("scope")
                 .map_or(Ok(Scope::Full), |value| Scope::parse(value))?;
+            let phase = options
+                .get("phase")
+                .map(|value| {
+                    ValidationPhase::parse(value).ok_or_else(|| {
+                        GeneratorError::usage(format!(
+                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, or check"
+                        ))
+                    })
+                })
+                .transpose()?;
             run_units(
                 &root,
                 &config,
                 scope,
                 options.get("unit").map(String::as_str),
+                phase,
             )?;
             Ok(true)
         }
@@ -1839,6 +1931,8 @@ mod runner_lane_tests {
             github_full_commands: vec!["github-full".to_owned()],
             velnor_pr_commands: vec!["velnor-pr".to_owned()],
             velnor_full_commands: vec!["velnor-full".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
@@ -1875,6 +1969,8 @@ mod runner_lane_tests {
                 github_full_commands: vec!["base".to_owned()],
                 velnor_pr_commands: vec!["base".to_owned()],
                 velnor_full_commands: vec!["base".to_owned()],
+                phases: Vec::new(),
+                check_commands: Vec::new(),
                 depends_on: Vec::new(),
                 tool_version: None,
                 cache: None,
@@ -1890,6 +1986,8 @@ mod runner_lane_tests {
                 github_full_commands: vec!["changed".to_owned()],
                 velnor_pr_commands: vec!["changed".to_owned()],
                 velnor_full_commands: vec!["changed".to_owned()],
+                phases: Vec::new(),
+                check_commands: Vec::new(),
                 depends_on: vec!["base".to_owned()],
                 tool_version: None,
                 cache: None,
@@ -1905,6 +2003,8 @@ mod runner_lane_tests {
                 github_full_commands: vec!["sibling".to_owned()],
                 velnor_pr_commands: vec!["sibling".to_owned()],
                 velnor_full_commands: vec!["sibling".to_owned()],
+                phases: Vec::new(),
+                check_commands: Vec::new(),
                 depends_on: vec!["base".to_owned()],
                 tool_version: None,
                 cache: None,
@@ -1920,6 +2020,8 @@ mod runner_lane_tests {
                 github_full_commands: vec!["leaf".to_owned()],
                 velnor_pr_commands: vec!["leaf".to_owned()],
                 velnor_full_commands: vec!["leaf".to_owned()],
+                phases: Vec::new(),
+                check_commands: Vec::new(),
                 depends_on: vec!["changed".to_owned()],
                 tool_version: None,
                 cache: None,
@@ -1948,6 +2050,8 @@ mod runner_lane_tests {
             github_full_commands: vec!["true".to_owned()],
             velnor_pr_commands: vec!["true".to_owned()],
             velnor_full_commands: vec!["true".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: depends_on.iter().map(|value| (*value).to_owned()).collect(),
             tool_version: None,
             cache: None,
@@ -1986,6 +2090,8 @@ mod runner_lane_tests {
             github_full_commands: vec![id.to_owned()],
             velnor_pr_commands: vec![id.to_owned()],
             velnor_full_commands: vec![id.to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: depends_on.iter().map(|name| (*name).to_owned()).collect(),
             tool_version: None,
             cache: None,
@@ -2025,12 +2131,13 @@ pub(crate) fn run_units(
     config_path: &Path,
     scope: Scope,
     only_unit: Option<&str>,
+    phase: Option<ValidationPhase>,
 ) -> Result<(), GeneratorError> {
     let selection_file = env::var_os("VELNOR_SELECTION_FILE").map_or_else(
         || root.join(".velnor-ci-selection/velnor-ci-selection"),
         PathBuf::from,
     );
-    run_units_with_selection_file(root, config_path, scope, only_unit, &selection_file)
+    run_units_with_selection_file(root, config_path, scope, only_unit, phase, &selection_file)
 }
 
 pub(crate) fn run_units_with_selection_file(
@@ -2038,6 +2145,7 @@ pub(crate) fn run_units_with_selection_file(
     config_path: &Path,
     scope: Scope,
     only_unit: Option<&str>,
+    phase: Option<ValidationPhase>,
     selection_file: &Path,
 ) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
@@ -2073,7 +2181,7 @@ pub(crate) fn run_units_with_selection_file(
     }
     let full_units = selection.full_units;
     let selected = select_units_for_job(selected, only_unit)?;
-    run_layers(root, &selected, scope, &full_units)
+    run_layers(root, &selected, scope, &full_units, phase)
 }
 
 fn select_units_for_job<'a>(
@@ -2518,6 +2626,7 @@ fn run_layers(
     units: &[&CiUnit],
     run_scope: Scope,
     full_units: &BTreeSet<String>,
+    phase: Option<ValidationPhase>,
 ) -> Result<(), GeneratorError> {
     let runner_lane = RunnerLane::current();
     let mut finished = BTreeSet::new();
@@ -2541,15 +2650,24 @@ fn run_layers(
                 "CI dependency graph contains a cycle or invalid ordering",
             ));
         }
+        // Resolve every command list before spawning: a `--phase` selection
+        // failure aborts the layer instead of running a partial tier.
+        let mut workloads = Vec::with_capacity(ready.len());
+        for unit in ready {
+            let commands = if full_units.contains(&unit.id) {
+                match phase {
+                    Some(selected) => unit.commands_for_phase(runner_lane, run_scope, selected)?,
+                    None => unit.commands(runner_lane, run_scope).to_vec(),
+                }
+            } else {
+                prerequisite_commands(unit, runner_lane, run_scope, phase)?
+            };
+            workloads.push((unit, commands));
+        }
         let (sender, receiver) = mpsc::channel();
         thread::scope(|thread_scope| {
-            for unit in ready.iter().copied() {
+            for (unit, commands) in workloads {
                 let sender = sender.clone();
-                let commands = if full_units.contains(&unit.id) {
-                    unit.commands(runner_lane, run_scope).to_vec()
-                } else {
-                    prerequisite_commands(unit, runner_lane, run_scope)
-                };
                 thread_scope.spawn(move || {
                     let result = run_unit(root, unit, &commands);
                     let _ = sender.send((unit.id.clone(), result));
@@ -2565,7 +2683,33 @@ fn run_layers(
     Ok(())
 }
 
-fn prerequisite_commands(unit: &CiUnit, lane: RunnerLane, scope: Scope) -> Vec<String> {
+fn prerequisite_commands(
+    unit: &CiUnit,
+    lane: RunnerLane,
+    scope: Scope,
+    phase: Option<ValidationPhase>,
+) -> Result<Vec<String>, GeneratorError> {
+    match phase {
+        None | Some(ValidationPhase::Fmt | ValidationPhase::Check) => {
+            if unit.phases.is_empty() {
+                // Units without phase tags — TOML the phase model predates,
+                // declared units, regen-gated units — keep the base
+                // clippy→check rewrite instead of silently no-oping.
+                Ok(legacy_prerequisite_commands(unit, lane, scope))
+            } else {
+                unit.commands_for_phase(lane, scope, ValidationPhase::Check)
+            }
+        }
+        // The prerequisite tier compiles the unit once, in the first
+        // validation step; later phase steps no-op.
+        Some(_) => Ok(Vec::new()),
+    }
+}
+
+/// The prerequisite rewrite for units without phase tags: rust units
+/// compile via their clippy command rewritten to `check`. Non-rust units
+/// have no prerequisite. Byte-identical to the pre-phase behavior.
+fn legacy_prerequisite_commands(unit: &CiUnit, lane: RunnerLane, scope: Scope) -> Vec<String> {
     if unit.kind != "rust" {
         return Vec::new();
     }
@@ -4565,6 +4709,8 @@ pub(crate) mod tests {
             github_full_commands: vec!["true".to_owned()],
             velnor_pr_commands: vec!["true".to_owned()],
             velnor_full_commands: vec!["true".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: depends_on.iter().map(|value| (*value).to_owned()).collect(),
             tool_version: None,
             cache: None,
@@ -4991,6 +5137,8 @@ workspace_check = true
             github_full_commands: vec!["true".to_owned()],
             velnor_pr_commands: vec!["true".to_owned()],
             velnor_full_commands: vec!["true".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
@@ -5184,7 +5332,90 @@ workspace_check = true
     }
 
     #[test]
-    fn prerequisite_tier_rewrites_rust_clippy_to_check() {
+    fn prerequisite_tier_selects_the_stored_check_phase() {
+        let unit = CiUnit {
+            id: "rust-app".to_owned(),
+            label: "rust-app".to_owned(),
+            kind: "rust".to_owned(),
+            root: ".".to_owned(),
+            watch: vec!["crates/app/**".to_owned()],
+            // The selection never inspects these: the check below is the
+            // contract even though no command here mentions clippy.
+            github_pr_commands: vec![
+                "cargo fmt --check".to_owned(),
+                "cargo nextest run --locked".to_owned(),
+            ],
+            github_full_commands: vec!["true".to_owned()],
+            velnor_pr_commands: vec!["mbx nextest run --locked".to_owned()],
+            velnor_full_commands: vec!["true".to_owned()],
+            phases: vec![ValidationPhase::Fmt, ValidationPhase::Test],
+            check_commands: vec!["cargo check --locked --no-deps --all-targets".to_owned()],
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+            workspace_check: false,
+        };
+        assert_eq!(
+            must(
+                prerequisite_commands(&unit, RunnerLane::Github, Scope::Affected, None),
+                "github prerequisite",
+            ),
+            vec!["cargo check --locked --no-deps --all-targets"]
+        );
+        assert_eq!(
+            must(
+                prerequisite_commands(&unit, RunnerLane::Velnor, Scope::Affected, None),
+                "velnor prerequisite",
+            ),
+            // `mbx check` does not expose Cargo's `--no-deps` flag.
+            vec!["cargo check --locked --all-targets"]
+        );
+        // The prerequisite tier compiles the unit in the first validation
+        // step; later phase steps no-op.
+        assert_eq!(
+            must(
+                prerequisite_commands(
+                    &unit,
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    Some(ValidationPhase::Fmt),
+                ),
+                "first-step prerequisite",
+            ),
+            vec!["cargo check --locked --no-deps --all-targets"]
+        );
+        assert!(
+            must(
+                prerequisite_commands(
+                    &unit,
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    Some(ValidationPhase::Test),
+                ),
+                "later-step prerequisite",
+            )
+            .is_empty(),
+            "later phase steps no-op on the prerequisite tier"
+        );
+        assert!(
+            must(
+                prerequisite_commands(
+                    &unit,
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    Some(ValidationPhase::Check),
+                ),
+                "check-phase prerequisite",
+            ) == vec!["cargo check --locked --no-deps --all-targets"],
+            "--phase check selects the stored check commands"
+        );
+    }
+
+    #[test]
+    fn prerequisite_tier_falls_back_to_clippy_rewrite_without_phases() {
+        // Old-TOML shape: no `phases` or `check_commands` keys, so both
+        // deserialize empty. The prerequisite tier must behave byte-identical
+        // to the pre-phase clippy→check rewrite, never silently no-op.
         let unit = CiUnit {
             id: "rust-app".to_owned(),
             label: "rust-app".to_owned(),
@@ -5201,18 +5432,212 @@ workspace_check = true
                 "mbx clippy --locked --no-deps --all-targets -- -D warnings".to_owned()
             ],
             velnor_full_commands: vec!["true".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
             workspace_check: false,
         };
         assert_eq!(
-            prerequisite_commands(&unit, RunnerLane::Github, Scope::Affected),
+            must(
+                prerequisite_commands(&unit, RunnerLane::Github, Scope::Affected, None),
+                "github prerequisite",
+            ),
             vec!["cargo check --locked --no-deps --all-targets"]
         );
         assert_eq!(
-            prerequisite_commands(&unit, RunnerLane::Velnor, Scope::Affected),
+            must(
+                prerequisite_commands(&unit, RunnerLane::Velnor, Scope::Affected, None),
+                "velnor prerequisite",
+            ),
             vec!["mbx check --locked --all-targets"]
+        );
+        // The fallback also covers the first validation step and an explicit
+        // `--phase check`; later phase steps still no-op.
+        for phase in [
+            None,
+            Some(ValidationPhase::Fmt),
+            Some(ValidationPhase::Check),
+        ] {
+            assert_eq!(
+                must(
+                    prerequisite_commands(&unit, RunnerLane::Github, Scope::Affected, phase),
+                    "unphased fallback follows the phase",
+                ),
+                vec!["cargo check --locked --no-deps --all-targets"]
+            );
+        }
+        assert!(
+            must(
+                prerequisite_commands(
+                    &unit,
+                    RunnerLane::Github,
+                    Scope::Affected,
+                    Some(ValidationPhase::Test),
+                ),
+                "later-step prerequisite",
+            )
+            .is_empty(),
+            "later phase steps no-op on the prerequisite tier"
+        );
+        // Non-rust units have no prerequisite, phased or not.
+        let mut foreign = unit.clone();
+        foreign.kind = "bun".to_owned();
+        assert!(
+            must(
+                prerequisite_commands(&foreign, RunnerLane::Github, Scope::Affected, None),
+                "non-rust prerequisite",
+            )
+            .is_empty(),
+            "unphased non-rust units no-op on the prerequisite tier"
+        );
+    }
+
+    #[test]
+    fn phase_selection_filters_positionally_and_fails_closed() {
+        let unit = CiUnit {
+            id: "rust-app".to_owned(),
+            label: "rust-app".to_owned(),
+            kind: "rust".to_owned(),
+            root: ".".to_owned(),
+            watch: vec!["crates/app/**".to_owned()],
+            github_pr_commands: vec![
+                "cargo fmt --check".to_owned(),
+                "cargo clippy -- -D warnings".to_owned(),
+                "cargo nextest run".to_owned(),
+            ],
+            github_full_commands: vec![
+                "cargo fmt --check".to_owned(),
+                "cargo clippy -- -D warnings".to_owned(),
+                "cargo nextest run".to_owned(),
+            ],
+            velnor_pr_commands: vec![
+                "mbx fmt --check".to_owned(),
+                "mbx clippy -- -D warnings".to_owned(),
+                "mbx nextest run".to_owned(),
+            ],
+            velnor_full_commands: vec![
+                "mbx fmt --check".to_owned(),
+                "mbx clippy -- -D warnings".to_owned(),
+                "mbx nextest run".to_owned(),
+            ],
+            phases: vec![
+                ValidationPhase::Fmt,
+                ValidationPhase::Clippy,
+                ValidationPhase::Test,
+            ],
+            check_commands: vec!["cargo check --locked --no-deps".to_owned()],
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+            workspace_check: false,
+        };
+        for (lane, tool) in [(RunnerLane::Github, "cargo"), (RunnerLane::Velnor, "mbx")] {
+            for scope in [Scope::Affected, Scope::Full] {
+                assert_eq!(
+                    must(
+                        unit.commands_for_phase(lane, scope, ValidationPhase::Fmt),
+                        "fmt selection",
+                    ),
+                    vec![format!("{tool} fmt --check")],
+                );
+                assert_eq!(
+                    must(
+                        unit.commands_for_phase(lane, scope, ValidationPhase::Clippy),
+                        "clippy selection",
+                    ),
+                    vec![format!("{tool} clippy -- -D warnings")],
+                );
+                assert_eq!(
+                    must(
+                        unit.commands_for_phase(lane, scope, ValidationPhase::Test),
+                        "test selection",
+                    ),
+                    vec![format!("{tool} nextest run")],
+                );
+            }
+        }
+        let error = must_fail(
+            unit.commands_for_phase(RunnerLane::Github, Scope::Full, ValidationPhase::Doctest),
+            "a phase the unit does not carry",
+        );
+        assert!(
+            error.to_string().contains("has no doctest phase"),
+            "missing phases fail closed: {error}"
+        );
+        let mut bare = unit.clone();
+        bare.phases.clear();
+        bare.check_commands.clear();
+        let error = must_fail(
+            bare.commands_for_phase(RunnerLane::Github, Scope::Full, ValidationPhase::Fmt),
+            "an unphased unit",
+        );
+        assert!(
+            error.to_string().contains("has no validation phases"),
+            "unphased units fail closed instead of silently skipping: {error}"
+        );
+        let error = must_fail(
+            bare.commands_for_phase(RunnerLane::Github, Scope::Full, ValidationPhase::Check),
+            "an unphased unit with --phase check",
+        );
+        assert!(
+            error.to_string().contains("has no validation phases"),
+            "--phase check on an unphased unit fails closed: {error}"
+        );
+        let mut skewed = unit.clone();
+        skewed.github_pr_commands.push("extra".to_owned());
+        let error = must_fail(
+            skewed.commands_for_phase(RunnerLane::Github, Scope::Affected, ValidationPhase::Fmt),
+            "misaligned tags",
+        );
+        assert!(
+            error.to_string().contains("misaligned"),
+            "tag/command misalignments fail closed: {error}"
+        );
+        let mut corrupt = unit.clone();
+        corrupt.check_commands.clear();
+        let error = must_fail(
+            corrupt.commands_for_phase(RunnerLane::Github, Scope::Full, ValidationPhase::Check),
+            "phases without a stored check",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("without prerequisite check commands"),
+            "a phased unit without a check fails closed: {error}"
+        );
+    }
+
+    #[test]
+    fn run_rejects_unknown_phases_before_touching_the_filesystem() {
+        let args = ["run", "--phase", "fuzz"]
+            .iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        let error = must_fail(super::try_run(&args), "unknown phase");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported --phase: fuzz; use fmt, clippy, test, doctest, or check"),
+            "the failure lists the valid phases: {error}"
+        );
+        // A valid phase parses through to execution: the missing config,
+        // not the selector, fails.
+        let args = [
+            "run",
+            "--phase",
+            "fmt",
+            "--config",
+            "/nonexistent-project-toml-dir/project.toml",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+        let error = must_fail(super::try_run(&args), "missing config");
+        assert!(
+            error.to_string().contains("project.toml"),
+            "a valid phase reaches execution: {error}"
         );
     }
 
@@ -5381,6 +5806,8 @@ workspace_check = true
             github_full_commands: vec!["true".to_owned()],
             velnor_pr_commands: vec!["true".to_owned()],
             velnor_full_commands: vec!["true".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,

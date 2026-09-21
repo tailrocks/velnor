@@ -664,6 +664,10 @@ fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) {
     let mut full_commands = commands.to_vec();
     full_commands.extend(unit.full_commands.iter().cloned());
     unit.full_commands = full_commands;
+    // Prepare commands carry no phase tags and shift every position: the unit
+    // keeps the product rebuild ahead of its checks and verifies through the
+    // single legacy step.
+    unit.clear_phases();
     unit.watch.sort();
     unit.watch.dedup();
 }
@@ -753,6 +757,8 @@ mod tests {
             watch: Vec::new(),
             pr_commands: Vec::new(),
             full_commands: Vec::new(),
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,

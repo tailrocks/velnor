@@ -3615,7 +3615,7 @@ fn render_release_unit_job(
     // history, but release checkouts are shallow: the hosted leg fetches the
     // pin before the checks, like the unit provider job.
     render_release_pin_fetch(output, provider, unit);
-    render_release_unit_checks_step(
+    render_release_check_steps(
         output,
         unit,
         &verify_name,
@@ -3624,6 +3624,41 @@ fn render_release_unit_job(
         token_env,
     );
     id
+}
+
+/// The checks steps of one release leg. Release legs know their unit
+/// statically: phased units verify through one step per runnable phase,
+/// like the collapsed jobs, while unphased units keep the single step.
+fn render_release_check_steps(
+    output: &mut String,
+    unit: &Unit,
+    verify_name: &str,
+    head_sha: &str,
+    cargo_offline: &str,
+    token_env: &str,
+) {
+    let runnable = unit.runnable_phases();
+    if runnable.is_empty() {
+        render_release_unit_checks_step(
+            output,
+            unit,
+            verify_name,
+            head_sha,
+            cargo_offline,
+            token_env,
+        );
+    } else {
+        for phase in runnable {
+            let _ = writeln!(
+                output,
+                "      - name: {} ({verify_name})\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: {head_sha}{cargo_offline}{token_env}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} --phase {}\n",
+                phase.step_name(),
+                yaml_scalar(&unit.id),
+                yaml_scalar(&unit.id),
+                phase.as_str(),
+            );
+        }
+    }
 }
 
 /// The D19 pin-fetch step for a hosted release leg whose unit runs the
@@ -5773,6 +5808,8 @@ cp "$record" "$out"
             watch: vec!["Cargo.toml".to_owned()],
             pr_commands: vec!["cargo check".to_owned()],
             full_commands: vec!["cargo check".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,

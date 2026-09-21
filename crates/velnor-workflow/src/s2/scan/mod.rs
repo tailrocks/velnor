@@ -371,6 +371,8 @@ pub(crate) fn unit(
         watch,
         pr_commands: commands.clone(),
         full_commands: commands,
+        phases: Vec::new(),
+        check_commands: Vec::new(),
         depends_on: Vec::new(),
         cache,
         pinned_lockfile: false,

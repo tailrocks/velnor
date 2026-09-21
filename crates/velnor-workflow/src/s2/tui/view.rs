@@ -705,6 +705,8 @@ mod tests {
                 .map(|index| format!("cargo test --package example-{index}"))
                 .collect(),
             full_commands: vec!["cargo test --workspace --all-targets".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             pinned_lockfile: true,
             cache: None,
