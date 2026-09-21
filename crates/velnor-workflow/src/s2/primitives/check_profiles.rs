@@ -525,6 +525,7 @@ fn render_tool_steps(output: &mut String, config: &ProjectConfig, profile: &Chec
     super::close_mise_tool_subset(
         &mut tools,
         &config.mise_lock_keys,
+        &config.mise_lock_backends,
         &config.mise_install_deps,
     );
     if profile.runner == "velnor" {
@@ -673,6 +674,7 @@ mod tests {
             reviewers: Vec::new(),
             declared_surface: true,
             mise_lock_keys: std::collections::BTreeSet::new(),
+            mise_lock_backends: std::collections::BTreeMap::new(),
             mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
             velnor_host_cache: config::CacheVelnorSection::default(),

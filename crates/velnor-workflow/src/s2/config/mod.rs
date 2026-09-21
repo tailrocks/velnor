@@ -2406,82 +2406,261 @@ pub(crate) fn mise_lock_keys_for_root(root: &Path) -> Result<BTreeSet<String>, G
 /// Location of the mise configuration, relative to the repository root.
 pub(crate) const MISE_CONFIG_PATH: &str = "mise.toml";
 
-/// The machine-readable install dependencies the root `mise.toml` declares:
-/// the `[settings] cargo.binstall` flag, which makes every `cargo:`-backend
-/// install require the `cargo-binstall` tool, plus each tool entry's
-/// `depends` list. Derived `install_args` subsets close over these so every
-/// rendered subset installs with `mise --locked`: mise refuses an explicit
-/// install whose configured dependency is not installed rather than
-/// installing it implicitly.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct MiseInstallDeps {
-    /// Whether `[settings] cargo.binstall` is true.
-    pub(crate) cargo_binstall: bool,
-    /// Tool key to the dependency names its entry's `depends` lists.
-    pub(crate) depends: BTreeMap<String, Vec<String>>,
+/// The `npm` package manager mise installs `npm:`-backend tools with, read
+/// from `[settings] npm.package_manager`. It selects which extra install
+/// dependency an `npm:` install declares beyond `node`: the default embedded
+/// installer needs none, an explicit one needs its own CLI on `PATH`.
+/// Mirrors `NpmPackageManager` in mise 2026.9.12 (`src/config/settings.rs`);
+/// the model-version note on the closure tables in `crate::s2::primitives`
+/// explains the pinning.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum NpmPackageManager {
+    /// The default: mise's embedded `aube` installer, or `npm` under
+    /// `npm.shell_out`. Declares no package-manager dependency itself.
+    #[default]
+    Auto,
+    /// An explicit `npm` installer (or `auto` under shell-out).
+    Npm,
+    /// The embedded `aube` installer, selected explicitly.
+    Aube,
+    /// A standalone `aube` executable.
+    AubeCli,
+    /// An explicit `bun` installer.
+    Bun,
+    /// An explicit `pnpm` installer.
+    Pnpm,
 }
 
-/// Collect the install dependencies from `mise.toml` text: the
-/// `[settings] cargo.binstall` flag and every tool entry's `depends` list.
-/// Strict TOML parsing (never hand-splitting), like the lock readers; only
-/// these two shapes are consulted and everything else is ignored.
+impl NpmPackageManager {
+    /// Parse one `[settings] npm.package_manager` value. mise spells the
+    /// variants snake-case (`aube_cli`, not `aube-cli`).
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "npm" => Some(Self::Npm),
+            "aube" => Some(Self::Aube),
+            "aube_cli" => Some(Self::AubeCli),
+            "bun" => Some(Self::Bun),
+            "pnpm" => Some(Self::Pnpm),
+            _ => None,
+        }
+    }
+}
+
+/// The machine-readable install dependencies the root `mise.toml` declares,
+/// plus the settings that select backend-implied ones. Derived
+/// `install_args` subsets close over these so every rendered subset installs
+/// with `mise --locked`: mise refuses an explicit install whose configured
+/// dependency is not installed rather than installing it implicitly.
+///
+/// The backend-implied edges (a `cargo:` install needs `rust`,
+/// `cargo-binstall`, and `sccache` when configured; an `npm:` install needs
+/// `node`; and so on) come from mise's own backend metadata, not from this
+/// file: the closure tables in `crate::s2::primitives` model them. This file
+/// only reads what selects them — the `[settings] npm.*` keys and each tool
+/// entry's `depends` list and `pipx` installer options — plus the lock's
+/// recorded backends, which attribute bare tool ids to a backend.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MiseInstallDeps {
+    /// The `[settings] npm.package_manager` selection (default `auto`).
+    pub(crate) npm_package_manager: NpmPackageManager,
+    /// Whether `[settings] npm.shell_out` is true (default false).
+    pub(crate) npm_shell_out: bool,
+    /// Tool key to the dependency names its entry's `depends` lists.
+    pub(crate) depends: BTreeMap<String, Vec<String>>,
+    /// Tool keys whose entry selects the `uv`-only `pipx` installer via a
+    /// non-empty `with` or `expose` list or a `dependency_prereleases` value.
+    /// Those installs declare `uv` instead of `pipx` as the required
+    /// installer; every other `pipx:` install declares `pipx`.
+    pub(crate) pipx_uv_only: BTreeSet<String>,
+}
+
+/// Whether a `pipx` tool option holds a non-empty string list, mirroring
+/// mise's `string_list`: a bare string counts as one requirement (even an
+/// empty one, which mise refuses), a `[`-leading string parses as JSON, and
+/// an array counts its string elements. Anything else is malformed, and mise
+/// refuses it at install time, so planning refuses it here with the exact
+/// key instead of guessing the installer the dependency graph needs.
 ///
 /// # Errors
-/// Returns a usage error when the text is not valid TOML, when
-/// `cargo.binstall` is present but not a boolean, or when a tool's
-/// `depends` is present but not a list of names.
+/// Returns a usage error naming the tool and key when the value is neither
+/// a string nor an array of strings, or holds an empty value.
+fn pipx_string_list_is_nonempty(
+    tool: &str,
+    key: &str,
+    value: &toml::Value,
+) -> Result<bool, GeneratorError> {
+    let malformed = || {
+        GeneratorError::usage(format!(
+            "parse mise.toml for install dependencies: tool `{tool}` declares `{key}`, which must be a string or array of strings"
+        ))
+    };
+    let values = match value {
+        toml::Value::String(text) => {
+            if text.trim_start().starts_with('[') {
+                serde_json::from_str::<Vec<String>>(text).map_err(|_| malformed())?
+            } else {
+                vec![text.clone()]
+            }
+        }
+        toml::Value::Array(rows) => rows
+            .iter()
+            .map(|row| row.as_str().map(str::to_owned).ok_or_else(malformed))
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => return Err(malformed()),
+    };
+    if values.iter().any(|value| value.trim().is_empty()) {
+        return Err(GeneratorError::usage(format!(
+            "parse mise.toml for install dependencies: tool `{tool}` declares `{key}`, which cannot contain empty values"
+        )));
+    }
+    Ok(!values.is_empty())
+}
+
+/// Collect one tool entry's install edges into the running maps: its
+/// `depends` names, and — for `pipx:`/`pypi:` entries and bare ones, whose
+/// backend the lock attributes later — whether its options select the
+/// `uv`-only installer.
+///
+/// # Errors
+/// Returns a usage error naming the tool when its `depends` is present but
+/// not a list of names, or when a `pipx` installer option is malformed.
+fn collect_tool_install_edges(
+    key: &str,
+    entry: &toml::Value,
+    depends: &mut BTreeMap<String, Vec<String>>,
+    pipx_uv_only: &mut BTreeSet<String>,
+) -> Result<(), GeneratorError> {
+    let Some(options) = entry.as_table() else {
+        return Ok(());
+    };
+    if let Some(deps) = options.get("depends") {
+        let Some(names) = deps.as_array().and_then(|rows| {
+            rows.iter()
+                .map(toml::Value::as_str)
+                .collect::<Option<Vec<_>>>()
+        }) else {
+            return Err(GeneratorError::usage(format!(
+                "parse mise.toml for install dependencies: tool `{key}` declares `depends`, which must be a list of tool names"
+            )));
+        };
+        let names = names
+            .into_iter()
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if !names.is_empty() {
+            depends.insert(key.to_owned(), names);
+        }
+    }
+    // Only `pipx:`/`pypi:` entries (and bare ones, whose backend the lock
+    // attributes later) can select the `uv`-only installer.
+    let prefixed = key.split_once(':').map(|(prefix, _)| prefix);
+    if prefixed.is_some_and(|prefix| prefix != "pipx" && prefix != "pypi") {
+        return Ok(());
+    }
+    let mut uv_only = false;
+    for option in ["with", "expose"] {
+        if let Some(value) = options.get(option)
+            && pipx_string_list_is_nonempty(key, option, value)?
+        {
+            uv_only = true;
+        }
+    }
+    if let Some(value) = options.get("dependency_prereleases") {
+        if !value.is_str() {
+            return Err(GeneratorError::usage(format!(
+                "parse mise.toml for install dependencies: tool `{key}` declares `dependency_prereleases`, which must be a string"
+            )));
+        }
+        uv_only = true;
+    }
+    if uv_only {
+        pipx_uv_only.insert(key.to_owned());
+    }
+    Ok(())
+}
+
+/// Collect the install dependencies from `mise.toml` text: the `[settings]`
+/// `npm` installer selection, every tool entry's `depends` list, and every
+/// `pipx:` (or bare, hence maybe-`pipx`) entry's `uv`-only installer
+/// options. Strict TOML parsing (never hand-splitting), like the lock
+/// readers; only these shapes are consulted and everything else is ignored.
+/// `pipx` installer options on any other backend prefix are skipped: that
+/// backend never reads them, so refusing them here would invent a failure
+/// mise itself never reports.
+///
+/// # Errors
+/// Returns a usage error when the text is not valid TOML, when an `npm`
+/// setting is present but malformed, when a tool's `depends` is present but
+/// not a list of names, or when a `pipx` installer option is malformed.
 pub(crate) fn parse_mise_install_deps(
     config_toml: &str,
 ) -> Result<MiseInstallDeps, GeneratorError> {
     let table: toml::Table = config_toml.parse().map_err(|error| {
         GeneratorError::usage(format!("parse mise.toml for install dependencies: {error}"))
     })?;
-    let cargo_binstall = table
+    let npm = table
         .get("settings")
         .and_then(toml::Value::as_table)
-        .and_then(|settings| settings.get("cargo"))
-        .and_then(toml::Value::as_table)
-        .and_then(|cargo| cargo.get("binstall"))
+        .and_then(|settings| settings.get("npm"))
+        .and_then(toml::Value::as_table);
+    let npm_package_manager = npm
+        .and_then(|npm| npm.get("package_manager"))
+        .map(|value| {
+            value
+                .as_str()
+                .and_then(NpmPackageManager::parse)
+                .ok_or_else(|| {
+                    GeneratorError::usage(
+                        "parse mise.toml for install dependencies: `[settings] npm.package_manager` must be one of: auto, npm, aube, aube_cli, bun, pnpm",
+                    )
+                })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    // The deprecated `npm.bun` flag still forces the `bun` installer when
+    // true, overriding the selection above, exactly like mise's own
+    // settings post-processing.
+    let npm_bun = npm
+        .and_then(|npm| npm.get("bun"))
         .map(|value| {
             value.as_bool().ok_or_else(|| {
                 GeneratorError::usage(
-                    "parse mise.toml for install dependencies: `[settings] cargo.binstall` must be a boolean",
+                    "parse mise.toml for install dependencies: `[settings] npm.bun` must be a boolean",
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let npm_package_manager = if npm_bun {
+        NpmPackageManager::Bun
+    } else {
+        npm_package_manager
+    };
+    let npm_shell_out = npm
+        .and_then(|npm| npm.get("shell_out"))
+        .map(|value| {
+            value.as_bool().ok_or_else(|| {
+                GeneratorError::usage(
+                    "parse mise.toml for install dependencies: `[settings] npm.shell_out` must be a boolean",
                 )
             })
         })
         .transpose()?
         .unwrap_or(false);
     let mut depends = BTreeMap::new();
+    let mut pipx_uv_only = BTreeSet::new();
     if let Some(tools) = table.get("tools").and_then(toml::Value::as_table) {
         for (key, entry) in tools {
-            let Some(options) = entry.as_table() else {
-                continue;
-            };
-            let Some(deps) = options.get("depends") else {
-                continue;
-            };
-            let Some(names) = deps.as_array().and_then(|rows| {
-                rows.iter()
-                    .map(toml::Value::as_str)
-                    .collect::<Option<Vec<_>>>()
-            }) else {
-                return Err(GeneratorError::usage(format!(
-                    "parse mise.toml for install dependencies: tool `{key}` declares `depends`, which must be a list of tool names"
-                )));
-            };
-            let names = names
-                .into_iter()
-                .filter(|name| !name.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            if !names.is_empty() {
-                depends.insert(key.clone(), names);
-            }
+            collect_tool_install_edges(key, entry, &mut depends, &mut pipx_uv_only)?;
         }
     }
     Ok(MiseInstallDeps {
-        cargo_binstall,
+        npm_package_manager,
+        npm_shell_out,
         depends,
+        pipx_uv_only,
     })
 }
 
@@ -2507,6 +2686,77 @@ pub(crate) fn mise_install_deps_for_root(root: &Path) -> Result<MiseInstallDeps,
         GeneratorError::usage(format!("parse mise.toml {}: {error}", path.display()))
     })?;
     parse_mise_install_deps(&text)
+        .map_err(|error| GeneratorError::usage(format!("{}: {error}", path.display())))
+}
+
+/// Read the recorded backend for each tool key in `mise.lock` text: the
+/// first row's `backend` full (such as `aqua:rhysd/actionlint` for a bare
+/// `actionlint` key), which attributes bare ids to the backend whose
+/// install dependencies apply. Only the first row is consulted, matching
+/// mise's own locked-backend lookup; keys without a recorded backend (or
+/// with an empty row list) are absent from the map and fall back to the
+/// known registry defaults. Strict TOML parsing (never hand-splitting), so
+/// quoted keys such as `[[tools."cargo:sccache"]]` resolve to the same key
+/// both sides check.
+///
+/// # Errors
+/// Returns a usage error when the lock text is not valid TOML, or when a
+/// recorded `backend` is present but not a non-empty string.
+pub(crate) fn parse_mise_lock_backends(
+    lock_toml: &str,
+) -> Result<BTreeMap<String, String>, GeneratorError> {
+    let table: toml::Table = lock_toml.parse().map_err(|error| {
+        GeneratorError::usage(format!(
+            "parse lock TOML for recorded tool backends: {error}"
+        ))
+    })?;
+    let mut backends = BTreeMap::new();
+    let Some(tools) = table.get("tools").and_then(toml::Value::as_table) else {
+        return Ok(backends);
+    };
+    for (key, entry) in tools {
+        let row = entry
+            .as_array()
+            .and_then(|rows| rows.first())
+            .or(Some(entry));
+        let Some(row) = row else {
+            continue;
+        };
+        let Some(backend) = row.get("backend") else {
+            continue;
+        };
+        let Some(backend) = backend.as_str().filter(|backend| !backend.is_empty()) else {
+            return Err(GeneratorError::usage(format!(
+                "parse lock TOML for recorded tool backends: tool `{key}` records `backend`, which must be a non-empty string"
+            )));
+        };
+        backends.insert(key.clone(), backend.to_owned());
+    }
+    Ok(backends)
+}
+
+/// Read the recorded tool backends from the root `mise.lock`.
+///
+/// A missing lock is a valid outcome, matching
+/// [`mise_lock_keys_for_root`]: no keys, no backends. Only the root lock is
+/// consulted, matching the same root-lock rule.
+///
+/// # Errors
+/// Returns an I/O error when the lock cannot be read, and a usage error when
+/// it is not valid UTF-8 TOML or records a malformed backend.
+pub(crate) fn mise_lock_backends_for_root(
+    root: &Path,
+) -> Result<BTreeMap<String, String>, GeneratorError> {
+    let path = root.join(MISE_LOCK_PATH);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => return Err(GeneratorError::io("read mise.lock", &path, &error)),
+    };
+    let text = String::from_utf8(bytes).map_err(|error| {
+        GeneratorError::usage(format!("parse mise.lock {}: {error}", path.display()))
+    })?;
+    parse_mise_lock_backends(&text)
         .map_err(|error| GeneratorError::usage(format!("{}: {error}", path.display())))
 }
 
@@ -6055,14 +6305,19 @@ mod tests {
     }
 
     #[test]
-    fn install_deps_parse_settings_flag_and_tool_depends() {
+    fn install_deps_parse_settings_selection_and_tool_depends() {
         let deps = must(
             parse_mise_install_deps(
-                "[tools]\n\"cargo:example-cli\" = \"1.2.3\"\n\"pipx:example-lint\" = { version = \"4.5.6\", depends = [\"python\", \"uv\"] }\n\n[settings]\ncargo.binstall = true\n",
+                "[tools]\n\"cargo:example-cli\" = \"1.2.3\"\n\"pipx:example-lint\" = { version = \"4.5.6\", depends = [\"python\", \"uv\"] }\n\n[settings]\nnpm.package_manager = \"bun\"\nnpm.shell_out = true\n",
             ),
             "parse install dependencies",
         );
-        assert!(deps.cargo_binstall, "the settings flag is read");
+        assert_eq!(
+            deps.npm_package_manager,
+            NpmPackageManager::Bun,
+            "the installer selection is read"
+        );
+        assert!(deps.npm_shell_out, "the shell-out flag is read");
         assert_eq!(
             deps.depends.get("pipx:example-lint"),
             Some(&vec!["python".to_owned(), "uv".to_owned()]),
@@ -6074,6 +6329,11 @@ mod tests {
             "a version-only entry declares no dependencies: {:?}",
             deps.depends
         );
+        assert!(
+            deps.pipx_uv_only.is_empty(),
+            "no installer options were declared: {:?}",
+            deps.pipx_uv_only
+        );
     }
 
     #[test]
@@ -6082,28 +6342,76 @@ mod tests {
             parse_mise_install_deps("[tools]\nripgrep = \"15.2.0\"\n"),
             "parse plain config",
         );
-        assert!(
-            !deps.cargo_binstall,
-            "an absent flag installs nothing extra"
+        assert_eq!(
+            deps.npm_package_manager,
+            NpmPackageManager::Auto,
+            "an absent selection installs with the embedded installer"
         );
+        assert!(!deps.npm_shell_out, "shell-out defaults to off");
         assert!(deps.depends.is_empty(), "no depends entries, no edges");
+        assert!(deps.pipx_uv_only.is_empty(), "no options, no edges");
         let deps = must(
             parse_mise_install_deps("[settings]\nlockfile = true\n"),
             "parse settings-only config",
         );
-        assert!(!deps.cargo_binstall, "other settings do not imply the flag");
+        assert_eq!(
+            deps.npm_package_manager,
+            NpmPackageManager::Auto,
+            "other settings do not imply a selection"
+        );
         assert!(deps.depends.is_empty(), "no tools table, no edges");
+    }
+
+    #[test]
+    fn install_deps_parse_pipx_uv_only_options() {
+        let deps = must(
+            parse_mise_install_deps(
+                "[tools]\n\"pipx:example-with\" = { version = \"1.0.0\", with = [\"example-extra\"] }\n\"pipx:example-empty\" = { version = \"1.0.0\", with = [] }\n\"pipx:example-expose\" = { version = \"1.0.0\", expose = \"example-bin\" }\n\"pipx:example-pre\" = { version = \"1.0.0\", dependency_prereleases = \"allow\" }\n\"cargo:example-cli\" = { version = \"1.2.3\", with = [\"example-extra\"] }\n",
+            ),
+            "parse pipx installer options",
+        );
+        assert_eq!(
+            deps.pipx_uv_only,
+            BTreeSet::from([
+                "pipx:example-with".to_owned(),
+                "pipx:example-expose".to_owned(),
+                "pipx:example-pre".to_owned(),
+            ]),
+            "non-empty options select the uv-only installer: {:?}",
+            deps.pipx_uv_only
+        );
+    }
+
+    #[test]
+    fn install_deps_deprecated_bun_flag_forces_bun() {
+        let deps = must(
+            parse_mise_install_deps("[settings]\nnpm.bun = true\n"),
+            "parse deprecated flag",
+        );
+        assert_eq!(
+            deps.npm_package_manager,
+            NpmPackageManager::Bun,
+            "the deprecated flag still forces bun"
+        );
     }
 
     #[test]
     fn install_deps_refuse_malformed_edges() {
         let error = must_fail(
-            parse_mise_install_deps("[settings]\ncargo.binstall = \"yes\"\n"),
-            "a non-boolean flag must fail",
+            parse_mise_install_deps("[settings]\nnpm.package_manager = \"yarn\"\n"),
+            "an unknown installer must fail",
         );
         assert!(
-            error.to_string().contains("cargo.binstall"),
-            "error names the flag: {error}"
+            error.to_string().contains("npm.package_manager"),
+            "error names the setting: {error}"
+        );
+        let error = must_fail(
+            parse_mise_install_deps("[settings]\nnpm.shell_out = \"yes\"\n"),
+            "a non-boolean shell-out must fail",
+        );
+        assert!(
+            error.to_string().contains("npm.shell_out"),
+            "error names the setting: {error}"
         );
         let error = must_fail(
             parse_mise_install_deps(
@@ -6113,6 +6421,16 @@ mod tests {
         );
         assert!(
             error.to_string().contains("ripgrep") && error.to_string().contains("depends"),
+            "error names the tool and key: {error}"
+        );
+        let error = must_fail(
+            parse_mise_install_deps(
+                "[tools]\n\"pipx:example-lint\" = { version = \"1.0.0\", with = 7 }\n",
+            ),
+            "a malformed installer option must fail",
+        );
+        assert!(
+            error.to_string().contains("pipx:example-lint") && error.to_string().contains("with"),
             "error names the tool and key: {error}"
         );
         let error = must_fail(
@@ -6137,16 +6455,55 @@ mod tests {
         must(
             fs::write(
                 root.join("mise.toml"),
-                "[tools]\nnode = \"24.0.0\"\n\n[settings]\ncargo.binstall = true\n",
+                "[tools]\nnode = \"24.0.0\"\n\n[settings]\nnpm.shell_out = true\n",
             ),
             "write config",
         );
         let deps = must(mise_install_deps_for_root(&root), "read present config");
         assert!(
-            deps.cargo_binstall,
-            "the settings flag survives the round trip"
+            deps.npm_shell_out,
+            "the shell-out flag survives the round trip"
         );
         assert!(deps.depends.is_empty(), "no depends entries were declared");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lock_backends_reader_records_the_first_row_backend() {
+        let root = scanned_root("mise-lock-backends");
+        let backends = must(mise_lock_backends_for_root(&root), "read missing lock");
+        assert!(backends.is_empty(), "a missing lock records no backends");
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "lockfile_version = 2\n\n[[tools.actionlint]]\nversion = \"1.7.12\"\nbackend = \"aqua:rhysd/actionlint\"\n\n[[tools.\"cargo:sccache\"]]\nversion = \"0.16.0\"\nbackend = \"cargo:sccache\"\n\n[[tools.unrecorded]]\nversion = \"1.0.0\"\n",
+            ),
+            "write lock",
+        );
+        let backends = must(mise_lock_backends_for_root(&root), "read present lock");
+        assert_eq!(
+            backends,
+            BTreeMap::from([
+                ("actionlint".to_owned(), "aqua:rhysd/actionlint".to_owned()),
+                ("cargo:sccache".to_owned(), "cargo:sccache".to_owned()),
+            ]),
+            "each key maps to its recorded backend: {backends:?}"
+        );
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.actionlint]]\nversion = \"1.7.12\"\nbackend = 7\n",
+            ),
+            "write malformed lock",
+        );
+        let error = must_fail(
+            mise_lock_backends_for_root(&root),
+            "a non-string backend must fail",
+        );
+        assert!(
+            error.to_string().contains("actionlint") && error.to_string().contains("backend"),
+            "error names the tool and key: {error}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
