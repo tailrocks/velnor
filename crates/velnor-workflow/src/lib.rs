@@ -6224,7 +6224,7 @@ fn generated_files_with_surface(
         if config
             .static_files
             .iter()
-            .any(|owned| owned.path == reserved)
+            .any(|owned| Path::new(&owned.path) == Path::new(reserved))
         {
             return Err(GeneratorError::usage(format!(
                 "remove the `[[static_files]]` row for `{reserved}`: the generator owns this path"
@@ -6397,13 +6397,25 @@ enum FilePreimage {
     Regular {
         identity: FileIdentity,
         bytes: Box<[u8]>,
+        /// The on-disk permission bits (unix only; zero elsewhere). Generated
+        /// files are never executable, so a set execute bit is drift the
+        /// next publish normalizes away, and rollback restores the recorded
+        /// bits exactly.
+        mode: u32,
     },
-    /// The generator-owned symlink only: any other symlink still fails closed
-    /// in [`capture_file_preimage`], so this variant can only name
-    /// [`.github/CLAUDE.md`](GITHUB_CLAUDE_MD).
+    /// A symlink: either the generator-owned
+    /// [`.github/CLAUDE.md`](GITHUB_CLAUDE_MD) or an unknown `.github` link
+    /// slated for force-gated removal. Any other symlink at an expected
+    /// path still fails closed in [`capture_file_preimage`].
     Symlink {
         target: PathBuf,
     },
+    /// An unknown `.github` directory with no expected descendants: force
+    /// moves it aside whole instead of expanding it into leaves.
+    Directory,
+    /// An unknown non-regular, non-symlink `.github` entry (fifo, socket,
+    /// device): force moves it aside, since it can never be byte-restored.
+    Special,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6420,6 +6432,11 @@ struct GeneratedWritePlan {
     files: Vec<PlannedFile>,
     changed: Vec<PathBuf>,
     stale: Vec<PathBuf>,
+    /// Unknown `.github` entries slated for force-gated removal: unrecorded
+    /// files, symlinks, special files, and whole directories with no
+    /// expected descendants. Kept apart from `files` so validation
+    /// re-captures them without the expected-path refusals.
+    unknown: Vec<PlannedFile>,
     conflicts: Vec<PathBuf>,
     ownership_present: bool,
     ownership_needs_refresh: bool,
@@ -6434,21 +6451,25 @@ impl GeneratedWritePlan {
         self.files
             .iter()
             .any(|file| file.action != PlannedAction::Same)
+            || !self.unknown.is_empty()
     }
 
     fn differences(&self) -> Vec<PathBuf> {
-        self.files
+        let mut differences = self
+            .files
             .iter()
             .filter(|file| file.action != PlannedAction::Same)
             .map(|file| file.path.clone())
-            .collect()
+            .collect::<Vec<_>>();
+        differences.extend(self.unknown.iter().map(|file| file.path.clone()));
+        differences
     }
 }
 
 impl FilePreimage {
     fn bytes(&self) -> Option<&[u8]> {
         match self {
-            Self::Missing | Self::Symlink { .. } => None,
+            Self::Missing | Self::Symlink { .. } | Self::Directory | Self::Special => None,
             Self::Regular { bytes, .. } => Some(bytes),
         }
     }
@@ -6457,10 +6478,16 @@ impl FilePreimage {
         self.bytes().is_some_and(|bytes| bytes == expected)
     }
 
+    /// Whether the preimage is a regular file with any execute bit set.
+    /// Generated files are never executable, so this is drift.
+    fn is_executable(&self) -> bool {
+        matches!(self, Self::Regular { mode, .. } if mode & 0o111 != 0)
+    }
+
     fn symlink_target(&self) -> Option<&Path> {
         match self {
             Self::Symlink { target } => Some(target),
-            Self::Missing | Self::Regular { .. } => None,
+            Self::Missing | Self::Regular { .. } | Self::Directory | Self::Special => None,
         }
     }
 
@@ -6915,6 +6942,7 @@ fn plan_generated_write_with_options(
     inputs: &GenerationInputs,
     adopt: bool,
 ) -> Result<GeneratedWritePlan, GeneratorError> {
+    validate_generated_paths(files, symlinks)?;
     for relative in symlinks.keys() {
         if files.contains_key(relative) {
             return Err(GeneratorError::usage(format!(
@@ -6966,6 +6994,7 @@ fn plan_generated_write_with_options(
     )?;
     let ownership_needs_refresh = files_need_refresh
         || symlinks_need_refresh
+        || ownership_preimage.is_executable()
         || !ownership_preimage
             .has_bytes(ownership_state_content(files, symlinks, inputs).as_bytes());
     let stale_files =
@@ -6977,9 +7006,9 @@ fn plan_generated_write_with_options(
     let mut changed: Vec<PathBuf> = files
         .iter()
         .filter(|(relative, wanted)| {
-            preimages
-                .get(*relative)
-                .is_none_or(|preimage| !preimage.has_bytes(wanted.as_bytes()))
+            preimages.get(*relative).is_none_or(|preimage| {
+                !preimage.has_bytes(wanted.as_bytes()) || preimage.is_executable()
+            })
         })
         .map(|(relative, _)| relative.clone())
         .collect::<Vec<_>>();
@@ -6993,20 +7022,35 @@ fn plan_generated_write_with_options(
             })
             .map(|(relative, _)| relative.clone()),
     );
-    let legacy = direct_legacy_workflows(root, files)?;
+    let expected = expected_tree_paths(files, symlinks, ownership.map(|state| &state.outputs));
+    let unknown_paths = collect_unknown_tree_entries(root, &expected)?;
     let conflicts = changed
         .iter()
         .filter(|relative| root.join(relative).exists())
         .cloned()
         .collect::<Vec<_>>();
 
-    // Unowned workflows are never imported. `--force` deletes them so the
-    // generated surface can take over; without `--force` generation stops.
-    if !legacy.is_empty() && !adopt {
+    // Unknown `.github` content is never imported. `--force` removes it so
+    // the generated tree can take over; without `--force` generation stops.
+    if !unknown_paths.is_empty() && !adopt {
         return Err(GeneratorError::usage(format!(
-            "existing workflows are outside the Velnor workflow generator and will not be imported: {}; rerun with --force to replace unowned workflow files with generated output (bodies are never adopted)",
-            display_paths(legacy.iter()),
+            "existing files are outside the Velnor workflow generator and will not be imported: {}; rerun with --force to replace them with generated output (bodies are never adopted)",
+            display_paths(unknown_paths.iter()),
         )));
+    }
+    let mut unknown = Vec::new();
+    if adopt {
+        for relative in unknown_paths {
+            let preimage = capture_unknown_preimage(&root.join(&relative))?;
+            if matches!(preimage, FilePreimage::Missing) {
+                continue;
+            }
+            unknown.push(PlannedFile {
+                path: relative,
+                action: PlannedAction::Delete,
+                preimage,
+            });
+        }
     }
     let mut planned_files = files
         .keys()
@@ -7050,19 +7094,13 @@ fn plan_generated_write_with_options(
         }
     }));
     planned_files.extend(stale_files);
-    if adopt {
-        for path in legacy {
-            let preimage = capture_file_preimage(&root.join(&path), &path)?;
-            planned_files.push(PlannedFile {
-                path,
-                action: PlannedAction::Delete,
-                preimage,
-            });
-        }
-    }
     let ownership_action = if ownership.is_none() {
         PlannedAction::Create
-    } else if ownership_needs_refresh || !changed.is_empty() || !stale.is_empty() {
+    } else if ownership_needs_refresh
+        || !changed.is_empty()
+        || !stale.is_empty()
+        || !unknown.is_empty()
+    {
         PlannedAction::Update
     } else {
         PlannedAction::Same
@@ -7076,6 +7114,7 @@ fn plan_generated_write_with_options(
         files: planned_files,
         changed,
         stale,
+        unknown,
         conflicts,
         ownership_present: matches!(state_file, OwnershipStateFile::Present(_)),
         ownership_needs_refresh,
@@ -7102,7 +7141,8 @@ fn generated_check_error(
             })
         })
     };
-    let outputs_unchanged = plan.changed.is_empty() && plan.stale.is_empty();
+    let outputs_unchanged =
+        plan.changed.is_empty() && plan.stale.is_empty() && plan.unknown.is_empty();
     if outputs_unchanged
         && plan.differences() == [PathBuf::from(OWNERSHIP_STATE)]
         && let Some(error) = input_change(plan)
@@ -7170,77 +7210,18 @@ fn apply_generated_write_plan(
     }
     let _generation_lock = GenerationLock::acquire(root, files.keys().chain(symlinks.keys()))?;
     validate_plan_preimages(root, plan)?;
+    revalidate_unknown_tree(root, files, symlinks, plan)?;
     // A pre-state version is safe to adopt only when every existing generated
     // file exactly matches this renderer's output. `verify_generated_ownership`
     // rejects any divergent file before this point, including under `--force`.
     if plan.changed.is_empty()
         && plan.stale.is_empty()
+        && plan.unknown.is_empty()
         && (!plan.ownership_present || plan.ownership_needs_refresh)
     {
         return apply_ownership_refresh(root, files, symlinks, inputs, plan);
     }
-    let created = plan
-        .files
-        .iter()
-        .filter(|file| file.action == PlannedAction::Create)
-        .map(|file| file.path.clone())
-        .collect::<BTreeSet<_>>();
-    let mut written = plan.changed.clone();
-    written.extend(plan.stale.iter().cloned());
-    let ownership_path = PathBuf::from(OWNERSHIP_STATE);
-    if !written.contains(&ownership_path) {
-        written.push(ownership_path.clone());
-    }
-    for relative in &plan.changed {
-        if let Some(target) = symlinks.get(relative) {
-            let planned = plan
-                .files
-                .iter()
-                .find(|file| &file.path == relative)
-                .ok_or_else(|| GeneratorError::usage("generated plan has no file preimage"))?;
-            write_reviewed_symlink(&root.join(relative), relative, target, &planned.preimage)?;
-            continue;
-        }
-        let Some(content) = files.get(relative) else {
-            return Err(GeneratorError::usage(format!(
-                "generated plan references an unknown file: {}",
-                relative.display()
-            )));
-        };
-        let planned = plan
-            .files
-            .iter()
-            .find(|file| &file.path == relative)
-            .ok_or_else(|| GeneratorError::usage("generated plan has no file preimage"))?;
-        write_reviewed_file(&root.join(relative), relative, content, &planned.preimage)?;
-    }
-    for relative in &plan.stale {
-        let planned = plan
-            .files
-            .iter()
-            .find(|file| &file.path == relative)
-            .ok_or_else(|| GeneratorError::usage("generated plan has no stale-file preimage"))?;
-        if is_generator_owned_symlink(relative) {
-            delete_reviewed_symlink(&root.join(relative), relative, &planned.preimage)?;
-            continue;
-        }
-        delete_reviewed_file(&root.join(relative), relative, &planned.preimage)?;
-    }
-    let ownership_file = plan
-        .files
-        .iter()
-        .find(|file| file.path == ownership_path)
-        .ok_or_else(|| GeneratorError::usage("generated plan has no ownership preimage"))?;
-    write_reviewed_file(
-        &root.join(&ownership_path),
-        &ownership_path,
-        &ownership_state_content(files, symlinks, inputs),
-        &ownership_file.preimage,
-    )?;
-    Ok(WriteOutcome::Written {
-        changed: written,
-        created,
-    })
+    publish_staged_tree(root, files, symlinks, inputs, plan)
 }
 
 fn apply_ownership_refresh(
@@ -7270,6 +7251,844 @@ fn apply_ownership_refresh(
         changed: vec![ownership_path],
         created,
     })
+}
+
+/// After the generation lock is held, the unknown set must still equal
+/// the plan: an extra planted after planning would otherwise survive a
+/// publish that claims a complete tree.
+fn revalidate_unknown_tree(
+    root: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    symlinks: &BTreeMap<PathBuf, PathBuf>,
+    plan: &GeneratedWritePlan,
+) -> Result<(), GeneratorError> {
+    let state_path = PathBuf::from(OWNERSHIP_STATE);
+    let state_preimage = capture_file_preimage(&root.join(&state_path), &state_path)?;
+    let recorded = match parse_ownership_state(root, &state_preimage)? {
+        OwnershipStateFile::Present(state) => Some(state.outputs),
+        OwnershipStateFile::Absent | OwnershipStateFile::ForeignSchema { .. } => None,
+    };
+    let expected = expected_tree_paths(files, symlinks, recorded.as_ref());
+    let current = collect_unknown_tree_entries(root, &expected)?;
+    let planned = plan
+        .unknown
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    if current != planned {
+        let mut moved = current;
+        moved.extend(planned);
+        moved.sort();
+        moved.dedup();
+        return Err(GeneratorError::usage(format!(
+            "generated files changed after preflight: {}; review again",
+            display_paths(moved.iter()),
+        )));
+    }
+    Ok(())
+}
+
+/// Render the complete new tree into empty staging, validate it, then
+/// publish it over the live tree. A pre-publication failure leaves the
+/// live tree untouched; a mid-publish failure rolls every install,
+/// removal, move-aside, and prune back before the error surfaces. No
+/// staging directory or backup survives either outcome.
+fn publish_staged_tree(
+    root: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    symlinks: &BTreeMap<PathBuf, PathBuf>,
+    inputs: &GenerationInputs,
+    plan: &GeneratedWritePlan,
+) -> Result<WriteOutcome, GeneratorError> {
+    let mut staging = StagedTree::create(root, files, symlinks, inputs)?;
+    let outcome = staging.publish(root, files, symlinks, inputs, plan);
+    match outcome {
+        Ok(outcome) => {
+            staging.finish()?;
+            Ok(outcome)
+        }
+        Err(error) => {
+            let restore = staging.rollback(root, plan);
+            staging.remove();
+            if let Err(restore_error) = restore {
+                return Err(GeneratorError::usage(format!(
+                    "{error}; then restoring the pre-publication tree failed: {restore_error}"
+                )));
+            }
+            Err(error)
+        }
+    }
+}
+
+/// A complete rendered tree staged beside the live one: every expected
+/// file, symlink, and the ownership state, written into an empty
+/// `<output>/.velnor-workflow-stage-<pid>-<uniq>` directory and validated
+/// before publication moves anything. Staging lives at the output root —
+/// never under `.github`, so the unknown walk cannot see it — and shares
+/// the live tree's filesystem, so publication renames instead of copying.
+/// Moved-aside unknowns wait in a `<staging>.backups` sibling. The journal
+/// records each publish step for rollback.
+struct StagedTree {
+    dir: PathBuf,
+    backups: PathBuf,
+    /// Live paths installed in install order; rollback restores them from
+    /// the plan preimages in reverse.
+    installed: Vec<PathBuf>,
+    /// Live paths removed in removal order; rollback rewrites them from
+    /// the plan preimages in reverse.
+    removed: Vec<PathBuf>,
+    /// Moved-aside unknowns as (live relative, backup relative); rollback
+    /// renames them back in reverse.
+    moved_aside: Vec<(PathBuf, PathBuf)>,
+    /// Pruned empty directories in removal (deepest-first) order; rollback
+    /// recreates them in reverse.
+    pruned: Vec<PathBuf>,
+}
+
+impl StagedTree {
+    fn create(
+        root: &Path,
+        files: &BTreeMap<PathBuf, String>,
+        symlinks: &BTreeMap<PathBuf, PathBuf>,
+        inputs: &GenerationInputs,
+    ) -> Result<Self, GeneratorError> {
+        let dir = root.join(format!(
+            ".velnor-workflow-stage-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let staged = || -> Result<(), GeneratorError> {
+            fs::create_dir(&dir)
+                .map_err(|error| GeneratorError::io("create staging directory", &dir, &error))?;
+            for (relative, content) in files {
+                write_staging_file(&dir.join(relative), content)?;
+            }
+            for (relative, target) in symlinks {
+                let link = dir.join(relative);
+                if let Some(parent) = link.parent() {
+                    fs::create_dir_all(parent).map_err(|error| {
+                        GeneratorError::io("create staging directory", parent, &error)
+                    })?;
+                }
+                create_generator_symlink(target, &link)?;
+            }
+            write_staging_file(
+                &dir.join(OWNERSHIP_STATE),
+                &ownership_state_content(files, symlinks, inputs),
+            )?;
+            validate_staged_tree(&dir, files, symlinks, inputs)?;
+            Ok(())
+        };
+        if let Err(error) = staged() {
+            let _ = remove_tree_without_following(&dir);
+            return Err(error);
+        }
+        let mut backups = dir.as_os_str().to_owned();
+        backups.push(".backups");
+        Ok(Self {
+            dir,
+            backups: PathBuf::from(backups),
+            installed: Vec::new(),
+            removed: Vec::new(),
+            moved_aside: Vec::new(),
+            pruned: Vec::new(),
+        })
+    }
+
+    /// Publish the validated staging over the live tree: unknown removals
+    /// first, then stale owned files, then installs from staging, then the
+    /// ownership state, then empty-directory pruning. Every step journals
+    /// before its post-check, so a failed verification still rolls back.
+    fn publish(
+        &mut self,
+        root: &Path,
+        files: &BTreeMap<PathBuf, String>,
+        symlinks: &BTreeMap<PathBuf, PathBuf>,
+        inputs: &GenerationInputs,
+        plan: &GeneratedWritePlan,
+    ) -> Result<WriteOutcome, GeneratorError> {
+        for file in &plan.unknown {
+            let path = root.join(&file.path);
+            match &file.preimage {
+                FilePreimage::Regular { .. } => {
+                    delete_reviewed_file(&path, &file.path, &file.preimage)?;
+                    self.removed.push(file.path.clone());
+                }
+                FilePreimage::Symlink { .. } => {
+                    delete_unknown_symlink(&path, &file.path, &file.preimage)?;
+                    self.removed.push(file.path.clone());
+                }
+                FilePreimage::Directory | FilePreimage::Special => {
+                    self.move_aside(root, &file.path, &file.preimage)?;
+                }
+                FilePreimage::Missing => return Err(preimage_changed(&file.path)),
+            }
+        }
+        for relative in &plan.stale {
+            let planned =
+                planned_file(plan, relative, "generated plan has no stale-file preimage")?;
+            if is_generator_owned_symlink(relative) {
+                delete_reviewed_symlink(&root.join(relative), relative, &planned.preimage)?;
+            } else {
+                delete_reviewed_file(&root.join(relative), relative, &planned.preimage)?;
+            }
+            self.removed.push(relative.clone());
+        }
+        for relative in &plan.changed {
+            if let Some(target) = symlinks.get(relative) {
+                let planned = planned_file(plan, relative, "generated plan has no file preimage")?;
+                install_staged_symlink(
+                    &self.dir.join(relative),
+                    &root.join(relative),
+                    relative,
+                    target,
+                    &planned.preimage,
+                )?;
+                self.installed.push(relative.clone());
+                continue;
+            }
+            let Some(content) = files.get(relative) else {
+                return Err(GeneratorError::usage(format!(
+                    "generated plan references an unknown file: {}",
+                    relative.display()
+                )));
+            };
+            let planned = planned_file(plan, relative, "generated plan has no file preimage")?;
+            install_staged_file(
+                &self.dir.join(relative),
+                &root.join(relative),
+                relative,
+                content,
+                &planned.preimage,
+            )?;
+            self.installed.push(relative.clone());
+        }
+        let ownership_path = PathBuf::from(OWNERSHIP_STATE);
+        let ownership_file = planned_file(
+            plan,
+            &ownership_path,
+            "generated plan has no ownership preimage",
+        )?;
+        let mut state_installed = false;
+        if ownership_file.action != PlannedAction::Same {
+            let content = ownership_state_content(files, symlinks, inputs);
+            install_staged_file(
+                &self.dir.join(&ownership_path),
+                &root.join(&ownership_path),
+                &ownership_path,
+                &content,
+                &ownership_file.preimage,
+            )?;
+            self.installed.push(ownership_path.clone());
+            state_installed = true;
+        }
+        self.pruned = prune_empty_generated_dirs(root)?;
+        let created = plan
+            .files
+            .iter()
+            .filter(|file| file.action == PlannedAction::Create)
+            .map(|file| file.path.clone())
+            .collect::<BTreeSet<_>>();
+        let mut written = plan.changed.clone();
+        written.extend(plan.stale.iter().cloned());
+        written.extend(plan.unknown.iter().map(|file| file.path.clone()));
+        if state_installed {
+            written.push(ownership_path);
+        }
+        Ok(WriteOutcome::Written {
+            changed: written,
+            created,
+        })
+    }
+
+    /// Move an unknown directory or special file aside into the backups
+    /// sibling: rename carries the whole subtree without following links
+    /// or reading bytes, and rollback renames it back. Unknown files and
+    /// links delete through the reviewed removers instead, since their
+    /// preimages byte-restore.
+    fn move_aside(
+        &mut self,
+        root: &Path,
+        relative: &Path,
+        expected: &FilePreimage,
+    ) -> Result<(), GeneratorError> {
+        match expected {
+            FilePreimage::Directory | FilePreimage::Special => (),
+            _ => {
+                return Err(GeneratorError::usage(format!(
+                    "generated plan routes a file through the move-aside: {}",
+                    relative.display()
+                )));
+            }
+        }
+        let current = capture_unknown_preimage(&root.join(relative))?;
+        if &current != expected {
+            return Err(preimage_changed(relative));
+        }
+        let backup = self.backups.join(relative);
+        if let Some(parent) = backup.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                GeneratorError::io("create staging backup directory", parent, &error)
+            })?;
+        }
+        let live = root.join(relative);
+        fs::rename(&live, &backup).map_err(|error| {
+            GeneratorError::io("move aside unknown generated entry", &live, &error)
+        })?;
+        self.moved_aside.push((
+            relative.to_path_buf(),
+            backup
+                .strip_prefix(&self.backups)
+                .unwrap_or(relative)
+                .to_path_buf(),
+        ));
+        Ok(())
+    }
+
+    /// Best-effort restore of the pre-publish tree in reverse publish
+    /// order: pruned directories return first so moved-asides have their
+    /// parents back, then installs regain their preimages, then removals
+    /// rewrite. Every step is attempted even when one fails.
+    fn rollback(&mut self, root: &Path, plan: &GeneratedWritePlan) -> Result<(), GeneratorError> {
+        let mut failures = Vec::new();
+        for relative in self.pruned.iter().rev() {
+            if let Err(error) = fs::create_dir(root.join(relative))
+                && error.kind() != io::ErrorKind::AlreadyExists
+            {
+                failures.push(format!("recreate {}: {error}", relative.display()));
+            }
+        }
+        for (relative, backup) in self.moved_aside.iter().rev() {
+            if let Some(parent) = root.join(relative).parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Err(error) = fs::rename(self.backups.join(backup), root.join(relative)) {
+                failures.push(format!("restore {}: {error}", relative.display()));
+            }
+        }
+        for relative in self.installed.iter().rev() {
+            match plan.files.iter().find(|file| file.path == *relative) {
+                Some(planned) => {
+                    if let Err(failure) = restore_published_path(root, relative, &planned.preimage)
+                    {
+                        failures.push(failure);
+                    }
+                }
+                None => failures.push(format!("restore {}: no plan preimage", relative.display())),
+            }
+        }
+        for relative in self.removed.iter().rev() {
+            let planned = plan
+                .unknown
+                .iter()
+                .find(|file| file.path == *relative)
+                .or_else(|| plan.files.iter().find(|file| file.path == *relative));
+            match planned {
+                Some(planned) => {
+                    if let Err(failure) = restore_published_path(root, relative, &planned.preimage)
+                    {
+                        failures.push(failure);
+                    }
+                }
+                None => failures.push(format!("restore {}: no plan preimage", relative.display())),
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(GeneratorError::usage(failures.join("; ")))
+        }
+    }
+
+    /// Remove staging and its backups sibling after a successful publish:
+    /// no staged copies, no backups, nothing left inside the final tree.
+    fn finish(self) -> Result<(), GeneratorError> {
+        remove_tree_without_following(&self.dir)?;
+        remove_tree_without_following(&self.backups)?;
+        if fs::symlink_metadata(&self.dir).is_ok() || fs::symlink_metadata(&self.backups).is_ok() {
+            return Err(GeneratorError::io(
+                "remove staging directory",
+                &self.dir,
+                &io::Error::other("staging survived cleanup"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn remove(self) {
+        let _ = remove_tree_without_following(&self.dir);
+        let _ = remove_tree_without_following(&self.backups);
+    }
+}
+
+fn planned_file<'a>(
+    plan: &'a GeneratedWritePlan,
+    relative: &Path,
+    context: &str,
+) -> Result<&'a PlannedFile, GeneratorError> {
+    plan.files
+        .iter()
+        .find(|file| file.path.as_path() == relative)
+        .ok_or_else(|| GeneratorError::usage(context.to_owned()))
+}
+
+/// Install a validated staged file over its live path after revalidating
+/// the plan preimage. Fresh paths link into place (refusing a concurrent
+/// arrival); reviewed paths rename over atomically. A post-install read
+/// proves the live bytes and the clear execute bit, so the live tree
+/// holds exactly what staging validated.
+fn install_staged_file(
+    staged: &Path,
+    path: &Path,
+    relative: &Path,
+    content: &str,
+    expected: &FilePreimage,
+) -> Result<(), GeneratorError> {
+    match expected {
+        FilePreimage::Missing | FilePreimage::Regular { .. } => (),
+        _ => {
+            return Err(GeneratorError::usage(format!(
+                "generated plan routes a non-file through the file installer: {}",
+                relative.display()
+            )));
+        }
+    }
+    let current = capture_file_preimage(path, relative)?;
+    if &current != expected {
+        return Err(preimage_changed(relative));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| GeneratorError::io("create output directory", parent, &error))?;
+    }
+    if matches!(expected, FilePreimage::Missing) {
+        if let Err(error) = fs::hard_link(staged, path) {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                return Err(preimage_changed(relative));
+            }
+            return Err(GeneratorError::io(
+                "install new generated file",
+                path,
+                &error,
+            ));
+        }
+        let _ = fs::remove_file(staged);
+    } else if let Err(error) = fs::rename(staged, path) {
+        return Err(GeneratorError::io(
+            "atomically replace reviewed generated file",
+            path,
+            &error,
+        ));
+    }
+    let installed = capture_file_preimage(path, relative)?;
+    if !installed.has_bytes(content.as_bytes()) || installed.is_executable() {
+        return Err(GeneratorError::io(
+            "verify installed generated file",
+            path,
+            &io::Error::other("installed file differs from the staged render"),
+        ));
+    }
+    Ok(())
+}
+
+/// Install a validated staged symlink over its live path after
+/// revalidating the plan preimage. Unix renames over the old link
+/// atomically; other platforms remove first because rename does not
+/// replace there. A regular file squatting the link still fails closed.
+fn install_staged_symlink(
+    staged: &Path,
+    path: &Path,
+    relative: &Path,
+    target: &Path,
+    expected: &FilePreimage,
+) -> Result<(), GeneratorError> {
+    let current = capture_file_preimage(path, relative)?;
+    if &current != expected {
+        return Err(preimage_changed(relative));
+    }
+    if matches!(expected, FilePreimage::Regular { .. }) {
+        return Err(GeneratorError::usage(format!(
+            "expected generator-owned symlink at {} but found a regular file; remove it and regenerate",
+            relative.display()
+        )));
+    }
+    if !matches!(
+        expected,
+        FilePreimage::Missing | FilePreimage::Symlink { .. }
+    ) {
+        return Err(GeneratorError::usage(format!(
+            "generated plan routes a non-link through the symlink installer: {}",
+            relative.display()
+        )));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| GeneratorError::usage(format!("path has no parent: {}", path.display())))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| GeneratorError::io("create output directory", parent, &error))?;
+    #[cfg(not(unix))]
+    if fs::symlink_metadata(path).is_ok() {
+        fs::remove_file(path).map_err(|error| {
+            GeneratorError::io("remove replaced generator symlink", path, &error)
+        })?;
+    }
+    fs::rename(staged, path)
+        .map_err(|error| GeneratorError::io("install generator symlink", path, &error))?;
+    let created = fs::read_link(path)
+        .map_err(|error| GeneratorError::io("read installed generator symlink", path, &error))?;
+    if created != target {
+        return Err(GeneratorError::io(
+            "verify installed generator symlink",
+            path,
+            &io::Error::other(format!(
+                "link points at {}, wanted {}",
+                created.display(),
+                target.display()
+            )),
+        ));
+    }
+    Ok(())
+}
+
+/// Remove an unknown symlink after revalidating its recorded target.
+/// `remove_file` unlinks the link itself and never follows it, so the
+/// target — inside or outside the tree — stays untouched.
+fn delete_unknown_symlink(
+    path: &Path,
+    relative: &Path,
+    expected: &FilePreimage,
+) -> Result<(), GeneratorError> {
+    if matches!(expected, FilePreimage::Missing) {
+        return Err(preimage_changed(relative));
+    }
+    let current = capture_unknown_preimage(path)?;
+    if &current != expected {
+        return Err(preimage_changed(relative));
+    }
+    if !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(preimage_changed(relative));
+    }
+    fs::remove_file(path)
+        .map_err(|error| GeneratorError::io("remove unknown symlink", path, &error))?;
+    Ok(())
+}
+
+/// Restore one published path to its plan preimage during rollback:
+/// created paths unlink, files regain their bytes and recorded mode,
+/// links relink. A directory occupying the path refuses instead of
+/// recursing; a symlink in the way unlinks first so bytes never write
+/// through a link.
+fn restore_published_path(
+    root: &Path,
+    relative: &Path,
+    preimage: &FilePreimage,
+) -> Result<(), String> {
+    let path = root.join(relative);
+    match preimage {
+        FilePreimage::Missing => {
+            if fs::symlink_metadata(&path).is_ok() {
+                fs::remove_file(&path)
+                    .map_err(|error| format!("remove {}: {error}", path.display()))?;
+            }
+            Ok(())
+        }
+        FilePreimage::Regular { bytes, mode, .. } => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("restore parent of {}: {error}", path.display()))?;
+            }
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_dir() => {
+                    return Err(format!(
+                        "restore {}: a directory now occupies the path",
+                        path.display()
+                    ));
+                }
+                Ok(metadata) if metadata.file_type().is_file() => (),
+                Ok(_) => {
+                    fs::remove_file(&path)
+                        .map_err(|error| format!("remove {}: {error}", path.display()))?;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+                Err(error) => {
+                    return Err(format!("inspect {}: {error}", path.display()));
+                }
+            }
+            fs::write(&path, bytes)
+                .map_err(|error| format!("restore {}: {error}", path.display()))?;
+            restore_permission_mode(&path, *mode)?;
+            Ok(())
+        }
+        FilePreimage::Symlink { target } => {
+            if fs::symlink_metadata(&path).is_ok() {
+                fs::remove_file(&path)
+                    .map_err(|error| format!("remove {}: {error}", path.display()))?;
+            }
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("restore parent of {}: {error}", path.display()))?;
+            }
+            create_generator_symlink(target, &path)
+                .map_err(|error| format!("restore {}: {error}", path.display()))
+        }
+        FilePreimage::Directory | FilePreimage::Special => Err(format!(
+            "restore {}: a moved-aside entry has no byte preimage",
+            path.display()
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn restore_permission_mode(path: &Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777))
+        .map_err(|error| format!("restore mode of {}: {error}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn restore_permission_mode(_path: &Path, _mode: u32) -> Result<(), String> {
+    Ok(())
+}
+
+/// Write one staged file with deterministic non-executable permissions:
+/// the live tree installs exactly these bytes and this mode.
+fn write_staging_file(path: &Path, content: &str) -> Result<(), GeneratorError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| GeneratorError::io("create staging directory", parent, &error))?;
+    }
+    fs::write(path, content)
+        .map_err(|error| GeneratorError::io("write staged file", path, &error))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644))
+            .map_err(|error| GeneratorError::io("set staged file permissions", path, &error))?;
+    }
+    Ok(())
+}
+
+/// Prove the staged tree is exactly the render before publication moves
+/// anything: every expected file with exact bytes and a clear execute
+/// bit, every expected link with its exact target, and no extras.
+fn validate_staged_tree(
+    dir: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    symlinks: &BTreeMap<PathBuf, PathBuf>,
+    inputs: &GenerationInputs,
+) -> Result<(), GeneratorError> {
+    let mut expected_files = files.clone();
+    expected_files.insert(
+        PathBuf::from(OWNERSHIP_STATE),
+        ownership_state_content(files, symlinks, inputs),
+    );
+    let mut seen = BTreeSet::new();
+    validate_staged_directory(dir, dir, &expected_files, symlinks, &mut seen)?;
+    let mut expected = BTreeSet::new();
+    expected.extend(expected_files.keys().cloned());
+    expected.extend(symlinks.keys().cloned());
+    if seen != expected {
+        return Err(GeneratorError::usage(format!(
+            "staged tree differs from the render: {}",
+            display_paths(expected.symmetric_difference(&seen)),
+        )));
+    }
+    Ok(())
+}
+
+fn validate_staged_directory(
+    base: &Path,
+    directory: &Path,
+    expected_files: &BTreeMap<PathBuf, String>,
+    symlinks: &BTreeMap<PathBuf, PathBuf>,
+    seen: &mut BTreeSet<PathBuf>,
+) -> Result<(), GeneratorError> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| GeneratorError::io("read staged directory", directory, &error))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|error| GeneratorError::io("read staged entry", directory, &error))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort();
+    for path in entries {
+        let relative = path
+            .strip_prefix(base)
+            .map_err(|error| GeneratorError::usage(format!("make staged path relative: {error}")))?
+            .to_path_buf();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| GeneratorError::io("inspect staged entry", &path, &error))?;
+        if metadata.file_type().is_dir() {
+            validate_staged_directory(base, &path, expected_files, symlinks, seen)?;
+            continue;
+        }
+        seen.insert(relative.clone());
+        if metadata.file_type().is_symlink() {
+            let Some(wanted) = symlinks.get(&relative) else {
+                return Err(GeneratorError::usage(format!(
+                    "staged tree holds an unexpected symlink: {}",
+                    relative.display()
+                )));
+            };
+            let target = fs::read_link(&path)
+                .map_err(|error| GeneratorError::io("read staged symlink", &path, &error))?;
+            if &target != wanted {
+                return Err(GeneratorError::usage(format!(
+                    "staged symlink differs from the render: {}",
+                    relative.display()
+                )));
+            }
+            continue;
+        }
+        if !metadata.file_type().is_file() {
+            return Err(GeneratorError::usage(format!(
+                "staged tree holds a non-regular file: {}",
+                relative.display()
+            )));
+        }
+        let Some(wanted) = expected_files.get(&relative) else {
+            return Err(GeneratorError::usage(format!(
+                "staged tree holds an unexpected file: {}",
+                relative.display()
+            )));
+        };
+        let bytes = fs::read(&path)
+            .map_err(|error| GeneratorError::io("read staged file", &path, &error))?;
+        if bytes != wanted.as_bytes() {
+            return Err(GeneratorError::usage(format!(
+                "staged file differs from the render: {}",
+                relative.display()
+            )));
+        }
+        #[cfg(unix)]
+        if permission_mode(&metadata) & 0o111 != 0 {
+            return Err(GeneratorError::usage(format!(
+                "staged file is executable: {}",
+                relative.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Remove newly-emptied directories under `.github`, deepest first,
+/// returning the pruned paths in removal order for rollback. `.github`
+/// itself stays. Only real directories are considered; symlinks are
+/// never followed or descended into.
+fn prune_empty_generated_dirs(root: &Path) -> Result<Vec<PathBuf>, GeneratorError> {
+    let mut directories = Vec::new();
+    collect_generated_dirs(root, Path::new(".github"), &mut directories)?;
+    directories.sort_by_key(|relative: &PathBuf| std::cmp::Reverse(relative.components().count()));
+    let mut pruned = Vec::new();
+    for relative in directories {
+        if relative == Path::new(".github") {
+            continue;
+        }
+        let full = root.join(&relative);
+        match fs::symlink_metadata(&full) {
+            Ok(metadata) if metadata.file_type().is_dir() => (),
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(GeneratorError::io(
+                    "inspect generated directory",
+                    &full,
+                    &error,
+                ));
+            }
+        }
+        match fs::remove_dir(&full) {
+            Ok(()) => pruned.push(relative),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+            Err(error) => {
+                let empty = fs::read_dir(&full).is_ok_and(|mut entries| entries.next().is_none());
+                if empty {
+                    return Err(GeneratorError::io(
+                        "prune emptied generated directory",
+                        &full,
+                        &error,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(pruned)
+}
+
+fn collect_generated_dirs(
+    root: &Path,
+    relative_dir: &Path,
+    directories: &mut Vec<PathBuf>,
+) -> Result<(), GeneratorError> {
+    let directory = root.join(relative_dir);
+    let mut entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(GeneratorError::io(
+                "read generated directory",
+                &directory,
+                &error,
+            ));
+        }
+    }
+    .map(|entry| {
+        entry
+            .map(|entry| entry.path())
+            .map_err(|error| GeneratorError::io("read generated entry", &directory, &error))
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    entries.sort();
+    for path in entries {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| {
+                GeneratorError::usage(format!("make generated path relative: {error}"))
+            })?
+            .to_path_buf();
+        if fs::symlink_metadata(&path)
+            .map_err(|error| GeneratorError::io("inspect generated entry", &path, &error))?
+            .file_type()
+            .is_dir()
+        {
+            directories.push(relative.clone());
+            collect_generated_dirs(root, &relative, directories)?;
+        }
+    }
+    Ok(())
+}
+
+/// Remove a tree without following symlinks: links, files, and special
+/// files unlink; only real directories recurse. Staging cleanup and
+/// moved-aside unknowns go through here, where following a link would
+/// delete outside the tree.
+fn remove_tree_without_following(path: &Path) -> Result<(), GeneratorError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(GeneratorError::io("inspect staging entry", path, &error));
+        }
+    };
+    if !metadata.file_type().is_dir() {
+        return fs::remove_file(path)
+            .map_err(|error| GeneratorError::io("remove staging entry", path, &error));
+    }
+    let mut entries = fs::read_dir(path)
+        .map_err(|error| GeneratorError::io("read staging directory", path, &error))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|error| GeneratorError::io("read staging entry", path, &error))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort();
+    for entry in entries {
+        remove_tree_without_following(&entry)?;
+    }
+    fs::remove_dir(path)
+        .map_err(|error| GeneratorError::io("remove staging directory", path, &error))
 }
 
 fn reject_symlinked_output_root(root: &Path) -> Result<(), GeneratorError> {
@@ -7393,7 +8212,64 @@ fn capture_file_preimage(path: &Path, relative: &Path) -> Result<FilePreimage, G
     Ok(FilePreimage::Regular {
         identity: observed_identity,
         bytes: bytes.into_boxed_slice(),
+        mode: permission_mode(&observed),
     })
+}
+
+/// Capture whatever sits at an unknown `.github` path without following
+/// symlinks: files by bytes plus mode, links by target, directories and
+/// special files by kind. Unlike [`capture_file_preimage`] this never
+/// refuses: classification is the walk's job, and a refusal here would
+/// hide extras from `--check` instead of reporting them.
+fn capture_unknown_preimage(path: &Path) -> Result<FilePreimage, GeneratorError> {
+    let observed = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(FilePreimage::Missing);
+        }
+        Err(error) => {
+            return Err(GeneratorError::io(
+                "inspect unknown generated file",
+                path,
+                &error,
+            ))
+        }
+    };
+    let file_type = observed.file_type();
+    if file_type.is_symlink() {
+        let target = fs::read_link(path)
+            .map_err(|error| GeneratorError::io("read unknown symlink", path, &error))?;
+        return Ok(FilePreimage::Symlink { target });
+    }
+    if file_type.is_dir() {
+        return Ok(FilePreimage::Directory);
+    }
+    if !file_type.is_file() {
+        return Ok(FilePreimage::Special);
+    }
+    let bytes = fs::read(path)
+        .map_err(|error| GeneratorError::io("read unknown generated file", path, &error))?;
+    Ok(FilePreimage::Regular {
+        identity: file_identity(&observed),
+        bytes: bytes.into_boxed_slice(),
+        mode: permission_mode(&observed),
+    })
+}
+
+/// The on-disk permission bits, or zero where the platform reports none.
+/// Only unix filesystems carry an execute bit; elsewhere every file is
+/// definitionally non-executable.
+fn permission_mode(metadata: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        metadata.permissions().mode()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
 }
 
 fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
@@ -7417,10 +8293,22 @@ fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
 
 fn validate_plan_preimages(root: &Path, plan: &GeneratedWritePlan) -> Result<(), GeneratorError> {
     reject_symlinked_output_root(root)?;
-    reject_managed_symlink_ancestors(root, plan.files.iter().map(|file| &file.path))?;
+    reject_managed_symlink_ancestors(
+        root,
+        plan.files
+            .iter()
+            .map(|file| &file.path)
+            .chain(plan.unknown.iter().map(|file| &file.path)),
+    )?;
     let mut changed = Vec::new();
     for file in &plan.files {
         let current = capture_file_preimage(&root.join(&file.path), &file.path)?;
+        if current != file.preimage {
+            changed.push(file.path.clone());
+        }
+    }
+    for file in &plan.unknown {
+        let current = capture_unknown_preimage(&root.join(&file.path))?;
         if current != file.preimage {
             changed.push(file.path.clone());
         }
@@ -7860,43 +8748,130 @@ fn display_paths<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> String {
         .join(", ")
 }
 
-fn direct_legacy_workflows(
-    root: &Path,
-    generated: &BTreeMap<PathBuf, String>,
-) -> Result<Vec<PathBuf>, GeneratorError> {
-    let workflows = root.join(".github/workflows");
-    if !workflows.exists() {
-        return Ok(Vec::new());
+/// Every path the unknown walk excuses: the render, the ownership
+/// state, and recorded outputs. Recorded-but-unrendered entries verify
+/// through the digest-checked stale path, never through force-gated
+/// removal, so they must not classify as unknown.
+fn expected_tree_paths(
+    files: &BTreeMap<PathBuf, String>,
+    symlinks: &BTreeMap<PathBuf, PathBuf>,
+    recorded: Option<&BTreeMap<PathBuf, u64>>,
+) -> BTreeSet<PathBuf> {
+    let mut expected = BTreeSet::from([PathBuf::from(OWNERSHIP_STATE)]);
+    expected.extend(files.keys().cloned());
+    expected.extend(symlinks.keys().cloned());
+    if let Some(recorded) = recorded {
+        expected.extend(recorded.keys().cloned());
     }
-    let entries = fs::read_dir(&workflows)
-        .map_err(|error| GeneratorError::io("read workflows", &workflows, &error))?;
-    let mut legacy = Vec::new();
-    for entry in entries {
-        let entry =
-            entry.map_err(|error| GeneratorError::io("read workflow entry", &workflows, &error))?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| GeneratorError::io("read workflow type", &path, &error))?;
-        let extension = path.extension().and_then(|value| value.to_str());
+    expected
+}
+
+/// Render outputs must name contained repository-relative paths: an
+/// absolute path, a `..` segment, or a Windows prefix would carry the
+/// staged publish outside the validated output root.
+fn validate_generated_paths(
+    files: &BTreeMap<PathBuf, String>,
+    symlinks: &BTreeMap<PathBuf, PathBuf>,
+) -> Result<(), GeneratorError> {
+    for relative in files.keys().chain(symlinks.keys()) {
+        if relative.components().count() == 0
+            || !relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+        {
+            return Err(GeneratorError::usage(format!(
+                "generated path escapes the output tree: {}",
+                relative.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Every `.github` entry the render neither emits nor records: files,
+/// symlinks, and special files as leaves, plus whole directories with no
+/// expected descendants (moved aside as one). Expected paths and their
+/// ancestors are skipped; everything else sorts for deterministic plans.
+/// The walk never follows symlinks, so a link out of the tree classifies
+/// as one leaf and its target stays untouched.
+fn collect_unknown_tree_entries(
+    root: &Path,
+    expected: &BTreeSet<PathBuf>,
+) -> Result<Vec<PathBuf>, GeneratorError> {
+    let mut expected_dirs = BTreeSet::new();
+    for relative in expected {
+        expected_dirs.extend(
+            relative
+                .ancestors()
+                .skip(1)
+                .filter(|ancestor| ancestor.starts_with(".github"))
+                .map(Path::to_path_buf),
+        );
+    }
+    let mut unknown = Vec::new();
+    let github = root.join(".github");
+    match fs::symlink_metadata(&github) {
+        Ok(metadata) if metadata.file_type().is_dir() => (),
+        Ok(_) => return Ok(unknown),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(unknown),
+        Err(error) => {
+            return Err(GeneratorError::io(
+                "inspect generated tree",
+                &github,
+                &error,
+            ));
+        }
+    }
+    // A symlinked or file-squatting `.github` never reaches the walk: the
+    // managed-ancestor check refuses it during planning.
+    visit_unknown_directory(
+        root,
+        Path::new(".github"),
+        expected,
+        &expected_dirs,
+        &mut unknown,
+    )?;
+    unknown.sort();
+    Ok(unknown)
+}
+
+fn visit_unknown_directory(
+    root: &Path,
+    relative_dir: &Path,
+    expected: &BTreeSet<PathBuf>,
+    expected_dirs: &BTreeSet<PathBuf>,
+    unknown: &mut Vec<PathBuf>,
+) -> Result<(), GeneratorError> {
+    let directory = root.join(relative_dir);
+    let mut entries = fs::read_dir(&directory)
+        .map_err(|error| GeneratorError::io("read generated tree", &directory, &error))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|error| GeneratorError::io("read generated entry", &directory, &error))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort();
+    for path in entries {
         let relative = path
             .strip_prefix(root)
             .map_err(|error| {
-                GeneratorError::usage(format!("make workflow path relative: {error}"))
+                GeneratorError::usage(format!("make generated path relative: {error}"))
             })?
             .to_path_buf();
-        let generated_by_velnor =
-            fs::read_to_string(&path).is_ok_and(|content| content.starts_with(GENERATED_HEADER));
-        if file_type.is_file()
-            && matches!(extension, Some("yml" | "yaml"))
-            && !generated.contains_key(&relative)
-            && !generated_by_velnor
-        {
-            legacy.push(relative);
+        if expected.contains(&relative) {
+            continue;
+        }
+        let file_type = fs::symlink_metadata(&path)
+            .map_err(|error| GeneratorError::io("inspect generated entry", &path, &error))?
+            .file_type();
+        if file_type.is_dir() && expected_dirs.contains(&relative) {
+            visit_unknown_directory(root, &relative, expected, expected_dirs, unknown)?;
+        } else {
+            unknown.push(relative);
         }
     }
-    legacy.sort();
-    Ok(legacy)
+    Ok(())
 }
 
 struct GenerationLock {
@@ -7953,10 +8928,10 @@ where
     }
     let staged = stage_generated_file(path, content)?;
     match expected {
-        FilePreimage::Symlink { .. } => {
+        FilePreimage::Symlink { .. } | FilePreimage::Directory | FilePreimage::Special => {
             let _ = fs::remove_file(&staged);
             Err(GeneratorError::usage(format!(
-                "generated plan routes a symlink through the file writer: {}",
+                "generated plan routes a non-file through the file writer: {}",
                 relative.display()
             )))
         }
@@ -8069,54 +9044,6 @@ fn delete_reviewed_file(
     Ok(())
 }
 
-/// Replace the generator-owned symlink after revalidating its preimage.
-/// `verify_symlink_ownership` already proved the existing link, so only a
-/// concurrent change past the plan — or a non-link squatting the path —
-/// refuses here. A link carries no content, so there is no backup dance: the
-/// recorded target recreates it exactly.
-fn write_reviewed_symlink(
-    path: &Path,
-    relative: &Path,
-    target: &Path,
-    expected: &FilePreimage,
-) -> Result<(), GeneratorError> {
-    let current = capture_file_preimage(path, relative)?;
-    if &current != expected {
-        return Err(preimage_changed(relative));
-    }
-    if matches!(expected, FilePreimage::Regular { .. }) {
-        return Err(GeneratorError::usage(format!(
-            "expected generator-owned symlink at {} but found a regular file; remove it and regenerate",
-            relative.display()
-        )));
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| GeneratorError::usage(format!("path has no parent: {}", path.display())))?;
-    fs::create_dir_all(parent)
-        .map_err(|error| GeneratorError::io("create output directory", parent, &error))?;
-    if fs::symlink_metadata(path).is_ok() {
-        fs::remove_file(path).map_err(|error| {
-            GeneratorError::io("remove replaced generator symlink", path, &error)
-        })?;
-    }
-    create_generator_symlink(target, path)?;
-    let created = fs::read_link(path)
-        .map_err(|error| GeneratorError::io("read created generator symlink", path, &error))?;
-    if created != target {
-        return Err(GeneratorError::io(
-            "verify created generator symlink",
-            path,
-            &io::Error::other(format!(
-                "link points at {}, wanted {}",
-                created.display(),
-                target.display()
-            )),
-        ));
-    }
-    Ok(())
-}
-
 /// Remove a stale generator-owned symlink after revalidating its preimage.
 /// The link must still be a link: anything else means the tree moved past
 /// the plan.
@@ -8178,6 +9105,22 @@ fn stage_generated_file(path: &Path, content: &str) -> Result<PathBuf, Generator
                 file.sync_all().map_err(|error| {
                     GeneratorError::io("sync staged generated file", &staged, &error)
                 })?;
+                // Deterministic non-executable permissions, exactly like the
+                // staged-tree installer: the live tree inherits this mode on
+                // install, so a umask-derived mode here would make repeat
+                // generation churn under a restrictive umask.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    file.set_permissions(std::fs::Permissions::from_mode(0o644))
+                        .map_err(|error| {
+                            GeneratorError::io(
+                                "set staged generated file permissions",
+                                &staged,
+                                &error,
+                            )
+                        })?;
+                }
                 return Ok(staged);
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
@@ -19536,7 +20479,7 @@ channel = "stable"
         let _ = fs::remove_dir_all(root);
     }
     #[test]
-    fn unowned_legacy_guide_is_preserved() {
+    fn unknown_legacy_guide_blocks_without_force_and_removes_with_force() {
         let root = temporary_repository("unowned-generated-guide");
         must(
             fs::write(
@@ -19556,14 +20499,398 @@ channel = "stable"
             "scan unowned-guide repository",
         );
         let files = must(generated_files(&config), "generate");
-        must(
-            write_generated(&root, &files, false, false, false),
-            "generate beside unowned guide",
+        let error = must_some(
+            write_generated(&root, &files, false, false, false).err(),
+            "unknown guide must block generation without force",
         );
+        assert!(error.to_string().contains("will not be imported"));
         assert_eq!(
             must(fs::read_to_string(&guide), "read preserved guide"),
             "# local guide\n"
         );
+        must(
+            write_generated_with_options(
+                &root,
+                &files,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                true,
+                true,
+            ),
+            "force must remove the unknown guide",
+        );
+        assert!(
+            !guide.exists(),
+            "force must remove content absent from the ownership manifest"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn executable_mode_is_drift_and_force_normalizes_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = temporary_repository("executable-mode-drift");
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            ),
+            "write manifest",
+        );
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan repository",
+        );
+        let files = must(generated_files(&config), "generate");
+        must(
+            write_generated(&root, &files, false, false, false),
+            "write initial tree",
+        );
+        let target = root.join(".github/actionlint.yaml");
+        let mut permissions = must(fs::metadata(&target), "stat generated file").permissions();
+        permissions.set_mode(0o755);
+        must(
+            fs::set_permissions(&target, permissions),
+            "chmod generated file",
+        );
+        let error = must_some(
+            write_generated(&root, &files, false, true, false).err(),
+            "check must fail on executable mode",
+        );
+        assert!(
+            error.to_string().contains(".github/actionlint.yaml"),
+            "check must name the mode-drifted file: {error}"
+        );
+        must(
+            write_generated_with_options(
+                &root,
+                &files,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                true,
+                false,
+            ),
+            "force must normalize the mode",
+        );
+        assert_eq!(
+            must(fs::metadata(&target), "stat normalized file")
+                .permissions()
+                .mode()
+                & 0o111,
+            0,
+            "publish must clear the executable bit"
+        );
+        assert!(matches!(
+            write_generated(&root, &files, false, true, false),
+            Ok(WriteOutcome::Unchanged)
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn generated_path_escape_is_refused_at_plan() {
+        let root = temporary_repository("generated-path-escape");
+        let mut files = BTreeMap::new();
+        files.insert(PathBuf::from("../escape.txt"), "escape\n".to_owned());
+        let error = must_some(
+            plan_generated_write(
+                &root,
+                &files,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+            )
+            .err(),
+            "an escaping path must fail planning",
+        );
+        assert!(
+            error.to_string().contains("escapes the output tree"),
+            "refusal must name the boundary: {error}"
+        );
+        assert!(
+            !root.join("../escape.txt").exists(),
+            "a refused plan must write nothing outside the tree"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn reserved_agent_path_with_redundant_separator_is_refused() {
+        let root = temporary_repository("reserved-agent-spelling");
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            ),
+            "write manifest",
+        );
+        let mut config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan repository",
+        );
+        config.static_files.push(StaticFile {
+            path: ".github//AGENTS.md".to_owned(),
+            source: "x".to_owned(),
+            content: "evil\n".to_owned(),
+        });
+        let error = must_some(
+            generated_files(&config).err(),
+            "a redundant separator must not dodge the guard",
+        );
+        assert!(
+            error.to_string().contains("generator owns this path"),
+            "refusal must name the reservation: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn publish_failure_rolls_back_partial_installs() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = temporary_repository("publish-rollback");
+        let mut initial = BTreeMap::new();
+        initial.insert(PathBuf::from(".github/a-dir/a.txt"), "a-old\n".to_owned());
+        initial.insert(PathBuf::from(".github/b-dir/b.txt"), "b-old\n".to_owned());
+        must(
+            write_generated(&root, &initial, false, false, false),
+            "write initial tree",
+        );
+        let mut changed = BTreeMap::new();
+        changed.insert(PathBuf::from(".github/a-dir/a.txt"), "a-new\n".to_owned());
+        changed.insert(PathBuf::from(".github/b-dir/b.txt"), "b-new\n".to_owned());
+        // `b-dir` goes read-only: reads (plan, validation) pass, the `b`
+        // install fails, and rollback must restore `a` from its preimage.
+        let b_dir = root.join(".github/b-dir");
+        let mut permissions = must(fs::metadata(&b_dir), "stat b-dir").permissions();
+        permissions.set_mode(0o555);
+        must(fs::set_permissions(&b_dir, permissions), "lock b-dir");
+        let error = must_some(
+            write_generated_with_options(
+                &root,
+                &changed,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                true,
+                false,
+            )
+            .err(),
+            "the b install must fail",
+        );
+        let mut permissions = must(fs::metadata(&b_dir), "stat b-dir").permissions();
+        permissions.set_mode(0o755);
+        must(fs::set_permissions(&b_dir, permissions), "unlock b-dir");
+        assert!(
+            error.to_string().contains("b.txt"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            must(
+                fs::read_to_string(root.join(".github/a-dir/a.txt")),
+                "read rolled-back a"
+            ),
+            "a-old\n"
+        );
+        assert_eq!(
+            must(
+                fs::read_to_string(root.join(".github/b-dir/b.txt")),
+                "read preserved b"
+            ),
+            "b-old\n"
+        );
+        for entry in must(fs::read_dir(&root), "read root") {
+            let name = must(entry, "read root entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned();
+            assert!(
+                !name.starts_with(".velnor-workflow-stage-"),
+                "staging survives rollback: {name}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn rollback_restores_each_preimage_kind() {
+        let root = temporary_repository("rollback-preimages");
+        must(fs::create_dir_all(root.join(".github")), "create tree");
+        let created = PathBuf::from(".github/created.txt");
+        must(
+            fs::write(root.join(&created), "new\n"),
+            "write created file",
+        );
+        must(
+            restore_published_path(&root, &created, &FilePreimage::Missing),
+            "restore a created path",
+        );
+        assert!(!root.join(&created).exists());
+        let file = PathBuf::from(".github/file.txt");
+        must(fs::write(root.join(&file), "old\n"), "write old file");
+        let preimage = must(
+            capture_file_preimage(&root.join(&file), &file),
+            "capture old preimage",
+        );
+        must(fs::write(root.join(&file), "new\n"), "overwrite file");
+        must(
+            restore_published_path(&root, &file, &preimage),
+            "restore old bytes",
+        );
+        assert_eq!(
+            must(fs::read_to_string(root.join(&file)), "read restored file"),
+            "old\n"
+        );
+        #[cfg(unix)]
+        {
+            let link = PathBuf::from(".github/link");
+            must(
+                std::os::unix::fs::symlink("a-target", root.join(&link)),
+                "write old link",
+            );
+            let preimage = must(
+                capture_unknown_preimage(&root.join(&link)),
+                "capture old link",
+            );
+            must(fs::remove_file(root.join(&link)), "remove old link");
+            must(
+                std::os::unix::fs::symlink("b-target", root.join(&link)),
+                "write new link",
+            );
+            must(
+                restore_published_path(&root, &link, &preimage),
+                "restore old link",
+            );
+            assert_eq!(
+                must(fs::read_link(root.join(&link)), "read restored link"),
+                PathBuf::from("a-target")
+            );
+        }
+        let error = must_some(
+            restore_published_path(&root, &PathBuf::from(".github"), &FilePreimage::Directory)
+                .err(),
+            "directory restore must refuse",
+        );
+        assert!(
+            error.contains("no byte preimage"),
+            "unexpected error: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn planted_extra_fails_post_lock_revalidation() {
+        let root = temporary_repository("planted-extra");
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            ),
+            "write manifest",
+        );
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan repository",
+        );
+        let files = must(generated_files(&config), "generate");
+        must(
+            write_generated(&root, &files, false, false, false),
+            "write initial tree",
+        );
+        must(
+            fs::write(root.join(".github/first.txt"), "first\n"),
+            "plant first extra",
+        );
+        let plan = must(
+            plan_generated_write_with_options(
+                &root,
+                &files,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+                true,
+            ),
+            "plan the removal",
+        );
+        must(
+            fs::write(root.join(".github/planted.txt"), "planted\n"),
+            "plant second extra past the plan",
+        );
+        let error = must_some(
+            apply_generated_write_plan(
+                &root,
+                &files,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                true,
+                &plan,
+            )
+            .err(),
+            "a planted extra must fail revalidation",
+        );
+        assert!(
+            error.to_string().contains("changed after preflight"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            root.join(".github/first.txt").exists(),
+            "a refused publish must remove nothing"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn render_into_previous_era_tree_converges_clean() {
+        // Policy-candidate shape: the tree and its state predate the
+        // generator-owned link (as a pin-era scratch render does), and a
+        // fresh render carries it. The link is created, never flagged:
+        // unrecorded plus rendered means Create, not stale, not unknown.
+        let root = temporary_repository("previous-era-tree");
+        let mut previous = BTreeMap::new();
+        previous.insert(
+            PathBuf::from(".github/actionlint.yaml"),
+            "lint\n".to_owned(),
+        );
+        must(
+            write_generated(&root, &previous, false, false, false),
+            "write previous-era tree",
+        );
+        let mut current = previous.clone();
+        current.insert(PathBuf::from(".github/AGENTS.md"), "agents\n".to_owned());
+        let mut symlinks = BTreeMap::new();
+        symlinks.insert(PathBuf::from(GITHUB_CLAUDE_MD), PathBuf::from("AGENTS.md"));
+        must(
+            write_generated_with_options(
+                &root,
+                &current,
+                &symlinks,
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                true,
+                true,
+            ),
+            "a fresh render must converge over a previous-era tree",
+        );
+        assert_eq!(
+            must(
+                fs::read_link(root.join(GITHUB_CLAUDE_MD)),
+                "read created link"
+            ),
+            PathBuf::from("AGENTS.md")
+        );
+        assert!(matches!(
+            write_generated_with_options(
+                &root,
+                &current,
+                &symlinks,
+                &GenerationInputs::parts(0, 0),
+                false,
+                true,
+                false,
+                false,
+            ),
+            Ok(WriteOutcome::Unchanged)
+        ));
         let _ = fs::remove_dir_all(root);
     }
     #[cfg(unix)]
