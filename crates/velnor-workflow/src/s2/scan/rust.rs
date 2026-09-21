@@ -1282,6 +1282,7 @@ struct BoltffiManifest {
     swift_ffi_module_name: Option<String>,
     spm_layout: Option<String>,
     spm_output: Option<String>,
+    spm_wrapper_sources: Option<String>,
     skip_package_swift: bool,
     include_macos: bool,
     /// `None` means the key is absent and `BoltFFI` defaults apply; `Some`
@@ -1367,6 +1368,9 @@ fn parse_boltffi_manifest(contents: &str) -> BoltffiManifest {
             }
             ("targets.apple.spm", "output") => {
                 manifest.spm_output = toml_string_value(&value);
+            }
+            ("targets.apple.spm", "wrapper_sources") => {
+                manifest.spm_wrapper_sources = toml_string_value(&value);
             }
             ("targets.apple.spm", "skip_package_swift") => {
                 manifest.skip_package_swift = value == "true";
@@ -1501,17 +1505,20 @@ fn boltffi_expected_files(output: &str, crate_name: &str, slices: &[String]) -> 
     files
 }
 
-/// Resolve the `generate swift` bindings directory and expected binding file
+/// Resolve the `pack apple` bindings directory and expected binding file
 /// for a manifest rooted at `root`. Mirrors
-/// `boltffi_cli/src/commands/generate/bindings.rs`
-/// `swift_output_directory`: the Swift output falls back from
-/// `targets.apple.swift.output` through `{apple.output}/Sources` (with
-/// `dist/apple` as the Apple default), and the split SPM layout appends
-/// `BoltFFI`; bundled and ffi-only (the default) write directly. The file
-/// stem mirrors `Config::swift_bindings_file_stem`: an empty `PascalCase`
-/// library name yields bare `BoltFFI`. An unknown layout or a resolved path
-/// outside the repository is an `Err` for a scan diagnostic.
-/// The `generate swift` binding facts: output directory, expected binding
+/// `boltffi_cli/src/pack/apple/mod.rs` `generate_apple_bindings`: every SPM
+/// layout nests Swift sources under a `BoltFFI` segment. Bundled and
+/// ffi-only (the default) anchor at the SPM package root
+/// (`Config::apple_spm_output`, falling back through
+/// `[targets.apple].output` to `dist/apple`); bundled inserts
+/// `wrapper_sources` when configured, else `Sources`. Split anchors at the
+/// Swift output (`Config::apple_swift_output`: `targets.apple.swift.output`
+/// through `{apple.output}/Sources`). The file stem mirrors
+/// `Config::swift_bindings_file_stem`: an empty `PascalCase` library name
+/// yields bare `BoltFFI`. An unknown layout or a resolved path outside the
+/// repository is an `Err` for a scan diagnostic.
+/// The `pack apple` binding facts: output directory, expected binding
 /// file, deployment target, and FFI module name.
 #[derive(Debug)]
 struct BoltffiBindings {
@@ -1528,13 +1535,12 @@ struct BoltffiBindings {
 }
 
 /// Resolve the binding facts for a manifest rooted at `root`. The directory
-/// mirrors `boltffi_cli/src/commands/generate/bindings.rs`
-/// `swift_output_directory`: the Swift output falls back from
-/// `targets.apple.swift.output` through `{apple.output}/Sources` (with
-/// `dist/apple` as the Apple default), and the split SPM layout appends
-/// `BoltFFI`; bundled and ffi-only (the default) write directly. The file
-/// stem mirrors `Config::swift_bindings_file_stem`: an empty `PascalCase`
-/// library name yields bare `BoltFFI`. The FFI module falls back from
+/// mirrors `boltffi_cli/src/pack/apple/mod.rs` `generate_apple_bindings`:
+/// every layout nests under `BoltFFI`, with bundled/ffi-only anchored at
+/// the SPM package root and split at the Swift output (see
+/// `BoltffiBindings`). The file stem mirrors
+/// `Config::swift_bindings_file_stem`: an empty `PascalCase` library name
+/// yields bare `BoltFFI`. The FFI module falls back from
 /// `targets.apple.swift.ffi_module_name` to `{framework}FFI`. An unknown
 /// layout or a resolved path outside the repository is an `Err` for a scan
 /// diagnostic.
@@ -1550,27 +1556,36 @@ fn boltffi_binding_facts(
             "declares SPM layout `{layout}`, which is not bundled, split, or ffi-only"
         ));
     }
-    let base = parsed.swift_output.as_deref().map_or_else(
-        || {
-            format!(
-                "{}/Sources",
-                parsed
-                    .apple_output
-                    .as_deref()
-                    .unwrap_or(BOLTFFI_DEFAULT_APPLE_OUTPUT)
-            )
-        },
-        str::to_owned,
-    );
-    let Some(resolved) = resolve_repo_path(root, &base) else {
+    let package_root = parsed
+        .spm_output
+        .as_deref()
+        .unwrap_or(BOLTFFI_DEFAULT_APPLE_OUTPUT);
+    let base = match layout {
+        "bundled" => format!(
+            "{package_root}/{}/BoltFFI",
+            parsed.spm_wrapper_sources.as_deref().unwrap_or("Sources")
+        ),
+        "ffi-only" => format!("{package_root}/Sources/BoltFFI"),
+        _ => {
+            let swift_base = parsed.swift_output.as_deref().map_or_else(
+                || {
+                    format!(
+                        "{}/Sources",
+                        parsed
+                            .apple_output
+                            .as_deref()
+                            .unwrap_or(BOLTFFI_DEFAULT_APPLE_OUTPUT)
+                    )
+                },
+                str::to_owned,
+            );
+            format!("{swift_base}/BoltFFI")
+        }
+    };
+    let Some(dir) = resolve_repo_path(root, &base) else {
         return Err(format!(
             "declares Swift bindings output `{base}`, which is absolute or escapes the repository"
         ));
-    };
-    let dir = if layout == "split" {
-        join_repo_path(&resolved, "BoltFFI")
-    } else {
-        resolved
     };
     let pascal = boltffi_pascal_case(crate_name);
     let stem = if pascal.is_empty() {
@@ -2059,13 +2074,15 @@ fn boltffi_producer_from_manifest(
     };
     let output = join_repo_path(&parent, &format!("{framework}.xcframework"));
     let output_files = boltffi_expected_files(&output, &crate_name, &slices);
-    let (inputs, inputs_unknown) = native_input_closure(
-        context.root,
-        context.files,
-        context.file_set,
-        &root,
-        std::slice::from_ref(manifest_path),
-    )?;
+    // The committed bindings are drift-checked inputs: an edit to the
+    // generated Swift or `Package.swift` must select the producer so `pack`
+    // re-runs and the drift check fails instead of testing a stale tree.
+    let mut seed = vec![manifest_path.to_owned(), format!("{}/**", bindings.dir)];
+    if let Some(package_swift) = bindings.package_swift.as_deref() {
+        seed.push(package_swift.to_owned());
+    }
+    let (inputs, inputs_unknown) =
+        native_input_closure(context.root, context.files, context.file_set, &root, &seed)?;
     // The scanner never invents a Cargo profile: `None` keeps `BoltFFI`'s
     // own default. A typed profile policy arrives with declared Apple
     // facts; until then the recipe records exactly what the scan knows.
@@ -2784,6 +2801,41 @@ mod tests {
     }
 
     #[test]
+    fn boltffi_producers_resolves_bundled_bindings() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "libs/bridge-ffi/boltffi.toml",
+                "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
+                 [targets.apple.spm]\nlayout = \"bundled\"\noutput = \"../pkg\"\nwrapper_sources = \"Wrapped\"\n",
+            ),
+            (
+                "libs/bridge-ffi/Cargo.toml",
+                &boltffi_minimal_crate("bridge-core-ffi"),
+            ),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(producers.len(), 1);
+        let producer = &producers[0];
+        assert_eq!(producer.bindings_dir, "libs/pkg/Wrapped/BoltFFI");
+        assert_eq!(
+            producer.bindings_file,
+            "libs/pkg/Wrapped/BoltFFI/BridgeCoreFfiBoltFFI.swift"
+        );
+        assert_eq!(
+            producer.package_swift.as_deref(),
+            Some("libs/pkg/Package.swift")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn boltffi_producers_applies_bindings_defaults() {
         use super::{boltffi_producers, ScanContext};
         let (root, files, file_set) = boltffi_fixture(&[
@@ -2805,12 +2857,29 @@ mod tests {
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(producers.len(), 1);
         let producer = &producers[0];
-        assert_eq!(producer.bindings_dir, "crates/plain/dist/apple/Sources");
+        assert_eq!(
+            producer.bindings_dir,
+            "crates/plain/dist/apple/Sources/BoltFFI"
+        );
         assert_eq!(
             producer.bindings_file,
-            "crates/plain/dist/apple/Sources/PlainCoreBoltFFI.swift"
+            "crates/plain/dist/apple/Sources/BoltFFI/PlainCoreBoltFFI.swift"
         );
         assert_eq!(producer.deployment_target, "16.0");
+        assert!(
+            producer
+                .inputs
+                .contains(&"crates/plain/dist/apple/Sources/BoltFFI/**".to_owned()),
+            "committed bindings select the producer: {:?}",
+            producer.inputs
+        );
+        assert!(
+            producer
+                .inputs
+                .contains(&"crates/plain/dist/apple/Package.swift".to_owned()),
+            "the generated manifest selects the producer: {:?}",
+            producer.inputs
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2878,7 +2947,8 @@ mod tests {
             (
                 "crates/leaky/boltffi.toml",
                 "[package]\nname = \"leaky-core\"\n\n\
-                 [targets.apple.swift]\noutput = \"../../../outside\"\n",
+                 [targets.apple.swift]\noutput = \"../../../outside\"\n\n\
+                 [targets.apple.spm]\nlayout = \"split\"\n",
             ),
             (
                 "crates/leaky/Cargo.toml",
@@ -2893,9 +2963,9 @@ mod tests {
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
         assert!(producers.is_empty(), "{producers:?}");
         assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.contains("Swift bindings output `../../../outside`")),
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.contains("Swift bindings output `../../../outside/BoltFFI`")
+            }),
             "{diagnostics:?}"
         );
         let _ = fs::remove_dir_all(root);

@@ -1042,6 +1042,170 @@ mod tests {
         assert!(workflow.contains("xcodebuild -version"), "{workflow}");
     }
 
+    /// A fake `/Applications` tree plus `xcodebuild`/`swift` shims that
+    /// executes the exact rendered probe script.
+    struct ProbeStage {
+        root: std::path::PathBuf,
+    }
+
+    impl ProbeStage {
+        fn create(name: &str) -> Self {
+            static NEXT_STAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "velnor-xcode-probe-{name}-{}-{}",
+                std::process::id(),
+                NEXT_STAGE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            must_ok(
+                std::fs::create_dir_all(root.join("Applications")),
+                "stage Applications",
+            );
+            must_ok(std::fs::create_dir_all(root.join("bin")), "stage bin");
+            for tool in ["xcodebuild", "swift"] {
+                let shim = root.join("bin").join(tool);
+                must_ok(
+                    std::fs::write(&shim, format!("#!/bin/sh\necho fake-{tool}\n")),
+                    "stage tool shim",
+                );
+                Self::make_executable(&shim);
+            }
+            Self { root }
+        }
+
+        fn make_executable(path: &std::path::Path) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                must_ok(
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)),
+                    "stage shim is executable",
+                );
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = path;
+            }
+        }
+
+        fn install_versioned(&self, name: &str) {
+            must_ok(
+                std::fs::create_dir_all(
+                    self.root
+                        .join("Applications")
+                        .join(format!("{name}.app/Contents/Developer")),
+                ),
+                "stage versioned Xcode",
+            );
+        }
+
+        fn install_unversioned(&self, version: &str) {
+            let dir = self
+                .root
+                .join("Applications")
+                .join("Xcode.app/Contents/Developer/usr/bin");
+            must_ok(std::fs::create_dir_all(&dir), "stage Xcode.app");
+            let stub = dir.join("xcodebuild");
+            must_ok(
+                std::fs::write(
+                    &stub,
+                    format!("#!/bin/sh\necho 'Xcode {version}'\necho 'Build version TEST'\n"),
+                ),
+                "stage Xcode.app xcodebuild",
+            );
+            Self::make_executable(&stub);
+        }
+
+        fn run(&self, pin: &str) -> (bool, String, String, String) {
+            let script = WorkflowIr::xcode_probe_script(pin).replace(
+                "/Applications",
+                &self.root.join("Applications").to_string_lossy(),
+            );
+            let path = format!(
+                "{}:{}",
+                self.root.join("bin").to_string_lossy(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let env_file = self.root.join("github-env.txt");
+            let output = must_ok(
+                Command::new("bash")
+                    .args(["-c", &script])
+                    .env("PATH", path)
+                    .env("GITHUB_ENV", &env_file)
+                    .output(),
+                "bash executes the probe",
+            );
+            let env = std::fs::read_to_string(&env_file).unwrap_or_default();
+            (
+                output.status.success(),
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+                env,
+            )
+        }
+    }
+
+    impl Drop for ProbeStage {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn xcode_probe_selects_exact_prefix_and_unversioned() {
+        let stage = ProbeStage::create("exact");
+        stage.install_versioned("Xcode_26.6");
+        stage.install_versioned("Xcode_26.6.1");
+        stage.install_unversioned("27.0");
+        let (success, _, stderr, env) = stage.run("26.6");
+        assert!(success, "exact match wins: {stderr}");
+        assert!(
+            env.contains("DEVELOPER_DIR=") && env.contains("Xcode_26.6.app/Contents/Developer"),
+            "exact Xcode_26.6.app is exported, not the newer prefix or Xcode.app: {env}"
+        );
+
+        let stage = ProbeStage::create("prefix");
+        stage.install_versioned("Xcode_26.6.1");
+        stage.install_versioned("Xcode_26.6.2");
+        stage.install_unversioned("27.0");
+        let (success, _, stderr, env) = stage.run("26.6");
+        assert!(success, "newest prefix match wins: {stderr}");
+        assert!(
+            env.contains("Xcode_26.6.2.app/Contents/Developer"),
+            "newest prefix Xcode_26.6.2.app is exported: {env}"
+        );
+
+        let stage = ProbeStage::create("unversioned");
+        stage.install_unversioned("26.6.1");
+        let (success, _, stderr, env) = stage.run("26.6");
+        assert!(success, "version-matching Xcode.app is accepted: {stderr}");
+        assert!(
+            env.contains("Xcode.app/Contents/Developer"),
+            "Xcode.app is exported: {env}"
+        );
+    }
+
+    #[test]
+    fn xcode_probe_fails_closed_with_diagnostic() {
+        let stage = ProbeStage::create("mismatch");
+        stage.install_versioned("Xcode_27.0");
+        stage.install_unversioned("27.0");
+        let (success, _, stderr, _) = stage.run("26.6");
+        assert!(!success, "a wrong-version Xcode.app is refused");
+        assert!(
+            stderr.contains("::error::no installed Xcode matches pin 26.6"),
+            "refusal names the pin: {stderr}"
+        );
+
+        let stage = ProbeStage::create("empty");
+        let (success, _, stderr, _) = stage.run("26.6");
+        assert!(!success, "no installed Xcode fails");
+        assert!(
+            stderr.contains("::error::no installed Xcode matches pin 26.6"),
+            "an empty tree reports the diagnostic instead of dying silently: {stderr}"
+        );
+    }
+
     #[test]
     fn swift_without_xcode_pin_renders_no_probe_step() {
         let mut swift = rust_unit("swift-package-native", "native");
@@ -6558,15 +6722,34 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// installed Xcode matches, and export `DEVELOPER_DIR` so every later
     /// step uses the same toolchain instead of the image default. An exact
     /// `Xcode_<pin>.app` match wins; otherwise the newest installed
-    /// `Xcode_<pin>*.app` is selected. Local providers own their Xcode
+    /// `Xcode_<pin>*.app` is selected; otherwise an unversioned
+    /// `Xcode.app` is accepted only when its reported version matches the
+    /// pin. Every fallible probe pipeline ends in `|| true`: under
+    /// `set -euo pipefail` a bare failing substitution would kill the step
+    /// before the diagnostic runs. Local providers own their Xcode
     /// installation and skip this step.
     fn render_xcode_toolchain_step(output: &mut String, xcode: &XcodeToolchain) {
         let _ = writeln!(
             output,
-            "      - name: Select Xcode {}\n        run: |\n          set -euo pipefail\n          want=\"{}\"\n          if [ -d \"/Applications/Xcode_${{want}}.app\" ]; then\n            dir=\"/Applications/Xcode_${{want}}.app\"\n          else\n            dir=\"$(ls -d /Applications/Xcode_${{want}}*.app 2>/dev/null | sort | tail -n 1)\"\n          fi\n          if [ -z \"$dir\" ]; then\n            echo \"::error::no installed Xcode matches pin $want\"\n            ls /Applications | grep -i xcode || true\n            exit 1\n          fi\n          echo \"DEVELOPER_DIR=$dir/Contents/Developer\" >> \"$GITHUB_ENV\"\n          export DEVELOPER_DIR=\"$dir/Contents/Developer\"\n          xcodebuild -version\n          swift --version",
+            "      - name: Select Xcode {}\n        run: |{}",
             xcode.version(),
-            xcode.version(),
+            Self::xcode_probe_script(xcode.version()).lines().fold(
+                String::new(),
+                |mut indented, line| {
+                    indented.push_str("\n          ");
+                    indented.push_str(line);
+                    indented
+                }
+            ),
         );
+    }
+
+    /// The `Select Xcode` probe body, factored out so behavioral tests
+    /// execute the exact script the workflow renders.
+    fn xcode_probe_script(pin: &str) -> String {
+        format!(
+            "set -euo pipefail\nwant=\"{pin}\"\ndir=\"\"\nif [ -d \"/Applications/Xcode_${{want}}.app\" ]; then\n  dir=\"/Applications/Xcode_${{want}}.app\"\nelse\n  dir=\"$(ls -d /Applications/Xcode_${{want}}*.app 2>/dev/null | sort | tail -n 1 || true)\"\nfi\nif [ -z \"$dir\" ] && [ -d /Applications/Xcode.app ]; then\n  found=\"$(/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -version 2>/dev/null | head -n 1 | awk '{{print $2}}' || true)\"\n  case \"$found\" in\n    \"$want\"|\"$want\".*) dir=/Applications/Xcode.app ;;\n  esac\nfi\nif [ -z \"$dir\" ]; then\n  echo \"::error::no installed Xcode matches pin $want\" >&2\n  ls /Applications | grep -i xcode || true\n  exit 1\nfi\necho \"DEVELOPER_DIR=$dir/Contents/Developer\" >> \"$GITHUB_ENV\"\nexport DEVELOPER_DIR=\"$dir/Contents/Developer\"\nxcodebuild -version\nswift --version"
+        )
     }
 
     /// The cargo-bin tools a hosted provider installs through the pinned

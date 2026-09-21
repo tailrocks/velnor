@@ -1,4 +1,8 @@
-#[unsafe(no_mangle)]
-pub extern "C" fn bridge_core_version() -> u32 {
-    1
+pub struct BridgeCore;
+
+#[boltffi::export]
+impl BridgeCore {
+    pub fn version() -> u32 {
+        1
+    }
 }

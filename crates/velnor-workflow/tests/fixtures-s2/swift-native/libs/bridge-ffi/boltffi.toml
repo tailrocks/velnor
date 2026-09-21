@@ -2,6 +2,14 @@
 name = "bridge-core"
 crate = "bridge-core-ffi"
 
+[targets.apple]
+# macOS arm64 only: without this block `pack apple` defaults to iOS
+# slices and fails where the iOS targets are not installed.
+include_macos = true
+ios_architectures = []
+simulator_architectures = []
+macos_architectures = ["arm64"]
+
 [targets.apple.xcframework]
 name = "BridgeCore"
 output = "../../target/xcframework"

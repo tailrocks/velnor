@@ -233,7 +233,7 @@ fn ffi_source_change_selects_producer_and_swift_consumer() -> Result<(), Box<dyn
     let base = git(&root, &["rev-parse", "HEAD"])?;
     fs::write(
         root.join("libs/bridge-ffi/src/lib.rs"),
-        "#[unsafe(no_mangle)]\npub extern \"C\" fn bridge_core_version() -> u32 {\n    2\n}\n",
+        "pub struct BridgeCore;\n\n#[boltffi::export]\nimpl BridgeCore {\n    pub fn version() -> u32 {\n        2\n    }\n}\n",
     )?;
     git(&root, &["commit", "-qam", "bump ffi"])?;
     let head = git(&root, &["rev-parse", "HEAD"])?;
@@ -245,6 +245,20 @@ fn ffi_source_change_selects_producer_and_swift_consumer() -> Result<(), Box<dyn
             "an FFI edit selects {id}: {ids:?}"
         );
     }
+
+    let bindings =
+        root.join("libs/bridge-ffi/dist/apple/Sources/BoltFFI/BridgeCoreFfiBoltFFI.swift");
+    let mut edited = fs::read_to_string(&bindings)?;
+    edited.push_str("// hand edit to committed bindings\n");
+    fs::write(&bindings, edited)?;
+    git(&root, &["commit", "-qam", "touch bindings"])?;
+    let drift = git(&root, &["rev-parse", "HEAD"])?;
+
+    let ids = plan_unit_ids(&root, &head, &drift)?;
+    assert!(
+        ids.iter().any(|selected| selected == PRODUCER),
+        "a committed-bindings edit selects the producer for drift verification: {ids:?}"
+    );
 
     fs::remove_dir_all(&scratch)?;
     Ok(())
