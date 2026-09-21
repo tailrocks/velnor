@@ -17,7 +17,6 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
 
 use sha2::{Digest, Sha256};
@@ -1182,6 +1181,15 @@ fn select_command(
             id: unit.id.clone(),
             watch: unit.watch.clone(),
             depends_on: unit.depends_on.clone(),
+            kind: unit.kind.clone(),
+            commands: unit
+                .github_pr_commands
+                .iter()
+                .chain(&unit.github_full_commands)
+                .chain(&unit.velnor_pr_commands)
+                .chain(&unit.velnor_full_commands)
+                .cloned()
+                .collect(),
         })
         .collect();
     if scope == Scope::Full {
@@ -1193,6 +1201,7 @@ fn select_command(
                 .iter()
                 .map(|unit| (unit.id.clone(), "full scope requested".to_owned()))
                 .collect(),
+            fallback_reason: None,
         });
     }
     if base.is_empty() || base.chars().all(|character| character == '0') {
@@ -1649,11 +1658,18 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
             .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
         writeln!(file, "full_units={full_units}")
             .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        if let Some(reason) = &selection.fallback_reason {
+            writeln!(file, "fallback_reason={reason}")
+                .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        }
         write_kind_matrices(&mut file, &config, &selection, &output_path)?;
     }
     println!("scope={}", scope_name(scope));
     println!("units={units}");
     println!("full_units={full_units}");
+    if let Some(reason) = &selection.fallback_reason {
+        println!("fallback_reason={reason}");
+    }
     Ok(())
 }
 
@@ -1808,6 +1824,7 @@ fn selection_for_lanes<'a>(
             .into_iter()
             .filter(|id| kinds.get(id.as_str()).is_none_or(|kind| supported(kind)))
             .collect(),
+        fallback_reason: selection.fallback_reason,
     }
 }
 
@@ -2204,6 +2221,9 @@ fn select_units_for_job<'a>(
 struct UnitSelection<'a> {
     units: Vec<&'a CiUnit>,
     full_units: BTreeSet<String>,
+    /// Why the full set was chosen by fallback. `None` for requested-full,
+    /// narrow, and empty selections; surfaced additively by `plan`.
+    fallback_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2342,22 +2362,20 @@ fn selection_for_diff<'a>(
     head: &str,
 ) -> Result<UnitSelection<'a>, GeneratorError> {
     if scope == Scope::Full {
-        return full_selection(config);
+        return full_selection(config, None);
     }
     if base.is_empty() || base.chars().all(|character| character == '0') {
-        return full_selection(config);
+        return full_selection(config, Some("no affected base; fell back to full"));
     }
     let Some(changed) = git_changed_files(root, base, head)? else {
-        return full_selection(config);
+        return full_selection(config, Some("git diff unavailable; fell back to full"));
     };
     if changed.is_empty() {
         return Ok(UnitSelection {
             units: Vec::new(),
             full_units: BTreeSet::new(),
+            fallback_reason: None,
         });
-    }
-    if changed.iter().any(|file| file.starts_with(".github/")) {
-        return full_selection(config);
     }
     if version_bump_matches(
         root,
@@ -2378,36 +2396,57 @@ fn selection_for_diff<'a>(
         return Ok(UnitSelection {
             units: ordered_units(&config.unit, Some(&selected))?,
             full_units: selected,
+            fallback_reason: None,
         });
     }
-    let matchers = config
+    let watched: Vec<crate::reuse::WatchedUnit> = config
         .unit
         .iter()
-        .map(|unit| {
-            let mut builder = GlobSetBuilder::new();
-            for pattern in &unit.watch {
-                let glob = Glob::new(pattern).map_err(|error| {
-                    GeneratorError::usage(format!("invalid watch pattern {pattern}: {error}"))
-                })?;
-                builder.add(glob);
-            }
-            let matcher = builder
-                .build()
-                .map_err(|error| GeneratorError::usage(format!("build watch matcher: {error}")))?;
-            Ok::<_, GeneratorError>((unit, matcher))
+        .map(|unit| crate::reuse::WatchedUnit {
+            id: unit.id.clone(),
+            watch: unit.watch.clone(),
+            depends_on: unit.depends_on.clone(),
+            kind: unit.kind.clone(),
+            commands: unit
+                .github_pr_commands
+                .iter()
+                .chain(&unit.github_full_commands)
+                .chain(&unit.velnor_pr_commands)
+                .chain(&unit.velnor_full_commands)
+                .cloned()
+                .collect(),
         })
-        .collect::<Result<Vec<(&CiUnit, GlobSet)>, _>>()?;
+        .collect();
+    let compiled = crate::reuse::compile_ownership(&watched)?;
     let mut selected = BTreeSet::new();
     for file in &changed {
-        let mut matched = false;
-        for (unit, matcher) in &matchers {
-            if matcher.is_match(file) {
-                selected.insert(unit.id.clone());
-                matched = true;
+        if let Some(verdict) = crate::reuse::github_verdict(file) {
+            match verdict {
+                crate::reuse::GithubVerdict::Global { reason }
+                | crate::reuse::GithubVerdict::Unknown { reason } => {
+                    return full_selection(config, Some(&reason));
+                }
+                crate::reuse::GithubVerdict::Kind { kind } => {
+                    selected.extend(
+                        config
+                            .unit
+                            .iter()
+                            .filter(|unit| unit.kind.eq_ignore_ascii_case(&kind))
+                            .map(|unit| unit.id.clone()),
+                    );
+                }
+                crate::reuse::GithubVerdict::ReleaseScope => {}
             }
+            continue;
         }
-        if !matched {
-            return full_selection(config);
+        match crate::reuse::classify_path(&compiled, file) {
+            crate::reuse::PathVerdict::Owned { units } => {
+                selected.extend(units);
+            }
+            crate::reuse::PathVerdict::Unknown { reason } => {
+                return full_selection(config, Some(&reason));
+            }
+            crate::reuse::PathVerdict::Irrelevant => {}
         }
     }
     extend_workspace_checks_for_cargo_roots(config, &mut selected);
@@ -2415,6 +2454,7 @@ fn selection_for_diff<'a>(
     Ok(UnitSelection {
         units: ordered_units(&config.unit, Some(&selected))?,
         full_units,
+        fallback_reason: None,
     })
 }
 
@@ -2445,10 +2485,14 @@ fn extend_workspace_checks_for_cargo_roots(config: &CiConfig, selected: &mut BTr
     );
 }
 
-fn full_selection(config: &CiConfig) -> Result<UnitSelection<'_>, GeneratorError> {
+fn full_selection<'a>(
+    config: &'a CiConfig,
+    fallback_reason: Option<&str>,
+) -> Result<UnitSelection<'a>, GeneratorError> {
     Ok(UnitSelection {
         units: ordered_units(&config.unit, None)?,
         full_units: config.unit.iter().map(|unit| unit.id.clone()).collect(),
+        fallback_reason: fallback_reason.map(ToOwned::to_owned),
     })
 }
 
@@ -5524,7 +5568,7 @@ workspace_check = true
         let config = lanes_selection_config();
         let narrowed = selection_for_lanes(
             &config,
-            must(full_selection(&config), "full selection"),
+            must(full_selection(&config, None), "full selection"),
             RunnerMode::Velnor,
         );
         let ids = narrowed
@@ -5543,7 +5587,7 @@ workspace_check = true
         for lanes in [RunnerMode::Github, RunnerMode::Both] {
             let narrowed = selection_for_lanes(
                 &config,
-                must(full_selection(&config), "full selection"),
+                must(full_selection(&config, None), "full selection"),
                 lanes,
             );
             let ids = narrowed
@@ -5567,6 +5611,7 @@ workspace_check = true
         let selection = UnitSelection {
             units,
             full_units: ["swift-app"].into_iter().map(str::to_owned).collect(),
+            fallback_reason: None,
         };
         let narrowed = selection_for_lanes(&config, selection, RunnerMode::Velnor);
         assert!(narrowed.full_units.is_empty());
@@ -5584,7 +5629,7 @@ workspace_check = true
         let config = lanes_selection_config();
         let narrowed = selection_for_lanes(
             &config,
-            full_selection(&config).map_err(|error| error.to_string())?,
+            full_selection(&config, None).map_err(|error| error.to_string())?,
             RunnerMode::Velnor,
         );
         let units = narrowed
@@ -6016,6 +6061,15 @@ workspace_check = true
                 id: unit.id.clone(),
                 watch: unit.watch.clone(),
                 depends_on: unit.depends_on.clone(),
+                kind: unit.kind.clone(),
+                commands: unit
+                    .github_pr_commands
+                    .iter()
+                    .chain(&unit.github_full_commands)
+                    .chain(&unit.velnor_pr_commands)
+                    .chain(&unit.velnor_full_commands)
+                    .cloned()
+                    .collect(),
             })
             .collect();
         for changed in [
@@ -6066,18 +6120,96 @@ workspace_check = true
     }
 
     #[test]
-    fn affected_selection_falls_back_to_full_for_global_or_unmatched_changes(
+    fn affected_selection_falls_back_to_full_for_unknown_contract_changes(
     ) -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = selection_git_fixture("github", ".github/workflows/ci.yml")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer", "docs"]
+        );
+        assert!(
+            selection
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("classification table")),
+            "the planner surfaces the fallback reason: {:?}",
+            selection.fallback_reason
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_selects_nothing_for_an_unowned_transparent_change(
+    ) -> Result<(), Box<dyn Error>> {
+        // `README.md` matches no watch and every unit is transparent (rust
+        // units running the no-op), so the planner selects nothing.
+        let (root, base, head) = selection_git_fixture("unmatched", "README.md")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert!(selection.units.is_empty());
+        assert!(selection.full_units.is_empty());
+        assert!(selection.fallback_reason.is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_narrows_a_kind_reusable_to_that_kind() -> Result<(), Box<dyn Error>> {
+        let (root, base, head) =
+            selection_git_fixture("kind", ".github/workflows/ci-unit-rust.yml")?;
+        let config = polyglot_selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(selected_ids(selection.units), vec!["rust-alpha"]);
+        assert!(selection.fallback_reason.is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_selects_nothing_for_release_lanes() -> Result<(), Box<dyn Error>> {
         for (name, changed) in [
-            ("github", ".github/workflows/ci.yml"),
-            ("unmatched", "README.md"),
+            ("release", ".github/workflows/release.yml"),
+            ("maintenance", ".github/workflows/maintenance.yml"),
         ] {
             let (root, base, head) = selection_git_fixture(name, changed)?;
-            let config = selection_config();
-            let units = selected_units_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-            assert_eq!(selected_ids(units), vec!["base", "app", "consumer", "docs"]);
+            let config = polyglot_selection_config();
+            let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+            assert!(
+                selection.units.is_empty() && selection.full_units.is_empty(),
+                "release lanes select nothing in affected scope: {changed}"
+            );
             std::fs::remove_dir_all(root)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_falls_back_when_a_package_unit_is_opaque() -> Result<(), Box<dyn Error>> {
+        // The polyglot fixture's package unit runs the no-op (transparent);
+        // real package commands make it opaque, so the same unmatched change
+        // falls back with the consulted sources in the reason.
+        let (root, base, head) = selection_git_fixture("opaque", "AGENTS.md")?;
+        let mut config = polyglot_selection_config();
+        let bun = config
+            .unit
+            .iter_mut()
+            .find(|unit| unit.id == "bun-web")
+            .ok_or("the polyglot fixture must carry bun-web")?;
+        bun.github_pr_commands = vec!["bun run build".to_owned()];
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(selected_ids(selection.units).len(), 4);
+        assert!(
+            selection
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("command read-globs")),
+            "the fallback reason names the consulted sources: {:?}",
+            selection.fallback_reason
+        );
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
