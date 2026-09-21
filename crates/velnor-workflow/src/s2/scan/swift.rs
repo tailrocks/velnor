@@ -1680,7 +1680,15 @@ mod tests {
         assert_eq!(producer.products.len(), 1);
         assert_eq!(producer.products[0].name, "xcframework-bridgecore");
         assert_eq!(producer.products[0].task, None);
-        assert!(producer.products[0].env.is_empty());
+        assert_eq!(
+            producer.products[0]
+                .env
+                .get(crate::s2::scan::rust::MACOSX_DEPLOYMENT_TARGET)
+                .map(String::as_str),
+            Some("16.0"),
+            "the product exports the manifest floor: {:?}",
+            producer.products[0].env
+        );
         assert_eq!(
             producer.products[0].outputs,
             vec!["target/xcframework/BridgeCore.xcframework".to_owned()]
@@ -1775,7 +1783,10 @@ mod tests {
                 "package snapshot: {}",
                 tail[2]
             );
-            assert_eq!(tail[3], "cd -- 'libs/bridge-ffi' && boltffi -v pack apple");
+            assert_eq!(
+                tail[3],
+                "cd -- 'libs/bridge-ffi' && MACOSX_DEPLOYMENT_TARGET='16.0' boltffi -v pack apple"
+            );
             assert!(
                 tail[4].starts_with("diff -r ") && tail[5].starts_with("diff "),
                 "drift diffs: {:?}",

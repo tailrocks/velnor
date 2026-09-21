@@ -207,12 +207,21 @@ fn wire_native_edge(
         let recipe_commands = producer
             .recipe
             .commands(&producer.root, &producer.output, &surface);
+        // The product records the recipe's resolved floor — declared else
+        // manifest — so resolution carries it into the consumer's job env
+        // for `swift build`. The producer unit's own env stays untouched:
+        // declared rows overwrite it wholesale after the scan.
+        let mut product_env = std::collections::BTreeMap::new();
+        product_env.insert(
+            rust::MACOSX_DEPLOYMENT_TARGET.to_owned(),
+            producer.recipe.deployment.as_str().to_owned(),
+        );
         shape.units[producer_index]
             .products
             .push(crate::s2::platform::NamedProduct {
                 name: product_name.clone(),
                 task: None,
-                env: std::collections::BTreeMap::new(),
+                env: product_env,
                 outputs: vec![producer.output.clone()],
                 output_files: producer.output_files.clone(),
                 bindings_dir: producer.bindings_dir.clone(),
@@ -606,6 +615,7 @@ mod tests {
             package_swift: None,
             recipe: super::rust::BoltffiRecipe {
                 profile: Some(super::rust::CargoProfile("ci-release".to_owned())),
+                deployment: super::rust::DeploymentFloor("26.1".to_owned()),
                 locked: true,
                 verbose: false,
             },
@@ -628,6 +638,24 @@ mod tests {
         let product = &unit.products[0];
         assert_eq!("xcframework-bridgecore", product.name);
         assert_eq!(vec!["native/out/BridgeCore.xcframework"], product.outputs);
+        assert_eq!(
+            product.deployment_target, "26.0",
+            "the product keeps the manifest scan fact"
+        );
+        assert_eq!(
+            product
+                .env
+                .get(super::rust::MACOSX_DEPLOYMENT_TARGET)
+                .map(String::as_str),
+            Some("26.1"),
+            "the product exports the recipe's resolved floor: {:?}",
+            product.env
+        );
+        assert!(
+            unit.env.is_empty(),
+            "the producer unit's own env stays untouched: {:?}",
+            unit.env
+        );
         assert!(
             !product.rebuild.is_empty(),
             "the joined product records its local rebuild"
@@ -708,6 +736,7 @@ mod tests {
             package_swift: None,
             recipe: super::rust::BoltffiRecipe {
                 profile: None,
+                deployment: super::rust::DeploymentFloor("26.0".to_owned()),
                 locked: true,
                 verbose: false,
             },

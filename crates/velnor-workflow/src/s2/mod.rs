@@ -1716,10 +1716,13 @@ fn scan_target(
         .as_ref()
         .and_then(config::RepoGenerationConfig::default_branch)
         .unwrap_or(default_branch);
-    let apple = scan::rust::AppleNativePolicy::from_cargo_profile(
+    let apple = scan::rust::AppleNativePolicy::from_declared(
         generation
             .as_ref()
             .and_then(|generation| generation.native_apple().cargo_profile.as_deref()),
+        generation
+            .as_ref()
+            .and_then(|generation| generation.native_apple().deployment_floor.as_deref()),
     )?;
     let shape = scan::scan_shape(root, &scan_providers, scan_default_branch, exclude, &apple)?;
     let mut config = ProjectConfig::from(shape.clone());
@@ -12235,6 +12238,75 @@ mod tests {
         assert!(
             error.contains("[native.apple] cargo_profile"),
             "a bad profile must name the section: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generation_config_native_apple_floor_reaches_boltffi_recipe() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [workflow]\nproviders = [\"github-hosted\"]\n\n\
+             [native.apple]\ndeployment_floor = \"13.0\"\n";
+        let root = configured_repository("native-apple-floor", Some(config));
+        must(
+            fs::create_dir_all(root.join("libs/bridge-ffi")),
+            "create ffi directory",
+        );
+        must(
+            fs::write(
+                root.join("libs/bridge-ffi/boltffi.toml"),
+                "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
+                 [targets.apple]\ndeployment_target = \"15.0\"\n\n\
+                 [targets.apple.xcframework]\nname = \"BridgeCore\"\noutput = \"../../target/xcframework\"\n",
+            ),
+            "write BoltFFI manifest",
+        );
+        must(
+            fs::write(
+                root.join("libs/bridge-ffi/Cargo.toml"),
+                "[package]\nname = \"bridge-core-ffi\"\nversion = \"0.1.0\"\n",
+            ),
+            "write ffi manifest",
+        );
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(provider_set([ProviderId::GithubHosted])),
+                "main",
+            ),
+            "scan configured repository",
+        );
+        assert_eq!(scanned.shape.boltffi_producers.len(), 1);
+        let producer = &scanned.shape.boltffi_producers[0];
+        assert_eq!(
+            producer.recipe.deployment.as_str(),
+            "13.0",
+            "the declared floor reaches the recipe"
+        );
+        assert_eq!(
+            producer.deployment_target, "15.0",
+            "the scan fact keeps the manifest value"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generation_config_native_apple_floor_refuses_bad_shape() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [workflow]\nproviders = [\"github-hosted\"]\n\n\
+             [native.apple]\ndeployment_floor = \"15\"\n";
+        let root = configured_repository("native-apple-floor-bad", Some(config));
+        let error = match scan_target(
+            &root,
+            Some(provider_set([ProviderId::GithubHosted])),
+            "main",
+        ) {
+            Ok(_) => String::from("accepted"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("[native.apple] deployment_floor"),
+            "a bad floor must name the section: {error}"
         );
         let _ = fs::remove_dir_all(root);
     }
