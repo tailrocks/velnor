@@ -71,8 +71,12 @@ pub(crate) struct PublicationReadinessManifest {
     pub(crate) schema: String,
     /// Source/build-input identity of the renderer product.
     pub(crate) closure: String,
-    /// Source commit provenance recorded by the publisher.
-    pub(crate) revision: String,
+    /// Renderer commit the activation transaction will stamp.
+    pub(crate) activation_revision: String,
+    /// Original source commit the immutable product was built from. This is
+    /// deliberately distinct from `activation_revision`: closure-equivalent
+    /// commits may reuse a product without rewriting its provenance.
+    pub(crate) product_revision: String,
     /// One complete product row for every supported consumer platform.
     pub(crate) products: Vec<PublicationProduct>,
 }
@@ -122,9 +126,15 @@ impl PublicationReadinessManifest {
                     .to_owned(),
             ));
         }
-        if !is_lower_hex(&self.revision, 40) {
+        if !is_lower_hex(&self.activation_revision, 40) {
             return Err(GeneratorError::usage(
-                "publication readiness revision must be 40 lowercase hexadecimal characters"
+                "publication readiness activation_revision must be 40 lowercase hexadecimal characters"
+                    .to_owned(),
+            ));
+        }
+        if !is_lower_hex(&self.product_revision, 40) {
+            return Err(GeneratorError::usage(
+                "publication readiness product_revision must be 40 lowercase hexadecimal characters"
                     .to_owned(),
             ));
         }
@@ -134,10 +144,10 @@ impl PublicationReadinessManifest {
                 self.closure, expected_closure
             )));
         }
-        if self.revision != expected_revision {
+        if self.activation_revision != expected_revision {
             return Err(GeneratorError::usage(format!(
-                "publication readiness revision {} does not match the renderer revision {}",
-                self.revision, expected_revision
+                "publication readiness activation_revision {} does not match the renderer revision {}",
+                self.activation_revision, expected_revision
             )));
         }
 
@@ -220,7 +230,8 @@ mod tests {
         PublicationReadinessManifest {
             schema: PUBLICATION_READINESS_SCHEMA.to_owned(),
             closure: CLOSURE.repeat(64),
-            revision: REVISION.repeat(40),
+            activation_revision: REVISION.repeat(40),
+            product_revision: "b".repeat(40),
             products: REQUIRED_PLATFORMS
                 .into_iter()
                 .map(|platform| PublicationProduct {
@@ -254,8 +265,12 @@ mod tests {
         assert!(must_fail(&manifest, 100).contains("closure"));
 
         let mut manifest = valid_manifest();
-        manifest.revision = "R".repeat(40);
-        assert!(must_fail(&manifest, 100).contains("revision"));
+        manifest.activation_revision = "R".repeat(40);
+        assert!(must_fail(&manifest, 100).contains("activation_revision"));
+
+        let mut manifest = valid_manifest();
+        manifest.product_revision = "R".repeat(40);
+        assert!(must_fail(&manifest, 100).contains("product_revision"));
 
         let mut manifest = valid_manifest();
         manifest.products[0].digest = "not-a-digest".to_owned();
