@@ -16833,35 +16833,32 @@ channel = "stable"
     }
 
     #[test]
-    fn both_mode_plan_consumes_the_admitted_lanes() {
-        let config = scanned_fixture(RunnerMode::Both);
-        let generator = WorkflowIr::from_config(&config);
+    fn every_mode_plan_consumes_its_scheduled_lanes() {
         // The dispatch `runner` input carries the manual selection;
-        // automatic events fall back to the configured automatic lanes.
-        let consumer = format!(
-            "VELNOR_LANES: ${{{{ github.event.inputs.runner || '{}' }}}}",
-            config.automatic.as_str()
-        );
-        for aggregate in [
-            generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator), None),
-            generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator), None),
-            generator.render(WorkflowKind::Main),
-        ] {
-            assert!(aggregate.contains(&consumer), "{aggregate}");
-            // The consumer sits in the plan step.
-            let plan = must_some(aggregate.find("  plan:"), "plan job");
-            let lanes_env = must_some(aggregate.find(consumer.as_str()), "plan lanes env");
-            assert!(plan < lanes_env, "{aggregate}");
-        }
-        // Single-lane modes plan unfiltered, as before.
-        for runners in [RunnerMode::Github, RunnerMode::Velnor] {
+        // automatic events fall back to the configured automatic lanes —
+        // in every mode, so the plan scope equals the scheduled lane scope
+        // and single-lane workflows plan no phantom entries for the
+        // unscheduled lane.
+        for runners in [RunnerMode::Both, RunnerMode::Github, RunnerMode::Velnor] {
             let config = scanned_fixture(runners);
             let generator = WorkflowIr::from_config(&config);
-            for aggregate in [
+            let consumer = format!(
+                "VELNOR_LANES: ${{{{ github.event.inputs.runner || '{}' }}}}",
+                config.automatic.as_str()
+            );
+            let mut aggregates = vec![
                 generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator), None),
                 generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator), None),
-            ] {
-                assert!(!aggregate.contains("VELNOR_LANES"), "{aggregate}");
+            ];
+            if runners == RunnerMode::Both {
+                aggregates.push(generator.render(WorkflowKind::Main));
+            }
+            for aggregate in aggregates {
+                assert!(aggregate.contains(&consumer), "{aggregate}");
+                // The consumer sits in the plan step.
+                let plan = must_some(aggregate.find("  plan:"), "plan job");
+                let lanes_env = must_some(aggregate.find(consumer.as_str()), "plan lanes env");
+                assert!(plan < lanes_env, "{aggregate}");
             }
         }
     }
