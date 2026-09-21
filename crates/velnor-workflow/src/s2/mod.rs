@@ -5663,7 +5663,8 @@ pub(crate) fn rust_dependency_needs(
 /// artifact on `provider`. Hosted only — local providers share the
 /// workspace, so their consumers rebuild or reuse in place. An edge whose
 /// producer cannot run here, or whose product declares no outputs, yields
-/// no edge: the consumer's guarded rebuild covers it.
+/// no edge because no artifact contract exists. A declared transport edge is
+/// mandatory: its consumer never rebuilds around a skipped or failed producer.
 pub(crate) fn product_dependency_needs(
     provider: provider::ProviderId,
     unit: &Unit,
