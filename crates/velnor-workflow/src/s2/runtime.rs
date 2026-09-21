@@ -5098,6 +5098,8 @@ pub(crate) mod tests {
             cache: None,
             pr_commands: Vec::new(),
             full_commands: Vec::new(),
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             platform: "linux-x64".to_owned(),
             trust: "untrusted-ok".to_owned(),
             capabilities: RuntimeCapabilities::default(),

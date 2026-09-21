@@ -5122,6 +5122,8 @@ pub(crate) mod tests {
             github_full_commands: vec!["true".to_owned()],
             velnor_pr_commands: vec!["true".to_owned()],
             velnor_full_commands: vec!["true".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,

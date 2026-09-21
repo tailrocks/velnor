@@ -329,7 +329,7 @@ pub(crate) fn select_affected(
             PathVerdict::Owned { units: owners } => {
                 for id in owners {
                     let Some(matched) = compiled.iter().find_map(|compiled| {
-                        (compiled.unit.id == id).then(|| compiled.unit.id.as_str())
+                        (compiled.unit.id == id).then_some(compiled.unit.id.as_str())
                     }) else {
                         continue;
                     };
@@ -346,6 +346,17 @@ pub(crate) fn select_affected(
             PathVerdict::Irrelevant => {}
         }
     }
+    Ok(finish_selection(units, &hits, &kind_hits))
+}
+
+/// Expand direct path hits across `depends_on` edges and explain every
+/// selected unit: direct matches name their paths, kind-narrowed matches
+/// name the reusable, and closure members name the edge that pulled them in.
+fn finish_selection(
+    units: &[WatchedUnit],
+    hits: &BTreeMap<&str, Vec<String>>,
+    kind_hits: &BTreeMap<&str, Vec<String>>,
+) -> AffectedSelection {
     let direct: BTreeSet<String> = hits
         .keys()
         .chain(kind_hits.keys())
@@ -353,7 +364,7 @@ pub(crate) fn select_affected(
         .collect();
     let closure = expand_selection_closure(units, &direct);
     let mut explanations = BTreeMap::new();
-    for (id, items) in &hits {
+    for (id, items) in hits {
         let mut items = items.clone();
         items.sort();
         explanations.insert(
@@ -361,7 +372,7 @@ pub(crate) fn select_affected(
             format!("matched changed path {}", items.join(", ")),
         );
     }
-    for (id, items) in &kind_hits {
+    for (id, items) in kind_hits {
         let mut items = items.clone();
         items.sort();
         let attribution = format!("via {}", items.join(", "));
@@ -391,13 +402,13 @@ pub(crate) fn select_affected(
             ),
         );
     }
-    Ok(AffectedSelection {
+    AffectedSelection {
         required: closure.required,
         full_units: closure.full_units,
         fallback_full: false,
         explanations,
         fallback_reason: None,
-    })
+    }
 }
 
 /// The unit kinds whose scanners cannot prove a complete read set: package
@@ -857,9 +868,8 @@ fn extract_glob_token(token: &str) -> TokenGlobs {
     if value.is_empty() {
         return TokenGlobs::None;
     }
-    let (inner, quoted) = match dequote(value) {
-        Ok(dequoted) => dequoted,
-        Err(()) => return TokenGlobs::Unprovable,
+    let Ok((inner, quoted)) = dequote(value) else {
+        return TokenGlobs::Unprovable;
     };
     if let Some(negated) = inner.strip_prefix('#') {
         if !quoted {
@@ -927,9 +937,6 @@ pub(crate) enum GithubVerdict {
 /// lanes select nothing outside their own scope; the reporting action, the
 /// contract docs, and every unlisted contract path stay unknown.
 pub(crate) fn github_verdict(path: &str) -> Option<GithubVerdict> {
-    if !path.starts_with(".github/") {
-        return None;
-    }
     const GLOBAL_FILES: &[&str] = &[
         "workflows/ci-pr.yml",
         "workflows/ci-main.yml",
@@ -939,6 +946,9 @@ pub(crate) fn github_verdict(path: &str) -> Option<GithubVerdict> {
         "actionlint.yaml",
         "ci/project.toml",
     ];
+    if !path.starts_with(".github/") {
+        return None;
+    }
     let rest = &path[".github/".len()..];
     if GLOBAL_FILES.contains(&rest) {
         return Some(GithubVerdict::Global {
