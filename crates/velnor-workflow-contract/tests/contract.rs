@@ -79,6 +79,20 @@ fn the_generator_owns_every_current_workflow() {
     }
 }
 
+/// Candidate qualification renders the PR-built generator twice into
+/// disposable trees. It must never assert that experimental output is active;
+/// the pinned policy owns that distinct invariant.
+#[test]
+fn candidate_qualification_is_disposable_and_deterministic() {
+    let config = read(".github-gen/velnor-workflow.toml");
+    assert!(config.contains("candidate_root=\"$(mktemp -d)\""), "{config}");
+    assert!(config.contains("env -u GITHUB_TOKEN -u GH_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_TOKEN"), "{config}");
+    assert!(config.contains("--force --output \"$candidate_root/one\""), "{config}");
+    assert!(config.contains("--force --output \"$candidate_root/two\""), "{config}");
+    assert!(config.contains("diff -ru \"$candidate_root/one\" \"$candidate_root/two\""), "{config}");
+    assert!(!config.contains("--plain --check ../.."), "{config}");
+}
+
 /// The bootstrap composite action is repository-owned bytes under
 /// `.github-gen/sources`; the generator copies it into `.github/actions`, so
 /// the two copies must stay identical and the source must exist.
@@ -127,13 +141,14 @@ fn hosted_lane_uses_the_github_mb_boxington_backend() {
 }
 
 /// The regeneration gate stays wired: the workflow crate's own unit watches
-/// the runtime and the declared gate command checks the checked-out surface
-/// with the same generator that produced it.
+/// the runtime and qualifies candidate rendering without asserting that its
+/// experimental output is already active.
 #[test]
 fn the_regeneration_gate_is_declared() {
     let config = read(".github-gen/velnor-workflow.toml");
     assert!(config.contains("primitive = \"regen-gate\""));
-    assert!(config.contains("--plain --check ../.."));
+    assert!(config.contains("candidate_root=\"$(mktemp -d)\""));
+    assert!(config.contains("diff -ru \"$candidate_root/one\" \"$candidate_root/two\""));
     let project = read(".github/ci/project.toml");
     let runtime_watched = project.lines().any(|line| {
         line.starts_with("watch = [") && line.contains("crates/velnor-workflow/src/runtime.rs")
