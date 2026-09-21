@@ -1053,6 +1053,10 @@ mod tests {
             "transport consumer requires producer success: {workflow}"
         );
         assert!(
+            workflow.contains("needs: [plan, github-hosted-rust-ffi]"),
+            "required transport adds an explicit producer needs edge: {workflow}"
+        );
+        assert!(
             !workflow.contains(&format!("{producer_job} == 'success' ||")),
             "transport consumer never treats a skipped producer as an artifact: {workflow}"
         );
@@ -2390,6 +2394,26 @@ mod tests {
             assert!(
                 !output.contains("ci_provider"),
                 "{provider:?} must not rename the report action's input: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_generator_unit_has_no_candidate_manifest_transport() {
+        let ir = owner_test_ir(
+            workflow_setup_action_repository(),
+            vec![rust_unit("rust-generator-crate", "crates/velnor-workflow")],
+        );
+        let content = must_render_kind(&ir);
+        for forbidden in [
+            "candidate_publish",
+            "candidate generator product",
+            "candidate-manifest.json",
+            "actions/workflows/ci-pr.yml/runs",
+        ] {
+            assert!(
+                !content.contains(forbidden),
+                "legacy candidate transport {forbidden:?} rendered: {content}"
             );
         }
     }
@@ -6811,11 +6835,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             else {
                 continue;
             };
-            let eligible = producer.products.iter().any(|product| {
+            let requires_producer_success = producer.products.iter().any(|product| {
                 product.name == prerequisite.product
-                    && super::product_transport::transport_eligible(product)
+                    && super::product_transport::transport_contract(product)
+                        .requires_producer_success()
             });
-            if eligible && provider_supports_unit(provider, producer) {
+            if requires_producer_success && provider_supports_unit(provider, producer) {
                 edges.push((
                     super::product_transport::transport_record(
                         &prerequisite.producer,
@@ -6907,7 +6932,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 }) else {
                     continue;
                 };
-                if !super::product_transport::transport_eligible(product) {
+                if !super::product_transport::transport_contract(product)
+                    .requires_producer_success()
+                {
                     continue;
                 }
                 let record = super::product_transport::transport_record(

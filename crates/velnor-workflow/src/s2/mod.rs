@@ -5681,11 +5681,12 @@ pub(crate) fn product_dependency_needs(
         else {
             continue;
         };
-        let transportable = producer.products.iter().any(|product| {
+        let requires_producer_success = producer.products.iter().any(|product| {
             product.name == prerequisite.product
-                && crate::s2::primitives::product_transport::transport_eligible(product)
+                && crate::s2::primitives::product_transport::transport_contract(product)
+                    .requires_producer_success()
         });
-        if transportable && provider_supports_unit(provider, producer) {
+        if requires_producer_success && provider_supports_unit(provider, producer) {
             let job = unit_job_id(provider, &prerequisite.producer);
             if !needs.contains(&job) {
                 needs.push(job);
@@ -6218,6 +6219,13 @@ pub(crate) fn render_tree(
 }
 
 fn run(cli: &Cli) -> Result<(), GeneratorError> {
+    run_with_policy_lookup(cli, None)
+}
+
+fn run_with_policy_lookup(
+    cli: &Cli,
+    policy_lookup: Option<&policy::PinnedBinaryLookup>,
+) -> Result<(), GeneratorError> {
     #[cfg(feature = "tui")]
     if use_tui(cli) {
         return tui::run(cli);
@@ -6250,12 +6258,20 @@ fn run(cli: &Cli) -> Result<(), GeneratorError> {
         // layer. The active tree is therefore checked only against its
         // declared active pin; candidate rendering is qualified separately
         // and can never authorize a checked-in tree.
-        policy::verify_declared_pin_renders_tree(
-            &output_root,
-            checkout.path(),
-            &config,
-            cli.pin_build,
-        )?;
+        match policy_lookup {
+            Some(lookup) => policy::verify_declared_pin_renders_tree_with_lookup(
+                &output_root,
+                checkout.path(),
+                &config,
+                lookup,
+            )?,
+            None => policy::verify_declared_pin_renders_tree(
+                &output_root,
+                checkout.path(),
+                &config,
+                cli.pin_build,
+            )?,
+        }
         print_report(
             &cli.target,
             &config,
@@ -10080,6 +10096,137 @@ mod tests {
         ));
         must(fs::create_dir_all(&root), "create test directory");
         root
+    }
+
+    #[cfg(unix)]
+    fn active_pin_renderer(
+        directory: &Path,
+        baseline: &Path,
+        revision: &str,
+        closure: &str,
+    ) -> PathBuf {
+        let binary = directory.join("velnor-workflow-active-pin");
+        let baseline = shell_quote(&baseline.display().to_string());
+        let script = format!(
+            "#!/bin/sh\nset -eu\ncase \"$1\" in\n  --revision) printf '%s\\n' '{revision}'; exit 0 ;;\n  --closure) printf '%s\\n' '{closure}'; exit 0 ;;\nesac\noutput=\nwhile [ \"$#\" -gt 0 ]; do\n  case \"$1\" in\n    --output) output=\"$2\"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\ntest \"$output\" != ''\nmkdir -p \"$output/.github\"\ncp -R {baseline}/.github/. \"$output/.github/\"\n"
+        );
+        must(fs::write(&binary, script), "write active pin renderer");
+        must(
+            fs::set_permissions(&binary, std::os::unix::fs::PermissionsExt::from_mode(0o755)),
+            "mark active pin renderer executable",
+        );
+        binary
+    }
+
+    #[cfg(unix)]
+    fn snapshot_tree(source: &Path, destination: &Path) {
+        let metadata = must(fs::symlink_metadata(source), "inspect snapshot source");
+        if metadata.file_type().is_dir() {
+            must(fs::create_dir_all(destination), "create snapshot directory");
+            for entry in must(fs::read_dir(source), "read snapshot directory") {
+                let entry = must(entry, "read snapshot entry");
+                snapshot_tree(&entry.path(), &destination.join(entry.file_name()));
+            }
+        } else if metadata.file_type().is_symlink() {
+            let target = must(fs::read_link(source), "read snapshot symlink");
+            must(
+                std::os::unix::fs::symlink(target, destination),
+                "write snapshot symlink",
+            );
+        } else {
+            must(fs::copy(source, destination), "copy snapshot file");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_check_verifies_active_pin_when_candidate_render_differs() {
+        const ACTIVE_PIN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const ACTIVE_CLOSURE: &str =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let initial_config = format!(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\nrevision = \"{ACTIVE_PIN}\"\n\n[policy]\nci_required = false\n"
+        );
+        let root = configured_repository("active-pin-cli", Some(&initial_config));
+        let renderer_directory = temporary_directory("active-pin-cli-renderer");
+        let generate = Cli {
+            target: root.display().to_string(),
+            default_branch: Some("main".to_owned()),
+            output: None,
+            providers: Some(provider_set([provider::ProviderId::GithubHosted])),
+            dry_run: false,
+            check: false,
+            force: false,
+            plain: true,
+            pin_build: false,
+        };
+        must(run(&generate), "generate active tree");
+        let baseline_directory = temporary_directory("active-pin-cli-baseline");
+        snapshot_tree(&root.join(".github"), &baseline_directory.join(".github"));
+        let renderer = active_pin_renderer(
+            &renderer_directory,
+            &baseline_directory,
+            ACTIVE_PIN,
+            ACTIVE_CLOSURE,
+        );
+        let lookup = policy::PinnedBinaryLookup::from_env_with(ACTIVE_PIN, false, &|name| {
+            (name == policy::VELNOR_WORKFLOW_PINNED_BINARY_ENV)
+                .then(|| renderer.clone().into_os_string())
+        });
+
+        let candidate_config = initial_config.replace("ci_required = false", "ci_required = true");
+        must(
+            fs::write(
+                root.join(".github-gen/velnor-workflow.toml"),
+                candidate_config,
+            ),
+            "write candidate generation config",
+        );
+        let candidate = must(
+            scan_target(
+                &root,
+                Some(provider_set([provider::ProviderId::GithubHosted])),
+                "main",
+            ),
+            "scan candidate tree",
+        );
+        let candidate_files = must(generated_files(&candidate.config), "render candidate tree");
+        assert!(
+            candidate_files.iter().any(|(path, expected)| {
+                fs::read_to_string(root.join(path)).map_or(true, |actual| actual != *expected)
+            }),
+            "candidate rendering must differ from the active tree"
+        );
+
+        let mut check = generate.clone();
+        check.check = true;
+        must(
+            run_with_policy_lookup(&check, Some(&lookup)),
+            "candidate differences must not replace the active-pin check",
+        );
+
+        let active_workflow = root.join(".github/workflows/ci-pr.yml");
+        let active_content = must(fs::read_to_string(&active_workflow), "read active workflow");
+        must(
+            fs::write(
+                &active_workflow,
+                format!("{active_content}\n# active drift\n"),
+            ),
+            "introduce active-tree drift",
+        );
+        let error = must_some(
+            run_with_policy_lookup(&check, Some(&lookup)).err(),
+            "active-tree drift must fail the check",
+        )
+        .to_string();
+        assert!(
+            error.contains("declared generator pin") && error.contains("ci-pr.yml"),
+            "active-pin failure must identify the pinned-tree mismatch: {error}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(renderer_directory);
+        let _ = fs::remove_dir_all(baseline_directory);
     }
 
     #[test]

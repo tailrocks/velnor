@@ -2,7 +2,7 @@
 schema = 2
 [inputs]
 config	1d4bf56946251610
-scan	9166f76db8b95dd0
+scan	2fd9180511b0f6d6
 generator	69
 [outputs]
 .github/AGENTS.md	02ebb7198c435e9b
@@ -11,7 +11,7 @@ generator	69
 .github/actions/setup-velnor-workflow/action.yml	263260b42f1c2c99
 .github/ci/project.toml	df8b7d0cc5dd57b0
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
-.github/workflows/activate-renderer.yml	68508e527418572c
+.github/workflows/activate-renderer.yml	b97b8d8e929fde7b
 .github/workflows/ci-main.yml	b1afd2c4dd4c25ce
 .github/workflows/ci-policy.yml	c3244a1f836b9195
 .github/workflows/ci-pr.yml	c8740c1660501223
