@@ -30,6 +30,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
 /// Closure paths, mirroring `closure::CLOSURE_PATHS`.
@@ -77,6 +78,79 @@ fn main() {
         "cargo:rustc-env=VELNOR_WORKFLOW_PROFILE={}",
         std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_owned())
     );
+    println!(
+        "cargo:rustc-env=VELNOR_WORKFLOW_BUILD_IDENTITY={}",
+        build_identity(&sha)
+    );
+}
+
+/// The fields that can alter a runtime binary but are not represented by the
+/// source closure. This JSON is embedded in the binary and copied into the
+/// immutable release manifest by the trusted publisher; consumers therefore
+/// compare the manifest to bytes produced by the compiler itself rather than
+/// trusting a build step's self-reported environment.
+fn build_identity(source_revision: &str) -> String {
+    let target = env_value("TARGET").unwrap_or_default();
+    let host = env_value("HOST").unwrap_or_default();
+    let rustc = command_output("rustc", &["-Vv"]).unwrap_or_default();
+    let toolchain = env_value("VELNOR_WORKFLOW_BUILD_TOOLCHAIN")
+        .or_else(|| env_value("RUSTUP_TOOLCHAIN"))
+        .or_else(|| command_output("rustup", &["show", "active-toolchain"]))
+        .unwrap_or_else(|| rustc.clone());
+    let linker = target_linker(&target)
+        .or_else(|| env_value("RUSTC_LINKER"))
+        .unwrap_or_default();
+    let platform =
+        env_value("VELNOR_WORKFLOW_BUILD_PLATFORM").unwrap_or_else(|| platform_for_target(&target));
+    let identity = json!({
+        "schema": "velnor-workflow.runtime-build-identity.v1",
+        "source_revision": source_revision,
+        "toolchain": toolchain,
+        "rustc": rustc,
+        "target": target,
+        "host": host,
+        "platform": platform,
+        "profile": std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_owned()),
+        "features": cargo_features(),
+        "rustflags": std::env::var("RUSTFLAGS").unwrap_or_default(),
+        "cargo_encoded_rustflags": std::env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default(),
+        "linker": linker,
+        "cc": std::env::var("CC").unwrap_or_default(),
+        "cflags": std::env::var("CFLAGS").unwrap_or_default(),
+    });
+    serde_json::to_string(&identity).unwrap_or_else(|_| "{}".to_owned())
+}
+
+fn env_value(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn command_output(command: &str, arguments: &[&str]) -> Option<String> {
+    let output = Command::new(command).args(arguments).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+fn target_linker(target: &str) -> Option<String> {
+    let suffix = target.replace('-', "_").to_ascii_uppercase();
+    env_value(&format!("CARGO_TARGET_{suffix}_LINKER"))
+}
+
+fn platform_for_target(target: &str) -> String {
+    if target.starts_with("x86_64-") {
+        "Linux-X64".to_owned()
+    } else if target.starts_with("aarch64-apple-") {
+        "macOS-ARM64".to_owned()
+    } else if target.starts_with("aarch64-") {
+        "Linux-ARM64".to_owned()
+    } else {
+        target.to_owned()
+    }
 }
 
 /// Closure digest of the checkout's `HEAD` tree, or `None` when it cannot be

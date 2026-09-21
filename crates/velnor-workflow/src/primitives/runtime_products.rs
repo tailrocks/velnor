@@ -357,16 +357,29 @@ jobs:
           fi
           temporary="$(mktemp -d)"
           trap 'rm -rf "$temporary"' EXIT
+          release="$(gh release view "$TAG" --repo {repository} --json assets)"
+          jq -e '[.assets[].name] | index("manifest.json") != null' <<<"$release" >/dev/null
           gh release download "$TAG" --repo {repository} --pattern manifest.json --dir "$temporary"
           gh attestation verify "$temporary/manifest.json" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref}
-          release="$(gh release view "$TAG" --repo {repository} --json assets)"
           for platform in {platform_list}; do
             asset="velnor-workflow-$platform"
-            jq -e --arg asset "$asset" --arg platform "$platform" \
-              '[.assets[].name] | index($asset) != null and index("manifest.json") != null' \
+            checksum="$asset.sha256"
+            jq -e --arg asset "$asset" --arg checksum "$checksum" \
+              '[.assets[].name] as $names |
+               ($names | index($asset) != null) and
+               ($names | index($checksum) != null)' \
               <<<"$release" >/dev/null
+            gh release download "$TAG" --repo {repository} \
+              --pattern "$asset" --pattern "$checksum" --dir "$temporary"
+            gh attestation verify "$temporary/$asset" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref}
             jq -e --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "$asset" \
               '{accept_filter}' "$temporary/manifest.json" >/dev/null
+            expected="$(cat "$temporary/$checksum")"
+            [[ "$expected" =~ ^[0-9a-f]{{64}}$ ]] || {{ echo "::error::malformed digest for existing product $asset" >&2; exit 1; }}
+            actual="$(sha256sum "$temporary/$asset" | awk '{{print $1}}')"
+            [[ "$actual" == "$expected" ]] || {{ echo "::error::existing product digest mismatch for $asset" >&2; exit 1; }}
+            declared="$(jq -er --arg platform "$platform" '.products[$platform].binary' "$temporary/manifest.json")"
+            [[ "$declared" == "$expected" ]] || {{ echo "::error::manifest digest mismatch for existing product $asset" >&2; exit 1; }}
           done
           echo "exists=true" >> "$GITHUB_OUTPUT"
 
@@ -1335,8 +1348,8 @@ mod tests {
         let content = owner_content(&[]);
         assert_eq!(
             content.matches("--source-ref refs/heads/main").count(),
-            3,
-            "existing-product verification and the producer smoke test pin the ref: {content}"
+            4,
+            "existing-product verification and the producer smoke test pin every subject: {content}"
         );
     }
 
@@ -1460,6 +1473,37 @@ mod tests {
                 "the producer never overwrites ({overwrite}): {content}"
             );
         }
+    }
+
+    #[test]
+    fn existing_tags_require_complete_verified_products() {
+        let content = owner_content(&[]);
+        let check = must_some(
+            content
+                .split("      - name: Check for an existing product\n")
+                .nth(1)
+                .and_then(|tail| tail.split("\n  build:\n").next()),
+            "the existing-product check",
+        );
+        for marker in [
+            "gh release download \"$TAG\" --repo",
+            "--pattern manifest.json",
+            "--pattern \"$asset\" --pattern \"$checksum\"",
+            "gh attestation verify \"$temporary/manifest.json\"",
+            "gh attestation verify \"$temporary/$asset\"",
+            "expected=\"$(cat \"$temporary/$checksum\")\"",
+            "sha256sum \"$temporary/$asset\"",
+            "declared=\"$(jq -er --arg platform \"$platform\" '.products[$platform].binary' \"$temporary/manifest.json\")\"",
+        ] {
+            assert!(check.contains(marker), "existing-product check proves {marker}: {check}");
+        }
+        assert!(
+            check.find("echo \"exists=true\"").unwrap_or(0)
+                > check
+                    .find("gh attestation verify \"$temporary/$asset\"")
+                    .unwrap_or(usize::MAX),
+            "the existing tag is reusable only after every asset is verified: {check}"
+        );
     }
 
     #[test]
@@ -1744,8 +1788,8 @@ mod tests {
         let content = owner_content(&[]);
         assert_eq!(
             content.matches("--source-ref refs/heads/main").count(),
-            3,
-            "existing-product verification and the smoke test pin the default-branch ref: {content}"
+            4,
+            "existing-product verification and the smoke test pin every subject: {content}"
         );
         let mut config = owner_config(&[]);
         config.default_branch = "trunk".to_owned();
@@ -1755,7 +1799,7 @@ mod tests {
         );
         assert_eq!(
             content.matches("--source-ref refs/heads/trunk").count(),
-            3,
+            4,
             "existing-product verification and the smoke-test pin follow the configured default branch: {content}"
         );
     }
@@ -2432,7 +2476,7 @@ exit 1
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "4f5447e76c3277f15162c830448f8d51ef746956aeacbd9f1ec23205e0442ae1";
+        const PINNED: &str = "7488a027a0bef28b258cbc1709d637bd4484be208babb5845c8145a2dc5e364a";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");

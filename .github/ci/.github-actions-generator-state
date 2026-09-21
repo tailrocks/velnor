@@ -8,7 +8,7 @@ generator	70
 .github/AGENTS.md	02ebb7198c435e9b
 .github/actionlint.yaml	85a2e7172b525ecb
 .github/actions/report-velnor-ci-outcomes/action.yml	3c9db68a0a158ce0
-.github/actions/setup-velnor-workflow/action.yml	263260b42f1c2c99
+.github/actions/setup-velnor-workflow/action.yml	6cb5131fdcfbef0c
 .github/ci/project.toml	df8b7d0cc5dd57b0
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
 .github/workflows/activate-renderer.yml	b97b8d8e929fde7b
