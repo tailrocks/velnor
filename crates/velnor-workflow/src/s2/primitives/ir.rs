@@ -2322,12 +2322,27 @@ fn render_cache_outcome_report_inputs(
     if provider.is_local() {
         if let Some(layers) = &facts.host_warm_layers {
             let _ = writeln!(output, "          host_warm_layers: {layers}");
+            // The Velnor lane has no restore steps to observe; the host-warm
+            // list is the declaration, so the classifier reports listed
+            // layers as declared-but-unobserved instead of disabled.
+            let _ = writeln!(output, "          cache_declared_layers: {layers}");
         }
         return;
     }
+    let declared = facts
+        .layers
+        .iter()
+        .map(|layer| layer.report_input_prefix())
+        .collect::<Vec<_>>()
+        .join(",");
+    let _ = writeln!(output, "          cache_declared_layers: {declared}");
     for layer in &facts.layers {
         let input_prefix = layer.report_input_prefix();
         let step_id = layer.step_id();
+        let _ = writeln!(
+            output,
+            "          cache_{input_prefix}_outcome: ${{{{ steps.{step_id}.outcome }}}}"
+        );
         if *layer == ReportedCacheLayer::Mbx {
             let _ = writeln!(
                 output,

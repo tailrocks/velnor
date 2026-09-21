@@ -13281,7 +13281,7 @@ lockfile = true
 
     fn assert_report_action_template(action: &str) {
         for needle in [
-            "schema_version: 2",
+            "schema_version: 3",
             "runner_setup_seconds:",
             "selection_transport_seconds:",
             "tool_bootstrap_seconds:",
@@ -13292,16 +13292,21 @@ lockfile = true
             "jq -nc",
             "VELNOR_CI_REPORT ",
             "cache_outcomes:",
-            "classify_gha_cache()",
-            "classify_complete_cache_keys()",
+            "layer_declared()",
+            "cache_outcome_for()",
+            "compatible_seed",
+            "not_run",
             "cache_declarations_json=",
             "host_warm_layers:",
             "VELNOR_HOST_WARM_LAYERS: ${{ inputs.host_warm_layers }}",
             "VELNOR_CI_LANE: ${{ inputs.ci_lane }}",
+            "VELNOR_CACHE_DECLARED_LAYERS: ${{ inputs.cache_declared_layers }}",
+            "VELNOR_CACHE_RUSTUP_OUTCOME: ${{ inputs.cache_rustup_outcome }}",
             "VELNOR_CACHE_RUSTUP_PRIMARY: ${{ inputs.cache_rustup_primary }}",
             "VELNOR_CACHE_MBX_HIT: ${{ inputs.cache_mbx_hit }}",
             "VELNOR_CACHE_MBX_MATCHED: ${{ inputs.cache_mbx_matched }}",
-            "::warning::Cold cache layer(s)",
+            "::warning::Cache miss layer(s)",
+            "::warning::Invalid cache layer(s)",
             "VELNOR_CONTEXT_RUN_STARTED_AT: ${{ github.run_started_at }}",
             "VELNOR_RUN_STARTED_AT",
             "VELNOR_JOB_QUEUED_AT",
@@ -13321,6 +13326,13 @@ lockfile = true
         }
         for forbidden in [
             "schema_version: 1",
+            "schema_version: 2",
+            "classify_gha_cache()",
+            "classify_complete_cache_keys()",
+            "classify_mbx()",
+            "echo cold",
+            "echo prefix",
+            "Cold cache layer(s)",
             "grep -qiE 'exact hit'",
             "grep -qiE 'warm start'",
             "grep -qiE '(^|[^a-z])miss([^a-z]|$)'",
@@ -13635,24 +13647,130 @@ lockfile = true
             "github-cache-outcomes",
             &[
                 ("VELNOR_CI_LANE", "github"),
+                (
+                    "VELNOR_CACHE_DECLARED_LAYERS",
+                    "rustup,mold,cargo,mbx,docker_seed",
+                ),
+                ("VELNOR_CACHE_RUSTUP_OUTCOME", "success"),
                 ("VELNOR_CACHE_RUSTUP_PRIMARY", "velnor-rustup-Linux-X64-abc"),
                 ("VELNOR_CACHE_RUSTUP_MATCHED", "velnor-rustup-Linux-X64-abc"),
+                ("VELNOR_CACHE_MOLD_OUTCOME", "success"),
                 ("VELNOR_CACHE_MOLD_PRIMARY", "velnor-mold-2.42.0-Linux-X64"),
                 ("VELNOR_CACHE_MOLD_MATCHED", "velnor-mold-2.42.0-Linux"),
+                ("VELNOR_CACHE_CARGO_OUTCOME", "success"),
                 ("VELNOR_CACHE_CARGO_PRIMARY", "ci-Linux-rust-deadbeef"),
                 ("VELNOR_CACHE_CARGO_MATCHED", ""),
+                ("VELNOR_CACHE_MBX_OUTCOME", "success"),
                 ("VELNOR_CACHE_MBX_HIT", "false"),
+                ("VELNOR_CACHE_DOCKER_SEED_OUTCOME", "skipped"),
             ],
             &[
                 ("rustup", "exact"),
-                ("mold", "prefix"),
-                ("cargo", "cold"),
+                ("mold", "compatible_seed"),
+                ("cargo", "miss"),
                 ("mbx", "unknown"),
+                ("docker_seed", "not_run"),
             ],
         );
         assert_cache_outcomes(
             "github-matched-without-primary",
-            &[("VELNOR_CACHE_CARGO_MATCHED", "matched-only")],
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "cargo"),
+                ("VELNOR_CACHE_CARGO_MATCHED", "matched-only"),
+            ],
+            &[("cargo", "unknown")],
+        );
+    }
+
+    fn assert_cache_lifecycle_outcomes() {
+        assert_cache_outcomes(
+            "all-layers-disabled",
+            &[("VELNOR_CI_LANE", "github")],
+            &[
+                ("rustup", "disabled"),
+                ("mold", "disabled"),
+                ("cargo", "disabled"),
+                ("mbx", "disabled"),
+                ("docker_seed", "disabled"),
+            ],
+        );
+        assert_cache_outcomes(
+            "partial-declaration-disables-the-rest",
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "cargo"),
+                ("VELNOR_CACHE_CARGO_OUTCOME", "success"),
+                ("VELNOR_CACHE_CARGO_PRIMARY", "ci-Linux-rust-deadbeef"),
+                ("VELNOR_CACHE_CARGO_MATCHED", "ci-Linux-rust-deadbeef"),
+            ],
+            &[
+                ("rustup", "disabled"),
+                ("mold", "disabled"),
+                ("cargo", "exact"),
+                ("mbx", "disabled"),
+                ("docker_seed", "disabled"),
+            ],
+        );
+        assert_cache_outcomes(
+            "failed-restore-never-completed",
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "cargo"),
+                ("VELNOR_CACHE_CARGO_OUTCOME", "failure"),
+            ],
+            &[("cargo", "not_run")],
+        );
+        assert_cache_outcomes(
+            "miss-that-saved-populates-later-runs",
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "cargo"),
+                ("VELNOR_CACHE_CARGO_OUTCOME", "success"),
+                ("VELNOR_CACHE_CARGO_PRIMARY", "ci-Linux-rust-deadbeef"),
+                ("VELNOR_CACHE_CARGO_SAVED", "true"),
+            ],
+            &[("cargo", "saved")],
+        );
+        assert_cache_outcomes(
+            "match-wins-over-save-evidence",
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "cargo"),
+                ("VELNOR_CACHE_CARGO_OUTCOME", "success"),
+                ("VELNOR_CACHE_CARGO_PRIMARY", "ci-Linux-rust-deadbeef"),
+                ("VELNOR_CACHE_CARGO_MATCHED", "ci-Linux-rust-deadbeef"),
+                ("VELNOR_CACHE_CARGO_SAVED", "true"),
+            ],
+            &[("cargo", "exact")],
+        );
+        assert_cache_outcomes(
+            "failed-verification-invalidates-restore",
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "cargo"),
+                ("VELNOR_CACHE_CARGO_OUTCOME", "success"),
+                ("VELNOR_CACHE_CARGO_PRIMARY", "ci-Linux-rust-deadbeef"),
+                ("VELNOR_CACHE_CARGO_MATCHED", "ci-Linux-rust-deadbeef"),
+                ("VELNOR_CACHE_CARGO_VERIFIED", "false"),
+            ],
+            &[("cargo", "invalid")],
+        );
+        assert_cache_outcomes(
+            "keys-on-undeclared-layer-contradict-plan",
+            &[("VELNOR_CACHE_CARGO_PRIMARY", "ci-Linux-rust-deadbeef")],
+            &[("cargo", "unknown")],
+        );
+        assert_cache_outcomes(
+            "keys-on-skipped-step-contradict-outcome",
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "cargo"),
+                ("VELNOR_CACHE_CARGO_OUTCOME", "skipped"),
+                ("VELNOR_CACHE_CARGO_PRIMARY", "ci-Linux-rust-deadbeef"),
+            ],
+            &[("cargo", "unknown")],
+        );
+        assert_cache_outcomes(
+            "corrupt-step-outcome-stays-unknown",
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "cargo"),
+                ("VELNOR_CACHE_CARGO_OUTCOME", "stuck"),
+                ("VELNOR_CACHE_CARGO_PRIMARY", "ci-Linux-rust-deadbeef"),
+            ],
             &[("cargo", "unknown")],
         );
     }
@@ -13661,15 +13779,19 @@ lockfile = true
         assert_cache_outcomes(
             "mbx-explicit-prefix",
             &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_OUTCOME", "success"),
                 ("VELNOR_CACHE_MBX_HIT", "false"),
                 ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
                 ("VELNOR_CACHE_MBX_MATCHED", "primary-prefix"),
             ],
-            &[("mbx", "prefix")],
+            &[("mbx", "compatible_seed")],
         );
         assert_cache_outcomes(
             "mbx-false-with-equal-keys",
             &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_OUTCOME", "success"),
                 ("VELNOR_CACHE_MBX_HIT", "false"),
                 ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
                 ("VELNOR_CACHE_MBX_MATCHED", "primary"),
@@ -13679,6 +13801,8 @@ lockfile = true
         assert_cache_outcomes(
             "mbx-matched-without-primary",
             &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_OUTCOME", "success"),
                 ("VELNOR_CACHE_MBX_HIT", "false"),
                 ("VELNOR_CACHE_MBX_MATCHED", "matched-only"),
             ],
@@ -13687,6 +13811,8 @@ lockfile = true
         assert_cache_outcomes(
             "mbx-explicit-exact",
             &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_OUTCOME", "success"),
                 ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
                 ("VELNOR_CACHE_MBX_MATCHED", "primary"),
             ],
@@ -13698,6 +13824,8 @@ lockfile = true
         assert_cache_outcomes(
             "mbx-boolean-exact-without-matched-key",
             &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_OUTCOME", "success"),
                 ("VELNOR_CACHE_MBX_HIT", "true"),
                 ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
             ],
@@ -13705,12 +13833,17 @@ lockfile = true
         );
         assert_cache_outcomes(
             "mbx-boolean-exact-without-keys",
-            &[("VELNOR_CACHE_MBX_HIT", "true")],
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_HIT", "true"),
+            ],
             &[("mbx", "unknown")],
         );
         assert_cache_outcomes(
             "mbx-true-with-different-keys",
             &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_OUTCOME", "success"),
                 ("VELNOR_CACHE_MBX_HIT", "true"),
                 ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
                 ("VELNOR_CACHE_MBX_MATCHED", "primary-prefix"),
@@ -13720,11 +13853,21 @@ lockfile = true
         assert_cache_outcomes(
             "mbx-invalid-boolean",
             &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_OUTCOME", "success"),
                 ("VELNOR_CACHE_MBX_HIT", "TRUE"),
                 ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
                 ("VELNOR_CACHE_MBX_MATCHED", "primary"),
             ],
             &[("mbx", "unknown")],
+        );
+        assert_cache_outcomes(
+            "mbx-skipped-restore-never-completed",
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_OUTCOME", "skipped"),
+            ],
+            &[("mbx", "not_run")],
         );
     }
 
@@ -13734,7 +13877,10 @@ lockfile = true
             &[],
             None,
             None,
-            &[("VELNOR_CACHE_MBX_HIT", "false")],
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_HIT", "false"),
+            ],
             Some("exact hit\nwarm start\nmiss\n"),
         );
         assert_eq!(
@@ -13752,14 +13898,21 @@ lockfile = true
             &[
                 ("VELNOR_CI_LANE", "velnor"),
                 ("VELNOR_HOST_WARM_LAYERS", "rustup,mold,mbx,cargo"),
+                ("VELNOR_CACHE_DECLARED_LAYERS", "rustup,mold,mbx,cargo"),
             ],
         );
-        for layer in ["rustup", "cargo"] {
-            assert!(report["cache_outcomes"][layer].is_null(), "{layer}");
+        // The Velnor lane declares host-warm layers but renders no restore
+        // steps to observe: declared but unobserved, never disabled.
+        for layer in ["rustup", "cargo", "mbx"] {
+            assert_eq!(
+                report["cache_outcomes"][layer],
+                serde_json::json!("unknown"),
+                "{layer}"
+            );
         }
         assert_eq!(
-            report["cache_outcomes"]["mbx"],
-            serde_json::json!("unknown")
+            report["cache_outcomes"]["docker_seed"],
+            serde_json::json!("disabled")
         );
         assert_eq!(
             report["cache_declarations"]["host_warm_layers"],
@@ -13770,6 +13923,7 @@ lockfile = true
     #[test]
     fn report_action_classifies_cache_outcomes_for_github_and_velnor_lanes() {
         assert_github_cache_outcomes();
+        assert_cache_lifecycle_outcomes();
         assert_mbx_key_cache_outcomes();
         assert_mbx_boolean_cache_outcomes();
         assert_compiler_log_does_not_classify_mbx();

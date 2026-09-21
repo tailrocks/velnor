@@ -357,6 +357,8 @@ jobs:
         with:
           job_label: ${{ inputs.unit }}
           ci_lane: github
+          cache_declared_layers: cargo
+          cache_cargo_outcome: ${{ steps.cache.outcome }}
           cache_cargo_primary: ${{ steps.cache.outputs.cache-primary-key }}
           cache_cargo_matched: ${{ steps.cache.outputs.cache-matched-key }}
 
@@ -536,4 +538,5 @@ jobs:
           job_label: ${{ inputs.unit }}
           ci_lane: velnor
           host_warm_layers: cargo
+          cache_declared_layers: cargo
 

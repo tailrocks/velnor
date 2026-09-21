@@ -100,8 +100,22 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
   pack — `pack apple` has no output redirect, verified
   against pinned `boltffi_cli` CLI; 4 new tests incl a
   behavioral shell test, lib 1948 green, clippy clean.
-  Next: 4d verified cross-job artifact transport;
-  4e per-layer cache-state reporting (`snapshot.rs`).
+  4d done (`d7544a3d`): cross-job product transport with
+  guarded rebuild. 4e done: per-layer cache-state reporting
+  — schema v3 `cache_outcomes` (`disabled`, `not_run`,
+  `miss`, `compatible_seed`, `exact`, `invalid`, `saved`,
+  `unknown` fail-closed); generator renders
+  `cache_declared_layers` + per-layer step-outcome inputs;
+  Rust decision-table oracle in `snapshot.rs` (test-only,
+  the classifier ships in bash); report action rewritten
+  (source + owned output); 5 workflows regenerated (+18
+  lines, purely additive); lib 1995 green, workspace
+  clippy/fmt clean. Runner note: reverted out-of-scope
+  working-tree curl-transport edits in
+  `scaleset/client.rs` (preserved outside the repo for
+  separate review) — HEAD runner is green; the E0282 came
+  from those edits, not from main or the merge.
+  Next: Increment 5 hosted macOS integration.
   Follow-ups: `.build`
   intermediates need multi-layer cache support; scoped
   `derivedDataPath` per unit; runtime actual-Xcode probe (needs
@@ -113,11 +127,10 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
 ## Continue
 
 1. `git checkout integrate/apple-ci-s2`; `cargo test -p velnor-workflow`.
-2. Next edit surface: 4d verified cross-job artifact transport —
-   `s2/primitives/prepared_tools.rs` (staging dir + manifest
-   write/verify reuse), adapter recipe + verification-step
-   rendering from product `bindings_dir`/`bindings_file`
-   (4c-i done). Verified layout facts
+2. Next edit surface: Increment 5 hosted macOS integration —
+   published runtime, compatible Xcode toolchain, generated
+   native graph; needs real GitHub-hosted clean/warm runs
+   with actual app coverage. Verified layout facts
    (BoltFFI 0.30.1 @ `2e6320a`): slice dirs
    `macos/ios-{archs_joined}[-simulator]`, structural files
    `Info.plist` + per-slice `lib{crate}.a` (underscored) +

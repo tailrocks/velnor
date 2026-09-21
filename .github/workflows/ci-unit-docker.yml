@@ -395,6 +395,8 @@ jobs:
         with:
           job_label: ${{ inputs.unit }}
           ci_lane: github
+          cache_declared_layers: docker_seed
+          cache_docker_seed_outcome: ${{ steps.cache.outcome }}
           cache_docker_seed_primary: ${{ steps.cache.outputs.cache-primary-key }}
           cache_docker_seed_matched: ${{ steps.cache.outputs.cache-matched-key }}
 
@@ -575,4 +577,5 @@ jobs:
           job_label: ${{ inputs.unit }}
           ci_lane: velnor
           host_warm_layers: docker_seed
+          cache_declared_layers: docker_seed
 

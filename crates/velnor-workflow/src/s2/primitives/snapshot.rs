@@ -261,8 +261,183 @@ pub(crate) fn is_snapshot_key(key: &str) -> bool {
         && rest.contains("hashFiles('")
 }
 
+/// Telemetry schema version of the `cache_outcomes` object in
+/// `VELNOR_CI_REPORT`. Version 3 replaces the conflated `cold`/`prefix`
+/// vocabulary with explicit lifecycle states: `disabled`, `not_run`,
+/// `miss`, `compatible_seed`, `exact`, `invalid`, and `saved`
+/// (`unknown` stays the fail-closed fallback for contradictory evidence).
+/// The classifier ships in the report action's bash; this const and the
+/// [`CacheLayerState`]/[`CacheLayerEvidence`] decision table below are the
+/// test-only oracle the template and harness tests pin it against.
+#[cfg(test)]
+pub(crate) const CACHE_OUTCOME_SCHEMA_VERSION: u32 = 3;
+
+/// One cache layer's restore/save lifecycle state for a job. Every state is
+/// actionable: `disabled` means the generator did not declare the layer,
+/// `not_run` means the restore step never completed, `miss` means the
+/// restore ran and matched nothing without saving, `saved` means the run
+/// populated the cache for later runs, `compatible_seed`/`exact` mean the
+/// run reused a prefix/exact entry, and `invalid` means restored content
+/// failed verification. The report action classifies the same evidence in
+/// bash; [`CacheLayerEvidence::classify`] is the Rust statement of that
+/// decision table, and the report-action harness pins the bash side.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(test)]
+pub(crate) enum CacheLayerState {
+    Disabled,
+    NotRun,
+    Miss,
+    CompatibleSeed,
+    ExactHit,
+    Invalid,
+    Saved,
+    Unknown,
+}
+
+#[cfg(test)]
+impl CacheLayerState {
+    /// The telemetry spelling rendered into `cache_outcomes`.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::NotRun => "not_run",
+            Self::Miss => "miss",
+            Self::CompatibleSeed => "compatible_seed",
+            Self::ExactHit => "exact",
+            Self::Invalid => "invalid",
+            Self::Saved => "saved",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Parse a telemetry spelling back into a state. Returns `None` for
+    /// retired vocabulary (`cold`, `prefix`) so old telemetry fails closed
+    /// instead of silently mapping onto a different state.
+    pub(crate) fn parse(state: &str) -> Option<Self> {
+        match state {
+            "disabled" => Some(Self::Disabled),
+            "not_run" => Some(Self::NotRun),
+            "miss" => Some(Self::Miss),
+            "compatible_seed" => Some(Self::CompatibleSeed),
+            "exact" => Some(Self::ExactHit),
+            "invalid" => Some(Self::Invalid),
+            "saved" => Some(Self::Saved),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+
+    /// Every state in telemetry order, for exhaustive template coverage.
+    pub(crate) fn all() -> [Self; 8] {
+        [
+            Self::Disabled,
+            Self::NotRun,
+            Self::Miss,
+            Self::CompatibleSeed,
+            Self::ExactHit,
+            Self::Invalid,
+            Self::Saved,
+            Self::Unknown,
+        ]
+    }
+}
+
+/// The evidence the report action observes for one cache layer: whether the
+/// generator declared the layer for the job, the restore step's outcome, the
+/// primary/matched keys (and the exact-hit bit for backends that expose one),
+/// and the optional verification/save signals. `None` means the signal is
+/// not rendered on this lane — never invent one.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[cfg(test)]
+pub(crate) struct CacheLayerEvidence {
+    pub(crate) declared: bool,
+    pub(crate) step_outcome: Option<String>,
+    pub(crate) hit: Option<bool>,
+    pub(crate) primary_key: Option<String>,
+    pub(crate) matched_key: Option<String>,
+    pub(crate) verified: Option<bool>,
+    pub(crate) saved: Option<bool>,
+}
+
+#[cfg(test)]
+impl CacheLayerEvidence {
+    /// The decision table the report action implements in bash: declaration
+    /// first, then step completion, then verification, then key comparison,
+    /// then save evidence. Contradictory evidence (keys on an undeclared or
+    /// skipped layer, a matched key without a primary) always yields
+    /// [`CacheLayerState::Unknown`], never a confident wrong state.
+    pub(crate) fn classify(&self) -> CacheLayerState {
+        let has_keys = self
+            .primary_key
+            .as_deref()
+            .is_some_and(|key| !key.is_empty())
+            || self
+                .matched_key
+                .as_deref()
+                .is_some_and(|key| !key.is_empty())
+            || self.hit.is_some();
+        if !self.declared {
+            return if has_keys || self.verified.is_some() || self.saved.is_some() {
+                CacheLayerState::Unknown
+            } else {
+                CacheLayerState::Disabled
+            };
+        }
+        match self.step_outcome.as_deref() {
+            Some("skipped" | "failure" | "cancelled") => {
+                return if has_keys {
+                    CacheLayerState::Unknown
+                } else {
+                    CacheLayerState::NotRun
+                };
+            }
+            Some("success") | None => {}
+            Some(_) => return CacheLayerState::Unknown,
+        }
+        if self.verified == Some(false) {
+            return CacheLayerState::Invalid;
+        }
+        let primary = self.primary_key.as_deref().unwrap_or_default();
+        let matched = self.matched_key.as_deref().unwrap_or_default();
+        if !primary.is_empty() && !matched.is_empty() {
+            if primary == matched {
+                if self.hit == Some(false) {
+                    return CacheLayerState::Unknown;
+                }
+                return CacheLayerState::ExactHit;
+            }
+            if self.hit == Some(true) {
+                return CacheLayerState::Unknown;
+            }
+            return CacheLayerState::CompatibleSeed;
+        }
+        if !primary.is_empty() && matched.is_empty() {
+            if self.hit == Some(true) {
+                return CacheLayerState::ExactHit;
+            }
+            if self.hit == Some(false) {
+                // Explicitly not exact, but without a matched key a seed is
+                // indistinguishable from a miss: backends that expose the hit
+                // bit do not always expose the matched key.
+                return CacheLayerState::Unknown;
+            }
+            if self.saved == Some(true) {
+                return CacheLayerState::Saved;
+            }
+            return CacheLayerState::Miss;
+        }
+        if primary.is_empty() && !matched.is_empty() {
+            return CacheLayerState::Unknown;
+        }
+        if self.saved == Some(true) {
+            return CacheLayerState::Saved;
+        }
+        CacheLayerState::Unknown
+    }
+}
+
 /// Why retention selected an entry for eviction. Recorded per class in the
-/// maintenance job summary so a later cold run can be correlated with the
+/// maintenance job summary so a later miss can be correlated with the
 /// eviction that caused it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -2133,5 +2308,166 @@ mod tests {
             "protected rustup/cargo must never be planned: {plan:?}"
         );
         assert_eq!(plan_ids(&plan), vec!["older"]);
+    }
+
+    fn evidence() -> CacheLayerEvidence {
+        CacheLayerEvidence {
+            declared: true,
+            ..CacheLayerEvidence::default()
+        }
+    }
+
+    #[test]
+    fn report_action_template_pins_cache_outcome_schema_version() {
+        let action_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.github-gen/sources/actions/report-velnor-ci-outcomes/action.yml");
+        let action = must(
+            std::fs::read_to_string(&action_path),
+            &format!("read {}", action_path.display()),
+        );
+        let needle = format!("schema_version: {CACHE_OUTCOME_SCHEMA_VERSION}");
+        assert!(
+            action.contains(&needle),
+            "report action drifted from {needle}"
+        );
+    }
+
+    #[test]
+    fn cache_layer_state_spellings_round_trip_and_reject_retired_words() {
+        for state in CacheLayerState::all() {
+            assert_eq!(CacheLayerState::parse(state.as_str()), Some(state));
+        }
+        assert_eq!(CacheLayerState::parse("cold"), None);
+        assert_eq!(CacheLayerState::parse("prefix"), None);
+        assert_eq!(CacheLayerState::parse(""), None);
+    }
+
+    #[test]
+    fn cache_layer_classify_lifecycle_states() {
+        let declared = || evidence();
+        assert_eq!(
+            CacheLayerEvidence::default().classify(),
+            CacheLayerState::Disabled
+        );
+        assert_eq!(
+            CacheLayerEvidence {
+                step_outcome: Some("skipped".to_owned()),
+                ..declared()
+            }
+            .classify(),
+            CacheLayerState::NotRun
+        );
+        for outcome in ["failure", "cancelled"] {
+            assert_eq!(
+                CacheLayerEvidence {
+                    step_outcome: Some(outcome.to_owned()),
+                    ..declared()
+                }
+                .classify(),
+                CacheLayerState::NotRun,
+                "{outcome} never completed the restore"
+            );
+        }
+        assert_eq!(
+            CacheLayerEvidence {
+                primary_key: Some("key".to_owned()),
+                ..declared()
+            }
+            .classify(),
+            CacheLayerState::Miss
+        );
+        assert_eq!(
+            CacheLayerEvidence {
+                primary_key: Some("key".to_owned()),
+                saved: Some(true),
+                ..declared()
+            }
+            .classify(),
+            CacheLayerState::Saved
+        );
+        assert_eq!(
+            CacheLayerEvidence {
+                primary_key: Some("key-new".to_owned()),
+                matched_key: Some("key-old".to_owned()),
+                ..declared()
+            }
+            .classify(),
+            CacheLayerState::CompatibleSeed
+        );
+        assert_eq!(
+            CacheLayerEvidence {
+                primary_key: Some("key".to_owned()),
+                matched_key: Some("key".to_owned()),
+                ..declared()
+            }
+            .classify(),
+            CacheLayerState::ExactHit
+        );
+        assert_eq!(
+            CacheLayerEvidence {
+                primary_key: Some("key".to_owned()),
+                matched_key: Some("key".to_owned()),
+                verified: Some(false),
+                ..declared()
+            }
+            .classify(),
+            CacheLayerState::Invalid
+        );
+    }
+
+    #[test]
+    fn cache_layer_classify_hit_bit_and_contradictions_stay_unknown() {
+        let declared = || evidence();
+        assert_eq!(
+            CacheLayerEvidence {
+                hit: Some(true),
+                primary_key: Some("key".to_owned()),
+                ..declared()
+            }
+            .classify(),
+            CacheLayerState::ExactHit
+        );
+        for contradictory in [
+            // Matched key without a primary proves nothing about the restore.
+            CacheLayerEvidence {
+                matched_key: Some("orphan".to_owned()),
+                ..declared()
+            },
+            // Explicitly not exact without a matched key: seed or miss?
+            CacheLayerEvidence {
+                hit: Some(false),
+                primary_key: Some("key".to_owned()),
+                ..declared()
+            },
+            // Equal keys contradict the not-exact bit.
+            CacheLayerEvidence {
+                hit: Some(false),
+                primary_key: Some("key".to_owned()),
+                matched_key: Some("key".to_owned()),
+                ..declared()
+            },
+            // Differing keys contradict the exact-hit bit.
+            CacheLayerEvidence {
+                hit: Some(true),
+                primary_key: Some("key-new".to_owned()),
+                matched_key: Some("key-old".to_owned()),
+                ..declared()
+            },
+            // Keys on an undeclared layer: the job never asked for them.
+            CacheLayerEvidence {
+                primary_key: Some("key".to_owned()),
+                ..CacheLayerEvidence::default()
+            },
+            // Keys on a skipped step: skipped steps emit no outputs.
+            CacheLayerEvidence {
+                step_outcome: Some("skipped".to_owned()),
+                primary_key: Some("key".to_owned()),
+                ..declared()
+            },
+            // No evidence at all on a declared layer.
+            declared(),
+        ] {
+            assert_eq!(contradictory.classify(), CacheLayerState::Unknown);
+        }
     }
 }
