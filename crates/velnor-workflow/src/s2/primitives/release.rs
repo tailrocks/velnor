@@ -6638,7 +6638,7 @@ cp "$record" "$out"
             ),
             (
                 "ci-release-package-signer.yml",
-                "63e76d5e5615192d52e34bba0b8bd51ddcec3b610e934633dd282c585d9721f1",
+                "6b8532b90264f60a464f05462ea426c271e24507c1b732176b3b3bca0912daff",
             ),
         ];
         let root = scanned_root("default");
@@ -6755,7 +6755,7 @@ cp "$record" "$out"
             // input are gone; the build gate declares tag scope statically.
             (
                 "release.yml",
-                "7f31f4ac2d87afc62f85ec2f75e4805ee5575c2a6cfe796ed4acf2ee0081ac15",
+                "1f464f51046908299d5c16f79d4f57de94f04050bfc3047cccc1de5246d452ce",
             ),
             (
                 "preview.yml",
@@ -11874,7 +11874,7 @@ cp "$record" "$out"
         let release = rendered(&surface, "release.yml");
         assert_eq!(
             digest_of(&release),
-            "de8b89dc8e7f38d2a8cad3cd603bd5fba0cfdb2fa79b63dc4a3388acd1f019cb",
+            "7053537dce0c51553a7e3ba0d6e5a657f8563d6ac75c6fbcd2a4cad39aaaf64e",
             "the scalar docker render must stay byte-identical"
         );
         assert!(release.contains("  image-admission:\n"));

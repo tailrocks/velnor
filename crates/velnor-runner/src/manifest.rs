@@ -264,7 +264,7 @@ const RENOVATE_REFS: &[AllowedRef] = &[
     allowed("693b9ef15eec82123529a37c782242f091365961", "v43"),
 ];
 const BUILDX_REFS: &[AllowedRef] = &[
-    allowed("37fe631027851001ddb9b187196cc803df7f5f0e", "v4.3.0"),
+    allowed("f87e5991a6d7451dcb8d9637bfbc97413f497069", "v4.4.1"),
     allowed("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c", "v4"),
     allowed("v4", "fixture transition until plan 041"),
 ];
@@ -716,7 +716,7 @@ pub static ACTIONS: &[ActionCapability] = &[
         "docker/build-push-action",
         DockerBuildPush,
         &[
-            allowed("53b7df96c91f9c12dcc8a07bcb9ccacbed38856a", "v7"),
+            allowed("c3c9e263c25d99ce0380d002d59b67737d91b0dc", "v7.4.0"),
             allowed("v7", "fixture transition until plan 041"),
         ],
         BUILD_PUSH_INPUTS
@@ -761,7 +761,7 @@ pub static ACTIONS: &[ActionCapability] = &[
         "docker/setup-qemu-action",
         SetupQemu,
         &[
-            allowed("1f40c72289eff860ee54a304f1438e3cff362e0a", "v4.3.0"),
+            allowed("99012661954931238ded8c8b007157a8430204e1", "v4.4.0"),
             allowed("96fe6ef7f33517b61c61be40b68a1882f3264fb8", "v4"),
         ],
         &[
@@ -815,8 +815,8 @@ pub static ACTIONS: &[ActionCapability] = &[
         repository: "taiki-e/install-action",
         adapter: ActionAdapter::JavaScript,
         allowed_refs: &[allowed(
-            "0758d235715de2f3551eacc980d9ae8fce9342c3",
-            "v2.87.3",
+            "9114bf4d891761788c546334fd37538eae1bf8b3",
+            "v2.87.16",
         )],
         allowed_subpaths: &[],
         inputs: &[
