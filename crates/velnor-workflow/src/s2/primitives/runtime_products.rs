@@ -347,13 +347,27 @@ jobs:
         env:
           GH_TOKEN: ${{{{ github.token }}}}
           TAG: ${{{{ steps.closure.outputs.tag }}}}
+          CLOSURE: ${{{{ steps.closure.outputs.closure }}}}
         run: |
           set -euo pipefail
-          if gh release view "$TAG" --repo {repository} >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
+          if ! gh release view "$TAG" --repo {repository} >/dev/null 2>&1; then
             echo "exists=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          temporary="$(mktemp -d)"
+          trap 'rm -rf "$temporary"' EXIT
+          gh release download "$TAG" --repo {repository} --pattern manifest.json --dir "$temporary"
+          gh attestation verify "$temporary/manifest.json" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref}
+          release="$(gh release view "$TAG" --repo {repository} --json assets)"
+          for platform in {platform_list}; do
+            asset="velnor-workflow-$platform"
+            jq -e --arg asset "$asset" --arg platform "$platform" \
+              '[.assets[].name] | index($asset) != null and index("manifest.json") != null' \
+              <<<"$release" >/dev/null
+            jq -e --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "$asset" \
+              '{accept_filter}' "$temporary/manifest.json" >/dev/null
+          done
+          echo "exists=true" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build runtime (${{{{ matrix.os }}}}-${{{{ matrix.arch }}}})
@@ -1098,8 +1112,8 @@ mod tests {
         );
         assert_eq!(
             content.matches(MANIFEST_ACCEPT_FILTER).count(),
-            2,
-            "assemble and smoke-test evaluate the consumer filter: {content}"
+            3,
+            "existing products, assembly, and smoke-test evaluate the consumer filter: {content}"
         );
         assert!(
             content.contains("--arg revision \"$HEAD_SHA\""),
@@ -1251,8 +1265,8 @@ mod tests {
         let content = owner_content(&[]);
         assert_eq!(
             content.matches(signer).count(),
-            2,
-            "the producer smoke test pins the signer on the asset and the manifest: {content}"
+            3,
+            "existing-product verification and the producer smoke test pin the signer: {content}"
         );
     }
 
@@ -1678,8 +1692,8 @@ mod tests {
         let content = owner_content(&[]);
         assert_eq!(
             content.matches("--source-ref refs/heads/main").count(),
-            2,
-            "the smoke test pins the default-branch ref on the asset and the manifest: {content}"
+            3,
+            "existing-product verification and the smoke test pin the default-branch ref: {content}"
         );
         let mut config = owner_config(&[]);
         config.default_branch = "trunk".to_owned();
@@ -1692,8 +1706,8 @@ mod tests {
         );
         assert_eq!(
             content.matches("--source-ref refs/heads/trunk").count(),
-            2,
-            "the smoke-test pin follows the configured default branch: {content}"
+            3,
+            "existing-product verification and the smoke-test pin follow the configured default branch: {content}"
         );
     }
 
@@ -1817,7 +1831,7 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "a7b4721e9dbd7a19fb6fbbb51aca185678ebeb1b0b05b16be9c15d463ff39765";
+        const PINNED: &str = "ed7b7619e75cfa784aa7d9bfc17ec53ad30612aa5996475b94b7752cfdd1cc06";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");
