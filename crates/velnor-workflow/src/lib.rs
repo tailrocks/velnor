@@ -6089,29 +6089,39 @@ fn run(cli: &Cli) -> Result<(), GeneratorError> {
     let files = rendered.files;
     let symlinks = rendered.symlinks;
     let inputs = rendered.inputs;
-    let outcome = write_generated_with_options(
-        &output_root,
-        &files,
-        &symlinks,
-        &inputs,
-        cli.dry_run,
-        cli.check,
-        cli.force,
-        cli.force && !cli.check,
-    )?;
     if cli.check {
-        // D19: the generator this tree declares must render it byte-identically.
-        // `--check` above proved the running binary agrees with the tree; this
-        // proves the declared pin does too, which is what the base branch's
-        // policy validator will regenerate the tree with. Without `--pin-build`
-        // an unprovisioned pin fails closed; see `resolve_pinned_binary`.
+        // A candidate renderer may be under qualification while the checked-in
+        // workflows remain owned by an earlier active renderer. Checking the
+        // candidate's render here made that valid staged state impossible and
+        // recreated the candidate-as-authority exception in a different
+        // layer. The active tree is therefore checked only against its
+        // declared active pin; candidate rendering is qualified separately.
         policy::verify_declared_pin_renders_tree(
             &output_root,
             checkout.path(),
             &config,
             cli.pin_build,
         )?;
+        print_report(
+            &cli.target,
+            &config,
+            &files,
+            &symlinks,
+            &WriteOutcome::Unchanged,
+            &output_root,
+        );
+        return Ok(());
     }
+    let outcome = write_generated_with_options(
+        &output_root,
+        &files,
+        &symlinks,
+        &inputs,
+        cli.dry_run,
+        false,
+        cli.force,
+        cli.force && !cli.check,
+    )?;
     print_report(
         &cli.target,
         &config,
