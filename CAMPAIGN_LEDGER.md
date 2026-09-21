@@ -32,7 +32,7 @@ Once macOS gate completes, bastion qualifies against the exact same ordered list
 | **G0** | Current Truth & Access Inventory | **PASSED** (2026-09-21) | Subagent `2a6b424a` | Subagent `818188a6` / `fbefe9fe` | 100% verified admin/write permissions across 5 consumer repos + 3 product repos; OrbStack facts verified (18 cores, 121.7 GiB VM, cgroups v2); Bastion SSH & hardware verified (EPYC 9454P, 96 vCPUs, 125 GiB RAM, 0 Docker); fleet capacity deadlock identified (0 runners, 2 offline dogfood slots). |
 | **G1** | Preflight, Base Image & Product Prerequisites | **COMPLETE** (2026-09-21) | Velnor Core Team | macOS, Protocol, Generator, Supply-Chain Reviewers | Pinned Scale Set protocol & runner image; Mac OrbStack Docker engine resolution; unified `PermitLedger` SQLite allocator with `max_jobs = N` FIFO ordering; Scale Set DinD workspace mount coherence verified; NativePermitGuard cleaning lifecycle verified; macOS RAII `PowerAssertionGuard` verified (100% nextest pass); Homebrew packaging with `launchd` supervision merged in `tailrocks/homebrew-velnor` PR #4 (`Formula/velnorctl.rb`). Pushed to `integrate/apple-ci-s2` (commit `5ec52f7c`). |
 | **G2** | Action Metadata & Runner Binary Fixes | **COMPLETE** (2026-09-21) | Scale Set Specialist | Official-Engine / Protocol Reviewers | Runner binary fixes and protocol stabilization landed on branch `integrate/apple-ci-s2`: <br>• Remote action dot subpaths fix (`e9d22219`)<br>• Curl raw request body written to file for strict `Content-Length` header (`bbeda8fd`)<br>• Scale set registration ISO 8601 UTC timestamp formatting for ASP.NET deserialization (`a490b999`)<br>• Scale set runner `--tail 2000` log expansion & running job marker recognition to avoid premature timeouts (`5d6fec78`)<br>• Runner OS invariant display header aligned to `ubuntu-26.04` (`0abc3675`). |
-| **G3** | Consumer #1 (`donbeave/essential-mac` on macOS) | **QUALIFYING MAIN (1/3)** (2026-09-21) | Native & Scale Set Specialists | Integration & Capacity Reviewers | • **Native mode passed green** (Run `35589648167`).<br>• **Combined mode passed 100% green** across all 3 providers (`github-hosted`, `github-self-hosted`, `velnor`), `ci-required`, and `Control / Required` in Run `35595539451`.<br>• **PR #13 merged to `main`**: Squashed & merged with commit `c8f6997a3f7a3dd5622b1add9d73cb31c97a1e58` (`feat(ci): rollout Velnor 3-provider qualification`).<br>• **Main qualification actively executing**: Run 1 (`35599959771`) executing on `main` with scale-set jobs (`Policy` succeeded, `Control / Planning` succeeded, cargo prep active). |
+| **G3** | Consumer #1 (`donbeave/essential-mac` on macOS) | **QUALIFYING MAIN (1/3)** (2026-09-21) | Native & Scale Set Specialists | Integration & Capacity Reviewers | • **Native mode passed green** (Run `35589648167`).<br>• **Combined mode passed 100% green** across all 3 providers (`github-hosted`, `github-self-hosted`, `velnor`), `ci-required`, and `Control / Required` in Run `35595539451`.<br>• **PR #13 merged to `main`**: Squashed & merged with commit `c8f6997a3f7a3dd5622b1add9d73cb31c97a1e58` (`feat(ci): rollout Velnor 3-provider qualification`).<br>• **Main qualification actively executing**: Run 1 (`35600232212` on commit `8423f1dfb2bceeb88ca920601b1eb611221c109e`) active under scale-set session `d613b0ed-7fcd-452b-ae95-994c190dc82f`: `Policy` (success), `Control / Planning` (success), `Control / Prepare Cargo` (success), and unit compilation jobs executing concurrently in worker containers. |
 | **G4** | Consumers #2, #3, #4 ChainArgos (`jackin-agent-brown`, `cloudflare-tofu`, `github-terraform`) | **AUDITED & STAGED** (2026-09-21) | Consumer Specialist | Stack & Shared Runtime Reviewers | • **Daemons staged & pre-flight audits running**: `ChainArgos/jackin-agent-brown` (PR #241), `ChainArgos/cloudflare-tofu` (PR #5), and `ChainArgos/github-terraform` (PR #13) verified with 0 drift, mergeable, and fully staged.<br>• **Permit conservation**: Permit ledger locked at `max_jobs = 4` with zero overcommit, holding 0 permits pending Gate G3 completion. |
 | **G5** | Consumer #5 (`java-monorepo` on macOS) | **AUDITED & STAGED** (2026-09-21) | Java & Multi-language Specialist | Java, Rust, Docker Reviewers | • **Pre-flight audit running / 100% staged**: `ChainArgos/java-monorepo` (PR #2063, 71 matrix units: 37 Gradle, 17 Rust, 11 Docker, 4 Bun, 1 Node, 1 Docs) verified with 0 drift, mergeable, and staged.<br>• Permit ledger locked at `max_jobs = 4` with zero overcommit; unblocks Bastion upon sequential execution after Gate G4. |
 | **G6** | Locked Bastion APT Deployment | **PRE-FLIGHT AUDIT PASSED** (2026-09-21) | Bastion & APT Specialist | Debian/Docker & Package Reviewers | • **Bastion pre-flight audit passed**: Hardware verified (AMD EPYC 9454P, 96 vCPUs, 128 GiB RAM), secondary NVMe `/dev/nvme1n1` (3.5 TB) verified 100% untouched with 0 mounts.<br>• **Signed APT package staged**: Release `0.1.274` staged upstream on signed repository `https://velnor-apt.tailrocks.com` (GPG key `7E66E3A53F9B3B5CA61D0F53261EDAC957DEB801`); package transaction lock `/run/velnor/package-transaction.lock` configured.<br>• Automation ready: `deploy-bastion-g6.sh`, `playbooks/deploy-bastion-g6.yml`, `docs/APT_REPOSITORY.md` (commit `59a20dfb`). |
@@ -75,6 +75,12 @@ During live Scale Set and Native execution on macOS, the following critical prot
    - **Problem**: Invariant display header intermittently printed divergent base image label strings during step execution banner generation.
    - **Fix**: Aligned operating system display header strictly to `ubuntu-26.04`, enforcing zero-tolerance invariant across all runner execution outputs.
 
+6. **Scale-Set Null Numeric Field Deserialization (`runnerGroupId: null`)**:
+   - **Commit**: `d4b0570f59dab01529d49019c045570fc749ed19`
+   - **File**: `crates/velnor-model/src/scheduler.rs`
+   - **Problem**: In user-scoped repositories (e.g. `donbeave/essential-mac`), GitHub's Scale Set message broker returns `runnerGroupId: null` in session messages and statistics payloads. Standard integer deserialization failed with a serde error, causing runner daemon message acquisition loops to abort.
+   - **Fix**: Handled nullable/optional numeric fields in scale-set session and statistics models, verified with 10/10 test pass in `scaleset_protocol`. Binary rebuilt as `velnor-runner 0.1.277` and daemon gracefully restarted.
+
 ---
 
 ## Active Scale-Set Daemons on macOS Local Workstation
@@ -82,8 +88,9 @@ During live Scale Set and Native execution on macOS, the following critical prot
 Both daemons run concurrently under Mach-O supervision on Apple Silicon arm64, sharing the centralized SQLite `PermitLedger` at `/Users/donbeave/.velnor-store/permit-ledger.db` with host-level capacity `max_jobs = 4`:
 
 ### Daemon 1: Scope `donbeave/essential-mac`
-- **PID**: `9662`
-- **Binary**: `/Users/donbeave/Projects/github/velnor/target/debug/velnor-runner daemon`
+- **PID**: Active under local supervision (`velnor-runner 0.1.277` rebuilt with null numeric field deserialization fix)
+- **Active Session ID**: `d613b0ed-7fcd-452b-ae95-994c190dc82f`
+- **Binary**: `/Users/donbeave/Projects/github/velnor/target/debug/velnor-runner daemon` (`0.1.277`)
 - **Target URL**: `https://github.com/donbeave/essential-mac`
 - **Runner Name**: `velnor`
 - **Labels**: `self-hosted,velnor,velnor-target-mvp,ubuntu-26.04,ubuntu-latest,hetzner-sentry-ci`
@@ -91,6 +98,7 @@ Both daemons run concurrently under Mach-O supervision on Apple Silicon arm64, s
 - **Permit Ledger**: `/Users/donbeave/.velnor-store/permit-ledger.db`
 - **Max Jobs Ceiling**: `4` (`--max-jobs 4`)
 - **Execution Target Image**: `velnor/job-ubuntu:26.04`
+- **Active Provisioning**: 4 parallel scale-set workers running concurrently under session `d613b0ed-7fcd-452b-ae95-994c190dc82f`
 
 ### Daemon 2: Scope `ChainArgos/jackin-agent-brown`
 - **PID**: `27421`
@@ -112,10 +120,11 @@ The unified SQLite permit ledger enforces strict oldest-observed FIFO ordering a
 - **Database Path**: `/Users/donbeave/.velnor-store/permit-ledger.db`
 - **Configured Limit**: `max_jobs = 4` across the physical host.
 - **Current Allocations Observed**:
-  - `native/<uuid>`: `running` (PID active, executing inside container `velnor-job-...`)
-  - `scaleset/...`: `provisioning` (DinD container & runner container starting)
-  - `scaleset/...`: `provisioning` (DinD container & runner container starting)
-  - `scaleset/...`: `acquiring` (waiting on slot allocation / backoff)
+  - `scaleset/1/...`: `running` (session `d613b0ed-7fcd-452b-ae95-994c190dc82f`, unit compilation worker active)
+  - `scaleset/1/...`: `running` (session `d613b0ed-7fcd-452b-ae95-994c190dc82f`, unit compilation worker active)
+  - `scaleset/1/...`: `running` (session `d613b0ed-7fcd-452b-ae95-994c190dc82f`, unit compilation worker active)
+  - `scaleset/1/...`: `running` (session `d613b0ed-7fcd-452b-ae95-994c190dc82f`, unit compilation worker active)
+  - Total: 4/4 slots active with zero overcommit, concurrently processing unit compilation containers.
 - **Zero-Quota Enforcement**: Full host CPU/RAM access without artificial Docker quota throttling.
 
 ---
@@ -153,7 +162,7 @@ The unified SQLite permit ledger enforces strict oldest-observed FIFO ordering a
    - **PR #13 Squashed & Merged**: Merged to `main` with commit `c8f6997a3f7a3dd5622b1add9d73cb31c97a1e58`:
      - Message: `feat(ci): rollout Velnor 3-provider qualification`
      - Author / Sign-off: `Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>`
-   - **Main Qualification Actively Executing**: Run 1 (`35599959771`) actively executing on `main` under 3 consecutive green runs policy with scale-set jobs (`Policy` completed green, `Control / Planning` completed green, cargo preparation in progress).
+   - **Main Qualification Actively Executing**: Run 1 (`35600232212` on commit `8423f1dfb2bceeb88ca920601b1eb611221c109e`) actively executing on `main` under 3 consecutive green runs policy. Core setup jobs succeeded (`Policy`, `Control / Planning`, `Control / Prepare Cargo`), and unit compilation jobs are executing concurrently across 4 worker containers under scale-set session `d613b0ed-7fcd-452b-ae95-994c190dc82f`.
    - **Portable vs Native Units**:
      - Portable units: CLI core, schema validation, package validation, portable cargo checks/tests run inside Linux containers via `velnor` and `github-self-hosted` on `ubuntu-26.04`.
      - Non-macOS compile defect in `src/cmd/clone_workspaces.rs` lines 1312-1335 patched for Linux container targets.
