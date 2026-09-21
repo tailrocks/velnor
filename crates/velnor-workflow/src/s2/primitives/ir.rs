@@ -1385,6 +1385,40 @@ mod tests {
     }
 
     #[test]
+    fn transportable_prerequisite_requires_a_successful_producer() {
+        let (producer, consumer) = transport_fixture();
+        let ir = owner_test_ir("example/transport", vec![producer, consumer]);
+        let workflow = ir.render_nested(
+            WorkflowKind::PullRequest,
+            &aggregate_fixture_nodes(&ir),
+            None,
+        );
+        let producer_job = "needs.github-hosted-rust-ffi.result";
+        assert!(
+            workflow.contains(&format!("{producer_job} == 'success'")),
+            "transport consumer requires producer success: {workflow}"
+        );
+        assert!(
+            !workflow.contains(&format!("{producer_job} == 'success' ||")),
+            "transport consumer never treats a skipped producer as an artifact: {workflow}"
+        );
+        let consumer = job_block(&workflow, "github-hosted-rust-app");
+        let gate = must_some(consumer.find("if: ${{"), "consumer caller gate");
+        let call = must_some(
+            consumer.find("uses: ./.github/workflows/"),
+            "consumer reusable call",
+        );
+        assert!(
+            gate < call,
+            "the producer-success gate is evaluated before the consumer reusable can execute: {consumer}"
+        );
+        assert!(
+            consumer.contains("needs: [plan, github-hosted-rust-ffi]"),
+            "the consumer caller waits on the artifact producer: {consumer}"
+        );
+    }
+
+    #[test]
     fn transport_facts_pass_records_only_on_hosted() {
         let (producer, consumer) = transport_fixture();
         let ir = owner_test_ir("example/transport", vec![producer, consumer.clone()]);
@@ -3328,6 +3362,31 @@ mod tests {
         assert!(
             steps.contains("path: .velnor-ci-results/result-${{ inputs.unit }}-github-hosted.json"),
             "the upload publishes exactly what the record step wrote: {steps}"
+        );
+    }
+
+    #[test]
+    fn producer_failure_is_written_as_a_failed_expected_work_receipt() {
+        let steps = super::render_unit_result_steps(
+            "actions/upload-artifact@pinned",
+            "github-hosted",
+            "always()",
+        );
+        assert!(
+            steps.contains("VELNOR_RESULT_OUTCOME: ${{ job.status }}"),
+            "the receipt binds to the enclosing job status: {steps}"
+        );
+        assert!(
+            steps.contains("*) outcome=failure ;;"),
+            "setup, execution, and any other non-green job state records failure: {steps}"
+        );
+        assert!(
+            steps.contains("if: ${{ always() }}"),
+            "the receipt runs after a failed producer step: {steps}"
+        );
+        assert!(
+            !steps.contains("continue-on-error"),
+            "a failed producer cannot be hidden by the receipt step: {steps}"
         );
     }
 
@@ -7303,12 +7362,12 @@ impl WorkflowIr {
                 "(needs.{dependency}.result == 'success' || needs.{dependency}.result == 'skipped')"
             ));
         }
-        // A skipped or failed producer means no artifact: the consumer's
-        // guarded rebuild covers it, so the caller still runs.
+        // A transportable prerequisite is an explicit artifact dependency.
+        // GitHub schedules this caller only after the producer has succeeded;
+        // skipped, failed, and cancelled producers are terminal, never a
+        // permission to rebuild a required artifact in the consumer.
         for dependency in product_dependency_needs(provider, unit, &self.units) {
-            conditions.push(format!(
-                "(needs.{dependency}.result == 'success' || needs.{dependency}.result == 'skipped')"
-            ));
+            conditions.push(format!("needs.{dependency}.result == 'success'"));
         }
         conditions.push(aggregate_selected_unit_selector(&caller.unit_id));
         // The caller skips exactly when the callee's provider job would: same
