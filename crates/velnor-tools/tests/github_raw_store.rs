@@ -348,6 +348,12 @@ fn recovers_private_temporary_files_but_leaves_replaced_public_entry() {
         fs::write(&replaced, b"operator-owned-entry"),
         "write replaced temp",
     );
+    // The leave-alone premise requires a group/other-readable file; pin the
+    // mode explicitly so the test does not depend on the ambient umask.
+    must(
+        fs::set_permissions(&replaced, fs::Permissions::from_mode(0o644)),
+        "publish replaced temp",
+    );
 
     let reopened = must(RawObjectFileStore::new(&root), "reconcile temporary files");
     drop(reopened);
