@@ -1,0 +1,86 @@
+name: Activate Velnor renderer
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Full renderer commit SHA whose published closure is activated
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  attestations: read
+
+concurrency:
+  group: activate-renderer-${{ inputs.revision }}
+  cancel-in-progress: false
+
+jobs:
+  activate:
+    name: Verify product and prepare activation PR
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out protected base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate activation input
+        env:
+          REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::revision must be a full lowercase commit SHA" >&2; exit 1; }
+          git cat-file -e "$REVISION^{commit}" || { echo "::error::revision is not in the protected repository history" >&2; exit 1; }
+      - name: Set up declared renderer product
+        id: runtime
+        uses: ./.github/actions/setup-velnor-workflow
+        with:
+          rev: ${{ inputs.revision }}
+          checkout-path: ${{ github.workspace }}
+          cache: 'false'
+      - name: Verify immutable publication and derive readiness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ inputs.revision }}
+          CLOSURE: ${{ steps.runtime.outputs.closure }}
+        run: |
+          set -euo pipefail
+          tag="velnor-workflow-runtime-v1-${CLOSURE:0:16}"
+          temporary="$(mktemp -d)"
+          trap 'rm -rf "$temporary"' EXIT
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern manifest.json --dir "$temporary"
+          gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref "refs/heads/${{ github.event.repository.default_branch }}"
+          product_revision="$(jq -er '.revision | select(test("^[0-9a-f]{40}$"))' "$temporary/manifest.json")"
+          for platform in Linux-X64 Linux-ARM64 macOS-ARM64; do
+            asset="velnor-workflow-$platform"
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$temporary"
+            gh attestation verify "$temporary/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref "refs/heads/${{ github.event.repository.default_branch }}"
+            actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
+            expected="$(jq -er --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "$asset" '.closure == $closure and .profile == "release" and .features == "" and .products[$platform].asset == $asset and (.products[$platform].binary | test("^[0-9a-f]{64}$")) | .products[$platform].binary' "$temporary/manifest.json")"
+            [[ "$actual" == "$expected" ]] || { echo "::error::published $platform product digest mismatch" >&2; exit 1; }
+          done
+          expiry="$(( $(date -u +%s) + 86400 ))"
+          jq -n --arg closure "$CLOSURE" --arg activation_revision "$REVISION" --arg product_revision "$product_revision" --arg expiry "$expiry" \
+            --arg linux_x64 "$(jq -er '.products["Linux-X64"].binary' "$temporary/manifest.json")" \
+            --arg linux_arm64 "$(jq -er '.products["Linux-ARM64"].binary' "$temporary/manifest.json")" \
+            --arg macos_arm64 "$(jq -er '.products["macOS-ARM64"].binary' "$temporary/manifest.json")" \
+            '{schema: "velnor-workflow.publication-readiness.v1", closure: $closure, activation_revision: $activation_revision, product_revision: $product_revision, products: [{platform: "Linux-X64", digest: $linux_x64, revoked: false, expires_at: ($expiry | tonumber)}, {platform: "Linux-ARM64", digest: $linux_arm64, revoked: false, expires_at: ($expiry | tonumber)}, {platform: "macOS-ARM64", digest: $macos_arm64, revoked: false, expires_at: ($expiry | tonumber)}]}' > "$RUNNER_TEMP/publication-readiness.json"
+      - name: Promote on an activation branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          branch="activate-renderer-${REVISION:0:12}"
+          git switch --create "$branch"
+          git config user.name "velnor-workflow activation"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          velnor-workflow promote --rev "$REVISION" --publication-readiness "$RUNNER_TEMP/publication-readiness.json" --repo "$GITHUB_WORKSPACE" --generator-repo "$GITHUB_WORKSPACE"
+          gh auth setup-git
+          git push --set-upstream origin "$branch"
+          gh pr create --base "${{ github.event.repository.default_branch }}" --head "$branch" --title "chore(ci): activate renderer ${REVISION:0:12}" --body "Trusted activation: immutable runtime release, manifest, and all supported platform assets were attestation- and digest-verified before atomic pin/tree promotion."

@@ -108,6 +108,11 @@ speedup.
   checked against that freshly authenticated manifest. This removes the
   cache-hit provenance gap without making cache availability a correctness
   condition.
+- `activate-renderer.yml` is a main-owned manual activation producer. It
+  attests the manifest and every supported platform asset, derives a
+  short-lived readiness record that preserves product provenance separately
+  from the requested pin, runs `promote` on an activation branch, and opens a
+  protected PR. It cannot write activation directly to main.
 - Focused policy, policy-rendering, promotion, readiness, and transport
   regressions have been exercised locally. The implementation is not yet
   activated into `.github`, protected-integrated, or fully hosted-verified.
