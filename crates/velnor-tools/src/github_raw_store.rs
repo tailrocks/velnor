@@ -357,6 +357,8 @@ struct FileIdentity {
 }
 
 #[cfg(unix)]
+// Platform-dependent libc widths: casts required on macOS, redundant on Linux.
+#[allow(clippy::unnecessary_cast)]
 impl FileIdentity {
     fn is_regular_single_link(self) -> bool {
         self.mode & libc::S_IFMT as u32 == libc::S_IFREG as u32 && self.nlink == 1
@@ -556,6 +558,8 @@ fn read_bounded_file(file: &mut File, max_bytes: usize) -> io::Result<Vec<u8>> {
 }
 
 #[cfg(unix)]
+// Platform-dependent libc widths: casts required on macOS, redundant on Linux.
+#[allow(clippy::unnecessary_cast)]
 fn stat_fd(file: &File) -> io::Result<FileIdentity> {
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     let result = unsafe { libc::fstat(file.as_raw_fd(), stat.as_mut_ptr()) };
@@ -572,6 +576,8 @@ fn stat_fd(file: &File) -> io::Result<FileIdentity> {
 }
 
 #[cfg(unix)]
+// Platform-dependent libc widths: casts required on macOS, redundant on Linux.
+#[allow(clippy::unnecessary_cast)]
 fn stat_at(directory: &File, name: &CStr) -> Result<FileIdentity, RawStorageError> {
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     let result = unsafe {
@@ -595,6 +601,8 @@ fn stat_at(directory: &File, name: &CStr) -> Result<FileIdentity, RawStorageErro
 }
 
 #[cfg(unix)]
+// Platform-dependent libc widths: casts required on macOS, redundant on Linux.
+#[allow(clippy::unnecessary_cast)]
 fn validate_directory(file: &File) -> io::Result<()> {
     let identity = stat_fd(file)?;
     if identity.mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32 {
