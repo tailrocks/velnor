@@ -3433,13 +3433,39 @@ fn render_release_unit_job(
         skip_when_offline_ready,
     );
     let cargo_offline = checks_env(unit);
-    let _ = writeln!(
-        output,
-        "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
-        yaml_scalar(&unit.id),
-        yaml_scalar(&unit.id)
-    );
+    render_release_check_steps(output, unit, &verify_name, &cargo_offline);
     id
+}
+
+/// The checks steps of one release leg. Release legs know their unit
+/// statically: phased units verify through one step per runnable phase,
+/// like the collapsed jobs, while unphased units keep the single step.
+fn render_release_check_steps(
+    output: &mut String,
+    unit: &Unit,
+    verify_name: &str,
+    cargo_offline: &str,
+) {
+    let runnable = unit.runnable_phases();
+    if runnable.is_empty() {
+        let _ = writeln!(
+            output,
+            "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
+            yaml_scalar(&unit.id),
+            yaml_scalar(&unit.id)
+        );
+    } else {
+        for phase in runnable {
+            let _ = writeln!(
+                output,
+                "      - name: {} ({verify_name})\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} --phase {}\n",
+                phase.step_name(),
+                yaml_scalar(&unit.id),
+                yaml_scalar(&unit.id),
+                phase.as_str(),
+            );
+        }
+    }
 }
 
 fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
@@ -5698,6 +5724,8 @@ cp "$record" "$out"
             github_full_commands: None,
             velnor_pr_commands: None,
             velnor_full_commands: None,
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,

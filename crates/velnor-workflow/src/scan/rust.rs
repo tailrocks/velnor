@@ -594,6 +594,8 @@ fn analyze_rust_manifests(
             github_full_commands: None,
             velnor_pr_commands: None,
             velnor_full_commands: None,
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             pinned_lockfile: file_set.contains("Cargo.lock"),
             cache: Some(CacheSpec {
@@ -654,6 +656,8 @@ fn analyze_rust_manifests(
             github_full_commands: None,
             velnor_pr_commands: None,
             velnor_full_commands: None,
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             pinned_lockfile: file_set.contains("Cargo.lock"),
             cache: Some(CacheSpec {

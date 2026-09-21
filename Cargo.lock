@@ -4079,14 +4079,17 @@ dependencies = [
  "clap",
  "crossterm",
  "globset",
+ "libc",
  "noyalib",
  "ratatui",
  "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tar",
  "termrock",
  "toml",
+ "uuid",
  "velnor-runner",
 ]
 

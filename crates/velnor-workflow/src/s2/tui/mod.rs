@@ -972,6 +972,8 @@ mod tests {
             watch: Vec::new(),
             pr_commands: vec!["cargo test".to_owned()],
             full_commands: vec!["cargo test --all-targets".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: dependencies
                 .iter()
                 .map(|dependency| (*dependency).to_owned())
