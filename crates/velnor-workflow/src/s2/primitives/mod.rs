@@ -567,6 +567,116 @@ impl Args<'_> {
         }
         Ok(tables)
     }
+
+    /// A table of declared reads indexed by unit id, validated against the
+    /// scan: each unit names `{ paths, reason }` entries for relations the
+    /// scan cannot discover (opaque task runners, helper scripts, dynamic
+    /// includes). Generation-time only: the `watch-graph` primitive unions
+    /// the paths into the unit's watch set, so the runtime contract is
+    /// unchanged.
+    pub(crate) fn unit_reads(
+        &self,
+        ctx: &RenderCtx<'_>,
+        key: &str,
+    ) -> Result<Option<BTreeMap<String, Vec<DeclaredRead>>>, GeneratorError> {
+        let Some(value) = self.0.get(key) else {
+            return Ok(None);
+        };
+        let tables = parse_declared_reads(key, value)?;
+        for unit in tables.keys() {
+            if !ctx.shape.unit_ids().any(|candidate| candidate == unit) {
+                return Err(GeneratorError::usage(format!(
+                    "`{key}` names unit `{unit}`, which the scan did not produce; available units: {}",
+                    ctx.shape.unit_ids().collect::<Vec<_>>().join(", ")
+                )));
+            }
+        }
+        Ok(Some(tables))
+    }
+}
+
+/// One declared read: paths a unit's owner asserts the unit reads, with the
+/// non-empty reason that audits the claim. The declaration row itself is the
+/// audit trail; the paths compile into the unit's watch set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeclaredRead {
+    pub(crate) paths: Vec<String>,
+    pub(crate) reason: String,
+}
+
+/// Parse a `reads` table of unit ids to `{ paths, reason }` entries. Every
+/// entry must spell exactly `paths` (an array of strings, each a valid
+/// watch glob) and `reason` (a non-empty string): a typo'd or undocumented
+/// relation fails closed instead of silently widening (or never narrowing)
+/// affected selection.
+fn parse_declared_reads(
+    key: &str,
+    value: &toml::Value,
+) -> Result<BTreeMap<String, Vec<DeclaredRead>>, GeneratorError> {
+    let toml::Value::Table(table) = value else {
+        return Err(unexpected(
+            key,
+            value,
+            "a table of unit ids to `{ paths, reason }` entries",
+        ));
+    };
+    let mut reads = BTreeMap::new();
+    for (unit, entries) in table {
+        let toml::Value::Array(items) = entries else {
+            return Err(unexpected(
+                key,
+                entries,
+                "an array of `{ paths, reason }` tables",
+            ));
+        };
+        let mut declared = Vec::new();
+        for item in items {
+            let toml::Value::Table(entry) = item else {
+                return Err(unexpected(key, item, "a `{ paths, reason }` table"));
+            };
+            for name in entry.keys() {
+                if name != "paths" && name != "reason" {
+                    return Err(GeneratorError::usage(format!(
+                        "`[[declare]]` argument `{key}` for unit `{unit}` takes only `paths` and `reason`, found `{name}`"
+                    )));
+                }
+            }
+            let Some(paths) = entry.get("paths") else {
+                return Err(GeneratorError::usage(format!(
+                    "`[[declare]]` argument `{key}` for unit `{unit}` is missing `paths`"
+                )));
+            };
+            let toml::Value::Array(paths) = paths else {
+                return Err(unexpected(key, paths, "an array of path strings"));
+            };
+            let mut owned = Vec::new();
+            for path in paths {
+                let toml::Value::String(path) = path else {
+                    return Err(unexpected(key, path, "a path string"));
+                };
+                if globset::Glob::new(path).is_err() {
+                    return Err(GeneratorError::usage(format!(
+                        "`[[declare]]` argument `{key}` for unit `{unit}` names an invalid watch glob `{path}`"
+                    )));
+                }
+                owned.push(path.clone());
+            }
+            let reason = match entry.get("reason") {
+                Some(toml::Value::String(reason)) if !reason.trim().is_empty() => reason.clone(),
+                _ => {
+                    return Err(GeneratorError::usage(format!(
+                        "`[[declare]]` argument `{key}` for unit `{unit}` needs a non-empty `reason` auditing the read"
+                    )));
+                }
+            };
+            declared.push(DeclaredRead {
+                paths: owned,
+                reason,
+            });
+        }
+        reads.insert(unit.clone(), declared);
+    }
+    Ok(reads)
 }
 
 fn unexpected(key: &str, found: &toml::Value, expected: &str) -> GeneratorError {
@@ -1514,5 +1624,95 @@ mod tests {
         };
         assert!(error.contains("watch-graph"), "{error}");
         assert!(error.contains("which the scan did not produce"), "{error}");
+    }
+
+    /// The `watch-graph` schema admits the generation-time `reads` table
+    /// alongside the watch additions it unions with.
+    #[test]
+    fn watch_graph_schema_admits_declared_reads() -> Result<(), Box<dyn std::error::Error>> {
+        let primitive = lookup(WATCH_GRAPH)?;
+        let schema = primitive.schema();
+        assert!(schema.contains(&"watch"));
+        assert!(schema.contains(&"reads"));
+        Ok(())
+    }
+
+    /// Declared reads parse per unit id into `{ paths, reason }` entries.
+    #[test]
+    fn declared_reads_parse_paths_and_reasons() -> Result<(), Box<dyn std::error::Error>> {
+        let value: toml::Value = toml::from_str(
+            r#""rust-alpha" = [
+                { paths = ["scripts/check-boundary.sh"], reason = "task runner execs this script" },
+                { paths = ["assets/**"], reason = "bundler consumes non-source inputs" },
+            ]"#,
+        )?;
+        let reads = parse_declared_reads("reads", &value)?;
+        assert_eq!(
+            reads.get("rust-alpha"),
+            Some(&vec![
+                DeclaredRead {
+                    paths: vec!["scripts/check-boundary.sh".to_owned()],
+                    reason: "task runner execs this script".to_owned(),
+                },
+                DeclaredRead {
+                    paths: vec!["assets/**".to_owned()],
+                    reason: "bundler consumes non-source inputs".to_owned(),
+                },
+            ])
+        );
+        Ok(())
+    }
+
+    /// A missing, empty, or blank reason fails closed: every declared read
+    /// must audit its claim.
+    #[test]
+    fn declared_reads_reject_an_empty_reason() -> Result<(), Box<dyn std::error::Error>> {
+        for entry in [
+            r#"{ paths = ["scripts/check.sh"] }"#,
+            r#"{ paths = ["scripts/check.sh"], reason = "" }"#,
+            r#"{ paths = ["scripts/check.sh"], reason = "  " }"#,
+            r#"{ paths = ["scripts/check.sh"], reason = 7 }"#,
+        ] {
+            let value: toml::Value = toml::from_str(&format!(r#""a" = [ {entry} ]"#))?;
+            let Err(error) = parse_declared_reads("reads", &value) else {
+                panic!("an undocumented read must fail");
+            };
+            assert!(error.to_string().contains("reason"), "{error}");
+        }
+        Ok(())
+    }
+
+    /// Malformed entries fail closed: unknown keys, missing or mistyped
+    /// paths, and invalid globs never silently widen selection.
+    #[test]
+    fn declared_reads_reject_malformed_entries() -> Result<(), Box<dyn std::error::Error>> {
+        for (entry, needle) in [
+            (
+                r#"{ paths = ["a"], reason = "r", extra = true }"#,
+                "takes only `paths` and `reason`",
+            ),
+            (r#"{ reason = "r" }"#, "missing `paths`"),
+            (
+                r#"{ paths = "a", reason = "r" }"#,
+                "an array of path strings",
+            ),
+            (r#"{ paths = [7], reason = "r" }"#, "a path string"),
+            (
+                r#"{ paths = ["["], reason = "r" }"#,
+                "an invalid watch glob",
+            ),
+            (r#""just-a-string""#, "a `{ paths, reason }` table"),
+        ] {
+            let value: toml::Value = toml::from_str(&format!(r#""a" = [ {entry} ]"#))?;
+            let Err(error) = parse_declared_reads("reads", &value) else {
+                panic!("a malformed entry must fail: {entry}");
+            };
+            assert!(error.to_string().contains(needle), "entry {entry}: {error}");
+        }
+        let Err(error) = parse_declared_reads("reads", &toml::Value::Array(vec![])) else {
+            panic!("a non-table reads value must fail");
+        };
+        assert!(error.to_string().contains("a table of unit ids"), "{error}");
+        Ok(())
     }
 }
