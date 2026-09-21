@@ -2501,6 +2501,43 @@ mod tests {
             "{:?}",
             product.inputs_unknown
         );
+        let mut resolved = crate::s2::ProjectConfig::from(shape.clone());
+        crate::s2::platform::resolve(&mut resolved).expect("native product graph resolves");
+        let resolved_producer = must_some(
+            resolved.units.iter().find(|unit| {
+                unit.id == "rust-libs-bridge-ffi" || unit.id.starts_with("rust-bridge")
+            }),
+            "resolved rust producer unit",
+        );
+        for expected in [
+            "libs/bridge-ffi/boltffi.toml",
+            "libs/bridge-ffi/**/*.rs",
+            "libs/sibling/**/*.rs",
+        ] {
+            assert!(
+                resolved_producer
+                    .watch
+                    .iter()
+                    .any(|input| input == expected),
+                "resolved producer watch contains {expected}: {:?}",
+                resolved_producer.watch
+            );
+        }
+        let resolved_consumer = must_some(
+            resolved
+                .units
+                .iter()
+                .find(|unit| unit.id == "swift-package-clients-desktop"),
+            "resolved Swift consumer unit",
+        );
+        assert!(
+            resolved_consumer
+                .depends_on
+                .iter()
+                .any(|dependency| dependency == &resolved_producer.id),
+            "resolved consumer follows product producer: {:?}",
+            resolved_consumer.depends_on
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
