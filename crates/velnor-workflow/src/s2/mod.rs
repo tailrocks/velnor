@@ -12889,12 +12889,24 @@ channel = "stable"
             "clippy must use the test profile to match nextest: {}",
             rust.pr_commands[clippy_index]
         );
-        // The scan leaves units unphased until the phase activation
-        // lands; the order contract holds on the commands alone.
-        assert!(
-            rust.phases.is_empty() && rust.check_commands.is_empty(),
-            "scan units carry no phase tags yet: {:?}",
-            rust.phases
+        // The phase activation tags scan units: the order contract holds
+        // on the commands and the phase list mirrors them. The fixture
+        // ships no lib target, so no doctest phase follows the tests.
+        assert_eq!(
+            rust.phases,
+            vec![
+                ValidationPhase::Fmt,
+                ValidationPhase::Clippy,
+                ValidationPhase::Test,
+            ],
+            "scan units carry phase tags: {}",
+            rust.pr_commands.join(" | ")
+        );
+        assert_eq!(
+            rust.check_commands.len(),
+            1,
+            "scan units carry one prerequisite check: {:?}",
+            rust.check_commands
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -13744,11 +13756,17 @@ lockfile = true
     }
 
     fn assert_phase_report_workflow(workflow: &str, report_uses: &str) {
+        // Phase steps append to the shared unit log; the legacy single
+        // checks step owns (truncates) it. Both capture through the log.
+        assert!(
+            workflow.contains("| tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?")
+                || workflow.contains("| tee -a \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?"),
+            "workflow missing unit-log tee",
+        );
         for needle in [
             "set -o pipefail",
             "velnor-ci-timing-${GITHUB_RUN_ID:-unknown}",
             "(set -C; printf '%s\\n' \"$(date +%s)\"",
-            "| tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?",
             "\n          exit $rc",
             "- name: Report phase timings and cache outcomes",
             "\n        if: always()\n",
@@ -16832,13 +16850,13 @@ lockfile = true
         );
         // GitHub loads the callee once per caller into one template-memory
         // budget, so the callee must not grow with the kind's unit count.
-        // 20 three-provider rust units (60 callers) stay under the 8 MiB
+        // 19 three-provider rust units (57 callers) stay under the 8 MiB
         // ceiling the generator enforces on the aggregate; the ceiling
         // itself is covered by `template_memory`'s tests. The drift since
         // the three-provider cutover (dependency records, hardened
-        // transfers) honestly costs the headroom the old 25-unit stress
-        // level consumed.
-        for index in 0..19 {
+        // transfers, per-phase checks steps) honestly costs the headroom
+        // the old 25-unit stress level consumed.
+        for index in 0..18 {
             let mut unit = rust.clone();
             unit.id = format!("rust-pad{index:02}");
             unit.label = format!("Rust crate (pad{index:02})");
@@ -16865,7 +16883,7 @@ lockfile = true
         let growth = padded_rust.len().saturating_sub(baseline_rust.len());
         assert!(
             growth < 32 * 256,
-            "the kind reusable grew by {growth} bytes for 19 extra units; the step blocks must not be per unit"
+            "the kind reusable grew by {growth} bytes for 18 extra units; the step blocks must not be per unit"
         );
         for name in ["ci-pr.yml", "ci-main.yml"] {
             let workflow = must_some(
@@ -18854,6 +18872,18 @@ lockfile = true
         assert!(!save.contains("merge_group"));
     }
 
+    /// Where verification starts in a rendered kind reusable: the earliest
+    /// phase step, falling back to the legacy single checks step when no
+    /// member carries phases.
+    fn verification_step_position(workflow: &str) -> Option<usize> {
+        ValidationPhase::RUNNABLE
+            .iter()
+            .map(|phase| format!("- name: {}", phase.step_name()))
+            .chain(std::iter::once("- name: Run unit checks".to_owned()))
+            .filter_map(|step| workflow.find(step.as_str()))
+            .min()
+    }
+
     #[test]
     fn github_lane_restores_before_checks_on_hosted_lane() {
         let config = scanned_fixture(all_providers());
@@ -18873,7 +18903,7 @@ lockfile = true
             .split_once("\n  verify-github-self-hosted:")
             .map_or(kind.as_str(), |(lane, _)| lane);
         let restore = must_some(hosted.find("name: Restore unit cache"), "cargo restore");
-        let checks = must_some(hosted.find("name: Run unit checks"), "checks step");
+        let checks = must_some(verification_step_position(hosted), "checks step");
         assert!(
             restore < checks,
             "restore must precede checks on the hosted job"
@@ -19308,7 +19338,7 @@ lockfile = true
             "Cargo-source cache restore is rendered",
         );
         let checks = must_some(
-            kind.find("checks\n        env:"),
+            verification_step_position(kind.as_str()),
             "run-checks step is rendered",
         );
         assert!(

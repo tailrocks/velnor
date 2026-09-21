@@ -62,9 +62,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 8b8f1cbe03427227e9d04301de530b3e744110f4
+          rev: b145e7702a9f6c3accfa41d8f6ff1be9445ee436
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8b8f1cbe03427227e9d04301de530b3e744110f4" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=b145e7702a9f6c3accfa41d8f6ff1be9445ee436" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -82,7 +82,7 @@ jobs:
       - name: Prepare Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 8b8f1cbe03427227e9d04301de530b3e744110f4
+          EXPECTED_REVISION: b145e7702a9f6c3accfa41d8f6ff1be9445ee436
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/velnor-workflow-runtime"
@@ -101,7 +101,7 @@ jobs:
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-8b8f1cbe03427227e9d04301de530b3e744110f4-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-b145e7702a9f6c3accfa41d8f6ff1be9445ee436-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/velnor-workflow-runtime
           if-no-files-found: error
           retention-days: 7
@@ -366,7 +366,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: "877491872343"
+      mbx_compat: "42873ff80729"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -395,6 +395,7 @@ jobs:
       unit_platform: linux-x64
       unit_trust: untrusted-ok
       unit_admission: github-hosted
+      validation_phases: "fmt,clippy,test,doctest"
   velnor-rust-unit-collector:
     name: "Rust · unit-collector · velnor — rust-unit-collector"
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-unit-collector"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
@@ -417,6 +418,7 @@ jobs:
       unit_platform: linux-x64
       unit_trust: untrusted-ok
       unit_admission: velnor-trust-gated
+      validation_phases: "fmt,clippy,test,doctest"
   github-hosted-rust-velnor-bench:
     name: "Rust · velnor-bench · github-hosted — rust-velnor-bench"
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-bench"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
@@ -434,7 +436,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: "5b4a6ae1e5aa"
+      mbx_compat: "9204e859dced"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -516,6 +518,7 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: "rust-velnor-model,rust-velnor-runner"
       unit_admission: github-hosted
+      validation_phases: "fmt,clippy,test,doctest"
   velnor-rust-velnor-bench:
     name: "Rust · velnor-bench · velnor — rust-velnor-bench"
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-bench"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
@@ -539,6 +542,7 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: "rust-velnor-model,rust-velnor-runner"
       unit_admission: velnor-trust-gated
+      validation_phases: "fmt,clippy,test,doctest"
   github-hosted-rust-velnor-client:
     name: "Rust · velnor-client · github-hosted — rust-velnor-client"
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-client"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
@@ -556,7 +560,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: "701ca1f39aa3"
+      mbx_compat: c0e76007e2ac
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -590,6 +594,7 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: rust-velnor-model
       unit_admission: github-hosted
+      validation_phases: "fmt,clippy,test,doctest"
   velnor-rust-velnor-client:
     name: "Rust · velnor-client · velnor — rust-velnor-client"
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-client"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
@@ -613,6 +618,7 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: rust-velnor-model
       unit_admission: velnor-trust-gated
+      validation_phases: "fmt,clippy,test,doctest"
   github-hosted-rust-velnor-control:
     name: "Rust · velnor-control · github-hosted — rust-velnor-control"
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-control"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
@@ -630,7 +636,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: "3ea4cac963f4"
+      mbx_compat: b3f51a63e390
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -664,6 +670,7 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: rust-velnor-model
       unit_admission: github-hosted
+      validation_phases: "fmt,clippy,test,doctest"
   velnor-rust-velnor-control:
     name: "Rust · velnor-control · velnor — rust-velnor-control"
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-control"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
@@ -687,6 +694,7 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: rust-velnor-model
       unit_admission: velnor-trust-gated
+      validation_phases: "fmt,clippy,test,doctest"
   github-hosted-rust-velnor-model:
     name: "Rust · velnor-model · github-hosted — rust-velnor-model"
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-model"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
@@ -704,7 +712,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: "4f1bcff55c5e"
+      mbx_compat: ac0e80cc51da
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -732,6 +740,7 @@ jobs:
       unit_platform: linux-x64
       unit_trust: untrusted-ok
       unit_admission: github-hosted
+      validation_phases: "fmt,clippy,test,doctest"
   velnor-rust-velnor-model:
     name: "Rust · velnor-model · velnor — rust-velnor-model"
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-model"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
@@ -754,6 +763,7 @@ jobs:
       unit_platform: linux-x64
       unit_trust: untrusted-ok
       unit_admission: velnor-trust-gated
+      validation_phases: "fmt,clippy,test,doctest"
   github-hosted-rust-velnor-render:
     name: "Rust · velnor-render · github-hosted — rust-velnor-render"
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-render"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
@@ -771,7 +781,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: a86708708123
+      mbx_compat: "627bcc53ad13"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -805,6 +815,7 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: rust-velnor-model
       unit_admission: github-hosted
+      validation_phases: "fmt,clippy,test,doctest"
   velnor-rust-velnor-render:
     name: "Rust · velnor-render · velnor — rust-velnor-render"
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-render"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
@@ -828,6 +839,7 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: rust-velnor-model
       unit_admission: velnor-trust-gated
+      validation_phases: "fmt,clippy,test,doctest"
   github-hosted-rust-velnor-runner:
     name: "Rust · velnor-runner · github-hosted — rust-velnor-runner"
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-runner"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
@@ -845,7 +857,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: "7a4d74b185e3"
+      mbx_compat: "8ec7f343ea18"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -922,6 +934,7 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: "rust-velnor-control,rust-velnor-model"
       unit_admission: github-hosted
+      validation_phases: "fmt,clippy,test,doctest"
   velnor-rust-velnor-runner:
     name: "Rust · velnor-runner · velnor — rust-velnor-runner"
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-runner"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
@@ -945,6 +958,7 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: "rust-velnor-control,rust-velnor-model"
       unit_admission: velnor-trust-gated
+      validation_phases: "fmt,clippy,test,doctest"
   github-hosted-rust-velnor-tools:
     name: "Rust · velnor-tools · github-hosted — rust-velnor-tools"
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-tools"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
@@ -1012,6 +1026,7 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: "rust-velnor-client,rust-velnor-model"
       unit_admission: github-hosted
+      validation_phases: "fmt,clippy,test"
   velnor-rust-velnor-tools:
     name: "Rust · velnor-tools · velnor — rust-velnor-tools"
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-tools"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
@@ -1035,6 +1050,7 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: "rust-velnor-client,rust-velnor-model"
       unit_admission: velnor-trust-gated
+      validation_phases: "fmt,clippy,test"
   github-hosted-rust-velnor-workflow:
     name: "Rust · velnor-workflow · github-hosted — rust-velnor-workflow"
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
@@ -1052,7 +1068,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: "13a355ab0f86"
+      mbx_compat: "8ca12b20166c"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -1211,6 +1227,7 @@ jobs:
       unit_platform: linux-x64
       unit_trust: untrusted-ok
       unit_admission: github-hosted
+      validation_phases: "fmt,clippy,test"
   velnor-rust-velnor-workflow-contract:
     name: "Rust · velnor-workflow-contract · velnor — rust-velnor-workflow-contract"
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnor-workflow-contract"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
@@ -1233,6 +1250,7 @@ jobs:
       unit_platform: linux-x64
       unit_trust: untrusted-ok
       unit_admission: velnor-trust-gated
+      validation_phases: "fmt,clippy,test"
   github-hosted-rust-velnorctl:
     name: "Rust · velnorctl · github-hosted — rust-velnorctl"
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-velnorctl"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
@@ -1250,7 +1268,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       mbx_enabled: true
-      mbx_compat: bda00faa9a52
+      mbx_compat: "6a1deaf2af9c"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -1343,6 +1361,7 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: "rust-velnor-client,rust-velnor-control,rust-velnor-model,rust-velnor-render,rust-velnor-runner"
       unit_admission: github-hosted
+      validation_phases: "fmt,clippy,test,doctest"
   velnor-rust-velnorctl:
     name: "Rust · velnorctl · velnor — rust-velnorctl"
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-render.result == 'success' || needs.velnor-rust-velnor-render.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(needs.plan.outputs.units, '"unit_id":"rust-velnorctl"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
@@ -1366,6 +1385,7 @@ jobs:
       unit_trust: untrusted-ok
       unit_dependencies: "rust-velnor-client,rust-velnor-control,rust-velnor-model,rust-velnor-render,rust-velnor-runner"
       unit_admission: velnor-trust-gated
+      validation_phases: "fmt,clippy,test,doctest"
   github-hosted-rust-production-topology:
     name: "Rust · Rust production topology · github-hosted — rust-production-topology"
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"rust-production-topology"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
