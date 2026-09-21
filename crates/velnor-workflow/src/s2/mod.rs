@@ -1204,7 +1204,7 @@ pub struct ProjectConfig {
     /// Require the generated CI aggregate check to conclude the workflow.
     pub(crate) ci_required: bool,
     /// Status-check contexts the repository ruleset gates on that `ci-pr.yml`
-    /// must expose as job display names.
+    /// or `ci-policy.yml` must expose as job display names.
     pub(crate) ruleset_required_status_checks: Vec<String>,
     /// Status-check contexts the repository ruleset gates on that GitHub Apps
     /// report rather than workflows.
@@ -5451,16 +5451,18 @@ fn validate_unit_provider_coverage(config: &ProjectConfig) -> Result<(), Generat
 }
 
 const CI_PR_WORKFLOW: &str = ".github/workflows/ci-pr.yml";
+const CI_POLICY_WORKFLOW: &str = ".github/workflows/ci-policy.yml";
 
-pub(crate) fn workflow_job_display_names(yaml: &str) -> Result<BTreeSet<String>, GeneratorError> {
+pub(crate) fn workflow_job_display_names(
+    source: &str,
+    yaml: &str,
+) -> Result<BTreeSet<String>, GeneratorError> {
     let doc: Value = serde_yaml::from_str(yaml).map_err(|error| {
-        GeneratorError::usage(format!(
-            "parse {CI_PR_WORKFLOW} for ruleset validation: {error}"
-        ))
+        GeneratorError::usage(format!("parse {source} for ruleset validation: {error}"))
     })?;
     let Some(jobs) = doc.get("jobs").and_then(Value::as_mapping) else {
         return Err(GeneratorError::usage(format!(
-            "{CI_PR_WORKFLOW} is missing a top-level `jobs` mapping"
+            "{source} is missing a top-level `jobs` mapping"
         )));
     };
     let mut names = BTreeSet::new();
@@ -5493,7 +5495,8 @@ pub(crate) fn declared_ruleset_contexts_literal(config: &ProjectConfig) -> Strin
     contexts.into_iter().collect::<Vec<_>>().join(",")
 }
 
-/// Fail closed when a repository ruleset context is absent from `ci-pr.yml`.
+/// Fail closed when a repository ruleset context is absent from the union
+/// of `ci-pr.yml` and `ci-policy.yml` job display names.
 fn validate_ruleset_required_status_checks(
     config: &ProjectConfig,
     files: &BTreeMap<PathBuf, String>,
@@ -5502,16 +5505,19 @@ fn validate_ruleset_required_status_checks(
     if required.is_empty() {
         return Ok(());
     }
-    let path = PathBuf::from(CI_PR_WORKFLOW);
-    let Some(yaml) = files.get(&path) else {
+    let pr_path = PathBuf::from(CI_PR_WORKFLOW);
+    let Some(pr_yaml) = files.get(&pr_path) else {
         // Adopted or release-only surfaces omit the PR aggregate by design.
         return Ok(());
     };
-    let names = workflow_job_display_names(yaml)?;
+    let mut names = workflow_job_display_names(CI_PR_WORKFLOW, pr_yaml)?;
+    if let Some(policy_yaml) = files.get(&PathBuf::from(CI_POLICY_WORKFLOW)) {
+        names.extend(workflow_job_display_names(CI_POLICY_WORKFLOW, policy_yaml)?);
+    }
     for context in required {
         if !names.contains(&context) {
             return Err(GeneratorError::usage(format!(
-                "ruleset required status check `{context}` is absent from {CI_PR_WORKFLOW} job names; found [{}]",
+                "ruleset required status check `{context}` is absent from {CI_PR_WORKFLOW} and {CI_POLICY_WORKFLOW} job names; found [{}]",
                 names.iter().map(String::as_str).collect::<Vec<_>>().join(", ")
             )));
         }
@@ -17263,6 +17269,67 @@ lockfile = true
         assert!(files
             .values()
             .any(|content| content.contains("velnor-workflow run")));
+    }
+
+    #[test]
+    fn ruleset_validation_accepts_ci_pr_and_ci_policy_contexts() {
+        let mut config = scanned_fixture(all_providers());
+        config.ruleset_required_status_checks = vec!["ci-required".to_owned(), "Policy".to_owned()];
+        must(
+            generated_files(&config),
+            "contexts from ci-pr.yml and ci-policy.yml validate",
+        );
+    }
+
+    #[test]
+    fn ruleset_validation_rejects_contexts_absent_from_both_workflows() {
+        let mut config = scanned_fixture(all_providers());
+        config.ruleset_required_status_checks = vec![
+            "ci-required".to_owned(),
+            "Policy".to_owned(),
+            "bogus-context".to_owned(),
+        ];
+        let error = must_fail(
+            generated_files(&config),
+            "a context absent from both workflows must fail validation",
+        );
+        assert!(
+            error.to_string().contains("bogus-context"),
+            "the error names the absent context: {error}"
+        );
+    }
+
+    #[test]
+    fn ruleset_validation_skips_surfaces_without_the_pr_aggregate() {
+        let mut config = scanned_fixture(all_providers());
+        config.ruleset_required_status_checks = vec!["ci-required".to_owned(), "Policy".to_owned()];
+        let files: BTreeMap<PathBuf, String> = BTreeMap::new();
+        must(
+            validate_ruleset_required_status_checks(&config, &files),
+            "surfaces without ci-pr.yml skip validation",
+        );
+    }
+
+    #[test]
+    fn ruleset_validation_has_no_hard_coded_policy_exemption() {
+        let config = scanned_fixture(all_providers());
+        let mut files = must(generated_files(&config), "generate");
+        assert!(
+            files
+                .remove(&PathBuf::from(".github/workflows/ci-policy.yml"))
+                .is_some(),
+            "the fixture renders ci-policy.yml"
+        );
+        let mut declared = config.clone();
+        declared.ruleset_required_status_checks = vec!["Policy".to_owned()];
+        let error = must_fail(
+            validate_ruleset_required_status_checks(&declared, &files),
+            "Policy without a rendered ci-policy.yml must fail validation",
+        );
+        assert!(
+            error.to_string().contains("Policy"),
+            "the error names the absent context: {error}"
+        );
     }
 
     #[test]

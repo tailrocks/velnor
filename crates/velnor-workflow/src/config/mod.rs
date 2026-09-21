@@ -758,8 +758,8 @@ struct PolicySection {
     dco_required: Option<bool>,
     /// Require the generated policy workflow to conclude on a pull request.
     ci_required: Option<bool>,
-    /// Repository-ruleset status-check contexts that `ci-pr.yml` must expose as
-    /// top-level job `name:` values.
+    /// Repository-ruleset status-check contexts that `ci-pr.yml` or
+    /// `ci-policy.yml` must expose as top-level job `name:` values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     ruleset_required_status_checks: Vec<String>,
     /// Repository-ruleset status-check contexts reported by GitHub Apps rather
@@ -1771,7 +1771,7 @@ impl RepoGenerationConfig {
     }
 
     /// Status-check contexts the repository ruleset gates on that `ci-pr.yml`
-    /// must expose as job display names.
+    /// or `ci-policy.yml` must expose as job display names.
     pub(crate) fn ruleset_required_status_checks(&self) -> &[String] {
         &self.policy.ruleset_required_status_checks
     }

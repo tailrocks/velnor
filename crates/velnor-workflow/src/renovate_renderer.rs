@@ -76,7 +76,6 @@ pub(crate) fn render_writer(input: &WriterInput<'_>) -> String {
             velnor-renovate-${{{{ github.repository }}}}-{hash_files}-
             velnor-renovate-${{{{ github.repository }}}}-
       - name: Fix Renovate cache ownership
-        if: steps.renovate-cache.outputs.cache-matched-key != ''
         run: sudo chown -R 12021:0 /tmp/renovate/
 ",
             cache_restore = input.cache_restore,
@@ -339,5 +338,59 @@ fn shell_escape(value: &str) -> String {
         value.to_owned()
     } else {
         format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn writer_input() -> WriterInput<'static> {
+        WriterInput {
+            checkout: "actions/checkout@pin",
+            cache_restore: "actions/cache/restore@pin",
+            cache_save: "actions/cache/save@pin",
+            renovate_action: "renovatebot/github-action@pin",
+            runner: "ubuntu-24.04",
+            dispatch_inputs: "",
+            default_branch: "main",
+            token: "GH_RENOVATE_TOKEN",
+            config_path: "renovate.json",
+            schedule: "0 6 * * *",
+            schedules: &[],
+            repositories: &[],
+            host_rules_secret: None,
+            author: None,
+            signoff: false,
+            allowed_commands: &[],
+            cache: true,
+        }
+    }
+
+    #[test]
+    fn ownership_fix_runs_unconditionally_after_cache_restore() {
+        let workflow = render_writer(&writer_input());
+        // The container user (uid 12021) must own the workspace on cache MISS
+        // too: a restore-gated chown leaves runner-owned directories behind
+        // and Renovate dies with EACCES.
+        assert!(
+            !workflow.contains("cache-matched-key"),
+            "ownership fix must not depend on the restore outcome:\n{workflow}"
+        );
+        let lines: Vec<&str> = workflow.lines().collect();
+        let mut saw_step = false;
+        for pair in lines.windows(2) {
+            if pair[0].contains("Fix Renovate cache ownership") {
+                saw_step = true;
+                assert!(
+                    pair[1].trim_start().starts_with("run:"),
+                    "ownership fix must run unconditionally:\n{workflow}"
+                );
+            }
+        }
+        assert!(
+            saw_step,
+            "writer must keep the ownership fix step:\n{workflow}"
+        );
     }
 }
