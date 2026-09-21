@@ -49,6 +49,36 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// the row so a later redelivery keeps its place.
 pub const DEMAND_STALE_AFTER_SECS: u64 = 300;
 
+/// How long one guard acquisition keeps yielding to older eligible demand
+/// before departing for redelivery.
+///
+/// Strict oldest-first admission means only the head of the queue may
+/// grant, so a younger waiter must outlive the older attempts ahead of
+/// it. A live head acts within milliseconds (one immediate transaction),
+/// and the backoff between retries yields the SQLite lock so the head
+/// can act. Departure parks the demand (see
+/// [`PermitLedger::park_demand`]) rather than leaving a head-blocking
+/// row. Matches the SQLite busy timeout: lock contention already blocks
+/// this long.
+pub const DEFERRED_WAIT_BUDGET: Duration = Duration::from_secs(5);
+
+/// First pause between [`AcquireOutcome::Deferred`] retries; doubles per
+/// consecutive wait.
+pub const DEFERRED_WAIT_MIN: Duration = Duration::from_millis(1);
+
+/// Backoff cap between [`AcquireOutcome::Deferred`] retries.
+pub const DEFERRED_WAIT_MAX: Duration = Duration::from_millis(50);
+
+/// Pause before retrying after `attempt` consecutive [`AcquireOutcome::Deferred`]
+/// outcomes: exponential from [`DEFERRED_WAIT_MIN`], capped at
+/// [`DEFERRED_WAIT_MAX`]. The sleeps yield the SQLite lock — a tight spin
+/// re-locks unfairly and starves the head it waits for.
+#[must_use]
+pub fn deferred_wait(attempt: u32) -> Duration {
+    let scaled = DEFERRED_WAIT_MIN.saturating_mul(1 << attempt.min(10));
+    scaled.min(DEFERRED_WAIT_MAX)
+}
+
 /// A local lane sharing the one host-wide `N`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PermitLane {
@@ -78,12 +108,15 @@ impl PermitLane {
 /// Lifecycle of one durable demand. Only `Eligible` rows take part in the
 /// oldest-first admission decision. A granted row owns a permit; terminal
 /// and cancelled rows cannot block later work or be revived by redelivery.
+/// A waiting row is a departed waiter holding its queue ticket: it blocks
+/// nothing, and redelivery revives it at its original age.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DemandState {
     Eligible,
     Granted,
     Terminal,
     Cancelled,
+    Waiting,
 }
 
 impl DemandState {
@@ -93,6 +126,7 @@ impl DemandState {
             Self::Granted => "granted",
             Self::Terminal => "terminal",
             Self::Cancelled => "cancelled",
+            Self::Waiting => "waiting",
         }
     }
 
@@ -102,6 +136,7 @@ impl DemandState {
             "granted" => Some(Self::Granted),
             "terminal" => Some(Self::Terminal),
             "cancelled" => Some(Self::Cancelled),
+            "waiting" => Some(Self::Waiting),
             _ => None,
         }
     }
@@ -670,8 +705,9 @@ impl PermitLedger {
     ///
     /// On first observation, `first_seen_unix` and a host-wide immutable
     /// sequence are persisted. Redelivery preserves both and refreshes only
-    /// `updated_unix`. If the holder already owns a permit, a newly created
-    /// row starts granted so it cannot block younger demand.
+    /// `updated_unix`; a parked ([`DemandState::Waiting`]) row rejoins the
+    /// queue at its original age. If the holder already owns a permit, a
+    /// newly created row starts granted so it cannot block younger demand.
     pub fn observe_demand(
         &mut self,
         holder: &str,
@@ -713,7 +749,13 @@ impl PermitLedger {
             observed_unix,
             initial_state,
         )?;
-        if matches!(existing.state, DemandState::Eligible | DemandState::Granted) {
+        if existing.state == DemandState::Waiting {
+            tx.execute(
+                "UPDATE permit_demands SET state = 'eligible', updated_unix = ?1
+                 WHERE holder = ?2",
+                params![i64::try_from(observed_unix).unwrap_or(i64::MAX), holder],
+            )?;
+        } else if matches!(existing.state, DemandState::Eligible | DemandState::Granted) {
             tx.execute(
                 "UPDATE permit_demands SET updated_unix = ?1 WHERE holder = ?2",
                 params![i64::try_from(observed_unix).unwrap_or(i64::MAX), holder],
@@ -725,6 +767,25 @@ impl PermitLedger {
         Ok(demand)
     }
 
+    /// Park a departed waiter's demand: it keeps its queue ticket
+    /// (`first_seen_unix`, `sequence`) but no longer head-blocks younger
+    /// eligible demand. Redelivery ([`Self::observe_demand`],
+    /// [`Self::acquire`]) revives it at its original age; without
+    /// redelivery the row is inert. Only an eligible row parks; a permit
+    /// holder's granted row and closed rows are untouched.
+    pub fn park_demand(&mut self, holder: &str) -> Result<bool, LedgerError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE permit_demands SET state = 'waiting', updated_unix = ?1
+             WHERE holder = ?2 AND state = 'eligible'",
+            params![unix_now() as i64, holder],
+        )?;
+        tx.commit()?;
+        Ok(changed > 0)
+    }
+
     /// Cancel an eligible demand that its lane has confirmed is no longer
     /// available upstream. A held permit cannot be cancelled through this
     /// path; cleanup must release it first.
@@ -734,7 +795,7 @@ impl PermitLedger {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let changed = tx.execute(
             "UPDATE permit_demands SET state = 'cancelled', updated_unix = ?1
-             WHERE holder = ?2 AND state = 'eligible'
+             WHERE holder = ?2 AND state IN ('eligible', 'waiting')
                AND NOT EXISTS (SELECT 1 FROM permits WHERE holder = ?2)",
             params![unix_now() as i64, holder],
         )?;
@@ -763,7 +824,8 @@ impl PermitLedger {
     /// is left untouched) and reports [`AcquireOutcome::AlreadyHeld`]. A
     /// fresh holder acquires only when capacity is available and it is the
     /// oldest eligible demand. Permit insertion and the eligible-to-granted
-    /// transition commit together.
+    /// transition commit together. A parked ([`DemandState::Waiting`])
+    /// holder revives at its original age before the admission decision.
     ///
     /// `pid` records the acquiring host process as diagnostic recovery
     /// evidence; lanes whose holders are not host processes pass `None`.
@@ -829,6 +891,13 @@ impl PermitLedger {
             // A granted demand without its permit can only come from an
             // interrupted older release path. It is eligible again because
             // no capacity is currently held for it.
+            tx.execute(
+                "UPDATE permit_demands SET state = 'eligible', updated_unix = ?1
+                 WHERE holder = ?2",
+                params![i64::try_from(now).unwrap_or(i64::MAX), holder],
+            )?;
+        } else if demand.state == DemandState::Waiting {
+            // Redelivery revives a parked demand at its original age.
             tx.execute(
                 "UPDATE permit_demands SET state = 'eligible', updated_unix = ?1
                  WHERE holder = ?2",
@@ -1036,7 +1105,9 @@ impl PermitLedger {
                     params![now, holder],
                 )?;
             }
-            DemandState::Granted => {}
+            // A release never parks: a held permit implies a granted
+            // demand, which a waiting row cannot accompany.
+            DemandState::Granted | DemandState::Waiting => {}
         }
         tx.commit()?;
         Ok(removed > 0)
@@ -1364,6 +1435,87 @@ mod tests {
             AcquireOutcome::Acquired
         );
         assert_eq!(ledger.occupied_by_lane(PermitLane::ScaleSet).unwrap(), 1);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn parked_demand_yields_queue_and_revives_with_age() {
+        let (mut ledger, dir) = temp_ledger("park");
+        ledger.set_max_jobs(1).unwrap();
+        let generation = ledger.generation().unwrap();
+        let now = unix_now();
+
+        // Older demand parks (its waiter departed): it keeps its ticket
+        // but no longer head-blocks younger demand.
+        ledger
+            .observe_demand("older", PermitLane::Native, "", now, now)
+            .unwrap();
+        let ticket = ledger.demand("older").unwrap().unwrap();
+        assert!(ledger.park_demand("older").unwrap());
+        let parked = ledger.demand("older").unwrap().unwrap();
+        assert_eq!(parked.state, DemandState::Waiting);
+        assert_eq!(parked.first_seen_unix, ticket.first_seen_unix);
+        assert_eq!(parked.sequence, ticket.sequence);
+
+        // A younger holder grants past the parked head with free capacity.
+        assert_eq!(
+            ledger
+                .acquire(
+                    "younger",
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    None
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
+
+        // Redelivery revives the parked demand at its original age: it
+        // heads the queue again once capacity frees.
+        assert!(ledger.release("younger").unwrap());
+        assert_eq!(
+            ledger
+                .acquire(
+                    "older",
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    None
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
+        let revived = ledger.demand("older").unwrap().unwrap();
+        assert_eq!(revived.state, DemandState::Granted);
+        assert_eq!(revived.first_seen_unix, ticket.first_seen_unix);
+        assert_eq!(revived.sequence, ticket.sequence);
+
+        // A granted row never parks; a parked row still cancels; a
+        // cancelled row never revives.
+        assert!(!ledger.park_demand("older").unwrap());
+        ledger
+            .observe_demand("gone", PermitLane::Native, "", now, now)
+            .unwrap();
+        assert!(ledger.park_demand("gone").unwrap());
+        assert!(ledger.cancel_demand("gone").unwrap());
+        assert_eq!(
+            ledger.demand("gone").unwrap().unwrap().state,
+            DemandState::Cancelled
+        );
+        assert_eq!(
+            ledger
+                .acquire(
+                    "gone",
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    None
+                )
+                .unwrap(),
+            AcquireOutcome::Closed
+        );
 
         std::fs::remove_dir_all(dir).unwrap();
     }

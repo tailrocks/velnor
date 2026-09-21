@@ -110,6 +110,10 @@ on:
         required: false
         type: boolean
         default: false
+      apple_executor:
+        required: false
+        type: boolean
+        default: false
       unit_platform:
         required: false
         type: string
