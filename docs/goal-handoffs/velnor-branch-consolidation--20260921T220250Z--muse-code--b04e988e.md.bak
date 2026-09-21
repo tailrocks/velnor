@@ -193,7 +193,7 @@ Pre-existing/unrelated changes intentionally untouched: sibling repos, grok work
 `docs/goal-handoffs/supporting/velnor-consolidation-b04e988e/`: `ledger.md` (80K copy of
 `/tmp/velnor-ledger.md`), `original-objective.txt`, `pause-directive.txt`, `p962-report.md`,
 `p1063-review.md`, `policy-mechanic.md`, `audit-goal.md`, `audit-worktree.md`, `audit-branchpr.md`,
-`audit-verify.md`, `audit-handoff-review.md`. Essential material NOT in the diff and how to recover it: recovery bundle
+`audit-verify.md`. Essential material NOT in the diff and how to recover it: recovery bundle
 (local `/tmp/velnor-recovery-20260921.bundle` — see §K nonportable note); b40–b58 per-branch reports
 + recon files (local `/tmp`, summarized in committed ledger copy); session logs (local
 `$HOME/.local/share/muse/...`, volatile across machines).
@@ -391,7 +391,7 @@ After cleanup: re-enumerate worktrees/branches, reconcile with ledger, write dur
 | Full final green-main | NOT RUN | deferred to FIN | — | — |
 
 No full validation campaign run during handoff; only bounded nonmutating reads (audits) + this
-publication's own checks (pause-directive step 7).
+publication's own checks (§7).
 
 ## H. Ordered remaining-work plan
 
@@ -436,7 +436,7 @@ b57 backlog (pagination/masking). Nothing is dropped by being listed here — ea
   PR comments/closes, CI runs (all completed/observed). Repeating reads is safe; side-effecting ops
   (merge/close/delete) must be re-observed fresh at resume, never replayed blind.
 - No deployments, migrations, releases, or infra changes made. Draft handoff PR may trigger CI —
-  recorded, not repaired (pause-directive step 7).
+  recorded, not repaired (§7).
 
 ## J. Fresh-agent resume runbook
 
@@ -469,7 +469,7 @@ agent to pause again, regenerate this handoff, or recursively create another han
 
 ## K. Blockers, omissions, and independent review
 
-**Blockers for this handoff:** NONE (if pause-directive step-7 publication checks pass; else listed there).
+**Blockers for this handoff:** NONE (if §7 publication checks pass; else listed there).
 
 **Omissions / known limits:**
 - Recovery bundle is local-only (`/tmp`, 107M, no remote copy). Deleted-branch history recovery
@@ -485,52 +485,9 @@ agent to pause again, regenerate this handoff, or recursively create another han
 - WT-3 `MERGE_RR`/`COMMIT_EDITMSG` residue: status clean, but interrupted-op metadata possible —
   inspect (read-only) at resume before any checkout/commit there.
 - Full verbatim objective (33K) committed as supporting file rather than inline; §B.1 quotes the core.
-- Handoff PR CI (triggered by publication) is recorded, not repaired — see the §K addendum below.
+- Handoff PR CI (triggered by publication) is recorded, not repaired — see §7.
 
-**Independent review.** Handoff-review agent (read-only, subagent `01a0c607-…`, run
-2026-09-21T22:15–22:19Z, full verdict committed as supporting `audit-handoff-review.md`):
-**FINDINGS (3 + 1 nit), all fixed in this commit.** Verified clean: all 19 ledgered refs live at
-identical SHAs; PR states (#961 CLOSED 20:46:14Z, #962/#1063 OPEN, 15 open PRs); WT-1/2/3/4 present
-+ clean; bundle verify OK; merge-base math; PR #1065 DRAFT/base/auto-merge-off/title/head/body;
-11-file docs-only diff; secrets clean (one benign prose hit); resume path valid; E.6 gates complete.
-Findings: F1 post-audit drift unmapped → fixed by addendum (a) below; F2 handoff-PR CI unrecorded
-+ dangling "§7" refs → fixed by rewording + addendum (b) below; F3 literal placeholders → fixed
-(status READY, timestamps, SHA-slot rewording, this pointer); F4 WT-4 fallback recovery → fixed in
-§E.2. Reviewer assessment: handoff recoverable as-is; no lost work; no incorrect dispositions.
-
-### K-addendum (a): post-audit remote drift (reviewer-observed ~22:15Z, coordinator-confirmed ~22:19Z)
-
-The §E.3 snapshot (19 refs, ~22:05Z) was accurate at observation time. Concurrent publications in
-the 22:08–22:12Z window added refs from *other* handoff/preservation activity (not this goal's work
-product — do NOT delete at resume without owner coordination; §H-1 absorbs them via fresh
-`ls-remote`). Live count at ~22:19Z: 25 refs (19 + this handoff branch + 5 below):
-
-| Ref | Tip | Note |
-|---|---|---|
-| `codex/goal-handoff-2cc4de09` | `958a3e6b` | PR #1064 OPEN DRAFT, another goal's handoff ("Velnor generator activation… [2cc4de09]"); created 22:08:25Z. UNRELATED/other-goal. |
-| `preserve/handoff-1402ca52/velnor-rust-scan` | `01e3ce81` | No PR; commit 22:10:29Z. Publisher id `1402ca52` has no matching `goal-handoff/*` branch — unidentified. UNKNOWN. |
-| `preserve/handoff-1402ca52/velnor-pin-80bc` | `473eb7b6` | No PR; commit 22:10:37Z. Same unidentified publisher. UNKNOWN. |
-| `preserve/stray-runner-header-0abc3675` | `0abc3675` | No PR; commit older (12:24Z) but ref absent from 22:05Z audit → pushed in drift window. UNKNOWN. |
-| `preserve/repin-trial-be78a6d0` | `4300cc63` | No PR; appeared after reviewer's snapshot (absent ~22:15Z, present ~22:19Z). UNKNOWN. |
-
-Open PRs likewise 15 → 17 (#1064 + this #1065). None of these affects recorded goal dispositions.
-
-### K-addendum (b): handoff-PR (#1065) CI record — recorded, not repaired
-
-Run `35661403991` + Policy `35661401701` (docs-only PR): FAIL `docs` (MD032 lint on
-`supporting/…/ledger.md:95` + `runtime digest mismatch`), FAIL `rust-velnor-workflow` (`runtime
-digest mismatch`), FAIL `Policy` (`generated files match but generation inputs changed: scan input
-… in .github/ci/.github-actions-generator-state` — adding `docs/` changed scan inputs), FAIL
-`Control / Required` + `ci-required` (aggregates); PASS bun + planning; rest skip. Per pause rule:
-recorded only, no repair, no product-code changes for the checkpoint. At resume, do NOT treat this
-red as a product signal — it is an artifact of checkpointing docs into a digest-pinned tree.
-
-### K-addendum (c): pause-directive step-7 publication checks
-
-- HANDOFF + 12 supporting files on `goal-handoff/velnor-consolidation-b04e988e`, pushed; local head
-  == remote head == PR #1065 head (verified post-push; SHA in PR body).
-- PR #1065: repo `tailrocks/velnor`, base `main`, `GOAL:` title, full body, DRAFT, auto-merge null.
-- Resume command references the real file on the real branch (reviewer-verified fetchable).
-- All goal workers terminal; handoff agents finished; no implementation continued.
-- Unrelated work untouched (C1, WT-5, siblings, unknown dirs); no merges/deletions/cleanups done.
+**Independent review.** `<reviewer verdict + corrections filled after handoff-review agent runs on
+the published PR; must assess: fresh-agent recoverability, next-action clarity, ledger coverage vs
+discovery, unmapped/unpublished work, cleanup-gate completeness.>`
 
