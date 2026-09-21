@@ -710,6 +710,11 @@ pub struct Unit {
     /// for hand-built configs and non-Rust units.
     #[serde(skip_serializing)]
     pub(crate) toolchain: Option<RustToolchain>,
+    /// The Xcode toolchain the repository pins, as the scan parsed it from
+    /// `.xcode-version`. `None` means unpinned: the probe still records the
+    /// active toolchain, but nothing enforces it.
+    #[serde(skip_serializing)]
+    pub(crate) xcode: Option<XcodeToolchain>,
     /// GitHub Actions `services:` the unit job needs. Generator-only: omitted
     /// from runtime `project.toml` because packaged `velnor-workflow plan`
     /// deny_unknown_fields-rejects unknown unit keys. The runner starts these
@@ -846,6 +851,23 @@ impl RustToolchain {
     }
 }
 
+/// The Xcode toolchain a repository pins, parsed from the root
+/// `.xcode-version` file: one line, `MAJOR.MINOR[.PATCH]`. The probe step
+/// enforces it against `xcodebuild -version` and records the actual build,
+/// so the pin is the whole contract.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct XcodeToolchain {
+    pub(crate) version: String,
+}
+
+impl XcodeToolchain {
+    /// The pin's Xcode version, as `xcodebuild -version` reports it.
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+}
+
 /// Why a cache entry exists. Caches are classified by purpose, never by one
 /// mutually exclusive backend: a compiler-object transport and a Cargo-source
 /// cache answer different questions and must be able to coexist.
@@ -870,6 +892,17 @@ pub(crate) enum CachePurpose {
     /// unit's declared cache contract, so it never reaches the cache-transport
     /// validation a unit contract passes through.
     Toolchains,
+    /// `SwiftPM` dependency downloads and checkouts (the shared `SwiftPM` cache).
+    /// Keyed by the package manifest, resolution files, and toolchain pins;
+    /// `SwiftPM` validates content against the resolution, so restoring them
+    /// never duplicates or poisons compiler state. Never carries build
+    /// outputs: those are [`CachePurpose::XcodeIntermediates`].
+    SwiftPmSources,
+    /// Xcode and `SwiftPM` build intermediates (`DerivedData`, package
+    /// `.build` trees). An acceleration seed only: the build tool still runs
+    /// and validates freshness afterward. Keyed by project/spec inputs plus
+    /// toolchain pins; a toolchain change must invalidate, never reuse.
+    XcodeIntermediates,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1385,15 +1418,33 @@ impl ProjectConfig {
     }
 }
 
+fn toml_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for char in value.chars() {
+        match char {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            other if other.is_control() => {
+                let _ = write!(escaped, "\\u{:04X}", other as u32);
+            }
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
 fn write_toml_string(output: &mut String, name: &str, value: &str) {
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped = toml_escape(value);
     let _ = writeln!(output, "{name} = \"{escaped}\"");
 }
 
 fn write_toml_array(output: &mut String, name: &str, values: &[String]) {
     let values = values
         .iter()
-        .map(|value| format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")))
+        .map(|value| format!("\"{}\"", toml_escape(value)))
         .collect::<Vec<_>>()
         .join(", ");
     let _ = writeln!(output, "{name} = [{values}]");
@@ -1717,6 +1768,10 @@ fn scan_target(
     // render `install_args` the runner's own lock check rejects; refuse it at
     // generation time instead of shipping a failing job.
     crate::s2::primitives::validate_nextest_tools_are_locked(&config.units, &mise_lock_keys)?;
+    // A unit that runs the joined BoltFFI pack while the lock does not pin
+    // its tool id would fail at pack time instead; refuse it at generation
+    // time with the exact missing key.
+    crate::s2::primitives::validate_boltffi_tools_are_locked(&config.units, &mise_lock_keys)?;
     // Every surface that renders a self-hosted lane must name its labels,
     // whether the rest of the contract is scanned or declared.
     validate_provider_selectors(&config)?;
@@ -2816,6 +2871,7 @@ fn apply_unit_row(
             tool_version: row.tool_version().map(str::to_owned),
             mise_tools: row.mise_tools().unwrap_or_default().to_vec(),
             toolchain: None,
+            xcode: None,
             services: Vec::new(),
             trust: row
                 .trust()
@@ -5474,6 +5530,42 @@ pub(crate) fn rust_dependency_needs(
                 })
         })
         .collect()
+}
+
+/// The caller-level `needs` edges for verified product transport: one
+/// producer caller job per prerequisite edge whose product can ride an
+/// artifact on `provider`. Hosted only — local providers share the
+/// workspace, so their consumers rebuild or reuse in place. An edge whose
+/// producer cannot run here, or whose product declares no outputs, yields
+/// no edge: the consumer's guarded rebuild covers it.
+pub(crate) fn product_dependency_needs(
+    provider: provider::ProviderId,
+    unit: &Unit,
+    units: &[Unit],
+) -> Vec<String> {
+    if !matches!(provider, provider::ProviderId::GithubHosted) {
+        return Vec::new();
+    }
+    let mut needs = Vec::new();
+    for prerequisite in &unit.prerequisites {
+        let Some(producer) = units
+            .iter()
+            .find(|candidate| candidate.id == prerequisite.producer)
+        else {
+            continue;
+        };
+        let transportable = producer.products.iter().any(|product| {
+            product.name == prerequisite.product
+                && crate::s2::primitives::product_transport::transport_eligible(product)
+        });
+        if transportable && provider_supports_unit(provider, producer) {
+            let job = unit_job_id(provider, &prerequisite.producer);
+            if !needs.contains(&job) {
+                needs.push(job);
+            }
+        }
+    }
+    needs
 }
 
 /// The GitHub-owned macOS image jobs with `platform = "macos-arm64"` run on.
@@ -10733,6 +10825,7 @@ mod tests {
     #[test]
     fn swift_units_on_the_default_executor_are_named_in_contract_notes() {
         let unit = |id: &str, platform: provider::Platform| Unit {
+            xcode: None,
             id: id.to_owned(),
             label: id.to_owned(),
             kind: UnitKind::Swift,
@@ -11377,6 +11470,396 @@ mod tests {
         assert!(
             bridge.platform == provider::Platform::MacosArm64,
             "a binaryTarget package is Apple-bound"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn swift_package_without_test_targets_emits_build_only_commands() {
+        let root = temporary_repository("swift-build-only");
+        must(
+            fs::create_dir_all(root.join("Sources/Tool")),
+            "create Swift sources",
+        );
+        must(
+            fs::write(
+                root.join("Package.swift"),
+                "// swift-tools-version: 6.2\nlet package = Package(targets: [.executableTarget(name: \"Tool\")])\n",
+            ),
+            "write Package.swift",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan Swift repository",
+        );
+        let swift = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift),
+            "Swift unit",
+        );
+        assert_eq!(swift.pr_commands.len(), 1, "{:?}", swift.pr_commands);
+        assert!(swift.pr_commands[0].contains("swift build"));
+        assert!(
+            config
+                .analysis
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("build-only")),
+            "{:?}",
+            config.analysis.limitations
+        );
+        assert_eq!(swift.tool_version.as_deref(), Some("6.2"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn swift_package_with_test_targets_keeps_test_command() {
+        let root = temporary_repository("swift-with-tests");
+        must(
+            fs::create_dir_all(root.join("Sources/Tool")),
+            "create Swift sources",
+        );
+        must(
+            fs::write(
+                root.join("Package.swift"),
+                "// swift-tools-version: 6.2\nlet package = Package(targets: [.executableTarget(name: \"Tool\"), .testTarget(name: \"ToolTests\", dependencies: [\"Tool\"])])\n",
+            ),
+            "write Package.swift",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan Swift repository",
+        );
+        let swift = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift),
+            "Swift unit",
+        );
+        assert_eq!(swift.pr_commands.len(), 2, "{:?}", swift.pr_commands);
+        assert!(swift
+            .pr_commands
+            .iter()
+            .any(|command| command.contains("swift test")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn swift_missing_local_binary_target_names_the_gap() {
+        let root = temporary_repository("swift-missing-binary");
+        must(
+            fs::write(
+                root.join("Package.swift"),
+                "let package = Package(targets: [.binaryTarget(name: \"BridgeFFI\", path: \"Frameworks/Bridge.xcframework\")])\n",
+            ),
+            "write Package.swift",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan Swift repository",
+        );
+        let swift = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift),
+            "Swift unit",
+        );
+        assert_eq!(swift.platform, provider::Platform::MacosArm64);
+        assert!(
+            config.analysis.limitations.iter().any(|limitation| {
+                limitation.contains("BridgeFFI") && limitation.contains("no tracked file")
+            }),
+            "{:?}",
+            config.analysis.limitations
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn swift_tracked_bundle_satisfies_local_binary_target() {
+        let root = temporary_repository("swift-tracked-binary");
+        must(
+            fs::write(
+                root.join("Package.swift"),
+                "let package = Package(targets: [.binaryTarget(name: \"BridgeFFI\", path: \"Frameworks/Bridge.xcframework\")])\n",
+            ),
+            "write Package.swift",
+        );
+        must(
+            fs::create_dir_all(root.join("Frameworks/Bridge.xcframework")),
+            "create tracked bundle",
+        );
+        must(
+            fs::write(
+                root.join("Frameworks/Bridge.xcframework/Info.plist"),
+                "<plist/>\n",
+            ),
+            "write bundle marker",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan Swift repository",
+        );
+        assert!(
+            !config
+                .analysis
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("BridgeFFI")),
+            "{:?}",
+            config.analysis.limitations
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn swift_remote_binary_target_stays_portable_with_provenance_note() {
+        let root = temporary_repository("swift-remote-binary");
+        must(
+            fs::write(
+                root.join("Package.swift"),
+                "let package = Package(targets: [.binaryTarget(name: \"Remote\", url: \"https://example.com/Remote.xcframework.zip\", checksum: \"abc\")])\n",
+            ),
+            "write Package.swift",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan Swift repository",
+        );
+        let swift = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift),
+            "Swift unit",
+        );
+        assert_eq!(swift.platform, provider::Platform::LinuxX64);
+        assert!(
+            config
+                .analysis
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("remote binary target")),
+            "{:?}",
+            config.analysis.limitations
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn swift_unresolved_binary_target_is_classified_honestly() {
+        let root = temporary_repository("swift-unresolved-binary");
+        must(
+            fs::write(
+                root.join("Package.swift"),
+                "let package = Package(targets: [.binaryTarget(name: \"Mystery\", path: artifactPath)])\n",
+            ),
+            "write Package.swift",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan Swift repository",
+        );
+        assert!(
+            config.analysis.limitations.iter().any(|limitation| {
+                limitation.contains("Mystery") && limitation.contains("cannot be classified")
+            }),
+            "{:?}",
+            config.analysis.limitations
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn xcodegen_spec_only_discovers_the_app() {
+        let root = temporary_repository("xcodegen-app");
+        must(
+            fs::create_dir_all(root.join("client")),
+            "create spec directory",
+        );
+        must(
+            fs::write(
+                root.join("client/project.yml"),
+                "name: Widget\noptions:\n  minimumXcodeGenVersion: 2.46.0\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n  WidgetAppTests:\n    type: bundle.unit-test\n    platform: macOS\nschemes:\n  WidgetApp:\n    build:\n      targets:\n        WidgetApp: all\n    test:\n      targets:\n        - WidgetAppTests\n",
+            ),
+            "write project.yml",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan repository",
+        );
+        assert!(
+            config
+                .analysis
+                .detected
+                .iter()
+                .any(|surface| surface == "xcodegen:client/project.yml"),
+            "{:?}",
+            config.analysis.detected
+        );
+        let app = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift && unit.id.contains("xcodegen")),
+            "XcodeGen app unit",
+        );
+        assert_eq!(app.platform, provider::Platform::MacosArm64);
+        assert_eq!(app.tool_version.as_deref(), Some("2.46.0"));
+        assert_eq!(app.pr_commands.len(), 3, "{:?}", app.pr_commands);
+        assert!(app.pr_commands[0].contains("xcodegen generate"));
+        assert!(app.pr_commands[1].contains("CODE_SIGNING_ALLOWED=NO build"));
+        assert!(app.pr_commands[2].contains("CODE_SIGNING_ALLOWED=NO test"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn xcodegen_include_cycle_keeps_the_spec_with_a_diagnostic() {
+        let root = temporary_repository("xcodegen-cycle");
+        must(
+            fs::write(
+                root.join("project.yml"),
+                "name: Widget\ninclude: part.yml\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n",
+            ),
+            "write project.yml",
+        );
+        must(
+            fs::write(root.join("part.yml"), "include: project.yml\n"),
+            "write part.yml",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan repository",
+        );
+        assert!(
+            config.analysis.limitations.iter().any(|limitation| {
+                limitation.contains("project.yml -> part.yml -> project.yml")
+            }),
+            "{:?}",
+            config.analysis.limitations
+        );
+        assert!(
+            config.units.iter().any(|unit| unit.id.contains("xcodegen")),
+            "the cycle must not drop the app unit"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn foreign_project_yml_is_rejected_explicitly() {
+        let root = temporary_repository("foreign-project-yml");
+        must(
+            fs::write(root.join("project.yml"), "version: 1\njobs:\n  test: {}\n"),
+            "write project.yml",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan repository",
+        );
+        assert!(
+            config.analysis.limitations.iter().any(|limitation| {
+                limitation.contains("project.yml")
+                    && limitation.contains("not a recognized XcodeGen document")
+            }),
+            "{:?}",
+            config.analysis.limitations
+        );
+        assert!(
+            !config.units.iter().any(|unit| unit.id.contains("xcodegen")),
+            "a foreign spec must not produce an app unit"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn committed_project_with_schemes_covers_the_spec() {
+        let root = temporary_repository("xcodegen-shadowed");
+        must(
+            fs::create_dir_all(root.join("client/Widget.xcodeproj/xcshareddata/xcschemes")),
+            "create committed schemes",
+        );
+        must(
+            fs::write(
+                root.join("client/Widget.xcodeproj/xcshareddata/xcschemes/Widget.xcscheme"),
+                "<Scheme></Scheme>\n",
+            ),
+            "write scheme",
+        );
+        must(
+            fs::write(
+                root.join("client/project.yml"),
+                "name: Widget\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n",
+            ),
+            "write project.yml",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan repository",
+        );
+        assert!(
+            !config.units.iter().any(|unit| unit.id.contains("xcodegen")),
+            "the committed project must win deduplication"
+        );
+        assert!(
+            config.analysis.limitations.iter().any(|limitation| {
+                limitation.contains("Widget.xcodeproj") && limitation.contains("spec drift")
+            }),
+            "{:?}",
+            config.analysis.limitations
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -12853,6 +13336,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "scanned Rust toolchain",
         );
         config.units.push(Unit {
+            xcode: None,
             id: "rust-declared-lane-only".to_owned(),
             label: "Rust declared lane only".to_owned(),
             kind: UnitKind::Rust,
@@ -12881,6 +13365,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             prepared_tools: Vec::new(),
         });
         config.units.push(Unit {
+            xcode: None,
             id: "rust-declared-base".to_owned(),
             label: "Rust declared base".to_owned(),
             kind: UnitKind::Rust,
@@ -12909,6 +13394,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             prepared_tools: Vec::new(),
         });
         config.units.push(Unit {
+            xcode: None,
             id: "rust-declared-mise-free".to_owned(),
             label: "Rust declared mise free".to_owned(),
             kind: UnitKind::Rust,
@@ -13287,6 +13773,7 @@ channel = "stable"
     #[test]
     fn validate_unit_phases_rejects_misaligned_and_check_shapes() {
         let phased_unit = || Unit {
+            xcode: None,
             id: "rust-app".to_owned(),
             label: "rust-app".to_owned(),
             kind: UnitKind::Rust,
@@ -14169,7 +14656,7 @@ lockfile = true
 
     fn assert_report_action_template(action: &str) {
         for needle in [
-            "schema_version: 2",
+            "schema_version: 3",
             "runner_setup_seconds:",
             "selection_transport_seconds:",
             "tool_bootstrap_seconds:",
@@ -14180,16 +14667,21 @@ lockfile = true
             "jq -nc",
             "VELNOR_CI_REPORT ",
             "cache_outcomes:",
-            "classify_gha_cache()",
-            "classify_complete_cache_keys()",
+            "layer_declared()",
+            "cache_outcome_for()",
+            "compatible_seed",
+            "not_run",
             "cache_declarations_json=",
             "host_warm_layers:",
             "VELNOR_HOST_WARM_LAYERS: ${{ inputs.host_warm_layers }}",
             "VELNOR_CI_LANE: ${{ inputs.ci_lane }}",
+            "VELNOR_CACHE_DECLARED_LAYERS: ${{ inputs.cache_declared_layers }}",
+            "VELNOR_CACHE_RUSTUP_OUTCOME: ${{ inputs.cache_rustup_outcome }}",
             "VELNOR_CACHE_RUSTUP_PRIMARY: ${{ inputs.cache_rustup_primary }}",
             "VELNOR_CACHE_MBX_HIT: ${{ inputs.cache_mbx_hit }}",
             "VELNOR_CACHE_MBX_MATCHED: ${{ inputs.cache_mbx_matched }}",
-            "::warning::Cold cache layer(s)",
+            "::warning::Cache miss layer(s)",
+            "::warning::Invalid cache layer(s)",
             "VELNOR_CONTEXT_RUN_STARTED_AT: ${{ github.run_started_at }}",
             "VELNOR_RUN_STARTED_AT",
             "VELNOR_JOB_QUEUED_AT",
@@ -14209,6 +14701,13 @@ lockfile = true
         }
         for forbidden in [
             "schema_version: 1",
+            "schema_version: 2",
+            "classify_gha_cache()",
+            "classify_complete_cache_keys()",
+            "classify_mbx()",
+            "echo cold",
+            "echo prefix",
+            "Cold cache layer(s)",
             "grep -qiE 'exact hit'",
             "grep -qiE 'warm start'",
             "grep -qiE '(^|[^a-z])miss([^a-z]|$)'",
@@ -14523,24 +15022,130 @@ lockfile = true
             "github-cache-outcomes",
             &[
                 ("VELNOR_CI_LANE", "github"),
+                (
+                    "VELNOR_CACHE_DECLARED_LAYERS",
+                    "rustup,mold,cargo,mbx,docker_seed",
+                ),
+                ("VELNOR_CACHE_RUSTUP_OUTCOME", "success"),
                 ("VELNOR_CACHE_RUSTUP_PRIMARY", "velnor-rustup-Linux-X64-abc"),
                 ("VELNOR_CACHE_RUSTUP_MATCHED", "velnor-rustup-Linux-X64-abc"),
+                ("VELNOR_CACHE_MOLD_OUTCOME", "success"),
                 ("VELNOR_CACHE_MOLD_PRIMARY", "velnor-mold-2.42.0-Linux-X64"),
                 ("VELNOR_CACHE_MOLD_MATCHED", "velnor-mold-2.42.0-Linux"),
+                ("VELNOR_CACHE_CARGO_OUTCOME", "success"),
                 ("VELNOR_CACHE_CARGO_PRIMARY", "ci-Linux-rust-deadbeef"),
                 ("VELNOR_CACHE_CARGO_MATCHED", ""),
+                ("VELNOR_CACHE_MBX_OUTCOME", "success"),
                 ("VELNOR_CACHE_MBX_HIT", "false"),
+                ("VELNOR_CACHE_DOCKER_SEED_OUTCOME", "skipped"),
             ],
             &[
                 ("rustup", "exact"),
-                ("mold", "prefix"),
-                ("cargo", "cold"),
+                ("mold", "compatible_seed"),
+                ("cargo", "miss"),
                 ("mbx", "unknown"),
+                ("docker_seed", "not_run"),
             ],
         );
         assert_cache_outcomes(
             "github-matched-without-primary",
-            &[("VELNOR_CACHE_CARGO_MATCHED", "matched-only")],
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "cargo"),
+                ("VELNOR_CACHE_CARGO_MATCHED", "matched-only"),
+            ],
+            &[("cargo", "unknown")],
+        );
+    }
+
+    fn assert_cache_lifecycle_outcomes() {
+        assert_cache_outcomes(
+            "all-layers-disabled",
+            &[("VELNOR_CI_LANE", "github")],
+            &[
+                ("rustup", "disabled"),
+                ("mold", "disabled"),
+                ("cargo", "disabled"),
+                ("mbx", "disabled"),
+                ("docker_seed", "disabled"),
+            ],
+        );
+        assert_cache_outcomes(
+            "partial-declaration-disables-the-rest",
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "cargo"),
+                ("VELNOR_CACHE_CARGO_OUTCOME", "success"),
+                ("VELNOR_CACHE_CARGO_PRIMARY", "ci-Linux-rust-deadbeef"),
+                ("VELNOR_CACHE_CARGO_MATCHED", "ci-Linux-rust-deadbeef"),
+            ],
+            &[
+                ("rustup", "disabled"),
+                ("mold", "disabled"),
+                ("cargo", "exact"),
+                ("mbx", "disabled"),
+                ("docker_seed", "disabled"),
+            ],
+        );
+        assert_cache_outcomes(
+            "failed-restore-never-completed",
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "cargo"),
+                ("VELNOR_CACHE_CARGO_OUTCOME", "failure"),
+            ],
+            &[("cargo", "not_run")],
+        );
+        assert_cache_outcomes(
+            "miss-that-saved-populates-later-runs",
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "cargo"),
+                ("VELNOR_CACHE_CARGO_OUTCOME", "success"),
+                ("VELNOR_CACHE_CARGO_PRIMARY", "ci-Linux-rust-deadbeef"),
+                ("VELNOR_CACHE_CARGO_SAVED", "true"),
+            ],
+            &[("cargo", "saved")],
+        );
+        assert_cache_outcomes(
+            "match-wins-over-save-evidence",
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "cargo"),
+                ("VELNOR_CACHE_CARGO_OUTCOME", "success"),
+                ("VELNOR_CACHE_CARGO_PRIMARY", "ci-Linux-rust-deadbeef"),
+                ("VELNOR_CACHE_CARGO_MATCHED", "ci-Linux-rust-deadbeef"),
+                ("VELNOR_CACHE_CARGO_SAVED", "true"),
+            ],
+            &[("cargo", "exact")],
+        );
+        assert_cache_outcomes(
+            "failed-verification-invalidates-restore",
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "cargo"),
+                ("VELNOR_CACHE_CARGO_OUTCOME", "success"),
+                ("VELNOR_CACHE_CARGO_PRIMARY", "ci-Linux-rust-deadbeef"),
+                ("VELNOR_CACHE_CARGO_MATCHED", "ci-Linux-rust-deadbeef"),
+                ("VELNOR_CACHE_CARGO_VERIFIED", "false"),
+            ],
+            &[("cargo", "invalid")],
+        );
+        assert_cache_outcomes(
+            "keys-on-undeclared-layer-contradict-plan",
+            &[("VELNOR_CACHE_CARGO_PRIMARY", "ci-Linux-rust-deadbeef")],
+            &[("cargo", "unknown")],
+        );
+        assert_cache_outcomes(
+            "keys-on-skipped-step-contradict-outcome",
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "cargo"),
+                ("VELNOR_CACHE_CARGO_OUTCOME", "skipped"),
+                ("VELNOR_CACHE_CARGO_PRIMARY", "ci-Linux-rust-deadbeef"),
+            ],
+            &[("cargo", "unknown")],
+        );
+        assert_cache_outcomes(
+            "corrupt-step-outcome-stays-unknown",
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "cargo"),
+                ("VELNOR_CACHE_CARGO_OUTCOME", "stuck"),
+                ("VELNOR_CACHE_CARGO_PRIMARY", "ci-Linux-rust-deadbeef"),
+            ],
             &[("cargo", "unknown")],
         );
     }
@@ -14549,15 +15154,19 @@ lockfile = true
         assert_cache_outcomes(
             "mbx-explicit-prefix",
             &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_OUTCOME", "success"),
                 ("VELNOR_CACHE_MBX_HIT", "false"),
                 ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
                 ("VELNOR_CACHE_MBX_MATCHED", "primary-prefix"),
             ],
-            &[("mbx", "prefix")],
+            &[("mbx", "compatible_seed")],
         );
         assert_cache_outcomes(
             "mbx-false-with-equal-keys",
             &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_OUTCOME", "success"),
                 ("VELNOR_CACHE_MBX_HIT", "false"),
                 ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
                 ("VELNOR_CACHE_MBX_MATCHED", "primary"),
@@ -14567,6 +15176,8 @@ lockfile = true
         assert_cache_outcomes(
             "mbx-matched-without-primary",
             &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_OUTCOME", "success"),
                 ("VELNOR_CACHE_MBX_HIT", "false"),
                 ("VELNOR_CACHE_MBX_MATCHED", "matched-only"),
             ],
@@ -14575,6 +15186,8 @@ lockfile = true
         assert_cache_outcomes(
             "mbx-explicit-exact",
             &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_OUTCOME", "success"),
                 ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
                 ("VELNOR_CACHE_MBX_MATCHED", "primary"),
             ],
@@ -14586,6 +15199,8 @@ lockfile = true
         assert_cache_outcomes(
             "mbx-boolean-exact-without-matched-key",
             &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_OUTCOME", "success"),
                 ("VELNOR_CACHE_MBX_HIT", "true"),
                 ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
             ],
@@ -14593,12 +15208,17 @@ lockfile = true
         );
         assert_cache_outcomes(
             "mbx-boolean-exact-without-keys",
-            &[("VELNOR_CACHE_MBX_HIT", "true")],
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_HIT", "true"),
+            ],
             &[("mbx", "unknown")],
         );
         assert_cache_outcomes(
             "mbx-true-with-different-keys",
             &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_OUTCOME", "success"),
                 ("VELNOR_CACHE_MBX_HIT", "true"),
                 ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
                 ("VELNOR_CACHE_MBX_MATCHED", "primary-prefix"),
@@ -14608,11 +15228,21 @@ lockfile = true
         assert_cache_outcomes(
             "mbx-invalid-boolean",
             &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_OUTCOME", "success"),
                 ("VELNOR_CACHE_MBX_HIT", "TRUE"),
                 ("VELNOR_CACHE_MBX_PRIMARY", "primary"),
                 ("VELNOR_CACHE_MBX_MATCHED", "primary"),
             ],
             &[("mbx", "unknown")],
+        );
+        assert_cache_outcomes(
+            "mbx-skipped-restore-never-completed",
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_OUTCOME", "skipped"),
+            ],
+            &[("mbx", "not_run")],
         );
     }
 
@@ -14622,7 +15252,10 @@ lockfile = true
             &[],
             None,
             None,
-            &[("VELNOR_CACHE_MBX_HIT", "false")],
+            &[
+                ("VELNOR_CACHE_DECLARED_LAYERS", "mbx"),
+                ("VELNOR_CACHE_MBX_HIT", "false"),
+            ],
             Some("exact hit\nwarm start\nmiss\n"),
         );
         assert_eq!(
@@ -14640,14 +15273,21 @@ lockfile = true
             &[
                 ("VELNOR_CI_LANE", "velnor"),
                 ("VELNOR_HOST_WARM_LAYERS", "rustup,mold,mbx,cargo"),
+                ("VELNOR_CACHE_DECLARED_LAYERS", "rustup,mold,mbx,cargo"),
             ],
         );
-        for layer in ["rustup", "cargo"] {
-            assert!(report["cache_outcomes"][layer].is_null(), "{layer}");
+        // The Velnor lane declares host-warm layers but renders no restore
+        // steps to observe: declared but unobserved, never disabled.
+        for layer in ["rustup", "cargo", "mbx"] {
+            assert_eq!(
+                report["cache_outcomes"][layer],
+                serde_json::json!("unknown"),
+                "{layer}"
+            );
         }
         assert_eq!(
-            report["cache_outcomes"]["mbx"],
-            serde_json::json!("unknown")
+            report["cache_outcomes"]["docker_seed"],
+            serde_json::json!("disabled")
         );
         assert_eq!(
             report["cache_declarations"]["host_warm_layers"],
@@ -14658,6 +15298,7 @@ lockfile = true
     #[test]
     fn report_action_classifies_cache_outcomes_for_github_and_velnor_lanes() {
         assert_github_cache_outcomes();
+        assert_cache_lifecycle_outcomes();
         assert_mbx_key_cache_outcomes();
         assert_mbx_boolean_cache_outcomes();
         assert_compiler_log_does_not_classify_mbx();
@@ -17438,6 +18079,7 @@ lockfile = true
         ];
         for kind in kinds {
             let mut unit = Unit {
+                xcode: None,
                 id: format!("{kind:?}"),
                 label: format!("{kind:?}"),
                 kind,
@@ -17527,6 +18169,7 @@ lockfile = true
         let marker = root.join("execution-order");
         let marker = shell_quote(&marker.to_string_lossy());
         let unit = |id: &str, command: String, depends_on: Vec<String>| Unit {
+            xcode: None,
             id: id.to_owned(),
             label: id.to_owned(),
             kind: UnitKind::Rust,
@@ -19427,6 +20070,7 @@ lockfile = true
             "scanned Rust unit",
         );
         config.units.push(Unit {
+            xcode: None,
             id: "rust-mise-tools".to_owned(),
             label: "Rust mise tools".to_owned(),
             kind: UnitKind::Rust,
@@ -19761,6 +20405,7 @@ lockfile = true
             .find(|unit| unit.kind == UnitKind::Rust)
             .and_then(|unit| unit.toolchain.clone());
         config.units.push(Unit {
+            xcode: None,
             id: "rust-dependency-policy".to_owned(),
             label: "Rust dependency policy".to_owned(),
             kind: UnitKind::Rust,
@@ -19883,6 +20528,7 @@ lockfile = true
         config.units[rust_index].pinned_lockfile = true;
         let toolchain = config.units[rust_index].toolchain.clone();
         config.units.push(Unit {
+            xcode: None,
             id: "rust-dependency-policy".to_owned(),
             label: "Rust dependency policy".to_owned(),
             kind: UnitKind::Rust,
@@ -19979,6 +20625,7 @@ lockfile = true
     #[test]
     fn cargo_fetch_roots_deduplicate_workspace_members_and_keep_independent_lockfiles() {
         let workspace_member = |id: &str, root: &str| Unit {
+            xcode: None,
             id: id.to_owned(),
             label: format!("Rust crate ({id})"),
             kind: UnitKind::Rust,
@@ -20081,6 +20728,7 @@ lockfile = true
     #[test]
     fn velnor_dependency_closure_adds_direct_depends_on_needs_edges() {
         let rust_unit = |id: &str, depends_on: Vec<&str>| Unit {
+            xcode: None,
             id: id.to_owned(),
             label: format!("Rust crate ({id})"),
             kind: UnitKind::Rust,
@@ -20172,6 +20820,7 @@ lockfile = true
                          workspace_check: bool,
                          commands: Vec<&str>,
                          depends_on: Vec<&str>| Unit {
+            xcode: None,
             id: id.to_owned(),
             label: format!("Rust crate ({id})"),
             kind: UnitKind::Rust,
@@ -20348,6 +20997,7 @@ lockfile = true
             serial_stack_groups: true,
             units: vec![
                 Unit {
+                    xcode: None,
                     id: "bun-root".to_owned(),
                     label: "Bun".to_owned(),
                     kind: UnitKind::Bun,
@@ -20376,6 +21026,7 @@ lockfile = true
                     prepared_tools: Vec::new(),
                 },
                 Unit {
+                    xcode: None,
                     id: "docs".to_owned(),
                     label: "Documentation".to_owned(),
                     kind: UnitKind::Docs,
@@ -23384,5 +24035,71 @@ lockfile = true
             "a rejected config must not leave a state file"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn product_dependency_needs_names_transportable_producer_jobs_on_hosted() {
+        let unit = |id: &str| Unit {
+            xcode: None,
+            id: id.to_owned(),
+            label: id.to_owned(),
+            kind: UnitKind::Rust,
+            root: ".".to_owned(),
+            watch: Vec::new(),
+            pr_commands: vec!["cargo test --locked".to_owned()],
+            full_commands: vec!["cargo test --locked".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
+            depends_on: Vec::new(),
+            pinned_lockfile: false,
+            cache: None,
+            tool_version: None,
+            mise_tools: Vec::new(),
+            toolchain: None,
+            services: Vec::new(),
+            trust: provider::TrustReq::UntrustedOk,
+            capabilities: provider::Capabilities::default(),
+            workspace_check: false,
+            platform: provider::Platform::LinuxX64,
+            products: Vec::new(),
+            prerequisites: Vec::new(),
+            docker_contexts: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            mbx: None,
+            prepared_tools: Vec::new(),
+        };
+        let product = |name: &str, outputs: &[&str]| platform::NamedProduct {
+            name: name.to_owned(),
+            outputs: outputs.iter().map(ToString::to_string).collect(),
+            ..Default::default()
+        };
+        let edge = |producer: &str, product: &str| platform::Prerequisite {
+            producer: producer.to_owned(),
+            product: product.to_owned(),
+            ..Default::default()
+        };
+        let mut producer = unit("rust-ffi");
+        producer.products = vec![
+            product("xcframework", &["native/out/lib.xcframework"]),
+            product("sourceless", &[]),
+        ];
+        let mut consumer = unit("rust-app");
+        consumer.prerequisites = vec![
+            edge("rust-ffi", "xcframework"),
+            edge("rust-ffi", "sourceless"),
+            edge("rust-missing", "xcframework"),
+        ];
+        let units = vec![producer, consumer.clone()];
+        assert_eq!(
+            product_dependency_needs(ProviderId::GithubHosted, &consumer, &units),
+            vec![unit_job_id(ProviderId::GithubHosted, "rust-ffi")],
+            "only the output-declaring edge becomes a caller need"
+        );
+        for provider in [ProviderId::Velnor, ProviderId::GithubSelfHosted] {
+            assert!(
+                product_dependency_needs(provider, &consumer, &units).is_empty(),
+                "{provider:?} shares the workspace, so it needs no producer edge"
+            );
+        }
     }
 }

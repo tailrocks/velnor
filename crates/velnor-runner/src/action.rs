@@ -1273,6 +1273,9 @@ fn is_local_action_reference(name: Option<&str>, path: Option<&str>) -> bool {
 }
 
 fn local_action_path<'a>(name: Option<&'a str>, path: Option<&'a str>) -> Option<&'a str> {
+    if name.is_some_and(|n| !n.starts_with('.') && n.contains('/')) {
+        return None;
+    }
     path.filter(|value| value.starts_with('.'))
         .or_else(|| name.filter(|value| value.starts_with('.')))
 }
@@ -2330,6 +2333,43 @@ runs:
             Path::new("/tmp/workspace").join(".github/actions/aggregate-needs")
         );
         assert_eq!(plans[0].inputs["workflow-label"], "CI");
+    }
+
+    #[test]
+    fn remote_repository_action_with_dot_subpath_not_treated_as_local() {
+        assert_eq!(
+            local_action_path(
+                Some("tailrocks/velnor"),
+                Some(".github/actions/report-velnor-ci-outcomes")
+            ),
+            None
+        );
+        assert!(!is_local_action_reference(
+            Some("tailrocks/velnor"),
+            Some(".github/actions/report-velnor-ci-outcomes")
+        ));
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "report",
+                "reference": {
+                    "type": "Repository",
+                    "name": "tailrocks/velnor",
+                    "ref": "8b8f1cbe03427227e9d04301de530b3e744110f4",
+                    "path": ".github/actions/report-velnor-ci-outcomes"
+                }
+            }
+        ]))
+        .unwrap();
+        let local_plans = local_action_plans(&steps, Path::new("/tmp/workspace")).unwrap();
+        assert!(local_plans.is_empty());
+
+        let repo_plans = repository_action_plans(&steps, Path::new("/tmp/actions")).unwrap();
+        assert_eq!(repo_plans.len(), 1);
+        assert_eq!(repo_plans[0].repository, "tailrocks/velnor");
+        assert_eq!(
+            repo_plans[0].source_path.as_deref(),
+            Some(".github/actions/report-velnor-ci-outcomes")
+        );
     }
 
     #[test]

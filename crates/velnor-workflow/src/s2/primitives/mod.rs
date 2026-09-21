@@ -19,6 +19,7 @@ mod package_release;
 mod pipeline;
 mod plan;
 pub(crate) mod prepared_tools;
+pub(crate) mod product_transport;
 mod providers;
 mod regen;
 pub(crate) mod release;
@@ -43,8 +44,8 @@ pub(crate) use ir::{
     docker_build_token_env_for_members, render_cargo_source_preparation,
     render_mutable_mount_seed_restore_for_unit, render_pinned_toolchain_steps,
     render_retained_output_cache_note, trusted_cache_save_expression,
-    validate_nextest_tools_are_locked, ProviderAdmission, WorkflowIr, WorkflowKind,
-    D19_PIN_FETCH_COMMANDS, GITHUB_WORKFLOW_BYTE_LIMIT,
+    validate_boltffi_tools_are_locked, validate_nextest_tools_are_locked, ProviderAdmission,
+    WorkflowIr, WorkflowKind, D19_PIN_FETCH_COMMANDS, GITHUB_WORKFLOW_BYTE_LIMIT,
 };
 
 #[cfg(test)]
@@ -215,7 +216,12 @@ impl CacheBackend {
                     // through this match. Docker seeds render their own lifecycle.
                     // Refuse rather than silently enable either non-generic cache.
                     None | Some(CachePurpose::Toolchains | CachePurpose::DockerSeed) => false,
-                    Some(CachePurpose::CargoSources | CachePurpose::Generic) => true,
+                    Some(
+                        CachePurpose::CargoSources
+                        | CachePurpose::Generic
+                        | CachePurpose::SwiftPmSources
+                        | CachePurpose::XcodeIntermediates,
+                    ) => true,
                     Some(CachePurpose::Outputs) => {
                         !ir.uses_mr_boxington(unit)
                             || unit

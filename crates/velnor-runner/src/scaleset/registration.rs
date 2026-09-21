@@ -179,7 +179,7 @@ async fn get_or_create_by_name(
                 runner_group_name: group_name.to_owned(),
                 labels: desired_labels(&plan.labels),
                 runner_setting: RunnerSetting::default(),
-                created_on: String::new(),
+                created_on: "0001-01-01T00:00:00Z".to_string(),
                 runner_jit_config_url: String::new(),
                 statistics: None,
             };

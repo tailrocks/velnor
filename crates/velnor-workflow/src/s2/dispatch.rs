@@ -26,6 +26,8 @@ const RUNTIME_COMMANDS: &[&str] = &[
     "version",
     "closure",
     "prepared-tool-install",
+    "stage-product",
+    "verify-product",
     "cache-plan",
     "aggregate",
     "select",
@@ -264,5 +266,17 @@ mod tests {
     fn version_and_closure_stay_put() {
         assert!(!wants_s2(&args(&["version"])));
         assert!(!wants_s2(&args(&["closure"])));
+    }
+
+    #[test]
+    fn product_transport_subcommands_route_as_runtime_commands() {
+        // Membership pins the bridge peek: without it the schema-1 parser
+        // would reject the transport subcommands before `try_run` sees them.
+        for command in ["stage-product", "verify-product"] {
+            assert!(
+                RUNTIME_COMMANDS.contains(&command),
+                "{command} routes as a binary-only runtime command"
+            );
+        }
     }
 }

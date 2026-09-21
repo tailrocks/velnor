@@ -641,7 +641,7 @@ backend = "aqua:protocolbuffers/protobuf/protoc"
         let dockerfile = include_str!("../../../docker/job-ubuntu.Dockerfile");
         assert!(dockerfile.contains("COPY docker/job-mise.lock /opt/mise/config/mise.lock"));
         assert!(!dockerfile.contains("/opt/mise/config/config.lock"));
-        assert!(dockerfile.contains("MISE_VERSION=\"v2026.9.9\""));
+        assert!(dockerfile.contains("MISE_VERSION=\"v2026.9.12\""));
         assert!(dockerfile.contains("PATH=/opt/mbx/bin:"));
         assert!(dockerfile.contains("XDG_DATA_HOME=/opt exec"));
         assert!(dockerfile.contains("mbx_real=\"$(cat /opt/mbx/bin/mbx-target)\""));

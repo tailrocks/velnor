@@ -69,7 +69,7 @@ pub mod permit_guard;
 #[cfg(not(any(test, feature = "test-support")))]
 mod permit_guard;
 mod plan;
-mod platform;
+pub mod platform;
 mod preflight;
 pub mod protocol;
 mod release;

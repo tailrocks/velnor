@@ -107,6 +107,198 @@ fn thundering_herd_grants_exactly_one_per_permit() {
 }
 
 #[test]
+fn deferred_waiter_outlives_stalled_head() {
+    // N=2 with an older demand whose grant lands 500ms late. A younger
+    // single-shot waiter must still grant: departing on Deferred would
+    // leave the head eligible-but-departed, ghosting every younger waiter
+    // and stranding the free permit (the thundering-herd under-count).
+    // Budget math: 32 blind spins resolve in milliseconds even on slow
+    // disks (old code departs → None → this fails); the 5s wait budget
+    // covers the stall with 10x margin (new code grants → this passes).
+    stalled_head_grants_younger(false);
+    stalled_head_grants_younger(true);
+}
+
+fn stalled_head_grants_younger(native: bool) {
+    use std::time::Duration;
+    use velnor_control::permit_ledger::{
+        unix_now, AcquireOutcome, PermitLane, PermitLedger, PermitState,
+    };
+
+    let path = temp_ledger(if native {
+        "stall-native"
+    } else {
+        "stall-scaleset"
+    });
+    configure(&path, 2);
+    let allocator = ScaleSetAllocator::open(&path);
+    let (lane, scope) = if native {
+        (PermitLane::Native, "scope-test")
+    } else {
+        (PermitLane::ScaleSet, "")
+    };
+    let head_holder = if native {
+        native_permit_holder("stall-head")
+    } else {
+        permit_holder(7, 1)
+    };
+    let young_holder = if native {
+        native_permit_holder("stall-young")
+    } else {
+        permit_holder(7, 2)
+    };
+    // Plant the head first so it owns the front of the queue.
+    {
+        let mut ledger = PermitLedger::open(&path).unwrap();
+        let now = unix_now();
+        ledger
+            .observe_demand(&head_holder, lane, scope, now, now)
+            .unwrap();
+    }
+    // The head grants 500ms late on a background thread. The raw ledger
+    // call leaves the row held (no guard to drop), so the ledger ends at
+    // 2/2 with the younger waiter's guard.
+    let grant_path = path.clone();
+    let head_thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        let mut ledger = PermitLedger::open(&grant_path).unwrap();
+        let generation = ledger.generation().unwrap();
+        let pid = if native {
+            Some(std::process::id())
+        } else {
+            None
+        };
+        let outcome = ledger
+            .acquire(&head_holder, lane, PermitState::Acquiring, generation, pid)
+            .unwrap();
+        assert_eq!(outcome, AcquireOutcome::Acquired);
+    });
+    // The younger single-shot waiter outlives the stall and grants the
+    // second permit instead of departing behind the head.
+    if native {
+        let _young = NativePermitGuard::acquire(&path, young_holder, scope)
+            .unwrap()
+            .expect("younger waiter outlives stalled head");
+        head_thread.join().unwrap();
+        assert_eq!(allocator.occupied().unwrap(), 2);
+    } else {
+        let _young = allocator
+            .acquire(&young_holder)
+            .unwrap()
+            .expect("younger waiter outlives stalled head");
+        head_thread.join().unwrap();
+        assert_eq!(allocator.occupied().unwrap(), 2);
+    }
+}
+
+#[test]
+fn full_departure_parks_without_blocking_younger() {
+    // N=1: a waiter refused while full parks its demand instead of
+    // ghosting the queue head. A younger waiter grants past it, and the
+    // departed waiter's redelivery revives at its original age.
+    parked_departure_yields_to_younger(false);
+    parked_departure_yields_to_younger(true);
+}
+
+fn parked_departure_yields_to_younger(native: bool) {
+    use velnor_control::permit_ledger::{DemandState, PermitLedger};
+
+    let path = temp_ledger(if native {
+        "park-native"
+    } else {
+        "park-scaleset"
+    });
+    configure(&path, 1);
+    let allocator = ScaleSetAllocator::open(&path);
+    let scope = "scope-test";
+    let (first, second, third) = if native {
+        (
+            native_permit_holder("park-first"),
+            native_permit_holder("park-second"),
+            native_permit_holder("park-third"),
+        )
+    } else {
+        (
+            permit_holder(7, 11),
+            permit_holder(7, 12),
+            permit_holder(7, 13),
+        )
+    };
+    let demand_state = |holder: &str| {
+        PermitLedger::open(&path)
+            .unwrap()
+            .demand(holder)
+            .unwrap()
+            .map(|row| row.state)
+    };
+
+    // The first waiter holds the one permit; the second departs full and
+    // parks instead of head-blocking younger demand.
+    if native {
+        let first_guard = NativePermitGuard::acquire(&path, first, scope)
+            .unwrap()
+            .expect("first grants");
+        assert!(NativePermitGuard::acquire(&path, second.clone(), scope)
+            .unwrap()
+            .is_none());
+        assert_eq!(demand_state(&second), Some(DemandState::Waiting));
+        first_guard.release();
+        // A younger waiter grants past the parked departure.
+        let third_guard = NativePermitGuard::acquire(&path, third, scope)
+            .unwrap()
+            .expect("younger grants past parked departure");
+        third_guard.release();
+        // Redelivery revives the parked demand at its original age.
+        let ticket = PermitLedger::open(&path)
+            .unwrap()
+            .demand(&second)
+            .unwrap()
+            .unwrap();
+        let second_guard = NativePermitGuard::acquire(&path, second.clone(), scope)
+            .unwrap()
+            .expect("redelivery revives parked demand");
+        let revived = PermitLedger::open(&path)
+            .unwrap()
+            .demand(&second)
+            .unwrap()
+            .unwrap();
+        assert_eq!(revived.first_seen_unix, ticket.first_seen_unix);
+        assert_eq!(revived.sequence, ticket.sequence);
+        second_guard.release();
+    } else {
+        let first_guard = allocator.acquire(&first).unwrap().expect("first grants");
+        assert!(allocator.acquire(&second).unwrap().is_none());
+        assert_eq!(demand_state(&second), Some(DemandState::Waiting));
+        first_guard.release();
+        // A younger waiter grants past the parked departure.
+        let third_guard = allocator
+            .acquire(&third)
+            .unwrap()
+            .expect("younger grants past parked departure");
+        third_guard.release();
+        // Redelivery revives the parked demand at its original age.
+        let ticket = PermitLedger::open(&path)
+            .unwrap()
+            .demand(&second)
+            .unwrap()
+            .unwrap();
+        let second_guard = allocator
+            .acquire(&second)
+            .unwrap()
+            .expect("redelivery revives parked demand");
+        let revived = PermitLedger::open(&path)
+            .unwrap()
+            .demand(&second)
+            .unwrap()
+            .unwrap();
+        assert_eq!(revived.first_seen_unix, ticket.first_seen_unix);
+        assert_eq!(revived.sequence, ticket.sequence);
+        second_guard.release();
+    }
+    assert_eq!(allocator.occupied().unwrap(), 0);
+}
+
+#[test]
 fn occupancy_never_exceeds_n_under_churn() {
     let path = temp_ledger("churn");
     configure(&path, 4);

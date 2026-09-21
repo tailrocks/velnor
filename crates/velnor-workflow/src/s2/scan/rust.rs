@@ -4,11 +4,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
+use globset::{Glob, GlobSetBuilder};
+
 use super::file_walk::{
     files_named, has_extension, join_repo_path, path_prefix, resolve_repo_path,
 };
 use super::{RepositoryShape, ScanContext};
-use crate::rust_include::{parse_include_paths, resolve_include_path, IncludePathError};
+use crate::rust_include::{
+    parse_include_paths, resolve_include_path, IncludeDiscovery, IncludePathError,
+};
 use crate::s2::{
     identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec,
     GeneratorError, RustToolchain, Unit, UnitKind, ValidationPhase,
@@ -607,7 +611,10 @@ fn analyze_rust_manifests(
                 ));
             }
         }
-        watch.extend(include_str_paths(root, files, file_set, &manifest.root)?);
+        let (include_targets, include_limitations) =
+            include_str_paths(root, files, file_set, &manifest.root)?;
+        watch.extend(include_targets);
+        result.limitations.extend(include_limitations);
         let local_lock = join_repo_path(&manifest.root, "Cargo.lock");
         if file_set.contains(&local_lock) {
             watch.push(local_lock.clone());
@@ -662,6 +669,7 @@ fn analyze_rust_manifests(
             tool_version: None,
             mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
+            xcode: None,
             services: Vec::new(),
             trust: crate::s2::provider::TrustReq::UntrustedOk,
             platform: crate::s2::provider::Platform::LinuxX64,
@@ -730,6 +738,7 @@ fn analyze_rust_manifests(
             tool_version: None,
             mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
+            xcode: None,
             services: Vec::new(),
             trust: crate::s2::provider::TrustReq::UntrustedOk,
             platform: crate::s2::provider::Platform::LinuxX64,
@@ -802,9 +811,10 @@ fn include_str_paths(
     files: &[String],
     file_set: &BTreeSet<String>,
     package_root: &str,
-) -> Result<Vec<String>, GeneratorError> {
+) -> Result<(Vec<String>, Vec<String>), GeneratorError> {
     let prefix = path_prefix(package_root);
     let mut targets = BTreeSet::new();
+    let mut opaque: BTreeMap<&str, BTreeSet<(usize, &'static str)>> = BTreeMap::new();
     for source in files.iter().filter(|file| {
         has_extension(file, "rs") && (package_root == "." || file.starts_with(&prefix))
     }) {
@@ -813,7 +823,17 @@ fn include_str_paths(
         let included_paths = parse_include_paths(&source_contents).map_err(|error| {
             GeneratorError::usage(format!("{error} in {}", root.join(source).display()))
         })?;
-        for included in included_paths {
+        for discovery in included_paths {
+            let included = match discovery {
+                IncludeDiscovery::Resolved(included) => included,
+                IncludeDiscovery::Opaque { macro_name, line } => {
+                    opaque
+                        .entry(source.as_str())
+                        .or_default()
+                        .insert((line, macro_name));
+                    continue;
+                }
+            };
             let target = resolve_include_path(
                 root,
                 &parent_path(source),
@@ -841,7 +861,24 @@ fn include_str_paths(
             targets.insert(target);
         }
     }
-    Ok(targets.into_iter().collect())
+    let mut limitations = Vec::new();
+    if !opaque.is_empty() {
+        // An opaque target is not proven-bad, so generation continues; the
+        // package subtree is watched conservatively so no rebuild is missed.
+        let conservative = format!("{prefix}**");
+        targets.insert(conservative.clone());
+        for (file, sites) in &opaque {
+            let sites = sites
+                .iter()
+                .map(|(line, macro_name)| format!("{macro_name} line {line}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            limitations.push(format!(
+                "Opaque Rust include targets in {file} ({sites}) cannot be resolved statically; watching {conservative} conservatively."
+            ));
+        }
+    }
+    Ok((targets.into_iter().collect(), limitations))
 }
 
 pub(crate) fn cargo_dependency_name(key: &str) -> &str {
@@ -1075,12 +1112,962 @@ fn toml_inline_string(value: &str, wanted_key: &str) -> Option<String> {
     })
 }
 
+/// One `boltffi.toml` Apple producer: a Rust crate whose `pack apple` run
+/// emits `{framework}.xcframework` under a manifest-relative output
+/// directory. Field semantics mirror `boltffi_cli` 0.30.1
+/// (`Config::xcframework_name`, `apple_xcframework_output`,
+/// `AppleNames::ffi_module_name`): the framework name falls back from
+/// `targets.apple.xcframework.name` through
+/// `targets.apple.swift.module_name` to `PascalCase`(`package.name`), the
+/// output parent falls back from `targets.apple.xcframework.output` through
+/// `targets.apple.output` to `dist/apple`, and the FFI module falls back
+/// from `targets.apple.swift.ffi_module_name` to `{framework}FFI`. The
+/// bindings directory falls back from `targets.apple.swift.output` through
+/// `{apple.output}/Sources`, plus `BoltFFI` under the split SPM layout, and
+/// the binding file is `{PascalCase(crate)}BoltFFI.swift` inside it. Paths
+/// resolve against the manifest directory, the working directory `BoltFFI`
+/// itself assumes. The recipe carries the pack policy (profile, lock
+/// enforcement, verbosity) and renders the producer commands.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BoltffiProducer {
+    pub(crate) manifest: String,
+    pub(crate) root: String,
+    pub(crate) package: String,
+    pub(crate) crate_name: String,
+    pub(crate) framework: String,
+    pub(crate) ffi_module: String,
+    /// Normalized repo-relative `{parent}/{framework}.xcframework`.
+    pub(crate) output: String,
+    /// Normalized repo-relative `generate swift` output directory: the
+    /// resolved Swift output, plus `BoltFFI` under the split SPM layout.
+    pub(crate) bindings_dir: String,
+    /// The expected generated binding file under `bindings_dir`:
+    /// `{PascalCase(crate)}BoltFFI.swift`.
+    pub(crate) bindings_file: String,
+    /// The Apple deployment target that shapes generated manifests.
+    pub(crate) deployment_target: String,
+    /// The generated `Package.swift` the drift check snapshots, if the
+    /// manifest does not skip it. Render-local: the recipe consumes it at
+    /// join time, so it stays off the product until transport needs it.
+    pub(crate) package_swift: Option<String>,
+    /// The typed pack recipe: profile, lock enforcement, verbosity.
+    pub(crate) recipe: BoltffiRecipe,
+    /// The Rust unit owning the producing crate, resolved at detect time.
+    pub(crate) unit: Option<String>,
+    /// The expected structural output files: the framework manifest plus,
+    /// per slice, the static library and header modulemap. Sorted.
+    pub(crate) output_files: Vec<String>,
+    /// The transitive input closure: sorted patterns whose bytes feed the
+    /// pack, plus the binding manifest itself.
+    pub(crate) inputs: Vec<String>,
+    /// Closure gaps the scan could not resolve; empty means complete.
+    pub(crate) inputs_unknown: Vec<String>,
+    /// The exact inputs digest over the expanded closure bytes, or `None`
+    /// when `inputs_unknown` is nonempty: exact reuse without a complete
+    /// contract would be a false identity.
+    pub(crate) inputs_digest: Option<String>,
+}
+
+/// The `boltffi.toml` fields the producer join reads. SPM layout and debug
+/// symbols belong to the execution adapter, but architectures are static
+/// matching facts: they fix the expected slice directories of the pack.
+#[derive(Default)]
+struct BoltffiManifest {
+    enabled: bool,
+    package_name: Option<String>,
+    package_crate: Option<String>,
+    apple_output: Option<String>,
+    deployment_target: Option<String>,
+    xcframework_name: Option<String>,
+    xcframework_output: Option<String>,
+    swift_module_name: Option<String>,
+    swift_output: Option<String>,
+    swift_ffi_module_name: Option<String>,
+    spm_layout: Option<String>,
+    spm_output: Option<String>,
+    spm_wrapper_sources: Option<String>,
+    skip_package_swift: bool,
+    include_macos: bool,
+    /// `None` means the key is absent and `BoltFFI` defaults apply; `Some`
+    /// (possibly empty) is an explicit list, where empty disables the slice.
+    ios_architectures: Option<Vec<String>>,
+    simulator_architectures: Option<Vec<String>>,
+    macos_architectures: Option<Vec<String>>,
+}
+
+fn parse_boltffi_manifest(contents: &str) -> BoltffiManifest {
+    let mut manifest = BoltffiManifest {
+        enabled: true,
+        ..BoltffiManifest::default()
+    };
+    let mut section = String::new();
+    let lines: Vec<&str> = contents.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = strip_toml_comment(lines[index]).trim().to_owned();
+        index += 1;
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(header) = line.strip_prefix('[') {
+            if let Some(header) = header.strip_suffix(']') {
+                header.trim().clone_into(&mut section);
+            }
+            continue;
+        }
+        let Some((key, first_value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let mut value = first_value.trim().to_owned();
+        while toml_array_is_open(&value) && index < lines.len() {
+            value.push(' ');
+            value.push_str(strip_toml_comment(lines[index]).trim());
+            index += 1;
+        }
+        match (section.as_str(), key) {
+            ("package", "name") => manifest.package_name = toml_string_value(&value),
+            ("package", "crate") => manifest.package_crate = toml_string_value(&value),
+            ("targets.apple", "enabled") => {
+                if value == "true" {
+                    manifest.enabled = true;
+                } else if value == "false" {
+                    manifest.enabled = false;
+                }
+            }
+            ("targets.apple", "output") => manifest.apple_output = toml_string_value(&value),
+            ("targets.apple", "deployment_target") => {
+                manifest.deployment_target = toml_string_value(&value);
+            }
+            ("targets.apple", "include_macos") => {
+                manifest.include_macos = value == "true";
+            }
+            ("targets.apple", "ios_architectures") => {
+                manifest.ios_architectures = Some(toml_array_values(&value));
+            }
+            ("targets.apple", "simulator_architectures") => {
+                manifest.simulator_architectures = Some(toml_array_values(&value));
+            }
+            ("targets.apple", "macos_architectures") => {
+                manifest.macos_architectures = Some(toml_array_values(&value));
+            }
+            ("targets.apple.xcframework", "name") => {
+                manifest.xcframework_name = toml_string_value(&value);
+            }
+            ("targets.apple.xcframework", "output") => {
+                manifest.xcframework_output = toml_string_value(&value);
+            }
+            ("targets.apple.swift", "module_name") => {
+                manifest.swift_module_name = toml_string_value(&value);
+            }
+            ("targets.apple.swift", "output") => {
+                manifest.swift_output = toml_string_value(&value);
+            }
+            ("targets.apple.swift", "ffi_module_name") => {
+                manifest.swift_ffi_module_name = toml_string_value(&value);
+            }
+            ("targets.apple.spm", "layout") => {
+                manifest.spm_layout = toml_string_value(&value);
+            }
+            ("targets.apple.spm", "output") => {
+                manifest.spm_output = toml_string_value(&value);
+            }
+            ("targets.apple.spm", "wrapper_sources") => {
+                manifest.spm_wrapper_sources = toml_string_value(&value);
+            }
+            ("targets.apple.spm", "skip_package_swift") => {
+                manifest.skip_package_swift = value == "true";
+            }
+            _ => {}
+        }
+    }
+    manifest
+}
+
+/// `BoltFFI`'s `to_pascal_case`: split on `_` and `-`, uppercase each word's
+/// first character, concatenate the rest unchanged.
+fn boltffi_pascal_case(name: &str) -> String {
+    name.split(['_', '-'])
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+            }
+        })
+        .collect()
+}
+
+/// Whether `segment` can name the framework directory inside a normalized
+/// product output: no separators, control characters, or blank/path
+/// navigation segments.
+fn valid_framework_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && !segment.bytes().any(|byte| byte == b'/' || byte == b'\\')
+        && !segment.chars().any(char::is_control)
+        && segment != "."
+        && segment != ".."
+}
+
+/// `BoltFFI` 0.30.1 default slice architectures when the corresponding
+/// `targets.apple.*_architectures` key is absent
+/// (`boltffi_cli/src/target.rs`: `Architecture::IOS` and
+/// `APPLE_MULTI_ARCH`; `boltffi_cli/src/config/mod.rs`
+/// `apple_*_architectures`). An explicit empty list disables the slice.
+const BOLTFFI_DEFAULT_IOS_ARCHITECTURES: [&str; 1] = ["arm64"];
+const BOLTFFI_DEFAULT_MULTI_ARCHITECTURES: [&str; 2] = ["arm64", "x86_64"];
+
+/// `BoltFFI` 0.30.1 `targets.apple` output and deployment defaults
+/// (`default_apple_output`, `default_apple_deployment_target`).
+const BOLTFFI_DEFAULT_APPLE_OUTPUT: &str = "dist/apple";
+const BOLTFFI_DEFAULT_DEPLOYMENT_TARGET: &str = "16.0";
+
+/// Whether `arch` is an architecture `BoltFFI` can place in an Apple slice
+/// (`boltffi_cli/src/target.rs` `Architecture`, Apple members only).
+fn valid_boltffi_apple_arch(arch: &str) -> bool {
+    matches!(arch, "arm64" | "x86_64" | "armv7" | "x86")
+}
+
+/// Resolve the expected `XCFramework` slice directories in `BoltFFI` target
+/// order (iOS device, simulator, macOS). Directory names follow the
+/// `xcodebuild -create-xcframework` convention
+/// (`{macos,ios}-{archs joined by _}[-simulator]`), with architectures
+/// sorted so multi-arch slices are deterministic. An unknown architecture
+/// or an empty slice set (which `BoltFFI` itself rejects at build time)
+/// is an `Err` naming the problem for a scan diagnostic.
+/// An explicit architecture list as declared, or the `BoltFFI` default when
+/// the key is absent. An explicit empty list stays empty: it disables the
+/// slice.
+fn boltffi_arch_list(explicit: Option<&Vec<String>>, default: &[&str]) -> Vec<String> {
+    explicit.map_or_else(
+        || default.iter().map(ToString::to_string).collect(),
+        Clone::clone,
+    )
+}
+
+fn boltffi_slice_dirs(manifest: &BoltffiManifest) -> Result<Vec<String>, String> {
+    let ios = boltffi_arch_list(
+        manifest.ios_architectures.as_ref(),
+        &BOLTFFI_DEFAULT_IOS_ARCHITECTURES,
+    );
+    let simulator = boltffi_arch_list(
+        manifest.simulator_architectures.as_ref(),
+        &BOLTFFI_DEFAULT_MULTI_ARCHITECTURES,
+    );
+    let macos = boltffi_arch_list(
+        manifest.macos_architectures.as_ref(),
+        &BOLTFFI_DEFAULT_MULTI_ARCHITECTURES,
+    );
+    for arch in ios.iter().chain(simulator.iter()).chain(macos.iter()) {
+        if !valid_boltffi_apple_arch(arch) {
+            return Err(format!(
+                "architecture `{arch}` is not a supported Apple slice architecture"
+            ));
+        }
+    }
+    let mut slices = Vec::new();
+    if !ios.is_empty() {
+        slices.push(format!("ios-{}", join_sorted_arches(&ios)));
+    }
+    if !simulator.is_empty() {
+        slices.push(format!("ios-{}-simulator", join_sorted_arches(&simulator)));
+    }
+    if manifest.include_macos && !macos.is_empty() {
+        slices.push(format!("macos-{}", join_sorted_arches(&macos)));
+    }
+    if slices.is_empty() {
+        return Err(
+            "no Apple slice is enabled; at least one architecture list must be nonempty".to_owned(),
+        );
+    }
+    Ok(slices)
+}
+
+/// Join slice architectures with `_` in sorted order for a deterministic
+/// directory name.
+fn join_sorted_arches(arches: &[String]) -> String {
+    let mut sorted: Vec<&str> = arches.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    sorted.join("_")
+}
+
+/// The expected structural files of the pack: the framework manifest plus,
+/// per slice, the static library and header modulemap. Cargo names a
+/// staticlib `lib{crate}.a` with `-` folded to `_`; these are the paths
+/// a consumer's framework verification asserts. Generated headers
+/// beyond the modulemap and per-file digests are build-time facts the
+/// producer manifest records, not plan facts.
+fn boltffi_expected_files(output: &str, crate_name: &str, slices: &[String]) -> Vec<String> {
+    let mut files = vec![format!("{output}/Info.plist")];
+    let library = format!("lib{}.a", crate_name.replace('-', "_"));
+    for slice in slices {
+        files.push(format!("{output}/{slice}/{library}"));
+        files.push(format!("{output}/{slice}/Headers/module.modulemap"));
+    }
+    files.sort();
+    files
+}
+
+/// Resolve the `pack apple` bindings directory and expected binding file
+/// for a manifest rooted at `root`. Mirrors
+/// `boltffi_cli/src/pack/apple/mod.rs` `generate_apple_bindings`: every SPM
+/// layout nests Swift sources under a `BoltFFI` segment. Bundled and
+/// ffi-only (the default) anchor at the SPM package root
+/// (`Config::apple_spm_output`, falling back through
+/// `[targets.apple].output` to `dist/apple`); bundled inserts
+/// `wrapper_sources` when configured, else `Sources`. Split anchors at the
+/// Swift output (`Config::apple_swift_output`: `targets.apple.swift.output`
+/// through `{apple.output}/Sources`). The file stem mirrors
+/// `Config::swift_bindings_file_stem`: an empty `PascalCase` library name
+/// yields bare `BoltFFI`. An unknown layout or a resolved path outside the
+/// repository is an `Err` for a scan diagnostic.
+/// The `pack apple` binding facts: output directory, expected binding
+/// file, deployment target, and FFI module name.
+#[derive(Debug)]
+struct BoltffiBindings {
+    dir: String,
+    file: String,
+    deployment_target: String,
+    ffi_module: String,
+    /// The generated `Package.swift` `pack apple` emits at
+    /// `<spm output>/Package.swift` (`SpmPackageGenerator::generate`),
+    /// unless `skip_package_swift` opts out. The SPM output falls back
+    /// through `[targets.apple].output` to `dist/apple`
+    /// (`Config::apple_spm_output`).
+    package_swift: Option<String>,
+}
+
+/// Resolve the binding facts for a manifest rooted at `root`. The directory
+/// mirrors `boltffi_cli/src/pack/apple/mod.rs` `generate_apple_bindings`:
+/// every layout nests under `BoltFFI`, with bundled/ffi-only anchored at
+/// the SPM package root and split at the Swift output (see
+/// `BoltffiBindings`). The file stem mirrors
+/// `Config::swift_bindings_file_stem`: an empty `PascalCase` library name
+/// yields bare `BoltFFI`. The FFI module falls back from
+/// `targets.apple.swift.ffi_module_name` to `{framework}FFI`. An unknown
+/// layout or a resolved path outside the repository is an `Err` for a scan
+/// diagnostic.
+fn boltffi_binding_facts(
+    parsed: &BoltffiManifest,
+    root: &str,
+    crate_name: &str,
+    framework: &str,
+) -> Result<BoltffiBindings, String> {
+    let layout = parsed.spm_layout.as_deref().unwrap_or("ffi-only");
+    if !matches!(layout, "bundled" | "split" | "ffi-only") {
+        return Err(format!(
+            "declares SPM layout `{layout}`, which is not bundled, split, or ffi-only"
+        ));
+    }
+    let package_root = parsed
+        .spm_output
+        .as_deref()
+        .unwrap_or(BOLTFFI_DEFAULT_APPLE_OUTPUT);
+    let base = match layout {
+        "bundled" => format!(
+            "{package_root}/{}/BoltFFI",
+            parsed.spm_wrapper_sources.as_deref().unwrap_or("Sources")
+        ),
+        "ffi-only" => format!("{package_root}/Sources/BoltFFI"),
+        _ => {
+            let swift_base = parsed.swift_output.as_deref().map_or_else(
+                || {
+                    format!(
+                        "{}/Sources",
+                        parsed
+                            .apple_output
+                            .as_deref()
+                            .unwrap_or(BOLTFFI_DEFAULT_APPLE_OUTPUT)
+                    )
+                },
+                str::to_owned,
+            );
+            format!("{swift_base}/BoltFFI")
+        }
+    };
+    let Some(dir) = resolve_repo_path(root, &base) else {
+        return Err(format!(
+            "declares Swift bindings output `{base}`, which is absolute or escapes the repository"
+        ));
+    };
+    let pascal = boltffi_pascal_case(crate_name);
+    let stem = if pascal.is_empty() {
+        "BoltFFI".to_owned()
+    } else {
+        format!("{pascal}BoltFFI")
+    };
+    let file = join_repo_path(&dir, &format!("{stem}.swift"));
+    let package_swift = if parsed.skip_package_swift {
+        None
+    } else {
+        let base = parsed.spm_output.as_deref().map_or_else(
+            || {
+                parsed
+                    .apple_output
+                    .as_deref()
+                    .unwrap_or(BOLTFFI_DEFAULT_APPLE_OUTPUT)
+                    .to_owned()
+            },
+            str::to_owned,
+        );
+        let Some(resolved) = resolve_repo_path(root, &base) else {
+            return Err(format!(
+                "declares SPM output `{base}`, which is absolute or escapes the repository"
+            ));
+        };
+        Some(join_repo_path(&resolved, "Package.swift"))
+    };
+    Ok(BoltffiBindings {
+        dir,
+        file,
+        deployment_target: parsed
+            .deployment_target
+            .clone()
+            .unwrap_or_else(|| BOLTFFI_DEFAULT_DEPLOYMENT_TARGET.to_owned()),
+        ffi_module: parsed
+            .swift_ffi_module_name
+            .clone()
+            .unwrap_or_else(|| format!("{framework}FFI")),
+        package_swift,
+    })
+}
+
+/// Discover every usable `BoltFFI` Apple producer plus one diagnostic per
+/// manifest that cannot join a consumer. Semantic failures stay diagnostics:
+/// a malformed binding manifest must not fail the whole scan when `BoltFFI`
+/// itself will report the error at build time.
+/// The transitive input closure of the native-producing crate at
+/// `crate_root`: per-crate manifest, source, build-script, and `include_str!`
+/// patterns for the crate and every transitive path dependency, plus the
+/// binding `seed` files, shared locks and toolchain pins, and Cargo
+/// configuration. Returns sorted, deduplicated patterns with the closure
+/// gaps the scan could not resolve. Registry and git dependencies resolve
+/// through the lockfiles; a path dependency without a tracked manifest, or
+/// one pointing outside the repository, is a gap, never a silent omission:
+/// exact reuse must stay disabled while any gap remains.
+///
+/// # Errors
+/// Returns an IO error when a tracked manifest cannot be read, and a usage
+/// error when an `include_str!` target is missing, like the Rust unit scan.
+pub(crate) fn native_input_closure(
+    root: &Path,
+    files: &[String],
+    file_set: &BTreeSet<String>,
+    crate_root: &str,
+    seed: &[String],
+) -> Result<(Vec<String>, Vec<String>), GeneratorError> {
+    let mut inputs: Vec<String> = seed.to_vec();
+    for pinned in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "rust-toolchain",
+        "mise.toml",
+        "mise.lock",
+    ] {
+        if file_set.contains(pinned) {
+            inputs.push(pinned.to_owned());
+        }
+    }
+    inputs.push(".cargo/**".to_owned());
+    let local_lock = join_repo_path(crate_root, "Cargo.lock");
+    if local_lock != "Cargo.lock" && file_set.contains(&local_lock) {
+        inputs.push(local_lock);
+    }
+    let mut gaps = Vec::new();
+    let mut visited = BTreeSet::new();
+    let mut stack = vec![crate_root.to_owned()];
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        let manifest_path = join_repo_path(&current, "Cargo.toml");
+        let path = root.join(&manifest_path);
+        let contents = fs::read_to_string(&path)
+            .map_err(|error| GeneratorError::io("read Cargo manifest", &path, &error))?;
+        let facts = parse_cargo_manifest(&current, &contents);
+        let prefix = path_prefix(&current);
+        inputs.extend([
+            manifest_path,
+            format!("{prefix}**/*.rs"),
+            format!("{prefix}src/**"),
+            format!("{prefix}tests/**"),
+            format!("{prefix}examples/**"),
+            format!("{prefix}benches/**"),
+        ]);
+        let build_script = facts.build_script.as_deref().or_else(|| {
+            file_set
+                .contains(&join_repo_path(&current, "build.rs"))
+                .then_some("build.rs")
+        });
+        if let Some(script) = build_script {
+            match resolve_repo_path(&current, script) {
+                Some(script_path) => inputs.push(script_path),
+                None => gaps.push(format!(
+                    "build script `{script}` of crate `{current}` is absolute or escapes the repository"
+                )),
+            }
+        }
+        let (include_targets, include_gaps) = include_str_paths(root, files, file_set, &current)?;
+        inputs.extend(include_targets);
+        gaps.extend(include_gaps);
+        for dependency in &facts.dependencies {
+            let Some(path) = dependency.path.as_deref() else {
+                continue;
+            };
+            let Some(dep_root) = resolve_repo_path(&current, path) else {
+                gaps.push(format!(
+                    "path dependency `{}` of crate `{current}` is absolute or escapes the repository",
+                    dependency.name
+                ));
+                continue;
+            };
+            if !file_set.contains(&join_repo_path(&dep_root, "Cargo.toml")) {
+                gaps.push(format!(
+                    "path dependency `{}` of crate `{current}` has no tracked Cargo.toml",
+                    dependency.name
+                ));
+                continue;
+            }
+            stack.push(dep_root);
+        }
+    }
+    inputs.sort();
+    inputs.dedup();
+    gaps.sort();
+    gaps.dedup();
+    Ok((inputs, gaps))
+}
+
+/// The typed `BoltFFI` Apple pack execution recipe: the policy half of a
+/// native producer. `profile` selects the Cargo profile through
+/// `--cargo-arg` (`None` keeps `BoltFFI`'s own default, today Debug);
+/// `locked` passes `--cargo-arg=--locked` so nested Cargo invocations
+/// enforce the committed resolution instead of drifting; `verbose`
+/// streams the target build's compiler output (`-v`) so a long native
+/// link leaves liveness evidence instead of silence.
+/// The in-repo surface `pack apple` rewrites and the drift check guards:
+/// the Swift bindings directory, always, plus the generated `Package.swift`
+/// unless the manifest skips it. Headers land in `BoltFFI` scratch, never
+/// the repo, so they stay outside this surface. `framework` scopes the
+/// staging directory when one crate produces several frameworks.
+pub(crate) struct BoltffiDriftSurface<'a> {
+    pub(crate) bindings_dir: &'a str,
+    pub(crate) package_swift: Option<&'a str>,
+    pub(crate) framework: &'a str,
+}
+
+/// Render the pre-pack snapshot, one command per surface member so each
+/// failure keeps its own precise error: refuse a missing member (a fresh
+/// checkout without committed bindings is drift, not a silent skip),
+/// wipe any stale staging, then copy the surface.
+fn boltffi_snapshot_commands(
+    surface: &BoltffiDriftSurface<'_>,
+    staging: &str,
+    snapshot: &str,
+) -> Vec<String> {
+    let mut commands = vec![format!(
+        "test -d {} || {{ echo {} >&2; exit 1; }} && rm -rf {} && mkdir -p {} && cp -R {} {}",
+        shell_quote(surface.bindings_dir),
+        shell_quote(&format!(
+            "error: committed Swift bindings `{}` are missing from the checkout; the native pack needs them to compare against",
+            surface.bindings_dir
+        )),
+        shell_quote(staging),
+        shell_quote(staging),
+        shell_quote(surface.bindings_dir),
+        shell_quote(snapshot),
+    )];
+    if let Some(package_swift) = surface.package_swift {
+        commands.push(format!(
+            "test -f {} || {{ echo {} >&2; exit 1; }} && cp {} {}",
+            shell_quote(package_swift),
+            shell_quote(&format!(
+                "error: committed `{package_swift}` is missing from the checkout; the native pack needs it to compare against"
+            )),
+            shell_quote(package_swift),
+            shell_quote(&join_repo_path(staging, "Package.swift")),
+        ));
+    }
+    commands
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BoltffiRecipe {
+    pub(crate) profile: Option<String>,
+    pub(crate) locked: bool,
+    pub(crate) verbose: bool,
+}
+
+impl BoltffiRecipe {
+    /// The recipe half of the exact inputs digest: profile and lock
+    /// enforcement change the produced artifacts, so they participate in
+    /// the identity. Verbosity only changes streamed diagnostics and is
+    /// deliberately absent: a quiet and a verbose run over the same
+    /// closure produce the same bytes.
+    pub(crate) fn digest_identity(&self) -> String {
+        format!(
+            "boltffi:pack:apple:profile={}:locked={}",
+            self.profile.as_deref().unwrap_or("default"),
+            self.locked,
+        )
+    }
+
+    /// Render the producer commands: wipe the previous framework bundle
+    /// first (`BoltFFI` merges into an existing output directory, which
+    /// would keep stale slices), snapshot the committed bindings, pack
+    /// from the manifest root (the working directory `BoltFFI` itself
+    /// assumes), then diff the snapshot against the rewritten tree.
+    /// `pack apple` offers no output redirect, so the snapshot is the
+    /// staging: a pack that rewrites tracked bindings fails the unit
+    /// instead of silently testing only the rewritten tree.
+    pub(crate) fn commands(
+        &self,
+        manifest_root: &str,
+        output: &str,
+        surface: &BoltffiDriftSurface<'_>,
+    ) -> Vec<String> {
+        let staging = join_repo_path(
+            &join_repo_path(manifest_root, "target/velnor-boltffi-staging"),
+            surface.framework,
+        );
+        let snapshot = join_repo_path(&staging, "bindings");
+        let mut commands = vec![format!("rm -rf {}", shell_quote(output))];
+        commands.extend(boltffi_snapshot_commands(surface, &staging, &snapshot));
+        let mut pack = String::from("boltffi");
+        if self.verbose {
+            pack.push_str(" -v");
+        }
+        if self.locked {
+            pack.push_str(" --cargo-arg=--locked");
+        }
+        if let Some(profile) = &self.profile {
+            pack.push_str(" --cargo-arg=--profile --cargo-arg=");
+            pack.push_str(&shell_quote(profile));
+        }
+        pack.push_str(" pack apple");
+        commands.push(format!("{}{pack}", shell_change_dir(manifest_root)));
+        commands.push(format!(
+            "diff -r {} {} || {{ echo {} >&2; exit 1; }}",
+            shell_quote(&snapshot),
+            shell_quote(surface.bindings_dir),
+            shell_quote(&format!(
+                "error: committed Swift bindings in `{}` drifted from regeneration; rerun the native pack locally and commit the result",
+                surface.bindings_dir
+            )),
+        ));
+        if let Some(package_swift) = surface.package_swift {
+            commands.push(format!(
+                "diff {} {} || {{ echo {} >&2; exit 1; }}",
+                shell_quote(&join_repo_path(&staging, "Package.swift")),
+                shell_quote(package_swift),
+                shell_quote(&format!(
+                    "error: committed `{package_swift}` drifted from regeneration; rerun the native pack locally and commit the result"
+                )),
+            ));
+        }
+        commands
+    }
+}
+
+/// Locked resolution applies exactly when a `Cargo.lock` governs the
+/// producer closure: `--locked` without a lockfile fails every build,
+/// while omitting it with a committed lock lets nested Cargo drift.
+fn boltffi_recipe_locked(inputs: &[String]) -> bool {
+    inputs
+        .iter()
+        .any(|input| input == "Cargo.lock" || input.ends_with("/Cargo.lock"))
+}
+
+/// Expand validated closure patterns against tracked files and read the
+/// matched bytes. A pattern matching nothing contributes nothing (like
+/// `hashFiles`); deleting the last match still changes the digest because the
+/// file's `source` line disappears. Only tracked files participate: the
+/// digest identifies the merge candidate CI checks out, not local untracked
+/// state. An unreadable match fails the scan — a digest over unknown bytes
+/// would be a false identity.
+///
+/// # Errors
+/// Returns a usage error for a pattern that does not compile, or an I/O
+/// error naming the matched file that cannot be read.
+fn closure_sources(
+    root: &Path,
+    files: &[String],
+    inputs: &[String],
+    manifest_path: &str,
+) -> Result<Vec<(String, Vec<u8>)>, GeneratorError> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in inputs {
+        let glob = Glob::new(pattern).map_err(|error| {
+            GeneratorError::usage(format!(
+                "BoltFFI manifest {manifest_path} produced input `{pattern}`, which is not a valid glob: {error}"
+            ))
+        })?;
+        builder.add(glob);
+    }
+    let set = builder.build().map_err(|error| {
+        GeneratorError::usage(format!(
+            "BoltFFI manifest {manifest_path} inputs could not be compiled: {error}"
+        ))
+    })?;
+    let mut sources = Vec::new();
+    for file in files {
+        if !set.is_match(file) {
+            continue;
+        }
+        let path = root.join(file);
+        let bytes = std::fs::read(&path)
+            .map_err(|error| GeneratorError::io("read closure input", &path, &error))?;
+        sources.push((file.clone(), bytes));
+    }
+    Ok(sources)
+}
+
+/// Compute the exact inputs digest over the expanded closure, or `None`
+/// with a diagnostic when closure gaps make the contract incomplete.
+/// I/O errors propagate because they may hide a producer input.
+fn boltffi_inputs_digest(
+    context: &ScanContext<'_>,
+    manifest_path: &str,
+    inputs: &[String],
+    inputs_unknown: &[String],
+    recipe: &BoltffiRecipe,
+    diagnostics: &mut Vec<String>,
+) -> Result<Option<String>, GeneratorError> {
+    if !inputs_unknown.is_empty() {
+        diagnostics.push(format!(
+            "BoltFFI manifest {manifest_path} has an incomplete input closure ({}); no exact inputs digest was computed and the product cannot be reused exactly.",
+            inputs_unknown.join(", "),
+        ));
+        return Ok(None);
+    }
+    let sources = closure_sources(context.root, context.files, inputs, manifest_path)?;
+    Ok(Some(crate::s2::primitives::prepared_tools::inputs_digest(
+        &crate::s2::primitives::prepared_tools::InputsFacts {
+            // Lockfiles and toolchain pins ride `sources` as raw bytes,
+            // which subsumes the parsed lock/toolchain facts.
+            locks: Vec::new(),
+            sources,
+            recipe: vec![recipe.digest_identity()],
+            toolchain: Vec::new(),
+        },
+    )))
+}
+
+/// Identify the producing crate: the manifest's sibling `Cargo.toml` must
+/// exist and declare the `[package] crate` name (or `name` when `crate` is
+/// absent). Returns `Ok(None)` with a diagnostic when the crate cannot be
+/// identified; I/O errors propagate because they may hide a real producer.
+fn boltffi_producer_crate(
+    context: &ScanContext<'_>,
+    root: &str,
+    manifest_path: &str,
+    package: &str,
+    package_crate: Option<String>,
+    diagnostics: &mut Vec<String>,
+) -> Result<Option<String>, GeneratorError> {
+    let cargo_manifest = join_repo_path(root, "Cargo.toml");
+    if !context.file_set.contains(&cargo_manifest) {
+        diagnostics.push(format!(
+            "BoltFFI manifest {manifest_path} has no sibling Cargo.toml; the producing crate cannot be identified."
+        ));
+        return Ok(None);
+    }
+    let cargo_path = context.root.join(&cargo_manifest);
+    let cargo_contents = fs::read_to_string(&cargo_path)
+        .map_err(|error| GeneratorError::io("read Cargo manifest", &cargo_path, &error))?;
+    let cargo = parse_cargo_manifest(root, &cargo_contents);
+    let crate_name = package_crate.unwrap_or_else(|| package.to_owned());
+    if cargo.package_name.as_deref() != Some(crate_name.as_str()) {
+        diagnostics.push(format!(
+            "BoltFFI manifest {manifest_path} names crate `{crate_name}`, but the sibling Cargo.toml declares package `{}`; no producer edge was constructed.",
+            cargo.package_name.as_deref().unwrap_or("<unnamed>"),
+        ));
+        return Ok(None);
+    }
+    Ok(Some(crate_name))
+}
+
+/// Parse one `boltffi.toml` into a producer, pushing a diagnostic and
+/// returning `Ok(None)` when the manifest cannot yield a joinable edge.
+/// I/O and closure errors propagate because they may hide a real producer.
+/// Resolve the framework name for a `BoltFFI` manifest: the explicit
+/// `XCFramework` name wins, then the Swift module name, then `PascalCase`
+/// over the package name. An unusable segment is a diagnostic, never a guess.
+fn boltffi_framework_name(
+    parsed: &BoltffiManifest,
+    manifest_path: &str,
+    package: &str,
+    diagnostics: &mut Vec<String>,
+) -> Option<String> {
+    let framework = parsed
+        .xcframework_name
+        .clone()
+        .or(parsed.swift_module_name.clone())
+        .unwrap_or_else(|| boltffi_pascal_case(package));
+    if !valid_framework_segment(&framework) {
+        diagnostics.push(format!(
+            "BoltFFI manifest {manifest_path} resolves framework name `{framework}`, which is not a valid path segment; no producer edge was constructed."
+        ));
+        return None;
+    }
+    Some(framework)
+}
+
+fn boltffi_producer_from_manifest(
+    context: &ScanContext<'_>,
+    manifest_path: &String,
+    diagnostics: &mut Vec<String>,
+) -> Result<Option<BoltffiProducer>, GeneratorError> {
+    let root = parent_path(manifest_path);
+    let path = context.root.join(manifest_path);
+    let contents = fs::read_to_string(&path)
+        .map_err(|error| GeneratorError::io("read BoltFFI manifest", &path, &error))?;
+    let parsed = parse_boltffi_manifest(&contents);
+    if !parsed.enabled {
+        return Ok(None);
+    }
+    let slices = match boltffi_slice_dirs(&parsed) {
+        Ok(slices) => slices,
+        Err(problem) => {
+            diagnostics.push(format!(
+                "BoltFFI manifest {manifest_path} {problem}; no producer edge was constructed."
+            ));
+            return Ok(None);
+        }
+    };
+    let Some(package) = parsed.package_name.clone() else {
+        diagnostics.push(format!(
+            "BoltFFI manifest {manifest_path} declares no [package] name; the framework name cannot be derived."
+        ));
+        return Ok(None);
+    };
+    let Some(framework) = boltffi_framework_name(&parsed, manifest_path, &package, diagnostics)
+    else {
+        return Ok(None);
+    };
+    let declared_parent = parsed
+        .xcframework_output
+        .as_deref()
+        .or(parsed.apple_output.as_deref())
+        .unwrap_or(BOLTFFI_DEFAULT_APPLE_OUTPUT);
+    let Some(parent) = resolve_repo_path(&root, declared_parent) else {
+        diagnostics.push(format!(
+            "BoltFFI manifest {manifest_path} declares output `{declared_parent}`, which is absolute or escapes the repository; no producer edge was constructed."
+        ));
+        return Ok(None);
+    };
+    let Some(crate_name) = boltffi_producer_crate(
+        context,
+        &root,
+        manifest_path,
+        &package,
+        parsed.package_crate.clone(),
+        diagnostics,
+    )?
+    else {
+        return Ok(None);
+    };
+    let bindings = match boltffi_binding_facts(&parsed, &root, &crate_name, &framework) {
+        Ok(bindings) => bindings,
+        Err(problem) => {
+            diagnostics.push(format!(
+                "BoltFFI manifest {manifest_path} {problem}; no producer edge was constructed."
+            ));
+            return Ok(None);
+        }
+    };
+    let output = join_repo_path(&parent, &format!("{framework}.xcframework"));
+    let output_files = boltffi_expected_files(&output, &crate_name, &slices);
+    // The committed bindings are drift-checked inputs: an edit to the
+    // generated Swift or `Package.swift` must select the producer so `pack`
+    // re-runs and the drift check fails instead of testing a stale tree.
+    let mut seed = vec![manifest_path.to_owned(), format!("{}/**", bindings.dir)];
+    if let Some(package_swift) = bindings.package_swift.as_deref() {
+        seed.push(package_swift.to_owned());
+    }
+    let (inputs, inputs_unknown) =
+        native_input_closure(context.root, context.files, context.file_set, &root, &seed)?;
+    // The scanner never invents a Cargo profile: `None` keeps `BoltFFI`'s
+    // own default. A typed profile policy arrives with declared Apple
+    // facts; until then the recipe records exactly what the scan knows.
+    let recipe = BoltffiRecipe {
+        profile: None,
+        locked: boltffi_recipe_locked(&inputs),
+        verbose: true,
+    };
+    let inputs_digest = boltffi_inputs_digest(
+        context,
+        manifest_path,
+        &inputs,
+        &inputs_unknown,
+        &recipe,
+        diagnostics,
+    )?;
+    Ok(Some(BoltffiProducer {
+        manifest: manifest_path.to_owned(),
+        root,
+        package,
+        crate_name,
+        ffi_module: bindings.ffi_module,
+        output,
+        output_files,
+        bindings_dir: bindings.dir,
+        bindings_file: bindings.file,
+        deployment_target: bindings.deployment_target,
+        framework,
+        package_swift: bindings.package_swift,
+        recipe,
+        unit: None,
+        inputs,
+        inputs_unknown,
+        inputs_digest,
+    }))
+}
+
+pub(crate) fn boltffi_producers(
+    context: &ScanContext<'_>,
+) -> Result<(Vec<BoltffiProducer>, Vec<String>), GeneratorError> {
+    let mut manifests = files_named(context.files, "boltffi.toml");
+    manifests.sort();
+    let mut producers = Vec::new();
+    let mut diagnostics = Vec::new();
+    for manifest_path in &manifests {
+        if let Some(producer) =
+            boltffi_producer_from_manifest(context, manifest_path, &mut diagnostics)?
+        {
+            producers.push(producer);
+        }
+    }
+    let mut by_output: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for producer in &producers {
+        by_output
+            .entry(producer.output.as_str())
+            .or_default()
+            .push(producer.manifest.as_str());
+    }
+    let mut conflicted: BTreeSet<String> = BTreeSet::new();
+    for (output, claimants) in &by_output {
+        if claimants.len() > 1 {
+            diagnostics.push(format!(
+                "BoltFFI manifests {} claim the same XCFramework output `{output}`; none of them is joined to a consumer.",
+                claimants.join(", "),
+            ));
+            conflicted.insert((*output).to_owned());
+        }
+    }
+    producers.retain(|producer| !conflicted.contains(&producer.output));
+    Ok((producers, diagnostics))
+}
+
 pub(crate) fn detect(
     context: &ScanContext<'_>,
     shape: &mut RepositoryShape,
 ) -> Result<(), GeneratorError> {
+    let (mut producers, diagnostics) = boltffi_producers(context)?;
     let cargo_manifests = files_named(context.files, "Cargo.toml");
     if cargo_manifests.is_empty() {
+        shape.limitations.extend(diagnostics);
         return Ok(());
     }
     let rust = analyze_rust_manifests(
@@ -1089,8 +2076,24 @@ pub(crate) fn detect(
         context.file_set,
         &cargo_manifests,
     )?;
+    for producer in &mut producers {
+        producer.unit = rust
+            .units
+            .iter()
+            .find(|unit| {
+                unit.kind == UnitKind::Rust
+                    && unit.root == producer.root
+                    && unit.id != POLICY_UNIT_ID
+            })
+            .map(|unit| unit.id.clone());
+        shape
+            .detected
+            .push(format!("boltffi-producer:{}", producer.root));
+    }
+    shape.boltffi_producers.extend(producers);
     shape.units.extend(rust.units);
     shape.detected.extend(rust.detected);
+    shape.limitations.extend(diagnostics);
     shape.limitations.extend(rust.limitations);
     Ok(())
 }
@@ -1246,6 +2249,17 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_err<T: std::fmt::Debug, E>(result: Result<T, E>, context: &str) -> E {
+        match result {
+            Ok(value) => panic!("{context}: unexpectedly succeeded with {value:?}"),
+            Err(error) => error,
+        }
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-rust-scan-{name}-{}",
@@ -1287,12 +2301,13 @@ mod tests {
 
         let files = vec!["assets/manifest.yml".to_owned(), "src/lib.rs".to_owned()];
         let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
-        let targets = must(
+        let (targets, limitations) = must(
             include_str_paths(&root, &files, &file_set, "."),
             "resolve symlinked include target",
         );
 
         assert_eq!(targets, vec!["assets/manifest.yml"]);
+        assert!(limitations.is_empty(), "{limitations:?}");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1336,7 +2351,7 @@ mod tests {
             "docs/templates/example.rs".to_owned(),
         ];
         let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
-        let targets = must(
+        let (targets, limitations) = must(
             include_str_paths(&root, &files, &file_set, "crates/app"),
             "resolve manifest-dir include",
         );
@@ -1345,6 +2360,7 @@ mod tests {
             targets,
             vec!["crates/app/assets/font.ttf", "crates/app/src/lib.rs"]
         );
+        assert!(limitations.is_empty(), "{limitations:?}");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1376,12 +2392,13 @@ mod tests {
             "crates/appsrc/lib.rs".to_owned(),
         ];
         let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
-        let targets = must(
+        let (targets, limitations) = must(
             include_str_paths(&root, &files, &file_set, "crates/app"),
             "resolve exact concat include",
         );
 
         assert_eq!(targets, vec!["crates/appsrc/lib.rs"]);
+        assert!(limitations.is_empty(), "{limitations:?}");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1406,7 +2423,9 @@ mod tests {
                 error.to_string().contains("escapes the repository"),
                 "{error}"
             ),
-            Ok(targets) => assert!(!targets.is_empty(), "manifest-dir traversal was ignored"),
+            Ok((targets, _)) => {
+                assert!(!targets.is_empty(), "manifest-dir traversal was ignored");
+            }
         }
         let _ = fs::remove_dir_all(root);
     }
@@ -1432,8 +2451,197 @@ mod tests {
                 error.to_string().contains("static string expression"),
                 "{error}"
             ),
-            Ok(targets) => assert!(!targets.is_empty(), "dynamic include was ignored"),
+            Ok((targets, _)) => assert!(!targets.is_empty(), "dynamic include was ignored"),
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn include_str_manifest_dir_self_read_fixture_discovers_every_site() {
+        // Termrock-shaped fixture: policy tests read the crate's own sources
+        // through `concat!(env!("CARGO_MANIFEST_DIR"), ...)` in single-line
+        // and multi-line forms. Every site must resolve; nothing degrades.
+        let root = scratch("manifest-dir-self-read");
+        for directory in [
+            "crates/termrock/src/interaction",
+            "crates/termrock/src/style",
+            "crates/termrock/src/widgets",
+        ] {
+            must(
+                fs::create_dir_all(root.join(directory)),
+                "create package source directory",
+            );
+        }
+        must(
+            fs::write(
+                root.join("crates/termrock/src/lib.rs"),
+                concat!(
+                    "let lib = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/lib.rs\"));\n",
+                    "let interaction = include_str!(concat!(\n",
+                    "    env!(\"CARGO_MANIFEST_DIR\"),\n",
+                    "    \"/src/interaction/mod.rs\"\n",
+                    "));\n",
+                    "let style_mod = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/style/mod.rs\"));\n",
+                    "let tokens = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/style/tokens.rs\"));\n",
+                    "let panel = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/widgets/panel.rs\"));\n",
+                    "let interaction_again = include_str!(concat!(\n",
+                    "    env!(\"CARGO_MANIFEST_DIR\"),\n",
+                    "    \"/src/interaction/mod.rs\"\n",
+                    "));\n",
+                ),
+            ),
+            "write self-reading source",
+        );
+        for target in [
+            "crates/termrock/src/interaction/mod.rs",
+            "crates/termrock/src/style/mod.rs",
+            "crates/termrock/src/style/tokens.rs",
+            "crates/termrock/src/widgets/panel.rs",
+        ] {
+            must(
+                fs::write(root.join(target), "pub fn check() {}\n"),
+                "write include target",
+            );
+        }
+
+        let files = vec![
+            "crates/termrock/src/interaction/mod.rs".to_owned(),
+            "crates/termrock/src/lib.rs".to_owned(),
+            "crates/termrock/src/style/mod.rs".to_owned(),
+            "crates/termrock/src/style/tokens.rs".to_owned(),
+            "crates/termrock/src/widgets/panel.rs".to_owned(),
+        ];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let (targets, limitations) = must(
+            include_str_paths(&root, &files, &file_set, "crates/termrock"),
+            "resolve self-reading includes",
+        );
+
+        assert_eq!(
+            targets,
+            vec![
+                "crates/termrock/src/interaction/mod.rs",
+                "crates/termrock/src/lib.rs",
+                "crates/termrock/src/style/mod.rs",
+                "crates/termrock/src/style/tokens.rs",
+                "crates/termrock/src/widgets/panel.rs",
+            ]
+        );
+        assert!(limitations.is_empty(), "{limitations:?}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn include_str_opaque_shapes_watch_package_and_note_file_and_lines() {
+        let root = scratch("opaque-include");
+        must(
+            fs::create_dir_all(root.join("crates/app/src")),
+            "create package source directory",
+        );
+        must(
+            fs::create_dir_all(root.join("crates/app/data")),
+            "create package data directory",
+        );
+        must(
+            fs::create_dir_all(root.join("crates/app/src/data")),
+            "create source data directory",
+        );
+        must(
+            fs::write(
+                root.join("crates/app/src/lib.rs"),
+                concat!(
+                    "const OUT: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n",
+                    "const PATH: &str = \"data/words.txt\";\n",
+                    "const WORDS: &str = include_str!(PATH);\n",
+                    "const PLAIN: &str = include_str!(\"data/plain.txt\");\n",
+                ),
+            ),
+            "write package source",
+        );
+        must(
+            fs::write(root.join("crates/app/src/data/plain.txt"), "plain\n"),
+            "write determinate include target",
+        );
+        must(
+            fs::write(root.join("crates/app/data/words.txt"), "words\n"),
+            "write opaque include target",
+        );
+
+        let files = vec![
+            "crates/app/data/words.txt".to_owned(),
+            "crates/app/src/data/plain.txt".to_owned(),
+            "crates/app/src/lib.rs".to_owned(),
+        ];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let (targets, limitations) = must(
+            include_str_paths(&root, &files, &file_set, "crates/app"),
+            "opaque includes must degrade, never fail",
+        );
+
+        // The determinate target in the same file still resolves exactly; the
+        // opaque sites add the conservative package watch, which the glob
+        // engine must match against both nested and top-level package paths.
+        assert_eq!(
+            targets,
+            vec!["crates/app/**", "crates/app/src/data/plain.txt"]
+        );
+        let mut builder = globset::GlobSetBuilder::new();
+        builder.add(must(
+            globset::Glob::new("crates/app/**"),
+            "opaque watch must be a valid glob",
+        ));
+        let matcher = must(builder.build(), "opaque watch must build");
+        assert!(matcher.is_match("crates/app/data/words.txt"));
+        assert!(matcher.is_match("crates/app/src/lib.rs"));
+        assert!(!matcher.is_match("crates/other/src/lib.rs"));
+        assert_eq!(
+            limitations,
+            vec![
+                "Opaque Rust include targets in crates/app/src/lib.rs (include_str! line 1, include_str! line 3) cannot be resolved statically; watching crates/app/** conservatively."
+                    .to_owned()
+            ]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn include_str_opaque_shape_in_root_package_watches_whole_tree() {
+        let root = scratch("opaque-include-root");
+        must(
+            fs::create_dir_all(root.join("src")),
+            "create source directory",
+        );
+        must(
+            fs::write(
+                root.join("src/lib.rs"),
+                "const WORDS: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/words.bin\"));\n",
+            ),
+            "write package source",
+        );
+
+        let files = vec!["src/lib.rs".to_owned()];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let (targets, limitations) = must(
+            include_str_paths(&root, &files, &file_set, "."),
+            "root opaque include must degrade, never fail",
+        );
+
+        assert_eq!(targets, vec!["**"]);
+        let mut builder = globset::GlobSetBuilder::new();
+        builder.add(must(
+            globset::Glob::new("**"),
+            "root watch must be a valid glob",
+        ));
+        let matcher = must(builder.build(), "root watch must build");
+        assert!(matcher.is_match("src/lib.rs"));
+        assert!(matcher.is_match("Cargo.toml"));
+        assert_eq!(
+            limitations,
+            vec![
+                "Opaque Rust include targets in src/lib.rs (include_bytes! line 1) cannot be resolved statically; watching ** conservatively."
+                    .to_owned()
+            ]
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1657,5 +2865,930 @@ mod tests {
         assert!(error.to_string().contains("escapes the repository"));
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn boltffi_manifest_parses_apple_fields() {
+        use super::parse_boltffi_manifest;
+        let parsed = parse_boltffi_manifest(
+            "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
+             [targets.apple]\noutput = \"shared\"\n\n\
+             [targets.apple.xcframework]\nname = \"BridgeCore\"\noutput = \"../../target/xcframework\"\n\n\
+             [targets.apple.swift]\nmodule_name = \"BridgeSwift\"\n",
+        );
+        assert!(parsed.enabled);
+        assert_eq!(parsed.package_name.as_deref(), Some("bridge-core"));
+        assert_eq!(parsed.package_crate.as_deref(), Some("bridge-core-ffi"));
+        assert_eq!(parsed.apple_output.as_deref(), Some("shared"));
+        assert_eq!(parsed.xcframework_name.as_deref(), Some("BridgeCore"));
+        assert_eq!(
+            parsed.xcframework_output.as_deref(),
+            Some("../../target/xcframework")
+        );
+        assert_eq!(parsed.swift_module_name.as_deref(), Some("BridgeSwift"));
+        let disabled =
+            parse_boltffi_manifest("[package]\nname = \"x\"\n\n[targets.apple]\nenabled = false\n");
+        assert!(!disabled.enabled);
+    }
+
+    #[test]
+    fn boltffi_manifest_parses_spm_output_and_skip() {
+        use super::{boltffi_binding_facts, parse_boltffi_manifest};
+        let parsed = parse_boltffi_manifest("[package]\nname = \"x\"\n");
+        assert_eq!(parsed.spm_output, None);
+        assert!(!parsed.skip_package_swift);
+        // Default: generated at `<apple output>/Package.swift`.
+        let facts = must(
+            boltffi_binding_facts(&parsed, "libs/bridge-ffi", "bridge-core-ffi", "BridgeCore"),
+            "default package facts",
+        );
+        assert_eq!(
+            facts.package_swift.as_deref(),
+            Some("libs/bridge-ffi/dist/apple/Package.swift")
+        );
+        let explicit = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n[targets.apple.spm]\noutput = \"../pkg\"\nskip_package_swift = true\n",
+        );
+        assert_eq!(explicit.spm_output.as_deref(), Some("../pkg"));
+        assert!(explicit.skip_package_swift);
+        let skipped = must(
+            boltffi_binding_facts(
+                &explicit,
+                "libs/bridge-ffi",
+                "bridge-core-ffi",
+                "BridgeCore",
+            ),
+            "skipped package facts",
+        );
+        assert_eq!(skipped.package_swift, None);
+        // Skip off but output explicit: the manifest path wins.
+        let emitted = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n[targets.apple.spm]\noutput = \"../pkg\"\n",
+        );
+        let kept = must(
+            boltffi_binding_facts(&emitted, "libs/bridge-ffi", "bridge-core-ffi", "BridgeCore"),
+            "explicit package facts",
+        );
+        assert_eq!(
+            kept.package_swift.as_deref(),
+            Some("libs/pkg/Package.swift")
+        );
+        let escaping = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n[targets.apple.spm]\noutput = \"../../../elsewhere\"\n",
+        );
+        let error = must_err(
+            boltffi_binding_facts(
+                &escaping,
+                "libs/bridge-ffi",
+                "bridge-core-ffi",
+                "BridgeCore",
+            ),
+            "escaping spm output must fail",
+        );
+        assert!(error.contains("escapes the repository"), "{error}");
+    }
+
+    #[test]
+    fn boltffi_slice_dirs_applies_verified_defaults() {
+        use super::{boltffi_slice_dirs, parse_boltffi_manifest};
+        // No [targets.apple] keys: iOS [arm64], simulator [arm64, x86_64],
+        // macOS off. Matches BoltFFI 0.30.1 platform defaults.
+        let parsed = parse_boltffi_manifest("[package]\nname = \"x\"\n");
+        assert_eq!(
+            boltffi_slice_dirs(&parsed),
+            Ok(vec![
+                "ios-arm64".to_owned(),
+                "ios-arm64_x86_64-simulator".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn boltffi_slice_dirs_honors_explicit_lists() {
+        use super::{boltffi_slice_dirs, parse_boltffi_manifest};
+        // macOS-only arm64 shape: iOS and simulator disabled.
+        let parsed = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n\
+             [targets.apple]\ninclude_macos = true\nios_architectures = []\n\
+             simulator_architectures = []\nmacos_architectures = [\"arm64\"]\n",
+        );
+        assert_eq!(
+            boltffi_slice_dirs(&parsed),
+            Ok(vec!["macos-arm64".to_owned()])
+        );
+        // Multi-arch lists join sorted for deterministic directory names.
+        let parsed = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n\
+             [targets.apple]\ninclude_macos = true\n\
+             macos_architectures = [\"x86_64\", \"arm64\"]\n\
+             ios_architectures = []\nsimulator_architectures = []\n",
+        );
+        assert_eq!(
+            boltffi_slice_dirs(&parsed),
+            Ok(vec!["macos-arm64_x86_64".to_owned()])
+        );
+    }
+
+    #[test]
+    fn boltffi_slice_dirs_fails_closed_on_bad_config() {
+        use super::{boltffi_slice_dirs, parse_boltffi_manifest};
+        let parsed = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n[targets.apple]\nmacos_architectures = [\"riscv64\"]\n",
+        );
+        let error = must_err(boltffi_slice_dirs(&parsed), "unknown arch must fail");
+        assert!(error.contains("riscv64"), "unexpected error: {error}");
+        // Everything disabled: BoltFFI itself rejects the empty slice set.
+        let parsed = parse_boltffi_manifest(
+            "[package]\nname = \"x\"\n\n\
+             [targets.apple]\nios_architectures = []\nsimulator_architectures = []\n",
+        );
+        let error = must_err(boltffi_slice_dirs(&parsed), "zero slices must fail");
+        assert!(
+            error.contains("no Apple slice"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn boltffi_expected_files_lists_plist_lib_modulemap() {
+        use super::boltffi_expected_files;
+        let files = boltffi_expected_files(
+            "target/xcframework/BridgeCore.xcframework",
+            "bridge-core-ffi",
+            &["macos-arm64".to_owned()],
+        );
+        assert_eq!(
+            files,
+            vec![
+                "target/xcframework/BridgeCore.xcframework/Info.plist".to_owned(),
+                "target/xcframework/BridgeCore.xcframework/macos-arm64/Headers/module.modulemap"
+                    .to_owned(),
+                "target/xcframework/BridgeCore.xcframework/macos-arm64/libbridge_core_ffi.a"
+                    .to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn boltffi_pascal_case_matches_upstream() {
+        use super::boltffi_pascal_case;
+        assert_eq!(boltffi_pascal_case("bridge-core"), "BridgeCore");
+        assert_eq!(boltffi_pascal_case("foo_bar"), "FooBar");
+        assert_eq!(boltffi_pascal_case("Already"), "Already");
+        assert_eq!(boltffi_pascal_case("a--b"), "AB");
+        assert_eq!(boltffi_pascal_case("x"), "X");
+    }
+
+    fn boltffi_fixture(entries: &[(&str, &str)]) -> (PathBuf, Vec<String>, BTreeSet<String>) {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-boltffi-scan-{}",
+            crate::unique_suffix()
+        ));
+        must(fs::create_dir_all(&root), "create scratch directory");
+        let mut files = Vec::new();
+        for (path, contents) in entries {
+            let target = root.join(path);
+            if let Some(parent) = target.parent() {
+                must(fs::create_dir_all(parent), "create fixture directory");
+            }
+            must(fs::write(&target, contents), "write fixture file");
+            files.push((*path).to_owned());
+        }
+        files.sort();
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        (root, files, file_set)
+    }
+
+    fn boltffi_minimal_crate(package: &str) -> String {
+        format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\n")
+    }
+
+    #[test]
+    fn boltffi_producers_resolves_happy_path() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "libs/bridge-ffi/boltffi.toml",
+                "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
+                 [targets.apple.xcframework]\nname = \"BridgeCore\"\noutput = \"../../target/xcframework\"\n",
+            ),
+            (
+                "libs/bridge-ffi/Cargo.toml",
+                &boltffi_minimal_crate("bridge-core-ffi"),
+            ),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(producers.len(), 1);
+        let producer = &producers[0];
+        assert_eq!(producer.manifest, "libs/bridge-ffi/boltffi.toml");
+        assert_eq!(producer.root, "libs/bridge-ffi");
+        assert_eq!(producer.package, "bridge-core");
+        assert_eq!(producer.crate_name, "bridge-core-ffi");
+        assert_eq!(producer.framework, "BridgeCore");
+        assert_eq!(producer.ffi_module, "BridgeCoreFFI");
+        assert_eq!(producer.output, "target/xcframework/BridgeCore.xcframework");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producers_applies_name_and_output_defaults() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "crates/plain/boltffi.toml",
+                "[package]\nname = \"plain-core\"\n",
+            ),
+            (
+                "crates/plain/Cargo.toml",
+                &boltffi_minimal_crate("plain-core"),
+            ),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(producers.len(), 1);
+        assert_eq!(producers[0].framework, "PlainCore");
+        assert_eq!(producers[0].ffi_module, "PlainCoreFFI");
+        assert_eq!(
+            producers[0].output,
+            "crates/plain/dist/apple/PlainCore.xcframework"
+        );
+        assert_eq!(producers[0].crate_name, "plain-core");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producers_prefers_module_name_over_pascal_case() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "crates/modular/boltffi.toml",
+                "[package]\nname = \"modular-core\"\n\n\
+                 [targets.apple.swift]\nmodule_name = \"CustomModule\"\n",
+            ),
+            (
+                "crates/modular/Cargo.toml",
+                &boltffi_minimal_crate("modular-core"),
+            ),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(producers.len(), 1);
+        assert_eq!(producers[0].framework, "CustomModule");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producers_resolves_split_bindings() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "libs/bridge-ffi/boltffi.toml",
+                "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
+                 [targets.apple]\ndeployment_target = \"15.0\"\n\n\
+                 [targets.apple.xcframework]\nname = \"BridgeCore\"\noutput = \"../../target/xcframework\"\n\n\
+                 [targets.apple.spm]\nlayout = \"split\"\n\n\
+                 [targets.apple.swift]\noutput = \"../../app/Sources/BridgeBindings\"\n",
+            ),
+            (
+                "libs/bridge-ffi/Cargo.toml",
+                &boltffi_minimal_crate("bridge-core-ffi"),
+            ),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(producers.len(), 1);
+        let producer = &producers[0];
+        assert_eq!(producer.bindings_dir, "app/Sources/BridgeBindings/BoltFFI");
+        assert_eq!(
+            producer.bindings_file,
+            "app/Sources/BridgeBindings/BoltFFI/BridgeCoreFfiBoltFFI.swift"
+        );
+        assert_eq!(producer.deployment_target, "15.0");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producers_resolves_bundled_bindings() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "libs/bridge-ffi/boltffi.toml",
+                "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
+                 [targets.apple.spm]\nlayout = \"bundled\"\noutput = \"../pkg\"\nwrapper_sources = \"Wrapped\"\n",
+            ),
+            (
+                "libs/bridge-ffi/Cargo.toml",
+                &boltffi_minimal_crate("bridge-core-ffi"),
+            ),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(producers.len(), 1);
+        let producer = &producers[0];
+        assert_eq!(producer.bindings_dir, "libs/pkg/Wrapped/BoltFFI");
+        assert_eq!(
+            producer.bindings_file,
+            "libs/pkg/Wrapped/BoltFFI/BridgeCoreFfiBoltFFI.swift"
+        );
+        assert_eq!(
+            producer.package_swift.as_deref(),
+            Some("libs/pkg/Package.swift")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producers_applies_bindings_defaults() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "crates/plain/boltffi.toml",
+                "[package]\nname = \"plain-core\"\n",
+            ),
+            (
+                "crates/plain/Cargo.toml",
+                &boltffi_minimal_crate("plain-core"),
+            ),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(producers.len(), 1);
+        let producer = &producers[0];
+        assert_eq!(
+            producer.bindings_dir,
+            "crates/plain/dist/apple/Sources/BoltFFI"
+        );
+        assert_eq!(
+            producer.bindings_file,
+            "crates/plain/dist/apple/Sources/BoltFFI/PlainCoreBoltFFI.swift"
+        );
+        assert_eq!(producer.deployment_target, "16.0");
+        assert!(
+            producer
+                .inputs
+                .contains(&"crates/plain/dist/apple/Sources/BoltFFI/**".to_owned()),
+            "committed bindings select the producer: {:?}",
+            producer.inputs
+        );
+        assert!(
+            producer
+                .inputs
+                .contains(&"crates/plain/dist/apple/Package.swift".to_owned()),
+            "the generated manifest selects the producer: {:?}",
+            producer.inputs
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producers_honors_ffi_module_name() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "crates/custom/boltffi.toml",
+                "[package]\nname = \"custom-core\"\n\n\
+                 [targets.apple.swift]\nffi_module_name = \"CustomShim\"\n",
+            ),
+            (
+                "crates/custom/Cargo.toml",
+                &boltffi_minimal_crate("custom-core"),
+            ),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(producers.len(), 1);
+        assert_eq!(producers[0].framework, "CustomCore");
+        assert_eq!(producers[0].ffi_module, "CustomShim");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producers_rejects_unknown_spm_layout() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "crates/woven/boltffi.toml",
+                "[package]\nname = \"woven-core\"\n\n\
+                 [targets.apple.spm]\nlayout = \"woven\"\n",
+            ),
+            (
+                "crates/woven/Cargo.toml",
+                &boltffi_minimal_crate("woven-core"),
+            ),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(producers.is_empty(), "{producers:?}");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("SPM layout `woven`")),
+            "{diagnostics:?}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producers_rejects_escaping_swift_output() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "crates/leaky/boltffi.toml",
+                "[package]\nname = \"leaky-core\"\n\n\
+                 [targets.apple.swift]\noutput = \"../../../outside\"\n\n\
+                 [targets.apple.spm]\nlayout = \"split\"\n",
+            ),
+            (
+                "crates/leaky/Cargo.toml",
+                &boltffi_minimal_crate("leaky-core"),
+            ),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(producers.is_empty(), "{producers:?}");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.contains("Swift bindings output `../../../outside/BoltFFI`")
+            }),
+            "{diagnostics:?}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producers_skips_disabled_apple() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "crates/off/boltffi.toml",
+                "[package]\nname = \"off\"\n\n[targets.apple]\nenabled = false\n",
+            ),
+            ("crates/off/Cargo.toml", &boltffi_minimal_crate("off")),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(producers.is_empty());
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producers_reports_unusable_manifests() {
+        use super::{boltffi_producers, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            ("crates/nameless/boltffi.toml", "[targets.apple]\n"),
+            (
+                "crates/nameless/Cargo.toml",
+                &boltffi_minimal_crate("nameless"),
+            ),
+            (
+                "crates/orphan/boltffi.toml",
+                "[package]\nname = \"orphan\"\n",
+            ),
+            (
+                "crates/mismatched/boltffi.toml",
+                "[package]\nname = \"mismatched\"\ncrate = \"other-crate\"\n",
+            ),
+            (
+                "crates/mismatched/Cargo.toml",
+                &boltffi_minimal_crate("mismatched"),
+            ),
+            (
+                "crates/escaping/boltffi.toml",
+                "[package]\nname = \"escaping\"\n\n\
+                 [targets.apple.xcframework]\nname = \"Escaping\"\noutput = \"../../../../tmp\"\n",
+            ),
+            (
+                "crates/escaping/Cargo.toml",
+                &boltffi_minimal_crate("escaping"),
+            ),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(producers.is_empty());
+        assert_eq!(diagnostics.len(), 4);
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic
+            .contains("crates/nameless/boltffi.toml declares no [package] name")));
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic
+            .contains("crates/orphan/boltffi.toml has no sibling Cargo.toml")));
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic
+            .contains("names crate `other-crate`")
+            && diagnostic.contains("declares package `mismatched`")));
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic
+            .contains("crates/escaping/boltffi.toml")
+            && diagnostic.contains("escapes the repository")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_producers_rejects_conflicting_outputs() {
+        use super::{boltffi_producers, ScanContext};
+        let manifest = "[package]\nname = \"shared-core\"\ncrate = \"shared-core\"\n\n\
+             [targets.apple.xcframework]\nname = \"Shared\"\noutput = \"../../target/xcframework\"\n";
+        let (root, files, file_set) = boltffi_fixture(&[
+            ("libs/one/boltffi.toml", manifest),
+            ("libs/one/Cargo.toml", &boltffi_minimal_crate("shared-core")),
+            ("libs/two/boltffi.toml", manifest),
+            ("libs/two/Cargo.toml", &boltffi_minimal_crate("shared-core")),
+        ]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(producers.is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("claim the same XCFramework output"));
+        assert!(diagnostics[0].contains("libs/one/boltffi.toml"));
+        assert!(diagnostics[0].contains("libs/two/boltffi.toml"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_closure_collects_direct_crate_inputs() {
+        use super::native_input_closure;
+        let (root, files, file_set) = boltffi_fixture(&[
+            ("Cargo.lock", "lock\n"),
+            ("rust-toolchain.toml", "[toolchain]\n"),
+            (
+                "libs/bridge-ffi/Cargo.toml",
+                "[package]\nname = \"bridge-core-ffi\"\nversion = \"0.1.0\"\n",
+            ),
+            ("libs/bridge-ffi/build.rs", "fn main() {}\n"),
+            (
+                "libs/bridge-ffi/src/lib.rs",
+                "const SCHEMA: &str = include_str!(\"schema.json\");\n",
+            ),
+            ("libs/bridge-ffi/src/schema.json", "{}\n"),
+        ]);
+        let seed = vec!["libs/bridge-ffi/boltffi.toml".to_owned()];
+        let (inputs, gaps) = must(
+            native_input_closure(&root, &files, &file_set, "libs/bridge-ffi", &seed),
+            "collect direct closure",
+        );
+        assert!(gaps.is_empty(), "{gaps:?}");
+        for expected in [
+            "libs/bridge-ffi/boltffi.toml",
+            "libs/bridge-ffi/Cargo.toml",
+            "libs/bridge-ffi/**/*.rs",
+            "libs/bridge-ffi/src/**",
+            "libs/bridge-ffi/build.rs",
+            "libs/bridge-ffi/src/schema.json",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            ".cargo/**",
+        ] {
+            assert!(
+                inputs.iter().any(|input| input == expected),
+                "closure contains {expected}: {inputs:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_closure_follows_transitive_path_dependencies() {
+        use super::native_input_closure;
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "libs/bridge-ffi/Cargo.toml",
+                "[package]\nname = \"bridge-core-ffi\"\nversion = \"0.1.0\"\n\n[dependencies]\nsibling = { path = \"../sibling\" }\n",
+            ),
+            (
+                "libs/sibling/Cargo.toml",
+                "[package]\nname = \"sibling\"\nversion = \"0.1.0\"\n\n[dependencies]\nleaf = { path = \"../leaf\" }\n",
+            ),
+            (
+                "libs/leaf/Cargo.toml",
+                "[package]\nname = \"leaf\"\nversion = \"0.1.0\"\n",
+            ),
+        ]);
+        let (inputs, gaps) = must(
+            native_input_closure(&root, &files, &file_set, "libs/bridge-ffi", &[]),
+            "collect transitive closure",
+        );
+        assert!(gaps.is_empty(), "{gaps:?}");
+        for expected in [
+            "libs/bridge-ffi/Cargo.toml",
+            "libs/sibling/Cargo.toml",
+            "libs/sibling/**/*.rs",
+            "libs/leaf/Cargo.toml",
+            "libs/leaf/src/**",
+        ] {
+            assert!(
+                inputs.iter().any(|input| input == expected),
+                "closure contains {expected}: {inputs:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_closure_reports_missing_path_manifest_as_gap() {
+        use super::native_input_closure;
+        let (root, files, file_set) = boltffi_fixture(&[(
+            "libs/bridge-ffi/Cargo.toml",
+            "[package]\nname = \"bridge-core-ffi\"\nversion = \"0.1.0\"\n\n[dependencies]\nmissing = { path = \"../missing\" }\n",
+        )]);
+        let (inputs, gaps) = must(
+            native_input_closure(&root, &files, &file_set, "libs/bridge-ffi", &[]),
+            "collect closure with a missing dep",
+        );
+        assert!(
+            inputs
+                .iter()
+                .any(|input| input == "libs/bridge-ffi/Cargo.toml"),
+            "{inputs:?}"
+        );
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert!(gaps[0].contains("missing"), "{gaps:?}");
+        assert!(gaps[0].contains("no tracked Cargo.toml"), "{gaps:?}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_closure_terminates_on_dependency_cycle() {
+        use super::native_input_closure;
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "libs/one/Cargo.toml",
+                "[package]\nname = \"one\"\nversion = \"0.1.0\"\n\n[dependencies]\ntwo = { path = \"../two\" }\n",
+            ),
+            (
+                "libs/two/Cargo.toml",
+                "[package]\nname = \"two\"\nversion = \"0.1.0\"\n\n[dependencies]\none = { path = \"../one\" }\n",
+            ),
+        ]);
+        let (inputs, gaps) = must(
+            native_input_closure(&root, &files, &file_set, "libs/one", &[]),
+            "collect cyclic closure",
+        );
+        assert!(gaps.is_empty(), "{gaps:?}");
+        assert!(
+            inputs.iter().any(|input| input == "libs/one/**/*.rs"),
+            "{inputs:?}"
+        );
+        assert!(
+            inputs.iter().any(|input| input == "libs/two/**/*.rs"),
+            "{inputs:?}"
+        );
+        let mut deduped = inputs.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(inputs, deduped, "closure patterns are sorted and unique");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_recipe_digest_separates_policy_from_verbosity() {
+        use super::BoltffiRecipe;
+        let quiet = BoltffiRecipe {
+            profile: None,
+            locked: false,
+            verbose: false,
+        };
+        let loud = BoltffiRecipe {
+            profile: None,
+            locked: false,
+            verbose: true,
+        };
+        assert_eq!(
+            quiet.digest_identity(),
+            "boltffi:pack:apple:profile=default:locked=false"
+        );
+        assert_eq!(quiet.digest_identity(), loud.digest_identity());
+        let profiled = BoltffiRecipe {
+            profile: Some("desktop-release".to_owned()),
+            locked: false,
+            verbose: false,
+        };
+        assert_eq!(
+            profiled.digest_identity(),
+            "boltffi:pack:apple:profile=desktop-release:locked=false"
+        );
+        assert_ne!(quiet.digest_identity(), profiled.digest_identity());
+        let locked = BoltffiRecipe {
+            profile: None,
+            locked: true,
+            verbose: false,
+        };
+        assert_eq!(
+            locked.digest_identity(),
+            "boltffi:pack:apple:profile=default:locked=true"
+        );
+        assert_ne!(quiet.digest_identity(), locked.digest_identity());
+    }
+
+    fn drift_recipe() -> (super::BoltffiRecipe, super::BoltffiDriftSurface<'static>) {
+        (
+            super::BoltffiRecipe {
+                profile: None,
+                locked: false,
+                verbose: true,
+            },
+            super::BoltffiDriftSurface {
+                bindings_dir: "native/Sources/BridgeCore/BoltFFI",
+                package_swift: Some("dist/apple/Package.swift"),
+                framework: "BridgeCore",
+            },
+        )
+    }
+
+    #[test]
+    fn boltffi_recipe_renders_snapshot_pack_diff() {
+        let (recipe, surface) = drift_recipe();
+        let commands = recipe.commands(
+            "libs/bridge-ffi",
+            "target/xcframework/BridgeCore.xcframework",
+            &surface,
+        );
+        assert_eq!(commands.len(), 6, "{commands:?}");
+        assert_eq!(
+            commands[0],
+            "rm -rf 'target/xcframework/BridgeCore.xcframework'"
+        );
+        assert!(
+            commands[1].contains("test -d 'native/Sources/BridgeCore/BoltFFI'")
+                && commands[1]
+                    .contains("rm -rf 'libs/bridge-ffi/target/velnor-boltffi-staging/BridgeCore'")
+                && commands[1].contains("cp -R 'native/Sources/BridgeCore/BoltFFI'"),
+            "bindings snapshot: {}",
+            commands[1]
+        );
+        assert!(
+            commands[2].contains("test -f 'dist/apple/Package.swift'")
+                && commands[2].contains("cp 'dist/apple/Package.swift'"),
+            "package snapshot: {}",
+            commands[2]
+        );
+        assert_eq!(
+            commands[3],
+            "cd -- 'libs/bridge-ffi' && boltffi -v pack apple"
+        );
+        assert!(
+            commands[4].starts_with("diff -r ")
+                && commands[4].contains("'native/Sources/BridgeCore/BoltFFI'"),
+            "bindings drift check: {}",
+            commands[4]
+        );
+        assert!(
+            commands[5].starts_with("diff ") && commands[5].contains("'dist/apple/Package.swift'"),
+            "package drift check: {}",
+            commands[5]
+        );
+    }
+
+    #[test]
+    fn boltffi_recipe_omits_package_swift_when_skipped() {
+        let recipe = super::BoltffiRecipe {
+            profile: Some("desktop-release".to_owned()),
+            locked: true,
+            verbose: false,
+        };
+        let surface = super::BoltffiDriftSurface {
+            bindings_dir: "Sources/BoltFFI",
+            package_swift: None,
+            framework: "BridgeCore",
+        };
+        let commands = recipe.commands(".", "dist/apple/BridgeCore.xcframework", &surface);
+        assert_eq!(commands.len(), 4, "{commands:?}");
+        assert!(
+            commands
+                .iter()
+                .all(|command| !command.contains("Package.swift")),
+            "{commands:?}"
+        );
+        assert!(
+            commands[1].contains("rm -rf 'target/velnor-boltffi-staging/BridgeCore'"),
+            "staging stays repo-relative at the root: {}",
+            commands[1]
+        );
+        assert_eq!(
+            commands[2],
+            "boltffi --cargo-arg=--locked --cargo-arg=--profile --cargo-arg='desktop-release' pack apple"
+        );
+    }
+
+    /// Execute the rendered snapshot/diff pair against a fixture tree,
+    /// simulating the pack by rewriting the file in between: the check
+    /// must pass on an untouched tree and fail on a rewrite, an
+    /// addition, or a missing checkout member.
+    #[test]
+    fn boltffi_drift_shell_detects_rewrite() {
+        use std::process::Command;
+        let (recipe, surface) = drift_recipe();
+        let commands = recipe.commands(
+            "libs/bridge-ffi",
+            "target/xcframework/BridgeCore.xcframework",
+            &surface,
+        );
+        let root = scratch("boltffi-drift");
+        let live = root.join("native/Sources/BridgeCore/BoltFFI");
+        must(
+            std::fs::create_dir_all(&live),
+            "create live bindings fixture",
+        );
+        must(
+            std::fs::write(live.join("BridgeCoreBoltFFI.swift"), "committed\n"),
+            "write live bindings fixture",
+        );
+        must(
+            std::fs::create_dir_all(root.join("dist/apple")),
+            "create spm fixture",
+        );
+        must(
+            std::fs::write(root.join("dist/apple/Package.swift"), "committed\n"),
+            "write package fixture",
+        );
+        let run = |command: &str| {
+            must(
+                Command::new("sh")
+                    .arg("-c")
+                    .arg(command)
+                    .current_dir(&root)
+                    .output(),
+                "run drift shell",
+            )
+        };
+        assert!(run(&commands[1]).status.success());
+        assert!(run(&commands[2]).status.success());
+        assert!(run(&commands[4]).status.success());
+        assert!(run(&commands[5]).status.success());
+        must(
+            std::fs::write(live.join("BridgeCoreBoltFFI.swift"), "rewritten\n"),
+            "simulate pack rewrite",
+        );
+        let drifted = run(&commands[4]);
+        assert!(!drifted.status.success());
+        let stderr = String::from_utf8_lossy(&drifted.stderr);
+        assert!(stderr.contains("drifted from regeneration"), "{stderr}");
+        must(
+            std::fs::write(live.join("BridgeCoreBoltFFI.swift"), "committed\n"),
+            "restore live bindings fixture",
+        );
+        must(
+            std::fs::write(live.join("Extra.swift"), "added\n"),
+            "simulate pack addition",
+        );
+        assert!(!run(&commands[4]).status.success());
+        let _ = std::fs::remove_dir_all(&live);
+        let missing = run(&commands[1]);
+        assert!(!missing.status.success());
+        let stderr = String::from_utf8_lossy(&missing.stderr);
+        assert!(stderr.contains("missing from the checkout"), "{stderr}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

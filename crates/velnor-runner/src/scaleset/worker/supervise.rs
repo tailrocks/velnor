@@ -39,7 +39,7 @@ use super::WorkerRunner;
 /// How many DinD restarts one worker tolerates before failing.
 pub const MAX_DIND_RESTARTS: u32 = 3;
 /// JIT runner startup deadline, persisted as an absolute epoch time.
-pub const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(120);
+pub const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Per-worker DinD restart budget (persisted with the worker record once
 /// the journal extension lands; until then owned by the tick caller).
@@ -655,7 +655,10 @@ fn remove_network(runner: &mut dyn WorkerRunner, network: &str, failures: &mut V
         ],
     ) {
         Ok(output) if output.code == 0 => {}
-        Ok(output) if crate::docker::client::daemon_reports_missing(&output.stderr) => {}
+        Ok(output)
+            if crate::docker::client::daemon_reports_missing(&output.stderr)
+                || output.stderr.contains("not found")
+                || output.stderr.contains("Not found") => {}
         Ok(output) => failures.push(format!(
             "remove network {network} exited {}: {}",
             output.code,
@@ -676,7 +679,10 @@ fn remove_volume(runner: &mut dyn WorkerRunner, volume: &str, failures: &mut Vec
         ],
     ) {
         Ok(output) if output.code == 0 => {}
-        Ok(output) if crate::docker::client::daemon_reports_missing(&output.stderr) => {}
+        Ok(output)
+            if crate::docker::client::daemon_reports_missing(&output.stderr)
+                || output.stderr.contains("not found")
+                || output.stderr.contains("Not found") => {}
         Ok(output) => failures.push(format!(
             "remove volume {volume} exited {}: {}",
             output.code,

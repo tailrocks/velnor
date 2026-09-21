@@ -198,6 +198,8 @@ impl DockerBackend {
         world: &mut ExecutionWorld<'_>,
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
+        let _power_assertion =
+            crate::platform::PowerAssertionGuard::acquire(&format!("velnor-job-{}", isolation.id));
         if let Some(engine) = world.docker_engine.as_mut() {
             engine.execute_github_job(events)?;
             return Ok(());
