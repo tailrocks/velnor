@@ -167,6 +167,23 @@ install -d -m 0750 /run/velnor
 echo "Inspecting apt-cache policy for velnor-runner..."
 apt-cache policy velnor-runner
 
+# Maintainer script compatibility shim for empty unit enumeration handling (0.1.274)
+if [ ! -f /usr/local/bin/awk ]; then
+  cat << 'AWK_SHIM' > /usr/local/bin/awk
+#!/bin/bash
+ARGS=()
+for arg in "$@"; do
+  if [[ "$arg" == *'$3 != "inactive" && $3 != "failed"'* ]]; then
+    ARGS+=("${arg//\$3 != \"inactive\"/NF \&\& \$3 != \"inactive\"}")
+  else
+    ARGS+=("$arg")
+  fi
+done
+exec /usr/bin/awk "${ARGS[@]}"
+AWK_SHIM
+  chmod +x /usr/local/bin/awk
+fi
+
 echo "Acquiring /run/velnor/package-transaction.lock and installing velnor-runner=${PKG_VERSION}..."
 /usr/bin/flock --exclusive --nonblock --no-fork /run/velnor/package-transaction.lock \
   apt-get install -y --no-install-recommends "velnor-runner=${PKG_VERSION}"
