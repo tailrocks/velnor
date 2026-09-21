@@ -1700,9 +1700,67 @@ fn boltffi_snapshot_commands(
     commands
 }
 
+/// A Cargo profile name the `BoltFFI` pack passes through `--cargo-arg`.
+/// The charset is Cargo's own profile-name surface: ASCII letters, digits,
+/// `-`, and `_`, starting with an alphanumeric.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CargoProfile(pub(crate) String);
+
+impl CargoProfile {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Whether `profile` is a Cargo profile name: 1 to 64 ASCII letters,
+/// digits, `-`, or `_`, starting with an alphanumeric.
+pub(crate) fn valid_cargo_profile(profile: &str) -> bool {
+    let mut chars = profile.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (1..=64).contains(&profile.len())
+        && first.is_ascii_alphanumeric()
+        && chars
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+/// The declared Apple native-pack policy: the Cargo profile from
+/// `[native.apple] cargo_profile`, or `None` when the repository declares
+/// none and the scan keeps `BoltFFI`'s own default.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct AppleNativePolicy {
+    pub(crate) cargo_profile: Option<CargoProfile>,
+}
+
+impl AppleNativePolicy {
+    /// Parse the declared `[native.apple] cargo_profile` into the typed
+    /// policy. Absent stays `None`; a present value must be a valid Cargo
+    /// profile name.
+    ///
+    /// # Errors
+    /// Returns a usage error naming `[native.apple] cargo_profile` when the
+    /// declared value is not a valid Cargo profile name.
+    pub(crate) fn from_cargo_profile(raw: Option<&str>) -> Result<Self, GeneratorError> {
+        let Some(raw) = raw else {
+            return Ok(Self {
+                cargo_profile: None,
+            });
+        };
+        if !valid_cargo_profile(raw) {
+            return Err(GeneratorError::usage(format!(
+                "[native.apple] cargo_profile `{raw}` is not a valid Cargo profile name: use 1 to 64 ASCII letters, digits, `-`, or `_`, starting with a letter or digit"
+            )));
+        }
+        Ok(Self {
+            cargo_profile: Some(CargoProfile(raw.to_owned())),
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BoltffiRecipe {
-    pub(crate) profile: Option<String>,
+    pub(crate) profile: Option<CargoProfile>,
     pub(crate) locked: bool,
     pub(crate) verbose: bool,
 }
@@ -1716,7 +1774,9 @@ impl BoltffiRecipe {
     pub(crate) fn digest_identity(&self) -> String {
         format!(
             "boltffi:pack:apple:profile={}:locked={}",
-            self.profile.as_deref().unwrap_or("default"),
+            self.profile
+                .as_ref()
+                .map_or("default", CargoProfile::as_str),
             self.locked,
         )
     }
@@ -1751,7 +1811,7 @@ impl BoltffiRecipe {
         }
         if let Some(profile) = &self.profile {
             pack.push_str(" --cargo-arg=--profile --cargo-arg=");
-            pack.push_str(&shell_quote(profile));
+            pack.push_str(&shell_quote(profile.as_str()));
         }
         pack.push_str(" pack apple");
         commands.push(format!("{}{pack}", shell_change_dir(manifest_root)));
@@ -1996,11 +2056,10 @@ fn boltffi_producer_from_manifest(
     }
     let (inputs, inputs_unknown) =
         native_input_closure(context.root, context.files, context.file_set, &root, &seed)?;
-    // The scanner never invents a Cargo profile: `None` keeps `BoltFFI`'s
-    // own default. A typed profile policy arrives with declared Apple
-    // facts; until then the recipe records exactly what the scan knows.
+    // The scanner never invents a Cargo profile: the recipe carries exactly
+    // the declared Apple policy, and `None` keeps `BoltFFI`'s own default.
     let recipe = BoltffiRecipe {
-        profile: None,
+        profile: context.apple.cargo_profile.clone(),
         locked: boltffi_recipe_locked(&inputs),
         verbose: true,
     };
@@ -3085,10 +3144,12 @@ mod tests {
                 &boltffi_minimal_crate("bridge-core-ffi"),
             ),
         ]);
+        let apple = super::AppleNativePolicy::default();
         let context = ScanContext {
             root: &root,
             files: &files,
             file_set: &file_set,
+            apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -3117,10 +3178,12 @@ mod tests {
                 &boltffi_minimal_crate("plain-core"),
             ),
         ]);
+        let apple = super::AppleNativePolicy::default();
         let context = ScanContext {
             root: &root,
             files: &files,
             file_set: &file_set,
+            apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -3149,10 +3212,12 @@ mod tests {
                 &boltffi_minimal_crate("modular-core"),
             ),
         ]);
+        let apple = super::AppleNativePolicy::default();
         let context = ScanContext {
             root: &root,
             files: &files,
             file_set: &file_set,
+            apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -3178,10 +3243,12 @@ mod tests {
                 &boltffi_minimal_crate("bridge-core-ffi"),
             ),
         ]);
+        let apple = super::AppleNativePolicy::default();
         let context = ScanContext {
             root: &root,
             files: &files,
             file_set: &file_set,
+            apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -3210,10 +3277,12 @@ mod tests {
                 &boltffi_minimal_crate("bridge-core-ffi"),
             ),
         ]);
+        let apple = super::AppleNativePolicy::default();
         let context = ScanContext {
             root: &root,
             files: &files,
             file_set: &file_set,
+            apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -3244,10 +3313,12 @@ mod tests {
                 &boltffi_minimal_crate("plain-core"),
             ),
         ]);
+        let apple = super::AppleNativePolicy::default();
         let context = ScanContext {
             root: &root,
             files: &files,
             file_set: &file_set,
+            apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -3293,10 +3364,12 @@ mod tests {
                 &boltffi_minimal_crate("custom-core"),
             ),
         ]);
+        let apple = super::AppleNativePolicy::default();
         let context = ScanContext {
             root: &root,
             files: &files,
             file_set: &file_set,
+            apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -3320,10 +3393,12 @@ mod tests {
                 &boltffi_minimal_crate("woven-core"),
             ),
         ]);
+        let apple = super::AppleNativePolicy::default();
         let context = ScanContext {
             root: &root,
             files: &files,
             file_set: &file_set,
+            apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
         assert!(producers.is_empty(), "{producers:?}");
@@ -3351,10 +3426,12 @@ mod tests {
                 &boltffi_minimal_crate("leaky-core"),
             ),
         ]);
+        let apple = super::AppleNativePolicy::default();
         let context = ScanContext {
             root: &root,
             files: &files,
             file_set: &file_set,
+            apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
         assert!(producers.is_empty(), "{producers:?}");
@@ -3377,10 +3454,12 @@ mod tests {
             ),
             ("crates/off/Cargo.toml", &boltffi_minimal_crate("off")),
         ]);
+        let apple = super::AppleNativePolicy::default();
         let context = ScanContext {
             root: &root,
             files: &files,
             file_set: &file_set,
+            apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
         assert!(producers.is_empty());
@@ -3419,10 +3498,12 @@ mod tests {
                 &boltffi_minimal_crate("escaping"),
             ),
         ]);
+        let apple = super::AppleNativePolicy::default();
         let context = ScanContext {
             root: &root,
             files: &files,
             file_set: &file_set,
+            apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
         assert!(producers.is_empty());
@@ -3451,10 +3532,12 @@ mod tests {
             ("libs/two/boltffi.toml", manifest),
             ("libs/two/Cargo.toml", &boltffi_minimal_crate("shared-core")),
         ]);
+        let apple = super::AppleNativePolicy::default();
         let context = ScanContext {
             root: &root,
             files: &files,
             file_set: &file_set,
+            apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
         assert!(producers.is_empty());
@@ -3619,13 +3702,13 @@ mod tests {
         );
         assert_eq!(quiet.digest_identity(), loud.digest_identity());
         let profiled = BoltffiRecipe {
-            profile: Some("desktop-release".to_owned()),
+            profile: Some(super::CargoProfile("ci-release".to_owned())),
             locked: false,
             verbose: false,
         };
         assert_eq!(
             profiled.digest_identity(),
-            "boltffi:pack:apple:profile=desktop-release:locked=false"
+            "boltffi:pack:apple:profile=ci-release:locked=false"
         );
         assert_ne!(quiet.digest_identity(), profiled.digest_identity());
         let locked = BoltffiRecipe {
@@ -3638,6 +3721,246 @@ mod tests {
             "boltffi:pack:apple:profile=default:locked=true"
         );
         assert_ne!(quiet.digest_identity(), locked.digest_identity());
+    }
+
+    #[test]
+    fn cargo_profile_names_accept_valid_and_refuse_the_rest() {
+        use super::valid_cargo_profile;
+        let longest = "a".repeat(64);
+        for valid in ["ci-release", "a", "R1", "x-y_z", "0abc", &longest] {
+            assert!(valid_cargo_profile(valid), "{valid:?} must be accepted");
+        }
+        let too_long = "a".repeat(65);
+        for invalid in [
+            "",
+            "-lead",
+            "_lead",
+            "has space",
+            "has/slash",
+            "dot.name",
+            "unié",
+            "semi;colon",
+            &too_long,
+        ] {
+            assert!(!valid_cargo_profile(invalid), "{invalid:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn apple_policy_parses_absent_and_names_section_on_error() {
+        use super::AppleNativePolicy;
+        let absent = must(
+            AppleNativePolicy::from_cargo_profile(None),
+            "absent stays none",
+        );
+        assert_eq!(absent, AppleNativePolicy::default());
+        assert_eq!(absent.cargo_profile, None);
+        let typed = must(
+            AppleNativePolicy::from_cargo_profile(Some("ci-release")),
+            "valid parses",
+        );
+        assert_eq!(
+            typed
+                .cargo_profile
+                .as_ref()
+                .map(super::CargoProfile::as_str),
+            Some("ci-release")
+        );
+        for raw in ["has space", "", "-lead", "dot.name"] {
+            let error = must_err(
+                AppleNativePolicy::from_cargo_profile(Some(raw)),
+                "bad charset must fail",
+            );
+            assert!(
+                error.to_string().contains("[native.apple] cargo_profile"),
+                "{raw:?} must name the section: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn boltffi_producer_threads_declared_profile_into_recipe_and_digest() {
+        use super::{boltffi_producers, AppleNativePolicy, ScanContext};
+        let entries = [
+            (
+                "libs/bridge-ffi/boltffi.toml",
+                "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
+                 [targets.apple.xcframework]\nname = \"BridgeCore\"\noutput = \"../../target/xcframework\"\n",
+            ),
+            (
+                "libs/bridge-ffi/Cargo.toml",
+                &boltffi_minimal_crate("bridge-core-ffi"),
+            ),
+        ];
+        let (root, files, file_set) = boltffi_fixture(&entries);
+        let default = AppleNativePolicy::default();
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+            apple: &default,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(producers.len(), 1);
+        assert_eq!(producers[0].recipe.profile, None);
+        assert_eq!(
+            producers[0].recipe.digest_identity(),
+            "boltffi:pack:apple:profile=default:locked=false"
+        );
+        let typed = must(
+            AppleNativePolicy::from_cargo_profile(Some("ci-release")),
+            "parse declared profile",
+        );
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+            apple: &typed,
+        };
+        let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(producers.len(), 1);
+        assert_eq!(
+            producers[0]
+                .recipe
+                .profile
+                .as_ref()
+                .map(super::CargoProfile::as_str),
+            Some("ci-release")
+        );
+        assert!(
+            producers[0]
+                .recipe
+                .digest_identity()
+                .contains("profile=ci-release"),
+            "the digest carries the declared profile: {}",
+            producers[0].recipe.digest_identity()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_inputs_digest_mints_new_identity_on_profile_change() {
+        use super::{boltffi_producers, AppleNativePolicy, ScanContext};
+        let (root, files, file_set) = boltffi_fixture(&[
+            (
+                "crates/plain/boltffi.toml",
+                "[package]\nname = \"plain-core\"\n",
+            ),
+            (
+                "crates/plain/Cargo.toml",
+                &boltffi_minimal_crate("plain-core"),
+            ),
+        ]);
+        let digest_for = |policy: &AppleNativePolicy| {
+            let context = ScanContext {
+                root: &root,
+                files: &files,
+                file_set: &file_set,
+                apple: policy,
+            };
+            let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            assert_eq!(producers.len(), 1);
+            producers[0].inputs_digest.clone()
+        };
+        let default = AppleNativePolicy::default();
+        let first = must(
+            digest_for(&default).ok_or("complete closure mints a digest"),
+            "digest without a profile",
+        );
+        let release = must(
+            AppleNativePolicy::from_cargo_profile(Some("ci-release")),
+            "parse declared profile",
+        );
+        let second = must(
+            digest_for(&release).ok_or("complete closure mints a digest"),
+            "digest with a profile",
+        );
+        assert_ne!(
+            first, second,
+            "declaring a profile must mint a new inputs digest"
+        );
+        let retry = must(
+            digest_for(&release).ok_or("complete closure mints a digest"),
+            "digest with the same profile",
+        );
+        assert_eq!(second, retry, "the same profile keeps its digest");
+        let other = must(
+            AppleNativePolicy::from_cargo_profile(Some("ci-debug")),
+            "parse another profile",
+        );
+        let third = must(
+            digest_for(&other).ok_or("complete closure mints a digest"),
+            "digest with another profile",
+        );
+        assert_ne!(
+            second, third,
+            "a different profile must mint a new inputs digest"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn boltffi_pack_renders_declared_profile_end_to_end() {
+        use super::AppleNativePolicy;
+        let (root, _files, _file_set) = boltffi_fixture(&[
+            (
+                "libs/bridge-ffi/boltffi.toml",
+                "[package]\nname = \"bridge-core\"\ncrate = \"bridge-core-ffi\"\n\n\
+                 [targets.apple.xcframework]\nname = \"BridgeCore\"\noutput = \"../../target/xcframework\"\n",
+            ),
+            (
+                "libs/bridge-ffi/Cargo.toml",
+                &boltffi_minimal_crate("bridge-core-ffi"),
+            ),
+            (
+                "rust-toolchain.toml",
+                "[toolchain]\nchannel = \"1.91.1\"\n",
+            ),
+        ]);
+        let config = must(
+            toml::from_str::<crate::s2::config::RepoGenerationConfig>(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [native.apple]\ncargo_profile = \"ci-release\"\n",
+            ),
+            "parse generation config under test",
+        );
+        let policy = must(
+            AppleNativePolicy::from_cargo_profile(config.native_apple().cargo_profile.as_deref()),
+            "parse declared profile",
+        );
+        let providers = std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]);
+        let shape = must(
+            super::super::scan_shape(&root, &providers, "main", &[], &policy),
+            "scan fixture",
+        );
+        assert_eq!(shape.boltffi_producers.len(), 1);
+        let producer = &shape.boltffi_producers[0];
+        assert_eq!(
+            producer
+                .recipe
+                .profile
+                .as_ref()
+                .map(super::CargoProfile::as_str),
+            Some("ci-release")
+        );
+        let surface = super::BoltffiDriftSurface {
+            bindings_dir: &producer.bindings_dir,
+            package_swift: producer.package_swift.as_deref(),
+            framework: &producer.framework,
+        };
+        let commands = producer
+            .recipe
+            .commands(&producer.root, &producer.output, &surface);
+        assert!(
+            commands
+                .iter()
+                .any(|command| command.contains("--cargo-arg=--profile --cargo-arg='ci-release'")),
+            "the rendered pack carries the declared profile: {commands:?}"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     fn drift_recipe() -> (super::BoltffiRecipe, super::BoltffiDriftSurface<'static>) {
@@ -3702,7 +4025,7 @@ mod tests {
     #[test]
     fn boltffi_recipe_omits_package_swift_when_skipped() {
         let recipe = super::BoltffiRecipe {
-            profile: Some("desktop-release".to_owned()),
+            profile: Some(super::CargoProfile("ci-release".to_owned())),
             locked: true,
             verbose: false,
         };
@@ -3726,7 +4049,7 @@ mod tests {
         );
         assert_eq!(
             commands[2],
-            "boltffi --cargo-arg=--locked --cargo-arg=--profile --cargo-arg='desktop-release' pack apple"
+            "boltffi --cargo-arg=--locked --cargo-arg=--profile --cargo-arg='ci-release' pack apple"
         );
     }
 
