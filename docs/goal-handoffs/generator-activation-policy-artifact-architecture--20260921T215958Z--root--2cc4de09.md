@@ -173,3 +173,15 @@ Additional related clean separate clone/worktrees found by the verification audi
 ## Publication receipt
 
 Published preservation branch: `codex/goal-handoff-2cc4de09`. Draft PR: [#1064](https://github.com/tailrocks/velnor/pull/1064). Initial handoff commit: `a965d357cec42c9d5e6833083294489931060c01`. The final branch SHA is reported in the PR body and final response, rather than self-embedded here. Auto-merge was not enabled and no queue/merge action was performed.
+
+## Audit expansion: branch, PR, worktree coverage (2026-09-21T22:09Z)
+
+Independent audits found **369** registered worktrees in W1's common repository: 286 live, 83 missing/prunable, 74 branch-attached, 295 detached; no worktree/index locks. There are no stashes in W1. The separate older clone `/Users/donbeave/Projects/tailrocks/velnor-project/velnor/.git` has 85 live worktrees and 11 untouched stashes. Other discovered related clone common dirs: `/Users/donbeave/Projects/github/velnor/.git` (6 live); `/Users/donbeave/Projects/github/all-repo/tailrocks_velnor/.git` (23 live); `/Users/donbeave/Projects/tailrocks/velnor-project/velnor2/.git` (21 registered, 9 prunable). Discovery did not scan other machines or arbitrary private paths.
+
+Known in-progress/dirty **shared or unknown** resources include numerous historical `/private/tmp/g*/`, `/private/tmp/velnor-*` fixtures and `/Users/donbeave/Projects/tailrocks/velnor-evidence-checkpoint` (587 modifications). Do not touch them. Specific unresolved operations: `/private/tmp/g1-pr955-merge.9aAKSZ` and `/private/tmp/velnor-pr953-954-merged` have `MERGE_HEAD`; `/private/tmp/velnor-latest-macos-policy` and `/private/tmp/velnor-rust-cache` have `REBASE_HEAD`; an old common clone has ambiguous stale `REBASE_HEAD`. These remain `REVIEW_SHARED`.
+
+Additional W8: `/private/tmp/velnor-1044-lifecycle`, detached `d4651cfb`, clean, retained. No local-only worker implementation from this session is unpreserved; broader historical local-only branches are listed by the independent PR audit and must be classified, not removed.
+
+Relevant server branch/PR map: `codex/ci-performance-campaign@155d6b81` has post-merged-#968 WIP; `codex/ci-performance-next@970a6dd5` is #978 draft; `fix/ci-validation-contract@9bbf4a4e` is #979 draft; `refactor/holla-parity@ab2f12fa` is #980 draft. #978/#979/#980 are stale and overlap 107/82/142 files pairwise. Keep their useful evidence/tests but do not merge intact. Focused open PRs #1050/#1052/#1054/#1055/#1056/#1057/#1058/#1063 overlap R1-R10 in the files/counts reported by the branch audit; re-evaluate each after live head refresh. #1063 is a selective port from dirty/stale #962, not blanket merge authority.
+
+At audit end, remote candidate run `35660441660` had passed. Policy `35660437293` remained in progress; CI `35660442225` remained in progress and `velnor-tools` had failed. This is an observed pause-time state, not a repair task. The local watcher for Policy was stopped by coordinator; remote runs were retained.
