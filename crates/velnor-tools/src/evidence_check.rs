@@ -9791,7 +9791,7 @@ mod tests {
                 endpoint_or_operation: format!(
                     "/repos/{repository}/actions/runs/{main_run_id}/artifacts"
                 ),
-                query_base64: BASE64.encode(&canonical_rest_query("per_page=100&page=1")),
+                query_base64: BASE64.encode(canonical_rest_query("per_page=100&page=1")),
                 variables_base64: BASE64.encode(b"{}"),
                 query_sha256: digest_bytes(&canonical_rest_query("per_page=100&page=1")),
                 variables_sha256: digest_bytes(b"{}"),
@@ -12389,7 +12389,7 @@ mod tests {
             "api": "rest",
             "method": "GET",
             "endpoint_or_operation": "/repos/tailrocks/velnor",
-            "query_base64": BASE64.encode(&canonical_rest_query("page=1")),
+            "query_base64": BASE64.encode(canonical_rest_query("page=1")),
             "variables_base64": BASE64.encode(b"{}"),
             "query_sha256": digest_bytes(&canonical_rest_query("page=1")),
             "variables_sha256": digest_bytes(b"{}"),
@@ -12467,7 +12467,7 @@ mod tests {
             api: G0ApiKind::Rest,
             method: "GET".to_owned(),
             endpoint_or_operation: "/repos/jackin-project/jackin-agent-smith/commits/b9db5b149cc46baba9c49549432307c29e3972b0/check-runs".to_owned(),
-            query_base64: BASE64.encode(&canonical_rest_query("per_page=100&filter=all&page=1")),
+            query_base64: BASE64.encode(canonical_rest_query("per_page=100&filter=all&page=1")),
             variables_base64: BASE64.encode(b"{}"),
             query_sha256: digest_bytes(&canonical_rest_query("per_page=100&filter=all&page=1")),
             variables_sha256: digest_bytes(b"{}"),
@@ -12915,7 +12915,7 @@ mod tests {
             .iter()
             .any(|finding| finding.code == "g0-request-query"));
 
-        let noncanonical_order = b"filter\0all\0per_page\0100\0page\01\0";
+        let noncanonical_order = b"filter\0all\0per_page\x00100\0page\x001\0";
         collector.requests[0].query_base64 = BASE64.encode(noncanonical_order);
         collector.requests[0].query_sha256 = digest_bytes(noncanonical_order);
         findings.clear();
@@ -12924,7 +12924,7 @@ mod tests {
             .iter()
             .any(|finding| finding.code == "g0-request-query"));
 
-        let duplicate_query = b"filter\0all\0filter\0all\0page\01\0per_page\0100\0";
+        let duplicate_query = b"filter\0all\0filter\0all\0page\x001\0per_page\x00100\0";
         collector.requests[0].query_base64 = BASE64.encode(duplicate_query);
         collector.requests[0].query_sha256 = digest_bytes(duplicate_query);
         findings.clear();
@@ -13041,7 +13041,7 @@ mod tests {
             method: "GET".to_owned(),
             endpoint_or_operation:
                 "/repos/tailrocks/holla-apt/actions/runs/35079189599/attempts/1/jobs".to_owned(),
-            query_base64: BASE64.encode(&canonical_rest_query("per_page=100&page=1")),
+            query_base64: BASE64.encode(canonical_rest_query("per_page=100&page=1")),
             variables_base64: BASE64.encode(b"{}"),
             query_sha256: digest_bytes(&canonical_rest_query("per_page=100&page=1")),
             variables_sha256: digest_bytes(b"{}"),
@@ -13839,7 +13839,7 @@ mod tests {
             api: G0ApiKind::Rest,
             method: "GET".to_owned(),
             endpoint_or_operation: "/repos/tailrocks/velnor".to_owned(),
-            query_base64: BASE64.encode(&canonical_rest_query("page=1")),
+            query_base64: BASE64.encode(canonical_rest_query("page=1")),
             variables_base64: BASE64.encode(b"{}"),
             query_sha256: digest_bytes(&canonical_rest_query("page=1")),
             variables_sha256: digest_bytes(b"{}"),
@@ -13890,7 +13890,7 @@ mod tests {
         });
         let mut second = collector.requests[0].clone();
         second.request_id = "request-2".to_owned();
-        second.query_base64 = BASE64.encode(&canonical_rest_query("page=2"));
+        second.query_base64 = BASE64.encode(canonical_rest_query("page=2"));
         second.query_sha256 = digest_bytes(&canonical_rest_query("page=2"));
         second.page.number = 2;
         second.page.link_next = None;

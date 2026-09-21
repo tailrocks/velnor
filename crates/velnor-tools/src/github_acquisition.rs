@@ -3078,7 +3078,7 @@ mod tests {
         );
         assert_eq!(
             result.requests[0].query_sha256,
-            Some(sha256_digest(b"page\01\0per_page\0100\0"))
+            Some(sha256_digest(b"page\x001\0per_page\x00100\0"))
         );
         assert_eq!(transport.requests().len(), 2);
     }

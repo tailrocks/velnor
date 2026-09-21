@@ -2779,7 +2779,7 @@ where
             if let Some((tree, raw_ids)) = ledger.dependency_trees.get(&tree_key).cloned() {
                 (tree, raw_ids)
             } else {
-                let fetched = collect_one(
+                collect_one(
                     transport,
                     store,
                     auth,
@@ -2804,8 +2804,7 @@ where
                         "workflow dependency tree {}/{}@{}",
                         dependency.repository, dependency.path, dependency.revision
                     )
-                })?;
-                fetched
+                })?
             };
         let resolved_path =
             validate_dependency_tree(&tree, &dependency.repository, &dependency.path)?;
