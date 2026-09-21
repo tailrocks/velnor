@@ -332,15 +332,18 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("fixture directory");
+        std::fs::create_dir_all(&root).unwrap_or_else(|error| panic!("fixture directory: {error}"));
         let path = root.join("manifest.json");
         let bytes = br#"{"schema":"velnor-workflow.publication-readiness.v1","closure":"x","revision":"y","products":[],"extra":true}"#;
-        std::fs::write(&path, bytes).expect("manifest");
-        let before = std::fs::read(&path).expect("read fixture");
+        std::fs::write(&path, bytes).unwrap_or_else(|error| panic!("write manifest: {error}"));
+        let before = std::fs::read(&path).unwrap_or_else(|error| panic!("read fixture: {error}"));
         let error = PublicationReadinessManifest::from_file(&path)
             .expect_err("unknown fields are not part of the contract");
         assert!(error.to_string().contains("invalid JSON"));
-        assert_eq!(std::fs::read(&path).expect("read fixture"), before);
+        assert_eq!(
+            std::fs::read(&path).unwrap_or_else(|error| panic!("read fixture: {error}")),
+            before
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
