@@ -1486,6 +1486,33 @@ mod tests {
     }
 
     #[test]
+    fn plan_job_scopes_expected_work_lanes_to_scheduled_lanes() {
+        // The plan scope must equal the scheduled lane scope in every mode:
+        // a single-lane workflow that plans unfiltered writes phantom
+        // entries for the unscheduled lane, and the aggregate fails closed
+        // on records no job can report. The dispatch `runner` input narrows
+        // the scope at runtime; automatic events fall back to the
+        // configured lanes.
+        for mode in [RunnerMode::Github, RunnerMode::Velnor, RunnerMode::Both] {
+            let mut ir = owner_test_ir(
+                "example/s4-plan-lanes",
+                vec![rust_unit("rust", "crates/rust")],
+            );
+            ir.runners = mode;
+            ir.automatic = mode;
+            let mut plan = String::new();
+            ir.render_plan(&mut plan, mode, false);
+            assert!(
+                plan.contains(&format!(
+                    "VELNOR_LANES: ${{{{ github.event.inputs.runner || '{}' }}}}",
+                    mode.as_str()
+                )),
+                "{mode:?} plans its scheduled lanes with dispatch narrowing: {plan}"
+            );
+        }
+    }
+
+    #[test]
     fn plan_step_creates_expected_work_dir_before_invoking_plan() {
         // The pinned product predates the runtime's own parent creation, so
         // the branch-controlled render prepares the dir for the old binary.
@@ -6367,21 +6394,24 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             )
         };
         let base_sha = self.base_sha_expression();
-        // Both-mode planning consumes the admitted lanes: a velnor-only
-        // dispatch plans a velnor-only selection, so units the Velnor lane
-        // cannot run stay unselected (and green under the required gate)
-        // instead of failing a selection they can never satisfy.
-        // Single-lane modes plan unfiltered, as before. The dispatch
-        // `runner` input carries the manual selection; automatic events
-        // fall back to the configured automatic lanes.
-        let lanes_env = if self.runners == RunnerMode::Both {
-            format!(
-                "          VELNOR_LANES: ${{{{ github.event.inputs.runner || '{}' }}}}\n",
-                self.automatic.as_str()
-            )
-        } else {
-            String::new()
-        };
+        // Planning consumes the admitted lanes, so the expected-work scope
+        // always equals the scheduled lane scope: a velnor-only dispatch
+        // plans a velnor-only selection, so units the Velnor lane cannot
+        // run stay unselected (and green under the required gate) instead
+        // of failing a selection they can never satisfy — and a single-lane
+        // workflow plans only its lane instead of defaulting to both and
+        // failing the aggregate on phantom entries no job can report. The
+        // dispatch `runner` input carries the manual selection; automatic
+        // events fall back to the configured automatic lanes (which the
+        // lane gating in `lane_event_expression` reads from the same
+        // source). Single-lane dispatch inputs offer only that lane, so the
+        // expression collapses to the static scope there; a smuggled
+        // foreign value plans entries no lane job reports, and the
+        // aggregate fails those closed.
+        let lanes_env = format!(
+            "          VELNOR_LANES: ${{{{ github.event.inputs.runner || '{}' }}}}\n",
+            self.automatic.as_str()
+        );
         let mut outputs = vec![
             "      scope: ${{ steps.plan.outputs.scope }}".to_owned(),
             "      base_sha: ${{ steps.plan.outputs.base_sha }}".to_owned(),
