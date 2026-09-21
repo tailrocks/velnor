@@ -11,8 +11,8 @@ use super::file_walk::{
 };
 use super::{unit, RepositoryShape, ScanContext};
 use crate::s2::{
-    identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec, Unit,
-    UnitKind,
+    identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec,
+    GeneratorError, Unit, UnitKind, XcodeToolchain,
 };
 
 /// Toolchain pin files every Swift cache key hashes, mirroring how Rust keys
@@ -22,6 +22,44 @@ use crate::s2::{
 /// their existing keys; the Swift tools version is deliberately absent — it
 /// is a minimum-version floor, not a toolchain identity.
 const APPLE_TOOLCHAIN_PIN_KEY_FILES: [&str; 3] = ["mise.lock", ".swift-version", ".xcode-version"];
+
+/// Parse the repository's pinned Xcode toolchain, if it declares one.
+///
+/// The root `.xcode-version` file carries one line, `MAJOR.MINOR[.PATCH]`.
+/// Everything the renderer later feeds to the probe comparison is validated
+/// here, so a malformed pin fails the scan instead of failing a workflow
+/// step on a runner. Absence is legal: the probe still records the active
+/// toolchain, but enforces nothing.
+pub(crate) fn parse_xcode_toolchain(
+    root: &Path,
+    file_set: &BTreeSet<String>,
+) -> Result<Option<XcodeToolchain>, GeneratorError> {
+    if !file_set.contains(".xcode-version") {
+        return Ok(None);
+    }
+    let path = root.join(".xcode-version");
+    let contents = fs::read_to_string(&path)
+        .map_err(|error| GeneratorError::io("read .xcode-version", &path, &error))?;
+    validate_xcode_version(contents.trim(), &path).map(|version| Some(XcodeToolchain { version }))
+}
+
+/// The `.xcode-version` grammar: two or three dot-separated nonempty digit
+/// runs, matching what `xcodebuild -version` reports after `Xcode `.
+fn validate_xcode_version(value: &str, path: &Path) -> Result<String, GeneratorError> {
+    let parts: Vec<&str> = value.split('.').collect();
+    let valid = (parts.len() == 2 || parts.len() == 3)
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
+    if valid {
+        Ok(value.to_owned())
+    } else {
+        Err(GeneratorError::usage(format!(
+            ".xcode-version must be MAJOR.MINOR[.PATCH] in {}, got `{value}`",
+            path.display()
+        )))
+    }
+}
 
 /// One `.binaryTarget` stanza: a local `path` artifact or a remote `url`
 /// artifact. `None` means the stanza had no literal value for that key — a
@@ -795,6 +833,7 @@ fn xcodegen_generate_unit(
         tool_version: spec.minimum_version.clone(),
         mise_tools: Vec::new(),
         toolchain: None,
+        xcode: None,
         services: Vec::new(),
         trust: crate::s2::provider::TrustReq::UntrustedOk,
         platform: crate::s2::provider::Platform::MacosArm64,
@@ -1039,6 +1078,7 @@ fn xcode_scheme_unit(
         tool_version: None,
         mise_tools: Vec::new(),
         toolchain: None,
+        xcode: None,
         services: Vec::new(),
         trust: crate::s2::provider::TrustReq::UntrustedOk,
         platform: crate::s2::provider::Platform::MacosArm64,
@@ -1059,7 +1099,11 @@ fn xcode_scheme_unit(
     unit
 }
 
-pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
+pub(crate) fn detect(
+    context: &ScanContext<'_>,
+    shape: &mut RepositoryShape,
+) -> Result<(), GeneratorError> {
+    let xcode = parse_xcode_toolchain(context.root, context.file_set)?;
     for package_root in roots_for_manifests(&files_named(context.files, "Package.swift")) {
         shape.detected.push(format!("swift-package:{package_root}"));
         let manifest = join_repo_path(&package_root, "Package.swift");
@@ -1073,6 +1117,7 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
             ));
         }
         let mut unit = swift_package_unit(&package_root, &facts);
+        unit.xcode.clone_from(&xcode);
         for target in &facts.binary_targets {
             let name = target.name.as_deref().unwrap_or("<unnamed>");
             match (&target.path, &target.url) {
@@ -1107,6 +1152,9 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
         shape
             .detected
             .push(format!("xcode-shared-schemes:{}", xcode_units.len()));
+        for unit in &mut xcode_units {
+            unit.xcode.clone_from(&xcode);
+        }
         shape.units.append(&mut xcode_units);
     }
     let has_xcode_container = context.files.iter().any(|file| {
@@ -1123,10 +1171,15 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
             "Apple test destinations use platform defaults; review the generated simulator destination when a project requires a named device or OS version.".to_owned(),
         );
     }
-    detect_xcodegen_specs(context, shape);
+    detect_xcodegen_specs(context, shape, xcode.as_ref());
+    Ok(())
 }
 
-fn detect_xcodegen_specs(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
+fn detect_xcodegen_specs(
+    context: &ScanContext<'_>,
+    shape: &mut RepositoryShape,
+    xcode: Option<&XcodeToolchain>,
+) {
     let mut specs = files_named(context.files, "project.yml");
     specs.extend(files_named(context.files, "project.yaml"));
     specs.sort();
@@ -1162,7 +1215,8 @@ fn detect_xcodegen_specs(context: &ScanContext<'_>, shape: &mut RepositoryShape)
         shape.detected.push(format!("xcodegen:{}", merged.path));
         let (unit, unit_notes) = xcodegen_unit(&merged, context.files);
         shape.limitations.extend(unit_notes);
-        if let Some(unit) = unit {
+        if let Some(mut unit) = unit {
+            unit.xcode = xcode.cloned();
             shape.units.push(unit);
         }
     }
@@ -1171,8 +1225,9 @@ fn detect_xcodegen_specs(context: &ScanContext<'_>, shape: &mut RepositoryShape)
 #[cfg(test)]
 mod tests {
     use super::{
-        is_xcodegen_spec, load_spec_closure, merge_spec, parse_package_facts, parse_yaml_mapping,
-        xcodegen_unit, PackageFacts, XcodeGenSpec,
+        is_xcodegen_spec, load_spec_closure, merge_spec, parse_package_facts,
+        parse_xcode_toolchain, parse_yaml_mapping, validate_xcode_version, xcodegen_unit,
+        PackageFacts, XcodeGenSpec,
     };
     use std::collections::BTreeMap;
 
@@ -1195,6 +1250,17 @@ mod tests {
         match result {
             Ok(value) => value,
             Err(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_err<T: std::fmt::Debug, E>(result: Result<T, E>, context: &str) -> E {
+        match result {
+            Ok(value) => panic!("{context}: unexpectedly succeeded with {value:?}"),
+            Err(error) => error,
         }
     }
 
@@ -2308,6 +2374,82 @@ mod tests {
                 cache.key_files
             );
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn xcode_version_grammar_accepts_major_minor_patch() {
+        let path = std::path::Path::new(".xcode-version");
+        assert_eq!(
+            must_ok(validate_xcode_version("26.6", path), "minor pin"),
+            "26.6"
+        );
+        assert_eq!(
+            must_ok(validate_xcode_version("26.6.1", path), "patch pin"),
+            "26.6.1"
+        );
+        for invalid in ["26", "26.6.1.2", "26.x", "", "26..6", "Xcode 26.6"] {
+            assert!(
+                validate_xcode_version(invalid, path).is_err(),
+                "reject `{invalid}`"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_xcode_version_file_yields_no_pin() {
+        let files = std::collections::BTreeSet::new();
+        let pin = must_ok(
+            parse_xcode_toolchain(std::path::Path::new("/nonexistent"), &files),
+            "absent pin reads nothing",
+        );
+        assert_eq!(pin, None);
+    }
+
+    #[test]
+    fn scan_attaches_xcode_pin_to_swift_units() {
+        let root = native_fixture(&[
+            (
+                "native/Package.swift",
+                "// swift-tools-version: 6.0\nimport PackageDescription\n\nlet package = Package(\n    name: \"Desktop\",\n    targets: [\n        .target(name: \"Bridge\"),\n        .testTarget(name: \"BridgeTests\", dependencies: [\"Bridge\"]),\n    ]\n)\n",
+            ),
+            (".xcode-version", "26.6\n"),
+        ]);
+        let shape = scan_native(&root);
+        let unit = must_some(
+            shape
+                .units
+                .iter()
+                .find(|unit| unit.id == "swift-package-native"),
+            "swift package unit",
+        );
+        assert_eq!(
+            unit.xcode.as_ref().map(crate::s2::XcodeToolchain::version),
+            Some("26.6"),
+            "the pin attaches to the scanned unit"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_rejects_malformed_xcode_pin() {
+        let root = native_fixture(&[
+            (
+                "native/Package.swift",
+                "// swift-tools-version: 6.0\nimport PackageDescription\n\nlet package = Package(\n    name: \"Desktop\",\n    targets: [.target(name: \"Bridge\")]\n)\n",
+            ),
+            (".xcode-version", "soon\n"),
+        ]);
+        let error = must_err(
+            super::super::scan_shape(
+                &root,
+                &std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
+                "main",
+                &[],
+            ),
+            "a malformed pin fails the scan",
+        );
+        assert!(error.to_string().contains(".xcode-version"), "{error}");
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -69,7 +69,7 @@ pub(crate) fn scan_shape(
     signals::detect(&context, &mut shape);
     gradle::detect(&context, &mut shape)?;
     node::detect(&context, &mut shape)?;
-    swift::detect(&context, &mut shape);
+    swift::detect(&context, &mut shape)?;
     opentofu::detect(&context, &mut shape);
     docker::detect(&context, &mut shape);
     homebrew::detect(&context, &mut shape);
@@ -379,6 +379,7 @@ pub(crate) fn unit(
         tool_version: None,
         mise_tools: Vec::new(),
         toolchain: None,
+        xcode: None,
         services: Vec::new(),
         trust,
         platform,

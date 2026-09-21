@@ -31,7 +31,7 @@ use std::fmt::Write as _;
 
 use sha2::{Digest as _, Sha256};
 
-use crate::s2::{CachePurpose, RustToolchain};
+use crate::s2::{CachePurpose, RustToolchain, XcodeToolchain};
 
 /// The snapshot key schema. Bumping it abandons every previously saved
 /// snapshot: entries saved under an older schema are unreachable by design,
@@ -60,6 +60,9 @@ pub(crate) struct CompatibilityFacts {
     /// The repository's pinned Rust toolchain, as the provisioning steps
     /// install it.
     pub(crate) toolchain: Option<RustToolchain>,
+    /// The repository's pinned Xcode toolchain, as the probe step selects
+    /// it. Absent on lanes that never touch Apple tooling.
+    pub(crate) xcode: Option<XcodeToolchain>,
     /// The hosted runner image: the host OS and its native toolchain.
     pub(crate) host_image: String,
     /// The provider the snapshot was saved from: cross-provider restores are
@@ -105,6 +108,7 @@ impl CompatibilityFacts {
             ("rustflags", vec![self.rustflags.clone()]),
             ("schema", vec![self.schema.to_owned()]),
             ("trust", vec![self.trust.clone()]),
+            ("xcode", xcode_fields(self.xcode.as_ref())),
         ] {
             write_field(&mut canonical, key, &value);
         }
@@ -125,6 +129,13 @@ impl CompatibilityFacts {
         output.truncate(COMPATIBILITY_DIGEST_CHARS);
         output
     }
+}
+
+/// The Xcode pin as the field list the digest consumes: empty when the lane
+/// never selects an Xcode.
+fn xcode_fields(pin: Option<&XcodeToolchain>) -> Vec<String> {
+    pin.map(|pin| vec![format!("version={}", pin.version())])
+        .unwrap_or_default()
 }
 
 /// The toolchain pin as the ordered field list the digest consumes.
@@ -1613,6 +1624,7 @@ mod tests {
                 targets: vec!["x86_64-unknown-linux-gnu".to_owned()],
                 profile: None,
             }),
+            xcode: None,
             host_image: "ubuntu-24.04".to_owned(),
             provider: "velnor".to_owned(),
             platform: "linux-x64".to_owned(),
@@ -1644,6 +1656,24 @@ mod tests {
             new_mbx.digest(),
             base,
             "an mbx version change is a compatibility change"
+        );
+        let mut new_xcode = facts("-C link-arg=-fuse-ld=mold");
+        new_xcode.xcode = Some(XcodeToolchain {
+            version: "26.6".to_owned(),
+        });
+        assert_ne!(
+            new_xcode.digest(),
+            base,
+            "adding an Xcode pin is a compatibility change"
+        );
+        let mut bumped_xcode = facts("-C link-arg=-fuse-ld=mold");
+        bumped_xcode.xcode = Some(XcodeToolchain {
+            version: "26.7".to_owned(),
+        });
+        assert_ne!(
+            bumped_xcode.digest(),
+            new_xcode.digest(),
+            "an Xcode pin change is a compatibility change"
         );
         let reordered = CompatibilityFacts {
             cargo_inputs: vec![".cargo/**".to_owned(), "Cargo.lock".to_owned()],

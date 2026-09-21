@@ -29,8 +29,8 @@ use crate::s2::{
     unit_group_job_id, unit_job_display_name, unit_job_id, workflow_runtime_artifact_upload,
     workflow_runtime_download, workflow_runtime_setup, workflow_selection_file_materialize,
     yaml_scalar, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, RustNeeds, RustToolchain,
-    SelectionFieldSources, Unit, UnitKind, ValidationPhase, GENERATED_HEADER, MR_BOXINGTON_VERSION,
-    OPEN_TOFU_VERSION,
+    SelectionFieldSources, Unit, UnitKind, ValidationPhase, XcodeToolchain, GENERATED_HEADER,
+    MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
 };
 
 /// GitHub rejects reusable workflow files above this size.
@@ -77,7 +77,7 @@ mod tests {
     use super::{
         provider_input, unit_owns_workflow_crate, GraphNode, Pins, ProviderAdmission, ProviderId,
         ProviderSet, RequiredCaller, RustNeeds, Unit, UnitKind, WorkflowIr, WorkflowKind,
-        REQUIRED_CHECK,
+        XcodeToolchain, REQUIRED_CHECK,
     };
     use crate::s2::platform::{NamedProduct, Prerequisite};
     use crate::s2::{
@@ -168,6 +168,7 @@ mod tests {
     /// ownership of the generator crate.
     fn rust_unit(id: &str, root: &str) -> Unit {
         Unit {
+            xcode: None,
             id: id.to_owned(),
             label: format!("Rust crate ({id})"),
             kind: UnitKind::Rust,
@@ -1012,6 +1013,63 @@ mod tests {
                 && !rust_workflow.contains("runs-on: macos-26"),
             "{rust_workflow}"
         );
+    }
+
+    fn xcode_swift_unit(id: &str, root: &str, version: &str) -> Unit {
+        let mut unit = rust_unit(id, root);
+        unit.kind = UnitKind::Swift;
+        unit.label = format!("Swift package ({root})");
+        unit.platform = crate::s2::provider::Platform::MacosArm64;
+        unit.xcode = Some(XcodeToolchain {
+            version: version.to_owned(),
+        });
+        unit
+    }
+
+    #[test]
+    fn xcode_pin_renders_probe_step_on_hosted_swift() {
+        let ir = owner_test_ir(
+            "example/fixture",
+            vec![xcode_swift_unit("swift-package-native", "native", "26.6")],
+        );
+        let rendered = must_ok(
+            ir.render_kind_unit_workflow(UnitKind::Swift, None),
+            "swift kind reusable renders",
+        );
+        let workflow = must_some(rendered, "swift kind has members").1;
+        assert!(workflow.contains("- name: Select Xcode 26.6"), "{workflow}");
+        assert!(workflow.contains("DEVELOPER_DIR="), "{workflow}");
+        assert!(workflow.contains("xcodebuild -version"), "{workflow}");
+    }
+
+    #[test]
+    fn swift_without_xcode_pin_renders_no_probe_step() {
+        let mut swift = rust_unit("swift-package-native", "native");
+        swift.kind = UnitKind::Swift;
+        swift.platform = crate::s2::provider::Platform::MacosArm64;
+        let ir = owner_test_ir("example/fixture", vec![swift]);
+        let rendered = must_ok(
+            ir.render_kind_unit_workflow(UnitKind::Swift, None),
+            "swift kind reusable renders",
+        );
+        let workflow = must_some(rendered, "swift kind has members").1;
+        assert!(!workflow.contains("Select Xcode"), "{workflow}");
+    }
+
+    #[test]
+    fn disagreeing_xcode_pins_fail_swift_render() {
+        let ir = owner_test_ir(
+            "example/fixture",
+            vec![
+                xcode_swift_unit("swift-package-a", "a", "26.6"),
+                xcode_swift_unit("swift-package-b", "b", "26.7"),
+            ],
+        );
+        let error = must_err(
+            ir.render_kind_unit_workflow(UnitKind::Swift, None),
+            "members disagree on the Xcode pin",
+        );
+        assert!(error.to_string().contains("Xcode toolchain pin"), "{error}");
     }
 
     #[test]
@@ -1955,6 +2013,7 @@ pub(crate) fn config_snapshot_identity(config: &ProjectConfig) -> (String, Strin
         payload: "mbx",
         mbx_version: MR_BOXINGTON_VERSION.to_owned(),
         toolchain: config_rust_toolchain(config),
+        xcode: None,
         host_image: config
             .selectors
             .get(&ProviderId::GithubHosted)
@@ -2005,6 +2064,7 @@ fn snapshot_compatibility(
         },
         mbx_version: MR_BOXINGTON_VERSION.to_owned(),
         toolchain: unit.toolchain.clone(),
+        xcode: unit.xcode.clone(),
         host_image: ir
             .selectors
             .get(&provider)
@@ -5582,6 +5642,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
             pins.into_iter().next().flatten()
         };
+        let xcode = {
+            let pins = members
+                .iter()
+                .map(|unit| unit.xcode.clone())
+                .collect::<Vec<_>>();
+            if pins.iter().any(|pin| pin != &pins[0]) {
+                return Err(disagreement("the Xcode toolchain pin"));
+            }
+            pins.into_iter().next().flatten()
+        };
         let kind_tools = {
             let per_member = members
                 .iter()
@@ -5641,6 +5711,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             && let Some(toolchain) = &toolchain
         {
             self.render_rust_toolchain_steps(output, toolchain, cache_save);
+        }
+        if hosted
+            && kind == UnitKind::Swift
+            && let Some(xcode) = &xcode
+        {
+            Self::render_xcode_toolchain_step(output, xcode);
         }
         if hosted && mise_tools.any {
             let trusted = trusted_cache_save_expression(&self.default_branch);
@@ -6474,6 +6550,22 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             self.pins.cache_save,
             toolchain,
             save_gate.as_deref(),
+        );
+    }
+
+    /// The hosted-provider Xcode contract: select the installed Xcode
+    /// matching the repository's `.xcode-version` pin, fail closed when no
+    /// installed Xcode matches, and export `DEVELOPER_DIR` so every later
+    /// step uses the same toolchain instead of the image default. An exact
+    /// `Xcode_<pin>.app` match wins; otherwise the newest installed
+    /// `Xcode_<pin>*.app` is selected. Local providers own their Xcode
+    /// installation and skip this step.
+    fn render_xcode_toolchain_step(output: &mut String, xcode: &XcodeToolchain) {
+        let _ = writeln!(
+            output,
+            "      - name: Select Xcode {}\n        run: |\n          set -euo pipefail\n          want=\"{}\"\n          if [ -d \"/Applications/Xcode_${{want}}.app\" ]; then\n            dir=\"/Applications/Xcode_${{want}}.app\"\n          else\n            dir=\"$(ls -d /Applications/Xcode_${{want}}*.app 2>/dev/null | sort | tail -n 1)\"\n          fi\n          if [ -z \"$dir\" ]; then\n            echo \"::error::no installed Xcode matches pin $want\"\n            ls /Applications | grep -i xcode || true\n            exit 1\n          fi\n          echo \"DEVELOPER_DIR=$dir/Contents/Developer\" >> \"$GITHUB_ENV\"\n          export DEVELOPER_DIR=\"$dir/Contents/Developer\"\n          xcodebuild -version\n          swift --version",
+            xcode.version(),
+            xcode.version(),
         );
     }
 

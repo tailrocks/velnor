@@ -749,6 +749,7 @@ mod tests {
 
     fn unit(id: &str, kind: UnitKind) -> Unit {
         Unit {
+            xcode: None,
             id: id.to_owned(),
             label: id.to_owned(),
             kind,

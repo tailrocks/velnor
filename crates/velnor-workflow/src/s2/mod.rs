@@ -710,6 +710,11 @@ pub struct Unit {
     /// for hand-built configs and non-Rust units.
     #[serde(skip_serializing)]
     pub(crate) toolchain: Option<RustToolchain>,
+    /// The Xcode toolchain the repository pins, as the scan parsed it from
+    /// `.xcode-version`. `None` means unpinned: the probe still records the
+    /// active toolchain, but nothing enforces it.
+    #[serde(skip_serializing)]
+    pub(crate) xcode: Option<XcodeToolchain>,
     /// GitHub Actions `services:` the unit job needs. Generator-only: omitted
     /// from runtime `project.toml` because packaged `velnor-workflow plan`
     /// deny_unknown_fields-rejects unknown unit keys. The runner starts these
@@ -843,6 +848,23 @@ impl RustToolchain {
     #[must_use]
     pub fn profile(&self) -> Option<&str> {
         self.profile.as_deref()
+    }
+}
+
+/// The Xcode toolchain a repository pins, parsed from the root
+/// `.xcode-version` file: one line, `MAJOR.MINOR[.PATCH]`. The probe step
+/// enforces it against `xcodebuild -version` and records the actual build,
+/// so the pin is the whole contract.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct XcodeToolchain {
+    pub(crate) version: String,
+}
+
+impl XcodeToolchain {
+    /// The pin's Xcode version, as `xcodebuild -version` reports it.
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.version
     }
 }
 
@@ -2647,6 +2669,7 @@ fn apply_unit_row(
             tool_version: row.tool_version().map(str::to_owned),
             mise_tools: row.mise_tools().unwrap_or_default().to_vec(),
             toolchain: None,
+            xcode: None,
             services: Vec::new(),
             trust: row
                 .trust()
@@ -10427,6 +10450,7 @@ mod tests {
     #[test]
     fn swift_units_on_the_default_executor_are_named_in_contract_notes() {
         let unit = |id: &str, platform: provider::Platform| Unit {
+            xcode: None,
             id: id.to_owned(),
             label: id.to_owned(),
             kind: UnitKind::Swift,
@@ -12921,6 +12945,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "scanned Rust toolchain",
         );
         config.units.push(Unit {
+            xcode: None,
             id: "rust-declared-lane-only".to_owned(),
             label: "Rust declared lane only".to_owned(),
             kind: UnitKind::Rust,
@@ -12949,6 +12974,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             prepared_tools: Vec::new(),
         });
         config.units.push(Unit {
+            xcode: None,
             id: "rust-declared-base".to_owned(),
             label: "Rust declared base".to_owned(),
             kind: UnitKind::Rust,
@@ -12977,6 +13003,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             prepared_tools: Vec::new(),
         });
         config.units.push(Unit {
+            xcode: None,
             id: "rust-declared-mise-free".to_owned(),
             label: "Rust declared mise free".to_owned(),
             kind: UnitKind::Rust,
@@ -13343,6 +13370,7 @@ channel = "stable"
     #[test]
     fn validate_unit_phases_rejects_misaligned_and_check_shapes() {
         let phased_unit = || Unit {
+            xcode: None,
             id: "rust-app".to_owned(),
             label: "rust-app".to_owned(),
             kind: UnitKind::Rust,
@@ -17560,6 +17588,7 @@ lockfile = true
         ];
         for kind in kinds {
             let mut unit = Unit {
+                xcode: None,
                 id: format!("{kind:?}"),
                 label: format!("{kind:?}"),
                 kind,
@@ -17649,6 +17678,7 @@ lockfile = true
         let marker = root.join("execution-order");
         let marker = shell_quote(&marker.to_string_lossy());
         let unit = |id: &str, command: String, depends_on: Vec<String>| Unit {
+            xcode: None,
             id: id.to_owned(),
             label: id.to_owned(),
             kind: UnitKind::Rust,
@@ -19525,6 +19555,7 @@ lockfile = true
             "scanned Rust unit",
         );
         config.units.push(Unit {
+            xcode: None,
             id: "rust-mise-tools".to_owned(),
             label: "Rust mise tools".to_owned(),
             kind: UnitKind::Rust,
@@ -19854,6 +19885,7 @@ lockfile = true
             .find(|unit| unit.kind == UnitKind::Rust)
             .and_then(|unit| unit.toolchain.clone());
         config.units.push(Unit {
+            xcode: None,
             id: "rust-dependency-policy".to_owned(),
             label: "Rust dependency policy".to_owned(),
             kind: UnitKind::Rust,
@@ -19976,6 +20008,7 @@ lockfile = true
         config.units[rust_index].pinned_lockfile = true;
         let toolchain = config.units[rust_index].toolchain.clone();
         config.units.push(Unit {
+            xcode: None,
             id: "rust-dependency-policy".to_owned(),
             label: "Rust dependency policy".to_owned(),
             kind: UnitKind::Rust,
@@ -20076,6 +20109,7 @@ lockfile = true
     )]
     fn cargo_fetch_roots_deduplicate_workspace_members_and_keep_independent_lockfiles() {
         let workspace_member = |id: &str, root: &str| Unit {
+            xcode: None,
             id: id.to_owned(),
             label: format!("Rust crate ({id})"),
             kind: UnitKind::Rust,
@@ -20181,6 +20215,7 @@ lockfile = true
     #[test]
     fn velnor_dependency_closure_adds_direct_depends_on_needs_edges() {
         let rust_unit = |id: &str, depends_on: Vec<&str>| Unit {
+            xcode: None,
             id: id.to_owned(),
             label: format!("Rust crate ({id})"),
             kind: UnitKind::Rust,
@@ -20275,6 +20310,7 @@ lockfile = true
                          workspace_check: bool,
                          commands: Vec<&str>,
                          depends_on: Vec<&str>| Unit {
+            xcode: None,
             id: id.to_owned(),
             label: format!("Rust crate ({id})"),
             kind: UnitKind::Rust,
@@ -20455,6 +20491,7 @@ lockfile = true
             serial_stack_groups: true,
             units: vec![
                 Unit {
+                    xcode: None,
                     id: "bun-root".to_owned(),
                     label: "Bun".to_owned(),
                     kind: UnitKind::Bun,
@@ -20483,6 +20520,7 @@ lockfile = true
                     prepared_tools: Vec::new(),
                 },
                 Unit {
+                    xcode: None,
                     id: "docs".to_owned(),
                     label: "Documentation".to_owned(),
                     kind: UnitKind::Docs,
@@ -23453,6 +23491,7 @@ lockfile = true
     #[test]
     fn product_dependency_needs_names_transportable_producer_jobs_on_hosted() {
         let unit = |id: &str| Unit {
+            xcode: None,
             id: id.to_owned(),
             label: id.to_owned(),
             kind: UnitKind::Rust,

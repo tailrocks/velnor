@@ -138,6 +138,15 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
   intermediates need multi-layer cache support; scoped
   `derivedDataPath` per unit; runtime actual-Xcode probe (needs
   macOS runs).
+- Increment 5a landed: `XcodeToolchain` type + `Unit.xcode`,
+  root `.xcode-version` parse (MAJOR.MINOR[.PATCH], malformed
+  fails scan), hosted Swift `Select Xcode <pin>` probe step
+  (exact match else newest prefix, fail-closed, exports
+  `DEVELOPER_DIR`, records `xcodebuild -version`), xcode in
+  `CompatibilityFacts` digest (one-time v3 rotation,
+  regen diff verified digest-only, no probe in own
+  workflows), 7 new tests; lib 2022 + full_tree_replacement
+  35 + runner 2386 green, clippy/fmt clean.
 - Increments 5-8 per goal: hosted macOS, Jackin migration (#1013
   incl. Landlock P1), native provider, proof/cleanup.
 - Benchmarks: none yet; set latency goals after first controlled baseline.
@@ -145,10 +154,9 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
 ## Continue
 
 1. `git checkout integrate/apple-ci-s2`; `cargo test -p velnor-workflow`.
-2. Next edit surface: Increment 5a Xcode toolchain contract —
-   `s2/config` typed `[apple.toolchain]`, `ir.rs` selection
-   render, probe step, cache/telemetry identity; then 5b s2
-   native e2e fixture, then 5c real hosted runs.
+2. Next edit surface: 5b s2 native e2e fixture + generation
+   test (SwiftPM + XcodeGen + BoltFFI producer ordering,
+   ABI, artifact needs), then 5c real hosted runs.
    Verified layout facts
    (BoltFFI 0.30.1 @ `2e6320a`): slice dirs
    `macos/ios-{archs_joined}[-simulator]`, structural files
