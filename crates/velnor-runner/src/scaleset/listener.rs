@@ -200,7 +200,8 @@ impl SessionStore {
         }))
     }
 
-    /// Record session identity after (re)connect. Never moves the cursor.
+    /// Record session identity after (re)connect. Never moves the cursor within
+    /// an existing session, but resets last_message_id to 0 on session rollover.
     pub fn save_session(
         &mut self,
         scale_set_id: i32,
@@ -209,6 +210,9 @@ impl SessionStore {
         generation: u64,
     ) -> Result<()> {
         let mut cursor = self.load_or_default(scale_set_id)?;
+        if cursor.session_id != session_id {
+            cursor.last_message_id = 0;
+        }
         cursor.session_id = session_id.to_owned();
         cursor.owner = owner.to_owned();
         cursor.generation = generation;
