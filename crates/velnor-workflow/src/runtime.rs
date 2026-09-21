@@ -429,6 +429,52 @@ fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
 /// (render with X ⇒ stamp X); anything else fails closed before touching the
 /// tree. `--generator-repo` points fleet promotion at a product checkout
 /// holding the pin's history; it defaults to the promoted repository itself.
+/// `velnor-workflow visibility (check|refresh) [--repo PATH]
+/// [--repository owner/name]`: the metadata-acquisition side of the
+/// visibility-based runner policy. `check` compares the checked-in evidence
+/// against the live visibility; `refresh` reacquires and rewrites it. Both
+/// are explicit and fail closed; rendering itself never calls either.
+fn visibility_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    const USAGE: &str =
+        "usage: velnor-workflow visibility (check|refresh) [--repo PATH] [--repository owner/name]";
+    let (verb, rest) = arguments
+        .split_first()
+        .ok_or_else(|| GeneratorError::usage(format!("visibility needs a verb; {USAGE}")))?;
+    let verb = verb
+        .to_str()
+        .ok_or_else(|| GeneratorError::usage("CI argument must be valid UTF-8"))?;
+    if !matches!(verb, "check" | "refresh") {
+        return Err(GeneratorError::usage(format!(
+            "unsupported visibility verb: {verb}; {USAGE}"
+        )));
+    }
+    let options = parse_options(rest, &["repo", "repository"])?;
+    let root = options.get("repo").map_or_else(
+        || {
+            std::env::current_dir()
+                .map_err(|error| GeneratorError::usage(format!("resolve repository root: {error}")))
+        },
+        |repo| Ok(PathBuf::from(repo)),
+    )?;
+    match verb {
+        "check" => {
+            if options.contains_key("repository") {
+                return Err(GeneratorError::usage(
+                    "visibility check takes no --repository: it verifies the checked-in evidence as is".to_owned(),
+                ));
+            }
+            crate::visibility::check(&root)
+        }
+        "refresh" => {
+            crate::visibility::refresh(&root, options.get("repository").map(String::as_str))
+                .map(|_| ())
+        }
+        _ => Err(GeneratorError::usage(format!(
+            "unsupported visibility verb: {verb}; {USAGE}"
+        ))),
+    }
+}
+
 fn promote_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let (flags, rest): (Vec<&OsString>, Vec<&OsString>) = arguments
         .iter()
@@ -543,6 +589,10 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
         }
         "promote" => {
             promote_command(arguments.get(1..).unwrap_or_default())?;
+            Ok(true)
+        }
+        "visibility" => {
+            visibility_command(arguments.get(1..).unwrap_or_default())?;
             Ok(true)
         }
         "prepared-tool-install" => {

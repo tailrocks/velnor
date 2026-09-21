@@ -35,6 +35,10 @@ pub(crate) struct WriterInput<'a> {
 pub(crate) struct ValidateInput<'a> {
     pub(crate) checkout: &'a str,
     pub(crate) runner: &'a str,
+    /// The job-level trusted-event gate. `None` on hosted runners (which
+    /// need no gate); `Some` on local runners, where the validator mounts
+    /// the pull-request checkout and must skip fork and bot pull requests.
+    pub(crate) gate: Option<&'a str>,
     pub(crate) default_branch: &'a str,
     pub(crate) config_path: &'a str,
 }
@@ -171,6 +175,9 @@ jobs:
 /// Render the Renovate configuration validator for both schema generations.
 pub(crate) fn render_validate(input: &ValidateInput<'_>) -> String {
     let config_arg = shell_escape(input.config_path);
+    let gate = input
+        .gate
+        .map_or_else(String::new, |gate| format!("    if: ${{{{ ({gate}) }}}}\n"));
 
     format!(
         r#"name: Renovate validate
@@ -202,7 +209,7 @@ concurrency:
 jobs:
   validate:
     name: Validate Renovate configuration
-    runs-on: {runner}
+{gate}    runs-on: {runner}
     timeout-minutes: 10
     steps:
       - name: Checkout repository

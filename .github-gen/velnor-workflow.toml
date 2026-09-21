@@ -14,21 +14,17 @@ revision = "4c12824fa861a1b31ab503a9db866b91574306d6"
 [scan]
 exclude = ["migrations/**"]
 
-# Provider placement: `providers` is the available backends.
-# `automatic_providers` run on PR/push/schedule without a dispatch choice.
-# Hosted recovery: normal PR/push/schedule and omitted dispatch run on the
-# GitHub-hosted lane. Keep Velnor in the provider universe for explicit later
-# qualification, after hosted recovery is green.
+# Provider placement: the visibility-based runner policy resolves exactly one
+# provider from the repository visibility evidence. This repository is public,
+# so every executable job runs on GitHub-hosted runners only; a Velnor
+# selector or universe here would be a contradictory rejection.
 [workflow]
-providers = ["github-hosted", "velnor"]
+providers = ["github-hosted"]
 automatic_providers = ["github-hosted"]
-default_dispatch_providers = ["github-hosted"]
 default_branch = "main"
-# Routing contract: the release-side guest-payload producer builds Linux
-# cross-target guest agents and Firecracker kernel/rootfs images, so the
-# generator keeps that job on the hosted selector. The verification units
-# below only run native Linux checks and remain eligible for Docker-backed
-# Velnor capacity, including a macOS host.
+# Routing contract: this public repository renders hosted-only, so every
+# job — including the release-side guest-payload producer — runs on the
+# hosted selector.
 profile = "rust-workspace-release"
 rust_needs = "dependency-closure"
 # Supersede stale heads within one PR/branch; separate PRs run in parallel.
@@ -42,11 +38,6 @@ version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust
 
 [workflow.selectors.github-hosted]
 runs_on = ["ubuntu-24.04"]
-
-# Recovery: repository-scoped macOS/Linux hosts claim Velnor-lane jobs with
-# these labels without joining an org pool.
-[workflow.selectors.velnor]
-runs_on = ["self-hosted", "velnor-target-mvp"]
 
 [policy]
 ruleset_required_status_checks = ["ci-required"]
@@ -71,9 +62,8 @@ mbx_generation_bound = 6
 enabled = true
 reason = "Release contract is explicitly cataloged; review credentials, environments, and tag protection before cutover."
 kind = "native"
-# Release verification prerequisites are hosted-only during recovery. This is
-# independent from automatic/dispatch CI routing; expand it to both providers
-# only after the Velnor lane is qualified.
+# Release verification prerequisites follow the hosted-only singleton: a
+# public repository verifies releases on GitHub-hosted runners.
 verification_providers = ["github-hosted"]
 package = "velnor-runner"
 packages = []
