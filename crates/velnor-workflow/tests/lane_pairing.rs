@@ -406,7 +406,7 @@ fn automatic_both_gates_pair_except_fork_pr_admission() {
         "Velnor admits same-repo pull_request only: {velnor_if}"
     );
     assert!(
-        !velnor_if.contains("github.event.pull_request.head.repo.full_name != github.repository"),
+        !velnor_if.contains("github.event.pull_request.head.repo.full_name!=github.repository"),
         "Velnor must not admit fork pull_request: {velnor_if}"
     );
 
