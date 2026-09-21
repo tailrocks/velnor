@@ -1629,24 +1629,24 @@ mod tests {
     /// The `watch-graph` schema admits the generation-time `reads` table
     /// alongside the watch additions it unions with.
     #[test]
-    fn watch_graph_schema_admits_declared_reads() {
-        let schema = lookup(WATCH_GRAPH).map(|primitive| primitive.schema());
-        let schema = schema.expect("watch-graph is registered");
+    fn watch_graph_schema_admits_declared_reads() -> Result<(), Box<dyn std::error::Error>> {
+        let primitive = lookup(WATCH_GRAPH)?;
+        let schema = primitive.schema();
         assert!(schema.contains(&"watch"));
         assert!(schema.contains(&"reads"));
+        Ok(())
     }
 
     /// Declared reads parse per unit id into `{ paths, reason }` entries.
     #[test]
-    fn declared_reads_parse_paths_and_reasons() {
+    fn declared_reads_parse_paths_and_reasons() -> Result<(), Box<dyn std::error::Error>> {
         let value: toml::Value = toml::from_str(
             r#""rust-alpha" = [
                 { paths = ["scripts/check-boundary.sh"], reason = "task runner execs this script" },
                 { paths = ["assets/**"], reason = "bundler consumes non-source inputs" },
             ]"#,
-        )
-        .expect("the fixture is valid TOML");
-        let reads = parse_declared_reads("reads", &value).expect("the reads parse");
+        )?;
+        let reads = parse_declared_reads("reads", &value)?;
         assert_eq!(
             reads.get("rust-alpha"),
             Some(&vec![
@@ -1660,31 +1660,32 @@ mod tests {
                 },
             ])
         );
+        Ok(())
     }
 
     /// A missing, empty, or blank reason fails closed: every declared read
     /// must audit its claim.
     #[test]
-    fn declared_reads_reject_an_empty_reason() {
+    fn declared_reads_reject_an_empty_reason() -> Result<(), Box<dyn std::error::Error>> {
         for entry in [
             r#"{ paths = ["scripts/check.sh"] }"#,
             r#"{ paths = ["scripts/check.sh"], reason = "" }"#,
             r#"{ paths = ["scripts/check.sh"], reason = "  " }"#,
             r#"{ paths = ["scripts/check.sh"], reason = 7 }"#,
         ] {
-            let value: toml::Value = toml::from_str(&format!(r#""a" = [ {entry} ]"#))
-                .expect("the fixture is valid TOML");
-            let error = parse_declared_reads("reads", &value)
-                .err()
-                .expect("an undocumented read must fail");
+            let value: toml::Value = toml::from_str(&format!(r#""a" = [ {entry} ]"#))?;
+            let Err(error) = parse_declared_reads("reads", &value) else {
+                panic!("an undocumented read must fail");
+            };
             assert!(error.to_string().contains("reason"), "{error}");
         }
+        Ok(())
     }
 
     /// Malformed entries fail closed: unknown keys, missing or mistyped
     /// paths, and invalid globs never silently widen selection.
     #[test]
-    fn declared_reads_reject_malformed_entries() {
+    fn declared_reads_reject_malformed_entries() -> Result<(), Box<dyn std::error::Error>> {
         for (entry, needle) in [
             (
                 r#"{ paths = ["a"], reason = "r", extra = true }"#,
@@ -1702,16 +1703,16 @@ mod tests {
             ),
             (r#""just-a-string""#, "a `{ paths, reason }` table"),
         ] {
-            let value: toml::Value = toml::from_str(&format!(r#""a" = [ {entry} ]"#))
-                .expect("the fixture is valid TOML");
-            let error = parse_declared_reads("reads", &value)
-                .err()
-                .expect("a malformed entry must fail: {entry}");
+            let value: toml::Value = toml::from_str(&format!(r#""a" = [ {entry} ]"#))?;
+            let Err(error) = parse_declared_reads("reads", &value) else {
+                panic!("a malformed entry must fail: {entry}");
+            };
             assert!(error.to_string().contains(needle), "entry {entry}: {error}");
         }
-        let error = parse_declared_reads("reads", &toml::Value::Array(vec![]))
-            .err()
-            .expect("a non-table reads value must fail");
+        let Err(error) = parse_declared_reads("reads", &toml::Value::Array(vec![])) else {
+            panic!("a non-table reads value must fail");
+        };
         assert!(error.to_string().contains("a table of unit ids"), "{error}");
+        Ok(())
     }
 }

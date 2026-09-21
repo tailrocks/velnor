@@ -96,8 +96,8 @@ no-`-M` + inline match + version-bump + workspace gates; select:
 Keep sound: stale/empty-base->full, git-failure->full, `.github/`
 blanket until S2 audit, `version_bump_matches` before irrelevant-skip.
 
-Adjacent open PRs (avoid conflicts): #990 (generator-owned AGENTS.md),
-#979/#980 (validation contract), #985, #978.
+Adjacent open PRs (avoid conflicts): PR #990 (generator-owned
+AGENTS.md), #979/#980 (validation contract), #985, #978.
 
 ## Decisions
 
