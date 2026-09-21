@@ -293,6 +293,7 @@ mod tests {
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -490,6 +491,225 @@ mod tests {
                 !output.contains("prepared-tool"),
                 "undeclared provisioning on {provider:?} mentions no prepared tool"
             );
+        }
+    }
+
+    #[test]
+    fn full_history_facts_travel_per_invocation_and_render_unquoted() {
+        let mut deep = rust_unit("rust-deep", "crates/deep");
+        deep.full_history = true;
+        let shallow = rust_unit("rust-shallow", "crates/shallow");
+        let ir = owner_test_ir("example/full-history", vec![deep.clone(), shallow.clone()]);
+        for provider in [ProviderId::GithubHosted, ProviderId::Velnor] {
+            let deep_facts =
+                ir.unit_provider_facts(&deep, &ir.default_unit_contract(&deep, true), provider);
+            let shallow_facts = ir.unit_provider_facts(
+                &shallow,
+                &ir.default_unit_contract(&shallow, true),
+                provider,
+            );
+            assert!(
+                deep_facts.full_history,
+                "{provider:?} carries the deep unit's flag"
+            );
+            assert!(
+                !shallow_facts.full_history,
+                "{provider:?} leaves the shallow unit shallow"
+            );
+            let deep_values = deep_facts.input_values();
+            assert!(
+                deep_values.contains(&(provider_input::FULL_HISTORY, "true".to_owned())),
+                "{provider:?} passes the flag for the deep unit: {deep_values:?}"
+            );
+            assert!(
+                !shallow_facts
+                    .input_values()
+                    .iter()
+                    .any(|(name, _)| *name == provider_input::FULL_HISTORY),
+                "{provider:?} omits the flag for the shallow unit"
+            );
+            let rendered = super::render_caller_inputs(&deep_values);
+            assert!(
+                rendered
+                    .lines()
+                    .any(|line| line == "      full_history: true"),
+                "{provider:?} renders the boolean unquoted: {rendered}"
+            );
+        }
+        let bare = super::ProviderStepFacts::default();
+        assert!(
+            !bare
+                .input_values()
+                .iter()
+                .any(|(name, _)| *name == provider_input::FULL_HISTORY),
+            "default facts omit the flag"
+        );
+    }
+
+    #[test]
+    fn kind_header_declares_full_history_only_when_a_member_needs_it() {
+        let shallow_ir = owner_test_ir(
+            "example/full-history",
+            vec![rust_unit("rust-a", "crates/a")],
+        );
+        let shallow = must_some(
+            must_ok(
+                shallow_ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                "shallow kind renders",
+            ),
+            "shallow kind has members",
+        )
+        .1;
+        assert!(
+            !shallow.contains("full_history"),
+            "a kind with no deep member declares nothing: {shallow}"
+        );
+        let mut deep = rust_unit("rust-deep", "crates/deep");
+        deep.full_history = true;
+        let mixed_ir = owner_test_ir(
+            "example/full-history",
+            vec![deep, rust_unit("rust-shallow", "crates/shallow")],
+        );
+        let mixed = must_some(
+            must_ok(
+                mixed_ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                "mixed kind renders",
+            ),
+            "mixed kind has members",
+        )
+        .1;
+        let declaration =
+            "      full_history:\n        required: false\n        type: boolean\n        default: false";
+        assert!(
+            mixed.contains(declaration),
+            "a kind with a deep member declares the boolean flag: {mixed}"
+        );
+        assert_eq!(
+            mixed.matches("full_history:").count(),
+            1,
+            "the flag is declared exactly once: {mixed}"
+        );
+        assert_eq!(
+            provider_input::declaration(provider_input::FULL_HISTORY),
+            declaration,
+            "the declaration helper pins the exact bytes"
+        );
+    }
+
+    #[test]
+    fn collapsed_checkout_stays_byte_identical_without_deep_members() {
+        let unit = rust_unit("rust-a", "crates/a");
+        let ir = owner_test_ir("example/full-history", vec![unit.clone()]);
+        let mut output = String::new();
+        must_ok(
+            ir.render_collapsed_provider_verify_job(
+                &mut output,
+                &[&unit],
+                None,
+                ProviderId::GithubHosted,
+                "verify",
+                "Verify",
+                "ubuntu-24.04",
+                None,
+            ),
+            "shallow job renders",
+        );
+        assert!(
+            !output.contains("fetch-depth"),
+            "a shallow job carries no fetch-depth key: {output}"
+        );
+        let checkout = format!(
+            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
+            ir.pins.checkout
+        );
+        assert!(
+            output.contains(&checkout),
+            "the shallow checkout keeps today's exact bytes: {output}"
+        );
+    }
+
+    #[test]
+    fn mixed_kind_renders_one_flipped_fetch_depth_expression_per_checkout() {
+        let mut deep = rust_unit("rust-deep", "crates/deep");
+        deep.full_history = true;
+        let shallow = rust_unit("rust-shallow", "crates/shallow");
+        let ir = owner_test_ir("example/full-history", vec![deep.clone(), shallow]);
+        let mut output = String::new();
+        must_ok(
+            ir.render_collapsed_provider_verify_job(
+                &mut output,
+                &[&deep],
+                None,
+                ProviderId::GithubHosted,
+                "verify",
+                "Verify",
+                "ubuntu-24.04",
+                None,
+            ),
+            "deep job renders",
+        );
+        // The caller invokes once per (unit, provider), so one expression
+        // serves mixed kinds; the operand order is load-bearing because 0 is
+        // falsy in GitHub Actions expressions.
+        let checkout = format!(
+            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}\n          fetch-depth: ${{{{ inputs.full_history == false && 1 || 0 }}}}",
+            ir.pins.checkout
+        );
+        assert!(
+            output.contains(&checkout),
+            "the deep checkout pins the exact flipped expression: {output}"
+        );
+        assert!(
+            !output.contains("inputs.full_history && 0"),
+            "never the falsy-0 form, which yields 1 in both cases: {output}"
+        );
+        let rendered = must_some(
+            must_ok(
+                ir.render_kind_unit_workflow(UnitKind::Rust, None),
+                "mixed kind renders",
+            ),
+            "mixed kind has members",
+        )
+        .1;
+        assert!(
+            rendered.contains("fetch-depth: ${{ inputs.full_history == false && 1 || 0 }}"),
+            "the kind reusable carries the flipped expression: {rendered}"
+        );
+        assert!(
+            !rendered.contains("inputs.full_history && 0"),
+            "the kind reusable never carries the falsy-0 form: {rendered}"
+        );
+    }
+
+    #[test]
+    fn callers_pass_full_history_only_on_deep_unit_call_jobs() {
+        let mut deep = rust_unit("rust-deep", "crates/deep");
+        deep.full_history = true;
+        let shallow = rust_unit("rust-shallow", "crates/shallow");
+        let ir = owner_test_ir("example/full-history", vec![deep.clone(), shallow.clone()]);
+        let file = nested_unit_workflow_file(&deep);
+        for (unit, expect) in [(&deep, true), (&shallow, false)] {
+            let callers = ir.unit_provider_callers(unit, &file, None);
+            assert!(!callers.is_empty(), "unit {} renders call jobs", unit.id);
+            for caller in &callers {
+                let mut output = String::new();
+                ir.render_unit_provider_caller(&mut output, unit, caller, false, &[], false);
+                if expect {
+                    assert!(
+                        output
+                            .lines()
+                            .any(|line| line == "      full_history: true"),
+                        "the deep unit's {} call job passes unquoted true: {output}",
+                        caller.job_id
+                    );
+                } else {
+                    assert!(
+                        !output.contains("full_history"),
+                        "the shallow unit's {} call job passes nothing: {output}",
+                        caller.job_id
+                    );
+                }
+            }
         }
     }
 
@@ -4672,6 +4892,10 @@ pub(crate) mod provider_input {
     /// (`fmt,clippy,test,doctest`); empty when the unit keeps the single
     /// legacy checks step.
     pub(crate) const VALIDATION_PHASES: &str = "validation_phases";
+    /// `true` when the unit's checkout must clone full history instead of
+    /// the default depth-1 shallow clone. Diff-aware gates (merge-base
+    /// against the base SHA) need ancestry the shallow checkout lacks.
+    pub(crate) const FULL_HISTORY: &str = "full_history";
 
     /// Every per-unit input, in declaration order.
     pub(crate) const ALL: &[&str] = &[
@@ -4704,6 +4928,7 @@ pub(crate) mod provider_input {
         PRODUCT_PROVIDES,
         PRODUCT_TRANSPORT_READY,
         VALIDATION_PHASES,
+        FULL_HISTORY,
     ];
 
     /// The inputs declared as `type: boolean`. Callers pass them unquoted so
@@ -4720,6 +4945,7 @@ pub(crate) mod provider_input {
                 | POLICY_RUNTIME
                 | CANDIDATE_PUBLISH
                 | APPLE_EXECUTOR
+                | FULL_HISTORY
         )
     }
 
@@ -4812,6 +5038,9 @@ pub(crate) struct ProviderStepFacts {
     /// The validation phases the unit verifies through, in step order;
     /// empty when the unit keeps the single legacy checks step.
     pub(crate) validation_phases: Vec<ValidationPhase>,
+    /// Whether the unit's checkout clones full history. Provider-independent:
+    /// the same value travels per (unit, provider) invocation.
+    pub(crate) full_history: bool,
 }
 
 impl ProviderStepFacts {
@@ -4923,6 +5152,9 @@ impl ProviderStepFacts {
                 provider_input::VALIDATION_PHASES,
                 ValidationPhase::id_list(&self.validation_phases).join(","),
             ));
+        }
+        if self.full_history {
+            values.push((provider_input::FULL_HISTORY, "true".to_owned()));
         }
         values
     }
@@ -5809,6 +6041,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             {
                 continue;
             }
+            // The full-history input is declared only when a member needs
+            // it: an unconditional declaration would rewrite every kind
+            // header for a feature only diff-aware gates use.
+            if *name == provider_input::FULL_HISTORY
+                && !members.iter().any(|unit| unit.full_history)
+            {
+                continue;
+            }
             let _ = writeln!(output, "{}", provider_input::declaration(name));
         }
         if !env.is_empty() {
@@ -6088,9 +6328,21 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         );
         output.push_str("    steps:\n");
         render_ci_job_started_marker(output);
+        // The caller invokes once per (unit, provider) and passes
+        // `full_history` per invocation, so one expression serves mixed
+        // kinds: deep legs clone full history, shallow legs stay depth-1.
+        // The operand order is load-bearing: number 0 is FALSY in GitHub
+        // Actions expressions, so `inputs.full_history && 0 || 1` yields 1
+        // in both cases and would silently keep deep legs shallow. The
+        // flipped form below yields 0 for deep legs and 1 otherwise.
+        let fetch_depth = if members.iter().any(|unit| unit.full_history) {
+            "\n          fetch-depth: ${{ inputs.full_history == false && 1 || 0 }}"
+        } else {
+            ""
+        };
         let _ = writeln!(
             output,
-            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
+            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}{fetch_depth}",
             self.pins.checkout
         );
         Self::render_unit_dependency_info_step(output);
@@ -6243,6 +6495,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             product_provides: Self::transport_provides(unit, provider),
             product_transport_ready: Self::transport_ready(&self.units, unit, provider),
             validation_phases: unit.runnable_phases(),
+            full_history: unit.full_history,
         }
     }
 

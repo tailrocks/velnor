@@ -679,6 +679,7 @@ fn analyze_rust_manifests(
                 ..crate::s2::provider::Capabilities::default()
             },
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
@@ -748,6 +749,7 @@ fn analyze_rust_manifests(
                 ..crate::s2::provider::Capabilities::default()
             },
             workspace_check: false,
+            full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
