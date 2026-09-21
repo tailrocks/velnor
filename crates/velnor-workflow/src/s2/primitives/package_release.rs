@@ -872,7 +872,6 @@ fn render_workflow(
     ));
     let package_dir_yaml = crate::s2::yaml_scalar(&spec.package_dir);
     let package_dir = spec.package_dir.as_str();
-    let package_path_yaml = crate::s2::yaml_scalar(&format!("{workspace_expr}/{package_dir}"));
     let channel_yaml = crate::s2::yaml_scalar(&spec.channel);
     let source_repository_yaml = crate::s2::yaml_scalar(&spec.source_repository);
     let source_ref_yaml = crate::s2::yaml_scalar(&spec.source_ref);
@@ -902,6 +901,13 @@ fn render_workflow(
     for name in &attested_assets {
         let _ = writeln!(
             attestation_subjects,
+            "            {workspace_expr}/{package_dir}/{name}"
+        );
+    }
+    let mut artifact_upload_paths = String::new();
+    for name in release_asset_names(spec) {
+        let _ = writeln!(
+            artifact_upload_paths,
             "            {workspace_expr}/{package_dir}/{name}"
         );
     }
@@ -947,7 +953,7 @@ fn render_workflow(
     );
     let _ = writeln!(
         output,
-        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n        run: |\n          set -euo pipefail\n          mkdir -p \"$VELNOR_VERIFIED_PACKAGE_DIR\"\n{tasks}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}{build_verify_tasks}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: {package_path_yaml}\n          if-no-files-found: error\n          retention-days: 2\n",
+        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n        run: |\n          set -euo pipefail\n          mkdir -p \"$VELNOR_VERIFIED_PACKAGE_DIR\"\n{tasks}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}{build_verify_tasks}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: |\n{artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
     );
     output.push('\n');
     output.push_str(&render_publish_job(
@@ -2253,8 +2259,8 @@ verify_asset_bytes() {
   rm -rf -- "$target_dir"
   mkdir -p "$target_dir"
   gh release download "$release_tag" --repo "$GITHUB_REPOSITORY" --dir "$target_dir"
-  downloaded_assets="$target_dir/.asset-names"
-  find "$target_dir" -maxdepth 1 -type f ! -name '.asset-names' -printf '%f\n' | LC_ALL=C sort > "$downloaded_assets"
+  downloaded_assets="$transaction_dir/downloaded-assets"
+  find "$target_dir" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$downloaded_assets"
   cmp -s "$names_file" "$downloaded_assets" || {
     echo "::error::immutable release downloaded asset set differs from its API asset set" >&2
     return 1
@@ -5961,5 +5967,33 @@ fi
             let error = parse_spec(&Args(&values)).expect_err("unsafe package directory must fail");
             assert!(error.to_string().contains("portable relative directory"));
         }
+    }
+
+    #[test]
+    fn configured_hidden_asset_and_inventory_name_survive_exact_verification() {
+        let mut values = args();
+        values.insert(
+            "payloads".to_owned(),
+            toml::Value::Array(vec![toml::Value::String(".asset-names".to_owned())]),
+        );
+        let spec = parse_spec(&Args(&values)).expect("hidden bare payload is valid");
+        assert!(release_asset_names(&spec).contains(&".asset-names".to_owned()));
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        assert!(workflow.contains("include-hidden-files: true"));
+        let upload_step = workflow
+            .find("Upload verified package handoff")
+            .expect("artifact upload step");
+        let upload_paths = workflow[upload_step..]
+            .split("          include-hidden-files: true")
+            .next()
+            .expect("upload path block");
+        assert!(upload_paths.contains(
+            "path: |\n            ${{ github.workspace }}/dist/release-manifest.json\n            ${{ github.workspace }}/dist/identity.json\n            ${{ github.workspace }}/dist/.asset-names"
+        ));
+        assert!(!upload_paths.contains("dist/unconfigured"));
+        let immutable = render_immutable_publish_script(&spec);
+        assert!(immutable.contains("downloaded_assets=\"$transaction_dir/downloaded-assets\""));
+        assert!(immutable.contains("find \"$target_dir\" -maxdepth 1 -type f -printf '%f\\n'"));
+        assert!(!immutable.contains("$target_dir/.asset-names"));
     }
 }
