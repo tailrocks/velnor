@@ -226,6 +226,9 @@ fn wire_native_edge(
         unit.capabilities.native_macos_arm64 = true;
         unit.pr_commands.extend(recipe_commands.clone());
         unit.full_commands.extend(recipe_commands);
+        // Recipe commands carry no phase tag; the unit keeps every command
+        // in order and verifies through the single legacy step.
+        unit.clear_phases();
     }
     shape.units[consumer_index]
         .prerequisites
