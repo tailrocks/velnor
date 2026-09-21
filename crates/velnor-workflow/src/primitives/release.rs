@@ -6109,7 +6109,7 @@ cp "$record" "$out"
             ),
             (
                 "maintenance.yml",
-                "41ef15b8f97eaa4503e592deb90be865cde0ef6b4912ef05c61cfc7c16f78dd7",
+                "42a7c619ecf999035d548734662ee0c465f74c81d50000fc1fedc3166a7317c7",
             ),
             (
                 "ci-release-package-signer.yml",
