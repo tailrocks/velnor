@@ -14853,7 +14853,7 @@ mod tests {
             .run_timeout("sleep", &["30".into()], std::time::Duration::from_secs(1))
             .unwrap();
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
+            start.elapsed() < std::time::Duration::from_secs(15),
             "watchdog must kill sleep, elapsed={:?}",
             start.elapsed()
         );

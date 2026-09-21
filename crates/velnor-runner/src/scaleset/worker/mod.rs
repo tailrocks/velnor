@@ -39,7 +39,7 @@ pub mod supervise;
 
 pub use dind::{
     DindProvision, DindSpec, NetworkProvision, BUILDKIT_CACHE_DIR, DIND_READY_POLL_INTERVAL,
-    DIND_READY_TIMEOUT, DIND_SOCKET, STATE_MOUNT,
+    DIND_READY_TIMEOUT, DIND_SOCKET, STATE_MOUNT, WORK_DIR,
 };
 pub use ownership::{OwnershipId, WorkerIdentity};
 pub use runner::{
@@ -47,7 +47,7 @@ pub use runner::{
     RunnerProvision, RunnerSpec, ToolContentAttestation, ToolContentExpectation, ToolContentHook,
     DIND_DIGEST_AMD64, DIND_DIGEST_ARM64, DIND_INDEX_DIGEST, DIND_REPOSITORY, DIND_VERSION,
     RUNNER_DIGEST_AMD64, RUNNER_DIGEST_ARM64, RUNNER_INDEX_DIGEST, RUNNER_REPOSITORY,
-    RUNNER_VERSION,
+    RUNNER_VERSION, RUNNER_WORK_DIR, TOOL_CACHE_DIR,
 };
 pub use supervise::{CleanupReport, DiagnosticExport, Supervision, SupervisionOutcome};
 
