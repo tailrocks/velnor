@@ -1,7 +1,7 @@
 # Generated ownership state; do not edit.
 schema = 2
 [inputs]
-config	d821be0d74d03536
+config	447fba69393f76ee
 scan	5e964dd9012f60aa
 generator	70
 [outputs]
@@ -11,6 +11,8 @@ generator	70
 .github/actions/setup-velnor-workflow/action.yml	fb307963640278fb
 .github/ci/project.toml	df8b7d0cc5dd57b0
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
+.github/workflows/activate-renderer.yml	87cf4a016c0486c8
+.github/workflows/candidate-qualification.yml	1408488e32d3a135
 .github/workflows/ci-main.yml	904f473dd9d69398
 .github/workflows/ci-policy.yml	c5fa616c60074090
 .github/workflows/ci-pr.yml	070786b81fba79dc
