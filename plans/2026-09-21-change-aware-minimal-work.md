@@ -52,7 +52,12 @@ diff (fetch-depth 0, no truncation).
 
 - S0 failing regression on the live `plan` path (`selection_for_diff`
   s1+s2): unmatched-no-consumer change -> zero workload units
-  (currently selects all). [in progress]
+  (currently selects all). [done: 4 tests fail, 1833 pass, committed]
+- #978 coordination decision (parent, 2026-09-21): implement the
+  classifier against the `unit.watch` seam only; do NOT cherry-pick
+  #978's unmerged hunks. Node/bun opaque paths stay `Unknown`->full
+  (today's sound behavior) until #978 lands, then narrow automatically;
+  declared `reads` covers urgent node gaps. Rebase after #978 merges.
 - S2-read-proof FIRST (gates S1): per-repo ownership/read-glob discovery
   (watches + command read globs); no hardcoded extension lists. Blocker
   found by review: velnor docs unit watches `*.md` but lints `**/*.md`
