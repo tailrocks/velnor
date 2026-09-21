@@ -24571,6 +24571,174 @@ lockfile = true
         let _ = fs::remove_dir_all(root);
     }
 
+    /// A public repository's `[renovate]` contract on the hosted
+    /// singleton (declared hosted providers, hosted selector, writer +
+    /// validator declare rows).
+    fn public_hosted_renovate_config() -> String {
+        "schema = 2\n\n\
+             [generator]\n\
+             repository = \"example/fixture\"\n\n\
+             [workflow]\n\
+             providers = [\"github-hosted\"]\n\
+             automatic_providers = [\"github-hosted\"]\n\
+             files = [\"ci-pr.yml\", \"ci-policy.yml\", \"ci-main.yml\", \"nightly.yml\", \"maintenance.yml\", \"renovate.yml\", \"renovate-validate.yml\"]\n\n\
+             [workflow.selectors.github-hosted]\n\
+             runs_on = [\"ubuntu-24.04\"]\n\n\
+             [renovate]\n\
+             enabled = true\n\
+             reason = \"Hosted Renovate for repository dependencies.\"\n\n\
+             [[declare]]\n\
+             primitive = \"renovate\"\n\
+             file = \"renovate.yml\"\n\n\
+             [[declare]]\n\
+             primitive = \"renovate-validate\"\n\
+             file = \"renovate-validate.yml\"\n"
+            .to_owned()
+    }
+
+    #[test]
+    fn public_hosted_renovate_renders_writer_on_hosted_runner() {
+        let config = public_hosted_renovate_config();
+        let root = renovate_repository("renovate-public-hosted", Some(&config));
+        let scanned = must(
+            scan_target(&root, None, "main"),
+            "scan public renovate repository",
+        );
+        let spec = must_some(
+            scanned.config.renovate.as_ref(),
+            "the hosted contract produces a renovate spec",
+        );
+        assert_eq!(spec.token, "GH_RENOVATE_TOKEN");
+        let files = must(
+            generated_files(&scanned.config),
+            "render public renovate repository",
+        );
+        let renovate = must_some(
+            files.get(&PathBuf::from(".github/workflows/renovate.yml")),
+            "generated renovate.yml",
+        );
+        assert!(renovate.contains("runs-on: ubuntu-24.04"), "{renovate}");
+        assert!(renovate.contains("secrets.GH_RENOVATE_TOKEN"));
+        assert!(!renovate.contains("velnor-native"));
+        let validate = must_some(
+            files.get(&PathBuf::from(".github/workflows/renovate-validate.yml")),
+            "generated renovate-validate.yml",
+        );
+        assert!(validate.contains("renovate-config-validator"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn public_derived_singleton_renovate_renders_writer() {
+        // No declared providers or selectors: the visibility evidence
+        // derives the hosted singleton, and the writer follows it.
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [workflow]\nfiles = [\"renovate.yml\"]\n\n\
+             [renovate]\nenabled = true\nreason = \"Hosted Renovate for repository dependencies.\"\n\n\
+             [[declare]]\nprimitive = \"renovate\"\nfile = \"renovate.yml\"\n";
+        let root = renovate_repository("renovate-public-derived", Some(config));
+        let scanned = must(
+            scan_target(&root, None, "main"),
+            "scan derived-singleton renovate repository",
+        );
+        assert!(scanned.config.renovate.is_some());
+        let files = must(
+            generated_files(&scanned.config),
+            "render derived-singleton renovate repository",
+        );
+        let renovate = must_some(
+            files.get(&PathBuf::from(".github/workflows/renovate.yml")),
+            "generated renovate.yml",
+        );
+        assert!(renovate.contains("runs-on: ubuntu-24.04"), "{renovate}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn public_renovate_rejects_velnor_provider() {
+        // The cross shape: a public repository declaring the velnor
+        // provider stays a visibility contradiction with [renovate] on.
+        let config = renovate_generation_config();
+        let root = renovate_repository("renovate-public-velnor", Some(&config));
+        let error = must_some(
+            scan_target(&root, None, "main").err(),
+            "public repo with velnor provider must fail",
+        )
+        .to_string();
+        assert!(
+            error.contains("contradictory runner selection")
+                && error.contains("[workflow] providers"),
+            "error must reject the cross-visibility provider: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn public_renovate_rejects_velnor_selector() {
+        // Hosted providers with a velnor selector: the pre-fix validator
+        // demanded this selector, the visibility policy forbids it, and
+        // the fixed validator must not resurrect the demand.
+        let config = format!(
+            "{}\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"{}\"]\n",
+            public_hosted_renovate_config(),
+            fleet_label()
+        );
+        let root = renovate_repository("renovate-public-selector", Some(&config));
+        let error = must_some(
+            scan_target(&root, None, "main").err(),
+            "public repo with velnor selector must fail",
+        )
+        .to_string();
+        assert!(
+            error.contains("contradictory runner selection")
+                && error.contains("[workflow.selectors.velnor]"),
+            "error must reject the cross-visibility selector: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn private_renovate_rejects_hosted_provider() {
+        // The mirrored cross shape: a private repository declaring the
+        // hosted provider stays a visibility contradiction.
+        let config = public_hosted_renovate_config();
+        let root = renovate_repository("renovate-private-hosted", Some(&config));
+        rebind_visibility_evidence(&root, "private");
+        let error = must_some(
+            scan_target(&root, None, "main").err(),
+            "private repo with hosted provider must fail",
+        )
+        .to_string();
+        assert!(
+            error.contains("contradictory runner selection")
+                && error.contains("[workflow] providers"),
+            "error must reject the cross-visibility provider: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn renovate_rejects_both_providers() {
+        // An ambiguous universe stays rejected: the visibility policy
+        // admits only singletons, with [renovate] on or off.
+        let config = public_hosted_renovate_config().replace(
+            "providers = [\"github-hosted\"]\nautomatic_providers = [\"github-hosted\"]",
+            "providers = [\"github-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\", \"velnor\"]",
+        );
+        let root = renovate_repository("renovate-both", Some(&config));
+        let error = must_some(
+            scan_target(&root, None, "main").err(),
+            "both-providers universe must fail",
+        )
+        .to_string();
+        assert!(
+            error.contains("contradictory runner selection")
+                && error.contains("[workflow] providers"),
+            "error must reject the ambiguous universe: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn configured_repository(name: &str, config: Option<&str>) -> PathBuf {
         let root = temporary_repository(name);
         must(
