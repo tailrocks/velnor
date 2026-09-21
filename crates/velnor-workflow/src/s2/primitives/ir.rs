@@ -1515,11 +1515,6 @@ mod tests {
             "transport consumer requires producer success: {workflow}"
         );
         assert!(
-            workflow
-                .contains("|| !(contains(needs.plan.outputs.units, '\"unit_id\":\"rust-ffi\"'))"),
-            "an unselected producer permits the consumer's guarded rebuild: {workflow}"
-        );
-        assert!(
             !workflow.contains(
                 "needs.github-hosted-rust-ffi.result == 'success' || needs.github-hosted-rust-ffi.result == 'skipped'"
             ),
@@ -1541,30 +1536,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn transportable_prerequisite_falls_back_when_producer_is_inadmissible() {
-        let (mut producer, consumer) = transport_fixture();
-        producer.trust = crate::s2::provider::TrustReq::TrustedOnly;
-        let ir = owner_test_ir("example/transport", vec![producer, consumer]);
-        let workflow = ir.render_nested(
-            WorkflowKind::PullRequest,
-            &aggregate_fixture_nodes(&ir),
-            None,
-        );
-        let admission = ir.provider_admission_expression(ProviderAdmission::for_unit(
-            ProviderId::GithubHosted,
-            &ir.units[0],
-        ));
-        let fallback = format!("|| !({admission})");
-        assert!(
-            workflow.contains(&fallback),
-            "an inadmissible producer permits the consumer's guarded rebuild: {workflow}"
-        );
-        assert!(
-            workflow.contains("needs.github-hosted-rust-ffi.result == 'success'"),
-            "an admissible producer still requires success: {workflow}"
-        );
-    }
 
     #[test]
     fn transport_facts_pass_records_only_on_hosted() {
@@ -7039,12 +7010,12 @@ impl WorkflowIr {
                 "(needs.{dependency}.result == 'success' || needs.{dependency}.result == 'skipped')"
             ));
         }
-        // A selected, admitted transportable prerequisite is an explicit
-        // artifact dependency. An out-of-plan or inadmissible producer is
-        // intentionally skipped and the consumer's guarded rebuild covers
-        // that product; a failed producer never qualifies for the fallback.
+        // A transportable prerequisite is an explicit artifact dependency.
+        // GitHub schedules this caller only after the producer has succeeded;
+        // skipped, failed, and cancelled producers are terminal, never a
+        // permission to rebuild a required artifact in the consumer.
         for dependency in product_dependency_needs(provider, unit, &self.units) {
-            conditions.push(self.product_dependency_condition(provider, unit, &dependency));
+            conditions.push(format!("needs.{dependency}.result == 'success'"));
         }
         conditions.push(aggregate_selected_unit_selector(&caller.unit_id));
         // The caller skips exactly when the callee's provider job would: same
@@ -7066,45 +7037,6 @@ impl WorkflowIr {
             caller.provider.as_str(),
             render_caller_inputs(&caller.inputs),
         );
-    }
-
-    /// Gate one transported-product caller on the producer only when that
-    /// producer is part of this plan and admitted on this provider. The
-    /// static workflow still lists the producer in `needs` so its result is
-    /// available; a skipped producer is safe only when the plan or admission
-    /// predicate proves it was never required. A selected/admitted producer
-    /// that fails or unexpectedly skips blocks the consumer and leaves the
-    /// expected-work aggregate red.
-    fn product_dependency_condition(
-        &self,
-        provider: ProviderId,
-        consumer: &Unit,
-        dependency: &str,
-    ) -> String {
-        let producer = consumer.prerequisites.iter().find_map(|prerequisite| {
-            let candidate = self
-                .units
-                .iter()
-                .find(|candidate| candidate.id == prerequisite.producer)?;
-            (unit_job_id(provider, &candidate.id) == dependency
-                && candidate.products.iter().any(|product| {
-                    product.name == prerequisite.product
-                        && super::product_transport::transport_eligible(product)
-                }))
-            .then_some(candidate)
-        });
-        let Some(producer) = producer else {
-            return format!("needs.{dependency}.result == 'success'");
-        };
-        let selected = aggregate_selected_unit_selector(&producer.id);
-        let admission =
-            self.provider_admission_expression(ProviderAdmission::for_unit(provider, producer));
-        let not_admitted = match admission.as_str() {
-            "true" => "false".to_owned(),
-            "false" => "true".to_owned(),
-            _ => format!("!({admission})"),
-        };
-        format!("(needs.{dependency}.result == 'success' || !({selected}) || {not_admitted})")
     }
 
     /// One reusable-workflow caller per (unit, provider). The kind reusable holds
