@@ -2157,6 +2157,14 @@ pub(crate) fn run_units(
     run_units_with_selection_file(root, config_path, scope, only_unit, phase, &selection_file)
 }
 
+/// Whether an event is trusted: push, schedule, and merge-queue validation
+/// always run full scope, mirroring [`scope_for_event_values`]. Unit jobs
+/// re-check the plan-time verdict so a narrowed job scope can never execute
+/// under a trusted event.
+fn event_requires_full_scope(event: &str) -> bool {
+    matches!(event, "push" | "schedule" | "merge_group")
+}
+
 pub(crate) fn run_units_with_selection_file(
     root: &Path,
     config_path: &Path,
@@ -2166,7 +2174,8 @@ pub(crate) fn run_units_with_selection_file(
     selection_file: &Path,
 ) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
-    if matches!(env::var("EVENT_NAME").as_deref(), Ok("push" | "schedule")) && scope != Scope::Full
+    if event_requires_full_scope(&env::var("EVENT_NAME").unwrap_or_default())
+        && scope != Scope::Full
     {
         return Err(GeneratorError::usage(
             "trusted events require full CI scope",
@@ -2367,8 +2376,11 @@ fn selection_for_diff<'a>(
     if base.is_empty() || base.chars().all(|character| character == '0') {
         return full_selection(config, Some("no affected base; fell back to full"));
     }
-    let Some(changed) = git_changed_files(root, base, head)? else {
+    let Some(raw) = git_name_status_nul(root, base, head)? else {
         return full_selection(config, Some("git diff unavailable; fell back to full"));
+    };
+    let Some(changed) = parse_name_status_nul(&raw) else {
+        return full_selection(config, Some("unparseable change entry; fell back to full"));
     };
     if changed.is_empty() {
         return Ok(UnitSelection {
@@ -2604,28 +2616,82 @@ fn expand_affected_units(units: &[CiUnit], changed: BTreeSet<String>) -> BTreeSe
     expand_affected_units_with_full(units, changed).0
 }
 
-fn git_changed_files(
+/// Collect the plan-path change list as raw `git diff --name-status -M -z`
+/// bytes. `-z` NUL-delimits entries so unusual filenames (spaces, quotes,
+/// unicode, newlines, glob metacharacters) arrive exactly instead of
+/// C-quoted; `-M` reports renames with both sides so the matcher sees the
+/// old and the new owner atomically with collection. `None` means git
+/// failed: the caller falls back to full, never to empty.
+fn git_name_status_nul(
     root: &Path,
     base: &str,
     head: &str,
-) -> Result<Option<Vec<String>>, GeneratorError> {
+) -> Result<Option<Vec<u8>>, GeneratorError> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["diff", "--name-only"])
+        .args(["diff", "--name-status", "-M", "-z"])
         .arg(format!("{base}...{head}"))
         .output()
         .map_err(|error| GeneratorError::usage(format!("run git diff: {error}")))?;
     if !output.status.success() {
         return Ok(None);
     }
-    Ok(Some(
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-    ))
+    Ok(Some(output.stdout))
+}
+
+/// Parse `--name-status -z` bytes into the matchable path list, mirroring the
+/// select path's rename/delete semantics: a rename contributes its target
+/// then its source (both owners match), a copy contributes its target only,
+/// and a delete keeps its path (its owner still matches). `None` means the
+/// input is truncated, malformed, or non-UTF-8: the caller falls back to
+/// full instead of matching a mangled name.
+fn parse_name_status_nul(output: &[u8]) -> Option<Vec<String>> {
+    if output.is_empty() {
+        return Some(Vec::new());
+    }
+    let text = std::str::from_utf8(output).ok()?;
+    let mut records = text.split('\0');
+    let mut changed = Vec::new();
+    loop {
+        let status = records.next()?;
+        if status.is_empty() {
+            // The trailing NUL terminates the stream: anything after it is a
+            // malformed record, not an empty diff.
+            return records.next().is_none().then_some(changed);
+        }
+        if let Some(score) = status.strip_prefix('R') {
+            if score.is_empty() || !score.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let from = records.next()?;
+            let to = records.next()?;
+            if from.is_empty() || to.is_empty() {
+                return None;
+            }
+            changed.push(to.to_owned());
+            changed.push(from.to_owned());
+        } else if let Some(score) = status.strip_prefix('C') {
+            if score.is_empty() || !score.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let from = records.next()?;
+            let to = records.next()?;
+            if from.is_empty() || to.is_empty() {
+                return None;
+            }
+            changed.push(to.to_owned());
+        } else {
+            if !matches!(status, "A" | "M" | "T" | "D") {
+                return None;
+            }
+            let path = records.next()?;
+            if path.is_empty() {
+                return None;
+            }
+            changed.push(path.to_owned());
+        }
+    }
 }
 
 fn ordered_units<'a>(
@@ -5174,6 +5240,101 @@ pub(crate) mod tests {
         Ok((root, base, head))
     }
 
+    fn git_fixture_head(root: &std::path::Path) -> Result<String, Box<dyn Error>> {
+        Ok(String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned())
+    }
+
+    /// A two-commit fixture whose diff is a pure rename: `from` exists at
+    /// base, `to` carries identical content at head, so `-M` reports `R100`
+    /// with both sides.
+    fn selection_git_rename_fixture(
+        name: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        let id = crate::unique_suffix();
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-selection-{name}-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let run = |args: &[&str]| -> Result<(), Box<dyn Error>> {
+            let status = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()?;
+            assert!(status.success(), "git command failed: {args:?}");
+            Ok(())
+        };
+        run(&["init", "-q"])?;
+        run(&["config", "user.email", "test@example.invalid"])?;
+        run(&["config", "user.name", "Velnor test"])?;
+        let from_path = root.join(from);
+        let parent = from_path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "rename source parent")
+        })?;
+        std::fs::create_dir_all(parent)?;
+        std::fs::write(&from_path, "line one\nline two\nline three\n")?;
+        run(&["add", "."])?;
+        run(&["commit", "-qm", "base"])?;
+        let base = git_fixture_head(&root)?;
+        if let Some(parent) = root.join(to).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        run(&["mv", from, to])?;
+        run(&["commit", "-qm", "rename"])?;
+        let head = git_fixture_head(&root)?;
+        Ok((root, base, head))
+    }
+
+    /// A two-commit fixture whose diff deletes `deleted`: the path exists at
+    /// base and is gone at head, so the diff reports `D` with the old path.
+    fn selection_git_delete_fixture(
+        name: &str,
+        deleted: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        let id = crate::unique_suffix();
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-selection-{name}-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let run = |args: &[&str]| -> Result<(), Box<dyn Error>> {
+            let status = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()?;
+            assert!(status.success(), "git command failed: {args:?}");
+            Ok(())
+        };
+        run(&["init", "-q"])?;
+        run(&["config", "user.email", "test@example.invalid"])?;
+        run(&["config", "user.name", "Velnor test"])?;
+        for path in [deleted, "keeper.txt"] {
+            let path = root.join(path);
+            let parent = path.parent().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "delete fixture parent")
+            })?;
+            std::fs::create_dir_all(parent)?;
+            std::fs::write(path, "initial\n")?;
+        }
+        run(&["add", "."])?;
+        run(&["commit", "-qm", "base"])?;
+        let base = git_fixture_head(&root)?;
+        run(&["rm", "-q", deleted])?;
+        run(&["commit", "-qm", "delete"])?;
+        let head = git_fixture_head(&root)?;
+        Ok((root, base, head))
+    }
+
     fn stale_base_selection_git_fixture(
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
         let id = crate::unique_suffix();
@@ -6083,8 +6244,8 @@ workspace_check = true
             let (root, base, head) = selection_git_fixture("slice-c", changed)?;
             let runtime_selection =
                 selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-            let changed_files =
-                git_changed_files(&root, &base, &head)?.ok_or("the diff must resolve")?;
+            let raw = git_name_status_nul(&root, &base, &head)?.ok_or("the diff must resolve")?;
+            let changed_files = parse_name_status_nul(&raw).ok_or("the diff must parse")?;
             let changes: Vec<crate::reuse::ChangedPath> = changed_files
                 .into_iter()
                 .map(|path| crate::reuse::ChangedPath {
@@ -6238,6 +6399,291 @@ workspace_check = true
         );
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn affected_selection_matches_both_rename_sides() -> Result<(), Box<dyn Error>> {
+        // A rename invalidates the old owner (the file left) and the new
+        // owner (the file arrived): both select, plus the dependent closure.
+        let (root, base, head) = selection_git_rename_fixture(
+            "rename-both",
+            "crates/base/src/lib.rs",
+            "crates/app/src/moved.rs",
+        )?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer"]
+        );
+        assert_eq!(
+            selection.full_units,
+            ["app", "base", "consumer"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert!(selection.fallback_reason.is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_matches_the_rename_source_when_the_target_is_unowned(
+    ) -> Result<(), Box<dyn Error>> {
+        // The target matches nothing, but the source still selects its owner:
+        // a rename out of a watched tree is not a disappearance.
+        let (root, base, head) = selection_git_rename_fixture(
+            "rename-source",
+            "crates/base/src/lib.rs",
+            "notes/moved.md",
+        )?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer"]
+        );
+        assert_eq!(
+            selection.full_units,
+            ["app", "base", "consumer"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert!(selection.fallback_reason.is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_selects_the_owner_of_a_deleted_file() -> Result<(), Box<dyn Error>> {
+        let (root, base, head) =
+            selection_git_delete_fixture("delete-owned", "crates/app/src/lib.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer"]
+        );
+        assert_eq!(
+            selection.full_units,
+            ["app", "consumer"].into_iter().map(str::to_owned).collect()
+        );
+        assert!(selection.fallback_reason.is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_matches_unusual_owned_filenames_exactly() -> Result<(), Box<dyn Error>> {
+        // Quotes and glob metacharacters in an owned path match their owner
+        // exactly instead of failing closed on the quoted form.
+        let (root, base, head) = selection_git_fixture("unusual-owned", "crates/app/we\"ird?.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer"]
+        );
+        assert_eq!(
+            selection.full_units,
+            ["app", "consumer"].into_iter().map(str::to_owned).collect()
+        );
+        assert!(selection.fallback_reason.is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn unmatched_unusual_filename_selects_nothing() -> Result<(), Box<dyn Error>> {
+        // Spaces, quotes, and newlines in an unowned path parse exactly and
+        // select nothing instead of failing closed on the quoted form.
+        let (root, base, head) =
+            selection_git_fixture("unusual-unowned", "notes/with \"quotes\" and\nnewline.txt")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert!(selection.units.is_empty());
+        assert!(selection.full_units.is_empty());
+        assert!(selection.fallback_reason.is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn plan_selection_agrees_with_select_path_on_rename_and_delete() -> Result<(), Box<dyn Error>> {
+        // The plan path and the select path share one rename/delete model: a
+        // rename matches both owners, a delete matches its owner.
+        let config = selection_config();
+        let watched: Vec<crate::reuse::WatchedUnit> = config
+            .unit
+            .iter()
+            .map(|unit| crate::reuse::WatchedUnit {
+                id: unit.id.clone(),
+                watch: unit.watch.clone(),
+                depends_on: unit.depends_on.clone(),
+                kind: unit.kind.clone(),
+                commands: unit
+                    .github_pr_commands
+                    .iter()
+                    .chain(&unit.github_full_commands)
+                    .chain(&unit.velnor_pr_commands)
+                    .chain(&unit.velnor_full_commands)
+                    .cloned()
+                    .collect(),
+            })
+            .collect();
+        let (root, base, head) = selection_git_rename_fixture(
+            "parity-rename",
+            "crates/base/src/lib.rs",
+            "crates/app/src/moved.rs",
+        )?;
+        let runtime_selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let model = crate::reuse::select_affected(
+            &watched,
+            &[crate::reuse::ChangedPath {
+                path: "crates/app/src/moved.rs".to_owned(),
+                previous: Some("crates/base/src/lib.rs".to_owned()),
+                status: crate::reuse::ChangeKind::Renamed,
+            }],
+            crate::reuse::FULL_SELECTION_PREFIXES,
+        )?;
+        assert_eq!(
+            selected_id_set(&runtime_selection),
+            model.required,
+            "required set for the rename"
+        );
+        assert_eq!(
+            runtime_selection.full_units, model.full_units,
+            "full set for the rename"
+        );
+        std::fs::remove_dir_all(root)?;
+        let (root, base, head) =
+            selection_git_delete_fixture("parity-delete", "crates/app/src/lib.rs")?;
+        let runtime_selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let model = crate::reuse::select_affected(
+            &watched,
+            &[crate::reuse::ChangedPath {
+                path: "crates/app/src/lib.rs".to_owned(),
+                previous: None,
+                status: crate::reuse::ChangeKind::Deleted,
+            }],
+            crate::reuse::FULL_SELECTION_PREFIXES,
+        )?;
+        assert_eq!(
+            selected_id_set(&runtime_selection),
+            model.required,
+            "required set for the delete"
+        );
+        assert_eq!(
+            runtime_selection.full_units, model.full_units,
+            "full set for the delete"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn name_status_nul_parses_exact_paths() {
+        // Status entries arrive verbatim: spaces, quotes, unicode, newlines,
+        // and glob metacharacters survive because NUL delimits records.
+        // Renames contribute target then source; copies contribute the target
+        // only; deletes keep their path.
+        for (input, expected) in [
+            ("".as_bytes(), Vec::new()),
+            ("M\0src/lib.rs\0".as_bytes(), vec!["src/lib.rs".to_owned()]),
+            (
+                "A\0dir with space/f ile.txt\0".as_bytes(),
+                vec!["dir with space/f ile.txt".to_owned()],
+            ),
+            (
+                "M\0we\"ird?.rs\0".as_bytes(),
+                vec!["we\"ird?.rs".to_owned()],
+            ),
+            (
+                "M\0ünïcode/[bracket]*.rs\0".as_bytes(),
+                vec!["ünïcode/[bracket]*.rs".to_owned()],
+            ),
+            (
+                "M\0with\nnewline.txt\0".as_bytes(),
+                vec!["with\nnewline.txt".to_owned()],
+            ),
+            ("D\0gone.rs\0".as_bytes(), vec!["gone.rs".to_owned()]),
+            ("T\0link.rs\0".as_bytes(), vec!["link.rs".to_owned()]),
+            (
+                "R100\0old.rs\0new.rs\0".as_bytes(),
+                vec!["new.rs".to_owned(), "old.rs".to_owned()],
+            ),
+            (
+                "R050\0a.rs\0b.rs\0".as_bytes(),
+                vec!["b.rs".to_owned(), "a.rs".to_owned()],
+            ),
+            ("C75\0a.rs\0b.rs\0".as_bytes(), vec!["b.rs".to_owned()]),
+            (
+                "M\0a.rs\0D\0b.rs\0R100\0c.rs\0d.rs\0".as_bytes(),
+                vec![
+                    "a.rs".to_owned(),
+                    "b.rs".to_owned(),
+                    "d.rs".to_owned(),
+                    "c.rs".to_owned(),
+                ],
+            ),
+        ] {
+            assert_eq!(
+                parse_name_status_nul(input),
+                Some(expected),
+                "input {input:?} must parse exactly"
+            );
+        }
+    }
+
+    #[test]
+    fn name_status_nul_fails_closed_on_malformed_input() {
+        // Unknown statuses, truncated records, empty paths, trailing
+        // garbage, and non-UTF-8 bytes never parse: the caller falls back to
+        // full instead of matching a mangled name.
+        for input in [
+            "X\0a.rs\0".as_bytes(),
+            "U\0a.rs\0".as_bytes(),
+            "m\0a.rs\0".as_bytes(),
+            "R\0a.rs\0b.rs\0".as_bytes(),
+            "Rx\0a.rs\0b.rs\0".as_bytes(),
+            "C\0a.rs\0b.rs\0".as_bytes(),
+            "M\0".as_bytes(),
+            "M\0a.rs".as_bytes(),
+            "R100\0a.rs\0".as_bytes(),
+            "R100\0a.rs".as_bytes(),
+            "M\0\0".as_bytes(),
+            "R100\0\0b.rs\0".as_bytes(),
+            "M\0a.rs\0junk".as_bytes(),
+            "A\0a.rs\0\0".as_bytes(),
+            "\0".as_bytes(),
+            b"M\0\xff.rs\0".as_slice(),
+        ] {
+            assert_eq!(
+                parse_name_status_nul(input),
+                None,
+                "input {input:?} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn unit_jobs_require_full_scope_for_trusted_events() {
+        // The unit-job guard mirrors the plan-time verdict: push, schedule,
+        // and merge-queue validation always run full scope.
+        for event in ["push", "schedule", "merge_group"] {
+            assert!(
+                event_requires_full_scope(event),
+                "{event} is a trusted event"
+            );
+        }
+        for event in ["", "pull_request", "workflow_dispatch"] {
+            assert!(
+                !event_requires_full_scope(event),
+                "{event} admits affected scope"
+            );
+        }
     }
 
     #[test]
