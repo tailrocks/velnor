@@ -2421,8 +2421,10 @@ fn select_units_for_job<'a>(
 struct UnitSelection<'a> {
     units: Vec<&'a CiUnit>,
     full_units: BTreeSet<String>,
-    /// Why the full set was chosen by fallback. `None` for requested-full,
-    /// narrow, and empty selections; surfaced additively by `plan`.
+    /// Why a fallback widened the selection: the full set, or the opaque
+    /// subset an unmatched path conservatively selects. `None` for
+    /// requested-full, proven-narrow, and empty selections; surfaced
+    /// additively by `plan`.
     fallback_reason: Option<String>,
     /// Why the planner selected zero workload units. `Some` exactly when
     /// `units` is empty for a proven no-work plan; `None` for real-work
@@ -2767,6 +2769,7 @@ fn selection_for_diff<'a>(
         .collect();
     let compiled = crate::s2::reuse::compile_ownership(&watched)?;
     let mut selected = BTreeSet::new();
+    let mut opaque_reasons: Vec<String> = Vec::new();
     for file in &changed {
         if let Some(verdict) = crate::s2::reuse::github_verdict(file) {
             match verdict {
@@ -2787,14 +2790,10 @@ fn selection_for_diff<'a>(
             }
             continue;
         }
-        match crate::s2::reuse::classify_path(&compiled, file) {
-            crate::s2::reuse::PathVerdict::Owned { units } => {
-                selected.extend(units);
-            }
-            crate::s2::reuse::PathVerdict::Unknown { reason } => {
-                return full_selection(config, Some(&reason));
-            }
-            crate::s2::reuse::PathVerdict::Irrelevant => {}
+        if let Some(reason) =
+            fold_affected_file(&compiled, file, &mut selected, &mut opaque_reasons)
+        {
+            return full_selection(config, Some(&reason));
         }
     }
     extend_workspace_checks_for_cargo_roots(config, &mut selected);
@@ -2803,9 +2802,33 @@ fn selection_for_diff<'a>(
     Ok(UnitSelection {
         units: ordered_units(&config.unit, Some(&selected))?,
         full_units,
-        fallback_reason: None,
+        fallback_reason: crate::s2::reuse::join_opaque_reasons(opaque_reasons),
         no_work_reason,
     })
+}
+
+/// Fold one non-contract changed file into the affected set: owned units join
+/// directly, opaque-narrowed units join with their reason recorded, and an
+/// unprovable path returns its full-fallback reason for the caller to honor.
+fn fold_affected_file(
+    compiled: &[crate::s2::reuse::CompiledUnit<'_>],
+    file: &str,
+    selected: &mut BTreeSet<String>,
+    opaque_reasons: &mut Vec<String>,
+) -> Option<String> {
+    match crate::s2::reuse::classify_path(compiled, file) {
+        crate::s2::reuse::PathVerdict::Owned { units } => {
+            selected.extend(units);
+            None
+        }
+        crate::s2::reuse::PathVerdict::Opaque { units, reason } => {
+            selected.extend(units);
+            opaque_reasons.push(reason);
+            None
+        }
+        crate::s2::reuse::PathVerdict::Unknown { reason } => Some(reason),
+        crate::s2::reuse::PathVerdict::Irrelevant => None,
+    }
 }
 
 /// Select only the workspace checks that share a Cargo lockfile root with a
@@ -6513,6 +6536,45 @@ workspace_check = true
     }
 
     #[test]
+    fn affected_selection_narrows_an_unmatched_path_to_opaque_units() -> Result<(), Box<dyn Error>>
+    {
+        // `AGENTS.md` matches no watch; only `app` runs unprovable package
+        // commands, so the planner selects it plus its prerequisite and
+        // dependent — not the transparent units, not the full set.
+        let (root, base, head) = selection_git_fixture("opaque", "AGENTS.md")?;
+        let mut config = selection_config();
+        let app = config
+            .unit
+            .iter_mut()
+            .find(|unit| unit.id == "app")
+            .ok_or("the fixture must carry the app unit")?;
+        app.kind = "bun".to_owned();
+        app.pr_commands = vec!["bun run build".to_owned()];
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer"]
+        );
+        assert_eq!(
+            selection.full_units,
+            BTreeSet::from(["app".to_owned(), "consumer".to_owned()]),
+            "the prerequisite joins the required set, not full"
+        );
+        assert!(
+            selection
+                .fallback_reason
+                .as_deref()
+                .is_some_and(
+                    |reason| reason.contains("selects only opaque units") && reason.contains("app")
+                ),
+            "the planner surfaces the opaque-narrowing reason: {:?}",
+            selection.fallback_reason
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn affected_selection_narrows_a_kind_reusable_to_that_kind() -> Result<(), Box<dyn Error>> {
         let (root, base, head) =
             selection_git_fixture("kind", ".github/workflows/ci-unit-rust.yml")?;
@@ -6543,11 +6605,11 @@ workspace_check = true
     }
 
     #[test]
-    fn affected_selection_falls_back_when_a_package_unit_is_opaque() -> Result<(), Box<dyn Error>> {
+    fn affected_selection_narrows_to_the_opaque_package_unit() -> Result<(), Box<dyn Error>> {
         // The polyglot fixture's package unit carries no commands
         // (transparent); real package commands make it opaque, so the same
-        // unmatched change falls back with the consulted sources in the
-        // reason.
+        // unmatched change selects only it, with the consulted sources and
+        // the opaque unit in the reason.
         let (root, base, head) = selection_git_fixture("opaque", "AGENTS.md")?;
         let mut config = polyglot_selection_config();
         let bun = config
@@ -6557,13 +6619,15 @@ workspace_check = true
             .ok_or("the polyglot fixture must carry bun-web")?;
         bun.pr_commands = vec!["bun run build".to_owned()];
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-        assert_eq!(selected_ids(selection.units).len(), 4);
+        assert_eq!(selected_ids(selection.units), vec!["bun-web"]);
         assert!(
             selection
                 .fallback_reason
                 .as_deref()
-                .is_some_and(|reason| reason.contains("command read-globs")),
-            "the fallback reason names the consulted sources: {:?}",
+                .is_some_and(|reason| reason.contains("command read-globs")
+                    && reason.contains("selects only opaque units")
+                    && reason.contains("bun-web")),
+            "the fallback reason names the consulted sources and the opaque unit: {:?}",
             selection.fallback_reason
         );
         std::fs::remove_dir_all(root)?;
