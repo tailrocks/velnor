@@ -9991,7 +9991,7 @@ mod tests {
     }
 
     #[test]
-    fn velnor_runtime_does_not_publish_an_orphan_artifact() {
+    fn plan_always_publishes_runtime_for_the_required_check_aggregate() {
         let config = must(
             scan_repository_with_default_branch(
                 &fixture_root(),
@@ -10006,15 +10006,22 @@ mod tests {
             plan.contains("runs-on: ubuntu-24.04"),
             "Planning is control plane, always hosted: {plan}"
         );
+        // `ci-required` runs on the hosted control plane on every universe
+        // and downloads this artifact for its aggregate step, so the plan
+        // always publishes it — the artifact is never an orphan.
         assert!(
-            !plan.contains("name: Prepare Velnor workflow runtime"),
-            "a universe without hosted jobs must not prepare a runtime artifact: {plan}"
+            plan.contains("name: Prepare Velnor workflow runtime"),
+            "the plan prepares the runtime artifact on every universe: {plan}"
         );
         assert!(
-            !plan.contains("name: Publish Velnor workflow runtime"),
-            "a universe without hosted jobs must not publish a runtime artifact: {plan}"
+            plan.contains("name: Publish Velnor workflow runtime"),
+            "the plan publishes the runtime artifact on every universe: {plan}"
         );
-        assert!(!workflow.contains("name: Download Velnor workflow runtime"));
+        let required = yaml_job(&workflow, "ci-required");
+        assert!(
+            required.contains("name: Download Velnor workflow runtime"),
+            "ci-required downloads the runtime for its aggregate step: {required}"
+        );
         assert!(!workflow.contains("  github-hosted-"));
         assert!(workflow.contains("  velnor-"));
     }
@@ -16693,9 +16700,13 @@ lockfile = true
                 }),
             "large required-check block",
         );
+        // The aggregate steps precede the verdict step; anchor on the
+        // verdict step's name so the expression budget covers the shell
+        // verdict, not the constant-size collection scripts.
         let required_script = must_some(
             required_block
-                .split_once("        run: |\n")
+                .split_once("- name: Validate generated stack results")
+                .and_then(|(_, step)| step.split_once("        run: |\n"))
                 .map(|(_, script)| script),
             "large required-check script",
         );
@@ -17048,7 +17059,7 @@ lockfile = true
     }
 
     #[test]
-    fn generated_planning_stays_hosted_without_runtime_artifact() {
+    fn generated_planning_stays_hosted_and_publishes_the_aggregate_runtime() {
         let config = scanned_fixture(provider_set([ProviderId::Velnor]));
         let files = must(generated_files(&config), "generate");
         let workflow = must_some(
@@ -17067,12 +17078,12 @@ lockfile = true
             "Planning is control plane, always hosted: {plan}"
         );
         assert!(
-            !plan.contains("name: Prepare Velnor workflow runtime"),
-            "Velnor Planning must not prepare a runtime artifact: {plan}"
+            plan.contains("name: Prepare Velnor workflow runtime"),
+            "the plan prepares the runtime artifact ci-required aggregates with: {plan}"
         );
         assert!(
-            !plan.contains("name: Publish Velnor workflow runtime"),
-            "a universe without hosted jobs must not publish a runtime artifact: {plan}"
+            plan.contains("name: Publish Velnor workflow runtime"),
+            "the plan publishes the runtime artifact ci-required aggregates with: {plan}"
         );
         let all_runs_on: Vec<&str> = workflow
             .lines()
@@ -17491,13 +17502,14 @@ lockfile = true
         );
         // GitHub loads the callee once per caller into one template-memory
         // budget, so the callee must not grow with the kind's unit count.
-        // 19 three-provider rust units (57 callers) stay under the 8 MiB
+        // 17 three-provider rust units (51 callers) stay under the 8 MiB
         // ceiling the generator enforces on the aggregate; the ceiling
         // itself is covered by `template_memory`'s tests. The drift since
         // the three-provider cutover (dependency records, hardened
-        // transfers, per-phase checks steps) honestly costs the headroom
-        // the old 25-unit stress level consumed.
-        for index in 0..18 {
+        // transfers, per-phase checks steps, unit-result record/upload
+        // blocks, expected-work aggregate steps) honestly costs the
+        // headroom the old 25-unit stress level consumed.
+        for index in 0..16 {
             let mut unit = rust.clone();
             unit.id = format!("rust-pad{index:02}");
             unit.label = format!("Rust crate (pad{index:02})");
@@ -17524,7 +17536,7 @@ lockfile = true
         let growth = padded_rust.len().saturating_sub(baseline_rust.len());
         assert!(
             growth < 32 * 256,
-            "the kind reusable grew by {growth} bytes for 18 extra units; the step blocks must not be per unit"
+            "the kind reusable grew by {growth} bytes for 16 extra units; the step blocks must not be per unit"
         );
         for name in ["ci-pr.yml", "ci-main.yml"] {
             let workflow = must_some(

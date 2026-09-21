@@ -682,6 +682,19 @@ pub struct NativeActionInvocation {
     pub env: Vec<(String, String)>,
 }
 
+/// Strip a `docker://` scheme prefix, ASCII case-insensitively.
+///
+/// URI schemes are case-insensitive (RFC 3986 §3.1) and upstream matches this
+/// prefix with OrdinalIgnoreCase, while `runs.image` itself is passed verbatim.
+/// `.get(..len)` keeps this boundary-safe for short or non-ASCII inputs.
+fn strip_docker_scheme(image: &str) -> Option<&str> {
+    const SCHEME: &str = "docker://";
+    image
+        .get(..SCHEME.len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case(SCHEME))
+        .map(|_| &image[SCHEME.len()..])
+}
+
 impl ResolvedAction {
     pub fn native_invocation(&self) -> Result<Option<NativeActionInvocation>> {
         native_invocation_from_plan(&self.plan)
@@ -778,7 +791,7 @@ impl ResolvedAction {
         );
 
         let (image, build_context_host, dockerfile_host) =
-            if let Some(image) = image.strip_prefix("docker://") {
+            if let Some(image) = strip_docker_scheme(image) {
                 // `runs.image` is repository content, so in the fork-PR case it
                 // is attacker-controlled. Without a grammar check a value like
                 // `docker://--privileged` reaches the host `docker run` as a
@@ -3661,6 +3674,77 @@ runs:
         assert!(invocation
             .env
             .contains(&("LOG_LEVEL".into(), "debug".into())));
+    }
+
+    #[test]
+    fn docker_action_image_scheme_is_case_insensitive() {
+        let actions_host = Path::new("/tmp/actions");
+        let plan = RepositoryActionPlan {
+            step_id: "renovate".into(),
+            repository: "renovatebot/github-action".into(),
+            git_ref: "v46.1.14".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/renovatebot_github-action/v46.1.14"),
+            action_dir: actions_host.join("_actions/renovatebot_github-action/v46.1.14"),
+            inputs: Default::default(),
+            env: Default::default(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let metadata =
+            parse_action_metadata("runs:\n  using: docker\n  image: DOCKER://alpine:3.20\n")
+                .unwrap();
+        let runtime = metadata.runtime().unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: actions_host
+                .join("_actions/renovatebot_github-action/v46.1.14/action.yml"),
+            metadata,
+            runtime,
+        };
+
+        let invocation = resolved.docker_invocation(actions_host).unwrap();
+
+        assert_eq!(invocation.image, "alpine:3.20");
+        assert!(invocation.build_context_host.is_none());
+        assert!(invocation.dockerfile_host.is_none());
+    }
+
+    #[test]
+    fn docker_action_uppercase_scheme_flag_shaped_image_is_refused() {
+        let actions_host = Path::new("/tmp/actions");
+        let plan = RepositoryActionPlan {
+            step_id: "evil".into(),
+            repository: "attacker/action".into(),
+            git_ref: "v1".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/attacker_action/v1"),
+            action_dir: actions_host.join("_actions/attacker_action/v1"),
+            inputs: Default::default(),
+            env: Default::default(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let metadata =
+            parse_action_metadata("runs:\n  using: docker\n  image: DOCKER://--privileged\n")
+                .unwrap();
+        let runtime = metadata.runtime().unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: actions_host.join("_actions/attacker_action/v1/action.yml"),
+            metadata,
+            runtime,
+        };
+
+        let error = resolved
+            .docker_invocation(actions_host)
+            .expect_err("a flag-shaped image must never build an invocation");
+        assert!(
+            error.to_string().contains("invalid Docker image"),
+            "{error}"
+        );
     }
 
     /// Fork-PR payload: `runs.image` is repository content. Without a grammar
