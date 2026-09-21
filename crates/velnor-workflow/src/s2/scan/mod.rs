@@ -39,6 +39,7 @@ pub(crate) fn scan_shape(
     providers: &ProviderSet,
     default_branch: &str,
     exclude: &[String],
+    apple: &rust::AppleNativePolicy,
 ) -> Result<RepositoryShape, GeneratorError> {
     let files = file_walk::repository_files(root, exclude)?;
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
@@ -46,6 +47,7 @@ pub(crate) fn scan_shape(
         root,
         files: &files,
         file_set: &file_set,
+        apple,
     };
     let mut shape = RepositoryShape {
         files: Vec::new(),
@@ -346,6 +348,7 @@ pub(crate) struct ScanContext<'a> {
     root: &'a Path,
     files: &'a [String],
     file_set: &'a BTreeSet<String>,
+    pub(crate) apple: &'a rust::AppleNativePolicy,
 }
 
 /// Build a verification unit with the shared id, label, and command contract.
@@ -601,7 +604,7 @@ mod tests {
             deployment_target: "26.0".to_owned(),
             package_swift: None,
             recipe: super::rust::BoltffiRecipe {
-                profile: Some("desktop-release".to_owned()),
+                profile: Some(super::rust::CargoProfile("ci-release".to_owned())),
                 locked: true,
                 verbose: false,
             },
