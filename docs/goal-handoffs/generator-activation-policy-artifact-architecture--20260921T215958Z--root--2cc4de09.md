@@ -1,14 +1,14 @@
 # GOAL: Redesign Velnor generator activation, policy validation, and CI artifact dependency architecture
 
 **Handoff ID:** `generator-activation-policy-artifact-architecture--20260921T215958Z--root--2cc4de09`  
-**Created / last updated UTC:** 2026-09-21T21:59:58Z / 2026-09-21T22:05:00Z  
+**Created / last updated UTC:** 2026-09-21T21:59:58Z / 2026-09-21T22:11:00Z  
 **Original goal status:** `PAUSED_BY_USER`  
-**Handoff status:** `READY`  
+**Handoff status:** `BLOCKED`  
 **Runtime stop:** verified: `update_goal(status=paused)` returned the original objective and `paused` at 2026-09-21T21:59:40Z. This expresses user pause; it does not cancel already-created GitHub runs.  
 **Source agent:** `/root`, Codex session `01a0c510-7a18-7680-8954-8a6121240bb9`; `rtk 0.49.0`.  
 **Repository:** `tailrocks/velnor`, `git@github.com:tailrocks/velnor.git` (sanitized).  
 **Source checkpoint:** local `codex/activation-foundation` `d97645d917c1fb7680af8678c9243286ec30963f`; observed `origin/main` `45ef1ebef769c78f45315e11a798fdaafaef4c4e`.  
-**Preservation branch / PR:** filled after publication in this document's final commit and PR body.  
+**Preservation branch / PR:** `codex/goal-handoff-2cc4de09`; [draft #1064](https://github.com/tailrocks/velnor/pull/1064); final published head is reported in the PR body.  
 **Portability:** code checkpoint is remote-portable after publication. The active pinned renderer binary is local-only at the path stored in `/tmp/velnor-active-render-path`; rebuild it from pin `eed474c4a1d9b071fd1b5de00c769c8997398e5a` with the locked toolchain.  
 **Resume authorization:** only a later explicit user request. `PAUSED_BY_USER` is not completion or abandonment.
 
@@ -144,7 +144,7 @@ Use repository root, `rtk`, locked Rust toolchain, and active renderer rebuilt f
 ```sh
 cd /Users/donbeave/Projects/tailrocks/velnor-project/velnor3
 git fetch origin --prune=false
-git switch <published-preservation-branch>
+git switch codex/goal-handoff-2cc4de09
 /goal Read and resume docs/goal-handoffs/generator-activation-policy-artifact-architecture--20260921T215958Z--root--2cc4de09.md
 ```
 
@@ -185,3 +185,12 @@ Additional W8: `/private/tmp/velnor-1044-lifecycle`, detached `d4651cfb`, clean,
 Relevant server branch/PR map: `codex/ci-performance-campaign@155d6b81` has post-merged-#968 WIP; `codex/ci-performance-next@970a6dd5` is #978 draft; `fix/ci-validation-contract@9bbf4a4e` is #979 draft; `refactor/holla-parity@ab2f12fa` is #980 draft. #978/#979/#980 are stale and overlap 107/82/142 files pairwise. Keep their useful evidence/tests but do not merge intact. Focused open PRs #1050/#1052/#1054/#1055/#1056/#1057/#1058/#1063 overlap R1-R10 in the files/counts reported by the branch audit; re-evaluate each after live head refresh. #1063 is a selective port from dirty/stale #962, not blanket merge authority.
 
 At audit end, remote candidate run `35660441660` had passed. Policy `35660437293` remained in progress; CI `35660442225` remained in progress and `velnor-tools` had failed. This is an observed pause-time state, not a repair task. The local watcher for Policy was stopped by coordinator; remote runs were retained.
+
+
+### Independent handoff review disposition
+
+Reviewer `/root/handoff_review` (read-only, after #1064 publication) verified durable code checkpoint and draft PR, but found the handoff does not meet the user-required exhaustive inventory standard. Therefore status is `BLOCKED`, not `READY`. Required administrative recovery before a READY handoff: enumerate/classify every one of the 369 registered W1 worktrees, each related worktree in the other discovered clone common directories, every local/remote related branch/ref and stash, and every related PR with exact head/base/check/review/disposition; provide a cleanup row per candidate; refresh #1064 checks/head after final publication; replace partial original-goal quotation with the complete recoverable request or a durable approved transcript reference.
+
+Corrections accepted from review: W1 now denotes the handoff branch checkout, while B1 preserves local source `d97645d9`; exact known renderer worktrees are `/private/tmp/velnor-active-render-new.4dhvov` at `eed474c4` and `/private/tmp/velnor-active-render.KWIEiB` at `6737cdb3`, both retained. P4 was overbroad: #1051/#1053 were merged; current related open PR details require the promised per-PR refresh. #1064 itself is the pause artifact, not an original-goal implementation PR.
+
+The original engineering goal remains paused. This administrative block does not authorize implementation or cleanup; it names the exact preservation-record work a later handoff/resumption coordinator must complete before claiming exhaustive inventory coverage.
