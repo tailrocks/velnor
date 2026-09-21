@@ -250,7 +250,7 @@ fn automatic_pr_schedules_github_hosted_unit_jobs() {
     let unit = generated.workflow("ci-unit-rust.yml");
     assert!(unit.contains("runs-on: ubuntu-24.04"));
     assert!(
-        unit.contains("github.event_name == 'pull_request'"),
+        unit.contains("github.event_name=='pull_request'"),
         "automatic PR must enable the GitHub-hosted lane: {unit}"
     );
     assert!(
@@ -258,7 +258,7 @@ fn automatic_pr_schedules_github_hosted_unit_jobs() {
         "Velnor jobs must stay dispatch-selectable: {unit}"
     );
     assert!(
-        unit.contains("github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule'"),
+        unit.contains("github.ref=='refs/heads/main'&&(github.event_name=='push'||github.event_name=='schedule'"),
         "inferred automatic=both runs Velnor on trusted push/schedule: {unit}"
     );
     assert!(
@@ -267,7 +267,7 @@ fn automatic_pr_schedules_github_hosted_unit_jobs() {
     );
     assert!(
         !unit.contains(
-            "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository"
+            "github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository"
         ),
         "without pull_request_on_velnor, Velnor must not admit PRs: {unit}"
     );
@@ -382,7 +382,7 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
     let generated = generate(&root);
     let unit = generated.workflow("ci-unit-rust.yml");
     assert!(
-        unit.contains("github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository"),
+        unit.contains("github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository"),
         "opt-in Velnor lane must admit pull_request: {unit}"
     );
     let project = fs::read_to_string(generated.output.join(".github/ci/project.toml")).unwrap();
@@ -439,7 +439,7 @@ fn dual_lane_automatic_velnor_units_pass_policy() {
     );
     let unit = fs::read_to_string(root.join(".github/workflows/ci-unit-rust.yml")).unwrap();
     assert!(
-        unit.contains("github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository"),
+        unit.contains("github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository"),
         "dual-lane Velnor units must emit the same-repo PR gate: {unit}"
     );
     let policy = fs::read_to_string(root.join(".github/workflows/ci-policy.yml")).unwrap();
@@ -1079,7 +1079,7 @@ fn kind_reusable_renders_each_unit_root_in_its_own_job() {
         .map_or("", |(body, _)| body);
     assert!(
         velnor_prep.contains("github.event_name == 'workflow_dispatch'")
-            && velnor_prep.contains("github.ref == 'refs/heads/main'"),
+            && velnor_prep.contains("github.ref=='refs/heads/main'"),
         "Velnor prep must use the Velnor lane event gate: {velnor_prep}"
     );
     assert!(!velnor_prep.contains("Restore Rust toolchain"));
