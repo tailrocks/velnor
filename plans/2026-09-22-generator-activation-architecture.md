@@ -79,6 +79,9 @@ runner polling loop.
 | Foundation PR Policy | [run 35641013363](https://github.com/tailrocks/velnor/actions/runs/35641013363) | Passed in 29s at `cf2e236`; the active renderer validated the active tree without candidate acquisition. |
 | Cache-proof PR Policy | [run 35643201030](https://github.com/tailrocks/velnor/actions/runs/35643201030) | Passed in 25s at `04c520d8`. The checked-in workflow is still rendered by the old active pin and executed its legacy candidate-acquisition step, so this is recovery evidence only. |
 | Foundation final-SHA CI | [run 35641107449](https://github.com/tailrocks/velnor/actions/runs/35641107449) | Cancelled after two jobs were stuck far beyond 120s: `Set up Mr. Boxington` and `Clippy check`. This is retained as a hosted performance failure, not a green verification. |
+| Artifact-fanout regression | [run 35647988900](https://github.com/tailrocks/velnor/actions/runs/35647988900) | Planning finalized artifact `10661426022`; two consumers received Results-service intermediary HTTP 403 while peers downloaded the identical artifact. This proves the per-consumer artifact fanout was a structural availability defect. |
+| Fanout-free source check | [run 35649490883](https://github.com/tailrocks/velnor/actions/runs/35649490883) | All completed formerly affected download lanes passed. The run later failed only from runner-priority cancellation; it is not activation or performance acceptance evidence. |
+| Current policy after merge | [run 35649789413](https://github.com/tailrocks/velnor/actions/runs/35649789413) | Passed at `cf63bde`; this validates the active-pinned tree only. |
 
 The detailed timing observations remain in
 [`plans/ci-performance/README.md`](ci-performance/README.md) and its retained
@@ -93,8 +96,9 @@ speedup.
   head-SHA PR-run search or waits 900 seconds for a guessed producer.
 - The existing promotion command now requires a publication-readiness
   manifest and validates it before local render/stamp mutation.
-- `4ad4b28`, `a111a04`, `11342007`, `cf2e236`, and `30a7995` are pushed on
-  PR #1044. The active renderer regenerated the ownership state at `11342007`.
+- PR #1044 additionally contains `8f3e636`, `09fb262`, `cf63bde`, and
+  `2d9bd07`: static activation-workflow ownership, removal of active-runtime
+  artifact fanout, readiness lint proof, and current-main integration.
 - Transportable same-run prerequisites now require producer `success`; a
   skipped, failed, or cancelled producer cannot unlock a consumer-side rebuild.
 - The setup action now refreshes and attests the immutable release manifest on
@@ -113,13 +117,14 @@ speedup.
 
 ## Remaining required work and demonstrated blocks
 
-- Implement and connect the typed workflow graph: explicit event contexts,
-  artifact producers/requirements, platform/build contracts, trust edges, and
-  a bounded resolver state machine. Static graph checks must reject cycles,
-  producer-less requirements, and impossible event/platform edges before
-  execution.
-- Complete the restricted candidate qualification lane and separately
-  controlled publisher. Verify builder identity, approved revision, build
+- Complete and connect the typed workflow graph: explicit event contexts and
+  typed same-run artifact requirements are present, but the resolver state
+  machine and complete event/platform/trust validation are not yet proven over
+  every active path. Static graph checks must reject cycles, producer-less
+  requirements, and impossible event/platform edges before execution.
+- Implement the restricted candidate qualification lane and separately
+  controlled publisher. No candidate qualification lane currently exists;
+  removal of unsafe acquisition is not candidate proof. Verify builder identity, approved revision, build
   inputs, artifact digest, platform/profile/features, run/attempt, retention,
   revocation, complete-manifest visibility, concurrent publishers, and
   rollback. Local manifest validation alone does not establish hosted

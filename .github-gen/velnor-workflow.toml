@@ -8,7 +8,8 @@ repository = "tailrocks/velnor"
 # last generator change (see the plan ledger).
 # The branch changes the generator, so keep Stage 0 on the published base
 # product until the generator change is merged and published. The policy
-# candidate path verifies the checked-in tree with this branch's renderer.
+# Candidate qualification is a separate restricted lifecycle; active policy
+# always verifies this checked-in tree with the declared published renderer.
 revision = "6737cdb3b90d5c2c039b2694b5862e3b163420d2"
 
 [scan]
