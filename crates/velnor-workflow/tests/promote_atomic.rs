@@ -128,7 +128,8 @@ fn readiness(root: &Path, closure: &str, revision: &str) -> PathBuf {
         serde_json::to_vec(&serde_json::json!({
             "schema": "velnor-workflow.publication-readiness.v1",
             "closure": closure,
-            "revision": revision,
+            "activation_revision": revision,
+            "product_revision": "b".repeat(40),
             "products": products,
         }))
         .unwrap(),
