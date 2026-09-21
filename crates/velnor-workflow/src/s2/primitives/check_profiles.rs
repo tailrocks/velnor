@@ -10,7 +10,7 @@
 //! the renderer refuses the mix instead of silently over-executing.
 //!
 //! A row may also declare file-level `events` (`push`, `pull_request`,
-//! `workflow_dispatch`): the file then renders those triggers alongside the
+//! `merge_group`, `workflow_dispatch`): the file then renders those triggers alongside the
 //! shared cron, and profiles in an evented file may omit `schedule` entirely
 //! for a cron-less evented file. One file carries one trigger set — scheduled
 //! and schedule-less profiles never mix in one file — and runners stay
@@ -391,27 +391,43 @@ fn render_checks_file(
         let _ = writeln!(output, "    - cron: {}", yaml_scalar(schedule));
     }
     output.push_str("  workflow_dispatch:\n\npermissions:\n  contents: read\n\nconcurrency:\n");
-    let _ = writeln!(
-        output,
-        "  group: {stem}-${{{{ github.repository }}}}-${{{{ github.ref }}}}"
-    );
-    if events.iter().any(|event| event == "pull_request") {
-        // PR-only cancel, like the docs-site and Renovate files:
-        // pull-request runs supersede each other for fast feedback, while
-        // push, schedule, and dispatch runs — the compliance signal on the
-        // default branch — always run to completion instead of cancelling a
-        // prior signal.
+    let has_pull_request = events.iter().any(|event| event == "pull_request");
+    let has_committed_event = events
+        .iter()
+        .any(|event| matches!(event.as_str(), "push" | "merge_group"));
+    if has_committed_event {
+        // GitHub keeps only one running and one pending run per concurrency
+        // group. A shared ref key therefore still loses an older pending
+        // commit even with cancellation disabled. Commit-scoping committed
+        // and merge-queue events makes each tree's evidence independently
+        // queueable; PR attempts remain supersedable by their ref.
+        if has_pull_request {
+            let _ = writeln!(
+                output,
+                "  group: {stem}-${{{{ github.repository }}}}-${{{{ github.event_name == 'pull_request' && github.ref || github.sha }}}}"
+            );
+        } else {
+            let _ = writeln!(
+                output,
+                "  group: {stem}-${{{{ github.repository }}}}-${{{{ github.sha }}}}"
+            );
+        }
+    } else {
+        let _ = writeln!(
+            output,
+            "  group: {stem}-${{{{ github.repository }}}}-${{{{ github.ref }}}}"
+        );
+    }
+    if has_pull_request {
+        // PR attempts supersede each other for fast feedback. Committed and
+        // merge-queue evidence uses the non-canceling path above, so a later
+        // event cannot erase a predecessor's verdict.
         output.push_str(
             "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n\njobs:\n",
         );
-    } else if events
-        .iter()
-        .any(|event| matches!(event.as_str(), "push" | "merge_group"))
-    {
+    } else if has_committed_event {
         // A push or merge-group run is evidence for a committed/candidate
-        // tree. Queue the same-ref runs so a later event cannot erase the
-        // predecessor's verdict. Only pull_request attempts are
-        // supersedable; that branch is handled above.
+        // tree. The SHA-scoped group above prevents pending replacement.
         output.push_str("  cancel-in-progress: false\n\njobs:\n");
     } else {
         // A cron-only or dispatch-only file has no candidate/main event to
@@ -1398,7 +1414,9 @@ mod tests {
             "{evented}"
         );
         assert!(
-            evented.contains("group: scheduled-daily-${{ github.repository }}-${{ github.ref }}"),
+            evented.contains(
+                "group: scheduled-daily-${{ github.repository }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}"
+            ),
             "{evented}"
         );
     }
@@ -1437,6 +1455,10 @@ branches = ["main"]"#,
             assert!(
                 !rendered.contains("cancel-in-progress: ${{"),
                 "the PR expression would be constant-false without the trigger: {events_toml}\n{rendered}"
+            );
+            assert!(
+                rendered.contains("group: scheduled-daily-${{ github.repository }}-${{ github.sha }}"),
+                "committed/candidate evidence must use a SHA-scoped group: {events_toml}\n{rendered}"
             );
         }
     }
