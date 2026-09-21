@@ -29,6 +29,13 @@ use crate::s2::{content_digest_bytes, GeneratorError};
 /// repository root.
 pub(crate) const GENERATION_CONFIG_PATH: &str = ".github-gen/velnor-workflow.toml";
 
+/// Optional capability activation for generator features that the pinned
+/// planning runtime must understand. Kept separate from the runtime-facing
+/// project config so an older runtime can continue to read the generated tree.
+pub(crate) const PHASE_ACTIVATION_CONFIG_PATH: &str = ".github-gen/velnor-workflow-activation.toml";
+
+const PHASE_ACTIVATION_SCHEMA: i64 = 1;
+
 /// The only accepted `schema` value. Rejecting every other value keeps the
 /// config contract explicit instead of guessing at future layouts. Schema 2
 /// is the provider-set contract; schema 1 lane strings are not read.
@@ -53,7 +60,7 @@ pub(crate) fn load(path: &Path) -> Result<RepoGenerationConfig, GeneratorError> 
 /// Returns filesystem errors and parse errors with the affected path.
 pub(crate) fn discover(root: &Path) -> Result<Option<RepoGenerationConfig>, GeneratorError> {
     let path = root.join(GENERATION_CONFIG_PATH);
-    match fs::metadata(&path) {
+    let generation = match fs::metadata(&path) {
         Ok(metadata) if metadata.is_dir() => Err(GeneratorError::usage(format!(
             "generation config is a directory: {}",
             path.display()
@@ -65,7 +72,57 @@ pub(crate) fn discover(root: &Path) -> Result<Option<RepoGenerationConfig>, Gene
             &path,
             &error,
         )),
+    }?;
+
+    let activation_path = root.join(PHASE_ACTIVATION_CONFIG_PATH);
+    let activation = match fs::metadata(&activation_path) {
+        Ok(metadata) if metadata.is_dir() => Err(GeneratorError::usage(format!(
+            "phase activation config is a directory: {}",
+            activation_path.display()
+        ))),
+        Ok(_) => load_phase_activation(&activation_path).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(GeneratorError::io(
+            "inspect phase activation config",
+            &activation_path,
+            &error,
+        )),
+    }?;
+
+    match (generation, activation) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(GeneratorError::usage(format!(
+            "phase activation config {} requires {} with a pinned `[generator] revision`",
+            activation_path.display(),
+            path.display(),
+        ))),
+        (Some(mut generation), activation) => {
+            if let Some(activation) = activation {
+                generation.validate_phase_activation(&activation, &activation_path)?;
+                generation.phase_activation = Some(activation);
+            }
+            Ok(Some(generation))
+        }
     }
+}
+
+fn load_phase_activation(path: &Path) -> Result<PhaseActivation, GeneratorError> {
+    let bytes = fs::read(path)
+        .map_err(|error| GeneratorError::io("read phase activation config", path, &error))?;
+    let content = std::str::from_utf8(&bytes).map_err(|_| {
+        GeneratorError::usage(format!(
+            "phase activation config must be UTF-8: {}",
+            path.display()
+        ))
+    })?;
+    let activation = toml::from_str::<PhaseActivation>(content).map_err(|error| {
+        GeneratorError::usage(format!(
+            "invalid phase activation config {}: {error}",
+            path.display()
+        ))
+    })?;
+    activation.validate(path)?;
+    Ok(activation)
 }
 
 pub(crate) fn parse(path: &Path, bytes: &[u8]) -> Result<RepoGenerationConfig, GeneratorError> {
@@ -131,6 +188,45 @@ pub(crate) struct RepoGenerationConfig {
     /// canonical form of a repository without native overrides is unchanged.
     #[serde(default, skip_serializing_if = "NativeRootSection::is_empty")]
     native: NativeRootSection,
+    /// Capability activation is attached by [`discover`] after the two
+    /// repository-owned files are validated together. It is included in the
+    /// input digest below, but never emitted to the runtime-facing config.
+    #[serde(skip)]
+    phase_activation: Option<PhaseActivation>,
+}
+
+/// Capability activation for phase preconditions. It must name the exact
+/// generator revision pinned in the adjacent generation config; a candidate
+/// runtime cannot self-authorize this transition.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PhaseActivation {
+    schema: Option<i64>,
+    precondition_runtime: Option<String>,
+}
+
+impl PhaseActivation {
+    fn validate(&self, path: &Path) -> Result<(), GeneratorError> {
+        if self.schema != Some(PHASE_ACTIVATION_SCHEMA) {
+            return Err(GeneratorError::usage(format!(
+                "phase activation config {} must declare schema = {PHASE_ACTIVATION_SCHEMA}",
+                path.display()
+            )));
+        }
+        let revision = self.precondition_runtime.as_deref().ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "phase activation config {} is missing `precondition_runtime`",
+                path.display()
+            ))
+        })?;
+        if !crate::s2::is_full_revision(revision) {
+            return Err(GeneratorError::usage(format!(
+                "phase activation config {} requires a full 40-character `precondition_runtime` SHA, got {revision:?}",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// GitHub Actions cache account retention (`[cache.github]`). Governs
@@ -1750,6 +1846,39 @@ impl RepoGenerationConfig {
         self.generator.revision.as_deref()
     }
 
+    /// Whether the repository has explicitly activated the precondition phase
+    /// against the exact generator revision it pins. A configured repository
+    /// without the activation file stays on the old runtime-compatible path;
+    /// an unconfigured fixture uses the generator's native behavior.
+    pub(crate) fn phase_preconditions_enabled(&self) -> bool {
+        self.phase_activation.is_some()
+    }
+
+    fn validate_phase_activation(
+        &self,
+        activation: &PhaseActivation,
+        path: &Path,
+    ) -> Result<(), GeneratorError> {
+        activation.validate(path)?;
+        let pinned = self.revision().ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "phase activation config {} requires `[generator] revision`",
+                path.display()
+            ))
+        })?;
+        let activated = activation
+            .precondition_runtime
+            .as_deref()
+            .unwrap_or_default();
+        if pinned != activated {
+            return Err(GeneratorError::usage(format!(
+                "phase activation config {} names runtime {activated}, but `[generator] revision` pins {pinned}; activate only the published pinned runtime",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
     /// The declared provider universe, if any.
     pub(crate) fn providers(&self) -> Option<&[String]> {
         self.workflow.providers.as_deref()
@@ -1999,9 +2128,20 @@ impl RepoGenerationConfig {
     /// # Errors
     /// Returns an error for values without a stable canonical form.
     pub(crate) fn canonical_json(&self) -> Result<String, GeneratorError> {
-        let value = serde_json::to_value(self).map_err(|error| {
+        let mut value = serde_json::to_value(self).map_err(|error| {
             GeneratorError::usage(format!("canonicalize generation config: {error}"))
         })?;
+        if let Some(activation) = &self.phase_activation {
+            let object = value.as_object_mut().ok_or_else(|| {
+                GeneratorError::usage("canonical generation config is not an object")
+            })?;
+            object.insert(
+                "phase_activation".to_owned(),
+                serde_json::to_value(activation).map_err(|error| {
+                    GeneratorError::usage(format!("canonicalize phase activation config: {error}"))
+                })?,
+            );
+        }
         canonical::canonical_value(&value)
     }
 
@@ -6797,6 +6937,84 @@ mod tests {
         );
         let discovered = must(discover(&root), "discover present config");
         assert!(discovered.is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn phase_activation_is_explicit_pinned_and_digest_bound() {
+        let root = scanned_root("phase-activation");
+        let revision = "a".repeat(40);
+        let config_path = root.join(GENERATION_CONFIG_PATH);
+        let activation_path = root.join(PHASE_ACTIVATION_CONFIG_PATH);
+        must(
+            fs::create_dir_all(config_path.parent().unwrap_or(&root)),
+            "create activation config directory",
+        );
+        must(
+            fs::write(
+                &config_path,
+                format!(
+                    "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\nrevision = \"{revision}\"\n"
+                ),
+            ),
+            "write pinned generation config",
+        );
+        let inactive = must(discover(&root), "discover inactive generation config").unwrap();
+        assert!(!inactive.phase_preconditions_enabled());
+        let inactive_digest = must(
+            RepoGenerationConfig::digest(Some(&inactive)),
+            "digest inactive generation config",
+        );
+        must(
+            fs::write(
+                &activation_path,
+                format!("schema = 1\nprecondition_runtime = \"{revision}\"\n"),
+            ),
+            "write matching activation config",
+        );
+        let active = must(discover(&root), "discover active generation config").unwrap();
+        assert!(active.phase_preconditions_enabled());
+        assert_ne!(
+            inactive_digest,
+            must(
+                RepoGenerationConfig::digest(Some(&active)),
+                "digest active generation config"
+            ),
+            "activation is a generation input, not an untracked side file"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn phase_activation_rejects_unpinned_or_unpublished_runtime() {
+        let root = scanned_root("phase-activation-reject");
+        let config_path = root.join(GENERATION_CONFIG_PATH);
+        let activation_path = root.join(PHASE_ACTIVATION_CONFIG_PATH);
+        must(
+            fs::create_dir_all(config_path.parent().unwrap_or(&root)),
+            "create activation rejection directory",
+        );
+        must(
+            fs::write(
+                &activation_path,
+                "schema = 1\nprecondition_runtime = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            ),
+            "write activation without generation config",
+        );
+        let error = must_fail(
+            discover(&root),
+            "activation without generation config must fail",
+        );
+        assert!(error.to_string().contains("requires"), "{error}");
+        must(
+            fs::write(
+                &config_path,
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\nrevision = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\n",
+            ),
+            "write a different pinned runtime",
+        );
+        let error = must_fail(discover(&root), "activation with a different pin must fail");
+        assert!(error.to_string().contains("names runtime"), "{error}");
         let _ = fs::remove_dir_all(root);
     }
 

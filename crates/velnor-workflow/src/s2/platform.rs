@@ -276,11 +276,24 @@ pub(crate) fn guarded_rebuild_command(marker: &str, commands: &[String]) -> Stri
 /// conflicting product output, for a self-edge or dependency cycle, for an
 /// object-transport toggle on a unit that cannot use it, and for a unit no
 /// enabled lane can execute.
+///
+/// Test and fixture callers use the generator's native phase contract. Repo
+/// generation calls [`resolve_with_phase_preconditions`] with its explicit
+/// runtime capability boundary.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn resolve(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
+    resolve_with_phase_preconditions(config, true)
+}
+
+/// Resolve product prerequisites with an explicit runtime capability boundary.
+pub(crate) fn resolve_with_phase_preconditions(
+    config: &mut ProjectConfig,
+    phase_preconditions_enabled: bool,
+) -> Result<(), GeneratorError> {
     validate_mbx_toggles(config)?;
     validate_toolchain_membership(config)?;
     validate_product_graph(config)?;
-    materialize_prerequisites(config)?;
+    materialize_prerequisites(config, phase_preconditions_enabled)?;
     Ok(())
 }
 
@@ -570,7 +583,10 @@ fn find_product<'a>(
 /// the consumer through the existing transitive closure), prepare commands
 /// (so the consumer rebuilds each product before its own checks on every
 /// provider), and consumer env (so product outputs reach the checks).
-fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
+fn materialize_prerequisites(
+    config: &mut ProjectConfig,
+    phase_preconditions_enabled: bool,
+) -> Result<(), GeneratorError> {
     for unit in &config.units {
         for prerequisite in &unit.prerequisites {
             let Some(producer) = config
@@ -668,7 +684,7 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
             }
         }
         if let Some(commands) = prepared.remove(&unit.id) {
-            prepend_prepare_commands(unit, &commands)?;
+            prepend_prepare_commands(unit, &commands, phase_preconditions_enabled)?;
         }
     }
     Ok(())
@@ -677,8 +693,25 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
 /// Prepend prepare commands ahead of every command vector the unit runs, so
 /// the product rebuilds before the unit's own checks on every provider and in
 /// local runs, which read the same serialized vectors.
-fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) -> Result<(), GeneratorError> {
-    unit.prepend_precondition_commands(commands)?;
+fn prepend_prepare_commands(
+    unit: &mut Unit,
+    commands: &[String],
+    phase_preconditions_enabled: bool,
+) -> Result<(), GeneratorError> {
+    if phase_preconditions_enabled {
+        unit.prepend_precondition_commands(commands)?;
+    } else {
+        let mut pr_commands = commands.to_vec();
+        pr_commands.extend(unit.pr_commands.iter().cloned());
+        unit.pr_commands = pr_commands;
+        let mut full_commands = commands.to_vec();
+        full_commands.extend(unit.full_commands.iter().cloned());
+        unit.full_commands = full_commands;
+        // The active planning runtime predates the precondition phase. Keep
+        // the product gate first, but render this affected unit through its
+        // supported single legacy step until activation is explicit.
+        unit.clear_phases();
+    }
     unit.watch.sort();
     unit.watch.dedup();
     Ok(())
@@ -718,8 +751,9 @@ pub(crate) fn agreed_env(
 mod tests {
     use super::{
         agreed_env, guarded_rebuild_command, is_ffi_crate_type, prepare_command, resolve,
-        transport_marker, valid_env_name, valid_env_value, valid_product_input, valid_product_name,
-        valid_product_output, valid_task_name, NamedProduct, Prerequisite,
+        resolve_with_phase_preconditions, transport_marker, valid_env_name, valid_env_value,
+        valid_product_input, valid_product_name, valid_product_output, valid_task_name,
+        NamedProduct, Prerequisite,
     };
     use crate::s2::provider::{Capabilities, Platform, ProviderId, TrustReq};
     use crate::s2::scan::default_selectors;
@@ -1289,6 +1323,37 @@ mod tests {
             "consumer rebuilds the product first: {:?}",
             consumer.pr_commands
         );
+    }
+
+    #[test]
+    fn inactive_runtime_boundary_keeps_product_gate_without_precondition_phase() {
+        let mut config = project_config(clean_graph());
+        let consumer = config
+            .units
+            .iter_mut()
+            .find(|unit| unit.id == "swift-app")
+            .expect("fixture consumer");
+        consumer.pr_commands = vec!["swift test".to_owned()];
+        consumer.full_commands = consumer.pr_commands.clone();
+        consumer.phases = vec![crate::s2::ValidationPhase::Test];
+        consumer.check_commands = vec!["swift check".to_owned()];
+
+        must_ok(
+            resolve_with_phase_preconditions(&mut config, false),
+            "inactive runtime boundary resolves product graph",
+        );
+        let consumer = must_find(&config.units, "swift-app");
+        assert!(
+            consumer.phases.is_empty(),
+            "legacy runtime gets no precondition phase"
+        );
+        assert_eq!(consumer.pr_commands, consumer.full_commands);
+        assert!(
+            consumer.pr_commands[0].contains("build-xcframework"),
+            "product gate remains first on the legacy lane: {:?}",
+            consumer.pr_commands
+        );
+        assert_eq!(consumer.pr_commands[1], "swift test");
     }
 
     #[test]

@@ -1045,9 +1045,9 @@ impl Unit {
                     lane.insert(0, command.clone());
                 }
             }
-            let mut phases = vec![ValidationPhase::Precondition; requested.len()];
-            phases.extend(self.phases.iter().copied());
-            self.phases = phases;
+            let mut precondition_phases = vec![ValidationPhase::Precondition; requested.len()];
+            precondition_phases.extend(self.phases.iter().copied());
+            self.phases = precondition_phases;
             return Ok(());
         }
 

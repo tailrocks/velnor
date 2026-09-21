@@ -896,9 +896,9 @@ impl Unit {
                     lane.insert(0, command.clone());
                 }
             }
-            let mut phases = vec![ValidationPhase::Precondition; requested.len()];
-            phases.extend(self.phases.iter().copied());
-            self.phases = phases;
+            let mut precondition_phases = vec![ValidationPhase::Precondition; requested.len()];
+            precondition_phases.extend(self.phases.iter().copied());
+            self.phases = precondition_phases;
             return Ok(());
         }
 
@@ -1882,6 +1882,10 @@ fn validate_visibility_selector_identities(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "scan_target is the single ordered repository-to-contract pipeline"
+)]
 fn scan_target(
     root: &Path,
     providers: Option<provider::ProviderSet>,
@@ -1929,7 +1933,12 @@ fn scan_target(
     // Prerequisites compile into the selection graph and prepare commands, and
     // placement is rejected before any byte renders, so every later stage —
     // mbxify, templates, validation — sees the resolved surface.
-    platform::resolve(&mut config)?;
+    platform::resolve_with_phase_preconditions(
+        &mut config,
+        generation
+            .as_ref()
+            .is_none_or(config::RepoGenerationConfig::phase_preconditions_enabled),
+    )?;
     // Generation config can replace scanned Rust commands after the first pass
     // (for example `workspace_check = true` rewrites the workspace gate back to
     // raw `cargo check`). Re-mbxify once all overrides are applied so every Rust
