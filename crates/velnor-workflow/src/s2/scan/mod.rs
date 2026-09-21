@@ -409,6 +409,7 @@ pub(crate) fn unit(
         platform,
         capabilities,
         workspace_check: false,
+        reads_closed: false,
         full_history: false,
         products: Vec::new(),
         prerequisites: Vec::new(),

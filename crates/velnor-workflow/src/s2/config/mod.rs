@@ -3317,7 +3317,7 @@ impl RepoGenerationConfig {
         let reason = renovate.reason.as_deref().unwrap_or_default();
         if reason.is_empty() {
             return Err(GeneratorError::usage(
-                "[renovate] enabled = true requires `reason` documenting why Renovate runs on trusted Velnor runners",
+                "[renovate] enabled = true requires `reason` documenting why this repository runs the scheduled Renovate writer",
             ));
         }
         if !self
@@ -3339,23 +3339,12 @@ impl RepoGenerationConfig {
                 "[renovate] validate = true requires `[[declare]] primitive = \"renovate-validate\" file = \"renovate-validate.yml\"`",
             ));
         }
-        let universe = self
-            .workflow
-            .providers
-            .as_deref()
-            .map(|providers| parse_provider_set(providers, "[workflow] providers"))
-            .transpose()?
-            .unwrap_or_else(|| crate::s2::provider::ProviderId::ALL.into_iter().collect());
-        if !universe.contains(&crate::s2::provider::ProviderId::Velnor) {
-            return Err(GeneratorError::usage(
-                "[renovate] enabled = true requires the velnor provider in [workflow] providers; the Renovate writer runs on Velnor",
-            ));
-        }
-        if !self.workflow.selectors.contains_key("velnor") {
-            return Err(GeneratorError::usage(
-                "[renovate] enabled = true requires [workflow.selectors.velnor] for the writer job",
-            ));
-        }
+        // No provider or selector demand: the writer renders through the
+        // control-plane runner, so it follows the visibility singleton the
+        // policy pins before validation runs — hosted on public
+        // repositories, Velnor on private ones. Cross-visibility and
+        // ambiguous selections stay rejected by `enforce_visibility_policy`,
+        // which runs before this validation and names the evidence.
         if let Some(token) = renovate.token.as_deref() {
             validate_renovate_token_name(token)?;
         }
@@ -6508,6 +6497,71 @@ mod tests {
             "the removed renovate lanes key must fail",
         );
         assert!(error.contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn renovate_accepts_hosted_singleton() {
+        // The writer follows the visibility singleton: a public-shaped
+        // config (hosted providers, hosted selector) validates exactly
+        // like the private velnor shape.
+        let parsed = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [workflow]\nproviders = [\"github-hosted\"]\n\n\
+             [workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n\
+             [renovate]\nenabled = true\nreason = \"Hosted Renovate for repository dependencies.\"\n\n\
+             [[declare]]\nprimitive = \"renovate\"\nfile = \"renovate.yml\"\n",
+        );
+        must(
+            parsed.validate(&[], &[], &BTreeSet::new()),
+            "hosted renovate contract must validate",
+        );
+    }
+
+    #[test]
+    fn renovate_accepts_velnor_singleton() {
+        // The private shape keeps validating unchanged: velnor providers
+        // with a velnor selector.
+        let parsed = config_for(RENOVATE_CONTRACT_CONFIG);
+        must(
+            parsed.validate(&[], &[], &BTreeSet::new()),
+            "velnor renovate contract must validate",
+        );
+    }
+
+    #[test]
+    fn renovate_hosted_contract_still_requires_reason_and_declare_row() {
+        // Dropping the provider demand must not weaken the contract:
+        // reason and the writer declare row stay mandatory on every lane.
+        let enabled = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [workflow]\nproviders = [\"github-hosted\"]\n\n\
+             [renovate]\nenabled = true\n";
+        let error = must_fail(
+            config_for(&format!(
+                "{enabled}\n[[declare]]\nprimitive = \"renovate\"\nfile = \"renovate.yml\"\n"
+            ))
+            .validate(&[], &[], &BTreeSet::new()),
+            "hosted renovate without reason must fail",
+        );
+        assert!(
+            error.to_string().contains(
+                "[renovate] enabled = true requires `reason` documenting why this repository runs the scheduled Renovate writer"
+            ),
+            "{error}"
+        );
+        let error = must_fail(
+            config_for(&format!("{enabled}reason = \"Hosted Renovate.\"\n")).validate(
+                &[],
+                &[],
+                &BTreeSet::new(),
+            ),
+            "hosted renovate without declare must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[[declare]] primitive = \"renovate\""),
+            "{error}"
+        );
     }
 
     fn check_profile_config(body: &str) -> String {

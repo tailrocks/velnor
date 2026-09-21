@@ -701,6 +701,7 @@ mod tests {
             platform: crate::s2::provider::Platform::LinuxX64,
             capabilities: crate::s2::provider::Capabilities::default(),
             workspace_check: false,
+            reads_closed: false,
             full_history: false,
             products: Vec::new(),
             prerequisites: Vec::new(),

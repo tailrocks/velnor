@@ -125,9 +125,15 @@ impl Primitive for WatchGraph {
             // union, so overlapping an already-watched path changes nothing.
             // A script contract also owns its script: changing the opaque
             // script reselects exactly its unit instead of every opaque unit.
+            // A uniform `complete` claim closes the unit: the owner asserts
+            // the declared paths plus the scan watch are the whole read
+            // set, so unmatched paths provably exclude it. The parser
+            // guarantees uniformity; an empty entry list asserts nothing.
             if let Some(entries) = reads.get(&unit.id) {
                 watch.extend(entries.iter().flat_map(|entry| entry.paths.iter().cloned()));
                 watch.extend(entries.iter().filter_map(|entry| entry.script.clone()));
+                unit.reads_closed =
+                    !entries.is_empty() && entries.iter().all(|entry| entry.complete);
             }
             unit.watch = watch.into_iter().collect();
             units.push(unit);
@@ -486,6 +492,93 @@ mod tests {
                 Err(error) if error.to_string().contains("takes type")
             ),
             "a mistyped contract fails the render naming the valid types"
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn watch_graph_render_closes_uniform_complete_contracts(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root =
+            std::env::temp_dir().join(format!("velnor-watch-closed-{}", crate::unique_suffix()));
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"example\"\nversion = \"0.1.0\"\n",
+        )?;
+        fs::write(
+            root.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.91.1\"\n",
+        )?;
+        fs::write(root.join("src/lib.rs"), "pub fn f() {}\n")?;
+
+        let shape = crate::scan::scan_shape(&root, crate::RunnerMode::Both, "main", &[])?;
+        let config = crate::ProjectConfig::from(shape.clone());
+        let unit_id = config
+            .units
+            .iter()
+            .find(|unit| unit.kind == crate::UnitKind::Rust)
+            .map(|unit| unit.id.clone())
+            .ok_or_else(|| std::io::Error::other("a rust unit must scan"))?;
+        let units = config.units.iter().collect::<Vec<_>>();
+        let pins = super::super::Pins::resolved();
+        let lanes = super::super::lanes::resolve(&config, &[])?;
+        let cache = super::super::cache::resolve(&[])?;
+        let nodes = Vec::new();
+        let contracts = BTreeMap::new();
+        let ctx = RenderCtx {
+            root: &root,
+            shape: &shape,
+            config: &config,
+            unit: None,
+            units: &units,
+            file: None,
+            family: super::super::WATCH_GRAPH,
+            pins: &pins,
+            lanes: &lanes,
+            cache: &cache,
+            nodes: &nodes,
+            contracts: &contracts,
+        };
+        // A uniform `complete` claim closes the unit; an open contract
+        // leaves it open.
+        let reads: toml::Value = toml::from_str(&format!(
+            r#""{unit_id}" = [{{ paths = ["schemas/**"], reason = "task runner reads these", complete = true }}]"#
+        ))?;
+        let mut args_map = BTreeMap::new();
+        args_map.insert("reads".to_owned(), reads);
+        let rendered = Primitive::render(&WatchGraph, &ctx, &Args(&args_map))?;
+        let rendered_unit = rendered
+            .units
+            .iter()
+            .find(|unit| unit.id == unit_id)
+            .ok_or_else(|| std::io::Error::other("the rust unit must render"))?;
+        assert!(
+            rendered_unit.reads_closed,
+            "a uniform complete claim closes the unit"
+        );
+        assert!(
+            rendered_unit.watch.contains(&"schemas/**".to_owned()),
+            "closing still unions the bound: {:?}",
+            rendered_unit.watch
+        );
+
+        let open: toml::Value = toml::from_str(&format!(
+            r#""{unit_id}" = [{{ paths = ["schemas/**"], reason = "task runner reads these" }}]"#
+        ))?;
+        let mut open_args = BTreeMap::new();
+        open_args.insert("reads".to_owned(), open);
+        let rendered = Primitive::render(&WatchGraph, &ctx, &Args(&open_args))?;
+        let rendered_unit = rendered
+            .units
+            .iter()
+            .find(|unit| unit.id == unit_id)
+            .ok_or_else(|| std::io::Error::other("the rust unit must render"))?;
+        assert!(
+            !rendered_unit.reads_closed,
+            "an open contract leaves the unit open"
         );
 
         fs::remove_dir_all(root)?;

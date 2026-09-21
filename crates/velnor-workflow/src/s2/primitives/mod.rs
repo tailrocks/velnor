@@ -579,9 +579,9 @@ impl Args<'_> {
     /// A table of declared reads indexed by unit id, validated against the
     /// scan: each unit names typed contract entries for relations the scan
     /// cannot discover (opaque task runners, helper scripts, dynamic
-    /// includes). Generation-time only: the `watch-graph` primitive unions
-    /// the paths into the unit's watch set, so the runtime contract is
-    /// unchanged.
+    /// includes). The `watch-graph` primitive unions the paths into the
+    /// unit's watch set and renders a uniform `complete` claim as the
+    /// unit's `reads_closed` runtime flag.
     pub(crate) fn unit_reads(
         &self,
         ctx: &RenderCtx<'_>,
@@ -606,7 +606,9 @@ impl Args<'_> {
 /// One declared read: paths a unit's owner asserts the unit reads, with the
 /// non-empty reason that audits the claim and the contract type that says
 /// what the claim covers. The declaration row itself is the audit trail;
-/// the paths compile into the unit's watch set.
+/// the paths compile into the unit's watch set. `complete` asserts the
+/// closed world: the entry's paths plus the scan watch are the unit's
+/// entire read set, so unmatched paths provably exclude the unit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeclaredRead {
     pub(crate) paths: Vec<String>,
@@ -619,13 +621,20 @@ pub(crate) struct DeclaredRead {
     /// The unprovable mechanism an `unresolved` contract records. `None`
     /// for every other contract type.
     pub(crate) limitation: Option<String>,
+    /// Whether this entry claims the closed world. Uniform across a
+    /// unit's entries (mixed claims fail generation); `true` on every
+    /// entry closes the unit. Never set on an `unresolved` entry, whose
+    /// recorded unknown contradicts completeness.
+    pub(crate) complete: bool,
 }
 
 /// The contract type of one declared read: plain path reads, the opaque
 /// script plus its declared input bound, or an explicit record of a
 /// relationship the scan cannot bound. Every type unions its paths into the
-/// unit's watch set; no type narrows selection beyond the paths it covers,
-/// so a wrong claim over-selects instead of silently skipping verification.
+/// unit's watch set; without `complete`, no type narrows selection beyond
+/// the paths it covers, so a wrong claim over-selects instead of silently
+/// skipping verification. A uniform `complete` claim closes the unit: the
+/// trusted assertion that the bound is the whole read set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DeclaredReadKind {
     Paths,
@@ -660,22 +669,29 @@ impl DeclaredReadKind {
     }
 
     /// The keys one entry of this type may spell, for the typo check.
+    /// `complete` is allowed where a bound can be total (`paths`,
+    /// `script`) and rejected on `unresolved`, whose recorded unknown
+    /// contradicts completeness.
     fn allowed_keys(self) -> &'static [&'static str] {
         match self {
-            Self::Paths => &["paths", "reason", "type"],
-            Self::Script => &["paths", "reason", "type", "script"],
+            Self::Paths => &["paths", "reason", "type", "complete"],
+            Self::Script => &["paths", "reason", "type", "script", "complete"],
             Self::Unresolved => &["paths", "reason", "type", "limitation"],
         }
     }
 }
 
 /// Parse a `reads` table of unit ids to typed contract entries. Every entry
-/// spells `paths` (an array of strings, each a valid watch glob) and
-/// `reason` (a non-empty string); `type` selects the contract (`"paths"`
-/// when absent, else `"script"` or `"unresolved"`), and each type adds its
-/// own required key (`script`, `limitation`). A typo'd, mistyped, or
-/// undocumented relation fails closed instead of silently widening (or
-/// never narrowing) affected selection.
+/// spells `paths` (an array of strings, each a repo-relative watch glob)
+/// and `reason` (a non-empty string); `type` selects the contract
+/// (`"paths"` when absent, else `"script"` or `"unresolved"`), and each
+/// type adds its own required key (`script`, `limitation`). `complete`
+/// (absent means false) asserts the closed world for `paths` and `script`
+/// entries; completeness is a unit-wide claim, so a unit's entries must
+/// agree on it — a `complete` claim beside an open or `unresolved` entry
+/// fails as a mixed claim. A typo'd, mistyped, escaping, or undocumented
+/// relation fails closed instead of silently widening (or never narrowing)
+/// affected selection.
 fn parse_declared_reads(
     key: &str,
     value: &toml::Value,
@@ -736,6 +752,11 @@ fn parse_declared_reads(
                         "`[[declare]]` argument `{key}` for unit `{unit}` names an invalid watch glob `{path}`"
                     )));
                 }
+                if path.starts_with('/') || path.split('/').any(|segment| segment == "..") {
+                    return Err(GeneratorError::usage(format!(
+                        "`[[declare]]` argument `{key}` for unit `{unit}` names a path outside the repository `{path}`; contracts cover repo-relative globs only"
+                    )));
+                }
                 owned.push(path.clone());
             }
             let reason = match entry.get("reason") {
@@ -754,31 +775,39 @@ fn parse_declared_reads(
                 DeclaredReadKind::Unresolved => Some(parse_contract_limitation(key, unit, entry)?),
                 _ => None,
             };
+            let complete = match entry.get("complete") {
+                None => false,
+                Some(toml::Value::Boolean(complete)) => *complete,
+                Some(other) => return Err(unexpected(key, other, "a boolean `complete` flag")),
+            };
             declared.push(DeclaredRead {
                 paths: owned,
                 reason,
                 kind,
                 script,
                 limitation,
+                complete,
             });
         }
+        check_complete_uniformity(key, unit, &declared)?;
         reads.insert(unit.clone(), declared);
     }
     Ok(reads)
 }
 
 /// Parse the `script` of a `script` contract: the repo-relative path of the
-/// opaque script, treated as data (glob-unioned into the watch set, never
+/// opaque script, treated as data (unioned into the watch set, never
 /// executed or existence-checked — a build-generated script is legitimate).
-/// Absolute paths and root escapes fail closed; the glob check keeps the
-/// watch union infallible.
+/// Absolute paths and root escapes fail closed; glob metacharacters fail
+/// closed too, since `script` names one script, not a pattern. The stored
+/// path is trimmed; the glob check keeps the watch union infallible.
 fn parse_contract_script(
     key: &str,
     unit: &str,
     entry: &toml::map::Map<String, toml::Value>,
 ) -> Result<String, GeneratorError> {
     let script = match entry.get("script") {
-        Some(toml::Value::String(script)) if !script.trim().is_empty() => script.clone(),
+        Some(toml::Value::String(script)) if !script.trim().is_empty() => script.trim().to_owned(),
         _ => {
             return Err(GeneratorError::usage(format!(
                 "`[[declare]]` argument `{key}` for unit `{unit}` needs a non-empty `script` naming the opaque script"
@@ -790,12 +819,33 @@ fn parse_contract_script(
             "`[[declare]]` argument `{key}` for unit `{unit}` names a script outside the repository `{script}`"
         )));
     }
+    if script.contains(['*', '?', '[', ']']) {
+        return Err(GeneratorError::usage(format!(
+            "`[[declare]]` argument `{key}` for unit `{unit}` names a script glob `{script}`; `script` names one literal script path"
+        )));
+    }
     if globset::Glob::new(&script).is_err() {
         return Err(GeneratorError::usage(format!(
             "`[[declare]]` argument `{key}` for unit `{unit}` names an invalid watch glob `{script}`"
         )));
     }
     Ok(script)
+}
+
+/// Reject a unit's mixed `complete` claims: completeness is unit-wide, so
+/// a `complete` entry beside an open or `unresolved` entry fails closed.
+fn check_complete_uniformity(
+    key: &str,
+    unit: &str,
+    declared: &[DeclaredRead],
+) -> Result<(), GeneratorError> {
+    let complete = declared.iter().filter(|entry| entry.complete).count();
+    if complete > 0 && complete != declared.len() {
+        return Err(GeneratorError::usage(format!(
+            "`[[declare]]` argument `{key}` for unit `{unit}` mixes `complete` and open entries; completeness is a unit-wide claim"
+        )));
+    }
+    Ok(())
 }
 
 /// Parse the `limitation` of an `unresolved` contract: the non-empty record
@@ -1794,6 +1844,7 @@ mod tests {
                     kind: DeclaredReadKind::Paths,
                     script: None,
                     limitation: None,
+                    complete: false,
                 },
                 DeclaredRead {
                     paths: vec!["assets/**".to_owned()],
@@ -1801,6 +1852,7 @@ mod tests {
                     kind: DeclaredReadKind::Paths,
                     script: None,
                     limitation: None,
+                    complete: false,
                 },
             ])
         );
@@ -1833,7 +1885,7 @@ mod tests {
         for (entry, needle) in [
             (
                 r#"{ paths = ["a"], reason = "r", extra = true }"#,
-                "takes only `paths`, `reason`, `type`",
+                "takes only `paths`, `reason`, `type`, `complete`",
             ),
             (r#"{ reason = "r" }"#, "missing `paths`"),
             (
@@ -1881,6 +1933,7 @@ mod tests {
                     kind: DeclaredReadKind::Script,
                     script: Some("scripts/check-boundary.sh".to_owned()),
                     limitation: None,
+                    complete: false,
                 },
                 DeclaredRead {
                     paths: vec![],
@@ -1888,6 +1941,7 @@ mod tests {
                     kind: DeclaredReadKind::Unresolved,
                     script: None,
                     limitation: Some("bundler plugin graph resolves at build time".to_owned()),
+                    complete: false,
                 },
             ])
         );
@@ -1929,7 +1983,7 @@ mod tests {
             ),
             (
                 r#"{ type = "script", script = "[", paths = ["a"], reason = "r" }"#,
-                "an invalid watch glob",
+                "names a script glob",
             ),
             (
                 r#"{ type = "unresolved", paths = ["a"], reason = "r" }"#,
@@ -1965,6 +2019,150 @@ mod tests {
                 .and_then(|entries| entries.first())
                 .and_then(|entry| entry.script.as_deref()),
             Some("scripts/does-not-exist.sh")
+        );
+        Ok(())
+    }
+
+    /// Type-specific keys stay on their type: `script` on an `unresolved`
+    /// entry, `limitation` on a `script` entry, and `complete` on an
+    /// `unresolved` entry all fail with the misplaced key named.
+    #[test]
+    fn declared_read_contracts_reject_cross_type_keys() -> Result<(), Box<dyn std::error::Error>> {
+        for (entry, needle) in [
+            (
+                r#"{ type = "unresolved", paths = ["a"], reason = "r", limitation = "l", script = "s.sh" }"#,
+                "for a `\"unresolved\"` contract, found `script`",
+            ),
+            (
+                r#"{ type = "script", script = "s.sh", paths = ["a"], reason = "r", limitation = "l" }"#,
+                "for a `\"script\"` contract, found `limitation`",
+            ),
+            (
+                r#"{ type = "unresolved", paths = ["a"], reason = "r", limitation = "l", complete = true }"#,
+                "for a `\"unresolved\"` contract, found `complete`",
+            ),
+        ] {
+            let value: toml::Value = toml::from_str(&format!(r#""a" = [ {entry} ]"#))?;
+            let Err(error) = parse_declared_reads("reads", &value) else {
+                panic!("a cross-type key must fail: {entry}");
+            };
+            assert!(error.to_string().contains(needle), "entry {entry}: {error}");
+        }
+        Ok(())
+    }
+
+    /// `complete` parses as a boolean on `paths` and `script` entries,
+    /// absent means open, and a non-boolean fails closed.
+    #[test]
+    fn declared_read_complete_parses_as_a_boolean() -> Result<(), Box<dyn std::error::Error>> {
+        let value: toml::Value = toml::from_str(
+            r#""a" = [
+                { paths = ["web/**"], reason = "bundler inputs", complete = true },
+                { type = "script", script = "scripts/build.sh", paths = ["schemas/**"], reason = "task runner execs this script", complete = true },
+            ]"#,
+        )?;
+        let reads = parse_declared_reads("reads", &value)?;
+        let entries = reads.get("a").ok_or("the unit must carry entries")?;
+        assert!(
+            entries.iter().all(|entry| entry.complete),
+            "uniform complete claims parse: {entries:?}"
+        );
+        let value: toml::Value =
+            toml::from_str(r#""a" = [ { paths = ["web/**"], reason = "bundler inputs" } ]"#)?;
+        let reads = parse_declared_reads("reads", &value)?;
+        assert!(
+            reads
+                .get("a")
+                .is_some_and(|entries| entries.iter().all(|entry| !entry.complete)),
+            "absent complete means open"
+        );
+        let value: toml::Value =
+            toml::from_str(r#""a" = [ { paths = ["a"], reason = "r", complete = "yes" } ]"#)?;
+        let Err(error) = parse_declared_reads("reads", &value) else {
+            panic!("a non-boolean complete must fail");
+        };
+        assert!(
+            error.to_string().contains("a boolean `complete` flag"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    /// Completeness is unit-wide: mixed `complete` and open entries fail —
+    /// including a `complete` claim beside an `unresolved` entry, whose
+    /// recorded unknown can never be complete.
+    #[test]
+    fn declared_read_complete_rejects_mixed_claims() -> Result<(), Box<dyn std::error::Error>> {
+        for entries in [
+            r#"{ paths = ["web/**"], reason = "bundler inputs", complete = true },
+                { paths = ["assets/**"], reason = "more inputs" }"#,
+            r#"{ paths = ["web/**"], reason = "bundler inputs", complete = true },
+                { type = "unresolved", paths = [], reason = "dynamic", limitation = "plugin graph" }"#,
+        ] {
+            let value: toml::Value = toml::from_str(&format!(r#""a" = [ {entries} ]"#))?;
+            let Err(error) = parse_declared_reads("reads", &value) else {
+                panic!("mixed complete and open entries must fail: {entries}");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("mixes `complete` and open entries"),
+                "{error}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Declared paths stay inside the repository: absolute paths and root
+    /// escapes fail closed, since diff paths are repo-relative and such a
+    /// claim could never match.
+    #[test]
+    fn declared_read_paths_reject_escapes() -> Result<(), Box<dyn std::error::Error>> {
+        for entry in [
+            r#"{ paths = ["/etc/shadow"], reason = "r" }"#,
+            r#"{ paths = ["../sibling/**"], reason = "r" }"#,
+            r#"{ paths = ["a/../../escape"], reason = "r" }"#,
+        ] {
+            let value: toml::Value = toml::from_str(&format!(r#""a" = [ {entry} ]"#))?;
+            let Err(error) = parse_declared_reads("reads", &value) else {
+                panic!("an escaping path must fail: {entry}");
+            };
+            assert!(
+                error.to_string().contains("outside the repository"),
+                "entry {entry}: {error}"
+            );
+        }
+        Ok(())
+    }
+
+    /// `script` names one literal script: globs fail closed, and
+    /// surrounding whitespace is trimmed before the path is stored.
+    #[test]
+    fn declared_script_contract_rejects_globs_and_trims() -> Result<(), Box<dyn std::error::Error>>
+    {
+        for script in ["scripts/*.sh", "scripts/build?.sh", "scripts/[ab].sh"] {
+            let value: toml::Value = toml::from_str(&format!(
+                r#""a" = [ {{ type = "script", script = "{script}", paths = [], reason = "r" }} ]"#
+            ))?;
+            let Err(error) = parse_declared_reads("reads", &value) else {
+                panic!("a script glob must fail: {script}");
+            };
+            assert!(
+                error.to_string().contains("names a script glob"),
+                "script {script}: {error}"
+            );
+        }
+        let value: toml::Value = toml::from_str(
+            r#""a" = [ { type = "script", script = "  scripts/build.sh  ", paths = [], reason = "r" } ]"#,
+        )?;
+        let reads = parse_declared_reads("reads", &value)?;
+        assert_eq!(
+            reads
+                .get("a")
+                .and_then(|entries| entries.first())
+                .and_then(|entry| entry.script.as_deref()),
+            Some("scripts/build.sh"),
+            "the stored script is trimmed"
         );
         Ok(())
     }
