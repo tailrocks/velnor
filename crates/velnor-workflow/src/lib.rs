@@ -12258,12 +12258,24 @@ channel = "stable"
             "clippy must use the test profile to match nextest: {}",
             rust.pr_commands[clippy_index]
         );
-        // The scan leaves units unphased until the phase activation
-        // lands; the order contract holds on the commands alone.
-        assert!(
-            rust.phases.is_empty() && rust.check_commands.is_empty(),
-            "scan units carry no phase tags yet: {:?}",
-            rust.phases
+        // The phase activation tags scan units: the order contract holds
+        // on the commands and the phase list mirrors them. The fixture
+        // ships no lib target, so no doctest phase follows the tests.
+        assert_eq!(
+            rust.phases,
+            vec![
+                ValidationPhase::Fmt,
+                ValidationPhase::Clippy,
+                ValidationPhase::Test,
+            ],
+            "scan units carry phase tags: {}",
+            rust.pr_commands.join(" | ")
+        );
+        assert_eq!(
+            rust.check_commands.len(),
+            1,
+            "scan units carry one prerequisite check: {:?}",
+            rust.check_commands
         );
         let _ = fs::remove_dir_all(root);
     }
