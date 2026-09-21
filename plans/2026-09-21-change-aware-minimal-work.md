@@ -48,20 +48,40 @@ own dependents); `check_prerequisites` fail-closed aggregation;
 `closure_reuse.rs` planned-no-work acceptance; 3-dot base...head full-history
 diff (fetch-depth 0, no truncation).
 
-## Slices (status)
+## Slices (status; corrected by independent review 2026-09-21)
 
-- S0 failing regression: unmatched-no-consumer change -> zero workload
-  units (currently selects all). [pending]
-- S1 core selection fix + reason channel; update pinning tests. [pending]
-- S2 generic consumer/ownership discovery, `.github/` audit, typed declared
-  contracts for non-discoverable relations. [pending]
-- S3 diff robustness: NUL-delimited parsing, rename parity, merge_group
-  semantics, event-semantics tests. [pending]
-- S4 no-work gate/cache verification end to end. [pending]
+- S0 failing regression on the live `plan` path (`selection_for_diff`
+  s1+s2): unmatched-no-consumer change -> zero workload units
+  (currently selects all). [in progress]
+- S2-read-proof FIRST (gates S1): per-repo ownership/read-glob discovery
+  (watches + command read globs); no hardcoded extension lists. Blocker
+  found by review: velnor docs unit watches `*.md` but lints `**/*.md`
+  (read-set superset watch-set). [pending]
+- S1 core fix across ALL 4 selection impls (or collapse `plan` onto
+  `reuse::select_affected` core — preferred, kills divergence class) +
+  reason channel; update pinning tests (`runtime.rs:5577`,
+  `s2/runtime.rs:5552` — not 5387 — `reuse.rs:1863`, `s2/reuse.rs:1863`,
+  parity `runtime.rs:5514`/`s2/runtime.rs:5486`). Quoted paths fail
+  closed until S3. [pending]
+- S3 diff robustness: `-z` NUL parsing + `-M` rename handling atomic
+  with matcher; `run_units` merge_group guard symmetry
+  (`runtime.rs:2044`, `s2/runtime.rs:2129`); merge_group trigger work
+  DEMOTED (deliberately omitted per `lib.rs:16143`). [pending]
+- S4 live no-work proof only (caller skip + ci-required tolerance
+  already work; `ExpectedWork` aggregate is CLI-only/unwired — cut
+  as new scope). [pending]
 - S5 `crates/velnor-workflow/AGENTS.md` lean rule + `content/docs`
   contract docs. [pending]
 - S6 regenerate velnor + jackin consumers; real-CI before/after proof;
-  small PRs, merge where authorized. [pending]
+  small PRs, merge where authorized. Order after #980 (generated-YAML
+  churn); S2 coordinated with #978 (WatchGraph overlap). [pending]
+
+Review corrections: `select_affected` (s1/s2 `reuse.rs`) drives only the
+`select` CLI, never `plan` — the 4-impl divergence (plan: `--name-only`
+no-`-M` + inline match + version-bump + workspace gates; select:
+`--name-status -M` + closure + explanations) is the deeper condition.
+Keep sound: stale/empty-base->full, git-failure->full, `.github/`
+blanket until S2 audit, `version_bump_matches` before irrelevant-skip.
 
 Adjacent open PRs (avoid conflicts): #990 (generator-owned AGENTS.md),
 #979/#980 (validation contract), #985, #978.
