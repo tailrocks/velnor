@@ -74,7 +74,6 @@ verified = true
 default_branch = "main"
 providers = ["github-hosted"]
 automatic_providers = ["github-hosted"]
-default_dispatch_providers = ["github-hosted"]
 
 [[unit]]
 id = "lib"
@@ -188,7 +187,9 @@ impl Fixture {
             .current_dir(&self.root)
             .env("EVENT_NAME", "pull_request")
             .env("BASE_SHA", &self.base)
+            .env("SOURCE_SHA", &self.head)
             .env("HEAD_SHA", &self.head)
+            .env("VELNOR_EVENT_TRUSTED", "false")
             .env("GITHUB_OUTPUT", &github_output)
             .env("VELNOR_SELECTION_FILE", &selection_file)
             .env("VELNOR_EXPECTED_WORK_FILE", &expected_file)
@@ -272,7 +273,9 @@ impl Fixture {
             .current_dir(&self.root)
             .env("EVENT_NAME", "pull_request")
             .env("BASE_SHA", &self.base)
+            .env("SOURCE_SHA", &self.head)
             .env("HEAD_SHA", &self.head)
+            .env("VELNOR_EVENT_TRUSTED", "false")
             .env("VELNOR_SELECTION_FILE", &selection_path)
             .args([
                 "run",
