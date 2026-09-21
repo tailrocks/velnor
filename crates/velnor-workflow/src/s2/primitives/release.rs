@@ -23,7 +23,8 @@ use crate::s2::{
     selector_runs_on_yaml, shell_quote, unit_display_label, workflow_runtime_setup,
     workflow_runtime_setup_with_install_rev, workflow_setup_install_rev, yaml_scalar, ActionPin,
     GeneratorError, ProjectConfig, ReleaseImageSpec, ReleaseJobSpec, ReleaseSpec, Unit, UnitKind,
-    GENERATED_HEADER, MACOS_HOSTED_RUNS_ON, VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
+    GENERATED_HEADER, MACOS_HOSTED_RUNS_ON, TRUSTED_EVENT_EXPRESSION,
+    VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
 };
 
 /// The release-side file families and the canonical file each one renders.
@@ -5572,6 +5573,17 @@ fn render_maintenance(config: &ProjectConfig) -> String {
         "github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '')",
         config.default_branch
     );
+    // A local maintenance lane runs the prune job on caller-managed
+    // infrastructure, so the `pull_request` admission conjoins the
+    // trusted-event predicate: fork and bot pull requests skip the prune
+    // (the scheduled sweep still deletes their caches), and the
+    // trusted-runners audit admits the top-level conjunction. Hosted
+    // maintenance needs no gate and keeps the bare admission byte-identical.
+    let prune_gate = if maintenance.is_local() {
+        format!("({prune_gate}) && ({TRUSTED_EVENT_EXPRESSION})")
+    } else {
+        prune_gate
+    };
     let cache_gate = if maintenance == ProviderId::GithubHosted {
         "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'".to_owned()
     } else {
@@ -7581,6 +7593,101 @@ cp "$record" "$out"
         assert!(audit.actions.is_empty(), "{:?}", audit.actions);
         assert!(audit.structure.is_empty(), "{:?}", audit.structure);
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// A velnor-only (private, local-provider) maintenance render must pass
+    /// the trusted-runners audit: the prune job runs on the local selector,
+    /// so its `pull_request` admission needs the trusted-event conjunct.
+    /// Regression test for the private-consumer wave pin (Policy 10/11, sole
+    /// FAIL trusted-runners on `prune-pr-cache`).
+    #[test]
+    fn velnor_only_maintenance_passes_trusted_policy_audit() {
+        let mut cfg = config(&["maintenance.yml"], None);
+        cfg.providers = std::collections::BTreeSet::from([ProviderId::Velnor]);
+        cfg.automatic_providers = std::collections::BTreeSet::from([ProviderId::Velnor]);
+        let workflow = super::render_maintenance(&cfg);
+        let root = scanned_root("maintenance-velnor-audit");
+        let workflows = root.join(".github/workflows");
+        must(fs::create_dir_all(&workflows), "create audited workflows");
+        must(
+            fs::write(workflows.join("maintenance.yml"), &workflow),
+            "write audited maintenance.yml",
+        );
+        // The validator resolves providers and selectors from the tree's
+        // own configs, so the audited root carries the private-shaped
+        // generation contract the render was built from.
+        must(
+            fs::create_dir_all(root.join(".github-gen")),
+            "create audited generation config directory",
+        );
+        must(
+            fs::write(
+                root.join(".github-gen/velnor-workflow.toml"),
+                "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n\n[workflow]\nproviders = [\"velnor\"]\nautomatic_providers = [\"velnor\"]\ndefault_branch = \"main\"\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-runner\"]\n",
+            ),
+            "write audited generation config",
+        );
+        let audit = must(
+            crate::s2::policy::audit_workflows(&root),
+            "audit maintenance workflow",
+        );
+        assert!(
+            audit.pull_request_target.is_empty(),
+            "{:?}",
+            audit.pull_request_target
+        );
+        assert!(audit.runners.is_empty(), "{:?}", audit.runners);
+        assert!(audit.actions.is_empty(), "{:?}", audit.actions);
+        assert!(audit.structure.is_empty(), "{:?}", audit.structure);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The prune gate is provider-shaped: local lanes conjoin the exact
+    /// trusted-event predicate (the spelling `has_exact_trusted_conjunct`
+    /// admits), hosted lanes keep the bare admission byte-identical, and
+    /// every render is deterministic.
+    #[test]
+    fn maintenance_prune_gate_conjoins_trusted_event_on_local_lanes_only() {
+        const BARE: &str = "    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '') }}";
+        const GATED: &str = "    if: ${{ (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}";
+        fn prune_if(workflow: &str) -> &str {
+            workflow
+                .lines()
+                .find(|line| line.contains("inputs.pull_request_number !="))
+                .unwrap_or_else(|| panic!("prune gate must render: {workflow}"))
+        }
+        for providers in [
+            std::collections::BTreeSet::from([ProviderId::Velnor]),
+            std::collections::BTreeSet::from([ProviderId::GithubSelfHosted]),
+        ] {
+            let mut cfg = config(&["maintenance.yml"], None);
+            cfg.providers = providers;
+            let first = super::render_maintenance(&cfg);
+            let second = super::render_maintenance(&cfg);
+            assert_eq!(first, second, "maintenance render must be deterministic");
+            assert_eq!(
+                prune_if(&first),
+                GATED,
+                "local prune must carry the trusted-event conjunct: {first}"
+            );
+        }
+        for providers in [
+            std::collections::BTreeSet::from([ProviderId::GithubHosted]),
+            crate::s2::provider::ProviderId::ALL.into_iter().collect(),
+        ] {
+            let mut cfg = config(&["maintenance.yml"], None);
+            cfg.providers = providers;
+            let workflow = super::render_maintenance(&cfg);
+            assert_eq!(
+                prune_if(&workflow),
+                BARE,
+                "hosted prune keeps the bare admission: {workflow}"
+            );
+            assert!(
+                !workflow.contains("pull_request.head.repo.fork"),
+                "hosted maintenance carries no trusted-event predicate: {workflow}"
+            );
+        }
     }
 
     #[test]
