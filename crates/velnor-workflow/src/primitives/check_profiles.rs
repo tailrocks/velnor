@@ -207,12 +207,12 @@ fn check_shared_cadence(
 }
 
 /// The event names a `scheduled-checks` row may declare in `events`.
-const ACCEPTED_EVENTS: [&str; 3] = ["push", "pull_request", "workflow_dispatch"];
+const ACCEPTED_EVENTS: [&str; 4] = ["push", "pull_request", "merge_group", "workflow_dispatch"];
 
 /// The declared events that render trigger keys, in render order.
 /// `workflow_dispatch` validates but renders nothing extra: every
 /// scheduled-checks file already carries that trigger unconditionally.
-const RENDERED_EVENT_ORDER: [&str; 2] = ["push", "pull_request"];
+const RENDERED_EVENT_ORDER: [&str; 3] = ["push", "pull_request", "merge_group"];
 
 /// The file-level event triggers one `scheduled-checks` row declares, in
 /// canonical render order. An absent `events` argument renders today's
@@ -440,10 +440,18 @@ fn render_checks_file(
         output.push_str(
             "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n\njobs:\n",
         );
+    } else if events
+        .iter()
+        .any(|event| matches!(event.as_str(), "push" | "merge_group"))
+    {
+        // A push or merge-group run is evidence for a committed/candidate
+        // tree. Queue the same-ref runs so a later event cannot erase the
+        // predecessor's verdict. Only pull_request attempts are
+        // supersedable; that branch is handled above.
+        output.push_str("  cancel-in-progress: false\n\njobs:\n");
     } else {
-        // No pull_request trigger: the PR expression would be constant-false,
-        // so stale runs would queue per-ref instead of superseding. Cancel
-        // like the cron-only files.
+        // A cron-only or dispatch-only file has no candidate/main event to
+        // preserve, so retain the historical supersession behavior.
         output.push_str("  cancel-in-progress: true\n\njobs:\n");
     }
     for profile in profiles {
@@ -1178,7 +1186,7 @@ mod tests {
         let smoke = profile("smoke");
         let load = profile("load");
         let config = profile_config(vec![smoke, load]);
-        let map = args_for(r#"events = ["push", "pull_request"]"#);
+        let map = args_for(r#"events = ["push", "pull_request", "merge_group"]"#);
         let args = Args(&map);
         let selected = must(
             select_profiles(&config.check_profiles, &args, "scheduled-daily.yml"),
@@ -1188,10 +1196,11 @@ mod tests {
             select_events(&args, "scheduled-daily.yml"),
             "select the declared events",
         );
-        assert_eq!(events, vec!["push", "pull_request"]);
+        assert_eq!(events, vec!["push", "pull_request", "merge_group"]);
         let workflow = render_with_events(&config, None, &selected, &events);
         assert!(workflow.contains("  push:\n"), "{workflow}");
         assert!(workflow.contains("  pull_request:\n"), "{workflow}");
+        assert!(workflow.contains("  merge_group:\n"), "{workflow}");
         assert!(workflow.contains("- cron: \"23 2 * * *\""), "{workflow}");
         assert!(workflow.contains("workflow_dispatch:"), "{workflow}");
         let push = workflow.find("  push:\n").unwrap_or(usize::MAX);
@@ -1208,13 +1217,13 @@ mod tests {
     fn declared_events_canonicalize_to_push_then_pull_request() {
         let smoke = profile("smoke");
         let config = profile_config(vec![smoke]);
-        let map = args_for(r#"events = ["pull_request", "push"]"#);
+        let map = args_for(r#"events = ["merge_group", "pull_request", "push"]"#);
         let args = Args(&map);
         let events = must(
             select_events(&args, "scheduled-daily.yml"),
             "select the declared events",
         );
-        assert_eq!(events, vec!["push", "pull_request"]);
+        assert_eq!(events, vec!["push", "pull_request", "merge_group"]);
         let selected = must(
             select_profiles(&config.check_profiles, &args, "scheduled-daily.yml"),
             "select every profile",
@@ -1222,20 +1231,22 @@ mod tests {
         let workflow = render_with_events(&config, None, &selected, &events);
         let push = workflow.find("  push:\n").unwrap_or(usize::MAX);
         let pull = workflow.find("  pull_request:\n").unwrap_or(usize::MAX);
-        assert!(push < pull, "{workflow}");
+        let merge = workflow.find("  merge_group:\n").unwrap_or(usize::MAX);
+        assert!(push < pull && pull < merge, "{workflow}");
     }
 
     #[test]
     fn declared_workflow_dispatch_validates_without_rendering_twice() {
         let smoke = profile("smoke");
         let config = profile_config(vec![smoke]);
-        let map = args_for(r#"events = ["push", "pull_request", "workflow_dispatch"]"#);
+        let map =
+            args_for(r#"events = ["push", "pull_request", "merge_group", "workflow_dispatch"]"#);
         let args = Args(&map);
         let events = must(
             select_events(&args, "scheduled-daily.yml"),
             "dispatch is accepted",
         );
-        assert_eq!(events, vec!["push", "pull_request"]);
+        assert_eq!(events, vec!["push", "pull_request", "merge_group"]);
         let selected = must(
             select_profiles(&config.check_profiles, &args, "scheduled-daily.yml"),
             "select every profile",
@@ -1356,7 +1367,7 @@ branches = []"#,
         let smoke = unscheduled("smoke");
         let load = unscheduled("load");
         let config = profile_config(vec![smoke, load]);
-        let map = args_for(r#"events = ["push", "pull_request"]"#);
+        let map = args_for(r#"events = ["push", "pull_request", "merge_group"]"#);
         let args = Args(&map);
         let selected = must(
             select_profiles(&config.check_profiles, &args, "scheduled-daily.yml"),
@@ -1369,6 +1380,7 @@ branches = []"#,
         let workflow = render_with_events(&config, None, &selected, &events);
         assert!(workflow.contains("  push:\n"), "{workflow}");
         assert!(workflow.contains("  pull_request:\n"), "{workflow}");
+        assert!(workflow.contains("  merge_group:\n"), "{workflow}");
         assert!(workflow.contains("workflow_dispatch:"), "{workflow}");
         assert!(!workflow.contains("schedule:"), "{workflow}");
         assert!(!workflow.contains("cron:"), "{workflow}");
@@ -1480,14 +1492,15 @@ branches = []"#,
     }
 
     #[test]
-    fn push_without_pr_cancels_like_cron_only() {
+    fn push_and_merge_group_runs_are_lossless() {
         let smoke = profile("smoke");
         let config = profile_config(vec![smoke]);
         for events_toml in [
             r#"events = ["push"]"#,
             r#"events = ["push"]
 branches = ["main"]"#,
-            r#"events = ["push", "workflow_dispatch"]"#,
+            r#"events = ["merge_group"]"#,
+            r#"events = ["push", "merge_group", "workflow_dispatch"]"#,
         ] {
             let map = args_for(events_toml);
             let args = Args(&map);
@@ -1506,14 +1519,32 @@ branches = ["main"]"#,
             let rendered =
                 render_with_events_and_branches(&config, None, &selected, &events, &branches);
             assert!(
-                rendered.contains("cancel-in-progress: true"),
-                "a file without a pull_request trigger cancels stale runs: {events_toml}\n{rendered}"
+                rendered.contains("cancel-in-progress: false"),
+                "a push/merge-group file must retain every committed/candidate verdict: {events_toml}\n{rendered}"
             );
             assert!(
                 !rendered.contains("cancel-in-progress: ${{"),
                 "the PR expression would be constant-false without the trigger: {events_toml}\n{rendered}"
             );
         }
+    }
+
+    #[test]
+    fn dispatch_only_files_keep_supersession_without_commit_evidence() {
+        let smoke = profile("smoke");
+        let config = profile_config(vec![smoke]);
+        let map = args_for(r#"events = ["workflow_dispatch"]"#);
+        let args = Args(&map);
+        let selected = must(
+            select_profiles(&config.check_profiles, &args, "scheduled-daily.yml"),
+            "select every profile",
+        );
+        let events = must(
+            select_events(&args, "scheduled-daily.yml"),
+            "select the declared events",
+        );
+        let rendered = render_with_events(&config, None, &selected, &events);
+        assert!(rendered.contains("cancel-in-progress: true"), "{rendered}");
     }
 
     #[test]

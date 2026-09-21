@@ -263,14 +263,14 @@ fn an_unrendered_profile_stops_generation() {
 }
 
 #[test]
-fn evented_file_renders_push_pr_cron_and_pr_only_cancel() {
+fn evented_file_renders_push_pr_merge_group_cron_and_pr_only_cancel() {
     let workspace = tempfile();
     let root = copy_fixture(&workspace.join("fixture"));
     let config = root.join(".github-gen/velnor-workflow.toml");
     let before = fs::read_to_string(&config).unwrap();
     let after = before.replace(
         "profiles = [\"smoke\", \"load\", \"fleet\"]",
-        "profiles = [\"smoke\", \"load\", \"fleet\"]\nevents = [\"push\", \"pull_request\"]",
+        "profiles = [\"smoke\", \"load\", \"fleet\"]\nevents = [\"push\", \"pull_request\", \"merge_group\"]",
     );
     assert_ne!(before, after, "the daily row must gain file-level events");
     fs::write(&config, after).unwrap();
@@ -279,13 +279,18 @@ fn evented_file_renders_push_pr_cron_and_pr_only_cancel() {
     let daily = generated.workflow("scheduled-daily.yml");
     assert!(daily.contains("  push:\n"), "{daily}");
     assert!(daily.contains("  pull_request:\n"), "{daily}");
+    assert!(daily.contains("  merge_group:\n"), "{daily}");
     assert!(daily.contains("- cron: \"23 2 * * *\""), "{daily}");
     assert!(daily.contains("workflow_dispatch:"), "{daily}");
     let push = daily.find("  push:\n").unwrap();
     let pull = daily.find("  pull_request:\n").unwrap();
+    let merge = daily.find("  merge_group:\n").unwrap();
     let cron = daily.find("- cron:").unwrap();
     let dispatch = daily.find("workflow_dispatch:").unwrap();
-    assert!(push < pull && pull < cron && cron < dispatch, "{daily}");
+    assert!(
+        push < pull && pull < merge && merge < cron && cron < dispatch,
+        "{daily}"
+    );
     assert!(
         daily.contains("cancel-in-progress: ${{ github.event_name == 'pull_request' }}"),
         "{daily}"
@@ -295,6 +300,27 @@ fn evented_file_renders_push_pr_cron_and_pr_only_cancel() {
     assert!(!weekly.contains("  push:\n"), "{weekly}");
     assert!(!weekly.contains("pull_request:"), "{weekly}");
     assert!(weekly.contains("cancel-in-progress: true"), "{weekly}");
+}
+
+#[test]
+fn push_only_file_queues_committed_main_evidence() {
+    let workspace = tempfile();
+    let root = copy_fixture(&workspace.join("fixture"));
+    let config = root.join(".github-gen/velnor-workflow.toml");
+    let before = fs::read_to_string(&config).unwrap();
+    let after = before.replace(
+        "profiles = [\"smoke\", \"load\", \"fleet\"]",
+        "profiles = [\"smoke\", \"load\", \"fleet\"]\nevents = [\"push\"]",
+    );
+    assert_ne!(before, after, "the daily row must gain a push event");
+    fs::write(&config, after).unwrap();
+    let generated = generate(&root);
+    let daily = generated.workflow("scheduled-daily.yml");
+    assert!(daily.contains("  push:\n"), "{daily}");
+    assert!(
+        daily.contains("cancel-in-progress: false"),
+        "committed main evidence must not be canceled by the next push: {daily}"
+    );
 }
 
 #[test]
