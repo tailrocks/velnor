@@ -67,7 +67,12 @@ impl Primitive for WatchGraph {
                 // A root package watches its manifests, its sources, and every
                 // root-level build configuration the walk observed.
                 UnitKind::Bun => {
-                    add_bun_watch_paths(&mut watch, &unit, ctx.shape.files());
+                    add_bun_watch_paths(
+                        &mut watch,
+                        &unit,
+                        ctx.shape.files(),
+                        &ctx.config.analysis.detected,
+                    );
                 }
                 UnitKind::Docs => {
                     watch.extend(
@@ -124,7 +129,12 @@ impl Primitive for WatchGraph {
     }
 }
 
-fn add_bun_watch_paths(watch: &mut BTreeSet<String>, unit: &Unit, files: &[String]) {
+fn add_bun_watch_paths(
+    watch: &mut BTreeSet<String>,
+    unit: &Unit,
+    files: &[String],
+    detected: &[String],
+) {
     watch.extend(package_manager_watch_paths(unit));
     if unit.root.is_empty() || unit.root == "." {
         // Preserve the root Bun scanner contract. The scanner's unit.watch
@@ -132,6 +142,18 @@ fn add_bun_watch_paths(watch: &mut BTreeSet<String>, unit: &Unit, files: &[Strin
         // roots were also an explicit root-package input before metadata was
         // made unit-relative.
         watch.extend(["src/**".to_owned(), "scripts/**".to_owned()]);
+    } else {
+        // A workspace member's install walks up to its workspace roots, so a
+        // nested member watches its ancestors' manifests too — but only when
+        // the scan proved a workspace exists. Without that gate every nested
+        // package would reselect on unrelated root-manifest churn.
+        for root in workspace_manifest_roots(&unit.root, detected) {
+            watch.extend(
+                ["package.json", "bun.lock", "bun.lockb", "package-lock.json"]
+                    .into_iter()
+                    .map(|path| scoped_repo_path(&root, path)),
+            );
+        }
     }
     watch.extend(
         files
@@ -158,6 +180,20 @@ fn scoped_repo_path(root: &str, child: &str) -> String {
     } else {
         join_repo_path(root, child)
     }
+}
+
+/// Workspace roots above a nested unit, from the scan's
+/// `package-workspace:{root}` markers. The unit's own root is excluded: its
+/// manifests are already watched unit-relative.
+fn workspace_manifest_roots(unit_root: &str, detected: &[String]) -> Vec<String> {
+    detected
+        .iter()
+        .filter_map(|marker| marker.strip_prefix("package-workspace:"))
+        .filter(|root| {
+            *root != unit_root && (*root == "." || unit_root.starts_with(&format!("{root}/")))
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 fn opentofu_watch_paths(files: &[String]) -> Vec<String> {
@@ -337,7 +373,8 @@ pub(crate) fn validate_canonical_release_products(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_bun_watch_paths, is_broad_per_crate_source_watch, opentofu_watch_paths, WatchGraph,
+        add_bun_watch_paths, is_broad_per_crate_source_watch, opentofu_watch_paths,
+        workspace_manifest_roots, WatchGraph,
     };
     use crate::s2::primitives::{Args, Primitive, RenderCtx};
     use std::{
@@ -727,7 +764,7 @@ mod tests {
             "src/index.ts".to_owned(),
         ];
         let mut watch = unit.watch.iter().cloned().collect::<BTreeSet<_>>();
-        add_bun_watch_paths(&mut watch, &unit, &files);
+        add_bun_watch_paths(&mut watch, &unit, &files, &[]);
         assert!(watch.contains("ui/src/**"));
         assert!(watch.contains("ui/codegen.ts"));
         assert!(watch.contains("ui/package.json"));
@@ -736,6 +773,7 @@ mod tests {
         assert!(watch.contains("ui/vite.config.ts"));
         assert!(!watch.contains("package.json"));
         assert!(!watch.contains("src/**"));
+        assert!(!watch.contains("scripts/**"));
     }
 
     #[test]
@@ -748,11 +786,159 @@ mod tests {
             None,
         );
         let mut watch = unit.watch.iter().cloned().collect::<BTreeSet<_>>();
-        add_bun_watch_paths(&mut watch, &unit, &["package.json".to_owned()]);
+        add_bun_watch_paths(&mut watch, &unit, &["package.json".to_owned()], &[]);
         assert!(watch.contains("assets/**"));
         assert!(watch.contains("src/styles.css"));
         assert!(watch.contains("src/**"));
         assert!(watch.contains("scripts/**"));
+    }
+
+    #[test]
+    fn nested_bun_watch_adds_workspace_manifests_only_above_workspace_members() {
+        let unit = crate::s2::scan::unit(
+            crate::s2::UnitKind::Bun,
+            "ui",
+            vec!["ui/**/*.ts".to_owned()],
+            vec!["bun run build".to_owned()],
+            None,
+        );
+        let files = [
+            "package.json".to_owned(),
+            "bun.lock".to_owned(),
+            "ui/package.json".to_owned(),
+        ];
+        // No workspace marker: the nested member stays scoped to its own root.
+        let mut watch = unit.watch.iter().cloned().collect::<BTreeSet<_>>();
+        add_bun_watch_paths(&mut watch, &unit, &files, &[]);
+        assert!(watch.contains("ui/package.json"));
+        assert!(!watch.contains("package.json"));
+        assert!(!watch.contains("bun.lock"));
+
+        // A root workspace exists: the member install walks up to the root
+        // manifests, so the member watches them too.
+        let detected = ["package-workspace:.".to_owned()];
+        let mut watch = unit.watch.iter().cloned().collect::<BTreeSet<_>>();
+        add_bun_watch_paths(&mut watch, &unit, &files, &detected);
+        assert!(watch.contains("ui/package.json"));
+        assert!(watch.contains("package.json"));
+        assert!(watch.contains("bun.lock"));
+        assert!(watch.contains("bun.lockb"));
+        assert!(watch.contains("package-lock.json"));
+        assert!(!watch.contains("scripts/**"));
+    }
+
+    #[test]
+    fn workspace_manifest_roots_cover_ancestors_only() {
+        let detected = [
+            "package-manager:bun:.".to_owned(),
+            "package-workspace:.".to_owned(),
+            "package-workspace:docs".to_owned(),
+            "package-workspace:ui".to_owned(),
+        ];
+        assert_eq!(
+            workspace_manifest_roots("docs", &detected),
+            vec![".".to_owned()],
+            "the unit's own workspace root is already watched unit-relative"
+        );
+        assert_eq!(
+            workspace_manifest_roots("ui/packages/a", &detected),
+            vec![".".to_owned(), "ui".to_owned()],
+            "every ancestor workspace root contributes its manifests"
+        );
+        assert!(
+            workspace_manifest_roots("other", &["package-workspace:ui".to_owned()]).is_empty(),
+            "a sibling workspace root is not an install ancestor"
+        );
+        assert!(
+            workspace_manifest_roots("docs", &[]).is_empty(),
+            "no workspace marker means no ancestor manifests"
+        );
+    }
+
+    #[test]
+    fn watch_graph_render_adds_workspace_manifests_to_nested_bun_member(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root =
+            std::env::temp_dir().join(format!("velnor-watch-bun-ws-{}", crate::unique_suffix()));
+        fs::create_dir_all(root.join("ui"))?;
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","packageManager":"bun@1.3.14","workspaces":["ui"],"scripts":{"build":"bun build"}}"#,
+        )?;
+        fs::write(root.join("bun.lock"), "lock")?;
+        fs::write(
+            root.join("ui/package.json"),
+            r#"{"name":"ui","packageManager":"bun@1.3.14","scripts":{"build":"bun build"}}"#,
+        )?;
+        fs::write(root.join("ui/bun.lock"), "lock")?;
+        fs::write(root.join("ui/codegen.ts"), "export {};\n")?;
+
+        let scan_providers: crate::s2::provider::ProviderSet =
+            crate::s2::provider::ProviderId::ALL.into_iter().collect();
+        let shape = crate::s2::scan::scan_shape(
+            &root,
+            &scan_providers,
+            "main",
+            &[],
+            &crate::s2::scan::rust::AppleNativePolicy::default(),
+        )?;
+        let config = crate::s2::ProjectConfig::from(shape.clone());
+        assert!(
+            config
+                .analysis
+                .detected
+                .contains(&"package-workspace:.".to_owned()),
+            "the root workspaces field proves a workspace: {:?}",
+            config.analysis.detected
+        );
+        let units = config.units.iter().collect::<Vec<_>>();
+        let pins = super::super::Pins::resolved();
+        let providers = super::super::providers::resolve(&config, &[])?;
+        let cache = super::super::cache::resolve(&[])?;
+        let nodes = Vec::new();
+        let contracts = BTreeMap::new();
+        let ctx = RenderCtx {
+            root: &root,
+            shape: &shape,
+            config: &config,
+            unit: None,
+            units: &units,
+            file: None,
+            family: super::super::WATCH_GRAPH,
+            pins: &pins,
+            providers: &providers,
+            cache: &cache,
+            nodes: &nodes,
+            contracts: &contracts,
+        };
+        let args = BTreeMap::new();
+        let rendered = Primitive::render(&WatchGraph, &ctx, &Args(&args))?;
+        let nested_unit = rendered
+            .units
+            .iter()
+            .find(|unit| unit.root == "ui")
+            .ok_or_else(|| std::io::Error::other("nested Bun unit missing"))?;
+        for expected in [
+            "package.json",
+            "bun.lock",
+            "bun.lockb",
+            "package-lock.json",
+            "ui/package.json",
+        ] {
+            assert!(
+                nested_unit.watch.contains(&expected.to_owned()),
+                "the workspace member watches ancestor manifests ({expected}): {:?}",
+                nested_unit.watch
+            );
+        }
+        assert!(
+            !nested_unit.watch.contains(&"src/**".to_owned()),
+            "the member stays scoped to manifests, not root sources: {:?}",
+            nested_unit.watch
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
