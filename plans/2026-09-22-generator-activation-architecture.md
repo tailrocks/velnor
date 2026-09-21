@@ -3,9 +3,9 @@
 Status: active and incomplete. This is the authoritative execution record for
 the generator activation, policy validation, and CI artifact dependency work.
 Evidence was refreshed on 2026-09-22 against `origin/main` at
-`a850b255`; the reviewed implementation head is PR #1044 at
-`d4651cfbb5e61dac95804b9a877ded98ccfa423f`. Integration commits are listed
-below. This record remains active and incomplete.
+`45ef1ebef769c78f45315e11a798fdaafaef4c4e`; the reviewed implementation head
+is PR #1044 at `ed3eab8015d28af2f7da23f852761a39687a5374`. Integration commits
+are listed below. This record remains active and incomplete.
 
 ## Structural causes
 
@@ -67,7 +67,7 @@ runner polling loop.
 | `ci-runtime-products.yml` | Reused as an existing publication surface for investigation; its current lifecycle is not yet accepted as complete activation proof. |
 | #978, #979, #980 drafts | Inspected; overlapping or unresolved bootstrap/prospective-main designs. None is treated as an implementation or merge authority. |
 | Candidate-rendered PR exception and guessed `ci-pr.yml` acquisition | Superseded in the active source paths. The checked-in generated consumers still come from the old active pin until activation, so hosted proof must cover the regenerated activation increment. |
-| Candidate qualification lane in `d4651cf` | Implemented as an active-rendered static workflow that builds the candidate and renders twice into disposable directories without candidate credentials. It is a qualification surface, not yet proof of restricted execution, trusted verdict authority, or publication. |
+| Candidate qualification lane in `ed3eab8` | Implemented as an active-rendered static workflow that builds the candidate and renders twice into disposable directories without candidate credentials. Hosted run `35658419641` passed on job `106527617631`; the job ran for about 106s and took about 217s from event creation to completion. It is a qualification surface, not yet proof of hard restricted execution, trusted verdict authority, or publication. |
 | `f7a73dc` staging attempt | Reverted by `d4651cf`; it changed active-generated configuration before a runtime product was published and exposed the old consumer's guessed-producer path. It remains failure evidence, not an accepted activation. |
 
 ## Evidence and timing
@@ -78,10 +78,11 @@ runner polling loop.
 | Main incident | [run 35623133871, job 106410848097](https://github.com/tailrocks/velnor/actions/runs/35623133871/job/106410848097) | Policy failed after about 920s; about 906s was absent-producer acquisition. |
 | Recovery | Preview job `106420138590` and main Policy job `106420140784` | Passed in about 23s and 35s; these prove recovery, not complete lifecycle correctness. |
 | Current main baseline | CI Main run `35629948234` | About 18m30s wall; Docker job about 788s and runtime publication about 597s. This remains a performance violation against the 120s requirement. |
+| Current main pin reconciliation | `origin/main` `45ef1ebe` merged the D19 pin update to `eed474c4`; PR #1044 head `ed3eab8` includes that main reconciliation and retains `revision = eed474c4a1d9b071fd1b5de00c769c8997398e5a`. | The active renderer reference now matches current main's declared pin. This reconciles the hosted baseline before any activation attempt; it is not activation proof. |
 | Foundation PR Policy | [run 35641013363](https://github.com/tailrocks/velnor/actions/runs/35641013363) | Passed in 29s at `cf2e236`; the active renderer validated the active tree without candidate acquisition. |
 | Cache-proof PR Policy | [run 35643201030](https://github.com/tailrocks/velnor/actions/runs/35643201030) | Passed in 25s at `04c520d8`. The checked-in workflow is still rendered by the old active pin and executed its legacy candidate-acquisition step, so this is recovery evidence only. |
 | Invalid staging activation | [Policy run 35650532054](https://github.com/tailrocks/velnor/actions/runs/35650532054) and [CI / PR run 35650535124](https://github.com/tailrocks/velnor/actions/runs/35650535124) | `f7a73dc` failed in about 1m52s: the staged configuration was invalid for the planning workflow, and the old generated Policy path then attempted candidate acquisition with no same-repository producer. This demonstrates why candidate output and active configuration cannot be advanced before publication. The change was reverted. |
-| Static qualification implementation | [Policy run 35650881892](https://github.com/tailrocks/velnor/actions/runs/35650881892) | Passed in 27s at `d4651cf`. The active-pinned generated tree matched, so the legacy acquisition step short-circuited; this proves active-tree recovery only. GitHub emitted no candidate-qualification run for this introducing PR SHA, so hosted qualification scheduling and first-deployment behavior remain unproven. |
+| Static qualification implementation | [Policy run 35658417621](https://github.com/tailrocks/velnor/actions/runs/35658417621), [candidate run 35658419641](https://github.com/tailrocks/velnor/actions/runs/35658419641), [CI / PR run 35658420152](https://github.com/tailrocks/velnor/actions/runs/35658420152) | Policy passed at `ed3eab8`; the candidate job passed in about 106s, with about 217s from event creation to run completion. The CI / PR run was still live at evidence refresh, with child jobs queued or in progress. The candidate result establishes hosted scheduling for this head, but not hard network/filesystem isolation, a trusted required-verdict authority, or publication. Its event-to-completion path exceeds the 120s requirement and remains a performance breach. |
 | Foundation final-SHA CI | [run 35641107449](https://github.com/tailrocks/velnor/actions/runs/35641107449) | Cancelled after two jobs were stuck far beyond 120s: `Set up Mr. Boxington` and `Clippy check`. This is retained as a hosted performance failure, not a green verification. |
 | Artifact-fanout regression | [run 35647988900](https://github.com/tailrocks/velnor/actions/runs/35647988900) | Planning finalized artifact `10661426022`; two consumers received Results-service intermediary HTTP 403 while peers downloaded the identical artifact. This proves the per-consumer artifact fanout was a structural availability defect. |
 | Fanout-free source check | [run 35649490883](https://github.com/tailrocks/velnor/actions/runs/35649490883) | All completed formerly affected download lanes passed. The run later failed only from runner-priority cancellation; it is not activation or performance acceptance evidence. |
@@ -150,9 +151,12 @@ speedup.
   fork/rerun identities, failed/cancelled/skipped obligations, and supported
   consumer platforms.
 - Measure matched cold/warm qualification, publication, dependency wait,
-  artifact transfer, and generator-change-to-activation paths. The observed
-  hosted critical path is currently above 120s; no performance acceptance is
-  claimed until causes are measured and feasible remedies are verified.
+  artifact transfer, and generator-change-to-activation paths. The hosted
+  candidate job is about 106s, but its event-to-completion path is about 217s;
+  the live CI / PR run has not supplied a completed critical-path measurement.
+  The observed hosted path therefore remains above 120s, and no performance
+  acceptance is claimed until causes are measured and feasible remedies are
+  verified.
 - Local actionlint is temporarily unavailable: the unauthenticated GitHub API
   rate limit returned HTTP 403 while `mise` attempted to install
   `actionlint@1.7.10`. This is an external tooling block, not a passing lint

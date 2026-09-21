@@ -189,7 +189,9 @@ fn the_setup_action_is_owned_verbatim() {
     );
     assert!(installed.contains("name: Set up Velnor workflow runtime"));
     assert_eq!(
-        source.matches("--source-digest \"$manifest_revision\"").count(),
+        source
+            .matches("--source-digest \"$manifest_revision\"")
+            .count(),
         2,
         "manifest and asset attestations must bind the authenticated product revision"
     );
@@ -212,18 +214,23 @@ fn activation_binds_provenance_and_rejects_stale_branch_content() {
         "published product provenance must be in protected-main ancestry: {source}"
     );
     assert_eq!(
-        source.matches("--source-digest \"$product_revision\"").count(),
+        source
+            .matches("--source-digest \"$product_revision\"")
+            .count(),
         2,
         "the manifest and all supported assets must bind attestations to one exact source digest"
     );
     assert!(
-        source.contains(r#"protected_tip="$(git ls-remote --refs origin "refs/heads/$DEFAULT_BRANCH""#)
-            && source.contains("protected $DEFAULT_BRANCH advanced"),
+        source.contains(
+            r#"protected_tip="$(git ls-remote --refs origin "refs/heads/$DEFAULT_BRANCH""#
+        ) && source.contains("protected $DEFAULT_BRANCH advanced"),
         "activation must reject a main branch that moved while publication was checked: {source}"
     );
     assert!(
         source.contains(r#"parent="$(git rev-parse "$branch_tip^")"#)
-            && source.contains("activation branch $branch is stale or contains more than one activation commit"),
+            && source.contains(
+                "activation branch $branch is stale or contains more than one activation commit"
+            ),
         "activation must reject stale or multiply-parented reuse branches: {source}"
     );
     assert!(
