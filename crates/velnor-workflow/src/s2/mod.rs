@@ -20893,7 +20893,14 @@ lockfile = true
         .1;
         let save = must_some(kind.find("name: Save unit cache"), "cargo save step");
         let save_body = &kind[save..];
-        assert!(save_body.contains("if: always() &&"));
+        assert!(
+            save_body.contains("inputs.cache_key_files != ''"),
+            "cache save must not run with its reusable default-empty inputs"
+        );
+        assert!(
+            save_body.contains("always()"),
+            "cache save must retain its post-failure cleanup semantics"
+        );
         assert!(save_body.contains("steps.cache.outputs.cache-hit != 'true'"));
     }
 
