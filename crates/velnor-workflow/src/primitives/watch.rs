@@ -27,11 +27,12 @@ impl Primitive for WatchGraph {
     }
 
     fn schema(&self) -> &'static [&'static str] {
-        &["watch", "docker_closure"]
+        &["watch", "docker_closure", "reads"]
     }
 
     fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
         let additions = args.unit_strings(ctx, "watch")?.unwrap_or_default();
+        let reads = args.unit_reads(ctx, "reads")?.unwrap_or_default();
         let closure = args.strings("docker_closure")?.unwrap_or_default();
         let docker_watch = docker_watch_paths(
             ctx.root,
@@ -119,6 +120,11 @@ impl Primitive for WatchGraph {
                         })
                         .cloned(),
                 );
+            }
+            // Declared reads compile into the watch set: an idempotent
+            // union, so overlapping an already-watched path changes nothing.
+            if let Some(entries) = reads.get(&unit.id) {
+                watch.extend(entries.iter().flat_map(|entry| entry.paths.iter().cloned()));
             }
             unit.watch = watch.into_iter().collect();
             units.push(unit);
@@ -306,7 +312,94 @@ pub(crate) fn validate_canonical_release_products(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_broad_per_crate_source_watch, opentofu_watch_paths};
+    use super::{is_broad_per_crate_source_watch, opentofu_watch_paths, WatchGraph};
+    use crate::primitives::{Args, Primitive, RenderCtx};
+    use std::{collections::BTreeMap, fs};
+
+    #[test]
+    fn watch_graph_render_unions_declared_reads_into_unit_watch(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root =
+            std::env::temp_dir().join(format!("velnor-watch-reads-{}", crate::unique_suffix()));
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"example\"\nversion = \"0.1.0\"\n",
+        )?;
+        fs::write(
+            root.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.91.1\"\n",
+        )?;
+        fs::write(root.join("src/lib.rs"), "pub fn f() {}\n")?;
+
+        let shape = crate::scan::scan_shape(&root, crate::RunnerMode::Both, "main", &[])?;
+        let config = crate::ProjectConfig::from(shape.clone());
+        let unit_id = config
+            .units
+            .iter()
+            .find(|unit| unit.kind == crate::UnitKind::Rust)
+            .map(|unit| unit.id.clone())
+            .ok_or_else(|| std::io::Error::other("a rust unit must scan"))?;
+        let units = config.units.iter().collect::<Vec<_>>();
+        let pins = super::super::Pins::resolved();
+        let lanes = super::super::lanes::resolve(&config, &[])?;
+        let cache = super::super::cache::resolve(&[])?;
+        let nodes = Vec::new();
+        let contracts = BTreeMap::new();
+        let ctx = RenderCtx {
+            root: &root,
+            shape: &shape,
+            config: &config,
+            unit: None,
+            units: &units,
+            file: None,
+            family: super::super::WATCH_GRAPH,
+            pins: &pins,
+            lanes: &lanes,
+            cache: &cache,
+            nodes: &nodes,
+            contracts: &contracts,
+        };
+        // One declared input no scan watch owns, plus one overlapping an
+        // already-watched path: the union is idempotent.
+        let reads: toml::Value = toml::from_str(&format!(
+            r#""{unit_id}" = [{{ paths = ["schemas/**", "Cargo.lock"], reason = "helper script reads undeclared inputs" }}]"#
+        ))?;
+        let mut args_map = BTreeMap::new();
+        args_map.insert("reads".to_owned(), reads);
+        let rendered = Primitive::render(&WatchGraph, &ctx, &Args(&args_map))?;
+        let rendered_unit = rendered
+            .units
+            .iter()
+            .find(|unit| unit.id == unit_id)
+            .ok_or_else(|| std::io::Error::other("the rust unit must render"))?;
+        assert!(
+            rendered_unit.watch.contains(&"schemas/**".to_owned()),
+            "declared reads join the rendered unit watch: {:?}",
+            rendered_unit.watch
+        );
+        assert_eq!(
+            rendered_unit
+                .watch
+                .iter()
+                .filter(|path| path.as_str() == "Cargo.lock")
+                .count(),
+            1,
+            "overlapping an already-watched path changes nothing: {:?}",
+            rendered_unit.watch
+        );
+        for unit in rendered.units.iter().filter(|unit| unit.id != unit_id) {
+            assert!(
+                !unit.watch.contains(&"schemas/**".to_owned()),
+                "declared reads stay scoped to their consumer: {}: {:?}",
+                unit.id,
+                unit.watch
+            );
+        }
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn workspace_topology_gate_ignores_whole_crate_trees() {

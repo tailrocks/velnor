@@ -61,13 +61,19 @@ diff (fetch-depth 0, no truncation).
 - S2-read-proof FIRST (gates S1): per-repo ownership/read-glob discovery
   (watches + command read globs); no hardcoded extension lists. Blocker
   found by review: velnor docs unit watches `*.md` but lints `**/*.md`
-  (read-set superset watch-set). [pending]
+  (read-set superset watch-set) — closed by command read-glob extraction.
+  [done: classify Owned|Unknown|Irrelevant in reuse core (mirrored S1+S2),
+  declared `reads` table compiling into unit.watch, `.github/`
+  classification table replacing the blanket, reason channel; independent
+  review INTEGRATE, re-review INTEGRATE]
 - S1 core fix across ALL 4 selection impls (or collapse `plan` onto
   `reuse::select_affected` core — preferred, kills divergence class) +
   reason channel; update pinning tests (`runtime.rs:5577`,
   `s2/runtime.rs:5552` — not 5387 — `reuse.rs:1863`, `s2/reuse.rs:1863`,
   parity `runtime.rs:5514`/`s2/runtime.rs:5486`). Quoted paths fail
-  closed until S3. [pending]
+  closed until S3. [done: all 4 callsites converged on the classifier;
+  S0 4/4 green; full suite 2019/2019 green; command-vocabulary
+  conformance locks all 19 emitted shapes]
 - S3 diff robustness: `-z` NUL parsing + `-M` rename handling atomic
   with matcher; `run_units` merge_group guard symmetry
   (`runtime.rs:2044`, `s2/runtime.rs:2129`); merge_group trigger work
