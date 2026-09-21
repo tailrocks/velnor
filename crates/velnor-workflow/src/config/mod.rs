@@ -668,8 +668,9 @@ pub(crate) struct UnitSection {
 }
 
 /// One named build product a `[[units]]` row declares: the product's name,
-/// the repository task that rebuilds it, and the task outputs consumers
-/// receive as environment.
+/// the repository task that rebuilds it, task outputs consumers receive as
+/// environment, and the repo-relative input closure that owns selection for
+/// the producer.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProductSection {
@@ -677,6 +678,8 @@ pub(crate) struct ProductSection {
     task: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     env: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inputs: Option<Vec<String>>,
 }
 
 /// One prerequisite edge a `[[units]]` row declares: the producer unit, the
@@ -1330,10 +1333,27 @@ impl UnitSection {
             if let Some(env) = product.env.as_ref() {
                 crate::platform::validate_env(env, &format!("[[units]] {id} product `{name}`"))?;
             }
+            if let Some(inputs) = product.inputs.as_ref() {
+                let mut seen = std::collections::BTreeSet::new();
+                for input in inputs {
+                    if !crate::platform::valid_product_input(input) {
+                        return Err(GeneratorError::usage(format!(
+                            "[[units]] {id} declares product `{name}` with input `{input}`, which is not a repo-relative path or glob in normal form; use forward slashes without leading `/`, `.`, `..`, or empty segments"
+                        )));
+                    }
+                    if !seen.insert(input.as_str()) {
+                        return Err(GeneratorError::usage(format!(
+                            "[[units]] {id} declares product `{name}` input `{input}` twice; one entry per pattern"
+                        )));
+                    }
+                }
+            }
             products.push(crate::platform::NamedProduct {
                 name: name.to_owned(),
                 task: product.task.clone(),
                 env: product.env.clone().unwrap_or_default(),
+                inputs: product.inputs.clone().unwrap_or_default(),
+                inputs_unknown: Vec::new(),
             });
         }
         Ok(products)
@@ -4185,6 +4205,34 @@ mod tests {
             toml::from_str::<RepoGenerationConfig>(text),
             "parse config under test",
         )
+    }
+
+    #[test]
+    fn schema_one_product_inputs_are_typed_and_validated() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"rust-ffi\"\nkind = \"rust\"\n\n[[units.products]]\nname = \"xcframework\"\ntask = \"build-xcframework\"\ninputs = [\"libs/bridge-ffi/boltffi.toml\", \"libs/sibling/**/*.rs\"]\n",
+        );
+        let products = must(
+            config.units()[0].named_products("rust-ffi"),
+            "schema-one product inputs parse",
+        );
+        assert_eq!(
+            products[0].inputs,
+            vec![
+                "libs/bridge-ffi/boltffi.toml".to_owned(),
+                "libs/sibling/**/*.rs".to_owned(),
+            ]
+        );
+        let mut duplicate = config.units()[0].clone();
+        duplicate.products[0].inputs = Some(vec![
+            "libs/bridge-ffi/boltffi.toml".to_owned(),
+            "libs/bridge-ffi/boltffi.toml".to_owned(),
+        ]);
+        let error = must_fail(
+            duplicate.named_products("rust-ffi"),
+            "duplicate product input must fail",
+        );
+        assert!(error.to_string().contains("twice"), "{error}");
     }
 
     /// A test-owned `package-update.yml` body: the grant rules are validated

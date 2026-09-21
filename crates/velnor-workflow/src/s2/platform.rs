@@ -30,7 +30,9 @@ use crate::s2::{GeneratorError, ProjectConfig, Unit, UnitKind};
 /// globs: manifests, sources, build scripts, and configuration whose bytes
 /// feed the rebuild. `inputs_unknown` names closure gaps the scanner could
 /// not resolve; an empty list means the closure is complete, and exact reuse
-/// must stay disabled while any gap remains. `inputs_digest` is the
+/// must stay disabled while any gap remains. The resolved producer owns these
+/// inputs in its watch/read closure, and an unresolved gap widens ownership to
+/// the whole tree. `inputs_digest` is the
 /// generator-computed SHA-256 over the expanded closure bytes (the
 /// prepared-tool inputs digest with closure sources); `Some` only on a
 /// complete closure, `None` otherwise. `output_files` lists the expected
@@ -567,9 +569,10 @@ fn find_product<'a>(
 }
 
 /// Compile prerequisite edges into `depends_on` (so producer changes select
-/// the consumer through the existing transitive closure), prepare commands
-/// (so the consumer rebuilds each product before its own checks on every
-/// provider), and consumer env (so product outputs reach the checks).
+/// the consumer through the existing transitive closure), materialize every
+/// product's input closure into its producer watch set, prepare commands (so
+/// the consumer rebuilds each product before its own checks on every
+/// provider), and merge consumer env (so product outputs reach the checks).
 fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
     for unit in &config.units {
         for prerequisite in &unit.prerequisites {
@@ -614,6 +617,7 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
             }
         }
     }
+    materialize_product_input_watches(config);
     let mut prepared: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut inherited_env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -672,6 +676,28 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
         }
     }
     Ok(())
+}
+
+/// Add every product input to its producer's canonical watch/read closure.
+/// Unknown closure gaps widen ownership to the whole tree: exact reuse and
+/// affected selection both fail closed instead of silently skipping a read.
+fn materialize_product_input_watches(config: &mut ProjectConfig) {
+    for unit in &mut config.units {
+        let inputs = unit
+            .products
+            .iter()
+            .flat_map(|product| product.inputs.iter().cloned())
+            .chain(
+                unit.products
+                    .iter()
+                    .filter(|product| !product.inputs_unknown.is_empty())
+                    .map(|_| "**".to_owned()),
+            )
+            .collect::<BTreeSet<_>>();
+        unit.watch.extend(inputs);
+        unit.watch.sort();
+        unit.watch.dedup();
+    }
 }
 
 /// Prepend prepare commands ahead of every command vector the unit runs, so
@@ -988,6 +1014,37 @@ mod tests {
         vec![producer, consumer]
     }
 
+    fn selected(config: &ProjectConfig, path: &str) -> BTreeSet<String> {
+        let units = config
+            .units
+            .iter()
+            .map(|unit| crate::s2::reuse::WatchedUnit {
+                id: unit.id.clone(),
+                watch: unit.watch.clone(),
+                depends_on: unit.depends_on.clone(),
+                kind: unit.kind.id_prefix().to_owned(),
+                commands: unit
+                    .pr_commands
+                    .iter()
+                    .chain(unit.full_commands.iter())
+                    .cloned()
+                    .collect(),
+                reads_closed: unit.reads_closed,
+            })
+            .collect::<Vec<_>>();
+        crate::s2::reuse::select_affected(
+            &units,
+            &[crate::s2::reuse::ChangedPath {
+                path: path.to_owned(),
+                previous: None,
+                status: crate::s2::reuse::ChangeKind::Modified,
+            }],
+            &[],
+        )
+        .expect("product input selection")
+        .required
+    }
+
     #[test]
     fn product_output_accepts_normal_repo_relative_paths() {
         for accepted in [
@@ -1296,6 +1353,55 @@ mod tests {
                 .any(|command| command.contains("build-xcframework")),
             "consumer rebuilds the product first: {:?}",
             consumer.pr_commands
+        );
+    }
+
+    #[test]
+    fn product_inputs_select_schema_two_producer_and_dependents() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/BridgeFFI.xcframework"]);
+        ffi.inputs = vec![
+            "libs/bridge-ffi/boltffi.toml".to_owned(),
+            "native/Sources/BridgeCore/FfiBoltFFI.swift".to_owned(),
+            "libs/sibling/**/*.rs".to_owned(),
+        ];
+        producer.products = vec![ffi];
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.prerequisites = vec![requires("rust-ffi", "xcframework")];
+        let mut config = project_config(vec![producer, consumer]);
+        must_ok(resolve(&mut config), "schema-two product graph resolves");
+        let expected = BTreeSet::from(["rust-ffi".to_owned(), "swift-app".to_owned()]);
+        for input in [
+            "libs/bridge-ffi/boltffi.toml",
+            "native/Sources/BridgeCore/FfiBoltFFI.swift",
+            "libs/sibling/src/lib.rs",
+        ] {
+            assert_eq!(selected(&config, input), expected, "selection for {input}");
+        }
+        assert!(
+            config.units[0]
+                .watch
+                .contains(&"libs/bridge-ffi/boltffi.toml".to_owned()),
+            "BoltFFI manifest enters producer watch: {:?}",
+            config.units[0].watch
+        );
+    }
+
+    #[test]
+    fn unknown_schema_two_product_inputs_fail_closed_to_whole_tree() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["libs/bridge-ffi/boltffi.toml"]);
+        ffi.inputs_unknown = vec!["build script reads an untracked path".to_owned()];
+        producer.products = vec![ffi];
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.prerequisites = vec![requires("rust-ffi", "xcframework")];
+        let mut config = project_config(vec![producer, consumer]);
+        must_ok(resolve(&mut config), "unknown schema-two graph resolves");
+        assert!(config.units[0].watch.contains(&"**".to_owned()));
+        assert_eq!(
+            selected(&config, "unmodeled/input.txt"),
+            BTreeSet::from(["rust-ffi".to_owned(), "swift-app".to_owned()]),
+            "unknown closure cannot silently narrow selection"
         );
     }
 
