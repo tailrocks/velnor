@@ -168,6 +168,8 @@ pub(crate) fn unit(
         github_full_commands: None,
         velnor_pr_commands: None,
         velnor_full_commands: None,
+        phases: Vec::new(),
+        check_commands: Vec::new(),
         depends_on: Vec::new(),
         cache,
         pinned_lockfile: false,

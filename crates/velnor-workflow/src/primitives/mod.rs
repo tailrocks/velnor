@@ -33,8 +33,8 @@ use std::path::PathBuf;
 use crate::config::RepoGenerationConfig;
 use crate::scan::RepositoryShape;
 use crate::{
-    nested_unit_workflow_file, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, RunnerMode,
-    Unit, UnitKind,
+    nested_unit_workflow_file, validate_unit_phases, CachePurpose, CacheSpec, GeneratorError,
+    ProjectConfig, RunnerMode, Unit, UnitKind,
 };
 
 pub(crate) use ir::{
@@ -992,6 +992,9 @@ pub(crate) fn generate(
     }
     let mut resolved = config.clone();
     resolved.units.clone_from(&units);
+    // Unit contracts mutate commands after the scan validated them; refuse
+    // a misaligned phase model before it reaches any `--phase` step.
+    validate_unit_phases(&resolved)?;
     let lanes = lanes::resolve(&resolved, &rows)?;
 
     // Per-unit pipelines, then the plan, then the aggregates that compose both.

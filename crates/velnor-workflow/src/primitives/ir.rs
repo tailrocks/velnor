@@ -28,7 +28,7 @@ use crate::{
     workflow_runtime_artifact_upload, workflow_runtime_download, workflow_runtime_setup,
     workflow_selection_file_materialize, yaml_scalar, CachePurpose, CacheSpec, GeneratorError,
     ProjectConfig, RunnerMode, RustToolchain, SelectionFieldSources, Unit, UnitKind,
-    VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
+    ValidationPhase, VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
 };
 
 /// GitHub rejects reusable workflow files above this size.
@@ -168,6 +168,8 @@ mod tests {
             github_full_commands: None,
             velnor_pr_commands: None,
             velnor_full_commands: None,
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
@@ -3301,6 +3303,10 @@ pub(crate) mod lane_input {
     /// Comma-separated prepared-tool need records (`tool:digest:producers`)
     /// the lane restores for the unit; empty when it needs none.
     pub(crate) const PREPARED_TOOLS: &str = "prepared_tools";
+    /// Comma-separated validation phases the unit verifies through
+    /// (`fmt,clippy,test,doctest`); empty when the unit keeps the single
+    /// legacy checks step.
+    pub(crate) const VALIDATION_PHASES: &str = "validation_phases";
 
     /// Every per-unit input, in declaration order.
     pub(crate) const ALL: &[&str] = &[
@@ -3328,6 +3334,7 @@ pub(crate) mod lane_input {
         UNIT_DEPENDENCIES,
         UNIT_ADMISSION,
         PREPARED_TOOLS,
+        VALIDATION_PHASES,
     ];
 
     /// The inputs declared as `type: boolean`. Callers pass them unquoted so
@@ -3427,6 +3434,9 @@ pub(crate) struct LaneStepFacts {
     pub(crate) unit_admission: LaneAdmission,
     /// Prepared-tool need records the lane restores for the unit.
     pub(crate) prepared_tools: Vec<String>,
+    /// The validation phases the unit verifies through, in step order;
+    /// empty when the unit keeps the single legacy checks step.
+    pub(crate) validation_phases: Vec<ValidationPhase>,
 }
 
 impl LaneStepFacts {
@@ -3511,6 +3521,12 @@ impl LaneStepFacts {
         ));
         if !self.prepared_tools.is_empty() {
             values.push((lane_input::PREPARED_TOOLS, self.prepared_tools.join(",")));
+        }
+        if !self.validation_phases.is_empty() {
+            values.push((
+                lane_input::VALIDATION_PHASES,
+                ValidationPhase::id_list(&self.validation_phases).join(","),
+            ));
         }
         values
     }
@@ -4505,6 +4521,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             {
                 continue;
             }
+            // The validation-phases input is declared only when a member is
+            // phased: an unconditional declaration would rewrite every kind
+            // header for a feature only phased rust units use.
+            if *name == lane_input::VALIDATION_PHASES
+                && !members.iter().any(|unit| unit.has_phases())
+            {
+                continue;
+            }
             let _ = writeln!(output, "{}", lane_input::declaration(name));
         }
         if !env.is_empty() {
@@ -4887,11 +4911,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             apple_executor: github_lane && unit.platform.requires_apple(),
             unit_dependencies: unit.depends_on.clone(),
             unit_admission: LaneAdmission::for_unit(lane, unit),
-            prepared_tools: unit
-                .prepared_tools
-                .iter()
-                .map(super::prepared_tools::need_record)
-                .collect(),
+            prepared_tools: super::prepared_tools::need_records(&unit.prepared_tools),
+            validation_phases: unit.runnable_phases(),
         }
     }
 
@@ -5248,13 +5269,60 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
 
         // Verification. No pin-fetch step: the tool fetches the declared pin
         // itself before closure verification, so no lane needs its own.
+        // Units with validation phases verify through one step per runnable
+        // phase behind `run --phase`; units without keep the single legacy
+        // step. A kind mixing both gates each side on the dispatched unit's
+        // `validation_phases` input. Every step shares the job's checkout,
+        // caches, and unit log (phase steps append; the legacy step owns
+        // the log when it is the only checks step).
         let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
         let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
         let token_env = docker_build_token_env_for_members(lane, members);
-        let _ = writeln!(
-            output,
-            "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
-        );
+        let phased = FeatureCoverage::over(&facts, |facts| !facts.validation_phases.is_empty());
+        let rendered_phases = ValidationPhase::RUNNABLE
+            .iter()
+            .filter(|phase| {
+                facts
+                    .iter()
+                    .any(|facts| facts.validation_phases.contains(phase))
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        for (index, phase) in rendered_phases.iter().enumerate() {
+            let coverage =
+                FeatureCoverage::over(&facts, |facts| facts.validation_phases.contains(phase));
+            let gate = (coverage.any && !coverage.all)
+                .then(|| lane_input::contains_gate(lane_input::VALIDATION_PHASES, phase.as_str()));
+            let started = if index == 0 {
+                format!("{checks_started_marker}\n")
+            } else {
+                String::new()
+            };
+            let ended = if index + 1 == rendered_phases.len() {
+                format!("{checks_ended_marker}\n")
+            } else {
+                String::new()
+            };
+            let mut block = String::new();
+            let _ = writeln!(
+                block,
+                "      - name: {}\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{started}          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" --phase {} 2>&1 | tee -a \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{ended}          exit $rc",
+                phase.step_name(),
+                phase.as_str(),
+            );
+            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+        }
+        if !phased.all {
+            let gate = phased
+                .any
+                .then(|| format!("inputs.{} == ''", lane_input::VALIDATION_PHASES));
+            let mut block = String::new();
+            let _ = writeln!(
+                block,
+                "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
+            );
+            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+        }
 
         // Stage-1 candidate packaging, after the checks that build the
         // binary it reuses: only the hosted job of the generator crate's

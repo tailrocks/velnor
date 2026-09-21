@@ -669,6 +669,8 @@ mod tests {
             watch: vec!["Cargo.toml".to_owned()],
             pr_commands: vec!["cargo check".to_owned()],
             full_commands: vec!["cargo check".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
