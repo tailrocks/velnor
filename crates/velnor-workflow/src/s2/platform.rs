@@ -319,9 +319,10 @@ fn validate_output_files(unit: &Unit, product: &NamedProduct) -> Result<(), Gene
 
 /// Validate one product's binding contract: the directory and file are
 /// normal-form repo-relative paths, the file sits strictly under the
-/// directory, and the deployment target is printable text. All three are
-/// empty together when the product has no binding contract; a lone file or
-/// target without a directory names a contract the scanner never derived.
+/// directory, and the deployment target is an Apple deployment version.
+/// All three are empty together when the product has no binding contract;
+/// a lone file or target without a directory names a contract the scanner
+/// never derived.
 fn validate_bindings(unit: &Unit, product: &NamedProduct) -> Result<(), GeneratorError> {
     let dir = product.bindings_dir.as_str();
     let file = product.bindings_file.as_str();
@@ -356,9 +357,9 @@ fn validate_bindings(unit: &Unit, product: &NamedProduct) -> Result<(), Generato
             unit.id, product.name,
         )));
     }
-    if !valid_env_value(target) || target.is_empty() {
+    if !super::scan::rust::valid_deployment_floor(target) {
         return Err(GeneratorError::usage(format!(
-            "unit `{}` declares product `{}` with bindings directory `{dir}` but no printable deployment target; binding facts arrive together from the scanner",
+            "unit `{}` declares product `{}` with bindings directory `{dir}` but deployment target `{target}` is not a valid Apple deployment version; use `major.minor[.patch]` with numeric parts",
             unit.id, product.name,
         )));
     }
@@ -389,7 +390,7 @@ fn validate_rebuild(unit: &Unit, product: &NamedProduct) -> Result<(), Generator
 /// normal-form repo-relative path claimed by exactly one product, every
 /// expected output file is a duplicate-free normal-form path under a claimed
 /// root, every binding contract carries a normal-form directory with its
-/// expected file beneath it plus a printable deployment target, every
+/// expected file beneath it plus an Apple deployment version, every
 /// declared input is a normal-form path or glob without duplicates, closure
 /// gaps stay printable diagnostics, a claimed inputs digest is a hex SHA-256
 /// on a gap-free closure, no unit requires its own product, and the
@@ -1224,6 +1225,58 @@ mod tests {
         assert!(
             error.to_string().contains("no bindings directory"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_malformed_deployment_target() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.bindings_dir = "app/Sources/Bindings/BoltFFI".to_owned();
+        ffi.bindings_file = "app/Sources/Bindings/BoltFFI/BridgeCoreFfiBoltFFI.swift".to_owned();
+        ffi.deployment_target = "soon".to_owned();
+        producer.products = vec![ffi];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer])),
+            "a malformed target fails closed",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("not a valid Apple deployment version"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_carries_product_floor_into_consumer_env() {
+        use crate::s2::scan::rust::MACOSX_DEPLOYMENT_TARGET;
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.task = None;
+        ffi.env
+            .insert(MACOSX_DEPLOYMENT_TARGET.to_owned(), "15.0".to_owned());
+        ffi.rebuild = vec!["MACOSX_DEPLOYMENT_TARGET='15.0' boltffi pack apple".to_owned()];
+        producer.products = vec![ffi];
+        let mut consumer = unit("swift-app", UnitKind::Swift);
+        consumer.prerequisites = vec![requires("rust-ffi", "xcframework")];
+        let mut config = project_config(vec![producer, consumer]);
+        must_ok(resolve(&mut config), "floor-carrying graph resolves");
+        let consumer = must_find(&config.units, "swift-app");
+        assert_eq!(
+            consumer
+                .env
+                .get(MACOSX_DEPLOYMENT_TARGET)
+                .map(String::as_str),
+            Some("15.0"),
+            "the consumer inherits the product floor: {:?}",
+            consumer.env
+        );
+        let producer = must_find(&config.units, "rust-ffi");
+        assert!(
+            producer.env.is_empty(),
+            "the producer unit's own env stays untouched: {:?}",
+            producer.env
         );
     }
 
