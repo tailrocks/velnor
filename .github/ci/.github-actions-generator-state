@@ -3,8 +3,9 @@ schema = 2
 [inputs]
 config	8499374086d110b5
 scan	3b5c275529a92395
-generator	68
+generator	69
 [outputs]
+.github/AGENTS.md	02ebb7198c435e9b
 .github/actionlint.yaml	5f03ee5134752603
 .github/actions/report-velnor-ci-outcomes/action.yml	aec8ab938e281785
 .github/actions/setup-velnor-workflow/action.yml	da8fae1bb9e2226b
@@ -25,3 +26,4 @@ generator	68
 .github/workflows/preview.yml	d3114dd851a57b4f
 .github/workflows/release.yml	c3bd008c7948be03
 config/fleet/velnor-host.env	d14b419216449423
+.github/CLAUDE.md	78a740c6ccf6937a
