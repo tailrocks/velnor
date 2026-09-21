@@ -2412,6 +2412,10 @@ jobs:
           CARGO_INCREMENTAL: "0"
           RUSTC_WRAPPER: sccache
           VELNOR_RELEASE_BUILD: "1"
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
         run: mbx build --locked --release --package velnor-runner --bin velnor-runner --features release-build --target "${{ matrix.target }}"
       - name: Package release binary
         env:
@@ -3297,6 +3301,10 @@ jobs:
         env:
           CARGO_INCREMENTAL: "0"
           RUSTC_WRAPPER: sccache
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
         run: |
           set -euo pipefail
           metadata="$(cargo metadata --locked --no-deps --format-version 1)"

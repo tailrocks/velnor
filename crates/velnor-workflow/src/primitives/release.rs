@@ -1075,6 +1075,23 @@ fn deb_arch_matrix(config: &ProjectConfig, targets: &[String], guest: bool) -> O
     Some(matrix)
 }
 
+/// Step-level env exporting the cross C toolchain to Cargo and the C build
+/// scripts (`cc` et al.) for matrix jobs that compile `AArch64` Linux on
+/// the x64 builder. The toolchain install alone leaves Cargo on the host
+/// linker, and host-mode linking then rejects the `AArch64`-only link
+/// flags. Every variable is triple-scoped, so native rows ignore it;
+/// target sets without `AArch64` emit nothing.
+fn cross_linker_env(targets: &[String]) -> &'static str {
+    if targets
+        .iter()
+        .any(|target| target == "aarch64-unknown-linux-gnu")
+    {
+        "          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc\n          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc\n          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++\n          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar\n"
+    } else {
+        ""
+    }
+}
+
 fn hashfiles_expr(globs: &[String]) -> String {
     globs
         .iter()
@@ -1472,10 +1489,11 @@ fn render_release_metadata_job(
 /// release package itself is excluded: it builds separately below, runner
 /// binary only, so the guest agent is never rebuilt with a second identity
 /// (it arrives from the guest payload artifact instead).
-fn debian_sibling_build_steps(cargo_cmd: &str, package: &str) -> String {
-    let package = shell_quote(package);
+fn debian_sibling_build_steps(cargo_cmd: &str, release: &ReleaseSpec) -> String {
+    let package = shell_quote(&release.package);
+    let cross = cross_linker_env(&release.targets);
     format!(
-        "      - name: Build sibling binaries for the deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          metadata=\"$(cargo metadata --locked --no-deps --format-version 1)\"\n          while IFS= read -r sibling; do\n            [ -n \"$sibling\" ] || continue\n            if jq -e --arg p \"$sibling\" '.packages[] | select(.name == $p) | .features | has(\"release-build\")' <<<\"$metadata\" >/dev/null; then\n              features=\"--features release-build\"\n            else\n              features=\"\"\n            fi\n            # shellcheck disable=SC2086\n            {cargo_cmd} build --locked --release --package \"$sibling\" $features --target \"$TARGET\"\n          done < <(jq -r --arg release {package} '.packages[] | select(.name != $release) | select(.targets | map(.kind[]) | flatten | any(. == \"bin\")) | .name' <<<\"$metadata\" | sort -u)\n"
+        "      - name: Build sibling binaries for the deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n{cross}        run: |\n          set -euo pipefail\n          metadata=\"$(cargo metadata --locked --no-deps --format-version 1)\"\n          while IFS= read -r sibling; do\n            [ -n \"$sibling\" ] || continue\n            if jq -e --arg p \"$sibling\" '.packages[] | select(.name == $p) | .features | has(\"release-build\")' <<<\"$metadata\" >/dev/null; then\n              features=\"--features release-build\"\n            else\n              features=\"\"\n            fi\n            # shellcheck disable=SC2086\n            {cargo_cmd} build --locked --release --package \"$sibling\" $features --target \"$TARGET\"\n          done < <(jq -r --arg release {package} '.packages[] | select(.name != $release) | select(.targets | map(.kind[]) | flatten | any(. == \"bin\")) | .name' <<<\"$metadata\" | sort -u)\n"
     )
 }
 
@@ -1678,15 +1696,16 @@ fn render_identity_debian_job(
     let mut steps = format!(
         "      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Install cross C toolchain\n        run: |\n          set -euo pipefail\n          if [ \"${{{{ matrix.arch }}}}\" = \"arm64\" ]; then\n            # Cross GCC without the aarch64 sysroot cannot compile aws-lc or\n            # vendored openssl (sys/types.h / bits/libc-header-start.h).\n            sudo apt-get update\n            sudo apt-get install -y --no-install-recommends \\\n              gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross\n          fi\n      - name: Set up sccache\n        uses: {sccache}\n        with:\n          version: v0.16.0\n      - name: Install cargo-deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          cargo install cargo-deb --version 3.7.0 --locked\n          cargo-deb --version\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: {metadata_artifact}\n          path: {metadata_path}\n",
     );
+    let cross = cross_linker_env(&release.targets);
     if preview {
         let _ = writeln!(
             steps,
-            "      - name: Build release runner binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          {cargo_cmd} build --locked --release --package {package} --bin {binary} --features release-build --target \"$TARGET\""
+            "      - name: Build release runner binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n{cross}        run: |\n          set -euo pipefail\n          {cargo_cmd} build --locked --release --package {package} --bin {binary} --features release-build --target \"$TARGET\""
         );
     } else {
         steps.push_str(&debian_reuse_release_steps(config, release));
     }
-    steps.push_str(&debian_sibling_build_steps(cargo_cmd, &release.package));
+    steps.push_str(&debian_sibling_build_steps(cargo_cmd, release));
     steps.push_str(&debian_identity_steps(
         &release_package_dir(config, &release.package),
         &release.binary,
@@ -3636,7 +3655,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     let matrix_runner = release_matrix_runner(config, &release.targets);
     let _ = writeln!(
         output,
-        "    runs-on: {matrix_runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Add Rust target\n        run: rustup target add \"${{{{ matrix.target }}}}\"\n      - name: Install cross C toolchain\n        run: |\n          set -euo pipefail\n          if [ \"${{{{ matrix.target }}}}\" = \"aarch64-unknown-linux-gnu\" ]; then\n            # Cross GCC without the aarch64 sysroot cannot compile aws-lc or\n            # vendored openssl (sys/types.h / bits/libc-header-start.h).\n            sudo apt-get update\n            sudo apt-get install -y --no-install-recommends \\\n              gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross\n          fi\n      - name: Build release binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target \"${{{{ matrix.target }}}}\"\n      - name: Package release binary\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-binary --target \"${{{{ matrix.target }}}}\" --version \"${{VERSION#v}}\" --package {} --binary {}\n      - name: Attest release artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload release artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 2\n\n  publish:\n    name: Control / Publish\n    needs: [verify, build]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n    steps:\n      - name: Download release artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Verify archive checksums\n        run: |\n          set -euo pipefail\n          cd dist\n          for checksum in *.sha256; do sha256sum --check \"$checksum\"; done\n      - name: Checkout\n        uses: {publish_checkout}\n        with:\n          persist-credentials: false\n{tag_check}      - name: Publish immutable GitHub release\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: gh release create \"${{{{ github.ref_name }}}}\" dist/* --verify-tag --generate-notes\n",
+        "    runs-on: {matrix_runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Add Rust target\n        run: rustup target add \"${{{{ matrix.target }}}}\"\n      - name: Install cross C toolchain\n        run: |\n          set -euo pipefail\n          if [ \"${{{{ matrix.target }}}}\" = \"aarch64-unknown-linux-gnu\" ]; then\n            # Cross GCC without the aarch64 sysroot cannot compile aws-lc or\n            # vendored openssl (sys/types.h / bits/libc-header-start.h).\n            sudo apt-get update\n            sudo apt-get install -y --no-install-recommends \\\n              gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross\n          fi\n      - name: Build release binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n{cross}        run: cargo build --locked --release --package {} --bin {} --target \"${{{{ matrix.target }}}}\"\n      - name: Package release binary\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-binary --target \"${{{{ matrix.target }}}}\" --version \"${{VERSION#v}}\" --package {} --binary {}\n      - name: Attest release artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload release artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 2\n\n  publish:\n    name: Control / Publish\n    needs: [verify, build]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n    steps:\n      - name: Download release artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Verify archive checksums\n        run: |\n          set -euo pipefail\n          cd dist\n          for checksum in *.sha256; do sha256sum --check \"$checksum\"; done\n      - name: Checkout\n        uses: {publish_checkout}\n        with:\n          persist-credentials: false\n{tag_check}      - name: Publish immutable GitHub release\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: gh release create \"${{{{ github.ref_name }}}}\" dist/* --verify-tag --generate-notes\n",
         ActionPin::Checkout.reference(),
         ActionPin::Sccache.reference(),
         yaml_scalar(&release.package),
@@ -3649,6 +3668,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         matrix_runner = matrix_runner,
         publish_checkout = ActionPin::Checkout.reference(),
         tag_check = TAG_IMMUTABILITY_STEP,
+        cross = cross_linker_env(&release.targets),
     );
     if let Some((prefix, build)) = output.split_once("\n  build:") {
         let build = build.replace(
@@ -3824,9 +3844,10 @@ fn inject_native_verify_outputs(
 
 fn inject_native_build_identity(output: &str, release: &ReleaseSpec) -> String {
     let build_step = format!(
-        "      - name: Build release binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: mbx build --locked --release --package {} --bin {} --target \"${{{{ matrix.target }}}}\"",
+        "      - name: Build release binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n{cross}        run: mbx build --locked --release --package {} --bin {} --target \"${{{{ matrix.target }}}}\"",
         yaml_scalar(&release.package),
-        yaml_scalar(&release.binary)
+        yaml_scalar(&release.binary),
+        cross = cross_linker_env(&release.targets),
     );
     output.replace(
         &build_step,
@@ -5470,6 +5491,18 @@ cp "$record" "$out"
         )
     }
 
+    /// One complete step block from a generated job body, so env assertions
+    /// pin exports to the cross-compiling steps instead of merely the job.
+    fn yaml_step<'a>(job: &'a str, name: &str) -> &'a str {
+        let marker = format!("      - name: {name}");
+        let start = must_some(job.find(&marker), &format!("{name} step"));
+        let rest = &job[start..];
+        let end = rest[marker.len()..]
+            .find("\n      - name: ")
+            .map_or(rest.len(), |offset| marker.len() + offset);
+        must_some(rest.get(..end), &format!("{name} step bytes"))
+    }
+
     /// Extract one complete emitted `run: |` body from a generated job. The
     /// fixture executes this exact body; it must not reconstruct a similar
     /// command from individual assertions because that could miss quoting or
@@ -6055,7 +6088,7 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "7d895260d6b8fd9b6b9fa096cefbdf54d343bb217efde3bf12e3eaa99f37517e",
+                "11df400e5887ca8e517e85517fb5f1e3385f85ee804076d5ace072b47f47f317",
             ),
             (
                 "preview.yml",
@@ -6182,11 +6215,11 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "96b12c87ec1143ac449d51d79951bfca45f9910cc5c38a300bab5da9686e6bd0",
+                "aebcda490fb06b16894f4c2cc495ac87e82cc63a059eac21b3abc6f925622ec7",
             ),
             (
                 "preview.yml",
-                "8c144a527bf76d95f82a62775b9740f0b5e0b50f9273de6f9d380cfbe81ae4c5",
+                "0c1ecdf5cf8708cee2f812509c6ef849c00e62a3d64aa181f69acd628f049655",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -6295,6 +6328,116 @@ cp "$record" "$out"
             build
                 .contains("gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross"),
             "cross toolchain must carry the aarch64 sysroot:\n{build}"
+        );
+    }
+
+    #[test]
+    fn debian_cross_build_steps_export_the_aarch64_linker() {
+        // The arm64 debian row cross-compiles on the x64 runner: the
+        // toolchain install alone leaves Cargo on the host linker, which
+        // rejects the AArch64-only link flags. Both cross-compiling steps
+        // carry the exports; the stable lane has no runner-binary step.
+        const EXPORTS: &[&str] = &[
+            "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc",
+            "CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc",
+            "CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++",
+            "AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar",
+        ];
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract");
+        };
+        let preview = super::render_preview(&config, Some(release));
+        let preview_debian = yaml_job(&preview, "debian");
+        for step in [
+            "Build release runner binary",
+            "Build sibling binaries for the deb",
+        ] {
+            let block = yaml_step(preview_debian, step);
+            for export in EXPORTS {
+                assert!(
+                    block.contains(export),
+                    "preview debian {step} misses {export}:\n{block}"
+                );
+            }
+        }
+        let stable = super::render_release(&config, release);
+        let stable_debian = yaml_job(&stable, "debian");
+        let block = yaml_step(stable_debian, "Build sibling binaries for the deb");
+        for export in EXPORTS {
+            assert!(
+                block.contains(export),
+                "stable debian sibling build misses {export}:\n{block}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_target_sets_omit_the_cross_linker_exports() {
+        // The exports exist only for AArch64 rows: a native-only target set
+        // renders no cross-linker variable on any release build step. The
+        // install step still names the toolchain package; only the step env
+        // variables are gated.
+        const EXPORTS: &[&str] = &[
+            "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER",
+            "CC_aarch64_unknown_linux_gnu",
+            "CXX_aarch64_unknown_linux_gnu",
+            "AR_aarch64_unknown_linux_gnu",
+        ];
+        let mut config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_mut() else {
+            panic!("identity fixture must carry a release contract");
+        };
+        release.targets = vec!["x86_64-unknown-linux-gnu".to_owned()];
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract");
+        };
+        let preview = super::render_preview(&config, Some(release));
+        let stable = super::render_release(&config, release);
+        for (lane, id, job) in [
+            ("preview", "debian", yaml_job(&preview, "debian")),
+            ("stable", "debian", yaml_job(&stable, "debian")),
+            ("stable", "build", yaml_job(&stable, "build")),
+        ] {
+            for export in EXPORTS {
+                assert!(
+                    !job.contains(export),
+                    "native-only {lane} {id} leaks {export}:\n{job}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn binary_release_build_exports_the_aarch64_linker() {
+        // The aarch64 tarball row cross-compiles on the x64 runner: the same
+        // missing-linker failure as the debian lane. The native identity
+        // injection still lands on the same step.
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract");
+        };
+        let workflow = super::render_release(&config, release);
+        let build = yaml_job(&workflow, "build");
+        let step = yaml_step(build, "Build release binary");
+        for export in [
+            "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc",
+            "CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc",
+            "CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++",
+            "AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar",
+        ] {
+            assert!(
+                step.contains(export),
+                "release build misses {export}:\n{step}"
+            );
+        }
+        assert!(
+            step.contains("VELNOR_RELEASE_BUILD: \"1\""),
+            "native identity injection lost its anchor:\n{step}"
+        );
+        assert!(
+            step.contains("--features release-build"),
+            "native identity injection lost its anchor:\n{step}"
         );
     }
 
