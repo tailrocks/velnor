@@ -4,7 +4,7 @@
 //! itself through `.github-gen/velnor-workflow.toml`. These tests hold the
 //! lines that used to live inside the crate: the generator owns every
 //! generated file under `.github`, the bootstrap action is owned verbatim,
-//! and the self-hosted lane keeps its local Mr. Boxington backend.
+//! and the Rust unit workflow realizes exactly its declared backends.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -83,8 +83,10 @@ fn the_setup_action_is_owned_verbatim() {
     assert!(installed.contains("name: Set up Velnor workflow runtime"));
 }
 
-/// Hosted Rust verification uses the GitHub Mr. Boxington backend. A Velnor
-/// lane, when generated, pins `local` instead of sharing the hosted backend.
+/// The Rust unit workflow realizes exactly the backends its generated
+/// project config declares: `github-hosted` renders the GitHub Mr. Boxington
+/// backend, a local provider (`velnor`, `github-self-hosted`) renders the
+/// local backend, and an undeclared backend must not appear.
 #[test]
 fn hosted_lane_uses_the_github_mb_boxington_backend() {
     let (_, workflow) = generated_files()
@@ -92,34 +94,26 @@ fn hosted_lane_uses_the_github_mb_boxington_backend() {
         .find(|(name, _)| name == "ci-unit-rust.yml")
         .expect("the rust kind reusable renders a workflow");
     let project = read(".github/ci/project.toml");
-    if project.contains("runners = \"velnor\"") {
-        assert!(
-            !workflow.contains("backend: github"),
-            "velnor-only surface must not emit a GitHub hosted backend"
-        );
-        assert!(
-            workflow.contains("backend: local"),
-            "velnor lane lost its local backend"
-        );
-    } else if project.contains("runners = \"github\"") {
-        assert!(
-            workflow.contains("backend: github"),
-            "hosted lane lost the github backend"
-        );
-        assert!(
-            !workflow.contains("backend: local"),
-            "github-only surface must not emit a Velnor local backend"
-        );
-    } else {
-        assert!(
-            workflow.contains("backend: github"),
-            "hosted lane lost the github backend"
-        );
-        assert!(
-            workflow.contains("backend: local"),
-            "velnor lane lost its local backend"
-        );
-    }
+    let providers = project
+        .lines()
+        .find(|line| line.starts_with("providers = ["))
+        .expect("project config declares its provider universe");
+    let hosted = providers.contains("\"github-hosted\"");
+    let local = providers.contains("\"velnor\"") || providers.contains("\"github-self-hosted\"");
+    assert!(
+        hosted || local,
+        "project config declares no known provider: {providers}"
+    );
+    assert_eq!(
+        workflow.contains("backend: github"),
+        hosted,
+        "hosted backend presence must match the declared provider universe: {providers}"
+    );
+    assert_eq!(
+        workflow.contains("backend: local"),
+        local,
+        "local backend presence must match the declared provider universe: {providers}"
+    );
 }
 
 /// The regeneration gate stays wired: the workflow crate's own unit watches

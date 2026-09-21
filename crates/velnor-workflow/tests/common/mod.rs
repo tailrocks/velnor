@@ -101,6 +101,13 @@ pub fn write_schema2_config(root: &Path) {
          runs_on = [\"ubuntu-24.04\"]\n",
     )
     .unwrap();
+    // The scan path requires visibility evidence bound to the declared
+    // slug; the fixture is a public hosted-only repository.
+    fs::write(
+        directory.join("visibility.toml"),
+        "repository = \"example/minimal\"\nvisibility = \"public\"\n",
+    )
+    .unwrap();
 }
 
 pub fn write_config(pipeline: Pipeline, root: &Path) {

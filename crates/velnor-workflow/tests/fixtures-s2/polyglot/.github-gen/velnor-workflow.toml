@@ -5,5 +5,3 @@ repository = "example/polyglot"
 
 [workflow]
 
-[workflow.selectors.velnor]
-runs_on = ["self-hosted", "example-runner-label"]

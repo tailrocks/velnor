@@ -5,8 +5,6 @@ repository = "example/promote-trust"
 
 [workflow]
 
-[workflow.selectors.velnor]
-runs_on = ["self-hosted", "example-runner-label"]
 
 [[units]]
 id = "docs"

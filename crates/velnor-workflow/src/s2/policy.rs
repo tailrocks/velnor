@@ -2477,9 +2477,16 @@ fn has_safe_runner_gate(
     if has_trusted_runner_gate(condition) {
         return true;
     }
-    // Generated provider jobs admit a provider-selecting dispatch on any ref
-    // (dispatch needs write access on a ref of this repository) plus the
-    // automatic events, with the trusted-event conjunct for local providers
+    // A top-level conjunction carrying the exact trusted-event predicate
+    // excludes fork and bot pull requests whatever the functional side
+    // narrows: conjunction preserves exclusion. The split is paren- and
+    // quote-aware, and any top-level `||` disqualifies, so the conjunct
+    // cannot hide inside a wider disjunction.
+    if has_exact_trusted_conjunct(condition) {
+        return true;
+    }
+    // Generated provider jobs admit every event (automatic) or dispatches
+    // alone (manual), with the trusted-event conjunct for local providers
     // and trusted-only units. That generated shape is trusted even when the
     // advisory checkout lacks `.github/ci/project.toml` and only carries
     // `.github-gen`.
@@ -2487,6 +2494,55 @@ fn has_safe_runner_gate(
         return false;
     };
     is_generated_provider_gate(condition, &provider)
+}
+
+/// Whether the condition is a pure top-level `&&` conjunction with the
+/// exact trusted-event predicate as one member, e.g. the `(functional) &&
+/// (trusted)` shape every generated local job renders. Parentheses and
+/// single-quoted literals (with `''` escapes) nest; anything else splits.
+fn has_exact_trusted_conjunct(condition: &str) -> bool {
+    let value = condition.trim();
+    let value = value
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map_or(value, str::trim);
+    let flat: String = value.split_whitespace().collect();
+    let trusted = format!("({})", trusted_event_conjunct());
+    let mut members = Vec::new();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut start = 0usize;
+    let bytes = flat.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if byte == b'\'' {
+                if bytes.get(index + 1) == Some(&b'\'') {
+                    index += 1;
+                } else {
+                    in_string = false;
+                }
+            }
+        } else if byte == b'\'' {
+            in_string = true;
+        } else if byte == b'(' {
+            depth += 1;
+        } else if byte == b')' {
+            depth = depth.saturating_sub(1);
+        } else if depth == 0 {
+            if byte == b'&' && bytes.get(index + 1) == Some(&b'&') {
+                members.push(&flat[start..index]);
+                index += 1;
+                start = index + 1;
+            } else if byte == b'|' && bytes.get(index + 1) == Some(&b'|') {
+                return false;
+            }
+        }
+        index += 1;
+    }
+    members.push(&flat[start..]);
+    members.iter().any(|member| *member == trusted)
 }
 
 fn generation_workflow(root: &Path) -> Result<Option<toml::Value>, GeneratorError> {
@@ -2706,26 +2762,18 @@ fn trusted_event_conjunct() -> &'static str {
     "!(github.event_name=='pull_request'&&(github.event.pull_request.head.repo.fork||github.event.pull_request.user.type=='Bot'))"
 }
 
-/// Whether `value` is the generated admission for `provider`: a
-/// provider-selecting dispatch (`inputs.providers` comma-boundary match) or
-/// the automatic events, with the trusted-event conjunct. The reusable
-/// provider/unit selector prefix is stripped first; the remaining
-/// expression must be exactly the admission the generator renders.
-fn is_generated_provider_gate(value: &str, provider: &str) -> bool {
+/// Whether `value` is the generated admission for a local provider:
+/// dispatches select the static universe, so an automatic provider renders
+/// the bare trusted-event conjunct and a manual one conjoins it with the
+/// dispatch predicate. No input match survives. The reusable provider/unit
+/// selector prefix is stripped first; the remaining expression must be
+/// exactly the admission the generator renders.
+fn is_generated_provider_gate(value: &str, _provider: &str) -> bool {
     let normalized = normalize_gate_expression(value);
     let value = strip_reusable_unit_selector(&normalized).unwrap_or(&normalized);
-    let dispatch = format!(
-        "github.event_name=='workflow_dispatch'&&contains(format(',{{0}},',github.event.inputs.providers),',{provider},')"
-    );
     let trusted = trusted_event_conjunct();
-    // The generator renders `((dispatch) || (automatic)) && (trusted)` for
-    // local providers: the automatic side is the event predicate when the
-    // provider is in the automatic set, `false` otherwise.
-    let automatic_shapes = ["github.event_name!='workflow_dispatch'", "false"];
-    automatic_shapes.into_iter().any(|automatic| {
-        let event = format!("({dispatch})||({automatic})");
-        value == format!("({event})&&({trusted})") || value == format!("{event}&&({trusted})")
-    })
+    let dispatch = "github.event_name=='workflow_dispatch'";
+    value == format!("({trusted})") || value == format!("({dispatch})&&({trusted})")
 }
 
 fn inspect_jobs(

@@ -176,16 +176,17 @@ struct WorkflowSection {
     /// generator default (all three providers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     providers: Option<Vec<String>>,
-    /// Providers that run on `pull_request`/`push`/`schedule`. A subset of
-    /// `providers`; pure event-to-provider routing, never trust gating.
-    /// Absent keeps the generator default (the full universe).
+    /// Providers that run on `pull_request`/`push`/`schedule`. Under the
+    /// visibility-based runner policy this must equal the visibility
+    /// singleton; absent keeps the universe. Pure event-to-provider routing,
+    /// never trust gating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     automatic_providers: Option<Vec<String>>,
-    /// Default providers for the `workflow_dispatch` `providers:` multi-select
-    /// input. A subset of `providers`. Absent keeps the generator default
-    /// (the full universe).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    default_dispatch_providers: Option<Vec<String>>,
+    // NOTE: no `default_dispatch_providers`. Manual dispatches select the
+    // static universe; a dispatch-side provider default would be an
+    // alternate-provider input, which the visibility policy forbids. The
+    // runtime contract still carries the key (rendered from the universe)
+    // so pinned runtimes keep parsing it.
     /// Per-provider `runs-on` routing, keyed by provider ID. The only place
     /// labels live; local providers need disjoint dedicated selectors.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1470,10 +1471,9 @@ impl RepoGenerationConfig {
         self.workflow.automatic_providers.as_deref()
     }
 
-    /// The declared default dispatch providers, if any.
-    pub(crate) fn default_dispatch_providers(&self) -> Option<&[String]> {
-        self.workflow.default_dispatch_providers.as_deref()
-    }
+    // NOTE: no `default_dispatch_providers` accessor. The workflow
+    // `providers:` dispatch input is removed; dispatches select the static
+    // universe.
 
     /// The declared per-provider selectors, keyed by provider id string.
     pub(crate) fn selectors(&self) -> &BTreeMap<String, ProviderSelector> {
@@ -1846,15 +1846,6 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
             &automatic,
             &universe,
             "[workflow] automatic_providers",
-            "[workflow] providers",
-        )?;
-    }
-    if let Some(dispatch) = workflow.default_dispatch_providers.as_deref() {
-        let dispatch = parse_provider_set(dispatch, "[workflow] default_dispatch_providers")?;
-        require_subset(
-            &dispatch,
-            &universe,
-            "[workflow] default_dispatch_providers",
             "[workflow] providers",
         )?;
     }
@@ -4470,40 +4461,32 @@ mod tests {
     }
 
     #[test]
-    fn workflow_dispatch_and_automatic_provider_defaults_are_optional() {
+    fn workflow_automatic_provider_default_is_optional() {
         let config = config_for("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n");
         assert_eq!(config.automatic_providers(), None);
-        assert_eq!(config.default_dispatch_providers(), None);
         let declared = config_for(
-            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nautomatic_providers = [\"velnor\"]\ndefault_dispatch_providers = [\"github-hosted\"]\n",
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nautomatic_providers = [\"velnor\"]\n",
         );
         assert_eq!(
             declared.automatic_providers(),
             Some(&["velnor".to_owned()][..])
         );
-        assert_eq!(
-            declared.default_dispatch_providers(),
-            Some(&["github-hosted".to_owned()][..])
-        );
         must(
             declared.validate(&[], &[], &BTreeSet::new()),
-            "validate declared provider defaults",
+            "validate declared automatic providers",
         );
     }
 
     #[test]
-    fn workflow_dispatch_providers_must_stay_inside_the_universe() {
-        let config = config_for(
-            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\"]\ndefault_dispatch_providers = [\"velnor\"]\n",
-        );
+    fn workflow_dispatch_provider_default_is_removed_not_deprecated() {
         let error = must_fail(
-            config.validate(&[], &[], &BTreeSet::new()),
-            "dispatch default outside the universe",
+            toml::from_str::<RepoGenerationConfig>(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\"]\ndefault_dispatch_providers = [\"github-hosted\"]\n",
+            ),
+            "removed dispatch default",
         );
         assert!(
-            error.to_string().contains(
-                "[workflow] default_dispatch_providers names provider `velnor` outside [workflow] providers"
-            ),
+            error.to_string().contains("default_dispatch_providers"),
             "unexpected error: {error}"
         );
     }

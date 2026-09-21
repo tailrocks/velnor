@@ -920,7 +920,6 @@ mod tests {
             default_branch: "main".to_owned(),
             providers: ProviderId::ALL.into_iter().collect(),
             automatic_providers: ProviderId::ALL.into_iter().collect(),
-            default_dispatch_providers: ProviderId::ALL.into_iter().collect(),
             selectors: default_selectors(),
             release_enabled: false,
             release_reason: String::new(),

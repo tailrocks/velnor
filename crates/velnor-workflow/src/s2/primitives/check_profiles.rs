@@ -441,6 +441,15 @@ fn render_profile_job(
     if !profile.needs.is_empty() {
         let _ = writeln!(output, "    needs: [{}]", profile.needs.join(", "));
     }
+    // A Velnor profile mounts the checkout and runs named tasks, so it
+    // skips fork and bot pull requests exactly like any other local job.
+    if profile.runner.as_str() == "velnor" {
+        let _ = writeln!(
+            output,
+            "    if: ${{{{ ({}) }}}}",
+            super::ir::WorkflowIr::trusted_event_expression()
+        );
+    }
     let runs_on = profile_runs_on(config, profile)?;
     let _ = writeln!(output, "    runs-on: {runs_on}");
     let _ = writeln!(output, "    timeout-minutes: {}", profile.timeout_minutes);
@@ -602,10 +611,6 @@ mod tests {
                 crate::s2::provider::ProviderId::Velnor,
             ]),
             automatic_providers: std::collections::BTreeSet::from([
-                crate::s2::provider::ProviderId::GithubHosted,
-                crate::s2::provider::ProviderId::Velnor,
-            ]),
-            default_dispatch_providers: std::collections::BTreeSet::from([
                 crate::s2::provider::ProviderId::GithubHosted,
                 crate::s2::provider::ProviderId::Velnor,
             ]),
