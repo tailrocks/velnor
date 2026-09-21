@@ -400,6 +400,7 @@ pub(crate) fn unit(
         platform,
         capabilities,
         workspace_check: false,
+        full_history: false,
         products: Vec::new(),
         prerequisites: Vec::new(),
         docker_contexts: Vec::new(),

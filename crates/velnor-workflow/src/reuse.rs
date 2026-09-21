@@ -234,8 +234,9 @@ pub(crate) struct WatchedUnit {
 /// fallback rather than by matching: an empty diff selects nothing with the
 /// flag clear, and the planner records that as explicit no-work.
 /// `fallback_reason` carries the fallback's auditable reason (the consulted
-/// sources for an unprovable path); it is `None` for narrow and empty
-/// selections and serializes only when present.
+/// sources for an unprovable path); it is `None` for proven-narrow and empty
+/// selections, `Some` for full fallbacks and for opaque-narrowed selections,
+/// and serializes only when present.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct AffectedSelection {
     pub(crate) required: BTreeSet<String>,
@@ -255,8 +256,10 @@ pub(crate) struct AffectedSelection {
 /// break them), and prerequisites of selected units join the required set
 /// (their outputs must exist before the run). Edges are followed across unit
 /// kinds: a cross-language dependency invalidates exactly like a
-/// same-language one. A path no unit owns selects nothing; a global-prefix
-/// path, an unprovable path, or a duplicate unit id falls back to the full
+/// same-language one. A path no unit owns selects only the opaque units
+/// (whose unprovable commands may read it), or nothing when every unit is
+/// transparent; a global-prefix path, an unmatchable path, a
+/// CI-contract-unknown path, or a duplicate unit id falls back to the full
 /// set — or fails, for the duplicate id — so an input the model cannot prove
 /// narrow never silently skips verification.
 ///
@@ -302,6 +305,7 @@ pub(crate) fn select_affected(
     let compiled = compile_ownership(units)?;
     let mut hits: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     let mut kind_hits: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut opaque_reasons: Vec<String> = Vec::new();
     for candidate in &candidates {
         if let Some(verdict) = github_verdict(candidate.path) {
             match verdict {
@@ -327,18 +331,20 @@ pub(crate) fn select_affected(
         }
         match classify_path(&compiled, candidate.path) {
             PathVerdict::Owned { units: owners } => {
-                for id in owners {
-                    let Some(matched) = compiled.iter().find_map(|compiled| {
-                        (compiled.unit.id == id).then_some(compiled.unit.id.as_str())
-                    }) else {
-                        continue;
-                    };
-                    hits.entry(matched).or_default().push(format!(
-                        "`{}` ({})",
-                        candidate.path,
-                        candidate.kind.verb()
-                    ));
-                }
+                let item = format!("`{}` ({})", candidate.path, candidate.kind.verb());
+                record_path_hits(&compiled, &mut hits, &owners, &item);
+            }
+            PathVerdict::Opaque {
+                units: opaque_units,
+                reason,
+            } => {
+                let item = format!(
+                    "`{}` ({}; opaque fallback)",
+                    candidate.path,
+                    candidate.kind.verb()
+                );
+                record_path_hits(&compiled, &mut hits, &opaque_units, &item);
+                opaque_reasons.push(reason);
             }
             PathVerdict::Unknown { reason } => {
                 return Ok(fallback_selection(units, &reason));
@@ -346,7 +352,42 @@ pub(crate) fn select_affected(
             PathVerdict::Irrelevant => {}
         }
     }
-    Ok(finish_selection(units, &hits, &kind_hits))
+    let mut selection = finish_selection(units, &hits, &kind_hits);
+    selection.fallback_reason = join_opaque_reasons(opaque_reasons);
+    Ok(selection)
+}
+
+/// Attribute one changed path to its units: every named unit joins the direct
+/// hits with the preformatted item, so owned and opaque-narrowed matches share
+/// one attribution loop.
+fn record_path_hits<'a>(
+    compiled: &[CompiledUnit<'a>],
+    hits: &mut BTreeMap<&'a str, Vec<String>>,
+    ids: &BTreeSet<String>,
+    item: &str,
+) {
+    for id in ids {
+        let Some(matched) = compiled
+            .iter()
+            .find_map(|compiled| (compiled.unit.id == *id).then_some(compiled.unit.id.as_str()))
+        else {
+            continue;
+        };
+        hits.entry(matched).or_default().push(item.to_owned());
+    }
+}
+
+/// Join collected opaque-narrowing reasons into the additive fallback reason:
+/// [`None`] when no opaque fallback widened the selection, else the sorted,
+/// deduplicated reasons joined for the audit trail.
+#[must_use]
+pub(crate) fn join_opaque_reasons(mut opaque_reasons: Vec<String>) -> Option<String> {
+    if opaque_reasons.is_empty() {
+        return None;
+    }
+    opaque_reasons.sort();
+    opaque_reasons.dedup();
+    Some(opaque_reasons.join("; "))
 }
 
 /// Expand direct path hits across `depends_on` edges and explain every
@@ -414,8 +455,8 @@ fn finish_selection(
 /// The unit kinds whose scanners cannot prove a complete read set: package
 /// scripts and bundlers may consume files no watch names. Until the scan
 /// proves whole-root ownership for these units, any command beyond the
-/// provably-pure no-ops marks the unit opaque, and paths no unit owns fall
-/// back to full instead of selecting nothing.
+/// provably-pure no-ops marks the unit opaque, and paths no unit owns select
+/// the opaque units instead of nothing.
 fn is_opaque_kind(kind: &str) -> bool {
     kind.eq_ignore_ascii_case("node") || kind.eq_ignore_ascii_case("bun")
 }
@@ -476,8 +517,9 @@ const KNOWN_KINDS: &[&str] = &[
 
 /// What command analysis proved about one unit: literal read-globs (and
 /// ignore-globs) extracted from argv, or opacity with its cause. Opacity is
-/// per unit, never per path: an opaque unit forces fallback for paths no
-/// unit owns, while owned paths still narrow to their owners.
+/// per unit, never per path: an opaque unit joins the conservative selection
+/// for paths no unit owns (the full set only when every unit is opaque),
+/// while owned paths still narrow to their owners.
 struct CommandReads {
     positives: Vec<String>,
     negatives: Vec<String>,
@@ -520,7 +562,7 @@ pub(crate) struct CompiledUnit<'a> {
 ///
 /// Returns a usage error for an invalid watch pattern. An unreadable
 /// extracted glob never errors: the unit goes opaque instead, so the path
-/// falls back to full rather than failing the plan.
+/// selects conservatively rather than failing the plan.
 pub(crate) fn compile_ownership(
     units: &[WatchedUnit],
 ) -> Result<Vec<CompiledUnit<'_>>, GeneratorError> {
@@ -582,19 +624,29 @@ pub(crate) fn compile_ownership(
     Ok(compiled)
 }
 
-/// The ownership verdict for one changed path: its owners, unprovability
-/// with the consulted sources in the reason, or proven irrelevance.
+/// The ownership verdict for one changed path: its owners, the opaque units
+/// an unmatched path conservatively selects, unprovability with the consulted
+/// sources in the reason, or proven irrelevance.
 pub(crate) enum PathVerdict {
-    Owned { units: BTreeSet<String> },
-    Unknown { reason: String },
+    Owned {
+        units: BTreeSet<String>,
+    },
+    Opaque {
+        units: BTreeSet<String>,
+        reason: String,
+    },
+    Unknown {
+        reason: String,
+    },
     Irrelevant,
 }
 
 /// Classify one changed path against the compiled units: owned when any
-/// unit's watch or read-globs match, unknown when no unit owns it but some
-/// unit is opaque (or the path itself resists matching), irrelevant
-/// otherwise. Owned wins over opaque: a proven owner selects its units even
-/// when another unit's commands resist proof.
+/// unit's watch or read-globs match, opaque when no unit owns it but some
+/// (not every) unit is opaque, unknown when the path itself resists matching
+/// or every unit is opaque (narrowing is impossible), irrelevant otherwise.
+/// Owned wins over opaque: a proven owner selects its units even when
+/// another unit's commands resist proof.
 pub(crate) fn classify_path(compiled: &[CompiledUnit<'_>], path: &str) -> PathVerdict {
     if path.is_empty() {
         return PathVerdict::Unknown {
@@ -613,26 +665,44 @@ pub(crate) fn classify_path(compiled: &[CompiledUnit<'_>], path: &str) -> PathVe
         };
     }
     let mut owners = BTreeSet::new();
-    let mut opaque: Option<&str> = None;
+    let mut opaque = BTreeSet::new();
+    let mut causes = Vec::new();
     for unit in compiled {
         if unit.watch.is_match(path) || extraction_owns(unit, path) {
             owners.insert(unit.unit.id.clone());
-        } else if unit.opaque && opaque.is_none() {
-            opaque = unit.opaque_reason.as_deref();
+        } else if unit.opaque {
+            opaque.insert(unit.unit.id.clone());
+            if let Some(cause) = unit.opaque_reason.as_deref() {
+                causes.push(cause);
+            }
         }
     }
     if !owners.is_empty() {
         return PathVerdict::Owned { units: owners };
     }
-    if let Some(cause) = opaque {
+    if opaque.is_empty() {
+        return PathVerdict::Irrelevant;
+    }
+    let detail = if causes.is_empty() {
+        "every consulted unit is opaque".to_owned()
+    } else {
+        causes.join("; ")
+    };
+    if opaque.len() == compiled.len() {
         return PathVerdict::Unknown {
             reason: format!(
                 "unmatched path `{path}` selects every unit (consulted declared reads, \
-                watch globs, command read-globs; {cause})"
+                watch globs, command read-globs; {detail})"
             ),
         };
     }
-    PathVerdict::Irrelevant
+    PathVerdict::Opaque {
+        units: opaque,
+        reason: format!(
+            "unmatched path `{path}` selects only opaque units (consulted declared reads, \
+            watch globs, command read-globs; {detail})"
+        ),
+    }
 }
 
 /// Whether a unit's extracted read-globs own a path: some positive matches
@@ -2539,6 +2609,231 @@ mod tests {
         Ok(())
     }
 
+    /// An unmatched path with an opaque minority selects every opaque unit
+    /// (all of them, not the first) plus the ordinary dependency closure —
+    /// never the transparent units, never the full set.
+    #[test]
+    fn unmatched_selects_only_opaque_units() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("rust-base", &["crates/base/**"], &[], "rust", &["true"]),
+            watched_full(
+                "bun-web",
+                &["web/**"],
+                &["rust-base"],
+                "bun",
+                &["bun run build"],
+            ),
+            watched_full("node-api", &["api/**"], &[], "node", &["node server.js"]),
+            watched_full(
+                "rust-app",
+                &["crates/app/**"],
+                &["node-api"],
+                "rust",
+                &["true"],
+            ),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(
+            !selection.fallback_full,
+            "an opaque minority narrows: {:?}",
+            selection.required
+        );
+        assert_eq!(
+            selection.required,
+            BTreeSet::from([
+                "bun-web".to_owned(),
+                "node-api".to_owned(),
+                "rust-app".to_owned(),
+                "rust-base".to_owned(),
+            ]),
+            "both opaque units plus the prerequisite and the dependent"
+        );
+        assert_eq!(
+            selection.full_units,
+            BTreeSet::from([
+                "bun-web".to_owned(),
+                "node-api".to_owned(),
+                "rust-app".to_owned(),
+            ]),
+            "prerequisites join required, not full"
+        );
+        assert!(
+            !selection.required.contains("rust-alpha"),
+            "transparent units stay out: {:?}",
+            selection.required
+        );
+        let reason = selection.fallback_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("selects only opaque units")
+                && reason.contains("bun-web")
+                && reason.contains("node-api")
+                && reason.contains("command read-globs"),
+            "the reason names the consulted sources and every opaque unit: {reason:?}"
+        );
+        for id in ["bun-web", "node-api"] {
+            assert!(
+                selection
+                    .explanations
+                    .get(id)
+                    .is_some_and(|explanation| explanation.contains("opaque fallback")),
+                "the opaque hit carries its marker: {:?}",
+                selection.explanations
+            );
+        }
+        Ok(())
+    }
+
+    /// No owner plus zero opaque units is proven irrelevance: the path
+    /// selects nothing, with no fallback flag and no reason.
+    #[test]
+    fn unmatched_with_no_opaque_is_irrelevant() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("bun-web", &["web/**"], &[], "bun", &["true"]),
+        ];
+        let compiled = compile_ownership(&units)?;
+        assert!(
+            matches!(
+                classify_path(&compiled, "AGENTS.md"),
+                PathVerdict::Irrelevant
+            ),
+            "a parsed path with no owner and no opaque unit is irrelevant"
+        );
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(selection.required.is_empty());
+        assert!(selection.full_units.is_empty());
+        assert!(!selection.fallback_full);
+        assert!(selection.fallback_reason.is_none());
+        Ok(())
+    }
+
+    /// An empty path cannot be matched safely: blind-unknown still selects
+    /// every unit even when every unit is transparent.
+    #[test]
+    fn empty_path_selects_every_unit() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("rust-beta", &["crates/beta/**"], &[], "rust", &["true"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(selection.fallback_full);
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["rust-alpha".to_owned(), "rust-beta".to_owned()])
+        );
+        assert!(
+            selection
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("empty changed path")),
+            "the fallback reason names the cause: {:?}",
+            selection.fallback_reason
+        );
+        Ok(())
+    }
+
+    /// A quoted diff path cannot be matched safely: blind-unknown selects
+    /// every unit even when only a minority is opaque.
+    #[test]
+    fn quoted_path_selects_every_unit() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("bun-web", &["web/**"], &[], "bun", &["bun run build"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("\"quoted/path.md\"", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(
+            selection.fallback_full,
+            "blind-unknown must never narrow: {:?}",
+            selection.required
+        );
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["rust-alpha".to_owned(), "bun-web".to_owned()])
+        );
+        assert!(
+            selection
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("quoted")),
+            "the fallback reason names the cause: {:?}",
+            selection.fallback_reason
+        );
+        Ok(())
+    }
+
+    /// A proven owner selects its units even when another unit's commands
+    /// resist proof: ownership beats opacity, with no fallback reason.
+    #[test]
+    fn matched_path_owned_wins_over_opaque() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("bun-web", &["web/**"], &[], "bun", &["bun run build"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("crates/alpha/lib.rs", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        assert!(!selection.fallback_full);
+        assert_eq!(
+            selection.required,
+            BTreeSet::from(["rust-alpha".to_owned()]),
+            "the opaque unit stays out of an owned match"
+        );
+        assert!(
+            selection.fallback_reason.is_none(),
+            "a proven-narrow selection carries no fallback reason: {:?}",
+            selection.fallback_reason
+        );
+        Ok(())
+    }
+
+    /// The opaque-narrowed selection serializes as narrow-but-explained:
+    /// `fallback_full` is false, `required` is the opaque set, and
+    /// `fallback_reason` names the opaque units for the audit trail.
+    #[test]
+    fn opaque_narrowing_selection_shape() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![
+            watched_full("rust-alpha", &["crates/alpha/**"], &[], "rust", &["true"]),
+            watched_full("bun-web", &["web/**"], &[], "bun", &["bun run build"]),
+        ];
+        let selection = select_affected(
+            &units,
+            &[change("AGENTS.md", ChangeKind::Modified)],
+            FULL_SELECTION_PREFIXES,
+        )?;
+        let json = serde_json::to_string(&selection).map_err(|error| error.to_string())?;
+        let shape: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        assert_eq!(shape["fallback_full"], false);
+        assert_eq!(shape["required"], serde_json::json!(["bun-web"]));
+        assert_eq!(shape["full_units"], serde_json::json!(["bun-web"]));
+        assert!(
+            shape["fallback_reason"].as_str().is_some_and(|reason| {
+                reason.contains("selects only opaque units") && reason.contains("bun-web")
+            }),
+            "the serialized reason names the opaque set: {json}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn unknown_ci_contract_path_falls_back_to_full() -> Result<(), Box<dyn std::error::Error>> {
         let units = vec![
@@ -2760,15 +3055,22 @@ mod tests {
                 FULL_SELECTION_PREFIXES,
             )?;
             assert!(
-                selection.fallback_full,
-                "opaque package commands must fail closed: {command}"
+                !selection.fallback_full,
+                "an opaque minority narrows instead of falling back to full: {command}"
+            );
+            assert_eq!(
+                selection.required,
+                BTreeSet::from([id.to_owned()]),
+                "the unmatched path selects only the opaque unit: {command}"
             );
             assert!(
                 selection
                     .fallback_reason
                     .as_deref()
-                    .is_some_and(|reason| reason.contains("command read-globs")),
-                "the fallback reason names the consulted sources: {:?}",
+                    .is_some_and(|reason| reason.contains("command read-globs")
+                        && reason.contains(id)
+                        && reason.contains("selects only opaque units")),
+                "the fallback reason names the consulted sources and the opaque unit: {:?}",
                 selection.fallback_reason
             );
         }
