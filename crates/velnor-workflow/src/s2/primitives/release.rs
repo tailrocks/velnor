@@ -6084,11 +6084,11 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "79c7a5c878aff8be4c4c335d7da29e2d387d9e457a9df193f2853313721b01ea",
+                "9bac3040c77b0dc9fb9acf31cabb426f20a8da419f86f976d34819b0c1bc5e75",
             ),
             (
                 "preview.yml",
-                "d4a87e6719305ace8bbf42fa0956c8d02d07765d47131bc8e03b7686cdef558f",
+                "9c01438ada4a500c8f221aa890c20b58d492a2ae1b35ab54392f1d161393097f",
             ),
             (
                 "maintenance.yml",
@@ -6205,11 +6205,11 @@ cp "$record" "$out"
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "5304bb032a89905e7f687984af0cfa4a1f90c5068805376e5b9b441f1e1bc66e",
+                "084a34fb4f212c89ce2e09912961d4e7cb8ab47a1ad0ea16583d9dbd88e5ee95",
             ),
             (
                 "preview.yml",
-                "b0b5ecb785a160e80c2b3ba1d024afd857e887c9419c26520c89f32871edef4f",
+                "2986fc55fa37a3ca35bd370e12c328db78f302f299e7dc9859c2396d7f9137fc",
             ),
         ];
         let root = scanned_root("identity-pinned");

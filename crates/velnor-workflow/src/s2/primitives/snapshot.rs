@@ -92,7 +92,9 @@ impl CompatibilityFacts {
     /// Canonical, not merely stable: the field set is fixed, list order is
     /// normalized away (declaration order is not a compatibility fact), and
     /// every string is JSON-escaped, so the same facts digest the same value on
-    /// every machine and across generator versions.
+    /// every machine and across generator versions. The `xcode` field is
+    /// present only when the lane selects an Xcode, so lanes that never
+    /// select one keep the digest the pre-Xcode generator renders.
     pub(crate) fn digest(&self) -> String {
         let mut canonical = String::new();
         canonical.push('{');
@@ -108,9 +110,11 @@ impl CompatibilityFacts {
             ("rustflags", vec![self.rustflags.clone()]),
             ("schema", vec![self.schema.to_owned()]),
             ("trust", vec![self.trust.clone()]),
-            ("xcode", xcode_fields(self.xcode.as_ref())),
         ] {
             write_field(&mut canonical, key, &value);
+        }
+        if let Some(pin) = self.xcode.as_ref() {
+            write_field(&mut canonical, "xcode", &xcode_fields(Some(pin)));
         }
         write_field(
             &mut canonical,
