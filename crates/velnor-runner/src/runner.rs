@@ -14271,10 +14271,10 @@ fn setup_job_lines(
     ));
     lines.push("##[endgroup]".to_string());
 
-    // Operating System (fixed: Velnor jobs always run in Ubuntu 24.04).
+    // Operating System (fixed: Velnor jobs always run in Ubuntu 26.04).
     lines.push("##[group]Operating System".to_string());
     lines.push("Ubuntu".to_string());
-    lines.push("24.04.2".to_string());
+    lines.push("26.04".to_string());
     lines.push("LTS".to_string());
     lines.push("##[endgroup]".to_string());
 
@@ -26450,8 +26450,7 @@ runs:
         assert!(joined.contains("Backend: 'docker'"));
         assert!(!joined.contains("ghp_"));
         assert!(!joined.contains("github_pat_"));
-        assert!(joined.contains("##[group]Operating System"));
-        assert!(joined.contains("##[endgroup]"));
+        assert!(joined.contains("##[group]Operating System\nUbuntu\n26.04\nLTS\n##[endgroup]"));
         assert!(joined.contains("Prepare workflow directory"));
         // Secret source always present regardless of whether permissions are known.
         assert!(joined.contains("Secret source: Actions"));
