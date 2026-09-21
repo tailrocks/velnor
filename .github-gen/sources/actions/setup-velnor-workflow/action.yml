@@ -15,7 +15,7 @@
 # recomputed, the binary's own `--closure` report must match the resolved
 # closure and its `--revision` report must match the manifest revision, and
 # the asset and manifest attestations must verify against the pinned
-# producer workflow and default-branch ref.
+# producer workflow, default-branch ref, and exact manifest source revision.
 #
 # The Actions cache is a pure acceleration: the per-closure directory is
 # re-verified on every restore, and a cold cache costs one small download,
@@ -119,15 +119,18 @@ runs:
           echo "::error::no runtime product for revision $INSTALL_REV (closure ${CLOSURE:0:16}); the mainline runtime-product publisher builds it after merge" >&2
           exit 1
         fi
+        manifest_revision="$(jq -er '.revision | select(test("^[0-9a-f]{40}$"))' "$temporary/manifest.json")"
         gh attestation verify "$temporary/manifest.json" \
           --owner tailrocks \
           --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml \
-          --source-ref refs/heads/main
+          --source-ref refs/heads/main \
+          --source-digest "$manifest_revision"
         jq -e \
           --arg closure "$CLOSURE" \
+          --arg revision "$manifest_revision" \
           --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
           --arg asset "$asset" \
-          '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' \
+          '.closure == $closure and .revision == $revision and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' \
           "$temporary/manifest.json" >/dev/null
         runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
         mkdir -p "$runtime"
@@ -148,17 +151,19 @@ runs:
         asset="velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}"
         temporary="$(mktemp -d)"
         trap 'rm -rf "$temporary"' EXIT
+        runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
         gh release download "$tag" --repo "$PRODUCT_REPOSITORY" --pattern "$asset" --dir "$temporary"
+        manifest_revision="$(jq -er '.revision | select(test("^[0-9a-f]{40}$"))' "$runtime/manifest.json")"
         gh attestation verify "$temporary/$asset" \
           --owner tailrocks \
           --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml \
-          --source-ref refs/heads/main
+          --source-ref refs/heads/main \
+          --source-digest "$manifest_revision"
         if command -v sha256sum >/dev/null 2>&1; then
           actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
         else
           actual="$(shasum -a 256 "$temporary/$asset" | awk '{print $1}')"
         fi
-        runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
         expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$runtime/manifest.json")"
         [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
         mkdir -p "$runtime/bin"
