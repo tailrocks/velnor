@@ -1223,6 +1223,10 @@ pub struct ProjectConfig {
     /// Repository-local files the generated output owns verbatim, read from
     /// the declared sources at scan time.
     pub(crate) static_files: Vec<StaticFile>,
+    /// Reviewer rules from `[[reviewers]]` rows, in declaration order.
+    /// Generation time only: they render into `.github/CODEOWNERS`, never
+    /// into the runtime contract. Empty renders no file.
+    pub(crate) reviewers: Vec<ReviewerRule>,
     /// The repository states its own surface in a generation config: the
     /// checked-in `.github/workflows` are outputs and are never adopted as
     /// inputs.
@@ -1248,6 +1252,13 @@ pub(crate) struct StaticFile {
     pub(crate) path: String,
     pub(crate) source: String,
     pub(crate) content: String,
+}
+
+/// One CODEOWNERS rule: a file pattern and its owners, in declaration order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ReviewerRule {
+    pub(crate) pattern: String,
+    pub(crate) owners: Vec<String>,
 }
 
 fn default_workflow_files() -> Vec<String> {
@@ -2320,6 +2331,7 @@ fn apply_generation_config(
     apply_unit_rows(config, generation.units(), root)?;
     materialize_capability_commands(config, root)?;
     read_static_files(config, generation.static_files(), root)?;
+    apply_reviewer_rows(config, generation.reviewers());
     config.github_cache = generation.cache_github().clone();
     config.velnor_host_cache = generation.cache_velnor().clone();
     refresh_mr_boxington_note(config);
@@ -3334,6 +3346,21 @@ fn parse_mise_task_names(root: &Path) -> Result<Vec<String>, GeneratorError> {
 /// # Errors
 /// Returns errors for a declared source that is missing, unreadable, or not
 /// UTF-8.
+/// Carry validated `[[reviewers]]` rows onto the config in declaration
+/// order. Validation runs before apply, so a row missing its pattern is
+/// unreachable; it is skipped rather than rendered half-formed.
+fn apply_reviewer_rows(config: &mut ProjectConfig, rows: &[config::ReviewerSection]) {
+    for row in rows {
+        let Some(pattern) = row.pattern() else {
+            continue;
+        };
+        config.reviewers.push(ReviewerRule {
+            pattern: pattern.to_owned(),
+            owners: row.owners().to_vec(),
+        });
+    }
+}
+
 fn read_static_files(
     config: &mut ProjectConfig,
     rows: &[config::StaticFileSection],
@@ -6279,8 +6306,15 @@ fn generated_files_with_surface(
     // The agent-instruction file is unconditional: every render owns these
     // exact bytes, even for minimal repositories. A `static_files` row for a
     // generator-owned agent path can never take effect, so it fails closed
-    // with a remediation instead of being silently overridden.
-    for reserved in [crate::GITHUB_AGENTS_MD, crate::GITHUB_CLAUDE_MD] {
+    // with a remediation instead of being silently overridden. The
+    // reviewer-assignment file is generator-owned the same way even though
+    // its emission is conditional: an unvalidated passthrough row must never
+    // stand in for typed `[[reviewers]]` input.
+    for reserved in [
+        crate::GITHUB_AGENTS_MD,
+        crate::GITHUB_CLAUDE_MD,
+        crate::CODEOWNERS_PATH,
+    ] {
         if config
             .static_files
             .iter()
@@ -6295,6 +6329,19 @@ fn generated_files_with_surface(
         PathBuf::from(crate::GITHUB_AGENTS_MD),
         crate::GENERATED_GITHUB_AGENTS_MD.to_owned(),
     );
+    // Reviewer assignment is opt-in: zero rows render no file, so
+    // repositories without `[[reviewers]]` rows see no tree change.
+    if !config.reviewers.is_empty() {
+        let rules = config
+            .reviewers
+            .iter()
+            .map(|rule| (rule.pattern.as_str(), rule.owners.as_slice()))
+            .collect::<Vec<_>>();
+        files.insert(
+            PathBuf::from(crate::CODEOWNERS_PATH),
+            crate::render_codeowners_contents(&rules),
+        );
+    }
     validate_ruleset_required_status_checks(&config, &files)?;
     validate_hosted_mr_boxington_store_budget(&files)?;
     validate_policy_jobs_check_out_full_history(&files)?;
@@ -10923,6 +10970,7 @@ mod tests {
             concurrency_group: None,
             serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
             github_cache: config::CacheGithubSection::default(),
@@ -18249,6 +18297,7 @@ lockfile = true
             concurrency_group: None,
             serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
             github_cache: config::CacheGithubSection::default(),
@@ -22242,6 +22291,181 @@ lockfile = true
         );
         let _ = fs::remove_dir_all(root);
     }
+    #[test]
+    fn reviewers_render_in_declared_order_with_header() {
+        let config = format!(
+            "{DECLARED_SURFACE_CONFIG}\n\
+             [[reviewers]]\n\
+             pattern = \"*\"\n\
+             owners = [\"@tailrocks\"]\n\
+             [[reviewers]]\n\
+             pattern = \"/docs/**\"\n\
+             owners = [\"@tailrocks/docs-team\", \"docs@example.com\"]\n"
+        );
+        let root = declared_surface_repository("reviewers-order", &config, &[], &[]);
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(provider_set([ProviderId::GithubHosted])),
+                "main",
+            ),
+            "scan the declared surface",
+        );
+        let files = must(generated_files(&scanned.config), "generate");
+        let codeowners = must_some(
+            files.get(&PathBuf::from(crate::CODEOWNERS_PATH)),
+            "CODEOWNERS is emitted",
+        );
+        assert_eq!(
+            codeowners,
+            &format!(
+                "{GENERATED_HEADER}* @tailrocks\n/docs/** @tailrocks/docs-team docs@example.com\n"
+            ),
+            "CODEOWNERS must carry the generated header and one line per row"
+        );
+        assert!(
+            codeowners.find("* @tailrocks").unwrap_or(usize::MAX)
+                < codeowners.find("/docs/**").unwrap_or(0),
+            "row order is semantic under last-match-wins: {codeowners}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codeowners_static_file_row_is_refused() {
+        let root = temporary_repository("codeowners-reserved");
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            ),
+            "write manifest",
+        );
+        let mut config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan repository",
+        );
+        config.static_files.push(StaticFile {
+            path: crate::CODEOWNERS_PATH.to_owned(),
+            source: "x".to_owned(),
+            content: "* @evil\n".to_owned(),
+        });
+        let error = must_some(
+            generated_files(&config).err(),
+            "a passthrough row must not stand in for typed reviewers",
+        );
+        assert!(
+            error.to_string().contains(crate::CODEOWNERS_PATH),
+            "refusal must name the reserved path: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn zero_reviewer_rows_emit_no_codeowners() {
+        let root = temporary_repository("codeowners-absent");
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            ),
+            "write manifest",
+        );
+        let config = must(
+            scan_repository(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+            ),
+            "scan repository",
+        );
+        let files = must(generated_files(&config), "generate");
+        assert!(
+            !files.contains_key(&PathBuf::from(crate::CODEOWNERS_PATH)),
+            "reviewer assignment is opt-in: no rows, no file"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codeowners_hand_edit_blocks_regeneration() {
+        let config = format!(
+            "{DECLARED_SURFACE_CONFIG}\n\
+             [[reviewers]]\n\
+             pattern = \"*\"\n\
+             owners = [\"@tailrocks\"]\n"
+        );
+        let root = declared_surface_repository("codeowners-drift", &config, &[], &[]);
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(provider_set([ProviderId::GithubHosted])),
+                "main",
+            ),
+            "scan the declared surface",
+        );
+        let files = must(generated_files(&scanned.config), "generate");
+        must(
+            write_generated(&root, &files, false, false, false),
+            "write the generated tree",
+        );
+        let codeowners = root.join(crate::CODEOWNERS_PATH);
+        let tampered = format!(
+            "{}* @someone-else\n",
+            must(fs::read_to_string(&codeowners), "read CODEOWNERS")
+        );
+        must(fs::write(&codeowners, &tampered), "hand-edit CODEOWNERS");
+        let error = must_some(
+            write_generated(&root, &files, false, false, false).err(),
+            "a hand edit must block regeneration",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("manually modified generated file")
+                && error.to_string().contains(crate::CODEOWNERS_PATH),
+            "refusal must name the drifted file: {error}"
+        );
+        assert_eq!(
+            must(fs::read_to_string(&codeowners), "read preserved CODEOWNERS"),
+            tampered
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codeowners_render_is_deterministic() {
+        let config = format!(
+            "{DECLARED_SURFACE_CONFIG}\n\
+             [[reviewers]]\n\
+             pattern = \"*\"\n\
+             owners = [\"@tailrocks\"]\n"
+        );
+        let root = declared_surface_repository("codeowners-determinism", &config, &[], &[]);
+        let scanned = must(
+            scan_target(
+                &root,
+                Some(provider_set([ProviderId::GithubHosted])),
+                "main",
+            ),
+            "scan the declared surface",
+        );
+        let first = must(generated_files(&scanned.config), "generate once");
+        let second = must(generated_files(&scanned.config), "generate twice");
+        assert_eq!(
+            first.get(&PathBuf::from(crate::CODEOWNERS_PATH)),
+            second.get(&PathBuf::from(crate::CODEOWNERS_PATH)),
+            "repeated renders must be byte-identical"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[cfg(unix)]
     #[test]
     fn publish_failure_rolls_back_partial_installs() {
