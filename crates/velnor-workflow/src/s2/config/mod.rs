@@ -559,6 +559,13 @@ pub(crate) struct UnitSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pinned_lockfile: Option<bool>,
     tool_version: Option<String>,
+    /// The Rust channel this unit verifies under (for example `1.88.0` for an
+    /// MSRV leg), overriding the repository pin for this unit only. Rust units
+    /// only; a kind whose units span more than one channel renders one
+    /// provision leg per channel. A bare channel, never a command: verification
+    /// still runs the unit's typed checks as plain `cargo` invocations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toolchain: Option<String>,
     /// Workspace-wide `cargo check`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     workspace_check: Option<bool>,
@@ -1054,6 +1061,26 @@ impl UnitSection {
 
     pub(crate) fn tool_version(&self) -> Option<&str> {
         self.tool_version.as_deref()
+    }
+
+    pub(crate) fn toolchain(&self) -> Option<&str> {
+        self.toolchain.as_deref()
+    }
+
+    /// The row's declared channel, validated as a safe toolchain identifier.
+    /// Shared by validation and application so a row refused anywhere reports
+    /// the same error: apply runs before validate on real loads.
+    pub(crate) fn validated_toolchain(&self, id: &str) -> Result<Option<String>, GeneratorError> {
+        let Some(channel) = self.toolchain.as_deref() else {
+            return Ok(None);
+        };
+        if crate::s2::scan::rust::valid_toolchain_identifier(channel) {
+            Ok(Some(channel.to_owned()))
+        } else {
+            Err(GeneratorError::usage(format!(
+                "[[units]] {id} declares toolchain `{channel}`, which is not a safe toolchain identifier; use a channel such as `1.88.0` or `stable` without whitespace or shell metacharacters"
+            )))
+        }
     }
 
     pub(crate) fn workspace_check(&self) -> bool {
@@ -2128,6 +2155,18 @@ fn validate_units(
         if row.pr_commands.is_some() || row.full_commands.is_some() {
             return Err(GeneratorError::usage(format!(
                 "[[unit]] {id} declares command arrays; generation config is not a workflow programming language. Detected work uses typed capabilities; remove pr_commands and full_commands"
+            )));
+        }
+        row.validated_toolchain(id)?;
+        // A toolchain declaration on a row that declares a non-Rust kind is
+        // refused here; an override row may omit `kind`, so the resolved
+        // surface re-checks membership after application.
+        if row.toolchain().is_some()
+            && let Some(kind) = row.kind.as_deref()
+            && unit_kind_prefix(kind).is_some_and(|prefix| prefix != "rust")
+        {
+            return Err(GeneratorError::usage(format!(
+                "[[unit]] {id} declares kind `{kind}` with a Rust toolchain; `toolchain` applies to Rust units only"
             )));
         }
         if let Some(trust) = row.trust.as_deref() {
@@ -6193,5 +6232,80 @@ mod tests {
             "an escaping output must fail",
         );
         assert!(error.to_string().contains("normal form"), "{error}");
+    }
+
+    fn toolchain_row(id: &str, kind: Option<&str>, toolchain: &str) -> String {
+        let kind = kind.map_or_else(String::new, |kind| format!("\nkind = \"{kind}\""));
+        format!(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"{id}\"{kind}\ntoolchain = \"{toolchain}\"\n"
+        )
+    }
+
+    #[test]
+    fn toolchain_rows_validate_and_keep_their_channel() {
+        for channel in ["1.88.0", "stable", "nightly-2026-01-01"] {
+            let config = config_for(&toolchain_row("rust-msrv", Some("rust"), channel));
+            must(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "a bare channel validates",
+            );
+            assert_eq!(
+                must(
+                    config.units()[0].validated_toolchain("rust-msrv"),
+                    "validated channel",
+                )
+                .as_deref(),
+                Some(channel),
+            );
+        }
+    }
+
+    #[test]
+    fn toolchain_rows_refuse_unsafe_identifiers() {
+        // A literal newline cannot survive TOML parsing, so the parse layer
+        // refuses it before validation ever sees it.
+        for channel in ["1.88.0 $(rm -rf /)", "stable; echo hi", "nightly `id`", ""] {
+            let config = config_for(&toolchain_row("rust-msrv", Some("rust"), channel));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "an unsafe channel must fail",
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("not a safe toolchain identifier"),
+                "unexpected error for {channel:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn toolchain_rows_refuse_a_declared_non_rust_kind() {
+        let config = config_for(&toolchain_row("docs", Some("docs"), "1.88.0"));
+        let error = must_fail(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "a docs toolchain must fail",
+        );
+        assert!(
+            error.to_string().contains("applies to Rust units only"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn command_arrays_stay_refused() {
+        let config = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"rust-msrv\"\nkind = \"rust\"\ntoolchain = \"1.88.0\"\npr_commands = [\"cargo +1.88.0 check\"]\n",
+        );
+        let error = must_fail(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "command arrays must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("not a workflow programming language"),
+            "unexpected error: {error}"
+        );
     }
 }

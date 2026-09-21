@@ -278,6 +278,7 @@ pub(crate) fn guarded_rebuild_command(marker: &str, commands: &[String]) -> Stri
 /// enabled lane can execute.
 pub(crate) fn resolve(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
     validate_mbx_toggles(config)?;
+    validate_toolchain_membership(config)?;
     validate_product_graph(config)?;
     materialize_prerequisites(config)?;
     Ok(())
@@ -526,6 +527,24 @@ fn validate_mbx_toggles(config: &ProjectConfig) -> Result<(), GeneratorError> {
         if unit.kind != UnitKind::Rust && unit.mbx == Some(true) {
             return Err(GeneratorError::usage(format!(
                 "unit `{}` is a {} unit, which never runs under the object transport; `mbx` applies to Rust units only",
+                unit.id,
+                unit.kind.label(),
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A `toolchain` declaration on a non-Rust unit. Rows that declare a kind are
+/// refused at row validation; override rows may omit `kind`, so the resolved
+/// surface re-checks membership here, after application. Resolve runs before
+/// the pin stamp, so a toolchain on a non-Rust unit here is always declared,
+/// never stamped.
+fn validate_toolchain_membership(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    for unit in &config.units {
+        if unit.kind != UnitKind::Rust && unit.toolchain.is_some() {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` is a {} unit, which never provisions a Rust toolchain; `toolchain` applies to Rust units only",
                 unit.id,
                 unit.kind.label(),
             )));
@@ -931,6 +950,7 @@ mod tests {
             docs_reason: String::new(),
             docs: None,
             check_profiles: Vec::new(),
+            rust_pin: None,
             maintenance: MaintenanceSpec::default(),
             units,
             workflow_templates: BTreeMap::new(),
@@ -1474,5 +1494,37 @@ mod tests {
         let dir = prepare_scratch("failing");
         assert!(!run_prepare(&command, &dir, None), "failure propagates");
         assert!(dir.join("first").exists(), "earlier commands ran");
+    }
+
+    #[test]
+    fn resolve_rejects_toolchain_on_a_non_rust_unit() {
+        let mut docs = unit("docs", UnitKind::Docs);
+        docs.toolchain = Some(crate::s2::RustToolchain {
+            channel: "1.88.0".to_owned(),
+            components: Vec::new(),
+            targets: Vec::new(),
+            profile: None,
+        });
+        let error = must_err(
+            resolve(&mut project_config(vec![docs])),
+            "a docs toolchain must fail",
+        );
+        assert!(
+            error.to_string().contains("applies to Rust units only"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_accepts_toolchain_on_a_rust_unit() {
+        let mut rust = unit("rust-msrv", UnitKind::Rust);
+        rust.toolchain = Some(crate::s2::RustToolchain {
+            channel: "1.88.0".to_owned(),
+            components: Vec::new(),
+            targets: Vec::new(),
+            profile: None,
+        });
+        let mut config = project_config(vec![rust]);
+        must_ok(resolve(&mut config), "a rust toolchain must resolve");
     }
 }

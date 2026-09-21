@@ -941,6 +941,7 @@ mod tests {
             docs_reason: spec.reason.clone(),
             docs: Some(spec),
             check_profiles: Vec::new(),
+            rust_pin: None,
             maintenance: crate::s2::MaintenanceSpec::default(),
             units: Vec::new(),
             workflow_templates: BTreeMap::new(),

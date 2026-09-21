@@ -3530,6 +3530,7 @@ test "$publication_lock_retain" -eq 1
             docs_reason: String::new(),
             docs: None,
             check_profiles: Vec::new(),
+            rust_pin: None,
             maintenance: crate::s2::MaintenanceSpec::default(),
             units: Vec::new(),
             workflow_templates: BTreeMap::new(),
