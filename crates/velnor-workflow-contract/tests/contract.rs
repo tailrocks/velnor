@@ -84,13 +84,82 @@ fn the_generator_owns_every_current_workflow() {
 /// policy or publication authority.
 #[test]
 fn candidate_qualification_is_unprivileged_and_deterministic() {
-    let workflow = read(".github-gen/sources/workflows/candidate-qualification.yml");
-    assert!(workflow.contains("pull_request:"), "{workflow}");
-    assert!(workflow.contains("contents: read"), "{workflow}");
-    assert!(!workflow.contains("pull_request_target"), "{workflow}");
-    assert!(workflow.contains("persist-credentials: false"), "{workflow}");
-    assert!(workflow.contains("env -u GITHUB_TOKEN -u GH_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_TOKEN"), "{workflow}");
-    assert!(workflow.contains("diff -ru \"$candidate_root/one\" \"$candidate_root/two\""), "{workflow}");
+    let source = read(".github-gen/sources/workflows/candidate-qualification.yml");
+    let generated = read(".github/workflows/candidate-qualification.yml");
+    assert_eq!(
+        source, generated,
+        "the candidate workflow source was not copied byte-for-byte into the generated surface"
+    );
+
+    let events = top_level_block_text(&source, "on");
+    assert!(events.contains("  pull_request:"), "{events}");
+    assert_eq!(
+        events
+            .lines()
+            .filter(|line| line.starts_with("  ") && !line.starts_with("    "))
+            .count(),
+        1,
+        "candidate qualification must have exactly one trigger event: {events}"
+    );
+    for path in [
+        "crates/velnor-workflow/**",
+        ".github-gen/**",
+        ".github-gen/sources/workflows/candidate-qualification.yml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "rust-toolchain",
+        "rust-toolchain.toml",
+        ".cargo/**",
+    ] {
+        assert!(
+            events.contains(&format!("      - '{path}'")),
+            "candidate qualification does not trigger for `{path}`: {events}"
+        );
+    }
+    let concurrency = top_level_block_text(&source, "concurrency");
+    assert!(
+        concurrency.contains(
+            "group: candidate-qualification-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}"
+        ),
+        "candidate qualification must isolate cancellation by pull request: {concurrency}"
+    );
+    assert!(
+        concurrency.contains("cancel-in-progress: true"),
+        "candidate qualification must cancel superseded commits: {concurrency}"
+    );
+    assert!(!source.contains("pull_request_target"), "{source}");
+    assert!(!source.contains("workflow_run:"), "{source}");
+
+    let permissions = top_level_block_text(&source, "permissions");
+    assert_eq!(permissions, "  contents: read");
+    assert_eq!(source.matches("\npermissions:").count(), 1);
+    assert!(!source.contains("contents: write"), "{source}");
+    assert!(!source.contains("id-token: write"), "{source}");
+    assert!(!source.contains("actions: write"), "{source}");
+
+    assert!(source.contains("persist-credentials: false"), "{source}");
+    assert!(
+        source.contains("env -u GITHUB_TOKEN -u GH_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
+        "{source}"
+    );
+    assert!(
+        source.contains("candidate_root=\"$(mktemp -d)\""),
+        "{source}"
+    );
+    assert_eq!(
+        source
+            .matches("--force --output \"$candidate_root/")
+            .count(),
+        2
+    );
+    assert!(
+        source.contains("diff -ru \"$candidate_root/one\" \"$candidate_root/two\""),
+        "{source}"
+    );
+    assert!(
+        !source.contains("--output ."),
+        "candidate output must stay disposable: {source}"
+    );
 }
 
 /// The bootstrap composite action is repository-owned bytes under
