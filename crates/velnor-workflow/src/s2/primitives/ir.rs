@@ -2593,6 +2593,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one provider contract is exercised at facts and rendered-job levels"
+    )]
     fn local_provider_check_implies_policy_runtime() {
         const CHECK: &str = "cd -- 'crates/velnor-workflow' && mbx run -- --plain --check ../..";
         const OTHER: &str = "cargo test --locked";
@@ -2954,10 +2958,6 @@ mod tests {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one consumer contract pinned clause by clause"
-    )]
     #[test]
     fn plan_job_threads_expected_work_and_maps_no_work_outputs() {
         let ir = owner_test_ir("example/s4-plan", vec![rust_unit("rust", "crates/rust")]);

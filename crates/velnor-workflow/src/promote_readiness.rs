@@ -251,6 +251,13 @@ mod tests {
         }
     }
 
+    fn must_err<T, E>(result: Result<T, E>, context: &str) -> E {
+        match result {
+            Ok(_) => panic!("{context}: unexpectedly succeeded"),
+            Err(error) => error,
+        }
+    }
+
     #[test]
     fn complete_manifest_matches_exact_activation_identity() {
         assert!(valid_manifest()
@@ -292,14 +299,16 @@ mod tests {
     #[test]
     fn mismatched_identity_is_rejected() {
         let manifest = valid_manifest();
-        let error = manifest
-            .validate_for_activation(&"e".repeat(64), &REVISION.repeat(40), 100)
-            .expect_err("a different closure cannot activate");
+        let error = must_err(
+            manifest.validate_for_activation(&"e".repeat(64), &REVISION.repeat(40), 100),
+            "a different closure cannot activate",
+        );
         assert!(error.to_string().contains("does not match"));
 
-        let error = manifest
-            .validate_for_activation(&CLOSURE.repeat(64), &"e".repeat(40), 100)
-            .expect_err("a different revision cannot activate");
+        let error = must_err(
+            manifest.validate_for_activation(&CLOSURE.repeat(64), &"e".repeat(40), 100),
+            "a different revision cannot activate",
+        );
         assert!(error.to_string().contains("does not match"));
     }
 
@@ -337,8 +346,10 @@ mod tests {
         let bytes = br#"{"schema":"velnor-workflow.publication-readiness.v1","closure":"x","revision":"y","products":[],"extra":true}"#;
         std::fs::write(&path, bytes).unwrap_or_else(|error| panic!("write manifest: {error}"));
         let before = std::fs::read(&path).unwrap_or_else(|error| panic!("read fixture: {error}"));
-        let error = PublicationReadinessManifest::from_file(&path)
-            .expect_err("unknown fields are not part of the contract");
+        let error = must_err(
+            PublicationReadinessManifest::from_file(&path),
+            "unknown fields are not part of the contract",
+        );
         assert!(error.to_string().contains("invalid JSON"));
         assert_eq!(
             std::fs::read(&path).unwrap_or_else(|error| panic!("read fixture: {error}")),
