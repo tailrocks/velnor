@@ -4725,12 +4725,29 @@ fn render_docker_manifest_job(
         .join(",");
     let needs = needs.join(", ");
     format!(
-        "  image{suffix}:\n    if: ${{{{ always() && needs.verify.result == 'success' && needs.image-admission{suffix}.result == 'success' && (needs.image-platform{suffix}.result == 'success' || needs.image-platform{suffix}.result == 'skipped') }}}}\n    needs: [{needs}]\n    name: Assemble one multi-platform image\n    timeout-minutes: 15\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: write\n    outputs:\n      index_digest: ${{{{ steps.push.outputs.index_digest }}}}\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}      - name: Download platform digests\n        if: ${{{{ needs.image-admission{suffix}.outputs.existing != 'true' }}}}\n        uses: {download}\n        with:\n          pattern: image-platform{suffix}-*\n          path: image-artifacts{suffix}\n          merge-multiple: true\n      - name: Verify the complete platform digest set\n        if: ${{{{ needs.image-admission{suffix}.outputs.existing != 'true' }}}}\n        run: velnor-workflow release verify-digests --dir image-artifacts{suffix} --archs {arch_list}\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n{login_step}      - name: Assemble and inspect immutable image index\n        id: push\n        env:\n          IMAGE_ALREADY_EXISTS: ${{{{ needs.image-admission{suffix}.outputs.existing }}}}\n          EXPECTED_EXISTING_INDEX_DIGEST: ${{{{ needs.image-admission{suffix}.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          if [ \"$IMAGE_ALREADY_EXISTS\" = true ]; then\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n            [ \"$index_digest\" = \"$EXPECTED_EXISTING_INDEX_DIGEST\" ] || {{\n              echo \"::error::version tag moved from $EXPECTED_EXISTING_INDEX_DIGEST to $index_digest during admission\" >&2\n              exit 1\n            }}\n          else\n{reads}            docker buildx imagetools create \\\n              --tag \"${{GHCR_IMAGE}}:${{VERSION}}\" \\\n{sources}\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            jq -e{jq_args} '\n              {clauses}\n            ' image-digests.json >/dev/null || {{\n              echo \"::error::version tag does not reference the verified platform digests\" >&2\n              exit 1\n            }}\n            [ \"$(jq -r '[.manifest.manifests[] | select((.annotations[\"vnd.docker.reference.type\"] // \"\") != \"attestation-manifest\")] | length' image-digests.json)\" = \"{count}\" ] || {{\n              echo \"::error::version tag carries an unexpected platform set\" >&2\n              exit 1\n            }}\n          fi\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n          index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n          case \"$index_digest\" in\n            sha256:[0-9a-fA-F]*) ;;\n            *) echo \"::error::manifest inspection did not return an index digest\" >&2; exit 1 ;;\n          esac\n          printf 'index_digest=%s\\n' \"$index_digest\" >> \"$GITHUB_OUTPUT\"\n          printf '%s\\n' \"$index_digest\" > image-index.digest\n      - name: Upload image digests\n        uses: {upload}\n        with:\n          name: image-digests{suffix}\n          path: |\n            image-digests.json\n            image-index.digest\n          if-no-files-found: error\n          retention-days: 2\n",
+        "  image{suffix}:\n    if: ${{{{ always() && needs.release-verified.outputs.verify_result == 'success' && needs.image-admission{suffix}.result == 'success' && (needs.image-platform{suffix}.result == 'success' || needs.image-platform{suffix}.result == 'skipped') }}}}\n    needs: [{needs}]\n    name: Assemble one multi-platform image\n    timeout-minutes: 15\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: write\n    outputs:\n      index_digest: ${{{{ steps.push.outputs.index_digest }}}}\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.release-verified.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}      - name: Download platform digests\n        if: ${{{{ needs.image-admission{suffix}.outputs.existing != 'true' }}}}\n        uses: {download}\n        with:\n          pattern: image-platform{suffix}-*\n          path: image-artifacts{suffix}\n          merge-multiple: true\n      - name: Verify the complete platform digest set\n        if: ${{{{ needs.image-admission{suffix}.outputs.existing != 'true' }}}}\n        run: velnor-workflow release verify-digests --dir image-artifacts{suffix} --archs {arch_list}\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n{login_step}      - name: Assemble and inspect immutable image index\n        id: push\n        env:\n          IMAGE_ALREADY_EXISTS: ${{{{ needs.image-admission{suffix}.outputs.existing }}}}\n          EXPECTED_EXISTING_INDEX_DIGEST: ${{{{ needs.image-admission{suffix}.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          if [ \"$IMAGE_ALREADY_EXISTS\" = true ]; then\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n            [ \"$index_digest\" = \"$EXPECTED_EXISTING_INDEX_DIGEST\" ] || {{\n              echo \"::error::version tag moved from $EXPECTED_EXISTING_INDEX_DIGEST to $index_digest during admission\" >&2\n              exit 1\n            }}\n          else\n{reads}            docker buildx imagetools create \\\n              --tag \"${{GHCR_IMAGE}}:${{VERSION}}\" \\\n{sources}\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            jq -e{jq_args} '\n              {clauses}\n            ' image-digests.json >/dev/null || {{\n              echo \"::error::version tag does not reference the verified platform digests\" >&2\n              exit 1\n            }}\n            [ \"$(jq -r '[.manifest.manifests[] | select((.annotations[\"vnd.docker.reference.type\"] // \"\") != \"attestation-manifest\")] | length' image-digests.json)\" = \"{count}\" ] || {{\n              echo \"::error::version tag carries an unexpected platform set\" >&2\n              exit 1\n            }}\n          fi\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n          index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n          case \"$index_digest\" in\n            sha256:[0-9a-fA-F]*) ;;\n            *) echo \"::error::manifest inspection did not return an index digest\" >&2; exit 1 ;;\n          esac\n          printf 'index_digest=%s\\n' \"$index_digest\" >> \"$GITHUB_OUTPUT\"\n          printf '%s\\n' \"$index_digest\" > image-index.digest\n      - name: Upload image digests\n        uses: {upload}\n        with:\n          name: image-digests{suffix}\n          path: |\n            image-digests.json\n            image-index.digest\n          if-no-files-found: error\n          retention-days: 2\n",
         suffix = image.suffix,
         runner = selected_runner(config),
         image = yaml_scalar(image.image),
         count = arches.len(),
         login_step = docker_login_step(release),
+    )
+}
+
+/// The release unit aggregator: one job waits on `verify` plus every
+/// release unit lane and re-exports the tag gate the manifest jobs read.
+/// Without it each manifest job repeats the full unit fan-out in its own
+/// `needs` list, which pushes multi-image release files past GitHub's
+/// per-file size limit. The aggregator preserves the exact gate: unit
+/// lanes stay ordering-only (their results never block publication),
+/// while `verify_result`/`version` forward the tag gate verbatim.
+fn render_release_verified_job(config: &ProjectConfig, unit_job_ids: &[String]) -> String {
+    let mut needs = vec!["verify".to_owned()];
+    needs.extend(unit_job_ids.iter().cloned());
+    let needs = needs.join(", ");
+    format!(
+        "  release-verified:\n    name: Aggregate release unit results\n    if: ${{{{ always() }}}}\n    needs: [{needs}]\n    runs-on: {runner}\n    timeout-minutes: 5\n    outputs:\n      verify_result: ${{{{ needs.verify.result }}}}\n      version: ${{{{ needs.verify.outputs.version }}}}\n    steps:\n      - name: Export unit results\n        run: echo \"release unit lanes complete\"\n",
+        runner = selected_runner(config),
     )
 }
 
@@ -4741,18 +4758,18 @@ fn render_docker_manifest_job(
 /// per ref serializes publishers so a resume and a fresh publication can
 /// never interleave on the same tag. A multi-image contract renders one
 /// `-<name>` chain per `[[release.image]]` row in config order, each
-/// admission waiting on its `needs` tags; the scalar contract renders
-/// today's exact bytes.
+/// admission waiting on its `needs` tags. Every manifest job waits on the
+/// `release-verified` aggregator instead of repeating the unit fan-out.
 fn render_docker_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let (unit_jobs, unit_job_ids) = render_release_unit_jobs(config);
+    let verified = render_release_verified_job(config, &unit_job_ids);
     let chains = if release.images.is_empty() {
         let scalar = DockerImageView::scalar(release);
-        let mut manifest_needs = vec![
-            "verify".to_owned(),
+        let manifest_needs = vec![
+            "release-verified".to_owned(),
             "image-admission".to_owned(),
             "image-platform".to_owned(),
         ];
-        manifest_needs.extend(unit_job_ids);
         format!(
             "{admission}\n{platform}\n{manifest}",
             admission = render_docker_admission_job(config, release, &scalar, &[]),
@@ -4768,12 +4785,11 @@ fn render_docker_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
                 .iter()
                 .map(|dependency| format!("image-{dependency}"))
                 .collect::<Vec<_>>();
-            let mut manifest_needs = vec![
-                "verify".to_owned(),
+            let manifest_needs = vec![
+                "release-verified".to_owned(),
                 format!("image-admission{}", image.suffix),
                 format!("image-platform{}", image.suffix),
             ];
-            manifest_needs.extend(unit_job_ids.iter().cloned());
             chains.push_str(&render_docker_admission_job(
                 config,
                 release,
@@ -4793,10 +4809,11 @@ fn render_docker_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         chains
     };
     format!(
-        "{GENERATED_HEADER}name: Release\nrun-name: Release · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    tags: [{tags}]\n  workflow_dispatch:\n    inputs:\n      existing-image-digest:\n        description: Exact OCI index digest for an explicitly verified failed-run recovery.\n        type: string\n        required: false\n        default: ''\n\nconcurrency:\n  group: release-${{{{ github.ref }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n{verify}\n{unit_jobs}{chains}",
+        "{GENERATED_HEADER}name: Release\nrun-name: Release · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    tags: [{tags}]\n  workflow_dispatch:\n    inputs:\n      existing-image-digest:\n        description: Exact OCI index digest for an explicitly verified failed-run recovery.\n        type: string\n        required: false\n        default: ''\n\nconcurrency:\n  group: release-${{{{ github.ref }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n{verify}\n{unit_jobs}{verified}\n{chains}",
         tags = yaml_scalar(release_tag_pattern(release)),
         verify = render_docker_verify_job(config),
         unit_jobs = unit_jobs,
+        verified = verified,
         chains = chains,
     )
 }
@@ -6560,6 +6577,7 @@ cp "$record" "$out"
             reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
+            mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: crate::s2::config::CacheGithubSection::default(),
             velnor_host_cache: crate::s2::config::CacheVelnorSection::default(),
@@ -11931,7 +11949,7 @@ cp "$record" "$out"
         let release = rendered(&surface, "release.yml");
         assert_eq!(
             digest_of(&release),
-            "7053537dce0c51553a7e3ba0d6e5a657f8563d6ac75c6fbcd2a4cad39aaaf64e",
+            "e1f70f90b117a103207f8fc764366e81c2d053781dd59781b29a2f45aa595f3e",
             "the scalar docker render must stay byte-identical"
         );
         assert!(release.contains("  image-admission:\n"));
@@ -12049,6 +12067,58 @@ cp "$record" "$out"
             admission.contains("GHCR_IMAGE: \"example/node\""),
             "the admission gate must inspect the row's own tag:\n{admission}"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Manifest jobs wait on the `release-verified` aggregator instead of
+    /// repeating the full unit fan-out, keeping multi-image release files
+    /// under GitHub's per-file size limit without changing the gate.
+    #[test]
+    fn docker_manifest_waits_on_release_verified_aggregator() {
+        let root = scanned_root("release-verified-aggregator");
+        let config = config(&["release.yml"], Some(multi_image_docker_spec()));
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        let verified = yaml_job(&release, "release-verified");
+        let needs = yaml_job_needs(verified);
+        assert!(
+            needs.contains(&"verify".to_owned()),
+            "the aggregator must wait on the tag gate: {needs:?}"
+        );
+        assert!(
+            needs.iter().any(|need| need.starts_with("release-")),
+            "the aggregator must wait on every unit lane: {needs:?}"
+        );
+        assert!(
+            verified.contains("verify_result: ${{ needs.verify.result }}"),
+            "the aggregator must forward the tag result:\n{verified}"
+        );
+        for job in ["image-base", "image-node"] {
+            let manifest = yaml_job(&release, job);
+            let manifest_needs = yaml_job_needs(manifest);
+            assert!(
+                manifest_needs.contains(&"release-verified".to_owned()),
+                "{job} must wait on the aggregator: {manifest_needs:?}"
+            );
+            assert!(
+                !manifest_needs
+                    .iter()
+                    .any(|need| need.starts_with("release-github")),
+                "{job} must not repeat the unit fan-out: {manifest_needs:?}"
+            );
+            assert!(
+                manifest.contains("needs.release-verified.outputs.verify_result == 'success'"),
+                "{job} must read the tag gate from the aggregator:\n{manifest}"
+            );
+            assert!(
+                !manifest.contains("needs.verify.result"),
+                "{job} must not read the unwired verify result:\n{manifest}"
+            );
+            assert!(
+                manifest.contains("VERSION: ${{ needs.release-verified.outputs.version }}"),
+                "{job} must read the version from the aggregator:\n{manifest}"
+            );
+        }
         let _ = fs::remove_dir_all(root);
     }
 

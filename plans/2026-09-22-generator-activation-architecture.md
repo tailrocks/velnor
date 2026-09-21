@@ -3,9 +3,9 @@
 Status: active and incomplete. This is the authoritative execution record for
 the generator activation, policy validation, and CI artifact dependency work.
 Evidence was refreshed on 2026-09-22 against `origin/main` at
-`4dec6b9ec28b0d51cb370fd8f5d5401c6186adf0`; the local integration checkout is
-`b3b3c3cf38f9c71cf5dae75a2694bd2eb1bd31a0`; integration commits are listed
-below.
+`a850b255`; the reviewed implementation head is PR #1044 at
+`d4651cfbb5e61dac95804b9a877ded98ccfa423f`. Integration commits are listed
+below. This record remains active and incomplete.
 
 ## Structural causes
 
@@ -63,10 +63,12 @@ runner polling loop.
 | Work | State and disposition |
 | --- | --- |
 | Incident recovery pin bump in #1038 | Merged and CI-verified; recovery only, not architecture proof. |
-| Existing local `promote` transaction | Preserved; publication-readiness validation is being added at its existing gate. No duplicate promotion mechanism. |
+| Existing local `promote` transaction | Preserved; publication-readiness validation is enforced at its existing gate. No duplicate promotion mechanism. |
 | `ci-runtime-products.yml` | Reused as an existing publication surface for investigation; its current lifecycle is not yet accepted as complete activation proof. |
 | #978, #979, #980 drafts | Inspected; overlapping or unresolved bootstrap/prospective-main designs. None is treated as an implementation or merge authority. |
-| Candidate-rendered PR exception and guessed `ci-pr.yml` acquisition | Superseded in the active source paths; generated consumers still require regeneration and hosted proof. |
+| Candidate-rendered PR exception and guessed `ci-pr.yml` acquisition | Superseded in the active source paths. The checked-in generated consumers still come from the old active pin until activation, so hosted proof must cover the regenerated activation increment. |
+| Candidate qualification lane in `d4651cf` | Implemented as an active-rendered static workflow that builds the candidate and renders twice into disposable directories without candidate credentials. It is a qualification surface, not yet proof of restricted execution, trusted verdict authority, or publication. |
+| `f7a73dc` staging attempt | Reverted by `d4651cf`; it changed active-generated configuration before a runtime product was published and exposed the old consumer's guessed-producer path. It remains failure evidence, not an accepted activation. |
 
 ## Evidence and timing
 
@@ -78,6 +80,8 @@ runner polling loop.
 | Current main baseline | CI Main run `35629948234` | About 18m30s wall; Docker job about 788s and runtime publication about 597s. This remains a performance violation against the 120s requirement. |
 | Foundation PR Policy | [run 35641013363](https://github.com/tailrocks/velnor/actions/runs/35641013363) | Passed in 29s at `cf2e236`; the active renderer validated the active tree without candidate acquisition. |
 | Cache-proof PR Policy | [run 35643201030](https://github.com/tailrocks/velnor/actions/runs/35643201030) | Passed in 25s at `04c520d8`. The checked-in workflow is still rendered by the old active pin and executed its legacy candidate-acquisition step, so this is recovery evidence only. |
+| Invalid staging activation | [Policy run 35650532054](https://github.com/tailrocks/velnor/actions/runs/35650532054) and [CI / PR run 35650535124](https://github.com/tailrocks/velnor/actions/runs/35650535124) | `f7a73dc` failed in about 1m52s: the staged configuration was invalid for the planning workflow, and the old generated Policy path then attempted candidate acquisition with no same-repository producer. This demonstrates why candidate output and active configuration cannot be advanced before publication. The change was reverted. |
+| Static qualification implementation | [Policy run 35650881892](https://github.com/tailrocks/velnor/actions/runs/35650881892) | Passed in 27s at `d4651cf`. The active-pinned generated tree matched, so the legacy acquisition step short-circuited; this proves active-tree recovery only. GitHub emitted no candidate-qualification run for this introducing PR SHA, so hosted qualification scheduling and first-deployment behavior remain unproven. |
 | Foundation final-SHA CI | [run 35641107449](https://github.com/tailrocks/velnor/actions/runs/35641107449) | Cancelled after two jobs were stuck far beyond 120s: `Set up Mr. Boxington` and `Clippy check`. This is retained as a hosted performance failure, not a green verification. |
 | Artifact-fanout regression | [run 35647988900](https://github.com/tailrocks/velnor/actions/runs/35647988900) | Planning finalized artifact `10661426022`; two consumers received Results-service intermediary HTTP 403 while peers downloaded the identical artifact. This proves the per-consumer artifact fanout was a structural availability defect. |
 | Fanout-free source check | [run 35649490883](https://github.com/tailrocks/velnor/actions/runs/35649490883) | All completed formerly affected download lanes passed. The run later failed only from runner-priority cancellation; it is not activation or performance acceptance evidence. |
@@ -99,6 +103,11 @@ speedup.
 - PR #1044 additionally contains `8f3e636`, `09fb262`, `cf63bde`, and
   `2d9bd07`: static activation-workflow ownership, removal of active-runtime
   artifact fanout, readiness lint proof, and current-main integration.
+- PR #1044 at `d4651cf` adds a static candidate-qualification workflow. It
+  builds the proposed renderer in the pull-request worker, renders twice into
+  disposable trees, and compares those trees without changing the active
+  generated tree. The workflow does not yet establish a hard network/filesystem
+  sandbox or an independently controlled required-verdict authority.
 - Transportable same-run prerequisites now require producer `success`; a
   skipped, failed, or cancelled producer cannot unlock a consumer-side rebuild.
 - The setup action now refreshes and attests the immutable release manifest on
@@ -122,13 +131,14 @@ speedup.
   machine and complete event/platform/trust validation are not yet proven over
   every active path. Static graph checks must reject cycles, producer-less
   requirements, and impossible event/platform edges before execution.
-- Implement the restricted candidate qualification lane and separately
-  controlled publisher. No candidate qualification lane currently exists;
-  removal of unsafe acquisition is not candidate proof. Verify builder identity, approved revision, build
-  inputs, artifact digest, platform/profile/features, run/attempt, retention,
-  revocation, complete-manifest visibility, concurrent publishers, and
-  rollback. Local manifest validation alone does not establish hosted
-  publication trust.
+- Harden and connect the candidate qualification lane and separately
+  controlled publisher. The static lane exists, but its introducing PR had no
+  emitted hosted qualification run, and its current worker restrictions do not
+  prove hard network/filesystem isolation. Verify builder identity, approved
+  revision, build inputs, artifact digest, platform/profile/features,
+  run/attempt, retention, revocation, complete-manifest visibility, concurrent
+  publishers, and rollback. Local manifest validation alone does not establish
+  hosted publication trust.
 - Regenerate all active consumers through the pinned toolchain, prove a clean
   second generation pass, and remove every obsolete polling/permissive path.
 - Establish a trusted required-verdict authority that a PR cannot replace or
