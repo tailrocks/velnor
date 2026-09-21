@@ -651,13 +651,31 @@ impl RunnerSpec {
                 "{}:{BUILDKIT_CACHE_DIR}",
                 self.state_dir.join("buildkit-cache").display()
             ),
+            "--volume".to_string(),
+            format!(
+                "{}:/var/lib/apt/lists",
+                self.state_dir
+                    .parent()
+                    .unwrap_or(&self.state_dir)
+                    .join("apt/lists")
+                    .display()
+            ),
+            "--volume".to_string(),
+            format!(
+                "{}:/var/cache/apt/archives",
+                self.state_dir
+                    .parent()
+                    .unwrap_or(&self.state_dir)
+                    .join("apt/archives")
+                    .display()
+            ),
         ];
         args.extend(self.identity.label_args(ROLE_RUNNER));
         args.push("--".to_string());
         args.push(self.image.reference().to_string());
         args.push("sh".to_string());
         args.push("-c".to_string());
-        args.push("sudo mkdir -p /home/runner/_work /opt/hostedtoolcache && sudo chown -R runner:runner /home/runner/_work /opt/hostedtoolcache && sudo chmod 0777 /home/runner/_work /opt/hostedtoolcache && (command -v gh >/dev/null 2>&1 || (arch=$(uname -m); [ \"$arch\" = \"aarch64\" ] && gh_arch=\"arm64\" || gh_arch=\"amd64\"; curl -fsSL \"https://github.com/cli/cli/releases/download/v2.101.0/gh_2.101.0_linux_${gh_arch}.tar.gz\" | sudo tar -xz -C /usr/local/bin --strip-components=2 \"gh_2.101.0_linux_${gh_arch}/bin/gh\" 2>/dev/null || true)) && (command -v cargo >/dev/null 2>&1 || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable 2>/dev/null && sudo ln -sf /home/runner/.cargo/bin/* /usr/local/bin/ || true)) && (command -v mise >/dev/null 2>&1 || (curl -fsSL https://mise.run | sh 2>/dev/null && sudo ln -sf /home/runner/.local/bin/mise /usr/local/bin/mise || true)) && exec /home/runner/run.sh".to_string());
+        args.push("sudo mkdir -p /home/runner/_work /opt/hostedtoolcache && sudo chown -R runner:runner /home/runner/_work /opt/hostedtoolcache && sudo chmod 0777 /home/runner/_work /opt/hostedtoolcache && (command -v gh >/dev/null 2>&1 || (arch=$(uname -m); [ \"$arch\" = \"aarch64\" ] && gh_arch=\"arm64\" || gh_arch=\"amd64\"; curl -fsSL \"https://github.com/cli/cli/releases/download/v2.101.0/gh_2.101.0_linux_${gh_arch}.tar.gz\" | sudo tar -xz -C /usr/local/bin --strip-components=2 \"gh_2.101.0_linux_${gh_arch}/bin/gh\" 2>/dev/null || true)) && (command -v cargo >/dev/null 2>&1 || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable 2>/dev/null && sudo ln -sf /home/runner/.cargo/bin/* /usr/local/bin/ || true)) && (command -v mise >/dev/null 2>&1 || (curl -fsSL https://mise.run | sh 2>/dev/null && sudo ln -sf /home/runner/.local/bin/mise /usr/local/bin/mise || true)) && (ldconfig -p | grep -q libatomic || (sudo apt-get install -y --no-install-recommends build-essential libatomic1 2>/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends build-essential libatomic1 2>/dev/null || true))) && exec /home/runner/run.sh".to_string());
         args
     }
 }
