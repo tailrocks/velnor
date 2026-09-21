@@ -20892,9 +20892,19 @@ lockfile = true
         )
         .1;
         let save = must_some(kind.find("name: Save unit cache"), "cargo save step");
-        let save_body = &kind[save..];
-        assert!(save_body.contains("if: always() &&"));
-        assert!(save_body.contains("steps.cache.outputs.cache-hit != 'true'"));
+        let save_if = must_some(
+            kind[save..]
+                .lines()
+                .nth(1)
+                .map(str::trim)
+                .filter(|line| line.starts_with("if: ")),
+            "unit cache save condition directly follows its step name",
+        );
+        assert_eq!(
+            save_if,
+            "if: ${{ inputs.cache_key_files != '' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}",
+            "cache save must require non-empty caller inputs, preserve post-failure cleanup, accept only trusted main/schedule/dispatch events, and skip exact hits"
+        );
     }
 
     #[test]

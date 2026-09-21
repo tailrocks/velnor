@@ -2200,6 +2200,10 @@ mod tests {
             workflow.contains("-swift-${{ hashFiles(inputs.cache_key_files) }}"),
             "swift cache keeps the kind-level key segment: {workflow}"
         );
+        assert!(
+            workflow.contains("if: ${{ inputs.cache_key_files != '' }}"),
+            "swift cache skips valid default-empty cache inputs: {workflow}"
+        );
     }
 
     #[test]
@@ -7923,6 +7927,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let gated = |block: String, coverage: FeatureCoverage, input: &str| -> String {
             prefix_step_block_with_if(&block, coverage.gate(input).as_deref())
         };
+        // Reusable workflows accept empty cache inputs for valid callers that
+        // have no dependency bundle. Coverage alone cannot guard those calls:
+        // a kind whose declared members all cache still receives the reusable
+        // workflow's default-empty inputs in other callers.
+        let cache_gated = |block: String, coverage: FeatureCoverage, input: &str| -> String {
+            let gate = coverage
+                .gate(input)
+                .unwrap_or_else(|| format!("inputs.{input} != ''"));
+            prefix_step_block_with_if(&block, Some(&gate))
+        };
 
         // The pinned policy runtime for units that run the generator's own
         // `--check`: hosted lanes carry it in the Planning runtime artifact,
@@ -8104,7 +8118,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 self.pins.cache_restore,
                 provider_input::expression(provider_input::CACHE_PATHS),
             );
-            output.push_str(&gated(block, bundle, provider_input::CACHE_KEY_FILES));
+            output.push_str(&cache_gated(block, bundle, provider_input::CACHE_KEY_FILES));
         }
         render_ci_cache_prep_end_marker(output);
 
@@ -8281,7 +8295,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 self.pins.cache_save,
                 provider_input::expression(provider_input::CACHE_PATHS),
             );
-            output.push_str(&gated(block, bundle, provider_input::CACHE_KEY_FILES));
+            output.push_str(&cache_gated(block, bundle, provider_input::CACHE_KEY_FILES));
         }
         render_ci_cleanup_end_marker(output);
         let report = members
