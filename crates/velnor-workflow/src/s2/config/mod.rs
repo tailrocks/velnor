@@ -1168,6 +1168,9 @@ impl UnitSection {
                 outputs: product.outputs.clone().unwrap_or_default(),
                 inputs: product.inputs.clone().unwrap_or_default(),
                 inputs_unknown: Vec::new(),
+                // Declared rows cannot claim a digest: only the scanner
+                // computes one, over bytes it actually read.
+                inputs_digest: None,
             });
         }
         Ok(products)

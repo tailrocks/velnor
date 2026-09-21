@@ -59,9 +59,20 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
   `.swift-version` / `.xcode-version` key boundary, retention
   recognizes `swift-` keys in `unit-caches`; both layers share the
   kind-level `swift` key segment until callees partition by
-  purpose; 5 new tests, lib 1899 green). 4b exact native-product
-  identity (transitive input digest + per-file output manifest +
-  validation); 4c staging + binding-drift check before install;
+  purpose; 5 new tests, lib 1899 green). 4b-i done (`89bee89d`):
+  transitive Rust path-closure walker emits validated glob
+  `inputs` + toolchain/lockfile pins into `NamedProduct`
+  `inputs`/`inputs_unknown` at join time; unknown build-script or
+  out-of-repo inputs fail closed; 10 new tests, lib 1909 green.
+  4b-ii done: `InputsFacts.sources` extends the prepared-tool
+  digest to closure bytes (golden pin proves empty-sources
+  backward compat); scan expands closure globs over tracked
+  files and stores hex `inputs_digest` on producer/product
+  (`None` + diagnostic on gaps); `resolve` rejects malformed
+  digests and digest-with-gaps; transitive edit invalidates,
+  consumer-only edit preserves; 8 new tests, lib 1917 green.
+  4b-iii next: per-file output manifest + validation; 4c
+  staging + binding-drift check before install;
   4d verified cross-job artifact transport; 4e per-layer
   cache-state reporting (`snapshot.rs`). Follow-ups: `.build`
   intermediates need multi-layer cache support; scoped
@@ -74,7 +85,8 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
 ## Continue
 
 1. `git checkout integrate/apple-ci-s2`; `cargo test -p velnor-workflow`.
-2. Next edit surface: 4b exact native-product identity —
-   `s2/platform.rs` (identity/output manifest), `s2/scan/rust.rs`
-   (input closure facts).
+2. Next edit surface: 4b-iii per-file output manifest —
+   `s2/platform.rs` (expected output set + digests),
+   `s2/primitives/prepared_tools.rs` (reuse `ToolManifest`
+   verification for composite native products).
 3. Keep one branch per repo; merge main in, never rebase; `git commit -s`.

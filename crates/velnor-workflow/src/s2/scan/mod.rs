@@ -200,6 +200,7 @@ fn wire_native_edge(
                 outputs: vec![producer.output.clone()],
                 inputs: producer.inputs.clone(),
                 inputs_unknown: producer.inputs_unknown.clone(),
+                inputs_digest: producer.inputs_digest.clone(),
             });
     }
     shape.units[consumer_index]

@@ -30,7 +30,10 @@ use crate::s2::{GeneratorError, ProjectConfig, Unit, UnitKind};
 /// globs: manifests, sources, build scripts, and configuration whose bytes
 /// feed the rebuild. `inputs_unknown` names closure gaps the scanner could
 /// not resolve; an empty list means the closure is complete, and exact reuse
-/// must stay disabled while any gap remains.
+/// must stay disabled while any gap remains. `inputs_digest` is the
+/// generator-computed SHA-256 over the expanded closure bytes (the
+/// prepared-tool inputs digest with closure sources); `Some` only on a
+/// complete closure, `None` otherwise.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub(crate) struct NamedProduct {
     pub(crate) name: String,
@@ -44,6 +47,8 @@ pub(crate) struct NamedProduct {
     pub(crate) inputs: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) inputs_unknown: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) inputs_digest: Option<String>,
 }
 
 /// One prerequisite edge: `producer` builds `product` for this consumer.
@@ -216,7 +221,8 @@ pub(crate) fn resolve(config: &mut ProjectConfig) -> Result<(), GeneratorError> 
 /// Validate the product graph before compilation: every declared output is a
 /// normal-form repo-relative path claimed by exactly one product, every
 /// declared input is a normal-form path or glob without duplicates, closure
-/// gaps stay printable diagnostics, no unit requires its own product, and the
+/// gaps stay printable diagnostics, a claimed inputs digest is a hex SHA-256
+/// on a gap-free closure, no unit requires its own product, and the
 /// consumer-to-producer edges are acyclic. Unknown producers and products
 /// stay `materialize_prerequisites` errors, which already name the known
 /// units and offered products.
@@ -243,6 +249,20 @@ fn validate_product_graph(config: &ProjectConfig) -> Result<(), GeneratorError> 
                 if !valid_env_value(gap) {
                     return Err(GeneratorError::usage(format!(
                         "unit `{}` declares product `{}` with an unprintable closure gap; keep gap entries to printable text",
+                        unit.id, product.name,
+                    )));
+                }
+            }
+            if let Some(digest) = product.inputs_digest.as_deref() {
+                if !crate::s2::primitives::prepared_tools::is_digest(digest) {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` declares product `{}` with inputs digest `{digest}`, which is not a lowercase hex SHA-256; digests are generator-computed and cannot be declared by hand",
+                        unit.id, product.name,
+                    )));
+                }
+                if !product.inputs_unknown.is_empty() {
+                    return Err(GeneratorError::usage(format!(
+                        "unit `{}` declares product `{}` with both an inputs digest and closure gaps; a digest over an incomplete closure would be a false identity",
                         unit.id, product.name,
                     )));
                 }
@@ -623,6 +643,7 @@ mod tests {
             outputs: Vec::new(),
             inputs: Vec::new(),
             inputs_unknown: Vec::new(),
+            inputs_digest: None,
         };
         let plain = Prerequisite {
             producer: "rust-ffi".to_owned(),
@@ -667,6 +688,7 @@ mod tests {
         NamedProduct {
             inputs: Vec::new(),
             inputs_unknown: Vec::new(),
+            inputs_digest: None,
             name: name.to_owned(),
             task: Some(format!("build-{name}")),
             env: BTreeMap::new(),
@@ -839,6 +861,52 @@ mod tests {
         assert!(
             error.to_string().contains("unprintable closure gap"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_malformed_inputs_digest() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.inputs_digest = Some("not-a-digest".to_owned());
+        producer.products = vec![ffi];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer])),
+            "malformed digest fails closed",
+        );
+        assert!(
+            error.to_string().contains("not-a-digest"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_digest_with_closure_gaps() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.inputs_unknown = vec!["build script reads the network".to_owned()];
+        ffi.inputs_digest = Some("e".repeat(64));
+        producer.products = vec![ffi];
+        let error = must_err(
+            resolve(&mut project_config(vec![producer])),
+            "digest over gaps fails closed",
+        );
+        assert!(
+            error.to_string().contains("false identity"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_accepts_digest_on_gap_free_product() {
+        let mut producer = unit("rust-ffi", UnitKind::Rust);
+        let mut ffi = product("xcframework", &["native/out/lib.xcframework"]);
+        ffi.inputs = vec!["libs/ffi/**/*.rs".to_owned()];
+        ffi.inputs_digest = Some("e".repeat(64));
+        producer.products = vec![ffi];
+        must_ok(
+            resolve(&mut project_config(vec![producer])),
+            "digest on complete closure resolves",
         );
     }
 

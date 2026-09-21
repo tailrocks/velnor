@@ -5,6 +5,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use globset::{Glob, GlobSetBuilder};
+
 use super::file_walk::{
     files_named, has_extension, join_repo_path, path_prefix, resolve_repo_path,
 };
@@ -1229,6 +1231,10 @@ pub(crate) struct BoltffiProducer {
     pub(crate) inputs: Vec<String>,
     /// Closure gaps the scan could not resolve; empty means complete.
     pub(crate) inputs_unknown: Vec<String>,
+    /// The exact inputs digest over the expanded closure bytes, or `None`
+    /// when `inputs_unknown` is nonempty: exact reuse without a complete
+    /// contract would be a false identity.
+    pub(crate) inputs_digest: Option<String>,
 }
 
 /// The `boltffi.toml` fields the producer join reads. Everything else in the
@@ -1423,6 +1429,56 @@ pub(crate) fn native_input_closure(
     Ok((inputs, gaps))
 }
 
+/// Adapter operation identity bound into the product inputs digest. The
+/// typed execution recipe (Increment 4c) supersedes this label; until then it
+/// distinguishes a `BoltFFI` Apple pack from any future adapter sharing a
+/// source closure.
+const BOLTFFI_APPLE_RECIPE: &str = "boltffi:pack:apple";
+
+/// Expand validated closure patterns against tracked files and read the
+/// matched bytes. A pattern matching nothing contributes nothing (like
+/// `hashFiles`); deleting the last match still changes the digest because the
+/// file's `source` line disappears. Only tracked files participate: the
+/// digest identifies the merge candidate CI checks out, not local untracked
+/// state. An unreadable match fails the scan — a digest over unknown bytes
+/// would be a false identity.
+///
+/// # Errors
+/// Returns a usage error for a pattern that does not compile, or an I/O
+/// error naming the matched file that cannot be read.
+fn closure_sources(
+    root: &Path,
+    files: &[String],
+    inputs: &[String],
+    manifest_path: &str,
+) -> Result<Vec<(String, Vec<u8>)>, GeneratorError> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in inputs {
+        let glob = Glob::new(pattern).map_err(|error| {
+            GeneratorError::usage(format!(
+                "BoltFFI manifest {manifest_path} produced input `{pattern}`, which is not a valid glob: {error}"
+            ))
+        })?;
+        builder.add(glob);
+    }
+    let set = builder.build().map_err(|error| {
+        GeneratorError::usage(format!(
+            "BoltFFI manifest {manifest_path} inputs could not be compiled: {error}"
+        ))
+    })?;
+    let mut sources = Vec::new();
+    for file in files {
+        if !set.is_match(file) {
+            continue;
+        }
+        let path = root.join(file);
+        let bytes = std::fs::read(&path)
+            .map_err(|error| GeneratorError::io("read closure input", &path, &error))?;
+        sources.push((file.clone(), bytes));
+    }
+    Ok(sources)
+}
+
 /// Parse one `boltffi.toml` into a producer, pushing a diagnostic and
 /// returning `Ok(None)` when the manifest cannot yield a joinable edge.
 /// I/O and closure errors propagate because they may hide a real producer.
@@ -1492,6 +1548,25 @@ fn boltffi_producer_from_manifest(
         &root,
         std::slice::from_ref(manifest_path),
     )?;
+    let inputs_digest = if inputs_unknown.is_empty() {
+        let sources = closure_sources(context.root, context.files, &inputs, manifest_path)?;
+        Some(crate::s2::primitives::prepared_tools::inputs_digest(
+            &crate::s2::primitives::prepared_tools::InputsFacts {
+                // Lockfiles and toolchain pins ride `sources` as raw bytes,
+                // which subsumes the parsed lock/toolchain facts.
+                locks: Vec::new(),
+                sources,
+                recipe: vec![BOLTFFI_APPLE_RECIPE.to_owned()],
+                toolchain: Vec::new(),
+            },
+        ))
+    } else {
+        diagnostics.push(format!(
+            "BoltFFI manifest {manifest_path} has an incomplete input closure ({}); no exact inputs digest was computed and the product cannot be reused exactly.",
+            inputs_unknown.join(", "),
+        ));
+        None
+    };
     Ok(Some(BoltffiProducer {
         manifest: manifest_path.to_owned(),
         root,
@@ -1503,6 +1578,7 @@ fn boltffi_producer_from_manifest(
         unit: None,
         inputs,
         inputs_unknown,
+        inputs_digest,
     }))
 }
 

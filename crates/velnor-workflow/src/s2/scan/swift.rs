@@ -1990,6 +1990,150 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    fn digest_fixture(extra: &[(&str, &str)]) -> std::path::PathBuf {
+        let package = native_package(
+            ".binaryTarget(path: \"../../target/xcframework/BridgeCore.xcframework\")",
+        );
+        let mut entries = vec![
+            ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
+            (
+                "libs/bridge-ffi/Cargo.toml",
+                "[package]\nname = \"bridge-core-ffi\"\nversion = \"0.1.0\"\n\n[dependencies]\nsibling = { path = \"../sibling\" }\n",
+            ),
+            ("libs/bridge-ffi/src/lib.rs", "pub fn bridge() {}\n"),
+            (
+                "libs/sibling/Cargo.toml",
+                "[package]\nname = \"sibling\"\nversion = \"0.1.0\"\n",
+            ),
+            ("libs/sibling/src/lib.rs", "pub fn sibling() {}\n"),
+            ("rust-toolchain.toml", NATIVE_TOOLCHAIN),
+            ("clients/desktop/Package.swift", package.as_str()),
+            (
+                "clients/desktop/Sources/Bridge/Bridge.swift",
+                "public func greet() {}\n",
+            ),
+        ];
+        entries.extend_from_slice(extra);
+        // `native_fixture` takes `&str` contents; leak nothing by building
+        // owned pairs through a scratch vector of owned strings.
+        let owned: Vec<(String, String)> = entries
+            .iter()
+            .map(|(path, contents)| ((*path).to_owned(), (*contents).to_owned()))
+            .collect();
+        let borrowed: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(path, contents)| (path.as_str(), contents.as_str()))
+            .collect();
+        native_fixture(&borrowed)
+    }
+
+    fn producer_product_digest(shape: &super::super::RepositoryShape) -> Option<String> {
+        shape
+            .units
+            .iter()
+            .find(|unit| unit.id == "rust-libs-bridge-ffi" || unit.id.starts_with("rust-bridge"))
+            .and_then(|producer| producer.products.first())
+            .and_then(|product| product.inputs_digest.clone())
+    }
+
+    fn is_hex_digest(value: &str) -> bool {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    }
+
+    #[test]
+    fn native_join_computes_inputs_digest() {
+        let root = digest_fixture(&[]);
+        let shape = scan_native(&root);
+        let digest = must_some(
+            producer_product_digest(&shape),
+            "producer product carries a digest",
+        );
+        assert!(is_hex_digest(&digest), "digest is hex SHA-256: {digest}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_digest_invalidates_on_transitive_source_edit() {
+        let root = digest_fixture(&[]);
+        let before = must_some(
+            producer_product_digest(&scan_native(&root)),
+            "digest before edit",
+        );
+        must_some(
+            std::fs::write(
+                root.join("libs/sibling/src/lib.rs"),
+                "pub fn sibling2() {}\n",
+            )
+            .ok(),
+            "rewrite transitive source",
+        );
+        let after = must_some(
+            producer_product_digest(&scan_native(&root)),
+            "digest after edit",
+        );
+        assert_ne!(before, after, "transitive edit must invalidate the digest");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_digest_ignores_consumer_only_edit() {
+        let root = digest_fixture(&[]);
+        let before = must_some(
+            producer_product_digest(&scan_native(&root)),
+            "digest before edit",
+        );
+        must_some(
+            std::fs::write(
+                root.join("clients/desktop/Sources/Bridge/Bridge.swift"),
+                "public func greet2() {}\n",
+            )
+            .ok(),
+            "rewrite consumer source",
+        );
+        let after = must_some(
+            producer_product_digest(&scan_native(&root)),
+            "digest after edit",
+        );
+        assert_eq!(before, after, "consumer-only edit must preserve the digest");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_digest_absent_on_closure_gap() {
+        let root = digest_fixture(&[(
+            "libs/bridge-ffi/Cargo.toml",
+            "[package]\nname = \"bridge-core-ffi\"\nversion = \"0.1.0\"\n\n[dependencies]\nghost = { path = \"../ghost\" }\n",
+        )]);
+        // The duplicate Cargo.toml entry wins by write order: the ghost
+        // dependency has no tracked manifest, so the closure stays open.
+        let shape = scan_native(&root);
+        let producer = must_some(
+            shape.units.iter().find(|unit| {
+                unit.id == "rust-libs-bridge-ffi" || unit.id.starts_with("rust-bridge")
+            }),
+            "rust producer unit",
+        );
+        let product = must_some(producer.products.first(), "producer product");
+        assert!(
+            !product.inputs_unknown.is_empty(),
+            "gaps recorded: {:?}",
+            product.inputs_unknown
+        );
+        assert_eq!(product.inputs_digest, None);
+        assert!(
+            shape
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("no exact inputs digest")),
+            "{:?}",
+            shape.limitations
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn xcode_scheme_unit_caches_intermediates_with_toolchain_pins() {
         let root = native_fixture(&[(
