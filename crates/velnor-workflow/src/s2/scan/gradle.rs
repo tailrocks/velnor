@@ -742,6 +742,7 @@ include(":real")
             &std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
             "main",
             &[],
+            &crate::s2::scan::rust::AppleNativePolicy::default(),
         )
         .unwrap();
         let app = shape
@@ -798,6 +799,7 @@ jooqCodegen(libs.postgresql)
             &std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
             "main",
             &[],
+            &crate::s2::scan::rust::AppleNativePolicy::default(),
         )
         .unwrap();
         let domain = shape
@@ -918,6 +920,7 @@ flyway { url = datasourceUrl }
             &std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
             "main",
             &[],
+            &crate::s2::scan::rust::AppleNativePolicy::default(),
         )
         .unwrap();
         let domain = shape

@@ -125,6 +125,10 @@ pub(crate) struct RepoGenerationConfig {
     /// `.github/ci/project.toml`.
     #[serde(default)]
     cache: CacheRootSection,
+    /// Generator-only native-pack policy. Skipped while empty so the
+    /// canonical form of a repository without native overrides is unchanged.
+    #[serde(default, skip_serializing_if = "NativeRootSection::is_empty")]
+    native: NativeRootSection,
 }
 
 /// GitHub Actions cache account retention (`[cache.github]`). Governs
@@ -154,6 +158,35 @@ struct CacheRootSection {
     github: CacheGithubSection,
     #[serde(default)]
     velnor: CacheVelnorSection,
+}
+
+/// The Apple native-pack policy (`[native.apple]`). The Cargo profile the
+/// `BoltFFI` pack passes through `--cargo-arg`; absent keeps `BoltFFI`'s own
+/// default. Generator-only: never serialized into `.github/ci/project.toml`.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeAppleSection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cargo_profile: Option<String>,
+}
+
+impl NativeAppleSection {
+    fn is_empty(&self) -> bool {
+        self.cargo_profile.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeRootSection {
+    #[serde(default, skip_serializing_if = "NativeAppleSection::is_empty")]
+    apple: NativeAppleSection,
+}
+
+impl NativeRootSection {
+    fn is_empty(&self) -> bool {
+        self.apple.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -1587,6 +1620,11 @@ impl RepoGenerationConfig {
     /// Velnor host cache budget overrides from `[cache.velnor]`.
     pub(crate) fn cache_velnor(&self) -> &CacheVelnorSection {
         &self.cache.velnor
+    }
+
+    /// The Apple native-pack policy from `[native.apple]`.
+    pub(crate) fn native_apple(&self) -> &NativeAppleSection {
+        &self.native.apple
     }
 
     /// The declared repository-local files the generated output owns.
@@ -4134,7 +4172,13 @@ mod tests {
         let providers: crate::s2::provider::ProviderSet =
             crate::s2::provider::ProviderId::ALL.into_iter().collect();
         must(
-            crate::s2::scan::scan_shape(root, &providers, "main", &[]),
+            crate::s2::scan::scan_shape(
+                root,
+                &providers,
+                "main",
+                &[],
+                &crate::s2::scan::rust::AppleNativePolicy::default(),
+            ),
             "scan config test repository",
         )
     }
@@ -5335,6 +5379,43 @@ mod tests {
         let env = super::render_velnor_host_env(config.cache_velnor());
         assert!(env.contains("VELNOR_STORAGE_ROOT=/var"));
         assert!(env.contains("VELNOR_BUDGET_CACHES_BYTES=53687091200"));
+    }
+
+    #[test]
+    fn native_apple_section_parses_optional_profile() {
+        let config = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [native.apple]\ncargo_profile = \"ci-release\"\n",
+        );
+        assert_eq!(
+            config.native_apple().cargo_profile.as_deref(),
+            Some("ci-release")
+        );
+        let absent = config_for("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n");
+        assert_eq!(absent.native_apple().cargo_profile, None);
+        let canonical = must(
+            absent.canonical_json(),
+            "canonicalize config without native",
+        );
+        assert!(
+            !canonical.contains("native"),
+            "an empty native section stays out of the canonical form: {canonical}"
+        );
+    }
+
+    #[test]
+    fn native_apple_section_rejects_unknown_fields() {
+        let error = match toml::from_str::<RepoGenerationConfig>(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [native.apple]\ncargo_profile_typo = \"ci-release\"\n",
+        ) {
+            Ok(_) => String::from("accepted"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("unknown field"),
+            "typo'd fields must fail closed: {error}"
+        );
     }
 
     #[test]

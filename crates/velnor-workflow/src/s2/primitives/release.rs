@@ -6068,7 +6068,13 @@ cp "$record" "$out"
         let providers: crate::s2::provider::ProviderSet =
             crate::s2::provider::ProviderId::ALL.into_iter().collect();
         let shape = must(
-            crate::s2::scan::scan_shape(root, &providers, "main", &[]),
+            crate::s2::scan::scan_shape(
+                root,
+                &providers,
+                "main",
+                &[],
+                &crate::s2::scan::rust::AppleNativePolicy::default(),
+            ),
             "scan release fixture",
         );
         let generation = generation.map(|rows| {
@@ -8805,6 +8811,7 @@ cp "$record" "$out"
                     ]),
                     "main",
                     &[],
+                    &crate::s2::scan::rust::AppleNativePolicy::default(),
                 ),
                 "scan guest fixture",
             );
@@ -8978,6 +8985,7 @@ cp "$record" "$out"
                     ]),
                     "main",
                     &[],
+                    &crate::s2::scan::rust::AppleNativePolicy::default(),
                 ),
                 "scan identity fixture",
             );
