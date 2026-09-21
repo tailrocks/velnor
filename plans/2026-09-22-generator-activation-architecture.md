@@ -77,6 +77,7 @@ runner polling loop.
 | Recovery | Preview job `106420138590` and main Policy job `106420140784` | Passed in about 23s and 35s; these prove recovery, not complete lifecycle correctness. |
 | Current main baseline | CI Main run `35629948234` | About 18m30s wall; Docker job about 788s and runtime publication about 597s. This remains a performance violation against the 120s requirement. |
 | Foundation PR Policy | [run 35641013363](https://github.com/tailrocks/velnor/actions/runs/35641013363) | Passed in 29s at `cf2e236`; the active renderer validated the active tree without candidate acquisition. |
+| Cache-proof PR Policy | [run 35643201030](https://github.com/tailrocks/velnor/actions/runs/35643201030) | Passed in 25s at `04c520d8`. The checked-in workflow is still rendered by the old active pin and executed its legacy candidate-acquisition step, so this is recovery evidence only. |
 | Foundation final-SHA CI | [run 35641107449](https://github.com/tailrocks/velnor/actions/runs/35641107449) | Cancelled after two jobs were stuck far beyond 120s: `Set up Mr. Boxington` and `Clippy check`. This is retained as a hosted performance failure, not a green verification. |
 
 The detailed timing observations remain in
