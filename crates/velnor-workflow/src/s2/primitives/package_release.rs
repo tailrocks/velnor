@@ -3544,6 +3544,7 @@ test "$publication_lock_retain" -eq 1
             concurrency_group: None,
             serial_stack_groups: false,
             static_files: Vec::new(),
+            reviewers: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
             github_cache: crate::s2::config::CacheGithubSection::default(),
