@@ -74,7 +74,7 @@ impl PowerAssertionGuard {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = name;
-            Self
+            Self {}
         }
     }
 
@@ -98,7 +98,7 @@ impl PowerAssertionGuard {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = name;
-            Self
+            Self {}
         }
     }
 

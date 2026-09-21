@@ -800,7 +800,8 @@ impl ScaleSetClient {
         build: impl Fn(&Client, Method, Url) -> reqwest::RequestBuilder,
     ) -> Result<RawResponse, ScaleSetError> {
         let mut attempt: u32 = 0;
-        let use_curl = std::env::var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV).as_deref() == Ok("curl");
+        let use_curl =
+            std::env::var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV).as_deref() == Ok("curl");
         let timeout = self.inner.retry.timeout;
         loop {
             let request = build(&self.inner.http, method.clone(), url.clone())
@@ -814,12 +815,16 @@ impl ScaleSetClient {
             let url_text = request.url().to_string();
 
             if use_curl {
-                match tokio::task::spawn_blocking(move || run_curl_raw_request(&request, timeout)).await {
+                match tokio::task::spawn_blocking(move || run_curl_raw_request(&request, timeout))
+                    .await
+                {
                     Ok(Ok(response)) => {
                         if RetryPolicy::retryable_status(response.status, admin_handshake)
                             && self.inner.retry.may_retry(attempt)
                         {
-                            let delay = self.retry_delay(response.status, &response.headers, attempt).await;
+                            let delay = self
+                                .retry_delay(response.status, &response.headers, attempt)
+                                .await;
                             attempt += 1;
                             tokio::time::sleep(delay).await;
                             continue;
@@ -833,7 +838,9 @@ impl ScaleSetClient {
                     }
                     Ok(Err(error)) => return Err(error),
                     Err(join_err) => {
-                        return Err(ScaleSetError::Transport(format!("curl join error: {join_err}")));
+                        return Err(ScaleSetError::Transport(format!(
+                            "curl join error: {join_err}"
+                        )));
                     }
                 }
             } else {
@@ -919,7 +926,9 @@ fn run_curl_raw_request(
 
     if let Err(e) = write_res {
         let _ = std::fs::remove_file(&header_in_path);
-        return Err(ScaleSetError::Local(format!("failed to write curl header file: {e}")));
+        return Err(ScaleSetError::Local(format!(
+            "failed to write curl header file: {e}"
+        )));
     }
 
     let method_str = request.method().as_str();
@@ -963,10 +972,8 @@ fn run_curl_raw_request(
         }
     };
 
-    if let Some(bytes) = body_bytes {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(bytes);
-        }
+    if let (Some(bytes), Some(mut stdin)) = (body_bytes, child.stdin.take()) {
+        let _ = stdin.write_all(bytes);
     }
 
     let output_res = child.wait_with_output();
@@ -1016,12 +1023,11 @@ fn parse_curl_headers(bytes: &[u8]) -> Result<(StatusCode, HeaderMap), ScaleSetE
             headers.clear();
             let mut parts = line.split_whitespace();
             parts.next(); // skip HTTP version
-            if let Some(code_str) = parts.next() {
-                if let Ok(code) = code_str.parse::<u16>() {
-                    if let Ok(sc) = StatusCode::from_u16(code) {
-                        status = sc;
-                    }
-                }
+            if let Some(code_str) = parts.next()
+                && let Ok(code) = code_str.parse::<u16>()
+                && let Ok(sc) = StatusCode::from_u16(code)
+            {
+                status = sc;
             }
             continue;
         }

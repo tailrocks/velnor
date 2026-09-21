@@ -43,6 +43,7 @@ use velnor_model::{
 };
 
 use crate::scaleset::converge::WorkerLane;
+use crate::scaleset::errors::ScaleSetFault;
 use crate::scaleset::intents::{
     jit_fingerprint, permit_holder, ProvisionIntent, ProvisionIntentStore,
 };
@@ -53,7 +54,6 @@ use crate::scaleset::worker::{
     ScaleSetWorker, Supervision, SupervisionOutcome, ToolContentHook, VecEdgeSink, WorkerEdge,
     WorkerIdentity, WorkerRunner,
 };
-use crate::scaleset::errors::ScaleSetFault;
 use crate::scaleset::{CapacityLedger, LedgerPermitState, ScaleSetClient};
 
 /// One `scaleset_workers` row: the durable side of [`ScaleSetWorker`].
@@ -593,7 +593,10 @@ impl DaemonWorkerLane {
             name: runner_name.to_owned(),
             work_folder: RUNNER_WORK_DIR.to_owned(),
         };
-        let config = match client.generate_jit_runner_config(&setting, scale_set_id).await {
+        let config = match client
+            .generate_jit_runner_config(&setting, scale_set_id)
+            .await
+        {
             Ok(config) => config,
             Err(ref error)
                 if error.fault() == Some(ScaleSetFault::RunnerExists)
@@ -615,7 +618,9 @@ impl DaemonWorkerLane {
                     .generate_jit_runner_config(&setting, scale_set_id)
                     .await
                     .map_err(|error| {
-                        anyhow::anyhow!("retry generate JIT config for runner {runner_name:?}: {error}")
+                        anyhow::anyhow!(
+                            "retry generate JIT config for runner {runner_name:?}: {error}"
+                        )
                     })?
             }
             Err(error) => {

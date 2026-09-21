@@ -430,7 +430,10 @@ impl ScaleSetDaemon {
                 .client
                 .actions_service_request(
                     reqwest::Method::DELETE,
-                    &format!("/_apis/runtime/runnerscalesets/{set_id}/sessions/{}", existing_session.session_id),
+                    &format!(
+                        "/_apis/runtime/runnerscalesets/{set_id}/sessions/{}",
+                        existing_session.session_id
+                    ),
                     &[],
                     None,
                 )
@@ -439,7 +442,9 @@ impl ScaleSetDaemon {
 
         let mut session_attempt = 0;
         let session = loop {
-            match crate::scaleset::MessageSessionClient::create(&self.client, set_id, &self.owner).await {
+            match crate::scaleset::MessageSessionClient::create(&self.client, set_id, &self.owner)
+                .await
+            {
                 Ok(s) => break s,
                 Err(error) if session_attempt < 3 && error.to_string().contains("409 Conflict") => {
                     session_attempt += 1;
@@ -450,7 +455,9 @@ impl ScaleSetDaemon {
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 }
-                Err(error) => return Err(anyhow::anyhow!("create scale-set message session: {error}")),
+                Err(error) => {
+                    return Err(anyhow::anyhow!("create scale-set message session: {error}"))
+                }
             }
         };
         let queue = ClientSession::new(session.clone());
