@@ -182,6 +182,19 @@ scanner, product graph, planner, runtime) + Jackin migration off its opaque
   (Policy) failed only on candidate-publish starvation
   after push-cancels, not on code; awaiting a clean
   uninterrupted run on the final SHA.
+- Stabilization toward green CI on `5136f1e0` (pushed):
+  `d8b4dbab` scopes the v3 xcode digest to lanes with an
+  Xcode pin (non-Apple cache keys byte-stable, contract
+  6/6); runner fmt/clippy plus Linux `Self` fixes; walk
+  parity in both `scan/file_walk` twins (tool-output
+  names excluded at root only, `.git` never an input)
+  with a regression test each — regen no-op on this
+  tree. `--check --pin-build` exit 0 via the candidate
+  exception (closure `70cfe7e0`); the local check needs
+  the debug binary (candidate stamp is digest(`tui`,
+  `debug`), so release can never bind). Lib 2031 +
+  snapshot 47 + contract 6/6 + file_walk 8 + e2e 3
+  green; watching CI on the pushed head.
 - Increments 5-8 per goal: hosted macOS, Jackin migration (#1013
   incl. Landlock P1), native provider, proof/cleanup.
 - Benchmarks: none yet; set latency goals after first controlled baseline.
