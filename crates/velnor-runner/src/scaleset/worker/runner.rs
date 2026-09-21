@@ -891,7 +891,7 @@ pub(crate) fn runner_connection(
             &[
                 "logs".to_string(),
                 "--tail".to_string(),
-                "50".to_string(),
+                "2000".to_string(),
                 "--".to_string(),
                 name.clone(),
             ],
@@ -904,7 +904,7 @@ pub(crate) fn runner_connection(
             logs.stderr.trim()
         );
     }
-    if parse_connected_marker(&logs.stdout) {
+    if parse_connected_marker(&logs.stdout) || logs.stdout.contains("Running job:") {
         Ok(RunnerConnection::Connected)
     } else {
         Ok(RunnerConnection::Starting)
