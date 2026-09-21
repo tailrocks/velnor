@@ -17,6 +17,22 @@ pub(crate) enum IncludeString {
     ManifestDir(Vec<ManifestPart>),
 }
 
+/// One discovered include site. Determinate targets resolve against the
+/// repository; opaque sites (`env!("OUT_DIR")`, bare idents, unsupported
+/// macros, macro matchers shaped like an invocation) degrade to a
+/// conservative package watch plus an analysis limitation naming file and
+/// line, never a scan failure. An opaque shape is not proven-bad — only
+/// proven-bad literals (escape, missing target) still fail closed at
+/// resolution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum IncludeDiscovery {
+    Resolved(IncludeString),
+    Opaque {
+        macro_name: &'static str,
+        line: usize,
+    },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ManifestPart {
     Literal(String),
@@ -86,11 +102,13 @@ impl StaticString {
 /// parsing is deliberately used here instead of scanning bytes: comments,
 /// raw/cooked literals, macro trivia, and every macro delimiter are handled by
 /// the Rust lexer, while only the static expression subset is evaluated.
-pub(crate) fn parse_include_paths(source: &str) -> Result<Vec<IncludeString>, String> {
+/// Non-static arguments degrade to [`IncludeDiscovery::Opaque`] with the
+/// invocation line; only source that does not lex at all still fails.
+pub(crate) fn parse_include_paths(source: &str) -> Result<Vec<IncludeDiscovery>, String> {
     let tokens = TokenStream::from_str(source)
         .map_err(|error| format!("invalid Rust source while scanning includes: {error}"))?;
     let mut scanner = IncludeScanner::default();
-    scanner.scan_stream(tokens)?;
+    scanner.scan_stream(tokens);
     Ok(scanner.includes)
 }
 
@@ -98,55 +116,69 @@ pub(crate) fn parse_include_paths(source: &str) -> Result<Vec<IncludeString>, St
 pub(crate) fn parse_include_str_literals(source: &str) -> Result<Vec<String>, String> {
     parse_include_paths(source)?
         .into_iter()
-        .map(|path| match path {
-            IncludeString::Relative(value) => Ok(value),
-            IncludeString::ManifestDir(_) => Err(
+        .map(|discovery| match discovery {
+            IncludeDiscovery::Resolved(IncludeString::Relative(value)) => Ok(value),
+            IncludeDiscovery::Resolved(IncludeString::ManifestDir(_)) => Err(
                 "include_str! CARGO_MANIFEST_DIR expression requires repository context".to_owned(),
             ),
+            IncludeDiscovery::Opaque { macro_name, line } => Err(format!(
+                "{macro_name} at line {line} is not a static string expression"
+            )),
         })
         .collect()
 }
 
 #[derive(Default)]
 struct IncludeScanner {
-    includes: Vec<IncludeString>,
+    includes: Vec<IncludeDiscovery>,
 }
 
 impl IncludeScanner {
-    fn scan_stream(&mut self, stream: TokenStream) -> Result<(), String> {
+    fn scan_stream(&mut self, stream: TokenStream) {
         let tokens = stream.into_iter().collect::<Vec<_>>();
         let mut index = 0;
         while index < tokens.len() {
-            if let Some((macro_name, group)) = include_invocation(&tokens, index)? {
-                let expression = parse_static_string_expression(group.stream(), macro_name)?;
-                self.includes.push(IncludeString::from_static(expression));
-                // An include argument may itself contain a macro group. The
-                // evaluator has already rejected a dynamic include argument;
-                // recurse only to discover includes in arbitrary macro bodies.
-                self.scan_stream(group.stream())?;
-                index += 3;
+            if let Some(macro_name) = include_macro_at(&tokens, index) {
+                let line = token_line(&tokens[index]);
+                if let Some(TokenTree::Group(group)) = tokens.get(index + 2) {
+                    match parse_static_string_expression(group.stream(), macro_name) {
+                        Ok(expression) => self.includes.push(IncludeDiscovery::Resolved(
+                            IncludeString::from_static(expression),
+                        )),
+                        Err(_) => self
+                            .includes
+                            .push(IncludeDiscovery::Opaque { macro_name, line }),
+                    }
+                    // An include argument may itself contain a macro group;
+                    // recurse to discover includes in arbitrary macro bodies.
+                    self.scan_stream(group.stream());
+                    index += 3;
+                } else {
+                    // Shaped like an invocation but undelimited (a
+                    // `macro_rules!` matcher fragment, incomplete code):
+                    // opaque, never fatal.
+                    self.includes
+                        .push(IncludeDiscovery::Opaque { macro_name, line });
+                    index += 2;
+                }
                 continue;
             }
             if let TokenTree::Group(group) = &tokens[index] {
-                self.scan_stream(group.stream())?;
+                self.scan_stream(group.stream());
             }
             index += 1;
         }
-        Ok(())
     }
 }
 
-fn include_invocation(
-    tokens: &[TokenTree],
-    index: usize,
-) -> Result<Option<(&'static str, &proc_macro2::Group)>, String> {
+fn include_macro_at(tokens: &[TokenTree], index: usize) -> Option<&'static str> {
     let TokenTree::Ident(identifier) = &tokens[index] else {
-        return Ok(None);
+        return None;
     };
     let macro_name = match identifier.to_string().as_str() {
         "include_str" => "include_str!",
         "include_bytes" => "include_bytes!",
-        _ => return Ok(None),
+        _ => return None,
     };
     // `foo::include_str!` is a user macro path, not the built-in include
     // macro. A field value has one preceding colon (`field: include_str!`),
@@ -155,18 +187,25 @@ fn include_invocation(
     // whitespace between its name, bang, and delimiter because tokens discard
     // trivia.
     if is_double_colon_before(tokens, index) {
-        return Ok(None);
+        return None;
     }
     if !tokens
         .get(index + 1)
         .is_some_and(|token| is_punct(token, '!'))
     {
-        return Ok(None);
+        return None;
     }
-    let Some(TokenTree::Group(group)) = tokens.get(index + 2) else {
-        return Err(format!("{macro_name} must have a delimited argument"));
-    };
-    Ok(Some((macro_name, group)))
+    Some(macro_name)
+}
+
+/// 1-based source line of an include invocation, from the lexer's spans.
+fn token_line(token: &TokenTree) -> usize {
+    match token {
+        TokenTree::Ident(identifier) => identifier.span().start().line,
+        TokenTree::Group(group) => group.span().start().line,
+        TokenTree::Punct(punct) => punct.span().start().line,
+        TokenTree::Literal(literal) => literal.span().start().line,
+    }
 }
 
 fn parse_static_string_expression(
@@ -449,7 +488,7 @@ fn resolve_repo_path(root: &str, relative: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_include_paths, IncludeString, ManifestPart};
+    use super::{parse_include_paths, IncludeDiscovery, IncludeString, ManifestPart};
 
     #[test]
     fn parses_manifest_dir_concat_with_suffix() {
@@ -458,10 +497,12 @@ mod tests {
                 "include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/lib.rs\"));"
             )
             .ok(),
-            Some(vec![IncludeString::ManifestDir(vec![
-                ManifestPart::ManifestDir,
-                ManifestPart::Literal("/src/lib.rs".to_owned()),
-            ])])
+            Some(vec![IncludeDiscovery::Resolved(
+                IncludeString::ManifestDir(vec![
+                    ManifestPart::ManifestDir,
+                    ManifestPart::Literal("/src/lib.rs".to_owned()),
+                ])
+            )])
         );
     }
 
@@ -469,7 +510,9 @@ mod tests {
     fn parses_include_bytes_and_rust_escapes() {
         assert_eq!(
             parse_include_paths("include_bytes!(concat!(\"assets\\\\\", \"font\\x2Ettf\"));").ok(),
-            Some(vec![IncludeString::Relative("assets\\font.ttf".to_owned())])
+            Some(vec![IncludeDiscovery::Resolved(IncludeString::Relative(
+                "assets\\font.ttf".to_owned()
+            ))])
         );
     }
 
@@ -483,7 +526,9 @@ mod tests {
         for source in sources {
             assert_eq!(
                 parse_include_paths(source).ok(),
-                Some(vec![IncludeString::Relative("a/b".to_owned())]),
+                Some(vec![IncludeDiscovery::Resolved(IncludeString::Relative(
+                    "a/b".to_owned()
+                ))]),
                 "failed source: {source}"
             );
         }
@@ -509,15 +554,15 @@ const _: &str = crate::include_str!("user-macro.txt");
         assert_eq!(
             parse_include_paths(source).ok(),
             Some(vec![
-                IncludeString::Relative("data.txt".to_owned()),
-                IncludeString::Relative("raw.txt".to_owned()),
-                IncludeString::Relative("assets/bytes.bin".to_owned()),
+                IncludeDiscovery::Resolved(IncludeString::Relative("data.txt".to_owned())),
+                IncludeDiscovery::Resolved(IncludeString::Relative("raw.txt".to_owned())),
+                IncludeDiscovery::Resolved(IncludeString::Relative("assets/bytes.bin".to_owned())),
             ])
         );
     }
 
     #[test]
-    fn rejects_dynamic_include_in_struct_field_value() {
+    fn dynamic_include_in_struct_field_value_degrades_to_opaque() {
         let source = r#"
 const PATH: &str = "data.txt";
 
@@ -529,9 +574,12 @@ const _: Holder = Holder {
     text: include_str!(PATH),
 };
 "#;
-        assert!(
-            matches!(&parse_include_paths(source), Err(error) if error.contains("static string expression")),
-            "dynamic field include was ignored or accepted with the wrong error"
+        assert_eq!(
+            parse_include_paths(source).ok(),
+            Some(vec![IncludeDiscovery::Opaque {
+                macro_name: "include_str!",
+                line: 9,
+            }])
         );
     }
 
@@ -542,18 +590,65 @@ const _: Holder = Holder {
                 "include_str!(concat!(\"prefix\", env!(\"CARGO_MANIFEST_DIR\"), \"/suffix\"));"
             )
             .ok(),
-            Some(vec![IncludeString::ManifestDir(vec![
-                ManifestPart::Literal("prefix".to_owned()),
-                ManifestPart::ManifestDir,
-                ManifestPart::Literal("/suffix".to_owned()),
-            ])])
+            Some(vec![IncludeDiscovery::Resolved(
+                IncludeString::ManifestDir(vec![
+                    ManifestPart::Literal("prefix".to_owned()),
+                    ManifestPart::ManifestDir,
+                    ManifestPart::Literal("/suffix".to_owned()),
+                ])
+            )])
         );
     }
 
     #[test]
-    fn rejects_dynamic_and_unterminated_input() {
+    fn indeterminate_shapes_degrade_to_opaque_with_invocation_lines() {
+        let source = concat!(
+            "const OUT: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/x\"));\n",
+            "const OPT: &str = include_str!(option_env!(\"MAYBE_PATH\").unwrap_or(\"d\"));\n",
+            "const IDENT: &str = include_str!(PATH);\n",
+            "const MANIFEST: &str = include_str!(concat!(\n",
+            "    env!(\"CARGO_MANIFEST_DIR\"),\n",
+            "    \"/src/lib.rs\",\n",
+            "));\n",
+        );
+        assert_eq!(
+            parse_include_paths(source).ok(),
+            Some(vec![
+                IncludeDiscovery::Opaque {
+                    macro_name: "include_str!",
+                    line: 1,
+                },
+                IncludeDiscovery::Opaque {
+                    macro_name: "include_str!",
+                    line: 2,
+                },
+                IncludeDiscovery::Opaque {
+                    macro_name: "include_str!",
+                    line: 3,
+                },
+                IncludeDiscovery::Resolved(IncludeString::ManifestDir(vec![
+                    ManifestPart::ManifestDir,
+                    ManifestPart::Literal("/src/lib.rs".to_owned()),
+                ])),
+            ])
+        );
+    }
+
+    #[test]
+    fn undelimited_invocation_shaped_fragment_degrades_to_opaque() {
+        let source = "macro_rules! m { (include_str! $($t:tt)*) => { $crate::emit!($($t)*) }; }\n";
+        assert_eq!(
+            parse_include_paths(source).ok(),
+            Some(vec![IncludeDiscovery::Opaque {
+                macro_name: "include_str!",
+                line: 1,
+            }])
+        );
+    }
+
+    #[test]
+    fn rejects_unterminated_input() {
         for source in [
-            "include_str!(PATH);",
             "/* include_str!(\"x\")",
             "include_str!(r#\"x);",
             "include_str! { \"x\"",
