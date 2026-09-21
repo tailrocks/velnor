@@ -550,6 +550,10 @@ fn join_function() {
         eval("join(github.list, ' - ')", &context).convert_to_string(),
         "a - b"
     );
+    assert_eq!(
+        eval("join(fromJson('[\"x\"]'), fromJson('bad'))", &context).convert_to_string(),
+        "x"
+    );
     assert_eq!(eval("join(github.empty)", &context).convert_to_string(), "");
     assert_eq!(
         eval("join(github.scalar)", &context).convert_to_string(),

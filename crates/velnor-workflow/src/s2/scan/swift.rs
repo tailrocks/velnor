@@ -23,6 +23,14 @@ use crate::s2::{
 /// is a minimum-version floor, not a toolchain identity.
 const APPLE_TOOLCHAIN_PIN_KEY_FILES: [&str; 3] = ["mise.lock", ".swift-version", ".xcode-version"];
 
+/// The single mise spelling the `XcodeGen` CLI pins under: the registry id
+/// whose lock entry carries the backend and version, so `install_args`
+/// names the id and `mise --locked` resolves everything else from the
+/// lock. `mise --locked` requires install args to equal the lock keys byte
+/// for byte, so generation refuses an `XcodeGen` unit the lock does not
+/// pin before rendering.
+pub(crate) const XCODEGEN_TOOL: &str = "xcodegen";
+
 /// Parse the repository's pinned Xcode toolchain, if it declares one.
 ///
 /// The root `.xcode-version` file carries one line, `MAJOR.MINOR[.PATCH]`.
@@ -831,7 +839,12 @@ fn xcodegen_generate_unit(
             mutable_mount_seed: false,
         }),
         tool_version: spec.minimum_version.clone(),
-        mise_tools: Vec::new(),
+        // The unit's own recipe invokes the generator CLI, so the job must
+        // provision it: the id travels into `install_args`, the lock
+        // resolves the backend and version. Only `XcodeGen` units carry a
+        // scan-derived tool; every other Swift unit provisions what the
+        // repository declares.
+        mise_tools: vec![XCODEGEN_TOOL.to_owned()],
         toolchain: None,
         xcode: None,
         services: Vec::new(),
@@ -1229,7 +1242,7 @@ mod tests {
     use super::{
         is_xcodegen_spec, load_spec_closure, merge_spec, parse_package_facts,
         parse_xcode_toolchain, parse_yaml_mapping, validate_xcode_version, xcodegen_unit,
-        PackageFacts, XcodeGenSpec,
+        PackageFacts, XcodeGenSpec, XCODEGEN_TOOL,
     };
     use std::collections::BTreeMap;
 
@@ -1402,6 +1415,12 @@ mod tests {
         assert!(unit.pr_commands[1].contains("xcodebuild -project 'Widget.xcodeproj'"));
         assert!(unit.pr_commands[1].contains("-scheme 'WidgetApp'"));
         assert!(unit.pr_commands[1].contains("CODE_SIGNING_ALLOWED=NO build"));
+        assert_eq!(
+            unit.mise_tools,
+            vec![XCODEGEN_TOOL.to_owned()],
+            "the unit carries the generator CLI its own recipe invokes: {:?}",
+            unit.mise_tools
+        );
     }
 
     #[test]

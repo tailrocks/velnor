@@ -1294,6 +1294,13 @@ pub struct ProjectConfig {
     /// Generator-only Velnor host cache budgets from `[cache.velnor]`. Never
     /// serialized into `project.toml`.
     pub(crate) velnor_host_cache: config::CacheVelnorSection,
+    /// The repository's own parsed Rust pin, recorded at stamp time. Scanned
+    /// units carry a clone each, but a declared per-unit channel is
+    /// indistinguishable from the pin without the file's own fact — so the
+    /// renderer reads this to tell the file-driven pin leg from explicit
+    /// channel legs. Generation time only: never serialized into
+    /// `project.toml`, where pinned runtimes would reject it.
+    pub(crate) rust_pin: Option<RustToolchain>,
 }
 
 /// A repository-local file the generated output owns verbatim: the repository
@@ -1804,14 +1811,19 @@ fn scan_target(
     // compile with the repository's own pinned toolchain like every scanned
     // Rust unit, so the parsed pin is stamped onto any Rust unit that lacks
     // one; a repository with no pin leaves them unstamped for generation to
-    // refuse.
-    if let Some(toolchain) = scan::rust::parse_rust_toolchain_from_dir(root)? {
+    // refuse. The `is_none` guard also preserves a declared per-unit channel:
+    // stamping never overwrites one. The parsed pin is recorded as the
+    // file's own fact so the renderer can tell the file-driven pin leg from
+    // explicit channel legs.
+    let rust_pin = scan::rust::parse_rust_toolchain_from_dir(root)?;
+    if let Some(toolchain) = &rust_pin {
         for unit in &mut config.units {
             if unit.kind == UnitKind::Rust && unit.toolchain.is_none() {
                 unit.toolchain = Some(toolchain.clone());
             }
         }
     }
+    config.rust_pin = rust_pin;
     let mut config = load_workflow_templates(root, config, generation.as_ref())?;
     // The root lock's tool keys pin every mise id the surface may install:
     // `mise --locked` requires install args to equal the lock keys, so both
@@ -1844,6 +1856,10 @@ fn scan_target(
     // its tool id would fail at pack time instead; refuse it at generation
     // time with the exact missing key.
     crate::s2::primitives::validate_boltffi_tools_are_locked(&config.units, &mise_lock_keys)?;
+    // A unit that runs XcodeGen while the lock does not pin its tool id
+    // would fail at install time on the runner instead; refuse it at
+    // generation time with the exact missing key.
+    crate::s2::primitives::validate_xcodegen_tools_are_locked(&config.units, &mise_lock_keys)?;
     // Every surface that renders a self-hosted lane must name its labels,
     // whether the rest of the contract is scanned or declared.
     validate_provider_selectors(&config)?;
@@ -2963,6 +2979,22 @@ fn apply_unit_row(
         let prerequisites = row.declared_prerequisites(id)?;
         let docker_contexts = row.named_docker_contexts(id, root)?;
         let env = row.validated_env(id)?.unwrap_or_default();
+        // A declared channel is a bare channel string: it carries no
+        // components, targets, or profile of its own. A non-pin leg
+        // provisions it explicitly with a minimal profile, so pin-only
+        // components can never leak onto a channel that lacks them.
+        let toolchain = row.validated_toolchain(id)?.map(|channel| RustToolchain {
+            channel,
+            components: Vec::new(),
+            targets: Vec::new(),
+            profile: None,
+        });
+        if toolchain.is_some() && kind != UnitKind::Rust {
+            return Err(GeneratorError::usage(format!(
+                "[[units]] {id} declares kind `{}` with a Rust toolchain; `toolchain` applies to Rust units only",
+                kind.id_prefix(),
+            )));
+        }
         config.units.push(Unit {
             id: id.to_owned(),
             label: row.label().unwrap_or_default().to_owned(),
@@ -3006,7 +3038,7 @@ fn apply_unit_row(
             }),
             tool_version: row.tool_version().map(str::to_owned),
             mise_tools: row.mise_tools().unwrap_or_default().to_vec(),
-            toolchain: None,
+            toolchain,
             xcode: None,
             services: Vec::new(),
             trust: row
@@ -3034,6 +3066,23 @@ fn apply_unit_row(
     }
     if let Some(kind) = row.kind().and_then(UnitKind::from_prefix) {
         unit.kind = kind;
+    }
+    // After the kind arm, so a row that flips the kind judges membership
+    // against the final kind. The declared channel replaces the whole pin:
+    // like an added row, it carries no components, targets, or profile.
+    if let Some(channel) = row.validated_toolchain(id)? {
+        if unit.kind != UnitKind::Rust {
+            return Err(GeneratorError::usage(format!(
+                "[[units]] {id} overrides a {} unit with a Rust toolchain; `toolchain` applies to Rust units only",
+                unit.kind.label(),
+            )));
+        }
+        unit.toolchain = Some(RustToolchain {
+            channel,
+            components: Vec::new(),
+            targets: Vec::new(),
+            profile: None,
+        });
     }
     if let Some(root) = row.root() {
         root.clone_into(&mut unit.root);
@@ -3775,11 +3824,16 @@ const SNAPSHOT_COMPATIBILITY_PLACEHOLDER: &str = "__VELNOR_SNAPSHOT_COMPATIBILIT
 const SNAPSHOT_STATE_PLACEHOLDER: &str = "__VELNOR_SNAPSHOT_STATE__";
 const AUTOMATIC_PROVIDERS_DEFAULT_PLACEHOLDER: &str = "__VELNOR_AUTOMATIC_PROVIDERS_DEFAULT__";
 
-/// The Rust toolchain a config's units record, when any Rust unit does. The
-/// scan stamps every Rust unit with the repository's parsed pin, so this is
-/// `None` only for a config that carries no Rust units or no recorded pin —
-/// and every consumer of the fact fails closed on the latter.
+/// The repository's own Rust pin. The scan stamps every Rust unit with the
+/// parsed pin, but a declared per-unit channel (an MSRV leg) is not the
+/// pin — so this reads the file's own recorded fact first and falls back to
+/// the first Rust unit's pin only for hand-built configs that never parsed a
+/// pin file. `None` for a config that carries no Rust units or no recorded
+/// pin, and every consumer of the fact fails closed on the latter.
 pub(crate) fn config_rust_toolchain(config: &ProjectConfig) -> Option<RustToolchain> {
+    if let Some(pin) = &config.rust_pin {
+        return Some(pin.clone());
+    }
     config
         .units
         .iter()
@@ -3913,6 +3967,35 @@ fn validate_rust_units_are_pinned(config: &ProjectConfig) -> Result<(), Generato
              channel (plus any components and targets) so every workflow provisions exactly \
              that toolchain",
         ));
+    }
+    Ok(())
+}
+
+/// A Rust kind spanning more than one channel provisions each leg through
+/// rustup — but local providers skip toolchain provisioning entirely (the
+/// image owns the toolchain), so a matrix leg there would silently verify
+/// under the image's toolchain instead of its declared channel. Refuse the
+/// combination at generation time instead of shipping a leg that proves
+/// nothing.
+fn validate_toolchain_matrix_providers(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    let mut channels = BTreeSet::new();
+    for unit in &config.units {
+        if unit.kind == UnitKind::Rust
+            && let Some(toolchain) = &unit.toolchain
+        {
+            channels.insert(toolchain.channel.clone());
+        }
+    }
+    if channels.len() < 2 {
+        return Ok(());
+    }
+    if config.providers.iter().any(|provider| provider.is_local()) {
+        let channels = channels.into_iter().collect::<Vec<_>>().join(", ");
+        return Err(GeneratorError::usage(format!(
+            "Rust units span more than one toolchain channel ({channels}), but a local provider \
+             cannot provision per-leg toolchains; remove the local provider or collapse the \
+             units onto one channel"
+        )));
     }
     Ok(())
 }
@@ -6352,6 +6435,7 @@ fn generated_files_with_surface(
     // pin or a release matrix the pin does not declare.
     validate_workflow_revision(&config)?;
     validate_rust_units_are_pinned(&config)?;
+    validate_toolchain_matrix_providers(&config)?;
     validate_release_targets_are_pinned(&config)?;
     validate_unit_provider_coverage(&config)?;
     let mut files = BTreeMap::new();
@@ -11089,6 +11173,7 @@ mod tests {
             docs_reason: String::new(),
             docs: None,
             check_profiles: Vec::new(),
+            rust_pin: None,
             maintenance: MaintenanceSpec::default(),
             units: Vec::new(),
             workflow_templates: BTreeMap::new(),
@@ -11898,6 +11983,13 @@ mod tests {
             ),
             "write project.yml",
         );
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.xcodegen]]\nversion = \"2.46.0\"\nbackend = \"aqua:yonaskolb/XcodeGen\"\n",
+            ),
+            "pin the generator CLI the app unit installs",
+        );
         let config = must(
             scan_repository(
                 &root,
@@ -11945,6 +12037,13 @@ mod tests {
         must(
             fs::write(root.join("part.yml"), "include: project.yml\n"),
             "write part.yml",
+        );
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.xcodegen]]\nversion = \"2.46.0\"\nbackend = \"aqua:yonaskolb/XcodeGen\"\n",
+            ),
+            "pin the generator CLI the app unit installs",
         );
         let config = must(
             scan_repository(
@@ -18835,6 +18934,7 @@ lockfile = true
             docs_reason: String::new(),
             docs: None,
             check_profiles: Vec::new(),
+            rust_pin: None,
             maintenance: MaintenanceSpec::default(),
             units: vec![
                 unit("a", format!("sleep 0.2; printf a >> {marker}"), Vec::new()),
@@ -24897,5 +24997,160 @@ lockfile = true
                 "{provider:?} shares the workspace, so it needs no producer edge"
             );
         }
+    }
+
+    /// A generation config whose `[[units]]` row declares `toolchain`: an
+    /// override when `id` names a scanned unit, an addition otherwise.
+    fn toolchain_declaration_config(id: &str, kind: Option<&str>, toolchain: &str) -> String {
+        let kind = kind.map_or_else(String::new, |kind| format!("\nkind = \"{kind}\""));
+        format!(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"{id}\"{kind}\ntoolchain = \"{toolchain}\"\nworkspace_check = true\n"
+        )
+    }
+
+    #[test]
+    fn declared_toolchain_survives_the_pin_stamp() {
+        let config = toolchain_declaration_config("rust-msrv", Some("rust"), "1.88.0");
+        let root = configured_repository("toolchain-declared", Some(&config));
+        let scanned = must(
+            scan_repository(&root, Some(provider_set([ProviderId::GithubHosted]))),
+            "scan repository with a declared channel",
+        );
+        let msrv = must_some(
+            scanned.units.iter().find(|unit| unit.id == "rust-msrv"),
+            "declared MSRV unit",
+        );
+        assert_eq!(
+            msrv.toolchain.as_ref().map(|pin| pin.channel.as_str()),
+            Some("1.88.0"),
+            "stamping must not overwrite a declared channel"
+        );
+        assert!(
+            msrv.toolchain
+                .as_ref()
+                .is_some_and(|pin| pin.components.is_empty() && pin.targets.is_empty()),
+            "a declared channel carries no pin components: {:?}",
+            msrv.toolchain
+        );
+        // The scanned unit still stamps the pin, and the pin file's own fact
+        // is recorded for the renderer's leg decision.
+        assert!(
+            scanned.units.iter().any(|unit| {
+                unit.id != "rust-msrv"
+                    && unit.toolchain.as_ref().map(|pin| pin.channel.as_str()) == Some("1.91.1")
+            }),
+            "the scanned unit stamps the pin"
+        );
+        assert_eq!(
+            scanned.rust_pin.as_ref().map(|pin| pin.channel.as_str()),
+            Some("1.91.1"),
+            "the pin file's own fact is recorded"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn toolchain_override_replaces_the_scanned_pin() {
+        let root = configured_repository("toolchain-override", None);
+        let id = scanned_rust_unit_id(&root);
+        let directory = root.join(".github-gen");
+        must(fs::create_dir_all(&directory), "create config directory");
+        let config = toolchain_declaration_config(&id, None, "1.88.0");
+        must(
+            fs::write(directory.join("velnor-workflow.toml"), &config),
+            "write generation config",
+        );
+        write_visibility_evidence(&root, Some(&config), "public");
+        let scanned = must(
+            scan_repository(&root, None),
+            "rescan with toolchain override",
+        );
+        let unit = must_some(
+            scanned.units.iter().find(|unit| unit.id == id),
+            "overridden unit",
+        );
+        assert_eq!(
+            unit.toolchain.as_ref().map(|pin| pin.channel.as_str()),
+            Some("1.88.0"),
+            "the override replaces the scanned pin"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn toolchain_override_of_a_non_rust_unit_fails() {
+        let root = configured_repository("toolchain-flip", None);
+        let id = scanned_rust_unit_id(&root);
+        let directory = root.join(".github-gen");
+        must(fs::create_dir_all(&directory), "create config directory");
+        let config = toolchain_declaration_config(&id, Some("docs"), "1.88.0");
+        must(
+            fs::write(directory.join("velnor-workflow.toml"), &config),
+            "write generation config",
+        );
+        write_visibility_evidence(&root, Some(&config), "public");
+        let error = must_fail(scan_repository(&root, None), "a docs toolchain must fail");
+        assert!(
+            error.to_string().contains("applies to Rust units only"),
+            "unexpected error: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn toolchain_matrix_with_a_local_provider_fails_generation() {
+        let config = toolchain_declaration_config("rust-msrv", Some("rust"), "1.88.0");
+        let root = configured_repository("toolchain-local", Some(&config));
+        let mut scanned = must(
+            scan_repository(&root, Some(provider_set([ProviderId::GithubHosted]))),
+            "scan repository with a declared channel",
+        );
+        // Forcing the local universe after the scan: detection is
+        // provider-independent, so this is what a local scan produced.
+        scanned.providers = provider_set([ProviderId::Velnor]);
+        scanned.automatic_providers = provider_set([ProviderId::Velnor]);
+        let error = must_fail(
+            validate_toolchain_matrix_providers(&scanned),
+            "a matrix on a local provider must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("cannot provision per-leg toolchains"),
+            "unexpected error: {error}"
+        );
+        scanned.providers = provider_set([ProviderId::GithubHosted]);
+        scanned.automatic_providers = provider_set([ProviderId::GithubHosted]);
+        must(
+            validate_toolchain_matrix_providers(&scanned),
+            "a hosted matrix must validate",
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn config_rust_toolchain_prefers_the_recorded_pin() {
+        let config = toolchain_declaration_config("rust-msrv", Some("rust"), "1.88.0");
+        let root = configured_repository("toolchain-pin-fact", Some(&config));
+        let mut scanned = must(
+            scan_repository(&root, Some(provider_set([ProviderId::GithubHosted]))),
+            "scan repository with a declared channel",
+        );
+        assert_eq!(
+            config_rust_toolchain(&scanned).map(|pin| pin.channel),
+            Some("1.91.1".to_owned()),
+            "the pin fact wins over a unit-ordered MSRV leg"
+        );
+        // Hand-built configs record no pin: the first unit's pin stands in.
+        scanned.rust_pin = None;
+        scanned.units.retain(|unit| unit.kind == UnitKind::Rust);
+        scanned.units.sort_by(|left, right| left.id.cmp(&right.id));
+        let first = scanned.units[0].toolchain.clone().map(|pin| pin.channel);
+        assert_eq!(
+            config_rust_toolchain(&scanned).map(|pin| pin.channel),
+            first,
+            "without a recorded pin the first unit's pin stands in"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 }
